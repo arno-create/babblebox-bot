@@ -1,4 +1,3 @@
-from keep_alive import keep_alive
 import discord
 from discord.ext import commands
 from discord import app_commands
@@ -8,6 +7,7 @@ import random
 import os
 import aiohttp
 from dotenv import load_dotenv
+from keep_alive import keep_alive # Cloud hosting keep-alive
 
 load_dotenv()
 
@@ -52,7 +52,7 @@ def get_lobby_embed(guild_id):
     host = game['host']
     
     titles = {
-        'none': ("🎮 Bot Menu", "Select a mini-game from the dropdown below!", discord.Color.dark_theme()),
+        'none': ("🎮 Party Bot Menu", "Select a mini-game from the dropdown below!", discord.Color.dark_theme()),
         'telephone': ("🎙️ Broken Telephone", "Voice mimicry game! (3+ players)", discord.Color.blue()),
         'corpse': ("📝 Exquisite Corpse", "Absurd collaborative story! (3+ players)", discord.Color.purple()),
         'spyfall': ("🕵️ Spyfall", "Find the spy among you! (3+ players)", discord.Color.dark_gray()),
@@ -61,7 +61,7 @@ def get_lobby_embed(guild_id):
     
     title, desc, color = titles[gt]
     embed = discord.Embed(title=title, description=desc, color=color)
-    embed.set_footer(text=f"Hosted by {host.display_name} • Use /help for rules")
+    embed.set_footer(text=f"Hosted by {host.display_name} • Use /stop to cancel • /help for rules")
     
     if gt != 'none':
         if not players:
@@ -76,20 +76,92 @@ async def cleanup_game(guild_id):
         game = games[guild_id]
         if game.get('timeout_task') and not game['timeout_task'].done():
             game['timeout_task'].cancel()
-        game['active'] = False
-        game['lobby_open'] = False
+        if game.get('vote_task') and not game['vote_task'].done():
+            game['vote_task'].cancel()
+        del games[guild_id]
 
+def reset_idle_timer(guild_id):
+    game = games.get(guild_id)
+    if not game: return
+    if game.get('timeout_task'): game['timeout_task'].cancel()
+    game['timeout_task'] = bot.loop.create_task(idle_timeout(guild_id))
+
+async def idle_timeout(guild_id):
+    await asyncio.sleep(300) # 5 Minute AFK Timer
+    game = games.get(guild_id)
+    if game and game['active']:
+        await game['channel'].send(embed=discord.Embed(title="💤 Game Abandoned", description="No activity for 5 minutes. The game has been closed.", color=discord.Color.dark_grey()))
+        await cleanup_game(guild_id)
 
 # ==========================================
-# 2. SPYFALL DYNAMIC DASHBOARD 
+# 2. SPYFALL DYNAMIC DASHBOARD & VOTING
 # ==========================================
+async def process_spyfall_votes(guild_id, channel):
+    game = games.get(guild_id)
+    if not game or not game.get('voting_active'): return
+    game['voting_active'] = False
+    
+    if game.get('vote_task'): game['vote_task'].cancel()
+    
+    if not game['votes']:
+        await channel.send("⏳ Time is up! Nobody voted. The Spy escapes!")
+        return await cleanup_game(guild_id)
+
+    vote_counts = {}
+    for v in game['votes'].values():
+        vote_counts[v] = vote_counts.get(v, 0) + 1
+        
+    highest_votes = max(vote_counts.values())
+    tied = list(vote_counts.values()).count(highest_votes) > 1
+    
+    if tied:
+        embed = discord.Embed(title="⚖️ Split Vote!", description=f"The village couldn't agree! It's a tie.\n\n💀 **SPY WINS!** They escaped!\n\nThe real Spy was {game['spy'].mention}.\nLocation: **{game['location']}**", color=discord.Color.red())
+    else:
+        accused_id = max(vote_counts, key=vote_counts.get)
+        accused = discord.utils.get(game['players'], id=accused_id)
+        is_spy = (accused == game['spy'])
+        
+        embed = discord.Embed(title="⚖️ The Village has spoken!", color=discord.Color.red())
+        embed.add_field(name="Executed:", value=accused.mention, inline=False)
+        if is_spy: embed.add_field(name="Result:", value="🎉 **VILLAGE WINS!** You caught the Spy!", inline=False)
+        else: embed.add_field(name="Result:", value=f"💀 **SPY WINS!** You executed an innocent!\n\nThe real Spy was {game['spy'].mention}.\nLocation: **{game['location']}**", inline=False)
+        
+    await channel.send(embed=embed)
+    await cleanup_game(guild_id)
+
+async def spyfall_vote_timeout(guild_id, channel):
+    await asyncio.sleep(60)
+    await channel.send("🚨 **Voting Time is UP! Tallying votes...**")
+    await process_spyfall_votes(guild_id, channel)
+
+class SpyfallVoteSelect(discord.ui.Select):
+    def __init__(self, players, guild_id):
+        options = [discord.SelectOption(label=p.display_name, value=str(p.id)) for p in players]
+        super().__init__(placeholder="Vote for the Spy (60s)...", min_values=1, max_values=1, options=options, custom_id=f"spy_vote_{guild_id}")
+
+    async def callback(self, interaction: discord.Interaction):
+        game = games.get(interaction.guild.id)
+        if not game or not game.get('voting_active'): 
+            return await interaction.response.send_message("❌ Voting is closed!", ephemeral=True)
+        if interaction.user not in game['players']: 
+            return await interaction.response.send_message("You aren't playing!", ephemeral=True)
+        if interaction.user.id in game['votes']: 
+            return await interaction.response.send_message("You already voted!", ephemeral=True)
+            
+        target_id = int(self.values[0])
+        game['votes'][interaction.user.id] = target_id
+        
+        await interaction.response.send_message(f"✅ Your vote is locked.", ephemeral=True)
+        await interaction.channel.send(f"🗳️ **{interaction.user.display_name}** has cast their vote! ({len(game['votes'])}/{len(game['players'])})")
+        
+        if len(game['votes']) >= len(game['players']):
+            await process_spyfall_votes(interaction.guild.id, interaction.channel)
+
 class SpyfallTargetSelect(discord.ui.Select):
     def __init__(self, players, current_player, guild_id):
         options = [discord.SelectOption(label=p.display_name, value=str(p.id)) for p in players if p != current_player]
-        # Failsafe if options is somehow empty
         if not options: options = [discord.SelectOption(label="Error", value="error")]
-        
-        super().__init__(placeholder=f"Select your target, {current_player.display_name}...", min_values=1, max_values=1, options=options, custom_id=f"spy_target_{guild_id}")
+        super().__init__(placeholder=f"Select your target...", min_values=1, max_values=1, options=options, custom_id=f"spy_target_{guild_id}")
 
     async def callback(self, interaction: discord.Interaction):
         game = games.get(interaction.guild.id)
@@ -102,57 +174,14 @@ class SpyfallTargetSelect(discord.ui.Select):
         target_id = int(self.values[0])
         target_player = discord.utils.get(game['players'], id=target_id)
         
-        # Pass the turn
         game['current_player_index'] = game['players'].index(target_player)
+        reset_idle_timer(interaction.guild.id)
         
-        # 1. Update the Dashboard silently
         embed = discord.Embed(title="🕵️ Spyfall: Interrogation Phase", color=discord.Color.dark_gray())
         embed.add_field(name="Current Turn:", value=f"👉 It is **{target_player.mention}**'s turn to pick a target.", inline=False)
         await interaction.response.edit_message(embed=embed, view=SpyfallDashboard(interaction.guild.id))
         
-        # 2. Send the highly visible ping in the channel
-        await interaction.channel.send(f"🗣️ **{target_player.mention}**, you are being interrogated by **{current_player.mention}**!\nAnswer their question, then use the menu above to pick the next target.")
-
-class SpyfallVoteSelect(discord.ui.Select):
-    def __init__(self, players, guild_id):
-        options = [discord.SelectOption(label=p.display_name, value=str(p.id)) for p in players]
-        super().__init__(placeholder="Vote for the Spy...", min_values=1, max_values=1, options=options, custom_id=f"spy_vote_{guild_id}")
-
-    async def callback(self, interaction: discord.Interaction):
-        game = games.get(interaction.guild.id)
-        if not game or not game['active']: return
-        
-        if interaction.user not in game['players']:
-            return await interaction.response.send_message("You are not playing!", ephemeral=True)
-            
-        if interaction.user.id in game['votes']:
-            return await interaction.response.send_message("You already voted!", ephemeral=True)
-            
-        target_id = int(self.values[0])
-        game['votes'][interaction.user.id] = target_id
-        
-        majority_needed = len(game['players']) // 2 + 1
-        vote_counts = {}
-        for v in game['votes'].values():
-            vote_counts[v] = vote_counts.get(v, 0) + 1
-            
-        await interaction.response.send_message(f"🗳️ **{interaction.user.display_name}** locked in their vote.", delete_after=5.0)
-        
-        for pid, count in vote_counts.items():
-            if count >= majority_needed:
-                accused = discord.utils.get(game['players'], id=pid)
-                is_spy = (accused == game['spy'])
-                
-                embed = discord.Embed(title="⚖️ The Village has spoken!", color=discord.Color.red())
-                embed.add_field(name="Executed:", value=accused.mention, inline=False)
-                if is_spy:
-                    embed.add_field(name="Result:", value="🎉 **VILLAGE WINS!** You caught the Spy!", inline=False)
-                else:
-                    embed.add_field(name="Result:", value=f"💀 **SPY WINS!** You executed an innocent!\n\nThe real Spy was {game['spy'].mention}.\nThe location was **{game['location']}**.", inline=False)
-                
-                await interaction.channel.send(embed=embed)
-                await cleanup_game(interaction.guild.id)
-                return
+        await interaction.channel.send(f"🗣️ **{target_player.mention}**, you are being interrogated by **{current_player.mention}**!\nAnswer, then use the menu above to pick the next target.")
 
 class SpyfallDashboard(discord.ui.View):
     def __init__(self, guild_id):
@@ -173,14 +202,19 @@ async def trigger_spyfall_vote(interaction: discord.Interaction):
         return await interaction.response.send_message("❌ No active Spyfall game to vote on.", ephemeral=True)
     if interaction.user not in game['players']: 
         return await interaction.response.send_message("❌ You are not playing!", ephemeral=True)
+    if game.get('voting_active'):
+        return await interaction.response.send_message("❌ A vote is already in progress!", ephemeral=True)
     
+    game['voting_active'] = True
     game['votes'] = {} 
+    
     view = discord.ui.View()
     view.add_item(SpyfallVoteSelect(game['players'], guild_id))
     
-    embed = discord.Embed(title="🚨 EMERGENCY MEETING", description=f"{interaction.user.mention} called a vote!\nSelect who you think the spy is. Majority rules.", color=discord.Color.red())
-    await interaction.response.send_message(embed=embed, view=view)
-
+    embed = discord.Embed(title="🚨 EMERGENCY MEETING", description=f"{interaction.user.mention} called a vote!\nSelect who you think the spy is. You have **60 seconds**.", color=discord.Color.red())
+    await interaction.response.send_message(f"Attention {', '.join([p.mention for p in game['players']])}!", embed=embed, view=view)
+    
+    game['vote_task'] = bot.loop.create_task(spyfall_vote_timeout(guild_id, interaction.channel))
 
 # ==========================================
 # 3. GAME TIMERS & LOGIC
@@ -261,7 +295,7 @@ async def dm_timeout(guild_id, player):
 
 
 # ==========================================
-# 4. LOBBY & MENUS (Unified System)
+# 4. LOBBY & MENUS
 # ==========================================
 class GameSelect(discord.ui.Select):
     def __init__(self, guild_id):
@@ -286,14 +320,12 @@ class GameSelect(discord.ui.Select):
         if gt == 'telephone': game.update({'first_audio': None, 'final_audio': None, 'waiting_for_guess': False})
         elif gt == 'corpse': game.update({'corpse_answers': [], 'theme': '', 'corpse_step': 0})
             
-        # Refreshes the embed while keeping the entire view intact
         await interaction.response.edit_message(embed=get_lobby_embed(guild_id), view=self.view)
 
 class LobbyView(discord.ui.View):
     def __init__(self, guild_id):
         super().__init__(timeout=None)
         self.guild_id = guild_id
-        # The dropdown is now a permanent part of the Lobby UI until started
         self.add_item(GameSelect(guild_id))
 
     @discord.ui.button(label="Join", style=discord.ButtonStyle.green, custom_id="join_btn", row=1)
@@ -316,13 +348,15 @@ class LobbyView(discord.ui.View):
         
         if interaction.user != game['host']:
             return await interaction.response.send_message("❌ Only the Host can start the game!", ephemeral=True)
-            
         if game['game_type'] == 'none':
             return await interaction.response.send_message("❌ Select a game from the dropdown first!", ephemeral=True)
             
         min_p = 2 if game['game_type'] == 'bomb' else 3
         if len(game['players']) < min_p:
             return await interaction.response.send_message(f"Need at least {min_p} players!", ephemeral=True)
+        
+        for child in self.children: child.disabled = True
+        await interaction.response.edit_message(view=self)
         
         random.shuffle(game['players'])
         game['active'] = True
@@ -348,7 +382,8 @@ class LobbyView(discord.ui.View):
             first_p = game['players'][0]
             embed = discord.Embed(title="🕵️ Spyfall Started!", color=discord.Color.dark_gray())
             embed.add_field(name="Check your DMs for roles!", value=f"🗣️ **{first_p.mention}**, start the game by selecting someone to interrogate below!", inline=False)
-            await interaction.response.edit_message(embed=embed, view=SpyfallDashboard(self.guild_id))
+            await interaction.channel.send(embed=embed, view=SpyfallDashboard(self.guild_id))
+            reset_idle_timer(self.guild_id)
             return 
             
         elif gt == 'bomb':
@@ -359,8 +394,7 @@ class LobbyView(discord.ui.View):
             first_player = game['players'][0]
             
             embed = discord.Embed(title="💣 BATTLE ROYALE BOMB STARTED!", description="Type a single, real English word containing the syllable to survive.", color=discord.Color.red())
-            await interaction.response.edit_message(embed=embed, view=None)
-            
+            await interaction.channel.send(embed=embed)
             await interaction.channel.send(f"💣 The bomb is ticking! {first_player.mention}, you have 15s! Syllable: **{game['syllable']}**")
             game['timeout_task'] = bot.loop.create_task(bomb_timeout(self.guild_id, first_player))
             return
@@ -368,7 +402,7 @@ class LobbyView(discord.ui.View):
         shuffled_list = "\n".join([f"**{i+1}.** {p.display_name}" for i, p in enumerate(game['players'])])
         start_embed = discord.Embed(title="🚀 Game Started!", description="Check your DMs.", color=discord.Color.gold())
         start_embed.add_field(name="Turn Order:", value=shuffled_list, inline=False)
-        await interaction.response.edit_message(embed=start_embed, view=None)
+        await interaction.channel.send(embed=start_embed)
         
         first_player = game['players'][0]
         try:
@@ -394,9 +428,9 @@ class ResignViewEnd(discord.ui.View):
 # ==========================================
 # 5. SLASH COMMANDS & ROUTER
 # ==========================================
-@bot.tree.command(name="help", description="View the BabbleBox Bot manual and game rules")
+@bot.tree.command(name="help", description="View the Party Bot manual and game rules")
 async def help_cmd(interaction: discord.Interaction):
-    embed = discord.Embed(title="🎮 BabbleBox Bot Manual", description="Gather your friends in a voice or text channel and let the chaos begin!", color=discord.Color.gold())
+    embed = discord.Embed(title="🎮 Party Bot Manual", description="Gather your friends in a voice or text channel and let the chaos begin!", color=discord.Color.gold())
     embed.add_field(name="🚀 How to Play", value="Type `/play` to open the lobby. The person who types it is the **Host**. The Host chooses the game and clicks Start.", inline=False)
     embed.add_field(name="🎙️ Broken Telephone (3+ Players)", value="The bot DMs the first player to record a voice message. The next player receives it, listens (it self-destructs in 15s!), and mimics it. The final player types a guess of what the original phrase was.", inline=False)
     embed.add_field(name="📝 Exquisite Corpse (3+ Players)", value="A blind story-building game. The bot DMs players asking for an adjective, noun, verb, etc., based on a random theme. Nobody sees the full sentence until the hilarious finale!", inline=False)
@@ -405,11 +439,11 @@ async def help_cmd(interaction: discord.Interaction):
     
     await interaction.response.send_message(embed=embed)
 
-@bot.tree.command(name="play", description="Open the BabbleBox Bot menu and host a game")
+@bot.tree.command(name="play", description="Open the Party Bot menu and host a game")
 async def play_cmd(interaction: discord.Interaction):
     guild_id = interaction.guild.id
-    if guild_id in games and games[guild_id].get('lobby_open'):
-        return await interaction.response.send_message(embed=discord.Embed(title="❌ Game Room is busy!", description="A lobby or game is already active on this server.", color=discord.Color.red()), ephemeral=True)
+    if guild_id in games:
+        return await interaction.response.send_message(embed=discord.Embed(title="❌ Game Room is busy!", description="A lobby or game is already active on this server. Use `/stop` to cancel it.", color=discord.Color.red()), ephemeral=True)
         
     games[guild_id] = {
         'host': interaction.user, 'lobby_open': True, 'game_type': 'none', 
@@ -422,8 +456,23 @@ async def play_cmd(interaction: discord.Interaction):
 async def vote_cmd(interaction: discord.Interaction):
     await trigger_spyfall_vote(interaction)
 
+@bot.tree.command(name="ping", description="Check if the bot is online and responsive")
+async def ping_cmd(interaction: discord.Interaction):
+    await interaction.response.send_message("Pong! 🏓 I am online and ready to party.", ephemeral=True)
+
+@bot.tree.command(name="stop", description="Host/Admin Only: Force stop the current game and clear the lobby")
+async def stop_cmd(interaction: discord.Interaction):
+    game = games.get(interaction.guild.id)
+    if not game:
+        return await interaction.response.send_message("❌ There is no active game or lobby to stop.", ephemeral=True)
+    if interaction.user != game['host'] and not interaction.user.guild_permissions.administrator:
+        return await interaction.response.send_message("❌ Only the Host or an Administrator can stop the game.", ephemeral=True)
+        
+    await cleanup_game(interaction.guild.id)
+    await interaction.response.send_message("🛑 **The game has been forcibly shut down by the Host.** The lobby is now open for a new `/play`.")
+
 async def handle_bomb_turn(message, guild_id, game):
-    if not game['active']: return # Race condition safety check
+    if not game['active']: return 
     
     if len(message.content.split()) > 1:
         return await message.channel.send("❌ Single words only!", delete_after=3.0)
@@ -542,8 +591,8 @@ async def on_ready():
         print(f"Dictionary loaded! {len(VALID_WORDS)} words ready for Word Bomb.")
     except Exception as e:
         print(f"Failed to load dictionary: {e}")
-    print(f'Bot {bot.user} is fully optimized and ready! 🎈')
+    print(f'Bot {bot.user} is fully optimized and ready to party! 🎈')
 
 if __name__ == '__main__':
-    keep_alive()  # Wakes up the Flask web server
+    keep_alive()
     bot.run(os.getenv('DISCORD_TOKEN'))
