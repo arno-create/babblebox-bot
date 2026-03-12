@@ -45,6 +45,15 @@ AFK_MAX_SCHEDULE_MINUTES = 10080
 AFK_REASON_SENTENCE_LIMIT = 3
 AFK_URL_RE = re.compile(
     r"(?i)(?:https?://|www\.|discord(?:app)?\.com/invite/|discord\.gg/|(?:[a-z0-9-]+\.)+[a-z]{2,}(?:/\S*)?)"
+    "\b[a-zA-Z0-9._%+-]+@([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}\b" 
+    "\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d?\d)\b"
+    "\b(?:[A-Fa-f0-9]{1,4}:){7}[A-Fa-f0-9]{1,4}\b" 
+    "(?:(?:\b(?:cvv|cvc|security\s*code)[:\s]))\d{3,4}\b"
+    "(?:\b(?:card(?:\s*number)?|cc|credit\s*card)[:\s])\d{4}(?:[ -]?\d{4}){3}\b"
+    "(?:\b(?:card(?:\s*number)?|cc|credit\s*card)[:\s])3[47]\d{2}[ -]?\d{6}[ -]?\d{5}\b"
+    "(?:\b(?:ssn|social\s*security(?:\s*number)?)[:\s])\d{3}-\d{2}-\d{4}\b"
+    "(?:mailto:|\b(?:email|e-mail)[:\s*])[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b"
+    "(?:^|[^A-Za-z0-9\/:])((?:(?:\+|00|011)\s?[1-9]\d{0,2}|\(\+?[1-9]\d{0,2}\))(?:[-.\s()]?\d){7,12})(?:$|[^A-Za-z0-9\/:])"
 )
 AFK_MENTION_RE = re.compile(r"@(?:everyone|here)|<@&?\d+>|<#\d+>")
 AFK_BLOCKLIST = {
@@ -89,6 +98,41 @@ AFK_BLOCKLIST = {
     "shit",
     "slut",
     "vagina",
+    "whore",
+    "bulimia",
+    "*child grooming*",
+    "chink", 
+    "coon", 
+    "cripple", 
+    "dyke", 
+    "edtwt", 
+    "faggot",
+    "gook",
+    "kike",
+    "killyourself",
+    "kkk", 
+    "loli",
+    "meanspo",
+    "mongoloid",
+    "n1gg@",
+    "n1gg3r",
+    "n1gga",
+    "n1gger",
+    "nazi",
+    "paki",
+    "pedophile",
+    "proana",
+    "redroom",
+    "retard",
+    "shemale",
+    "shota",
+    "slut",
+    "snuff",
+    "spic",
+    "terrorism",
+    "thinspo",
+    "tranny",
+    "wetback",
     "whore",
 }
 CORPSE_STEP_LABELS = [
