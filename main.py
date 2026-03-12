@@ -42,7 +42,6 @@ SESSION_NOTE = "Session stats reset whenever the bot restarts."
 AFK_REASON_MAX_LEN = 160
 AFK_MAX_DURATION_MINUTES = 10080
 AFK_MAX_SCHEDULE_MINUTES = 10080
-AFK_MAX_IMAGE_BYTES = 8 * 1024 * 1024
 AFK_REASON_SENTENCE_LIMIT = 3
 AFK_URL_RE = re.compile(
     r"(?i)(?:https?://|www\.|discord(?:app)?\.com/invite/|discord\.gg/|(?:[a-z0-9-]+\.)+[a-z]{2,}(?:/\S*)?)"
@@ -791,21 +790,6 @@ def sanitize_afk_reason(reason):
     return True, safe
 
 
-def validate_afk_image(image):
-    if image is None:
-        return True, None
-
-    content_type = (image.content_type or "").lower()
-    filename = image.filename.lower()
-    is_image = content_type.startswith("image/") or filename.endswith((".png", ".jpg", ".jpeg", ".gif", ".webp"))
-    if not is_image:
-        return False, "❌ Only image attachments are allowed for AFK status."
-
-    if image.size > AFK_MAX_IMAGE_BYTES:
-        return False, "❌ AFK images must be 8 MB or smaller."
-
-    return True, None
-
 
 async def afk_expiry_worker(user_id, version, delay_seconds):
     try:
@@ -841,7 +825,7 @@ async def afk_schedule_worker(user_id, version, delay_seconds):
         afk_expiry_tasks[user_id] = asyncio.create_task(afk_expiry_worker(user_id, version, remaining))
 
 
-def set_afk_record(user, *, reason=None, duration_minutes=None, start_in_minutes=None, image=None):
+def set_afk_record(user, *, reason=None, duration_minutes=None, start_in_minutes=None):
     user_id = user.id
     clear_afk_state(user_id)
 
@@ -858,8 +842,6 @@ def set_afk_record(user, *, reason=None, duration_minutes=None, start_in_minutes
         "set_at": created_at if not scheduled else None,
         "starts_at": starts_at,
         "ends_at": ends_at,
-        "image_url": image.url if image else None,
-        "image_filename": image.filename if image else None,
         "version": version,
     }
     afk_records[user_id] = record
@@ -896,8 +878,6 @@ def build_afk_status_embed(user, record, *, title=None):
 
     embed.add_field(name="Timing", value="\n".join(timing_lines), inline=False)
 
-    if record.get("image_url"):
-        embed.set_image(url=record["image_url"])
 
     embed.set_footer(text="AFK clears automatically when you send a message.")
     return embed
@@ -913,8 +893,6 @@ def build_afk_brief_line(user, record):
         since_value = record.get("set_at") or record.get("starts_at")
         if since_value is not None:
             line += f" • since {format_timestamp(since_value, 'R')}"
-    if record.get("image_url"):
-        line += " • 📷 image attached"
     return line
 async def cancel_task(task):
     if task is None or task.done() or task is asyncio.current_task():
@@ -2157,18 +2135,16 @@ async def handle_telephone_turn_locked(message, guild_id, game):
     reason="Short safe AFK reason (1-3 sentences, no links)",
     duration_minutes="Optional auto-clear timer in minutes",
     start_in_minutes="Optional delayed start in minutes",
-    image="Optional image attachment",
 )
 async def afk_cmd(
     interaction,
     reason: Optional[app_commands.Range[str, 1, AFK_REASON_MAX_LEN]] = None,
     duration_minutes: Optional[app_commands.Range[int, 1, AFK_MAX_DURATION_MINUTES]] = None,
     start_in_minutes: Optional[app_commands.Range[int, 1, AFK_MAX_SCHEDULE_MINUTES]] = None,
-    image: Optional[discord.Attachment] = None,
 ):
     user_id = interaction.user.id
     existing = afk_records.get(user_id)
-    has_custom_payload = any(value is not None for value in (reason, duration_minutes, start_in_minutes, image))
+    has_custom_payload = any(value is not None for value in (reason, duration_minutes, start_in_minutes))
 
     if existing and not has_custom_payload:
         clear_afk_state(user_id)
@@ -2182,9 +2158,6 @@ async def afk_cmd(
     if not valid_reason:
         return await interaction.response.send_message(reason_or_error, ephemeral=True)
 
-    valid_image, image_error = validate_afk_image(image)
-    if not valid_image:
-        return await interaction.response.send_message(image_error, ephemeral=True)
 
     if start_in_minutes is not None:
         record = set_afk_record(
@@ -2192,7 +2165,6 @@ async def afk_cmd(
             reason=reason_or_error,
             duration_minutes=duration_minutes,
             start_in_minutes=start_in_minutes,
-            image=image,
         )
         embed = build_afk_status_embed(interaction.user, record, title="⏰ AFK Scheduled")
         await interaction.response.send_message(
@@ -2206,7 +2178,6 @@ async def afk_cmd(
         interaction.user,
         reason=reason_or_error,
         duration_minutes=duration_minutes,
-        image=image,
     )
     embed = build_afk_status_embed(interaction.user, record, title="💤 AFK Enabled")
     await interaction.response.send_message(
@@ -2265,7 +2236,7 @@ async def help_cmd(interaction):
     )
     embed.add_field(
         name="📊 Session Commands",
-        value="`/stats` shows in-session player stats. `/leaderboard` ranks players across this session. `/afk` now supports safe reasons, optional images, auto-clear timers, and delayed schedules. `/afkstatus` shows your current AFK card.",
+        value="`/stats` shows in-session player stats. `/leaderboard` ranks players across this session. `/afk` now supports safe reasons, auto-clear timers, and delayed schedules. `/afkstatus` shows your current AFK card.",
         inline=False,
     )
     embed.set_footer(text=SESSION_NOTE)
@@ -2437,23 +2408,13 @@ async def on_message(message):
         if mention.id != message.author.id and is_active_afk_record(afk_records.get(mention.id))
     ]
     if active_afk_mentions:
-        if len(active_afk_mentions) == 1 and active_afk_mentions[0][1].get("image_url"):
-            mention_user, record = active_afk_mentions[0]
-            embed = build_afk_status_embed(mention_user, record, title=f"💤 {display_name_of(mention_user)} is AFK")
-            with contextlib.suppress(discord.HTTPException):
-                await message.channel.send(
-                    embed=embed,
-                    delete_after=12.0,
-                    allowed_mentions=discord.AllowedMentions.none(),
-                )
-        else:
-            lines_to_send = [build_afk_brief_line(user, record) for user, record in active_afk_mentions[:5]]
-            with contextlib.suppress(discord.HTTPException):
-                await message.channel.send(
-                    "💤 " + "\n".join(lines_to_send),
-                    delete_after=12.0,
-                    allowed_mentions=discord.AllowedMentions.none(),
-                )
+        lines_to_send = [build_afk_brief_line(user, record) for user, record in active_afk_mentions[:5]]
+        with contextlib.suppress(discord.HTTPException):
+            await message.channel.send(
+                "💤 " + "\n".join(lines_to_send),
+                delete_after=12.0,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
     # ------------------------
 
     if isinstance(message.channel, discord.DMChannel):
