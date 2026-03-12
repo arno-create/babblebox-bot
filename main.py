@@ -3,6 +3,10 @@ import contextlib
 import io
 import os
 import random
+import re
+import traceback
+import unicodedata
+from datetime import datetime, timedelta, timezone
 from typing import Optional
 
 import aiohttp
@@ -26,12 +30,68 @@ DICTIONARY_URL = "https://raw.githubusercontent.com/dwyl/english-words/master/wo
 
 VALID_WORDS = set()
 games = {}
-afk_users = set()
+afk_records = {}
+afk_schedule_tasks = {}
+afk_expiry_tasks = {}
+afk_versions = {}
 dm_routes = {}
 session_stats = {}
 games_guard = asyncio.Lock()
 
 SESSION_NOTE = "Session stats reset whenever the bot restarts."
+AFK_REASON_MAX_LEN = 160
+AFK_MAX_DURATION_MINUTES = 10080
+AFK_MAX_SCHEDULE_MINUTES = 10080
+AFK_MAX_IMAGE_BYTES = 8 * 1024 * 1024
+AFK_REASON_SENTENCE_LIMIT = 3
+AFK_URL_RE = re.compile(
+    r"(?i)(?:https?://|www\.|discord(?:app)?\.com/invite/|discord\.gg/|(?:[a-z0-9-]+\.)+[a-z]{2,}(?:/\S*)?)"
+)
+AFK_MENTION_RE = re.compile(r"@(?:everyone|here)|<@&?\d+>|<#\d+>")
+AFK_BLOCKLIST = {
+    "anal",
+    "bdsm",
+    "bitch",
+    "blowjob",
+    "boob",
+    "boobs",
+    "breast",
+    "breasts",
+    "cock",
+    "cum",
+    "dick",
+    "fetish",
+    "fuck",
+    "fucked",
+    "fucking",
+    "handjob",
+    "horny",
+    "kink",
+    "masturbate",
+    "masturbation",
+    "naked",
+    "nipple",
+    "nipples",
+    "nsfw",
+    "nude",
+    "nudes",
+    "onlyfans",
+    "orgasm",
+    "penis",
+    "porn",
+    "pornhub",
+    "pussy",
+    "rape",
+    "raped",
+    "raping",
+    "sex",
+    "sexual",
+    "sext",
+    "shit",
+    "slut",
+    "vagina",
+    "whore",
+}
 CORPSE_STEP_LABELS = [
     "Adjective",
     "Noun",
@@ -115,6 +175,13 @@ class BabbleBot(commands.Bot):
         intents.members = True
         super().__init__(command_prefix="!", intents=intents, help_command=None)
         self.dictionary_ready = False
+        self.dev_guild_id = None
+        dev_guild_raw = os.getenv("DEV_GUILD_ID", "").strip()
+        if dev_guild_raw:
+            try:
+                self.dev_guild_id = int(dev_guild_raw)
+            except ValueError:
+                print(f"Invalid DEV_GUILD_ID '{dev_guild_raw}'. Ignoring dev guild sync.")
 
     async def setup_hook(self):
         if not VALID_WORDS:
@@ -136,10 +203,16 @@ class BabbleBot(commands.Bot):
                 print(f"Failed to load dictionary: {exc}")
 
         try:
-            await self.tree.sync()
-            print("Commands synced globally.")
+            if self.dev_guild_id:
+                dev_guild = discord.Object(id=self.dev_guild_id)
+                self.tree.copy_global_to(guild=dev_guild)
+                guild_synced = await self.tree.sync(guild=dev_guild)
+                print(f"Commands synced to dev guild {self.dev_guild_id}: {len(guild_synced)}")
+            global_synced = await self.tree.sync()
+            print(f"Commands synced globally: {len(global_synced)}")
         except Exception as exc:
             print(f"Command sync failed: {exc}")
+            traceback.print_exc()
 
 
 bot = BabbleBot()
@@ -202,6 +275,13 @@ def unregister_view(guild_id, view):
         return
     with contextlib.suppress(ValueError):
         game["views"].remove(view)
+
+
+def get_live_view(game, view_type):
+    for view in reversed(game.get("views", [])):
+        if isinstance(view, view_type) and getattr(view, "message", None) is not None:
+            return view
+    return None
 
 
 def can_emit_notice(game, key, interval=1.5):
@@ -640,6 +720,202 @@ def build_leaderboard_embed(metric_key, label, entries):
     return embed
 
 
+
+def now_utc():
+    return datetime.now(timezone.utc)
+
+
+def format_timestamp(value, style="R"):
+    if value is None:
+        return "Unknown"
+    return f"<t:{int(value.timestamp())}:{style}>"
+
+
+def is_active_afk_record(record):
+    return bool(record and record.get("status") == "active")
+
+
+def cancel_background_task(task):
+    if task is not None and not task.done():
+        task.cancel()
+
+
+def clear_afk_state(user_id, *, cancel_schedule=True, cancel_expiry=True):
+    record = afk_records.pop(user_id, None)
+
+    if cancel_schedule:
+        task = afk_schedule_tasks.pop(user_id, None)
+        cancel_background_task(task)
+
+    if cancel_expiry:
+        task = afk_expiry_tasks.pop(user_id, None)
+        cancel_background_task(task)
+
+    return record
+
+
+def bump_afk_version(user_id):
+    afk_versions[user_id] = afk_versions.get(user_id, 0) + 1
+    return afk_versions[user_id]
+
+
+def sanitize_afk_reason(reason):
+    if reason is None:
+        return True, None
+
+    cleaned = reason.replace("\r", " ").replace("\n", " ")
+    cleaned = re.sub(r"\s+", " ", cleaned).strip()
+    if not cleaned:
+        return False, "❌ Your AFK reason cannot be empty."
+
+    if len(cleaned) > AFK_REASON_MAX_LEN:
+        return False, f"❌ Your AFK reason must be {AFK_REASON_MAX_LEN} characters or fewer."
+
+    sentence_count = len([chunk for chunk in re.split(r"[.!?]+", cleaned) if chunk.strip()])
+    if sentence_count > AFK_REASON_SENTENCE_LIMIT:
+        return False, f"❌ Keep your AFK reason to {AFK_REASON_SENTENCE_LIMIT} short sentences or fewer."
+
+    if AFK_URL_RE.search(cleaned):
+        return False, "❌ Links, invites, and raw domains are not allowed in AFK reasons."
+
+    if AFK_MENTION_RE.search(cleaned):
+        return False, "❌ Mentions are not allowed in AFK reasons."
+
+    normalized = unicodedata.normalize("NFKC", cleaned).lower()
+    compact = re.sub(r"[^a-z0-9]+", "", normalized)
+    for blocked in AFK_BLOCKLIST:
+        if re.search(rf"\b{re.escape(blocked)}\b", normalized) or blocked in compact:
+            return False, "❌ That AFK reason was blocked by the safety filter. Please keep it clean and work-safe."
+
+    safe = discord.utils.escape_markdown(discord.utils.escape_mentions(cleaned))
+    return True, safe
+
+
+def validate_afk_image(image):
+    if image is None:
+        return True, None
+
+    content_type = (image.content_type or "").lower()
+    filename = image.filename.lower()
+    is_image = content_type.startswith("image/") or filename.endswith((".png", ".jpg", ".jpeg", ".gif", ".webp"))
+    if not is_image:
+        return False, "❌ Only image attachments are allowed for AFK status."
+
+    if image.size > AFK_MAX_IMAGE_BYTES:
+        return False, "❌ AFK images must be 8 MB or smaller."
+
+    return True, None
+
+
+async def afk_expiry_worker(user_id, version, delay_seconds):
+    try:
+        await asyncio.sleep(delay_seconds)
+    except asyncio.CancelledError:
+        return
+
+    record = afk_records.get(user_id)
+    if not record or record.get("version") != version or record.get("status") != "active":
+        return
+
+    clear_afk_state(user_id, cancel_expiry=False)
+    afk_expiry_tasks.pop(user_id, None)
+
+
+async def afk_schedule_worker(user_id, version, delay_seconds):
+    try:
+        await asyncio.sleep(delay_seconds)
+    except asyncio.CancelledError:
+        return
+
+    record = afk_records.get(user_id)
+    if not record or record.get("version") != version or record.get("status") != "scheduled":
+        return
+
+    record["status"] = "active"
+    record["set_at"] = record.get("starts_at") or now_utc()
+    afk_schedule_tasks.pop(user_id, None)
+
+    ends_at = record.get("ends_at")
+    if ends_at is not None:
+        remaining = max(0.0, (ends_at - now_utc()).total_seconds())
+        afk_expiry_tasks[user_id] = asyncio.create_task(afk_expiry_worker(user_id, version, remaining))
+
+
+def set_afk_record(user, *, reason=None, duration_minutes=None, start_in_minutes=None, image=None):
+    user_id = user.id
+    clear_afk_state(user_id)
+
+    version = bump_afk_version(user_id)
+    created_at = now_utc()
+    scheduled = start_in_minutes is not None
+    starts_at = created_at + timedelta(minutes=start_in_minutes) if scheduled else created_at
+    ends_at = starts_at + timedelta(minutes=duration_minutes) if duration_minutes is not None else None
+
+    record = {
+        "user_id": user_id,
+        "status": "scheduled" if scheduled else "active",
+        "reason": reason,
+        "set_at": created_at if not scheduled else None,
+        "starts_at": starts_at,
+        "ends_at": ends_at,
+        "image_url": image.url if image else None,
+        "image_filename": image.filename if image else None,
+        "version": version,
+    }
+    afk_records[user_id] = record
+
+    if scheduled:
+        delay_seconds = max(0.0, start_in_minutes * 60)
+        afk_schedule_tasks[user_id] = asyncio.create_task(afk_schedule_worker(user_id, version, delay_seconds))
+    elif ends_at is not None:
+        delay_seconds = max(0.0, (ends_at - created_at).total_seconds())
+        afk_expiry_tasks[user_id] = asyncio.create_task(afk_expiry_worker(user_id, version, delay_seconds))
+
+    return record
+
+
+def build_afk_status_embed(user, record, *, title=None):
+    status = record.get("status", "active")
+    embed = discord.Embed(
+        title=title or ("⏰ AFK Scheduled" if status == "scheduled" else "💤 AFK Enabled"),
+        color=discord.Color.orange(),
+        description=f"**{display_name_of(user)}**",
+    )
+
+    if record.get("reason"):
+        embed.add_field(name="Reason", value=safe_field_text(record["reason"], limit=512), inline=False)
+
+    timing_lines = []
+    if status == "scheduled":
+        timing_lines.append(f"Starts: {format_timestamp(record.get('starts_at'), 'R')} ({format_timestamp(record.get('starts_at'), 'f')})")
+    else:
+        timing_lines.append(f"Since: {format_timestamp(record.get('set_at') or record.get('starts_at'), 'R')}")
+
+    if record.get("ends_at"):
+        timing_lines.append(f"Auto-clear: {format_timestamp(record['ends_at'], 'R')} ({format_timestamp(record['ends_at'], 'f')})")
+
+    embed.add_field(name="Timing", value="\n".join(timing_lines), inline=False)
+
+    if record.get("image_url"):
+        embed.set_image(url=record["image_url"])
+
+    embed.set_footer(text="AFK clears automatically when you send a message.")
+    return embed
+
+
+def build_afk_brief_line(user, record):
+    line = f"**{display_name_of(user)}** is AFK"
+    if record.get("reason"):
+        line += f" — {record['reason']}"
+    if record.get("ends_at"):
+        line += f" • back {format_timestamp(record['ends_at'], 'R')}"
+    else:
+        since_value = record.get("set_at") or record.get("starts_at")
+        if since_value is not None:
+            line += f" • since {format_timestamp(since_value, 'R')}"
+    if record.get("image_url"):
+        line += " • 📷 image attached"
+    return line
 async def cancel_task(task):
     if task is None or task.done() or task is asyncio.current_task():
         return
@@ -659,8 +935,11 @@ async def safe_send_interaction(interaction, *args, **kwargs):
             return await interaction.followup.send(*args, **kwargs)
         return await interaction.response.send_message(*args, **kwargs)
     except discord.InteractionResponded:
-        return await interaction.followup.send(*args, **kwargs)
-
+        with contextlib.suppress(discord.NotFound, discord.HTTPException):
+            return await interaction.followup.send(*args, **kwargs)
+        return None
+    except (discord.NotFound, discord.HTTPException):
+        return None
 
 async def safe_edit_interaction_message(interaction, **kwargs):
     try:
@@ -674,10 +953,16 @@ async def safe_edit_interaction_message(interaction, **kwargs):
             await interaction.edit_original_response(**kwargs)
             return True
         except (discord.NotFound, discord.HTTPException):
-            return False
+            pass
     except (discord.NotFound, discord.HTTPException):
-        return False
+        pass
 
+    message = getattr(interaction, "message", None)
+    if message is not None:
+        with contextlib.suppress(discord.NotFound, discord.Forbidden, discord.HTTPException):
+            await message.edit(**kwargs)
+            return True
+    return False
 
 async def disable_view(view):
     for child in view.children:
@@ -793,6 +1078,7 @@ class TrackedView(discord.ui.View):
 
     async def on_error(self, interaction, error, item):
         print(f"View error in guild {self.guild_id}: {error}")
+        traceback.print_exception(type(error), error, error.__traceback__)
         with contextlib.suppress(discord.HTTPException):
             if interaction.response.is_done():
                 await interaction.followup.send("❌ Something went wrong. The game state may have been reset.", ephemeral=True)
@@ -1111,8 +1397,8 @@ class SpyfallTargetSelect(discord.ui.Select):
             game["current_player_index"] = game["players"].index(target_player)
             reset_idle_timer(self.guild_id)
 
-            if isinstance(self.view, SpyfallDashboard):
-                self.view.rebuild()
+            new_dashboard = SpyfallDashboard(self.guild_id)
+            old_view = self.view if isinstance(self.view, SpyfallDashboard) else None
 
             embed = discord.Embed(title="🕵️ Spyfall: Interrogation Phase", color=discord.Color.dark_gray())
             embed.add_field(
@@ -1120,17 +1406,22 @@ class SpyfallTargetSelect(discord.ui.Select):
                 value=f"⚠️ **{target_player.mention}**, it is YOUR turn! Answer the question, then use the menu to pick the next target.",
                 inline=False,
             )
-            ok = await safe_edit_interaction_message(interaction, embed=embed, view=self.view)
+            ok = await safe_edit_interaction_message(interaction, embed=embed, view=new_dashboard)
             if not ok:
                 await cleanup_game(self.guild_id)
                 return
+
+            register_view(self.guild_id, new_dashboard, interaction.message)
+            if old_view is not None and old_view is not new_dashboard:
+                old_view.message = None
+                unregister_view(self.guild_id, old_view)
+                old_view.stop()
 
             with contextlib.suppress(discord.HTTPException):
                 await interaction.channel.send(
                     f"🗣️ **{target_player.mention}**, you are being interrogated by **{previous_player.mention}**!\n"
                     "Answer, then pick your target in the panel above."
                 )
-
 
 class SpyfallVoteButton(discord.ui.Button):
     def __init__(self):
@@ -1142,16 +1433,16 @@ class SpyfallVoteButton(discord.ui.Button):
 
 class SpyfallDashboard(TrackedView):
     def __init__(self, guild_id):
-        super().__init__(guild_id, timeout=300)
+        super().__init__(guild_id, timeout=None)
         self.rebuild()
 
     def rebuild(self):
         self.clear_items()
         game = games.get(self.guild_id)
-        if not game or not game.get("players"):
+        if not game or game.get("closing") or not game.get("active") or not game.get("players"):
             return
         current_player = get_current_player(game)
-        if current_player:
+        if current_player and len(game["players"]) > 1:
             self.add_item(SpyfallTargetSelect(game["players"], current_player, self.guild_id))
         self.add_item(SpyfallVoteButton())
 
@@ -1638,6 +1929,17 @@ async def trigger_spyfall_vote(interaction):
         game["voting_active"] = True
         game["votes"] = {}
         vote_token = bump_token(game, "vote_token")
+        reset_idle_timer(guild_id)
+
+        dashboard = get_live_view(game, SpyfallDashboard)
+        if dashboard is not None:
+            for child in dashboard.children:
+                child.disabled = True
+            if dashboard.message is not None:
+                with contextlib.suppress(discord.NotFound, discord.Forbidden, discord.HTTPException):
+                    await dashboard.message.edit(view=dashboard)
+            unregister_view(guild_id, dashboard)
+            dashboard.stop()
 
         vote_view = SpyfallVoteView(guild_id)
         embed = discord.Embed(
@@ -1850,15 +2152,83 @@ async def handle_telephone_turn_locked(message, guild_id, game):
 # ==========================================
 # SLASH COMMANDS
 # ==========================================
-@bot.tree.command(name="afk", description="Toggle AFK status safely.")
-async def afk_cmd(interaction):
+@bot.tree.command(name="afk", description="Set, schedule, or clear your AFK status safely.")
+@app_commands.describe(
+    reason="Short safe AFK reason (1-3 sentences, no links)",
+    duration_minutes="Optional auto-clear timer in minutes",
+    start_in_minutes="Optional delayed start in minutes",
+    image="Optional image attachment",
+)
+async def afk_cmd(
+    interaction,
+    reason: Optional[app_commands.Range[str, 1, AFK_REASON_MAX_LEN]] = None,
+    duration_minutes: Optional[app_commands.Range[int, 1, AFK_MAX_DURATION_MINUTES]] = None,
+    start_in_minutes: Optional[app_commands.Range[int, 1, AFK_MAX_SCHEDULE_MINUTES]] = None,
+    image: Optional[discord.Attachment] = None,
+):
     user_id = interaction.user.id
-    if user_id in afk_users:
-        afk_users.remove(user_id)
-        await interaction.response.send_message("👋 Welcome back! I have removed your AFK status.", ephemeral=True)
-    else:
-        afk_users.add(user_id)
-        await interaction.response.send_message("💤 You are now AFK. I will notify anyone who mentions you.", ephemeral=True)
+    existing = afk_records.get(user_id)
+    has_custom_payload = any(value is not None for value in (reason, duration_minutes, start_in_minutes, image))
+
+    if existing and not has_custom_payload:
+        clear_afk_state(user_id)
+        if existing.get("status") == "scheduled":
+            await interaction.response.send_message("👋 Your scheduled AFK has been cancelled.", ephemeral=True)
+        else:
+            await interaction.response.send_message("👋 Welcome back! I have removed your AFK status.", ephemeral=True)
+        return
+
+    valid_reason, reason_or_error = sanitize_afk_reason(reason)
+    if not valid_reason:
+        return await interaction.response.send_message(reason_or_error, ephemeral=True)
+
+    valid_image, image_error = validate_afk_image(image)
+    if not valid_image:
+        return await interaction.response.send_message(image_error, ephemeral=True)
+
+    if start_in_minutes is not None:
+        record = set_afk_record(
+            interaction.user,
+            reason=reason_or_error,
+            duration_minutes=duration_minutes,
+            start_in_minutes=start_in_minutes,
+            image=image,
+        )
+        embed = build_afk_status_embed(interaction.user, record, title="⏰ AFK Scheduled")
+        await interaction.response.send_message(
+            "⏰ Your AFK status is scheduled. I will activate it automatically.",
+            embed=embed,
+            ephemeral=True,
+        )
+        return
+
+    record = set_afk_record(
+        interaction.user,
+        reason=reason_or_error,
+        duration_minutes=duration_minutes,
+        image=image,
+    )
+    embed = build_afk_status_embed(interaction.user, record, title="💤 AFK Enabled")
+    await interaction.response.send_message(
+        "💤 You are now AFK. I will notify people who mention you.",
+        embed=embed,
+        ephemeral=True,
+    )
+
+
+@bot.tree.command(name="afkstatus", description="View your current AFK or scheduled AFK status")
+async def afkstatus_cmd(interaction):
+    record = afk_records.get(interaction.user.id)
+    if record is None:
+        return await interaction.response.send_message(
+            "✅ You do not currently have an AFK status or schedule.",
+            ephemeral=True,
+        )
+
+    await interaction.response.send_message(
+        embed=build_afk_status_embed(interaction.user, record),
+        ephemeral=True,
+    )
 
 
 @bot.tree.command(name="help", description="View the Babblebox manual and game rules")
@@ -1895,7 +2265,7 @@ async def help_cmd(interaction):
     )
     embed.add_field(
         name="📊 Session Commands",
-        value="`/stats` shows in-session player stats. `/leaderboard` ranks players across this session. `/afk` safely toggles AFK status without ping abuse.",
+        value="`/stats` shows in-session player stats. `/leaderboard` ranks players across this session. `/afk` now supports safe reasons, optional images, auto-clear timers, and delayed schedules. `/afkstatus` shows your current AFK card.",
         inline=False,
     )
     embed.set_footer(text=SESSION_NOTE)
@@ -2051,19 +2421,39 @@ async def on_message(message):
         return
 
     # --- AFK SYSTEM CHECK ---
-    if message.author.id in afk_users:
-        afk_users.remove(message.author.id)
+    author_afk = afk_records.get(message.author.id)
+    if is_active_afk_record(author_afk):
+        clear_afk_state(message.author.id)
         with contextlib.suppress(discord.HTTPException):
             await message.channel.send(
                 f"Welcome back {message.author.mention}, I removed your AFK status!",
                 delete_after=5.0,
+                allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
             )
 
-    afk_mentions = [mention for mention in message.mentions if mention.id in afk_users and mention.id != message.author.id]
-    if afk_mentions:
-        names = ", ".join(f"**{mention.display_name}**" for mention in afk_mentions[:5])
-        with contextlib.suppress(discord.HTTPException):
-            await message.channel.send(f"💤 {names} {'is' if len(afk_mentions) == 1 else 'are'} currently AFK.", delete_after=5.0)
+    active_afk_mentions = [
+        (mention, afk_records.get(mention.id))
+        for mention in message.mentions
+        if mention.id != message.author.id and is_active_afk_record(afk_records.get(mention.id))
+    ]
+    if active_afk_mentions:
+        if len(active_afk_mentions) == 1 and active_afk_mentions[0][1].get("image_url"):
+            mention_user, record = active_afk_mentions[0]
+            embed = build_afk_status_embed(mention_user, record, title=f"💤 {display_name_of(mention_user)} is AFK")
+            with contextlib.suppress(discord.HTTPException):
+                await message.channel.send(
+                    embed=embed,
+                    delete_after=12.0,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
+        else:
+            lines_to_send = [build_afk_brief_line(user, record) for user, record in active_afk_mentions[:5]]
+            with contextlib.suppress(discord.HTTPException):
+                await message.channel.send(
+                    "💤 " + "\n".join(lines_to_send),
+                    delete_after=12.0,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
     # ------------------------
 
     if isinstance(message.channel, discord.DMChannel):
@@ -2185,6 +2575,7 @@ async def on_raw_message_delete(payload):
 @bot.tree.error
 async def on_app_command_error(interaction, error):
     print(f"App command error: {error}")
+    traceback.print_exception(type(error), error, error.__traceback__)
 
     if isinstance(error, app_commands.errors.CheckFailure):
         message = "❌ This command can only be used in a server."
