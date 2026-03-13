@@ -2448,11 +2448,7 @@ def build_help_embed() -> discord.Embed:
         value="Type a valid English word containing the required syllable before the timer runs out. Last player standing wins.",
         inline=False
     )
-    embed.add_field(
-        name="⌨️ Prefix Commands",
-        value="Babblebox also supports `bb!help`, `bb!play`, `bb!ping`, `bb!stop`, `bb!afk`, and `bb!afkstatus`.",
-        inline=False
-    )
+ 
     embed.add_field(
         name="🔐 Required Channel Permissions",
         value=format_permission_list(PLAY_REQUIRED_PERMS),
