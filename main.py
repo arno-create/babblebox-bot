@@ -274,7 +274,7 @@ class BabbleBot(commands.Bot):
         intents = discord.Intents.default()
         intents.message_content = True
         intents.members = True
-        super().__init__(command_prefix="!", intents=intents, help_command=None)
+        super().__init__(command_prefix='bb!', intents=intents, help_command=None)
         self.dictionary_ready = False
         self.dev_guild_id = None
         dev_guild_raw = os.getenv("DEV_GUILD_ID", "").strip()
@@ -322,6 +322,56 @@ bot = BabbleBot()
 # ==========================================
 # HELPERS
 # ==========================================
+async def send_prefix_embed(ctx: commands.Context, *, embed: discord.Embed, view=None):
+    return await ctx.send(embed=embed, view=view)
+
+async def send_prefix_text(ctx: commands.Context, content: str):
+    return await ctx.send(content)
+
+def get_ctx_channel_permissions(ctx: commands.Context):
+    if ctx.guild is None or ctx.channel is None or bot.user is None:
+        return None
+
+    me = ctx.guild.me or ctx.guild.get_member(bot.user.id)
+    if me is None:
+        return None
+
+    return ctx.channel.permissions_for(me)
+
+async def require_bot_permissions_prefix(
+    ctx: commands.Context,
+    required_permissions,
+    command_name: str
+) -> bool:
+    channel_perms = get_ctx_channel_permissions(ctx)
+    if channel_perms is None:
+        return True
+
+    missing = [
+        PERMISSION_LABELS.get(name, name.replace("_", " ").title())
+        for name in required_permissions
+        if not getattr(channel_perms, name, False)
+    ]
+
+    if not missing:
+        return True
+
+    embed = discord.Embed(
+        title="⚠️ Missing Bot Permission(s)",
+        description=(
+            f"I can’t run **{command_name}** in this channel because I’m missing:\n"
+            + "\n".join(f"• {perm}" for perm in missing)
+        ),
+        color=discord.Color.orange(),
+    )
+    embed.add_field(
+        name="How to fix it",
+        value="Please restore those permissions for me in this channel or category, then try again.",
+        inline=False,
+    )
+    await ctx.send(embed=embed)
+    return False
+    
 def is_player_in_game(game, user_id):
     return any(player.id == user_id for player in game.get("players", []))
 
@@ -2366,47 +2416,42 @@ async def afkstatus_cmd(interaction):
         ephemeral=True,
     )
 
-
-@bot.tree.command(name="help", description="View the Babblebox manual and game rules")
-async def help_cmd(interaction):
-    if not await require_bot_permissions(interaction, HELP_REQUIRED_PERMS, "/help"):
-        return
+def build_help_embed() -> discord.Embed:
     embed = discord.Embed(
         title="🎮 Babblebox Manual",
         description="Gather your friends in a voice or text channel and let the chaos begin!",
-        color=discord.Color.gold(),
+        color=discord.Color.gold()
     )
     embed.add_field(
         name="🚀 How to Play",
-        value="Type `/play` to open the lobby. The person who types it is the **Host**. The Host chooses the game, sets Word Bomb mode if needed, and clicks Start.",
-        inline=False,
+        value="Use `/play` or `bb!play` to open the lobby. The person who starts it becomes the Host. The Host chooses the game and starts it.",
+        inline=False
     )
     embed.add_field(
         name="🎙️ Broken Telephone (3+ Players)",
-        value="The bot DMs the first player to record a voice message. The next player receives it, listens (it self-destructs in 15s!), and mimics it. The final player types a guess of what the original phrase was. Every round now ends with a recap card.",
-        inline=False,
+        value="The bot DMs the first player to record a voice message. The next player receives it, listens, and mimics it. The final player types a guess.",
+        inline=False
     )
     embed.add_field(
         name="📝 Exquisite Corpse (3+ Players)",
-        value="A blind story-building game. The bot DMs players asking for an adjective, noun, verb, etc., based on a random theme. Nobody sees the full sentence until the finale — and then the bot reveals a contributor recap too.",
-        inline=False,
+        value="A blind story-building game. The bot DMs players asking for words or phrases, then reveals the final absurd sentence.",
+        inline=False
     )
     embed.add_field(
         name="🕵️ Spyfall (3+ Players)",
-        value="The bot DMs everyone a location, except one person who gets 'Spy'. Ask each other questions to find the spy. Use the dropdown to pass the turn, and type `/vote` or click the button to execute someone!",
-        inline=False,
+        value="The bot DMs everyone a location except one secret spy. Players interrogate each other and vote to catch the spy.",
+        inline=False
     )
     embed.add_field(
         name="💣 Word Bomb (2+ Players)",
-        value="A Battle Royale in the server chat. Use the lobby button to cycle between **Classic**, **Chaos**, and **Hardcore** modes. Chaos adds safe random modifiers. Hardcore starts faster and gives no warning callouts.",
-        inline=False,
+        value="Type a valid English word containing the required syllable before the timer runs out. Last player standing wins.",
+        inline=False
     )
     embed.add_field(
-        name="📊 Session Commands",
-        value="`/stats` shows in-session player stats. `/leaderboard` ranks players across this session. `/afk` now supports safe reasons, auto-clear timers, and delayed schedules. `/afkstatus` shows your current AFK card.",
-        inline=False,
+        name="⌨️ Prefix Commands",
+        value="Babblebox also supports `bb!help`, `bb!play`, `bb!ping`, `bb!stop`, `bb!afk`, and `bb!afkstatus`.",
+        inline=False
     )
-    embed.set_footer(text=SESSION_NOTE)
     embed.add_field(
         name="🔐 Required Channel Permissions",
         value=format_permission_list(PLAY_REQUIRED_PERMS),
@@ -2417,7 +2462,14 @@ async def help_cmd(interaction):
         value="Broken Telephone, Exquisite Corpse, and Spyfall role messages require players to allow DMs from server members.",
         inline=False
     )
-    await interaction.response.send_message(embed=embed)
+    return embed
+
+@bot.tree.command(name="help", description="View the Party Bot manual and game rules")
+async def help_cmd(interaction: discord.Interaction):
+    if not await require_bot_permissions(interaction, HELP_REQUIRED_PERMS, "/help"):
+        return
+
+    await interaction.response.send_message(embed=build_help_embed())
 
 
 @app_commands.guild_only()
@@ -2501,6 +2553,9 @@ async def vote_cmd(interaction):
 async def ping_cmd(interaction):
     await interaction.response.send_message("Pong! 🏓 I am online and ready to party.", ephemeral=True)
 
+@bot.command(name="ping")
+async def prefix_ping_cmd(ctx: commands.Context):
+    await ctx.send("Pong! 🏓 I am online and ready to party.")
 
 @bot.tree.command(name="stats", description="View Babblebox session stats")
 @app_commands.describe(user="Whose session stats to view")
@@ -2644,7 +2699,7 @@ async def on_message(message):
             if not current_player or current_player.id != message.author.id:
                 return
             await handle_bomb_turn_locked(message, guild_id, game)
-
+    await bot.process_commands(message)
 
 @bot.event
 async def on_member_remove(member):
