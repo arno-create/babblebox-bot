@@ -276,7 +276,6 @@ class BabbleBot(commands.Bot):
         intents.message_content = True
         intents.members = True
         super().__init__(command_prefix='bb!', intents=intents, help_command=None)
-        bot = BabbleBot(command_prefix='bb!', intents=intents, help_command=None)
         self.dictionary_ready = False
         self.dev_guild_id = None
         dev_guild_raw = os.getenv("DEV_GUILD_ID", "").strip()
@@ -2657,50 +2656,53 @@ async def on_message(message):
             )
     # ------------------------
 
+    # DM game handling
     if isinstance(message.channel, discord.DMChannel):
         guild_id = dm_routes.get(message.author.id)
-        if guild_id is None:
-            return
-
-        game = games.get(guild_id)
-        if not game or game.get("closing") or not game.get("active"):
-            release_dm_route(message.author.id, guild_id)
-            return
-
-        async with game["lock"]:
+        if guild_id is not None:
             game = games.get(guild_id)
             if not game or game.get("closing") or not game.get("active"):
                 release_dm_route(message.author.id, guild_id)
-                return
+            else:
+                async with game["lock"]:
+                    game = games.get(guild_id)
+                    if not game or game.get("closing") or not game.get("active"):
+                        release_dm_route(message.author.id, guild_id)
+                    else:
+                        current_player = get_current_player(game)
+                        if current_player and current_player.id == message.author.id:
+                            if game["game_type"] == "corpse":
+                                await handle_corpse_turn_locked(message, guild_id, game)
+                                return
+                            elif game["game_type"] == "telephone":
+                                await handle_telephone_turn_locked(message, guild_id, game)
+                                return
 
-            current_player = get_current_player(game)
-            if not current_player or current_player.id != message.author.id:
-                return
-
-            if game["game_type"] == "corpse":
-                await handle_corpse_turn_locked(message, guild_id, game)
-            elif game["game_type"] == "telephone":
-                await handle_telephone_turn_locked(message, guild_id, game)
-        return
-
+    # Guild game handling
     if message.guild:
         guild_id = message.guild.id
         game = games.get(guild_id)
-        if not game or game.get("closing") or not game.get("active"):
-            return
-        if game.get("game_type") != "bomb":
-            return
-        if message.channel.id != game["channel"].id:
-            return
 
-        async with game["lock"]:
-            game = games.get(guild_id)
-            if not game or game.get("closing") or not game.get("active") or game.get("game_type") != "bomb":
-                return
-            current_player = get_current_player(game)
-            if not current_player or current_player.id != message.author.id:
-                return
-            await handle_bomb_turn_locked(message, guild_id, game)
+        if (
+            game
+            and not game.get("closing")
+            and game.get("active")
+            and game.get("game_type") == "bomb"
+            and message.channel.id == game["channel"].id
+        ):
+            async with game["lock"]:
+                game = games.get(guild_id)
+                if (
+                    game
+                    and not game.get("closing")
+                    and game.get("active")
+                    and game.get("game_type") == "bomb"
+                ):
+                    current_player = get_current_player(game)
+                    if current_player and current_player.id == message.author.id:
+                        await handle_bomb_turn_locked(message, guild_id, game)
+                        return
+
     await bot.process_commands(message)
 
 @bot.event
