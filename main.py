@@ -23,7 +23,7 @@ load_dotenv()
 # GLOBALS & CONSTANTS
 # ==========================================
 MAX_PLAYERS = 25  # Discord select menus support at most 25 options.
-IDLE_TIMEOUT_SECONDS = 300
+IDLE_TIMEOUT_SECONDS = 600
 TURN_TIMEOUT_SECONDS = 60
 MAX_VOICE_BYTES = 8 * 1024 * 1024
 DICTIONARY_URL = "https://raw.githubusercontent.com/dwyl/english-words/master/words_alpha.txt"
@@ -114,6 +114,7 @@ AFK_BLOCKLIST = {
     "loli",
     "meanspo",
     "mongoloid",
+    "nigga",
     "n1gg@",
     "n1gg3r",
     "n1gga",
@@ -1558,7 +1559,7 @@ async def idle_timeout(guild_id, game_ref):
             await game_ref["channel"].send(
                 embed=discord.Embed(
                     title="💤 Game Abandoned",
-                    description="No activity for 5 minutes. The game has been closed.",
+                    description="No activity for 10 minutes. The game has been closed.",
                     color=discord.Color.dark_grey(),
                 )
             )

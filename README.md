@@ -145,11 +145,17 @@ This architecture allows multiple servers to host independent game sessions simu
 
 ## Screenshots
 
-> Add screenshots in the `assets/` folder and link them here.
-
-Example:
-
-```md
+### Game Lobby
 ![Lobby](assets/lobby.png)
-![Spyfall](assets/spyfall.png)
-![Word Bomb](assets/wordbomb.png)
+
+### Spyfall Gameplay
+![Spyfall Gameplay](assets/spyfall_gameplay.png)
+
+### Spyfall Voting
+![Spyfall Voting](assets/spyfall_voting.png)
+
+### Word Bomb Gameplay
+![Word Bomb](assets/wordbomb_gameplay.png)
+
+### Exquisite Corpse
+![Exquisite Corpse](assets/exquisite_corpse.png)
