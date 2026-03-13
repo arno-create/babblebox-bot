@@ -269,12 +269,14 @@ STOP_REQUIRED_PERMS = (
 # ==========================================
 # BOT SETUP
 # ==========================================
+
 class BabbleBot(commands.Bot):
     def __init__(self):
         intents = discord.Intents.default()
         intents.message_content = True
         intents.members = True
         super().__init__(command_prefix='bb!', intents=intents, help_command=None)
+        bot = BabbleBot(command_prefix='bb!', intents=intents, help_command=None)
         self.dictionary_ready = False
         self.dev_guild_id = None
         dev_guild_raw = os.getenv("DEV_GUILD_ID", "").strip()
