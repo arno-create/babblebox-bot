@@ -44,9 +44,43 @@ AFK_MAX_DURATION_MINUTES = 10080
 AFK_MAX_SCHEDULE_MINUTES = 10080
 AFK_REASON_SENTENCE_LIMIT = 3
 AFK_URL_RE = re.compile(
-    r"(?i)(?:https?://|www\.|discord(?:app)?\.com/invite/|discord\.gg/|(?:[a-z0-9-]+\.)+[a-z]{2,}(?:/\S*)?)"
+    r"(?ix)"
+    r"(?:https?://|ftp://|www\.)\S+"
+    r"|(?:discord(?:app)?\.com/invite/|discord\.gg/)\S+"
+    r"|(?:[a-z0-9-]+\.)+(?:com|net|org|gg|io|me|dev|app|xyz|info|co|ru|am|uk|de|fr|ca|us)(?:/\S*)?"
 )
-AFK_MENTION_RE = re.compile(r"@(?:everyone|here)|<@&?\d+>|<#\d+>")
+
+AFK_EMAIL_RE = re.compile(
+    r"(?i)\b[A-Z0-9._%+-]+@(?:[A-Z0-9-]+\.)+[A-Z]{2,}\b"
+)
+
+AFK_IPV4_RE = re.compile(
+    r"\b(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\b"
+)
+
+AFK_IPV6_RE = re.compile(
+    r"(?i)\b(?:[A-F0-9]{1,4}:){2,7}[A-F0-9]{1,4}\b"
+)
+
+AFK_PHONE_RE = re.compile(
+    r"(?<!\w)(?:\+|00|011)?\s*(?:\(?\d{1,4}\)?[\s.-]*)?(?:\d[\s.-]*){7,14}(?!\w)"
+)
+
+AFK_CARD_RE = re.compile(
+    r"\b(?:\d[ -]?){13,19}\b"
+)
+
+AFK_SSN_RE = re.compile(
+    r"\b\d{3}-\d{2}-\d{4}\b"
+)
+
+AFK_MENTION_RE = re.compile(
+    r"(?i)@(?:everyone|here)|<@!?&?\d+>|<#\d+>"
+)
+
+AFK_MARKDOWN_LINK_RE = re.compile(
+    r"\[[^\]]{1,80}\]\((?:[^)]+)\)"
+)
 AFK_BLOCKLIST = {
     "anal",
     "bdsm",
@@ -830,32 +864,45 @@ def sanitize_afk_reason(reason):
     if reason is None:
         return True, None
 
-    cleaned = reason.replace("\r", " ").replace("\n", " ")
+    cleaned = unicodedata.normalize("NFKC", reason or "")
+    cleaned = "".join(ch for ch in cleaned if unicodedata.category(ch) != "Cf")
+    cleaned = cleaned.replace("\n", " ").replace("\r", " ")
     cleaned = re.sub(r"\s+", " ", cleaned).strip()
+
     if not cleaned:
-        return False, "❌ Your AFK reason cannot be empty."
+        return True, None
 
     if len(cleaned) > AFK_REASON_MAX_LEN:
-        return False, f"❌ Your AFK reason must be {AFK_REASON_MAX_LEN} characters or fewer."
+        return False, f"❌ AFK reason must be at most {AFK_REASON_MAX_LEN} characters."
 
-    sentence_count = len([chunk for chunk in re.split(r"[.!?]+", cleaned) if chunk.strip()])
-    if sentence_count > AFK_REASON_SENTENCE_LIMIT:
-        return False, f"❌ Keep your AFK reason to {AFK_REASON_SENTENCE_LIMIT} short sentences or fewer."
+    sentence_parts = [part.strip() for part in re.split(r"[.!?]+", cleaned) if part.strip()]
+    if len(sentence_parts) > AFK_REASON_SENTENCE_LIMIT:
+        return False, f"❌ AFK reason must be at most {AFK_REASON_SENTENCE_LIMIT} short sentences."
 
-    if AFK_URL_RE.search(cleaned):
-        return False, "❌ Links, invites, and raw domains are not allowed in AFK reasons."
+    squashed = re.sub(r"(?<=\w)[\s`~*_.,-]+(?=\w)", "", cleaned)
 
-    if AFK_MENTION_RE.search(cleaned):
-        return False, "❌ Mentions are not allowed in AFK reasons."
+    private_patterns = (
+        ("links or invites", AFK_URL_RE),
+        ("email addresses", AFK_EMAIL_RE),
+        ("IP addresses", AFK_IPV4_RE),
+        ("IP addresses", AFK_IPV6_RE),
+        ("phone numbers", AFK_PHONE_RE),
+        ("card-like numbers", AFK_CARD_RE),
+        ("sensitive ID numbers", AFK_SSN_RE),
+        ("mentions", AFK_MENTION_RE),
+        ("markdown links", AFK_MARKDOWN_LINK_RE),
+    )
 
-    normalized = unicodedata.normalize("NFKC", cleaned).lower()
-    compact = re.sub(r"[^a-z0-9]+", "", normalized)
-    for blocked in AFK_BLOCKLIST:
-        if re.search(rf"\b{re.escape(blocked)}\b", normalized) or blocked in compact:
-            return False, "❌ That AFK reason was blocked by the safety filter. Please keep it clean and work-safe."
+    for label, pattern in private_patterns:
+        if pattern.search(cleaned) or pattern.search(squashed):
+            return False, f"❌ AFK reason cannot contain {label}. Use short plain text only."
 
-    safe = discord.utils.escape_markdown(discord.utils.escape_mentions(cleaned))
-    return True, safe
+    for blocked_word in AFK_BLOCKLIST:
+        blocked_re = re.compile(rf"\b{re.escape(blocked_word)}\b", re.IGNORECASE)
+        if blocked_re.search(cleaned) or blocked_re.search(squashed):
+            return False, "❌ AFK reason contains blocked or inappropriate words. Use short plain text only."
+
+    return True, cleaned
 
 
 
