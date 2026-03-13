@@ -45,15 +45,6 @@ AFK_MAX_SCHEDULE_MINUTES = 10080
 AFK_REASON_SENTENCE_LIMIT = 3
 AFK_URL_RE = re.compile(
     r"(?i)(?:https?://|www\.|discord(?:app)?\.com/invite/|discord\.gg/|(?:[a-z0-9-]+\.)+[a-z]{2,}(?:/\S*)?)"
-    "\b[a-zA-Z0-9._%+-]+@([a-zA-Z0-9-]+\.)+[a-zA-Z]{2,}\b" 
-    "\b(?:(?:25[0-5]|2[0-4]\d|[01]?\d?\d)\.){3}(?:25[0-5]|2[0-4]\d|[01]?\d?\d)\b"
-    "\b(?:[A-Fa-f0-9]{1,4}:){7}[A-Fa-f0-9]{1,4}\b" 
-    "(?:(?:\b(?:cvv|cvc|security\s*code)[:\s]))\d{3,4}\b"
-    "(?:\b(?:card(?:\s*number)?|cc|credit\s*card)[:\s])\d{4}(?:[ -]?\d{4}){3}\b"
-    "(?:\b(?:card(?:\s*number)?|cc|credit\s*card)[:\s])3[47]\d{2}[ -]?\d{6}[ -]?\d{5}\b"
-    "(?:\b(?:ssn|social\s*security(?:\s*number)?)[:\s])\d{3}-\d{2}-\d{4}\b"
-    "(?:mailto:|\b(?:email|e-mail)[:\s*])[A-Za-z0-9._%+\-]+@[A-Za-z0-9.\-]+\.[A-Za-z]{2,}\b"
-    "(?:^|[^A-Za-z0-9\/:])((?:(?:\+|00|011)\s?[1-9]\d{0,2}|\(\+?[1-9]\d{0,2}\))(?:[-.\s()]?\d){7,12})(?:$|[^A-Za-z0-9\/:])"
 )
 AFK_MENTION_RE = re.compile(r"@(?:everyone|here)|<@&?\d+>|<#\d+>")
 AFK_BLOCKLIST = {
@@ -207,7 +198,39 @@ BOMB_SYLLABLES = [
     "TH", "ER", "IN", "ON", "AT", "CH", "ST", "RE",
     "QU", "BL", "CK", "ING", "OU", "SH", "TR", "PL",
 ]
+PERMISSION_LABELS = {
+    "view_channel": "View Channels",
+    "send_messages": "Send Messages",
+    "embed_links": "Embed Links",
+    "attach_files": "Attach Files",
+    "read_message_history": "Read Message History",
+    "add_reactions": "Add Reactions",
+}
 
+HELP_REQUIRED_PERMS = (
+    "send_messages",
+    "embed_links",
+)
+
+PLAY_REQUIRED_PERMS = (
+    "view_channel",
+    "send_messages",
+    "embed_links",
+    "attach_files",
+    "read_message_history",
+    "add_reactions",
+)
+
+VOTE_REQUIRED_PERMS = (
+    "view_channel",
+    "send_messages",
+    "embed_links",
+    "read_message_history",
+)
+
+STOP_REQUIRED_PERMS = (
+    "send_messages",
+)
 
 # ==========================================
 # BOT SETUP
@@ -1034,6 +1057,56 @@ async def cleanup_game(guild_id):
         if current is game:
             games.pop(guild_id, None)
 
+def format_permission_list(permission_names):
+    return "\n".join(
+        f"• {PERMISSION_LABELS.get(name, name.replace('_', ' ').title())}"
+        for name in permission_names
+    )
+
+async def send_interaction_ephemeral(interaction: discord.Interaction, **kwargs):
+    if interaction.response.is_done():
+        await interaction.followup.send(ephemeral=True, **kwargs)
+    else:
+        await interaction.response.send_message(ephemeral=True, **kwargs)
+
+async def require_bot_permissions(
+    interaction: discord.Interaction,
+    required_permissions,
+    command_name: str
+) -> bool:
+    if interaction.guild is None or interaction.channel is None or bot.user is None:
+        return True
+
+    me = interaction.guild.me or interaction.guild.get_member(bot.user.id)
+    if me is None:
+        return True
+
+    channel_perms = interaction.channel.permissions_for(me)
+    missing = [
+        PERMISSION_LABELS.get(name, name.replace("_", " ").title())
+        for name in required_permissions
+        if not getattr(channel_perms, name, False)
+    ]
+
+    if not missing:
+        return True
+
+    embed = discord.Embed(
+        title="⚠️ Missing Bot Permission(s)",
+        description=(
+            f"I can’t run **{command_name}** in this channel because I’m missing:\n"
+            + "\n".join(f"• {perm}" for perm in missing)
+        ),
+        color=discord.Color.orange(),
+    )
+    embed.add_field(
+        name="How to fix it",
+        value="Please restore those permissions for me in this channel or category, then try again.",
+        inline=False,
+    )
+
+    await send_interaction_ephemeral(interaction, embed=embed)
+    return False
 
 def get_lobby_embed(guild_id):
     game = games.get(guild_id)
@@ -2249,6 +2322,8 @@ async def afkstatus_cmd(interaction):
 
 @bot.tree.command(name="help", description="View the Babblebox manual and game rules")
 async def help_cmd(interaction):
+    if not await require_bot_permissions(interaction, HELP_REQUIRED_PERMS, "/help"):
+        return
     embed = discord.Embed(
         title="🎮 Babblebox Manual",
         description="Gather your friends in a voice or text channel and let the chaos begin!",
@@ -2285,12 +2360,24 @@ async def help_cmd(interaction):
         inline=False,
     )
     embed.set_footer(text=SESSION_NOTE)
+    embed.add_field(
+        name="🔐 Required Channel Permissions",
+        value=format_permission_list(PLAY_REQUIRED_PERMS),
+        inline=False
+    )
+    embed.add_field(
+        name="📩 DM Requirement",
+        value="Broken Telephone, Exquisite Corpse, and Spyfall role messages require players to allow DMs from server members.",
+        inline=False
+    )
     await interaction.response.send_message(embed=embed)
 
 
 @app_commands.guild_only()
 @bot.tree.command(name="play", description="Open the Babblebox menu and host a game")
 async def play_cmd(interaction):
+    if not await require_bot_permissions(interaction, PLAY_REQUIRED_PERMS, "/play"):
+        return
     guild_id = interaction.guild.id
 
     async with games_guard:
@@ -2358,6 +2445,8 @@ async def play_cmd(interaction):
 @app_commands.guild_only()
 @bot.tree.command(name="vote", description="Trigger a Spyfall vote")
 async def vote_cmd(interaction):
+    if not await require_bot_permissions(interaction, VOTE_REQUIRED_PERMS, "/vote"):
+        return
     await trigger_spyfall_vote(interaction)
 
 
@@ -2417,6 +2506,8 @@ async def leaderboard_cmd(interaction, metric: app_commands.Choice[str]):
 @app_commands.guild_only()
 @bot.tree.command(name="stop", description="Host/Admin Only: Force stop the current game and clear the lobby")
 async def stop_cmd(interaction):
+    if not await require_bot_permissions(interaction, STOP_REQUIRED_PERMS, "/stop"):
+        return
     game = games.get(interaction.guild.id)
     if not game:
         return await interaction.response.send_message("❌ There is no active game or lobby to stop.", ephemeral=True)
