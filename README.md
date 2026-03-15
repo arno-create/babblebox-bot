@@ -88,6 +88,93 @@ python main.py
 For production deployment, push changes to GitHub and redeploy through Render.
 
 ---
+## Environment Variables
+
+Babblebox uses the following environment variables:
+
+| Variable | Required | Description |
+|----------|----------|-------------|
+| `DISCORD_TOKEN` | Yes | Your Discord bot token from the Discord Developer Portal |
+| `DEV_GUILD_ID` | No | Your test server ID for faster slash command sync during development |
+
+### Example
+```env
+DISCORD_TOKEN=your_bot_token_here
+DEV_GUILD_ID=your_test_server_id_here
+---
+## Repository Structure
+
+```text
+.
+├── main.py
+├── keep_alive.py
+├── requirements.txt
+├── .env.example
+├── LICENSE
+├── README.md
+├── index.html
+├── sitemap.xml
+└── assets/
+
+---
+
+## Required Permissions & DM Notes
+
+Babblebox works best when it has the correct permissions in the server and channel where it is used.
+
+### Recommended permissions
+- View Channels
+- Send Messages
+- Embed Links
+- Attach Files
+- Read Message History
+- Add Reactions
+
+### Important DM note
+Some game modes rely on direct messages to players.
+
+These features may not work correctly unless players allow DMs from server members:
+- Broken Telephone
+- Exquisite Corpse
+- Spyfall role messages
+
+---
+
+## Required Permissions & DM Notes
+
+Babblebox works best when it has the correct permissions in the server and channel where it is used.
+
+### Recommended permissions
+- View Channels
+- Send Messages
+- Embed Links
+- Attach Files
+- Read Message History
+- Add Reactions
+
+### Important DM note
+Some game modes rely on direct messages to players.
+
+These features may not work correctly unless players allow DMs from server members:
+- Broken Telephone
+- Exquisite Corpse
+- Spyfall role messages
+
+---
+
+## Project Status
+
+Babblebox is actively being developed and improved.
+
+Current focus areas:
+- gameplay polish
+- bug fixing and stability
+- public bot listings
+- SEO and discoverability
+- server growth and community feedback
+
+---
+
 ## Why this project matters
 
 Babblebox is not just a toy bot.  
@@ -197,6 +284,7 @@ This architecture allows multiple servers to host independent game sessions simu
 ### Stats
 - `/stats` — view your Babblebox stats
 - `/leaderboard` — view the session leaderboard
+> Most gameplay starts with `/play`.
 
 ---
 
