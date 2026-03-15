@@ -255,3 +255,8 @@ Current focus areas:
 ### Exquisite Corpse
 
 ![Exquisite Corpse](assets/exquisite_corpse.png)
+
+## Links
+
+- Official website: [https://arno-create.github.io/babblebox-bot/](https://arno-create.github.io/babblebox-bot/)
+- Add the bot to your server: [https://discord.com/oauth2/authorize?client_id=1480903089518022739](https://discord.com/oauth2/authorize?client_id=1480903089518022739)
