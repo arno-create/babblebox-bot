@@ -87,11 +87,6 @@ python main.py
 
 For production deployment, push changes to GitHub and redeploy through Render.
 
-## Important
-Before pasting:
-1. delete the broken section completely
-2. paste the corrected version above
-3. save the file
 ---
 ## Why this project matters
 
