@@ -30,7 +30,69 @@ It is designed for chaotic, social, replayable mini-games with a strong focus on
   - Designed to run continuously on a free-tier style setup
 
 ---
+## Local Setup / How to Run
 
+### Requirements
+- Python 3.11+
+- A Discord bot token
+- A `.env` file in the project root
+
+### 1. Clone the repository
+~~~bash
+git clone https://github.com/arno-create/babblebox-bot.git
+cd babblebox-bot
+~~~
+
+### 2. Install dependencies
+~~~bash
+pip install -r requirements.txt
+~~~
+
+### 3. Create a `.env` file
+Create a file named `.env` in the project root and add:
+
+~~~env
+DISCORD_TOKEN=your_bot_token_here
+DEV_GUILD_ID=your_test_server_id_here
+~~~
+
+- `DISCORD_TOKEN` is required
+- `DEV_GUILD_ID` is optional, but useful for faster slash-command testing
+
+### 4. Enable required Discord settings
+In the Discord Developer Portal for your bot:
+- enable **Message Content Intent**
+- enable **Server Members Intent**
+- make sure the bot is set to **Public** if you want other servers to invite it
+
+### 5. Run the bot locally
+~~~bash
+python main.py
+~~~
+
+### 6. Test the bot
+In your Discord server, try:
+- `/play`
+- `/help`
+- `/ping`
+
+## Deployment Notes
+This project is deployed on **Render**.
+
+For local development, run:
+
+~~~bash
+python main.py
+~~~
+
+For production deployment, push changes to GitHub and redeploy through Render.
+
+## Important
+Before pasting:
+1. delete the broken section completely
+2. paste the corrected version above
+3. save the file
+---
 ## Why this project matters
 
 Babblebox is not just a toy bot.  
