@@ -1,0 +1,1 @@
+"""Cog package for Babblebox."""
