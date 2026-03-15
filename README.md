@@ -101,7 +101,7 @@ Babblebox uses the following environment variables:
 ```env
 DISCORD_TOKEN=your_bot_token_here
 DEV_GUILD_ID=your_test_server_id_here
----
+```
 ## Repository Structure
 
 ```text
@@ -115,28 +115,6 @@ DEV_GUILD_ID=your_test_server_id_here
 ├── index.html
 ├── sitemap.xml
 └── assets/
-
----
-
-## Required Permissions & DM Notes
-
-Babblebox works best when it has the correct permissions in the server and channel where it is used.
-
-### Recommended permissions
-- View Channels
-- Send Messages
-- Embed Links
-- Attach Files
-- Read Message History
-- Add Reactions
-
-### Important DM note
-Some game modes rely on direct messages to players.
-
-These features may not work correctly unless players allow DMs from server members:
-- Broken Telephone
-- Exquisite Corpse
-- Spyfall role messages
 
 ---
 
