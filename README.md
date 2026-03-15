@@ -1,128 +1,175 @@
 # Babblebox
 
-**Babblebox** is a production-style multiplayer Discord party game bot built with **Python**, **discord.py**, **Slash Commands**, and **custom UI Views**.  
-It is designed for chaotic, social, replayable mini-games with a strong focus on **stability**, **user experience**, and **real-world async architecture**.
+**Babblebox** is a multiplayer Discord party game bot built with Python and `discord.py`.
+It is designed around chaotic social games, smooth slash-command flows, and reliable async behavior across multiple servers.
+
+## Highlights
+
+- Four built-in multiplayer party games
+- Slash-command based Discord UX
+- Custom interactive `discord.ui.View` interfaces
+- DM and server hybrid gameplay flows
+- Guild-scoped game lifecycle management
+- Defensive cleanup for timeouts, exits, and stale interactions
+- Render-friendly deployment with a lightweight keep-alive endpoint
+
+## Included Games
+
+### Broken Telephone
+Players pass along a voice message by mimicking what they hear, then the final player types what they think the original phrase was.
+
+### Exquisite Corpse
+Players secretly contribute parts of a sentence that are stitched together into a chaotic final story.
+
+### Spyfall
+One player is the spy, everyone else knows the location, and the group must question each other before voting.
+
+### Word Bomb
+Players race to type valid English words containing a required syllable before the timer expires.
 
 ## Features
 
-- **4 built-in multiplayer mini-games**
-  - 🎙️ **Broken Telephone** — voice-message mimicry through DMs
-  - 📝 **Exquisite Corpse** — collaborative absurd story building
-  - 🕵️ **Spyfall** — social deduction with interactive UI voting
-  - 💣 **Word Bomb** — battle-royale typing game with multiple modes
+### Modern Discord UX
 
-- **Modern Discord UX**
-  - Slash commands via `app_commands`
-  - Custom `discord.ui.View` buttons and dropdowns
-  - Ephemeral responses where appropriate
-  - DM + server hybrid gameplay flows
+- Slash commands via `app_commands`
+- Custom buttons and dropdowns with `discord.ui.View`
+- Ephemeral responses where appropriate
+- Hybrid DM and public-channel game flows
 
-- **Reliability & safety systems**
-  - Per-game lifecycle management
-  - Timeout handling and cleanup logic
-  - Safe AFK system with sanitized reasons
-  - Protection against stale interactions and dead views
-  - Defensive handling for DM failures, deleted messages, and player exits
+### Reliability and Safety
 
-- **Deployment**
-  - Hosted on **Render**
-  - Keep-alive endpoint using Flask
-  - Designed to run continuously on a free-tier style setup
+- Per-game lifecycle management
+- Timeout handling and cleanup logic
+- AFK system with sanitized reasons
+- Protection against stale interactions and dead views
+- Defensive handling for DM failures, deleted messages, and player exits
 
----
-## Local Setup / How to Run
+### Deployment
+
+- Designed for deployment on Render
+- Includes a Flask keep-alive endpoint
+- Suitable for always-on hosting on lightweight infrastructure
+
+## Tech Stack
+
+- Python
+- `discord.py`
+- `asyncio`
+- `aiohttp`
+- Flask
+- Render
+
+## Repository Structure
+
+```text
+.
+|-- main.py
+|-- keep_alive.py
+|-- requirements.txt
+|-- .env.example
+|-- README.md
+|-- LICENSE
+|-- index.html
+|-- sitemap.xml
+|-- banner.png
+|-- logo.jpg
+`-- assets/
+```
+
+## Local Setup
 
 ### Requirements
+
 - Python 3.11+
 - A Discord bot token
 - A `.env` file in the project root
 
 ### 1. Clone the repository
-~~~bash
+
+```bash
 git clone https://github.com/arno-create/babblebox-bot.git
 cd babblebox-bot
-~~~
+```
 
 ### 2. Install dependencies
-~~~bash
+
+```bash
 pip install -r requirements.txt
-~~~
+```
 
 ### 3. Create a `.env` file
-Create a file named `.env` in the project root and add:
 
-~~~env
-DISCORD_TOKEN=your_bot_token_here
-DEV_GUILD_ID=your_test_server_id_here
-~~~
+Create `.env` in the project root:
 
-- `DISCORD_TOKEN` is required
-- `DEV_GUILD_ID` is optional, but useful for faster slash-command testing
-
-### 4. Enable required Discord settings
-In the Discord Developer Portal for your bot:
-- enable **Message Content Intent**
-- enable **Server Members Intent**
-- make sure the bot is set to **Public** if you want other servers to invite it
-
-### 5. Run the bot locally
-~~~bash
-python main.py
-~~~
-
-### 6. Test the bot
-In your Discord server, try:
-- `/play`
-- `/help`
-- `/ping`
-
-## Deployment Notes
-This project is deployed on **Render**.
-
-For local development, run:
-
-~~~bash
-python main.py
-~~~
-
-For production deployment, push changes to GitHub and redeploy through Render.
-
----
-## Environment Variables
-
-Babblebox uses the following environment variables:
-
-| Variable | Required | Description |
-|----------|----------|-------------|
-| `DISCORD_TOKEN` | Yes | Your Discord bot token from the Discord Developer Portal |
-| `DEV_GUILD_ID` | No | Your test server ID for faster slash command sync during development |
-
-### Example
 ```env
 DISCORD_TOKEN=your_bot_token_here
 DEV_GUILD_ID=your_test_server_id_here
 ```
-## Repository Structure
 
-```text
-.
-├── main.py
-├── keep_alive.py
-├── requirements.txt
-├── .env.example
-├── LICENSE
-├── README.md
-├── index.html
-├── sitemap.xml
-└── assets/
+- `DISCORD_TOKEN` is required
+- `DEV_GUILD_ID` is optional, but helpful for faster slash-command syncing during development
 
----
+### 4. Enable required Discord settings
 
-## Required Permissions & DM Notes
+In the Discord Developer Portal for your bot, enable:
 
-Babblebox works best when it has the correct permissions in the server and channel where it is used.
+- Message Content Intent
+- Server Members Intent
 
-### Recommended permissions
+If you want other servers to invite the bot, make sure the bot is set to Public.
+
+### 5. Run the bot
+
+```bash
+python main.py
+```
+
+### 6. Try the core commands
+
+Use these in your test server:
+
+- `/play`
+- `/help`
+- `/ping`
+
+## Environment Variables
+
+| Variable | Required | Description |
+| --- | --- | --- |
+| `DISCORD_TOKEN` | Yes | Discord bot token from the Discord Developer Portal |
+| `DEV_GUILD_ID` | No | Test server ID for faster command sync during development |
+
+## Commands
+
+### Core Commands
+
+- `/play` - Open the lobby and host a game
+- `/stop` - Stop the current game
+- `/help` - Show the game manual
+- `/ping` - Health check
+
+### Game Commands
+
+- `/vote` - Trigger a Spyfall vote
+
+### AFK Commands
+
+- `/afk` - Set or clear AFK status
+- `/afkstatus` - Check your AFK status
+
+### Stats Commands
+
+- `/stats` - View your Babblebox stats
+- `/leaderboard` - View the session leaderboard
+
+Most gameplay starts with `/play`.
+
+## Permissions and DM Notes
+
+Babblebox works best when it has the proper server and channel permissions.
+
+### Recommended Permissions
+
 - View Channels
 - Send Messages
 - Embed Links
@@ -130,155 +177,81 @@ Babblebox works best when it has the correct permissions in the server and chann
 - Read Message History
 - Add Reactions
 
-### Important DM note
-Some game modes rely on direct messages to players.
+### DM Requirement
 
-These features may not work correctly unless players allow DMs from server members:
+Some modes depend on direct messages to players. These features may not work correctly unless players allow DMs from server members:
+
 - Broken Telephone
 - Exquisite Corpse
 - Spyfall role messages
 
----
+## Deployment Notes
+
+This project is intended to run on Render.
+
+For local development:
+
+```bash
+python main.py
+```
+
+For production deployment, push changes to GitHub and redeploy through Render.
+
+## Architecture Notes
+
+Babblebox uses a guild-scoped game state model:
+
+- A global `games` dictionary keyed by `guild_id`
+- Per-game locks for safer concurrent interaction handling
+- Dedicated timeout tasks for idle, turn, and vote timing
+- Cleanup routines that cancel tasks and disable active UI views
+- DM routing to reduce cross-guild message collisions
+
+This allows multiple servers to host independent game sessions at the same time.
+
+## Why This Project Matters
+
+Babblebox is a portfolio-grade Discord bot that demonstrates practical engineering skills relevant to backend and real-time systems work:
+
+- Asynchronous programming with `asyncio`
+- Event-driven architecture
+- Shared state management across guilds
+- Discord API integration
+- Interaction-driven UI systems
+- Fault tolerance and cleanup design
+- Multiplayer game flow orchestration
+- External HTTP usage with `aiohttp`
 
 ## Project Status
 
 Babblebox is actively being developed and improved.
 
 Current focus areas:
-- gameplay polish
-- bug fixing and stability
-- public bot listings
+
+- Gameplay polish
+- Bug fixing and stability
+- Public bot listings
 - SEO and discoverability
-- server growth and community feedback
-
----
-
-## Why this project matters
-
-Babblebox is not just a toy bot.  
-It demonstrates practical engineering skills that are directly relevant to backend and real-time systems work:
-
-- asynchronous programming with `asyncio`
-- event-driven architecture
-- shared state management across guilds
-- Discord API integrations
-- interaction-driven UI systems
-- fault tolerance and cleanup design
-- multiplayer game flow orchestration
-- external HTTP usage with `aiohttp`
-
-This project was built as a portfolio-grade Discord bot to showcase both **software engineering ability** and **product thinking**.
-
----
-
-## Game Overview
-
-### 🎙️ Broken Telephone
-Players pass along a voice message by mimicking what they hear.  
-The final player types what they think the original phrase was.
-
-**Highlights**
-- DM-based voice flow
-- attachment handling
-- timeout enforcement
-- end-of-round reveal
-
----
-
-### 📝 Exquisite Corpse
-Players secretly contribute parts of a sentence based on prompts such as adjective, noun, verb, and location.  
-The final result is revealed as a funny story.
-
-**Highlights**
-- structured sequential DM prompts
-- hidden contributions
-- themed endings
-
----
-
-### 🕵️ Spyfall
-One player is secretly the spy. Everyone else knows the location.  
-Players interrogate one another and eventually trigger a vote to identify the spy.
-
-**Highlights**
-- dynamic UI target selection
-- live vote system
-- timed vote resolution
-- interaction-state synchronization
-
----
-
-### 💣 Word Bomb
-A fast-paced typing game where players must send a valid English word containing a required syllable before the timer runs out.
-
-**Highlights**
-- dictionary validation using `aiohttp`
-- multiple bomb modes
-- accelerating turn pressure
-- elimination flow and session recap
-
----
-
-## Tech Stack
-
-- **Python**
-- **discord.py**
-- **asyncio**
-- **aiohttp**
-- **Flask**
-- **Render**
-
----
-
-## Architecture Notes
-
-Babblebox uses a **guild-scoped game state model**:
-
-- global `games` dictionary keyed by `guild_id`
-- per-game locks for safer concurrent interaction handling
-- dedicated timeout tasks for idle, turn, and vote timing
-- cleanup routines that cancel tasks and disable active UI views
-- DM routing to prevent cross-guild message collisions
-
-This architecture allows multiple servers to host independent game sessions simultaneously.
-
----
-
-## Commands
-
-### Core
-- `/play` — open the lobby and host a game
-- `/stop` — stop the current game
-- `/help` — show the game manual
-- `/ping` — bot health check
-
-### Game
-- `/vote` — trigger a Spyfall vote
-
-### AFK
-- `/afk` — set or clear AFK status
-- `/afkstatus` — check your AFK status
-
-### Stats
-- `/stats` — view your Babblebox stats
-- `/leaderboard` — view the session leaderboard
-> Most gameplay starts with `/play`.
-
----
+- Server growth and community feedback
 
 ## Screenshots
 
 ### Game Lobby
-![Lobby](assets/lobby.png)
+
+![Game Lobby](assets/lobby.png)
 
 ### Spyfall Gameplay
+
 ![Spyfall Gameplay](assets/spyfall_gameplay.png)
 
 ### Spyfall Voting
+
 ![Spyfall Voting](assets/spyfall_voting.png)
 
 ### Word Bomb Gameplay
-![Word Bomb](assets/wordbomb_gameplay.png)
+
+![Word Bomb Gameplay](assets/wordbomb_gameplay.png)
 
 ### Exquisite Corpse
+
 ![Exquisite Corpse](assets/exquisite_corpse.png)
