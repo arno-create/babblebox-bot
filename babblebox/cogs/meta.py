@@ -28,7 +28,15 @@ class MetaCog(commands.Cog):
 
     @commands.hybrid_command(name="ping", with_app_command=True, description="Check if the bot is online and responsive")
     async def ping_command(self, ctx: commands.Context):
-        await send_hybrid_response(ctx, "Pong! I am online and ready to party.", ephemeral=True)
+        await send_hybrid_response(
+            ctx,
+            embed=ge.make_status_embed(
+                "Pong!",
+                "Babblebox is online, responsive, and ready to party.",
+                tone="success",
+            ),
+            ephemeral=True,
+        )
 
     @commands.hybrid_command(name="stats", with_app_command=True, description="View Babblebox session stats")
     @app_commands.describe(user="Whose session stats to view")
@@ -38,7 +46,12 @@ class MetaCog(commands.Cog):
         if not stats:
             await send_hybrid_response(
                 ctx,
-                "No session stats found for that player yet. Finish a game first!",
+                embed=ge.make_status_embed(
+                    "No Stats Yet",
+                    "No session stats were found for that player yet. Finish a game first.",
+                    tone="warning",
+                    footer="Babblebox Session Stats",
+                ),
                 ephemeral=True,
             )
             return
@@ -59,7 +72,12 @@ class MetaCog(commands.Cog):
         if metric not in LEADERBOARD_LABELS:
             await send_hybrid_response(
                 ctx,
-                f"Unknown leaderboard metric. Try one of: {', '.join(LEADERBOARD_LABELS)}.",
+                embed=ge.make_status_embed(
+                    "Unknown Metric",
+                    f"Try one of: {', '.join(LEADERBOARD_LABELS)}.",
+                    tone="warning",
+                    footer="Babblebox Leaderboard",
+                ),
                 ephemeral=True,
             )
             return
@@ -68,7 +86,12 @@ class MetaCog(commands.Cog):
         if not entries:
             await send_hybrid_response(
                 ctx,
-                "Nobody has any stats in that category yet. Finish a few games first!",
+                embed=ge.make_status_embed(
+                    "No Leaderboard Data",
+                    "Nobody has any stats in that category yet. Finish a few games first.",
+                    tone="warning",
+                    footer="Babblebox Leaderboard",
+                ),
                 ephemeral=True,
             )
             return

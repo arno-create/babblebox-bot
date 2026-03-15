@@ -27,7 +27,12 @@ class AfkCog(commands.Cog):
         if reason and len(reason) > ge.AFK_REASON_MAX_LEN:
             await send_hybrid_response(
                 ctx,
-                f"AFK reason must be {ge.AFK_REASON_MAX_LEN} characters or fewer.",
+                embed=ge.make_status_embed(
+                    "AFK Reason Too Long",
+                    f"AFK reason must be {ge.AFK_REASON_MAX_LEN} characters or fewer.",
+                    tone="warning",
+                    footer="Babblebox AFK",
+                ),
                 ephemeral=True,
             )
             return
@@ -35,7 +40,12 @@ class AfkCog(commands.Cog):
         if duration_minutes is not None and not (1 <= duration_minutes <= ge.AFK_MAX_DURATION_MINUTES):
             await send_hybrid_response(
                 ctx,
-                f"`duration_minutes` must be between 1 and {ge.AFK_MAX_DURATION_MINUTES}.",
+                embed=ge.make_status_embed(
+                    "Invalid Duration",
+                    f"`duration_minutes` must be between 1 and {ge.AFK_MAX_DURATION_MINUTES}.",
+                    tone="warning",
+                    footer="Babblebox AFK",
+                ),
                 ephemeral=True,
             )
             return
@@ -43,7 +53,12 @@ class AfkCog(commands.Cog):
         if start_in_minutes is not None and not (1 <= start_in_minutes <= ge.AFK_MAX_SCHEDULE_MINUTES):
             await send_hybrid_response(
                 ctx,
-                f"`start_in_minutes` must be between 1 and {ge.AFK_MAX_SCHEDULE_MINUTES}.",
+                embed=ge.make_status_embed(
+                    "Invalid Schedule",
+                    f"`start_in_minutes` must be between 1 and {ge.AFK_MAX_SCHEDULE_MINUTES}.",
+                    tone="warning",
+                    footer="Babblebox AFK",
+                ),
                 ephemeral=True,
             )
             return
@@ -55,12 +70,30 @@ class AfkCog(commands.Cog):
         if existing and not has_custom_payload:
             ge.clear_afk_state(user_id)
             message = "Your scheduled AFK has been cancelled." if existing.get("status") == "scheduled" else "Welcome back! I removed your AFK status."
-            await send_hybrid_response(ctx, message, ephemeral=True)
+            await send_hybrid_response(
+                ctx,
+                embed=ge.make_status_embed(
+                    "AFK Updated",
+                    message,
+                    tone="success",
+                    footer="Babblebox AFK",
+                ),
+                ephemeral=True,
+            )
             return
 
         valid_reason, reason_or_error = ge.sanitize_afk_reason(reason)
         if not valid_reason:
-            await send_hybrid_response(ctx, reason_or_error, ephemeral=True)
+            await send_hybrid_response(
+                ctx,
+                embed=ge.make_status_embed(
+                    "AFK Reason Rejected",
+                    reason_or_error,
+                    tone="warning",
+                    footer="Babblebox AFK",
+                ),
+                ephemeral=True,
+            )
             return
 
         if start_in_minutes is not None:
@@ -72,7 +105,6 @@ class AfkCog(commands.Cog):
             )
             await send_hybrid_response(
                 ctx,
-                "Your AFK status is scheduled. I will activate it automatically.",
                 embed=ge.build_afk_status_embed(ctx.author, record, title="AFK Scheduled"),
                 ephemeral=True,
             )
@@ -85,7 +117,6 @@ class AfkCog(commands.Cog):
         )
         await send_hybrid_response(
             ctx,
-            "You are now AFK. I will notify people who mention you.",
             embed=ge.build_afk_status_embed(ctx.author, record, title="AFK Enabled"),
             ephemeral=True,
         )
@@ -94,7 +125,16 @@ class AfkCog(commands.Cog):
     async def afkstatus_command(self, ctx: commands.Context):
         record = ge.afk_records.get(ctx.author.id)
         if record is None:
-            await send_hybrid_response(ctx, "You do not currently have an AFK status or schedule.", ephemeral=True)
+            await send_hybrid_response(
+                ctx,
+                embed=ge.make_status_embed(
+                    "AFK Not Set",
+                    "You do not currently have an AFK status or schedule.",
+                    tone="info",
+                    footer="Babblebox AFK",
+                ),
+                ephemeral=True,
+            )
             return
 
         await send_hybrid_response(

@@ -1,77 +1,98 @@
 # Babblebox
 
 Babblebox is a multiplayer Discord party game bot built with Python and `discord.py`.
-It now uses a modular package layout, a dual command system, and a lightweight Chaos Card feature designed to stay safe on a free Render instance.
+It is designed around social chaos, polished Discord UX, and replayable mini-games that feel lively instead of disposable.
+
+This version of the project includes:
+
+- A modular backend instead of one giant monolith
+- Dual slash and `bb!` prefix commands
+- A new `Chaos Card` lobby system
+- Upgraded embed-driven bot responses
+- A restored blue-themed website with privacy, community, and support sections
 
 ## Official Links
 
 - Official website: [https://arno-create.github.io/babblebox-bot/](https://arno-create.github.io/babblebox-bot/)
-- Add the bot: [https://discord.com/oauth2/authorize?client_id=1480903089518022739](https://discord.com/oauth2/authorize?client_id=1480903089518022739)
-- Repository: [https://github.com/arno-create/babblebox-bot](https://github.com/arno-create/babblebox-bot)
+- Invite link: [https://discord.com/oauth2/authorize?client_id=1480903089518022739](https://discord.com/oauth2/authorize?client_id=1480903089518022739)
+- GitHub repository: [https://github.com/arno-create/babblebox-bot](https://github.com/arno-create/babblebox-bot)
+- Support server: [https://discord.com/servers/inevitable-friendship-1322933864360050688](https://discord.com/servers/inevitable-friendship-1322933864360050688)
 
-## What Changed
+## What Babblebox Feels Like
 
-- The old single-file bot has been split into a package with cogs and shared services.
-- Core commands now support both slash commands and the `bb!` prefix.
-- A new `Chaos Card` lobby system adds low-cost twists without adding background workers.
-- The Flask keep-alive server and website content were updated to match the new command system.
+Babblebox is meant to create the kinds of Discord moments people remember:
 
-## Features
+- Voice-message mimicry that spirals into nonsense
+- Social deduction rounds that turn suspicious fast
+- Story prompts that produce ridiculous final reveals
+- Fast typing pressure that makes Word Bomb feel genuinely tense
 
-### Core Games
+It is a party bot, but it is built with real engineering discipline:
 
-- Broken Telephone
-- Exquisite Corpse
-- Spyfall
-- Word Bomb
+- guild-scoped state
+- timeout cleanup
+- defensive DM handling
+- interactive views
+- Render-friendly runtime behavior
 
-### Discord UX
+## Games
 
-- Slash commands and prefix commands
-- Interactive `discord.ui.View` buttons and selects
-- Hybrid DM and server game flow
-- Ephemeral responses where appropriate
+### Broken Telephone
 
-### Safety and Reliability
+Players pass along a voice message by imitating what they hear. The final player types what they think the original phrase was.
 
-- Guild-scoped runtime state
-- Turn, vote, and idle timeout cleanup
-- AFK scheduling and expiry support
-- Defensive handling for deleted panels, DM failures, and player exits
-- Render-friendly keep-alive server with no heavy polling loops
+### Exquisite Corpse
+
+Players secretly contribute words and phrases to build one absurd final sentence.
+
+### Spyfall
+
+One player is the spy, everyone else knows the location, and the server has to question each other before voting.
+
+### Word Bomb
+
+Players race to type valid English words containing a required syllable before the timer expires.
 
 ## Dual Command System
 
-These commands work in both formats:
+Core commands now work in both styles:
 
 | Slash | Prefix | Purpose |
 | --- | --- | --- |
 | `/help` | `bb!help` | Show the manual |
-| `/ping` | `bb!ping` | Bot health check |
-| `/play` | `bb!play` | Open a game lobby |
-| `/stop` | `bb!stop` | Force stop the current lobby or match |
+| `/ping` | `bb!ping` | Health check |
+| `/play` | `bb!play` | Open a lobby |
+| `/stop` | `bb!stop` | Force stop the active lobby/game |
 | `/afk` | `bb!afk` | Set, schedule, or clear AFK |
 | `/afkstatus` | `bb!afkstatus` | View AFK status |
 | `/vote` | `bb!vote` | Trigger a Spyfall vote |
-| `/stats` | `bb!stats` | View session stats |
-| `/leaderboard` | `bb!leaderboard` | View leaderboard |
+| `/stats` | `bb!stats` | Show session stats |
+| `/leaderboard` | `bb!leaderboard` | Show leaderboard |
 | `/chaoscard` | `bb!chaoscard` | Cycle the lobby Chaos Card |
 
 ## Chaos Cards
 
-Chaos Cards are lightweight lobby modifiers that the host can set before the game starts.
-They are designed to feel distinctive without adding database traffic or background processes.
+Chaos Cards are lightweight pre-game lobby modifiers. They change the vibe of a round without adding background workers, polling, or storage-heavy systems.
 
-### Included Cards
+### Included cards
 
 - `Off`: standard rules
-- `Reverse Order`: shuffle the lobby, then reverse the turn order
-- `Lightning Round`: shorter DM turns, tighter Spyfall vote windows, faster Word Bomb pressure
-- `Encore Reveal`: adds a dramatic recap headline at the end of the game
+- `Reverse Order`: reverse the shuffled player order
+- `Lightning Round`: shorter DM timers, faster vote timing, tighter Word Bomb pacing
+- `Encore Reveal`: add a dramatic recap headline at the end of the game
+
+## Embed UX Upgrade
+
+Babblebox now leans harder into embeds across command responses and game presentation:
+
+- Consistent color language for info, success, warning, and danger states
+- Shared footer style for better orientation
+- Cleaner AFK, lobby, stats, and vote messaging
+- Improved Word Bomb turn presentation
 
 ## Architecture
 
-The project now uses this structure:
+The project now uses a package-based layout:
 
 ```text
 .
@@ -95,34 +116,56 @@ The project now uses this structure:
 `-- README.md
 ```
 
-### Module Overview
+### File overview
 
-- `babblebox/bot.py`: bot startup, dictionary loading, extension loading, slash sync
-- `babblebox/game_engine.py`: shared state, views, timers, AFK logic, and game flow
+- `babblebox/bot.py`: bot bootstrap, dictionary loading, extension loading, command sync
+- `babblebox/game_engine.py`: shared state, views, AFK logic, timers, and core game flow
 - `babblebox/cogs/meta.py`: help, ping, stats, leaderboard
 - `babblebox/cogs/afk.py`: AFK commands
-- `babblebox/cogs/gameplay.py`: play, vote, stop, Chaos Card control
-- `babblebox/cogs/events.py`: message routing and lifecycle listeners
-- `babblebox/web.py`: Flask app and keep-alive thread
+- `babblebox/cogs/gameplay.py`: play, stop, vote, Chaos Card controls
+- `babblebox/cogs/events.py`: listeners and lifecycle handling
+- `babblebox/web.py`: Flask routes and keep-alive thread
+
+## Key Fixes In This Version
+
+### Prefix double-trigger bug
+
+The duplicated prefix response bug came from calling `bot.process_commands(message)` manually inside a cog `on_message` listener.
+`commands.Bot` already processes prefix commands through its own `on_message`, so the extra call caused every prefix command to fire twice.
+
+That extra call has been removed.
+
+### Resource-conscious improvements
+
+- The keep-alive thread is daemonized
+- The Word Bomb dictionary is cached to disk
+- Chaos Cards are stateless lobby modifiers
+- No database polling or always-on background worker system was added
 
 ## Hosting Notes
 
-Babblebox targets a constrained free Render environment.
+Babblebox is designed to survive on a constrained free Render instance.
 
-### Design choices for low-resource hosting
+### Safe design choices
 
-- No database polling loops were introduced
-- No always-running analytics or worker processes were added
-- The keep-alive thread is daemonized
-- The Word Bomb dictionary is cached to disk after download
-- Chaos Cards are stateless modifiers stored in the active lobby only
+- No heavy polling loops
+- No background analytics workers
+- No storage-dependent feature added just for novelty
+- Cleanup-first handling for stale game state
 
-### Visible issues from the original monolith that this refactor addresses
+## Website and Community
 
-- The old dictionary loader pulled the full word list into memory as one large string before building the set, which created an unnecessary memory spike at startup
-- The Flask keep-alive thread was non-daemon, which could interfere with clean process shutdown
-- Commands, listeners, timers, web boot logic, and AFK handling all lived in one file, making regressions and duplicate logic much easier to introduce
-- Prefix support was incomplete, even though part of the bot already assumed command-prefix handling existed
+The website was restored to the original blue visual direction and now also includes:
+
+- a dedicated Privacy Policy section
+- a Support Server section for **inevitable friendship**
+- social links in the footer
+- updated command and architecture content
+
+### inevitable friendship
+
+Babblebox lives alongside the **inevitable friendship** support server.
+That space is where updates can be tested, bugs can be reported, screenshots can be shared, and the next features can be shaped with actual community feedback.
 
 ## Local Setup
 
@@ -153,16 +196,16 @@ DEV_GUILD_ID=your_test_server_id_here
 ```
 
 - `DISCORD_TOKEN` is required
-- `DEV_GUILD_ID` is optional and useful for faster dev command sync
+- `DEV_GUILD_ID` is optional and useful for faster dev slash-command sync
 
-### 4. Enable Discord developer settings
+### 4. Enable Discord settings
 
 In the Discord Developer Portal, enable:
 
 - Message Content Intent
 - Server Members Intent
 
-If you want the bot to be inviteable by others, make sure it is set to Public.
+If you want other servers to invite the bot, make sure it is set to Public.
 
 ### 5. Run the bot
 
@@ -175,7 +218,7 @@ python main.py
 | Variable | Required | Description |
 | --- | --- | --- |
 | `DISCORD_TOKEN` | Yes | Discord bot token |
-| `DEV_GUILD_ID` | No | Optional development guild ID for quicker slash sync |
+| `DEV_GUILD_ID` | No | Optional development guild ID |
 
 ## Recommended Permissions
 
@@ -188,7 +231,7 @@ python main.py
 
 ## DM Requirement
 
-These features depend on players allowing DMs from server members:
+These features rely on DMs being available:
 
 - Broken Telephone
 - Exquisite Corpse
@@ -212,7 +255,8 @@ These features depend on players allowing DMs from server members:
 
 ![Exquisite Corpse](assets/exquisite_corpse.png)
 
-## Website and Invite
+## Links
 
 - Official website: [https://arno-create.github.io/babblebox-bot/](https://arno-create.github.io/babblebox-bot/)
 - Add the bot to your server: [https://discord.com/oauth2/authorize?client_id=1480903089518022739](https://discord.com/oauth2/authorize?client_id=1480903089518022739)
+- Support server: [https://discord.com/servers/inevitable-friendship-1322933864360050688](https://discord.com/servers/inevitable-friendship-1322933864360050688)

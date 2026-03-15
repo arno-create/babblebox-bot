@@ -22,7 +22,12 @@ class EventsCog(commands.Cog):
             ge.clear_afk_state(message.author.id)
             with contextlib.suppress(discord.HTTPException):
                 await message.channel.send(
-                    f"Welcome back {message.author.mention}, I removed your AFK status!",
+                    embed=ge.make_status_embed(
+                        "Welcome Back",
+                        f"{message.author.mention}, I removed your AFK status.",
+                        tone="success",
+                        footer="Babblebox AFK",
+                    ),
                     delete_after=5.0,
                     allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
                 )
@@ -36,10 +41,19 @@ class EventsCog(commands.Cog):
             lines_to_send = [ge.build_afk_brief_line(user, record) for user, record in active_afk_mentions[:5]]
             with contextlib.suppress(discord.HTTPException):
                 await message.channel.send(
-                    "\n".join(lines_to_send),
+                    embed=ge.make_status_embed(
+                        "AFK Notice",
+                        "\n".join(lines_to_send),
+                        tone="info",
+                        footer="Babblebox AFK | Mentions are muted to avoid ping spam",
+                    ),
                     delete_after=12.0,
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
+
+        prefix = self.bot.command_prefix
+        if isinstance(prefix, str) and message.content.startswith(prefix):
+            return
 
         if isinstance(message.channel, discord.DMChannel):
             guild_id = ge.dm_routes.get(message.author.id)
@@ -85,8 +99,6 @@ class EventsCog(commands.Cog):
                             await ge.handle_bomb_turn_locked(message, guild_id, game)
                             return
 
-        await self.bot.process_commands(message)
-
     @commands.Cog.listener()
     async def on_member_remove(self, member: discord.Member):
         game = ge.games.get(member.guild.id)
@@ -110,14 +122,26 @@ class EventsCog(commands.Cog):
             if game.get("active"):
                 with contextlib.suppress(discord.HTTPException):
                     await game["channel"].send(
-                        f"{member.display_name} left the server during the game. The match has been cancelled to avoid a broken state."
+                        embed=ge.make_status_embed(
+                            "Player Left Mid-Game",
+                            f"{member.display_name} left the server during the game. The match was cancelled to avoid a broken state.",
+                            tone="danger",
+                            footer="Babblebox Safety Shutdown",
+                        )
                     )
                 await ge.cleanup_game(member.guild.id)
                 return
 
             if was_host:
                 with contextlib.suppress(discord.HTTPException):
-                    await game["channel"].send("The host left the server. The lobby has been closed.")
+                    await game["channel"].send(
+                        embed=ge.make_status_embed(
+                            "Lobby Closed",
+                            "The host left the server, so the lobby has been closed.",
+                            tone="warning",
+                            footer="Babblebox Lobby",
+                        )
+                    )
                 await ge.cleanup_game(member.guild.id)
                 return
 
@@ -150,7 +174,12 @@ class EventsCog(commands.Cog):
                 return
             with contextlib.suppress(discord.HTTPException):
                 await game["channel"].send(
-                    "A live game panel was deleted. Closing the game to prevent a broken state."
+                    embed=ge.make_status_embed(
+                        "Panel Deleted",
+                        "A live game panel was deleted, so Babblebox closed the game to prevent a broken state.",
+                        tone="danger",
+                        footer="Babblebox Safety Shutdown",
+                    )
                 )
             await ge.cleanup_game(payload.guild_id)
 

@@ -3,45 +3,48 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Babblebox | Discord Party Game Bot</title>
+  <title>Babblebox - Discord Party Game Bot</title>
   <meta
     name="description"
-    content="Babblebox is a multiplayer Discord party game bot with dual slash and prefix commands, modular Python architecture, and Chaos Cards for memorable party lobbies."
+    content="Babblebox is a polished Discord party game bot with Spyfall, Word Bomb, Broken Telephone, Exquisite Corpse, dual slash and bb! commands, Chaos Cards, and a modular Python backend."
   />
   <meta name="robots" content="index,follow,max-image-preview:large" />
   <link rel="canonical" href="https://arno-create.github.io/babblebox-bot/" />
-  <meta property="og:title" content="Babblebox | Discord Party Game Bot" />
+  <meta property="og:title" content="Babblebox - Discord Party Game Bot" />
   <meta
     property="og:description"
-    content="Party games, slash commands, bb! prefix support, and Chaos Cards packed into a Render-friendly Discord bot."
+    content="A polished Discord party bot with social deduction, voice-message chaos, dual commands, and modular backend architecture."
   />
   <meta property="og:url" content="https://arno-create.github.io/babblebox-bot/" />
   <meta property="og:type" content="website" />
   <meta property="og:image" content="https://arno-create.github.io/babblebox-bot/banner.png" />
   <meta name="twitter:card" content="summary_large_image" />
-  <meta name="twitter:title" content="Babblebox | Discord Party Game Bot" />
+  <meta name="twitter:title" content="Babblebox - Discord Party Game Bot" />
   <meta
     name="twitter:description"
-    content="A modular Discord party game bot with dual commands, lobby Chaos Cards, and multiplayer party games."
+    content="Multiplayer Discord party games, beautiful UX, slash and prefix commands, and Chaos Cards."
   />
   <meta name="twitter:image" content="https://arno-create.github.io/babblebox-bot/banner.png" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Sora:wght@600;700&display=swap" rel="stylesheet" />
   <style>
     :root {
-      --bg: #f7efe4;
-      --bg-deep: #1f2628;
-      --ink: #142022;
-      --ink-soft: #475558;
-      --card: rgba(255, 249, 241, 0.9);
-      --card-dark: rgba(22, 29, 31, 0.94);
-      --line: rgba(20, 32, 34, 0.1);
-      --accent: #ec6c3f;
-      --accent-2: #0d8b7c;
-      --accent-3: #ffcc66;
-      --shadow: 0 20px 50px rgba(20, 32, 34, 0.14);
-      --radius: 26px;
+      --bg: #07111f;
+      --bg-soft: #0d1b30;
+      --card: rgba(14, 26, 46, 0.82);
+      --card-2: rgba(19, 35, 61, 0.96);
+      --text: #f3f7ff;
+      --muted: #a7b6d1;
+      --line: rgba(255, 255, 255, 0.08);
+      --primary: #7c5cff;
+      --primary-2: #00d7ff;
+      --accent: #ff5fd2;
+      --success: #3ddc97;
+      --warning: #ffcf6b;
+      --shadow: 0 24px 80px rgba(0, 0, 0, 0.35);
+      --radius: 24px;
+      --radius-sm: 16px;
       --max: 1180px;
     }
 
@@ -49,75 +52,96 @@
     html { scroll-behavior: smooth; }
     body {
       margin: 0;
-      font-family: "IBM Plex Sans", sans-serif;
-      color: var(--ink);
+      font-family: "Plus Jakarta Sans", sans-serif;
+      color: var(--text);
       background:
-        radial-gradient(circle at top left, rgba(236, 108, 63, 0.18), transparent 28%),
-        radial-gradient(circle at 85% 18%, rgba(13, 139, 124, 0.18), transparent 24%),
-        linear-gradient(180deg, #fffaf3 0%, #f6ecdf 45%, #f3e6d6 100%);
+        radial-gradient(circle at 15% 20%, rgba(124, 92, 255, 0.26), transparent 28%),
+        radial-gradient(circle at 85% 25%, rgba(0, 215, 255, 0.18), transparent 22%),
+        radial-gradient(circle at 50% 80%, rgba(255, 95, 210, 0.16), transparent 25%),
+        linear-gradient(180deg, #06101d 0%, #08111f 42%, #091524 100%);
+      min-height: 100vh;
     }
 
-    img { display: block; max-width: 100%; }
     a { color: inherit; text-decoration: none; }
+    img { max-width: 100%; display: block; }
 
     .container {
       width: min(calc(100% - 32px), var(--max));
       margin: 0 auto;
     }
 
-    .nav-shell {
+    .nav-wrap {
       position: sticky;
       top: 0;
-      z-index: 20;
-      backdrop-filter: blur(18px);
-      background: rgba(247, 239, 228, 0.76);
-      border-bottom: 1px solid rgba(20, 32, 34, 0.08);
+      z-index: 50;
+      backdrop-filter: blur(16px);
+      background: rgba(5, 12, 22, 0.62);
+      border-bottom: 1px solid var(--line);
     }
 
     nav {
       display: flex;
-      align-items: center;
       justify-content: space-between;
+      align-items: center;
+      padding: 16px 0;
       gap: 20px;
-      padding: 18px 0;
     }
 
     .brand {
       display: inline-flex;
       align-items: center;
-      gap: 14px;
-      font-family: "Space Grotesk", sans-serif;
+      gap: 12px;
+      font-family: "Sora", sans-serif;
       font-weight: 700;
       letter-spacing: -0.03em;
     }
 
-    .brand img {
-      width: 50px;
-      height: 50px;
-      border-radius: 16px;
+    .brand-logo {
+      width: 46px;
+      height: 46px;
+      border-radius: 14px;
       object-fit: cover;
-      box-shadow: var(--shadow);
+      border: 1px solid rgba(255,255,255,0.12);
+      box-shadow: 0 12px 30px rgba(124, 92, 255, 0.28);
+      background: rgba(255,255,255,0.03);
+    }
+
+    .brand-copy {
+      display: flex;
+      flex-direction: column;
+      line-height: 1.05;
+    }
+
+    .brand-copy small {
+      color: var(--muted);
+      font-size: 0.72rem;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+      margin-top: 3px;
     }
 
     .nav-links {
       display: flex;
       align-items: center;
       gap: 18px;
-      flex-wrap: wrap;
-      color: var(--ink-soft);
+      color: var(--muted);
       font-size: 0.96rem;
+      flex-wrap: wrap;
+      justify-content: flex-end;
     }
 
-    .nav-links a:hover { color: var(--ink); }
+    .nav-links a:hover { color: var(--text); }
 
     .hero {
-      padding: 76px 0 24px;
+      position: relative;
+      padding: 88px 0 26px;
+      overflow: hidden;
     }
 
     .hero-grid {
       display: grid;
       grid-template-columns: 1.05fr 0.95fr;
-      gap: 26px;
+      gap: 32px;
       align-items: center;
     }
 
@@ -126,42 +150,56 @@
       align-items: center;
       gap: 10px;
       padding: 10px 14px;
+      border: 1px solid rgba(255,255,255,0.09);
       border-radius: 999px;
-      background: rgba(236, 108, 63, 0.12);
-      color: #8c3f20;
+      background: rgba(255,255,255,0.04);
+      color: #d8e4ff;
       font-size: 0.92rem;
-      font-weight: 600;
       margin-bottom: 18px;
     }
 
     h1, h2, h3 {
-      font-family: "Space Grotesk", sans-serif;
+      font-family: "Sora", sans-serif;
       letter-spacing: -0.04em;
       margin: 0;
     }
 
     h1 {
-      font-size: clamp(3rem, 8vw, 5.8rem);
-      line-height: 0.94;
+      font-size: clamp(2.8rem, 7vw, 5.6rem);
+      line-height: 0.98;
       margin-bottom: 18px;
+    }
+
+    .gradient-text {
+      background: linear-gradient(90deg, #ffffff 0%, #b5c8ff 30%, #9adfff 55%, #f0a7ff 100%);
+      -webkit-background-clip: text;
+      background-clip: text;
+      color: transparent;
+    }
+
+    .hero p,
+    .section-head p,
+    .card p,
+    .card li,
+    .tiny {
+      color: var(--muted);
+      line-height: 1.75;
     }
 
     .hero p {
       margin: 0;
-      max-width: 650px;
-      line-height: 1.8;
-      color: var(--ink-soft);
-      font-size: 1.05rem;
+      font-size: 1.08rem;
+      max-width: 680px;
     }
 
     .cta-row {
       display: flex;
       gap: 14px;
       flex-wrap: wrap;
-      margin-top: 26px;
+      margin-top: 28px;
     }
 
-    .button {
+    .btn {
       display: inline-flex;
       align-items: center;
       justify-content: center;
@@ -170,55 +208,35 @@
       border-radius: 16px;
       border: 1px solid transparent;
       font-weight: 700;
-      transition: transform 0.18s ease, box-shadow 0.18s ease, background 0.18s ease;
+      transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease, background 0.18s ease;
     }
 
-    .button:hover { transform: translateY(-2px); }
+    .btn:hover { transform: translateY(-2px); }
 
-    .button-primary {
-      background: linear-gradient(135deg, var(--accent), #f29b4b);
+    .btn-primary {
+      background: linear-gradient(135deg, var(--primary), var(--primary-2));
       color: white;
-      box-shadow: 0 18px 36px rgba(236, 108, 63, 0.26);
+      box-shadow: 0 18px 50px rgba(95, 121, 255, 0.28);
     }
 
-    .button-secondary {
-      background: rgba(255, 255, 255, 0.65);
-      border-color: rgba(20, 32, 34, 0.1);
-    }
-
-    .hero-panel {
-      background: var(--card-dark);
-      color: white;
-      border-radius: 30px;
-      padding: 18px;
-      box-shadow: var(--shadow);
-    }
-
-    .hero-panel img {
-      border-radius: 22px;
-      width: 100%;
-      aspect-ratio: 16 / 10;
-      object-fit: cover;
-    }
-
-    .hero-panel p {
-      margin-top: 16px;
-      color: rgba(255, 255, 255, 0.78);
+    .btn-secondary {
+      background: rgba(255,255,255,0.04);
+      border-color: rgba(255,255,255,0.1);
+      color: var(--text);
     }
 
     .stats {
       display: grid;
       grid-template-columns: repeat(4, 1fr);
-      gap: 16px;
+      gap: 14px;
       margin-top: 30px;
     }
 
     .stat {
       padding: 18px;
-      border-radius: 20px;
-      background: rgba(255, 255, 255, 0.68);
-      border: 1px solid rgba(20, 32, 34, 0.08);
-      box-shadow: var(--shadow);
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.08);
+      border-radius: 18px;
     }
 
     .stat b {
@@ -227,26 +245,68 @@
       margin-bottom: 6px;
     }
 
-    .stat span {
-      color: var(--ink-soft);
-      font-size: 0.94rem;
+    .hero-card,
+    .card,
+    .gallery-card,
+    .cta-banner {
+      position: relative;
+      overflow: hidden;
+      box-shadow: var(--shadow);
     }
 
-    section { padding: 52px 0; }
+    .hero-card {
+      padding: 18px;
+      background: linear-gradient(180deg, rgba(255,255,255,0.08), rgba(255,255,255,0.03));
+      border: 1px solid rgba(255,255,255,0.09);
+      border-radius: 28px;
+    }
+
+    .hero-card::before {
+      content: "";
+      position: absolute;
+      inset: -1px;
+      border-radius: inherit;
+      padding: 1px;
+      background: linear-gradient(135deg, rgba(124,92,255,0.75), rgba(0,215,255,0.45), rgba(255,95,210,0.6));
+      -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+      mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+      -webkit-mask-composite: xor;
+      mask-composite: exclude;
+      pointer-events: none;
+    }
+
+    .banner-frame {
+      overflow: hidden;
+      border-radius: 22px;
+      border: 1px solid rgba(255,255,255,0.08);
+      background: rgba(255,255,255,0.03);
+    }
+
+    .banner-frame img {
+      width: 100%;
+      aspect-ratio: 16 / 9;
+      object-fit: cover;
+    }
+
+    .banner-caption {
+      padding: 16px 18px 6px;
+      color: #d7e4ff;
+      font-size: 0.96rem;
+      line-height: 1.7;
+    }
+
+    section { padding: 56px 0; }
 
     .section-head {
-      margin-bottom: 22px;
+      display: flex;
+      justify-content: space-between;
+      gap: 18px;
+      align-items: end;
+      margin-bottom: 24px;
     }
 
     .section-head h2 {
-      font-size: clamp(2rem, 4vw, 3rem);
-    }
-
-    .section-head p {
-      margin: 10px 0 0;
-      max-width: 720px;
-      line-height: 1.8;
-      color: var(--ink-soft);
+      font-size: clamp(1.8rem, 3vw, 2.8rem);
     }
 
     .grid {
@@ -254,49 +314,33 @@
       gap: 18px;
     }
 
-    .three {
-      grid-template-columns: repeat(3, 1fr);
-    }
-
-    .two {
-      grid-template-columns: repeat(2, 1fr);
-    }
+    .feature-grid { grid-template-columns: repeat(3, 1fr); }
+    .game-grid { grid-template-columns: repeat(2, 1fr); }
+    .gallery { grid-template-columns: repeat(3, 1fr); }
+    .privacy-grid { grid-template-columns: 1.1fr 0.9fr; align-items: start; }
 
     .card {
       padding: 24px;
       border-radius: var(--radius);
-      background: var(--card);
-      border: 1px solid var(--line);
-      box-shadow: var(--shadow);
-    }
-
-    .card p,
-    .card li,
-    .command-copy {
-      color: var(--ink-soft);
-      line-height: 1.8;
+      background: linear-gradient(180deg, rgba(255,255,255,0.06), rgba(255,255,255,0.035));
+      border: 1px solid rgba(255,255,255,0.08);
     }
 
     .card ul {
-      margin: 12px 0 0;
+      margin: 14px 0 0;
       padding-left: 18px;
     }
 
-    .tag {
-      display: inline-flex;
-      width: fit-content;
-      padding: 8px 12px;
-      border-radius: 999px;
-      background: rgba(13, 139, 124, 0.12);
-      color: #0d6a61;
-      font-size: 0.84rem;
-      font-weight: 700;
-      margin-bottom: 12px;
-    }
-
-    .command-panel {
-      background: var(--bg-deep);
-      color: white;
+    .icon {
+      width: 54px;
+      height: 54px;
+      display: grid;
+      place-items: center;
+      border-radius: 18px;
+      background: linear-gradient(135deg, rgba(124,92,255,0.26), rgba(0,215,255,0.16));
+      border: 1px solid rgba(255,255,255,0.08);
+      font-size: 1.5rem;
+      margin-bottom: 16px;
     }
 
     .mode-switch {
@@ -304,29 +348,29 @@
       gap: 8px;
       padding: 6px;
       border-radius: 999px;
-      background: rgba(255, 255, 255, 0.1);
-      margin-bottom: 18px;
+      background: rgba(255,255,255,0.06);
+      margin-bottom: 16px;
     }
 
     .mode-switch button {
       border: 0;
       border-radius: 999px;
-      padding: 9px 14px;
+      padding: 8px 14px;
       font: inherit;
       font-weight: 700;
-      color: rgba(255, 255, 255, 0.8);
+      color: rgba(255,255,255,0.7);
       background: transparent;
       cursor: pointer;
     }
 
     .mode-switch button.active {
       color: white;
-      background: rgba(255, 255, 255, 0.16);
+      background: rgba(255,255,255,0.12);
     }
 
     .command-list {
       display: grid;
-      gap: 14px;
+      gap: 12px;
     }
 
     .command-row {
@@ -335,105 +379,187 @@
       gap: 16px;
       padding: 14px 16px;
       border-radius: 18px;
-      background: rgba(255, 255, 255, 0.07);
+      background: rgba(255,255,255,0.05);
+      border: 1px solid rgba(255,255,255,0.06);
       align-items: center;
     }
 
     .command-row code {
+      color: #f3fbff;
       font-size: 1rem;
-      color: #fff5dc;
-    }
-
-    .command-note {
-      color: rgba(255, 255, 255, 0.72);
-      font-size: 0.94rem;
-      text-align: right;
-    }
-
-    .gallery {
-      display: grid;
-      grid-template-columns: repeat(3, 1fr);
-      gap: 18px;
     }
 
     .gallery-card {
-      overflow: hidden;
-      border-radius: 24px;
-      background: rgba(255, 255, 255, 0.76);
-      border: 1px solid var(--line);
-      box-shadow: var(--shadow);
+      border-radius: 22px;
+      background: linear-gradient(180deg, rgba(255,255,255,0.06), rgba(255,255,255,0.035));
+      border: 1px solid rgba(255,255,255,0.08);
     }
 
     .gallery-card img {
       width: 100%;
       aspect-ratio: 16 / 10;
       object-fit: cover;
-      border-bottom: 1px solid var(--line);
+      border-bottom: 1px solid rgba(255,255,255,0.08);
+      background: rgba(255,255,255,0.03);
     }
 
-    .gallery-card div {
+    .gallery-copy {
       padding: 18px;
     }
 
-    .banner {
+    .privacy-list {
       display: grid;
-      grid-template-columns: 1.1fr 0.9fr;
+      gap: 12px;
+      margin-top: 16px;
+    }
+
+    .privacy-item {
+      padding: 16px;
+      border-radius: 18px;
+      background: rgba(255,255,255,0.04);
+      border: 1px solid rgba(255,255,255,0.07);
+    }
+
+    .privacy-item strong {
+      display: block;
+      color: #edf4ff;
+      margin-bottom: 6px;
+    }
+
+    .server-card {
+      display: flex;
+      flex-direction: column;
+      gap: 14px;
+    }
+
+    .server-title {
+      font-size: 1.5rem;
+      font-family: "Sora", sans-serif;
+      line-height: 1.25;
+    }
+
+    .server-tag {
+      display: inline-flex;
+      width: fit-content;
+      padding: 8px 12px;
+      border-radius: 999px;
+      background: rgba(61,220,151,0.12);
+      color: #c7ffe7;
+      border: 1px solid rgba(61,220,151,0.28);
+      font-size: 0.88rem;
+      font-weight: 700;
+    }
+
+    .cta-banner {
+      display: grid;
+      grid-template-columns: 1.15fr 0.85fr;
       gap: 18px;
       align-items: center;
       padding: 28px;
       border-radius: 30px;
-      background: linear-gradient(135deg, rgba(236, 108, 63, 0.14), rgba(13, 139, 124, 0.12), rgba(255, 204, 102, 0.3));
-      border: 1px solid var(--line);
-      box-shadow: var(--shadow);
+      background: linear-gradient(135deg, rgba(124,92,255,0.20), rgba(0,215,255,0.16), rgba(255,95,210,0.14));
+      border: 1px solid rgba(255,255,255,0.1);
     }
 
     footer {
       padding: 28px 0 56px;
-      color: var(--ink-soft);
+      color: var(--muted);
+      font-size: 0.95rem;
     }
 
-    .footer-line {
+    .footer-card {
+      border-top: 1px solid rgba(255,255,255,0.08);
       display: flex;
       justify-content: space-between;
       gap: 16px;
       flex-wrap: wrap;
-      border-top: 1px solid rgba(20, 32, 34, 0.1);
       padding-top: 24px;
+      align-items: center;
+    }
+
+    .footer-meta {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+
+    .socials {
+      display: inline-flex;
+      align-items: center;
+      gap: 12px;
+    }
+
+    .social-link {
+      width: 46px;
+      height: 46px;
+      border-radius: 14px;
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      background: rgba(255,255,255,0.05);
+      border: 1px solid rgba(255,255,255,0.08);
+      transition: transform 0.18s ease, border-color 0.18s ease, background 0.18s ease;
+    }
+
+    .social-link:hover {
+      transform: translateY(-2px);
+      background: rgba(255,255,255,0.08);
+      border-color: rgba(255,255,255,0.14);
+    }
+
+    .social-link svg {
+      width: 21px;
+      height: 21px;
+      fill: #eef4ff;
     }
 
     @media (max-width: 1000px) {
       .hero-grid,
-      .stats,
-      .three,
-      .two,
+      .cta-banner,
+      .feature-grid,
+      .game-grid,
       .gallery,
-      .banner {
+      .privacy-grid,
+      .stats {
         grid-template-columns: 1fr;
+      }
+
+      .section-head {
+        flex-direction: column;
+        align-items: start;
       }
     }
 
-    @media (max-width: 700px) {
-      nav { flex-direction: column; align-items: flex-start; }
-      .command-row { flex-direction: column; align-items: flex-start; }
-      .command-note { text-align: left; }
-      .button { width: 100%; }
+    @media (max-width: 680px) {
+      nav { align-items: start; flex-direction: column; }
+      .nav-links { gap: 12px; }
+      .hero { padding-top: 52px; }
+      .btn { width: 100%; }
       .cta-row { flex-direction: column; }
+      .card, .hero-card, .cta-banner { padding: 20px; }
+      .footer-card { align-items: flex-start; }
+      .command-row { flex-direction: column; align-items: flex-start; }
     }
   </style>
 </head>
 <body>
-  <div class="nav-shell">
+  <div class="nav-wrap">
     <div class="container">
       <nav>
-        <a class="brand" href="#top">
-          <img src="logo.jpg" alt="Babblebox logo" />
-          <span>Babblebox</span>
+        <a class="brand" href="#top" aria-label="Babblebox home">
+          <img class="brand-logo" src="logo.jpg" alt="Babblebox logo" />
+          <span class="brand-copy">
+            <span>Babblebox</span>
+            <small>discord party game bot</small>
+          </span>
         </a>
         <div class="nav-links">
+          <a href="#features">Features</a>
           <a href="#commands">Commands</a>
-          <a href="#chaos-cards">Chaos Cards</a>
-          <a href="#architecture">Architecture</a>
           <a href="#gallery">Screenshots</a>
+          <a href="#privacy">Privacy</a>
+          <a href="#community">Support Server</a>
+          <a href="#launch">Invite</a>
           <a href="https://github.com/arno-create/babblebox-bot" target="_blank" rel="noreferrer">GitHub</a>
         </div>
       </nav>
@@ -443,45 +569,78 @@
   <header class="hero" id="top">
     <div class="container hero-grid">
       <div>
-        <div class="eyebrow">Discord party games + bb! prefix + slash commands + Render-friendly backend</div>
-        <h1>Babblebox feels like a party, not a placeholder.</h1>
+        <div class="eyebrow">Production-style Discord bot | Python | discord.py | modular architecture | real multiplayer game flows</div>
+        <h1><span class="gradient-text">Babblebox</span><br />the party game bot that actually feels alive.</h1>
         <p>
-          Babblebox is a multiplayer Discord party game bot built around replayable social moments,
-          modular Python architecture, and hosting-safe runtime rules. The latest build supports both slash commands
-          and the <code>bb!</code> prefix, with lobby Chaos Cards that add fast twists without adding background load.
+          Babblebox is built for the kind of moments people screenshot, quote later, and bring up again a week after the server call ends.
+          It mixes voice-message chaos, social deduction, absurd storytelling, interactive views, and fast multiplayer tension into one polished Discord experience.
+          This version also adds a modular backend, dual slash and <code>bb!</code> commands, and Chaos Cards that give every lobby a little more personality without stressing a free-tier Render deployment.
         </p>
         <div class="cta-row">
-          <a class="button button-primary" href="https://discord.com/oauth2/authorize?client_id=1480903089518022739" target="_blank" rel="noreferrer">Invite Babblebox</a>
-          <a class="button button-secondary" href="https://arno-create.github.io/babblebox-bot/" target="_blank" rel="noreferrer">Official Website</a>
-          <a class="button button-secondary" href="https://github.com/arno-create/babblebox-bot" target="_blank" rel="noreferrer">View Source</a>
+          <a class="btn btn-primary" href="https://discord.com/oauth2/authorize?client_id=1480903089518022739" target="_blank" rel="noreferrer">Invite Babblebox</a>
+          <a class="btn btn-secondary" href="https://discord.com/servers/inevitable-friendship-1322933864360050688" target="_blank" rel="noreferrer">Join Support Server</a>
+          <a class="btn btn-secondary" href="https://github.com/arno-create/babblebox-bot" target="_blank" rel="noreferrer">View Source</a>
         </div>
         <div class="stats">
-          <div class="stat"><b>4</b><span>Built-in party games</span></div>
-          <div class="stat"><b>2 paths</b><span>Slash and <code>bb!</code> commands</span></div>
-          <div class="stat"><b>3 cards</b><span>Chaos Card lobby twists</span></div>
-          <div class="stat"><b>0 daemons</b><span>No heavy background loops</span></div>
+          <div class="stat"><b>4+</b><span>Mini-games and modes</span></div>
+          <div class="stat"><b>Dual</b><span>Slash and <code>bb!</code> commands</span></div>
+          <div class="stat"><b>Chaos Cards</b><span>Lobby twists with no background cost</span></div>
+          <div class="stat"><b>Render-safe</b><span>Modular and free-tier friendly</span></div>
         </div>
       </div>
 
-      <aside class="hero-panel">
-        <img src="banner.png" alt="Babblebox banner artwork" />
-        <p>
-          The bot is now split into cogs and shared services, so game flow, AFK logic, commands, and the Flask keep-alive layer
-          can evolve without turning back into a 3,000-line monolith.
-        </p>
-      </aside>
+      <div class="hero-card">
+        <div class="banner-frame">
+          <img src="banner.png" alt="Babblebox banner art" />
+        </div>
+        <div class="banner-caption">
+          <strong>Babblebox Arcade</strong> keeps the original energy and visual identity, while the backend underneath is now far easier to maintain, extend, and stabilize.
+        </div>
+      </div>
     </div>
   </header>
+
+  <section id="features">
+    <div class="container">
+      <div class="section-head">
+        <div>
+          <h2>Built to feel smooth, not brittle.</h2>
+          <p>Babblebox focuses on social fun, but under the hood it now has a cleaner package layout, hybrid command routing, and game-state handling that fits a constrained hosting environment.</p>
+        </div>
+      </div>
+
+      <div class="grid feature-grid">
+        <article class="card">
+          <div class="icon">🧠</div>
+          <h3>Modular backend</h3>
+          <p>The old monolith is now split into a shared engine, cogs, and a web module, so commands, listeners, AFK logic, and hosting glue no longer live in one giant file.</p>
+        </article>
+
+        <article class="card">
+          <div class="icon">🎛️</div>
+          <h3>Dual command system</h3>
+          <p>Core commands now work as both slash commands and <code>bb!</code> prefix commands, so the bot fits both modern Discord UX and fast chat-driven communities.</p>
+        </article>
+
+        <article class="card">
+          <div class="icon">🎴</div>
+          <h3>Chaos Cards</h3>
+          <p>Hosts can set a low-cost lobby modifier like Reverse Order, Lightning Round, or Encore Reveal to make each round feel a little more distinct.</p>
+        </article>
+      </div>
+    </div>
+  </section>
 
   <section id="commands">
     <div class="container">
       <div class="section-head">
-        <h2>Dual command system</h2>
-        <p>
-          Every core command now works as both a slash command and a prefix command. Use whichever style matches your server culture.
-        </p>
+        <div>
+          <h2>Core commands, two ways.</h2>
+          <p>Switch between slash and prefix examples. Every important command now supports both routes.</p>
+        </div>
       </div>
-      <div class="card command-panel">
+
+      <div class="card">
         <div class="mode-switch" aria-label="Command display mode">
           <button class="active" data-mode="slash" type="button">Slash</button>
           <button data-mode="prefix" type="button">Prefix</button>
@@ -489,93 +648,33 @@
         <div class="command-list">
           <div class="command-row" data-slash="/help" data-prefix="bb!help">
             <code>/help</code>
-            <span class="command-note">Open the manual and rules.</span>
+            <span>Open the full game manual.</span>
           </div>
           <div class="command-row" data-slash="/ping" data-prefix="bb!ping">
             <code>/ping</code>
-            <span class="command-note">Quick health check.</span>
+            <span>Quick health check.</span>
           </div>
           <div class="command-row" data-slash="/play" data-prefix="bb!play">
             <code>/play</code>
-            <span class="command-note">Create a lobby and choose a game.</span>
+            <span>Open a lobby and host a game.</span>
           </div>
           <div class="command-row" data-slash="/stop" data-prefix="bb!stop">
             <code>/stop</code>
-            <span class="command-note">Host or admin stop.</span>
+            <span>Host/admin force stop.</span>
           </div>
           <div class="command-row" data-slash="/afk" data-prefix="bb!afk">
             <code>/afk</code>
-            <span class="command-note">Enable, schedule, or clear AFK.</span>
+            <span>Set, schedule, or clear AFK.</span>
           </div>
           <div class="command-row" data-slash="/afkstatus" data-prefix="bb!afkstatus">
             <code>/afkstatus</code>
-            <span class="command-note">Show the current AFK record.</span>
+            <span>View AFK state.</span>
           </div>
           <div class="command-row" data-slash="/chaoscard" data-prefix="bb!chaoscard">
             <code>/chaoscard</code>
-            <span class="command-note">Cycle the active lobby twist.</span>
+            <span>Cycle the current lobby twist.</span>
           </div>
         </div>
-      </div>
-    </div>
-  </section>
-
-  <section id="chaos-cards">
-    <div class="container">
-      <div class="section-head">
-        <h2>Chaos Cards</h2>
-        <p>
-          This is the new signature feature. Hosts can apply a low-cost lobby card before the round starts, giving Babblebox a layer of personality
-          without relying on database polling or expensive background jobs.
-        </p>
-      </div>
-      <div class="grid three">
-        <article class="card">
-          <span class="tag">Path winner</span>
-          <h3>Reverse Order</h3>
-          <p>The lobby shuffles players, then flips the order. Familiar games immediately feel different without changing the ruleset.</p>
-        </article>
-        <article class="card">
-          <span class="tag">Fast twist</span>
-          <h3>Lightning Round</h3>
-          <p>DM prompts, vote windows, and Word Bomb timing all tighten up for one spicy round that still fits free-tier hosting limits.</p>
-        </article>
-        <article class="card">
-          <span class="tag">Shareable finish</span>
-          <h3>Encore Reveal</h3>
-          <p>Babblebox recaps end with a dramatic headline so the funniest rounds are easier to screenshot and share.</p>
-        </article>
-      </div>
-    </div>
-  </section>
-
-  <section id="architecture">
-    <div class="container">
-      <div class="section-head">
-        <h2>Modular backend</h2>
-        <p>
-          The refactor moves the project away from a single-file bot and into a package layout that fits long-term maintenance and Render free-tier limits.
-        </p>
-      </div>
-      <div class="grid two">
-        <article class="card">
-          <h3>What moved where</h3>
-          <ul>
-            <li><strong>cogs/</strong> now owns commands and listeners.</li>
-            <li><strong>game_engine.py</strong> keeps shared game state, views, timers, and flow logic.</li>
-            <li><strong>bot.py</strong> handles startup, dictionary loading, and command sync.</li>
-            <li><strong>web.py</strong> runs the lightweight Flask keep-alive server.</li>
-          </ul>
-        </article>
-        <article class="card">
-          <h3>Why it fits Render</h3>
-          <ul>
-            <li>No polling database workers were added.</li>
-            <li>The keep-alive thread is daemonized for cleaner shutdown behavior.</li>
-            <li>The Word Bomb dictionary now caches to disk to avoid repeated full downloads.</li>
-            <li>Chaos Cards are stateless lobby modifiers, not long-running jobs.</li>
-          </ul>
-        </article>
       </div>
     </div>
   </section>
@@ -583,25 +682,35 @@
   <section id="games">
     <div class="container">
       <div class="section-head">
-        <h2>The game lineup</h2>
-        <p>Babblebox keeps the core games that already work while making the surrounding command and lobby experience much cleaner.</p>
+        <div>
+          <h2>Mini-games that create actual moments.</h2>
+          <p>Fast rounds, funny reveals, and replayable social tension. The games stay the same; the surrounding UX and codebase are now much stronger.</p>
+        </div>
       </div>
-      <div class="grid two">
+
+      <div class="grid game-grid">
         <article class="card">
+          <div class="icon">🎙️</div>
           <h3>Broken Telephone</h3>
-          <p>Voice-message mimicry through DMs, ending with a final typed guess and a recap.</p>
+          <p>Players pass a voice message through a chain of DMs by mimicking what they hear. The last player types the final guess and the recap reveals the damage.</p>
         </article>
+
         <article class="card">
+          <div class="icon">📝</div>
           <h3>Exquisite Corpse</h3>
-          <p>Hidden prompt-by-prompt story building that reveals one shared absurd sentence.</p>
+          <p>A blind collaborative story-builder where players secretly contribute prompts before the final absurd sentence is revealed.</p>
         </article>
+
         <article class="card">
+          <div class="icon">🕵️</div>
           <h3>Spyfall</h3>
-          <p>Social deduction with role DMs, interrogation routing, and a timed group vote.</p>
+          <p>One player is secretly the spy, everyone else knows the location, and the group interrogates each other before a timed vote.</p>
         </article>
+
         <article class="card">
+          <div class="icon">💣</div>
           <h3>Word Bomb</h3>
-          <p>Dictionary-backed word survival with Classic, Chaos, and Hardcore modes.</p>
+          <p>A dictionary-backed typing survival game with Classic, Chaos, and Hardcore modes and now even cleaner turn embeds.</p>
         </article>
       </div>
     </div>
@@ -610,30 +719,74 @@
   <section id="gallery">
     <div class="container">
       <div class="section-head">
-        <h2>Screenshots</h2>
-        <p>Real game UI still matters. The frontend now advertises the command system and architecture honestly instead of acting like the bot is a mystery box.</p>
+        <div>
+          <h2>See Babblebox in action.</h2>
+          <p>Real screenshots still matter. They show that Babblebox is a real product with real UX, not just a list of command names.</p>
+        </div>
       </div>
-      <div class="gallery">
+
+      <div class="grid gallery">
         <article class="gallery-card">
           <img src="assets/lobby.png" alt="Babblebox lobby screenshot" />
-          <div>
-            <h3>Lobby</h3>
-            <p>Host picks a game, rotates Chaos Cards, and launches from one panel.</p>
+          <div class="gallery-copy">
+            <h3>Lobby flow</h3>
+            <p>Host chooses a game, sets a Chaos Card, and launches from one clean panel.</p>
           </div>
         </article>
+
         <article class="gallery-card">
-          <img src="assets/spyfall_voting.png" alt="Spyfall voting screenshot" />
-          <div>
-            <h3>Spyfall vote</h3>
-            <p>Interactive voting stays intact while the command layer is now reusable.</p>
+          <img src="assets/spyfall_voting.png" alt="Babblebox Spyfall screenshot" />
+          <div class="gallery-copy">
+            <h3>Spyfall tension</h3>
+            <p>Interrogation, suspicion, and timed voting all live in one clear flow.</p>
           </div>
         </article>
+
         <article class="gallery-card">
-          <img src="assets/wordbomb_gameplay.png" alt="Word Bomb gameplay screenshot" />
-          <div>
-            <h3>Word Bomb</h3>
-            <p>The dictionary-backed survival mode now starts from a modular backend.</p>
+          <img src="assets/wordbomb_gameplay.png" alt="Babblebox Word Bomb screenshot" />
+          <div class="gallery-copy">
+            <h3>Word Bomb pressure</h3>
+            <p>Fast turns, valid-word checks, and sudden-death panic make it one of the bot's biggest crowd-pleasers.</p>
           </div>
+        </article>
+      </div>
+    </div>
+  </section>
+
+  <section id="privacy">
+    <div class="container">
+      <div class="section-head">
+        <div>
+          <h2>Privacy policy</h2>
+          <p>Babblebox is built to do the minimum necessary to provide its features. This section explains that plainly.</p>
+        </div>
+      </div>
+
+      <div class="grid privacy-grid">
+        <article class="card">
+          <h3>How Babblebox handles data</h3>
+          <p>Babblebox may process command input, game actions, DM replies needed for game flow, AFK status data, and the messages or attachments required to run features you actively use. It is designed around temporary runtime state rather than invasive tracking.</p>
+          <div class="privacy-list">
+            <div class="privacy-item"><strong>What may be processed</strong>Command usage, temporary game state, player turns, DM responses used by the games, AFK status information, and content needed to operate the feature a user chooses to use.</div>
+            <div class="privacy-item"><strong>What is not the goal</strong>Babblebox is not built to sell personal data, build ad profiles, or act like a surveillance product. It is a party game bot, not a data-mining machine.</div>
+            <div class="privacy-item"><strong>Retention approach</strong>Most gameplay data is temporary and tied to the active session. Lobbies, timers, and AFK entries exist to keep the bot functioning, not to become permanent storage.</div>
+            <div class="privacy-item"><strong>DM usage</strong>Some games rely on direct messages for prompts, replies, or role information. If users disable DMs from server members, those features may not work correctly.</div>
+            <div class="privacy-item"><strong>Sensitive information</strong>Do not send passwords, payment details, legal identifiers, or other private information through the bot.</div>
+            <div class="privacy-item"><strong>Third-party services</strong>Babblebox may rely on Discord, Render, and other infrastructure providers to operate. Those services have their own policies and limits.</div>
+          </div>
+        </article>
+
+        <article class="card server-card" id="community">
+          <span class="server-tag">Support server</span>
+          <div class="server-title">inevitable friendship</div>
+          <p>
+            <strong>inevitable friendship</strong> is Babblebox's support-server home base and community ad all in one:
+            a warm, welcoming place to test updates, share screenshots, report bugs, suggest ideas, and meet people who actually enjoy the same kind of weird multiplayer chaos.
+          </p>
+          <p>
+            If you want the fastest place to see changes, influence the bot's future, or just hang around a friendlier Discord space, this is where Babblebox lives.
+          </p>
+          <a class="btn btn-secondary" href="https://discord.com/servers/inevitable-friendship-1322933864360050688" target="_blank" rel="noreferrer">Join inevitable friendship</a>
         </article>
       </div>
     </div>
@@ -641,31 +794,35 @@
 
   <section id="launch">
     <div class="container">
-      <div class="banner">
+      <div class="cta-banner">
         <div>
-          <h2>Invite it, stress-test it, and make it louder.</h2>
-          <p class="command-copy">
-            Babblebox is built for multiplayer chaos, but now the codebase is much easier to evolve. That means faster feature work, safer fixes, and less fear of touching the bot.
+          <h2>Bring chaos to your server.</h2>
+          <p>
+            Invite Babblebox, test the games with your friends, try the Chaos Cards, and join the support community to follow updates and shape what gets built next.
           </p>
         </div>
-        <div class="cta-row" style="margin-top: 0;">
-          <a class="button button-primary" href="https://discord.com/oauth2/authorize?client_id=1480903089518022739" target="_blank" rel="noreferrer">Add the bot</a>
-          <a class="button button-secondary" href="https://arno-create.github.io/babblebox-bot/" target="_blank" rel="noreferrer">Official site</a>
+        <div class="cta-row" style="justify-content:flex-end; margin-top:0;">
+          <a class="btn btn-primary" href="https://discord.com/oauth2/authorize?client_id=1480903089518022739" target="_blank" rel="noreferrer">Invite the Bot</a>
+          <a class="btn btn-secondary" href="https://arno-create.github.io/babblebox-bot/" target="_blank" rel="noreferrer">Official Website</a>
         </div>
       </div>
     </div>
   </section>
 
   <footer>
-    <div class="container footer-line">
-      <div>
-        <strong>Babblebox</strong><br />
-        Modular Discord party chaos for slash commands, prefix commands, and hosting-safe multiplayer sessions.
+    <div class="container footer-card">
+      <div class="footer-meta">
+        <strong>Babblebox</strong>
+        <div class="tiny">Built by Arno | Python | discord.py | multiplayer party chaos</div>
+        <div class="tiny">GitHub repo: github.com/arno-create/babblebox-bot</div>
       </div>
-      <div>
-        <a href="https://github.com/arno-create/babblebox-bot" target="_blank" rel="noreferrer">GitHub</a> |
-        <a href="https://arno-create.github.io/babblebox-bot/" target="_blank" rel="noreferrer">Website</a> |
-        <a href="https://discord.com/oauth2/authorize?client_id=1480903089518022739" target="_blank" rel="noreferrer">Invite</a>
+      <div class="socials" aria-label="Social links">
+        <a class="social-link" href="https://instagram.com/arno.if" target="_blank" rel="noreferrer" aria-label="Instagram">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M7 2h10a5 5 0 0 1 5 5v10a5 5 0 0 1-5 5H7a5 5 0 0 1-5-5V7a5 5 0 0 1 5-5Zm0 2.2A2.8 2.8 0 0 0 4.2 7v10A2.8 2.8 0 0 0 7 19.8h10a2.8 2.8 0 0 0 2.8-2.8V7A2.8 2.8 0 0 0 17 4.2Zm10.25 1.65a1.1 1.1 0 1 1 0 2.2 1.1 1.1 0 0 1 0-2.2ZM12 7a5 5 0 1 1 0 10 5 5 0 0 1 0-10Zm0 2.2A2.8 2.8 0 1 0 12 14.8 2.8 2.8 0 0 0 12 9.2Z"/></svg>
+        </a>
+        <a class="social-link" href="https://x.com/arno__if" target="_blank" rel="noreferrer" aria-label="X / Twitter">
+          <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M18.9 2H22l-6.77 7.74L23.2 22h-6.24l-4.9-7.35L5.63 22H2.5l7.25-8.29L1 2h6.4l4.43 6.85L18.9 2Zm-1.1 18h1.73L6.46 3.9H4.61Z"/></svg>
+        </a>
       </div>
     </div>
   </footer>
@@ -680,8 +837,7 @@
       });
 
       rows.forEach((row) => {
-        const code = row.querySelector("code");
-        code.textContent = row.dataset[mode];
+        row.querySelector("code").textContent = row.dataset[mode];
       });
     }
 

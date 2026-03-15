@@ -730,7 +730,7 @@ def build_telephone_recap_embed(game, guess_text):
     ]
     embed.add_field(name="Audio Trail", value="\n".join(audio_lines), inline=False)
     apply_chaos_recap(embed, game)
-    return embed
+    return style_embed(embed, footer="Babblebox Recap | /play or bb!play for another round")
 
 
 def build_corpse_recap_embed(game):
@@ -752,7 +752,7 @@ def build_corpse_recap_embed(game):
         inline=False,
     )
     apply_chaos_recap(embed, game)
-    return embed
+    return style_embed(embed, footer="Babblebox Recap | /play or bb!play for another round")
 
 
 def build_spyfall_recap_embed(game):
@@ -790,7 +790,7 @@ def build_spyfall_recap_embed(game):
         inline=False,
     )
     apply_chaos_recap(embed, game)
-    return embed
+    return style_embed(embed, footer="Babblebox Recap | /play or bb!play for another round")
 
 
 def build_bomb_recap_embed(game, winner):
@@ -845,7 +845,7 @@ def build_bomb_recap_embed(game, winner):
         )
 
     apply_chaos_recap(embed, game)
-    return embed
+    return style_embed(embed, footer="Babblebox Recap | /play or bb!play for another round")
 
 
 def prepare_bomb_turn(game):
@@ -898,6 +898,27 @@ def build_bomb_turn_message(game, player):
     return base
 
 
+def build_bomb_turn_embed(game, player):
+    embed = discord.Embed(
+        title="Word Bomb Turn",
+        description=f"{player.mention}, you are live. Send one valid English word before the timer expires.",
+        color=EMBED_THEME["danger"],
+    )
+    embed.add_field(name="Syllable", value=f"**{game['syllable']}**", inline=True)
+    embed.add_field(name="Timer", value=f"**{game['bomb_current_turn_time_limit']:.1f}s**", inline=True)
+    embed.add_field(name="Mode", value=get_bomb_mode_config(game.get("bomb_mode", "classic"))["label"], inline=True)
+
+    modifier = game.get("bomb_current_rule")
+    if modifier and modifier.get("type") != "none":
+        embed.add_field(
+            name=f"Chaos Modifier: {modifier['label']}",
+            value=safe_field_text(modifier["description"]),
+            inline=False,
+        )
+
+    return style_embed(embed, footer="Babblebox Word Bomb | One word only")
+
+
 def validate_bomb_modifier(game, word):
     modifier = game.get("bomb_current_rule")
     if not modifier:
@@ -946,8 +967,7 @@ def build_stats_embed(target, stats):
         f"Fastest Word: {fastest_text}"
     )
     embed.add_field(name="Word Bomb", value=bomb, inline=False)
-    embed.set_footer(text=SESSION_NOTE)
-    return embed
+    return style_embed(embed, footer=f"Babblebox Session Stats | {SESSION_NOTE}")
 
 
 def build_leaderboard_embed(metric_key, label, entries):
@@ -960,13 +980,43 @@ def build_leaderboard_embed(metric_key, label, entries):
         for index, entry in enumerate(entries[:10])
     ]
     embed.description = join_limited_lines(lines, empty="Nobody has any stats for that category yet.")
-    embed.set_footer(text=SESSION_NOTE)
-    return embed
+    return style_embed(embed, footer=f"Babblebox Leaderboard | {SESSION_NOTE}")
 
 
 
 def now_utc():
     return datetime.now(timezone.utc)
+
+
+EMBED_THEME = {
+    "info": discord.Color.from_rgb(88, 145, 255),
+    "success": discord.Color.from_rgb(67, 185, 127),
+    "warning": discord.Color.from_rgb(245, 188, 66),
+    "danger": discord.Color.from_rgb(232, 86, 86),
+    "accent": discord.Color.from_rgb(120, 110, 255),
+}
+
+
+def style_embed(embed: discord.Embed, *, footer: str = "Babblebox | /help or bb!help") -> discord.Embed:
+    if embed.timestamp is None:
+        embed.timestamp = now_utc()
+    embed.set_footer(text=footer)
+    return embed
+
+
+def make_status_embed(
+    title: str,
+    description: str,
+    *,
+    tone: str = "info",
+    footer: str = "Babblebox | /help or bb!help",
+) -> discord.Embed:
+    embed = discord.Embed(
+        title=title,
+        description=description,
+        color=EMBED_THEME.get(tone, EMBED_THEME["info"]),
+    )
+    return style_embed(embed, footer=footer)
 
 
 def format_timestamp(value, style="R"):
@@ -1137,8 +1187,7 @@ def build_afk_status_embed(user, record, *, title=None):
     embed.add_field(name="Timing", value="\n".join(timing_lines), inline=False)
 
 
-    embed.set_footer(text="AFK clears automatically when you send a message.")
-    return embed
+    return style_embed(embed, footer="Babblebox AFK | AFK clears automatically when you send a message.")
 
 
 def build_afk_brief_line(user, record):
@@ -1340,7 +1389,7 @@ def get_lobby_embed(guild_id):
             players_list = "\n".join(f"**{i + 1}.** 🎮 {p.display_name}" for i, p in enumerate(players))
             embed.add_field(name=f"Players Lobby ({len(players)}/{MAX_PLAYERS})", value=players_list, inline=False)
 
-    return embed
+    return style_embed(embed, footer=f"Babblebox Lobby | Hosted by {host.display_name}")
 
 
 def reset_idle_timer(guild_id):
@@ -2178,7 +2227,7 @@ async def _start_bomb_turn_locked(guild_id, game):
     turn_token = bump_token(game, "turn_token")
 
     with contextlib.suppress(discord.HTTPException):
-        await game["channel"].send(build_bomb_turn_message(game, next_player))
+        await game["channel"].send(embed=build_bomb_turn_embed(game, next_player))
 
     game["turn_task"] = asyncio.create_task(bomb_timeout(guild_id, next_player.id, turn_token, game))
 
@@ -2550,4 +2599,4 @@ def build_help_embed() -> discord.Embed:
         value="Broken Telephone, Exquisite Corpse, and Spyfall role messages require players to allow DMs from server members.",
         inline=False,
     )
-    return embed
+    return style_embed(embed, footer="Babblebox Manual | /play or bb!play to start")
