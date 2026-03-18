@@ -9,13 +9,34 @@ from babblebox import game_engine as ge
 from babblebox.command_utils import is_command_message
 
 
+def _collect_away_targets(message: discord.Message) -> list[discord.abc.User]:
+    targets: list[discord.abc.User] = []
+    seen: set[int] = set()
+
+    for member in message.mentions:
+        if member.id in seen:
+            continue
+        targets.append(member)
+        seen.add(member.id)
+
+    reference = message.reference
+    resolved = getattr(reference, "resolved", None)
+    cached_message = getattr(reference, "cached_message", None)
+    reply_message = resolved if isinstance(resolved, discord.Message) else cached_message
+    reply_author = getattr(reply_message, "author", None)
+    if reply_author is not None and getattr(reply_author, "id", None) not in seen:
+        targets.append(reply_author)
+
+    return targets
+
+
 class EventsCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        if message.author.bot:
+        if message.author.bot or message.webhook_id is not None:
             return
 
         if await is_command_message(self.bot, message):
@@ -37,18 +58,25 @@ class EventsCog(commands.Cog):
                         footer="Babblebox AFK",
                     ),
                     delete_after=5.0,
-                        allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
+                    allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
                 )
 
+        away_targets = _collect_away_targets(message)
         active_afk_mentions = [
-            (mention, ge.afk_records.get(mention.id))
-            for mention in message.mentions
-            if mention.id != message.author.id and ge.is_active_afk_record(ge.afk_records.get(mention.id))
+            (target, ge.afk_records.get(target.id))
+            for target in away_targets
+            if target.id != message.author.id and ge.is_active_afk_record(ge.afk_records.get(target.id))
         ]
         notice_lines = [ge.build_afk_brief_line(user, record) for user, record in active_afk_mentions[:5]]
         if utility_service is not None and len(notice_lines) < 5:
             remaining = 5 - len(notice_lines)
-            notice_lines.extend(utility_service.build_brb_notice_lines(message)[:remaining])
+            notice_lines.extend(
+                utility_service.build_brb_notice_lines_for_targets(
+                    channel_id=message.channel.id,
+                    author_id=message.author.id,
+                    targets=away_targets,
+                )[:remaining]
+            )
         if notice_lines:
             with contextlib.suppress(discord.HTTPException):
                 await message.channel.send(

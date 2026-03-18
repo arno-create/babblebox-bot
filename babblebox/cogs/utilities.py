@@ -47,10 +47,10 @@ class UtilityCog(commands.Cog):
         await self.service.start()
         setattr(self.bot, "utility_service", self.service)
 
-    async def cog_unload(self):
+    def cog_unload(self):
         if getattr(self.bot, "utility_service", None) is self.service:
             delattr(self.bot, "utility_service")
-        await self.service.close()
+        self.bot.loop.create_task(self.service.close())
 
     async def _send_private_embed(
         self,

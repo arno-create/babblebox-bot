@@ -262,6 +262,17 @@ def build_reminder_delivery_embed(reminder: dict, *, delayed: bool = False) -> d
     return ge.style_embed(embed, footer="Babblebox Remind | One-time reminders only.")
 
 
+def build_reminder_delivery_view(reminder: dict) -> discord.ui.View | None:
+    jump_url = reminder.get("origin_jump_url")
+    if not jump_url:
+        return None
+    if reminder.get("delivery") != "dm":
+        return None
+    if reminder.get("guild_id") is None:
+        return None
+    return build_jump_view(jump_url)
+
+
 def build_brb_status_embed(user: discord.abc.User, record: dict) -> discord.Embed:
     ends_at = deserialize_datetime(record.get("ends_at"))
     created_at = deserialize_datetime(record.get("created_at"))

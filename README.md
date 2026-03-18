@@ -9,7 +9,7 @@ This version of the project includes:
 - Dual slash and `bb!` prefix commands
 - A new `Chaos Card` lobby system
 - A utility suite with Watch, Later, Capture, Remind, and BRB
-- A lightweight local JSON-backed utility store for reminders and personal settings
+- Postgres-first utility persistence with JSON fallback for local development
 - Upgraded embed-driven bot responses
 - A restored blue-themed website with privacy, community, and support sections
 
@@ -165,7 +165,7 @@ The project now uses a package-based layout:
 - `babblebox/bot.py`: bot bootstrap, dictionary loading, extension loading, command sync
 - `babblebox/game_engine.py`: shared state, views, AFK logic, timers, and core game flow
 - `babblebox/text_safety.py`: shared short-text validation used by AFK, Remind, and BRB
-- `babblebox/utility_store.py`: local JSON persistence for watch settings, markers, reminders, and BRB
+- `babblebox/utility_store.py`: utility persistence layer with Postgres primary storage, JSON fallback, and one-time JSON seed migration
 - `babblebox/utility_service.py`: utility-state orchestration, delivery scheduling, and watch matching
 - `babblebox/utility_helpers.py`: duration parsing, jump-link helpers, transcript generation, and utility embeds
 - `babblebox/cogs/meta.py`: help, ping, stats, leaderboard
@@ -199,14 +199,17 @@ Babblebox is designed to survive on a constrained free Render instance.
 
 - No heavy polling loops
 - No background analytics workers
-- One lightweight JSON utility store instead of a full database
-- One wake-on-change scheduler for reminders and BRB expiry instead of many always-on workers
+- One wake-on-change utility scheduler instead of many always-on workers
+- Postgres storage support without per-message database queries in hot paths
 - Cleanup-first handling for stale game state
 
 ### Persistence note
 
-Watch settings, Later markers, reminders, and BRB timers are stored in a local JSON file so they survive normal runtime operation and simple restarts when the disk is still available.
-That is still not the same as a real database or guaranteed durable storage across redeploys, host resets, or filesystem loss, so Babblebox does not claim permanent durability here.
+Babblebox now supports a Postgres-backed utility store for Watch settings, Later markers, reminders, and BRB timers. Supabase Postgres is the recommended hosted option.
+
+If `UTILITY_DATABASE_URL`, `SUPABASE_DB_URL`, or `DATABASE_URL` is configured, Babblebox will try to use Postgres first, create its utility tables automatically, and migrate the existing JSON utility file once if one is present.
+
+If Postgres is not configured or cannot be reached at startup, Babblebox falls back to the local JSON store so the bot can still run. That fallback is convenient for development and local testing, but it is still not the same as guaranteed permanent durability across redeploys, host resets, or filesystem loss.
 
 ## Website and Community
 
@@ -248,10 +251,20 @@ pip install -r requirements.txt
 ```env
 DISCORD_TOKEN=your_bot_token_here
 DEV_GUILD_ID=your_test_server_id_here
+UTILITY_DATABASE_URL=postgresql://...
+# or SUPABASE_DB_URL=postgresql://...
+# or DATABASE_URL=postgresql://...
+# optional:
+# UTILITY_STORAGE_BACKEND=auto
+# UTILITY_JSON_PATH=.cache/utility_state.json
 ```
 
 - `DISCORD_TOKEN` is required
 - `DEV_GUILD_ID` is optional and useful for faster dev slash-command sync
+- `UTILITY_DATABASE_URL` is the preferred Postgres connection string for durable utility storage
+- `SUPABASE_DB_URL` and `DATABASE_URL` are also accepted
+- `UTILITY_STORAGE_BACKEND=json` forces local JSON storage for local/dev workflows
+- `UTILITY_JSON_PATH` lets you override the fallback JSON file path
 
 ### 4. Enable Discord settings
 
@@ -274,6 +287,11 @@ python main.py
 | --- | --- | --- |
 | `DISCORD_TOKEN` | Yes | Discord bot token |
 | `DEV_GUILD_ID` | No | Optional development guild ID |
+| `UTILITY_DATABASE_URL` | No | Preferred Postgres connection string for utility persistence |
+| `SUPABASE_DB_URL` | No | Alternate Postgres connection string, useful for Supabase-style naming |
+| `DATABASE_URL` | No | Alternate Postgres connection string used by some hosts |
+| `UTILITY_STORAGE_BACKEND` | No | `auto` by default, or `json` to force file storage |
+| `UTILITY_JSON_PATH` | No | Override the local JSON fallback path |
 
 ## Recommended Permissions
 

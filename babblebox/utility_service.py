@@ -19,6 +19,7 @@ from babblebox.utility_helpers import (
     build_jump_view,
     build_later_marker_embed,
     build_reminder_delivery_embed,
+    build_reminder_delivery_view,
     build_watch_alert_embed,
     deserialize_datetime,
     format_duration_brief,
@@ -666,20 +667,17 @@ class UtilityService:
             self._wake_event.set()
         return True
 
-    def build_brb_notice_lines(self, message: discord.Message) -> list[str]:
-        if message.guild is None:
-            return []
-
+    def build_brb_notice_lines_for_targets(self, *, channel_id: int, author_id: int, targets: list[discord.abc.User]) -> list[str]:
         now_loop = asyncio.get_running_loop().time()
         lines = []
         seen = set()
-        for member in message.mentions:
-            if member.id == message.author.id or member.bot or member.id in seen:
+        for member in targets:
+            if member.id == author_id or member.bot or member.id in seen:
                 continue
             record = self.get_brb_record(member.id)
             if record is None:
                 continue
-            cooldown_key = (message.channel.id, member.id)
+            cooldown_key = (channel_id, member.id)
             last_notified = self._brb_notice_cooldowns.get(cooldown_key, 0.0)
             if now_loop - last_notified < BRB_NOTICE_COOLDOWN_SECONDS:
                 continue
@@ -695,8 +693,19 @@ class UtilityService:
                 break
         return lines
 
+    async def _wait_for_ready_state(self) -> bool:
+        while True:
+            try:
+                await self.bot.wait_until_ready()
+                return True
+            except RuntimeError:
+                if self.bot.is_closed():
+                    return False
+                await asyncio.sleep(0.5)
+
     async def _scheduler_loop(self):
-        await self.bot.wait_until_ready()
+        if not await self._wait_for_ready_state():
+            return
         while True:
             self._wake_event.clear()
             due_reminders, due_brb, next_due = self._collect_due_records()
@@ -769,7 +778,7 @@ class UtilityService:
         due_at = deserialize_datetime(record.get("due_at"))
         delayed = bool(due_at is not None and (ge.now_utc() - due_at).total_seconds() > 120)
         embed = build_reminder_delivery_embed(record, delayed=delayed)
-        view = build_jump_view(record["origin_jump_url"]) if record.get("origin_jump_url") else None
+        view = build_reminder_delivery_view(record)
         user_id = record.get("user_id")
 
         if record.get("delivery") == "here" and isinstance(record.get("channel_id"), int):
