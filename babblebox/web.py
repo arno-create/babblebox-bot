@@ -41,7 +41,6 @@ def health():
                 "/later mark",
                 "/capture",
                 "/remind set",
-                "/brb set",
             ],
             "website": "https://arno-create.github.io/babblebox-bot/",
         }

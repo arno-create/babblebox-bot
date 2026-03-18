@@ -6,7 +6,7 @@
   <title>Babblebox - Discord Party Game Bot</title>
   <meta
     name="description"
-    content="Babblebox is a polished Discord party game and utility bot with Spyfall, Word Bomb, Broken Telephone, Exquisite Corpse, Watch alerts, Later markers, Capture, Remind, BRB, dual slash and bb! commands, and a modular Python backend."
+    content="Babblebox is a polished Discord party game and utility bot with Spyfall, Word Bomb, Broken Telephone, Exquisite Corpse, Watch alerts, Later markers, Capture, Remind, timed AFK, dual slash and bb! commands, and a modular Python backend."
   />
   <meta name="robots" content="index,follow,max-image-preview:large" />
   <link rel="canonical" href="https://arno-create.github.io/babblebox-bot/" />
@@ -578,7 +578,7 @@
         <p>
           Babblebox is built for the kind of moments people screenshot, quote later, and bring up again a week after the server call ends.
           It mixes voice-message chaos, social deduction, absurd storytelling, interactive views, and fast multiplayer tension into one polished Discord experience.
-          This version also adds a modular backend, dual slash and <code>bb!</code> commands, and a quiet utility layer for Watch alerts, Later markers, Capture, Remind, and BRB without stressing a free-tier Render deployment.
+          This version also adds a modular backend, dual slash and <code>bb!</code> commands, and a quiet utility layer for Watch alerts, Later markers, Capture, Remind, and timed AFK without stressing a free-tier Render deployment.
         </p>
         <div class="cta-row">
           <a class="btn btn-primary" href="https://discord.com/oauth2/authorize?client_id=1480903089518022739" target="_blank" rel="noreferrer">Invite Babblebox</a>
@@ -630,7 +630,7 @@
           <div class="icon">🎴</div>
           <div class="icon">dY"'</div>
           <h3>Quiet utility suite</h3>
-          <p>Watch alerts, Later markers, Capture, Remind, and BRB add personal utility features without turning Babblebox into a noisy moderation dashboard, and their saved state can live in durable Postgres storage when configured.</p>
+          <p>Watch alerts, Later markers, Capture, Remind, and timed AFK add personal utility features without turning Babblebox into a noisy moderation dashboard, and their saved state can live in durable Postgres storage when configured.</p>
         </article>
 
         <article class="card">
@@ -674,7 +674,7 @@
           </div>
           <div class="command-row" data-slash="/afk" data-prefix="bb!afk">
             <code>/afk</code>
-            <span>Set, schedule, or clear AFK.</span>
+            <span>Set, schedule, or clear AFK, including timed away status.</span>
           </div>
           <div class="command-row" data-slash="/afkstatus" data-prefix="bb!afkstatus">
             <code>/afkstatus</code>
@@ -704,9 +704,9 @@
             <code>/remind set</code>
             <span>Create a one-time reminder.</span>
           </div>
-          <div class="command-row" data-slash="/brb set" data-prefix="bb!brb 30m grabbing coffee">
-            <code>/brb set</code>
-            <span>Start a timed BRB notice.</span>
+          <div class="command-row" data-slash="/remind list" data-prefix="bb!remind list">
+            <code>/remind list</code>
+            <span>Review your active reminders.</span>
           </div>
         </div>
       </div>
@@ -803,7 +803,7 @@
           <div class="privacy-list">
             <div class="privacy-item"><strong>What may be processed</strong>Command usage, temporary game state, player turns, DM responses used by the games, AFK status information, and content needed to operate the feature a user chooses to use.</div>
             <div class="privacy-item"><strong>What is not the goal</strong>Babblebox is not built to sell personal data, build ad profiles, or act like a surveillance product. It is a party game bot, not a data-mining machine.</div>
-            <div class="privacy-item"><strong>Retention approach</strong>Most gameplay data is temporary and tied to the active session. Utility settings and reminders can use Postgres-backed storage for stronger continuity, with local JSON fallback for development or degraded startup cases. That still is not a promise of perfect permanence across outages, misconfiguration, or infrastructure loss.</div>
+            <div class="privacy-item"><strong>Retention approach</strong>Most gameplay data is temporary and tied to the active session. Utility settings and reminders can use Postgres-backed storage for stronger continuity. Legacy JSON data can be imported once during migration, but local JSON is not used as the ongoing production persistence path. That still is not a promise of perfect permanence across outages, misconfiguration, or infrastructure loss.</div>
             <div class="privacy-item"><strong>DM usage</strong>Some games rely on direct messages for prompts, replies, or role information. If users disable DMs from server members, those features may not work correctly.</div>
             <div class="privacy-item"><strong>Sensitive information</strong>Do not send passwords, payment details, legal identifiers, or other private information through the bot.</div>
             <div class="privacy-item"><strong>Third-party services</strong>Babblebox may rely on Discord, Render, and other infrastructure providers to operate. Those services have their own policies and limits.</div>

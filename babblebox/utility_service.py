@@ -13,7 +13,8 @@ from discord.ext import commands
 from babblebox import game_engine as ge
 from babblebox.text_safety import find_private_pattern, normalize_plain_text, sanitize_short_plain_text
 from babblebox.utility_helpers import (
-    build_brb_status_embed,
+    build_afk_notice_line,
+    build_afk_status_embed,
     build_capture_delivery_embed,
     build_capture_transcript_file,
     build_jump_view,
@@ -26,7 +27,7 @@ from babblebox.utility_helpers import (
     parse_duration_string,
     serialize_datetime,
 )
-from babblebox.utility_store import UtilityStateStore
+from babblebox.utility_store import UtilityStateStore, UtilityStorageUnavailable
 
 
 WATCH_KEYWORD_LIMIT = 10
@@ -34,23 +35,18 @@ WATCH_KEYWORD_MAX_LEN = 40
 WATCH_DM_COOLDOWN_SECONDS = 20.0
 WATCH_DEDUP_TTL_SECONDS = 300.0
 CAPTURE_COOLDOWN_SECONDS = 45.0
-REMINDER_COOLDOWN_SECONDS = 15.0
-REMINDER_MAX_ACTIVE = 10
-REMINDER_MIN_SECONDS = 60
-REMINDER_MAX_SECONDS = 30 * 24 * 3600
-BRB_MIN_SECONDS = 60
-BRB_MAX_SECONDS = 7 * 24 * 3600
-BRB_NOTICE_COOLDOWN_SECONDS = 30.0
-BRB_SET_COOLDOWN_SECONDS = 15.0
-BRB_REASON_MAX_LEN = ge.AFK_REASON_MAX_LEN
+REMINDER_COOLDOWN_SECONDS = 60.0
+REMINDER_MAX_ACTIVE = 3
+REMINDER_MAX_PUBLIC_ACTIVE = 1
+REMINDER_TEXT_MAX_LEN = 120
+REMINDER_MIN_SECONDS = 5 * 60
+REMINDER_PUBLIC_MIN_SECONDS = 15 * 60
+REMINDER_MAX_SECONDS = 14 * 24 * 3600
+AFK_NOTICE_COOLDOWN_SECONDS = 30.0
 
 
 def _watch_default_config() -> dict:
-    return {
-        "mention_global": False,
-        "mention_guild_ids": [],
-        "keywords": [],
-    }
+    return {"mention_global": False, "mention_guild_ids": [], "keywords": []}
 
 
 def _build_keyword_matcher(phrase: str, mode: str):
@@ -64,7 +60,19 @@ def _build_keyword_matcher(phrase: str, mode: str):
 class UtilityService:
     def __init__(self, bot: commands.Bot, store: UtilityStateStore | None = None):
         self.bot = bot
-        self.store = store or UtilityStateStore()
+        self.storage_ready = False
+        self.storage_error: str | None = None
+        self._startup_storage_error: str | None = None
+        if store is not None:
+            self.store = store
+        else:
+            try:
+                self.store = UtilityStateStore()
+            except UtilityStorageUnavailable as exc:
+                # Keep the bot loadable when the utility database is missing or offline.
+                self.store = UtilityStateStore(backend="memory")
+                self._startup_storage_error = str(exc)
+                self.storage_error = str(exc)
         self._lock = asyncio.Lock()
         self._wake_event = asyncio.Event()
         self._scheduler_task: asyncio.Task | None = None
@@ -78,20 +86,40 @@ class UtilityService:
         self._watch_dedup: dict[tuple[int, int], float] = {}
         self._capture_cooldowns: dict[int, float] = {}
         self._reminder_cooldowns: dict[int, float] = {}
-        self._brb_set_cooldowns: dict[int, float] = {}
-        self._brb_notice_cooldowns: dict[tuple[int, int], float] = {}
+        self._afk_notice_cooldowns: dict[tuple[int, int], float] = {}
 
     async def start(self):
-        await self.store.load()
+        if self._startup_storage_error is not None:
+            self.storage_ready = False
+            self.storage_error = self._startup_storage_error
+            print(f"Utility storage unavailable: {self._startup_storage_error}")
+            return False
+        try:
+            await self.store.load()
+        except UtilityStorageUnavailable as exc:
+            self.storage_ready = False
+            self.storage_error = str(exc)
+            print(f"Utility storage unavailable: {exc}")
+            return False
+        self.storage_ready = True
+        self.storage_error = None
         self._rebuild_watch_indexes()
         self._scheduler_task = asyncio.create_task(self._scheduler_loop(), name="babblebox-utility-scheduler")
         self._wake_event.set()
+        return True
 
     async def close(self):
         if self._scheduler_task is not None:
             self._scheduler_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._scheduler_task
+        await self.store.close()
+
+    def storage_message(self, feature_name: str = "This feature") -> str:
+        return f"{feature_name} is temporarily unavailable because Babblebox could not reach its utility database."
+
+    def _has_storage(self) -> bool:
+        return self.storage_ready
 
     def _watch_config(self, user_id: int, *, create: bool = False) -> dict | None:
         configs = self.store.state.setdefault("watch", {})
@@ -120,7 +148,6 @@ class UtilityService:
         mention_by_guild: defaultdict[int, set[int]] = defaultdict(set)
         keywords_global: defaultdict[int, list[dict]] = defaultdict(list)
         keywords_by_guild: defaultdict[int, defaultdict[int, list[dict]]] = defaultdict(lambda: defaultdict(list))
-
         for user_id_text, config in self.store.state.get("watch", {}).items():
             try:
                 user_id = int(user_id_text)
@@ -128,14 +155,11 @@ class UtilityService:
                 continue
             if not isinstance(config, dict):
                 continue
-
             if config.get("mention_global"):
                 mention_global.add(user_id)
-
             for guild_id in config.get("mention_guild_ids", []):
                 if isinstance(guild_id, int):
                     mention_by_guild[guild_id].add(user_id)
-
             for item in config.get("keywords", []):
                 if not isinstance(item, dict):
                     continue
@@ -144,47 +168,15 @@ class UtilityService:
                 if not phrase or mode not in {"contains", "word"}:
                     continue
                 guild_id = item.get("guild_id")
-                entry = {
-                    "phrase": phrase,
-                    "mode": mode,
-                    "guild_id": guild_id if isinstance(guild_id, int) else None,
-                    "matcher": _build_keyword_matcher(phrase, mode),
-                }
+                entry = {"phrase": phrase, "mode": mode, "guild_id": guild_id if isinstance(guild_id, int) else None, "matcher": _build_keyword_matcher(phrase, mode)}
                 if entry["guild_id"] is None:
                     keywords_global[user_id].append(entry)
                 else:
                     keywords_by_guild[entry["guild_id"]][user_id].append(entry)
-
         self._mention_global = mention_global
         self._mention_by_guild = {guild_id: set(user_ids) for guild_id, user_ids in mention_by_guild.items()}
         self._keywords_global = {user_id: list(entries) for user_id, entries in keywords_global.items()}
-        self._keywords_by_guild = {
-            guild_id: {user_id: list(entries) for user_id, entries in by_user.items()}
-            for guild_id, by_user in keywords_by_guild.items()
-        }
-
-    async def set_watch_mentions(self, user_id: int, *, guild_id: int | None, scope: str, enabled: bool) -> tuple[bool, str]:
-        async with self._lock:
-            config = self._watch_config(user_id, create=True)
-            if scope == "global":
-                config["mention_global"] = enabled
-            else:
-                if guild_id is None:
-                    return False, "Server-scoped mention watch can only be changed inside a server."
-                guild_ids = {value for value in config.get("mention_guild_ids", []) if isinstance(value, int)}
-                if enabled:
-                    guild_ids.add(guild_id)
-                else:
-                    guild_ids.discard(guild_id)
-                config["mention_guild_ids"] = sorted(guild_ids)
-
-            self._cleanup_watch_user_if_empty(user_id)
-            self._rebuild_watch_indexes()
-            await self.store.flush()
-
-        state_label = "enabled" if enabled else "disabled"
-        scope_label = "global" if scope == "global" else "this server"
-        return True, f"Mention alerts are now {state_label} for {scope_label}."
+        self._keywords_by_guild = {guild_id: {user_id: list(entries) for user_id, entries in by_user.items()} for guild_id, by_user in keywords_by_guild.items()}
 
     def validate_watch_keyword(self, raw_keyword: str) -> tuple[bool, str]:
         cleaned = normalize_plain_text(raw_keyword)
@@ -205,112 +197,87 @@ class UtilityService:
             return False, "Keyword is too repetitive to be useful."
         return True, cleaned
 
-    async def add_watch_keyword(
-        self,
-        user_id: int,
-        *,
-        guild_id: int | None,
-        phrase: str,
-        scope: str,
-        mode: str,
-    ) -> tuple[bool, str]:
-        valid, cleaned_or_error = self.validate_watch_keyword(phrase)
+    async def set_watch_mentions(self, user_id: int, *, guild_id: int | None, scope: str, enabled: bool) -> tuple[bool, str]:
+        if not self._has_storage():
+            return False, self.storage_message("Watch")
+        async with self._lock:
+            config = self._watch_config(user_id, create=True)
+            if scope == "global":
+                config["mention_global"] = enabled
+            else:
+                if guild_id is None:
+                    return False, "Server-scoped mention watch can only be changed inside a server."
+                guild_ids = {value for value in config.get("mention_guild_ids", []) if isinstance(value, int)}
+                if enabled:
+                    guild_ids.add(guild_id)
+                else:
+                    guild_ids.discard(guild_id)
+                config["mention_guild_ids"] = sorted(guild_ids)
+            self._cleanup_watch_user_if_empty(user_id)
+            self._rebuild_watch_indexes()
+            await self.store.flush()
+        return True, f"Mention alerts are now {'enabled' if enabled else 'disabled'} for {'global' if scope == 'global' else 'this server'}."
+
+    async def add_watch_keyword(self, user_id: int, *, guild_id: int | None, phrase: str, scope: str, mode: str) -> tuple[bool, str]:
+        if not self._has_storage():
+            return False, self.storage_message("Watch")
+        valid, cleaned = self.validate_watch_keyword(phrase)
         if not valid:
-            return False, cleaned_or_error
+            return False, cleaned
         if mode not in {"contains", "word"}:
             return False, "Keyword mode must be either `contains` or `word`."
         if scope == "server" and guild_id is None:
             return False, "Server-scoped keywords can only be added inside a server."
-
-        cleaned = cleaned_or_error
         target_guild_id = None if scope == "global" else guild_id
-
         async with self._lock:
             config = self._watch_config(user_id, create=True)
             keywords = list(config.get("keywords", []))
             if len(keywords) >= WATCH_KEYWORD_LIMIT:
                 return False, f"You can store up to {WATCH_KEYWORD_LIMIT} watch keywords."
-
-            duplicate = next(
-                (
-                    item
-                    for item in keywords
-                    if normalize_plain_text(item.get("phrase")) == cleaned
-                    and item.get("mode", "contains") == mode
-                    and item.get("guild_id") == target_guild_id
-                ),
-                None,
-            )
+            duplicate = next((item for item in keywords if normalize_plain_text(item.get("phrase")) == cleaned and item.get("mode", "contains") == mode and item.get("guild_id") == target_guild_id), None)
             if duplicate is not None:
                 return False, "That keyword is already watched in that scope."
-
-            keywords.append(
-                {
-                    "phrase": cleaned,
-                    "mode": mode,
-                    "guild_id": target_guild_id,
-                    "created_at": serialize_datetime(ge.now_utc()),
-                }
-            )
+            keywords.append({"phrase": cleaned, "mode": mode, "guild_id": target_guild_id, "created_at": serialize_datetime(ge.now_utc())})
             config["keywords"] = keywords
             self._rebuild_watch_indexes()
             await self.store.flush()
+        return True, f"Watching `{cleaned}` {'globally' if scope == 'global' else 'in this server'} in {'whole-word' if mode == 'word' else 'contains'} mode."
 
-        scope_label = "globally" if scope == "global" else "in this server"
-        mode_label = "whole-word" if mode == "word" else "contains"
-        return True, f"Watching `{cleaned}` {scope_label} in {mode_label} mode."
-
-    async def remove_watch_keyword(
-        self,
-        user_id: int,
-        *,
-        guild_id: int | None,
-        phrase: str,
-        scope: str,
-    ) -> tuple[bool, str]:
+    async def remove_watch_keyword(self, user_id: int, *, guild_id: int | None, phrase: str, scope: str) -> tuple[bool, str]:
+        if not self._has_storage():
+            return False, self.storage_message("Watch")
         cleaned = normalize_plain_text(phrase)
         if not cleaned:
             return False, "Keyword cannot be empty."
         if scope == "server" and guild_id is None:
             return False, "Server-scoped keywords can only be removed inside a server."
-
         target_guild_id = None if scope == "global" else guild_id
         async with self._lock:
             config = self._watch_config(user_id)
             if config is None:
                 return False, "You do not have any watch keywords yet."
-
             keywords = list(config.get("keywords", []))
-            new_keywords = [
-                item
-                for item in keywords
-                if not (
-                    normalize_plain_text(item.get("phrase")) == cleaned
-                    and item.get("guild_id") == target_guild_id
-                )
-            ]
+            new_keywords = [item for item in keywords if not (normalize_plain_text(item.get("phrase")) == cleaned and item.get("guild_id") == target_guild_id)]
             if len(new_keywords) == len(keywords):
                 return False, "No matching keyword was found in that scope."
-
             config["keywords"] = new_keywords
             self._cleanup_watch_user_if_empty(user_id)
             self._rebuild_watch_indexes()
             await self.store.flush()
-
         return True, f"Stopped watching `{cleaned}`."
 
     async def disable_watch(self, user_id: int, *, guild_id: int | None, scope: str) -> tuple[bool, str]:
+        if not self._has_storage():
+            return False, self.storage_message("Watch")
         async with self._lock:
             if scope == "all":
                 self.store.state.get("watch", {}).pop(str(user_id), None)
                 self._rebuild_watch_indexes()
                 await self.store.flush()
                 return True, "All watch settings were cleared."
-
             config = self._watch_config(user_id)
             if config is None:
                 return False, "You do not have any watch settings saved."
-
             if scope == "global":
                 config["mention_global"] = False
                 config["keywords"] = [item for item in config.get("keywords", []) if item.get("guild_id") is not None]
@@ -323,24 +290,20 @@ class UtilityService:
                 config["mention_guild_ids"] = sorted(guild_ids)
                 config["keywords"] = [item for item in config.get("keywords", []) if item.get("guild_id") != guild_id]
                 label = "watch settings for this server"
-
             self._cleanup_watch_user_if_empty(user_id)
             self._rebuild_watch_indexes()
             await self.store.flush()
-
         return True, f"Cleared {label}."
 
     def get_watch_summary(self, user_id: int, *, guild_id: int | None) -> dict:
         config = self._watch_config(user_id) or _watch_default_config()
         mention_guild_ids = {value for value in config.get("mention_guild_ids", []) if isinstance(value, int)}
         keywords = list(config.get("keywords", []))
-        server_keywords = [item for item in keywords if guild_id is not None and item.get("guild_id") == guild_id]
-        global_keywords = [item for item in keywords if item.get("guild_id") is None]
         return {
             "mention_global": bool(config.get("mention_global")),
             "mention_server_enabled": guild_id in mention_guild_ids if guild_id is not None else False,
-            "global_keywords": global_keywords,
-            "server_keywords": server_keywords,
+            "global_keywords": [item for item in keywords if item.get("guild_id") is None],
+            "server_keywords": [item for item in keywords if guild_id is not None and item.get("guild_id") == guild_id],
             "total_keywords": len(keywords),
         }
 
@@ -350,48 +313,34 @@ class UtilityService:
         perms = message.channel.permissions_for(member)
         return perms.view_channel and perms.read_message_history
 
-    def _prune_watch_caches(self, now: float):
+    def _prune_hot_path_caches(self, now: float):
         if len(self._watch_dedup) > 512:
-            self._watch_dedup = {
-                key: timestamp
-                for key, timestamp in self._watch_dedup.items()
-                if now - timestamp < WATCH_DEDUP_TTL_SECONDS
-            }
+            self._watch_dedup = {key: timestamp for key, timestamp in self._watch_dedup.items() if now - timestamp < WATCH_DEDUP_TTL_SECONDS}
         if len(self._watch_dm_cooldowns) > 256:
-            self._watch_dm_cooldowns = {
-                key: timestamp
-                for key, timestamp in self._watch_dm_cooldowns.items()
-                if now - timestamp < WATCH_DM_COOLDOWN_SECONDS * 3
-            }
+            self._watch_dm_cooldowns = {key: timestamp for key, timestamp in self._watch_dm_cooldowns.items() if now - timestamp < WATCH_DM_COOLDOWN_SECONDS * 3}
+        if len(self._afk_notice_cooldowns) > 256:
+            self._afk_notice_cooldowns = {key: timestamp for key, timestamp in self._afk_notice_cooldowns.items() if now - timestamp < AFK_NOTICE_COOLDOWN_SECONDS * 3}
 
     async def handle_watch_message(self, message: discord.Message):
-        if message.guild is None:
+        if not self.storage_ready or message.guild is None:
             return
         if not (self._mention_global or self._mention_by_guild or self._keywords_global or self._keywords_by_guild):
             return
-
         alerts: dict[int, dict[str, set[str]]] = {}
         guild_id = message.guild.id
-        mentioned_members = {
-            member.id: member
-            for member in message.mentions
-            if member.id != message.author.id and not member.bot
-        }
-
+        mentioned_members = {member.id: member for member in message.mentions if member.id != message.author.id and not member.bot}
         watched_mentions = self._mention_by_guild.get(guild_id, set())
         for user_id, member in mentioned_members.items():
             if user_id in self._mention_global or user_id in watched_mentions:
                 if self._member_can_access_message(member, message):
                     alerts.setdefault(user_id, {"triggers": set(), "keywords": set()})["triggers"].add("Mention")
-
         content = normalize_plain_text(message.content).casefold()
-        keyword_candidates: defaultdict[int, list[dict]] = defaultdict(list)
-        for user_id, entries in self._keywords_global.items():
-            keyword_candidates[user_id].extend(entries)
-        for user_id, entries in self._keywords_by_guild.get(guild_id, {}).items():
-            keyword_candidates[user_id].extend(entries)
-
-        if content and keyword_candidates:
+        if content:
+            keyword_candidates: defaultdict[int, list[dict]] = defaultdict(list)
+            for user_id, entries in self._keywords_global.items():
+                keyword_candidates[user_id].extend(entries)
+            for user_id, entries in self._keywords_by_guild.get(guild_id, {}).items():
+                keyword_candidates[user_id].extend(entries)
             for user_id, entries in keyword_candidates.items():
                 if user_id == message.author.id:
                     continue
@@ -400,20 +349,17 @@ class UtilityService:
                     continue
                 matched = {entry["phrase"] for entry in entries if entry["matcher"](content)}
                 if matched:
-                    item = alerts.setdefault(user_id, {"triggers": set(), "keywords": set()})
-                    item["triggers"].add("Keyword")
-                    item["keywords"].update(matched)
-
+                    payload = alerts.setdefault(user_id, {"triggers": set(), "keywords": set()})
+                    payload["triggers"].add("Keyword")
+                    payload["keywords"].update(matched)
         if not alerts:
             return
-
         now = asyncio.get_running_loop().time()
-        self._prune_watch_caches(now)
+        self._prune_hot_path_caches(now)
         for user_id, payload in alerts.items():
             if self._watch_dedup.get((user_id, message.id)):
                 continue
-            last_sent = self._watch_dm_cooldowns.get(user_id, 0.0)
-            if now - last_sent < WATCH_DM_COOLDOWN_SECONDS:
+            if now - self._watch_dm_cooldowns.get(user_id, 0.0) < WATCH_DM_COOLDOWN_SECONDS:
                 continue
             self._watch_dedup[(user_id, message.id)] = now
             self._watch_dm_cooldowns[user_id] = now
@@ -423,16 +369,13 @@ class UtilityService:
         recipient = message.guild.get_member(user_id) or self.bot.get_user(user_id)
         if recipient is None:
             return
-        embed = build_watch_alert_embed(
-            message,
-            trigger_labels=sorted(payload["triggers"]),
-            matched_keywords=sorted(payload["keywords"]),
-        )
-        view = build_jump_view(message.jump_url)
+        embed = build_watch_alert_embed(message, trigger_labels=sorted(payload["triggers"]), matched_keywords=sorted(payload["keywords"]))
         with contextlib.suppress(discord.Forbidden, discord.HTTPException):
-            await recipient.send(embed=embed, view=view)
+            await recipient.send(embed=embed, view=build_jump_view(message.jump_url))
 
-    async def save_later_marker(self, *, user: discord.abc.User, channel: discord.abc.GuildChannel, message: discord.Message) -> dict:
+    async def save_later_marker(self, *, user: discord.abc.User, channel: discord.abc.GuildChannel, message: discord.Message) -> tuple[bool, str | dict]:
+        if not self._has_storage():
+            return False, self.storage_message("Later")
         marker = {
             "user_id": user.id,
             "guild_id": channel.guild.id,
@@ -447,50 +390,41 @@ class UtilityService:
             "author_id": message.author.id,
             "preview": ge.safe_field_text(message.content.strip() or "[no text content]", limit=280),
         }
-
         async with self._lock:
-            per_user = self.store.state.setdefault("later", {}).setdefault(str(user.id), {})
-            per_user[str(channel.id)] = marker
+            self.store.state.setdefault("later", {}).setdefault(str(user.id), {})[str(channel.id)] = marker
             await self.store.flush()
-
-        return marker
+        return True, marker
 
     def list_later_markers(self, user_id: int, *, guild_id: int | None = None) -> list[dict]:
+        if not self.storage_ready:
+            return []
         markers = list((self.store.state.get("later", {}).get(str(user_id), {}) or {}).values())
-        output = []
-        for marker in markers:
-            if not isinstance(marker, dict):
-                continue
-            if guild_id is not None and marker.get("guild_id") != guild_id:
-                continue
-            output.append(marker)
+        output = [marker for marker in markers if isinstance(marker, dict) and (guild_id is None or marker.get("guild_id") == guild_id)]
         output.sort(key=lambda item: item.get("saved_at", ""), reverse=True)
         return output
 
     async def clear_later_marker(self, user_id: int, *, channel_id: int | None = None) -> tuple[bool, str]:
+        if not self._has_storage():
+            return False, self.storage_message("Later")
         async with self._lock:
             per_user = self.store.state.get("later", {}).get(str(user_id))
             if not isinstance(per_user, dict) or not per_user:
                 return False, "You do not have any Later markers saved."
-
             if channel_id is None:
                 self.store.state.get("later", {}).pop(str(user_id), None)
                 await self.store.flush()
                 return True, "All of your Later markers were cleared."
-
             removed = per_user.pop(str(channel_id), None)
             if removed is None:
                 return False, "There is no Later marker saved for this channel."
             if not per_user:
                 self.store.state.get("later", {}).pop(str(user_id), None)
             await self.store.flush()
-
         return True, "Your Later marker for this channel was cleared."
 
     def can_run_capture(self, user_id: int) -> tuple[bool, str | None]:
         now = asyncio.get_running_loop().time()
-        last_used = self._capture_cooldowns.get(user_id, 0.0)
-        remaining = CAPTURE_COOLDOWN_SECONDS - (now - last_used)
+        remaining = CAPTURE_COOLDOWN_SECONDS - (now - self._capture_cooldowns.get(user_id, 0.0))
         if remaining > 0:
             return False, f"Capture is on cooldown. Try again in about {int(remaining)} seconds."
         self._capture_cooldowns[user_id] = now
@@ -499,51 +433,40 @@ class UtilityService:
     def parse_relative_duration(self, raw: str | None) -> int | None:
         return parse_duration_string(raw)
 
-    async def create_reminder(
-        self,
-        *,
-        user: discord.abc.User,
-        text: str,
-        delay_seconds: int,
-        delivery: str,
-        guild: discord.Guild | None,
-        channel: discord.abc.GuildChannel | discord.DMChannel | discord.Thread | None,
-        origin_jump_url: str | None,
-    ) -> tuple[bool, str | dict]:
-        valid, cleaned_or_error = sanitize_short_plain_text(
-            text,
-            field_name="Reminder text",
-            max_length=200,
-            sentence_limit=4,
-            reject_blocklist=True,
-            allow_empty=False,
-        )
-        if not valid:
-            return False, cleaned_or_error
+    def list_reminders(self, user_id: int) -> list[dict]:
+        if not self.storage_ready:
+            return []
+        reminders = [item for item in self.store.state.get("reminders", {}).values() if isinstance(item, dict) and item.get("user_id") == user_id]
+        reminders.sort(key=lambda item: item.get("due_at", ""))
+        return reminders
+
+    async def create_reminder(self, *, user: discord.abc.User, text: str, delay_seconds: int, delivery: str, guild: discord.Guild | None, channel: discord.abc.GuildChannel | discord.DMChannel | discord.Thread | None, origin_jump_url: str | None) -> tuple[bool, str | dict]:
+        if not self._has_storage():
+            return False, self.storage_message("Reminders")
         if delivery not in {"dm", "here"}:
             return False, "Reminder delivery must be either `dm` or `here`."
+        max_length = 80 if delivery == "here" else REMINDER_TEXT_MAX_LEN
+        sentence_limit = 1 if delivery == "here" else 2
+        valid, cleaned_or_error = sanitize_short_plain_text(text, field_name="Reminder text", max_length=max_length, sentence_limit=sentence_limit, reject_blocklist=True, allow_empty=False)
+        if not valid:
+            return False, cleaned_or_error
         if delay_seconds < REMINDER_MIN_SECONDS or delay_seconds > REMINDER_MAX_SECONDS:
-            return False, f"Reminders must be between 1 minute and {format_duration_brief(REMINDER_MAX_SECONDS)}."
-
+            return False, f"Reminders must be between {format_duration_brief(REMINDER_MIN_SECONDS)} and {format_duration_brief(REMINDER_MAX_SECONDS)}."
+        if delivery == "here" and delay_seconds < REMINDER_PUBLIC_MIN_SECONDS:
+            return False, f"Channel reminders must be scheduled at least {format_duration_brief(REMINDER_PUBLIC_MIN_SECONDS)} ahead."
         now = asyncio.get_running_loop().time()
-        last_used = self._reminder_cooldowns.get(user.id, 0.0)
-        remaining = REMINDER_COOLDOWN_SECONDS - (now - last_used)
+        remaining = REMINDER_COOLDOWN_SECONDS - (now - self._reminder_cooldowns.get(user.id, 0.0))
         if remaining > 0:
             return False, f"Reminder creation is on cooldown. Try again in about {int(remaining)} seconds."
-
-        active_count = len(
-            [
-                item
-                for item in self.store.state.get("reminders", {}).values()
-                if isinstance(item, dict) and item.get("user_id") == user.id
-            ]
-        )
-        if active_count >= REMINDER_MAX_ACTIVE:
+        active = [item for item in self.store.state.get("reminders", {}).values() if isinstance(item, dict) and item.get("user_id") == user.id]
+        if len(active) >= REMINDER_MAX_ACTIVE:
             return False, f"You can keep up to {REMINDER_MAX_ACTIVE} active reminders."
-
-        reminder_id = uuid.uuid4().hex
+        public_active = [item for item in active if item.get("delivery") == "here"]
+        if delivery == "here" and len(public_active) >= REMINDER_MAX_PUBLIC_ACTIVE:
+            return False, f"You can keep only {REMINDER_MAX_PUBLIC_ACTIVE} active channel reminder at a time."
         created_at = ge.now_utc()
         due_at = created_at + timedelta(seconds=delay_seconds)
+        reminder_id = uuid.uuid4().hex
         record = {
             "id": reminder_id,
             "user_id": user.id,
@@ -555,39 +478,23 @@ class UtilityService:
             "guild_name": guild.name if guild is not None else None,
             "channel_id": getattr(channel, "id", None) if delivery == "here" else None,
             "channel_name": getattr(channel, "name", None) if delivery == "here" else None,
-            "origin_jump_url": origin_jump_url,
+            "origin_jump_url": origin_jump_url if delivery == "dm" else None,
         }
-
         async with self._lock:
             self.store.state.setdefault("reminders", {})[reminder_id] = record
             await self.store.flush()
             self._wake_event.set()
-
         self._reminder_cooldowns[user.id] = now
         return True, record
 
-    def list_reminders(self, user_id: int) -> list[dict]:
-        reminders = [
-            item
-            for item in self.store.state.get("reminders", {}).values()
-            if isinstance(item, dict) and item.get("user_id") == user_id
-        ]
-        reminders.sort(key=lambda item: item.get("due_at", ""))
-        return reminders
-
     async def cancel_reminder(self, user_id: int, reminder_id_prefix: str) -> tuple[bool, str]:
+        if not self._has_storage():
+            return False, self.storage_message("Reminders")
         reminder_id_prefix = reminder_id_prefix.strip().lower()
         if not reminder_id_prefix:
             return False, "Provide the reminder ID from `/remind list`."
-
         async with self._lock:
-            matches = [
-                reminder_id
-                for reminder_id, record in self.store.state.get("reminders", {}).items()
-                if isinstance(record, dict)
-                and record.get("user_id") == user_id
-                and reminder_id.lower().startswith(reminder_id_prefix)
-            ]
+            matches = [reminder_id for reminder_id, record in self.store.state.get("reminders", {}).items() if isinstance(record, dict) and record.get("user_id") == user_id and reminder_id.lower().startswith(reminder_id_prefix)]
             if not matches:
                 return False, "No reminder matched that ID."
             if len(matches) > 1:
@@ -595,100 +502,90 @@ class UtilityService:
             self.store.state.get("reminders", {}).pop(matches[0], None)
             await self.store.flush()
             self._wake_event.set()
-
         return True, f"Reminder `{matches[0][:8]}` was cancelled."
 
-    async def set_brb(self, *, user: discord.abc.User, delay_seconds: int, reason: str | None, guild: discord.Guild | None) -> tuple[bool, str | dict]:
-        if delay_seconds < BRB_MIN_SECONDS or delay_seconds > BRB_MAX_SECONDS:
-            return False, f"BRB duration must be between 1 minute and {format_duration_brief(BRB_MAX_SECONDS)}."
-
-        valid, cleaned_or_error = sanitize_short_plain_text(
-            reason,
-            field_name="BRB reason",
-            max_length=BRB_REASON_MAX_LEN,
-            sentence_limit=3,
-            reject_blocklist=True,
-            allow_empty=True,
-        )
-        if not valid:
-            return False, cleaned_or_error
-
-        now = asyncio.get_running_loop().time()
-        last_used = self._brb_set_cooldowns.get(user.id, 0.0)
-        remaining = BRB_SET_COOLDOWN_SECONDS - (now - last_used)
-        if remaining > 0:
-            return False, f"BRB is on cooldown. Try again in about {int(remaining)} seconds."
-
-        created_at = ge.now_utc()
-        ends_at = created_at + timedelta(seconds=delay_seconds)
-        record = {
-            "user_id": user.id,
-            "reason": cleaned_or_error,
-            "created_at": serialize_datetime(created_at),
-            "ends_at": serialize_datetime(ends_at),
-            "guild_id": guild.id if guild is not None else None,
-            "guild_name": guild.name if guild is not None else None,
-        }
-
-        async with self._lock:
-            self.store.state.setdefault("brb", {})[str(user.id)] = record
-            await self.store.flush()
-            self._wake_event.set()
-
-        self._brb_set_cooldowns[user.id] = now
-        return True, record
-
-    def get_brb_record(self, user_id: int) -> dict | None:
-        record = self.store.state.get("brb", {}).get(str(user_id))
+    def get_afk_record(self, user_id: int, *, include_scheduled: bool = True) -> dict | None:
+        if not self.storage_ready:
+            return None
+        record = self.store.state.get("afk", {}).get(str(user_id))
         if not isinstance(record, dict):
             return None
+        now = ge.now_utc()
+        status = record.get("status", "active")
+        starts_at = deserialize_datetime(record.get("starts_at")) or deserialize_datetime(record.get("set_at")) or deserialize_datetime(record.get("created_at"))
         ends_at = deserialize_datetime(record.get("ends_at"))
-        if ends_at is None or ends_at <= ge.now_utc():
+        if ends_at is not None and ends_at <= now:
             return None
+        if status == "scheduled":
+            if starts_at is not None and starts_at <= now:
+                activated = dict(record)
+                activated["status"] = "active"
+                activated["set_at"] = activated.get("starts_at") or activated.get("set_at") or serialize_datetime(now)
+                return activated
+            return record if include_scheduled and starts_at and starts_at > now else None
         return record
 
-    async def clear_brb(self, user_id: int) -> tuple[bool, str]:
+    def get_active_afk_record(self, user_id: int) -> dict | None:
+        record = self.get_afk_record(user_id, include_scheduled=False)
+        return record if record is not None and record.get("status") == "active" else None
+
+    async def set_afk(self, *, user: discord.abc.User, reason: str | None, duration_minutes: int | None, start_in_minutes: int | None) -> tuple[bool, str | dict]:
+        if not self._has_storage():
+            return False, self.storage_message("AFK")
+        valid, cleaned_or_error = ge.sanitize_afk_reason(reason)
+        if not valid:
+            return False, cleaned_or_error
+        created_at = ge.now_utc()
+        scheduled = start_in_minutes is not None
+        starts_at = created_at + timedelta(minutes=start_in_minutes) if scheduled else created_at
+        ends_at = starts_at + timedelta(minutes=duration_minutes) if duration_minutes is not None else None
+        record = {"user_id": user.id, "status": "scheduled" if scheduled else "active", "reason": cleaned_or_error, "created_at": serialize_datetime(created_at), "set_at": None if scheduled else serialize_datetime(created_at), "starts_at": serialize_datetime(starts_at), "ends_at": serialize_datetime(ends_at)}
         async with self._lock:
-            record = self.store.state.get("brb", {}).pop(str(user_id), None)
-            if record is None:
-                return False, "You do not currently have an active BRB timer."
+            self.store.state.setdefault("afk", {})[str(user.id)] = record
             await self.store.flush()
             self._wake_event.set()
-        return True, "Your BRB timer was cleared."
+        return True, record
 
-    async def clear_brb_on_activity(self, user_id: int) -> bool:
-        if self.get_brb_record(user_id) is None:
-            return False
+    async def clear_afk(self, user_id: int, *, active_only: bool = False) -> tuple[bool, dict | None]:
+        if not self._has_storage():
+            return False, None
         async with self._lock:
-            removed = self.store.state.get("brb", {}).pop(str(user_id), None)
-            if removed is None:
-                return False
+            record = self.store.state.get("afk", {}).get(str(user_id))
+            if not isinstance(record, dict):
+                return False, None
+            if active_only and record.get("status") != "active":
+                return False, None
+            removed = self.store.state.get("afk", {}).pop(str(user_id), None)
             await self.store.flush()
             self._wake_event.set()
-        return True
+        return True, removed
 
-    def build_brb_notice_lines_for_targets(self, *, channel_id: int, author_id: int, targets: list[discord.abc.User]) -> list[str]:
-        now_loop = asyncio.get_running_loop().time()
+    async def clear_afk_on_activity(self, user_id: int) -> dict | None:
+        ok, removed = await self.clear_afk(user_id, active_only=True)
+        return removed if ok else None
+
+    def build_afk_status_embed_for(self, user: discord.abc.User, record: dict, *, title: str | None = None) -> discord.Embed:
+        return build_afk_status_embed(user, record, title=title)
+
+    def build_afk_notice_lines_for_targets(self, *, channel_id: int, author_id: int, targets: list[discord.abc.User]) -> list[str]:
+        if not self.storage_ready:
+            return []
+        now = asyncio.get_running_loop().time()
+        self._prune_hot_path_caches(now)
         lines = []
-        seen = set()
+        seen: set[int] = set()
         for member in targets:
             if member.id == author_id or member.bot or member.id in seen:
                 continue
-            record = self.get_brb_record(member.id)
+            record = self.get_active_afk_record(member.id)
             if record is None:
                 continue
             cooldown_key = (channel_id, member.id)
-            last_notified = self._brb_notice_cooldowns.get(cooldown_key, 0.0)
-            if now_loop - last_notified < BRB_NOTICE_COOLDOWN_SECONDS:
+            if now - self._afk_notice_cooldowns.get(cooldown_key, 0.0) < AFK_NOTICE_COOLDOWN_SECONDS:
                 continue
-            self._brb_notice_cooldowns[cooldown_key] = now_loop
+            self._afk_notice_cooldowns[cooldown_key] = now
             seen.add(member.id)
-
-            ends_at = deserialize_datetime(record.get("ends_at"))
-            line = f"**{ge.display_name_of(member)}** is BRB until {ge.format_timestamp(ends_at, 'R')}"
-            if record.get("reason"):
-                line += f" - {record['reason']}"
-            lines.append(line)
+            lines.append(build_afk_notice_line(member, record))
             if len(lines) >= 5:
                 break
         return lines
@@ -708,18 +605,16 @@ class UtilityService:
             return
         while True:
             self._wake_event.clear()
-            due_reminders, due_brb, next_due = self._collect_due_records()
-            if due_reminders or due_brb:
+            due_reminders, afk_to_activate, afk_to_expire, next_due = self._collect_due_records()
+            if due_reminders or afk_to_activate or afk_to_expire:
+                if afk_to_activate:
+                    await self._activate_due_afk(afk_to_activate)
                 if due_reminders:
                     await self._deliver_due_reminders(due_reminders)
-                if due_brb:
-                    await self._expire_due_brb(due_brb)
+                if afk_to_expire:
+                    await self._expire_due_afk(afk_to_expire)
                 continue
-
-            timeout = None
-            if next_due is not None:
-                timeout = max(1.0, (next_due - ge.now_utc()).total_seconds())
-
+            timeout = max(1.0, (next_due - ge.now_utc()).total_seconds()) if next_due is not None else None
             try:
                 if timeout is None:
                     await self._wake_event.wait()
@@ -728,12 +623,12 @@ class UtilityService:
             except asyncio.TimeoutError:
                 continue
 
-    def _collect_due_records(self) -> tuple[list[dict], list[dict], datetime | None]:
+    def _collect_due_records(self) -> tuple[list[dict], list[dict], list[dict], datetime | None]:
         now = ge.now_utc()
-        due_reminders = []
-        due_brb = []
+        due_reminders: list[dict] = []
+        afk_to_activate: list[dict] = []
+        afk_to_expire: list[dict] = []
         next_due = None
-
         for record in self.store.state.get("reminders", {}).values():
             if not isinstance(record, dict):
                 continue
@@ -744,19 +639,51 @@ class UtilityService:
                 due_reminders.append(record)
             elif next_due is None or due_at < next_due:
                 next_due = due_at
-
-        for record in self.store.state.get("brb", {}).values():
+        for record in self.store.state.get("afk", {}).values():
             if not isinstance(record, dict):
                 continue
+            status = record.get("status", "active")
+            starts_at = deserialize_datetime(record.get("starts_at")) or deserialize_datetime(record.get("set_at")) or deserialize_datetime(record.get("created_at"))
             ends_at = deserialize_datetime(record.get("ends_at"))
-            if ends_at is None:
-                continue
-            if ends_at <= now:
-                due_brb.append(record)
-            elif next_due is None or ends_at < next_due:
-                next_due = ends_at
+            if status == "scheduled":
+                if starts_at is not None and starts_at <= now:
+                    if ends_at is not None and ends_at <= now:
+                        afk_to_expire.append(record)
+                    else:
+                        afk_to_activate.append(record)
+                else:
+                    for candidate in (starts_at, ends_at):
+                        if candidate is not None and (next_due is None or candidate < next_due):
+                            next_due = candidate
+            else:
+                if ends_at is not None and ends_at <= now:
+                    afk_to_expire.append(record)
+                elif ends_at is not None and (next_due is None or ends_at < next_due):
+                    next_due = ends_at
+        return due_reminders, afk_to_activate, afk_to_expire, next_due
 
-        return due_reminders, due_brb, next_due
+    async def _activate_due_afk(self, records: list[dict]):
+        async with self._lock:
+            for record in records:
+                user_id = record.get("user_id")
+                if not isinstance(user_id, int):
+                    continue
+                current = self.store.state.get("afk", {}).get(str(user_id))
+                if not isinstance(current, dict) or current.get("status") != "scheduled":
+                    continue
+                current["status"] = "active"
+                current["set_at"] = current.get("starts_at") or serialize_datetime(ge.now_utc())
+            await self.store.flush()
+            self._wake_event.set()
+
+    async def _expire_due_afk(self, records: list[dict]):
+        async with self._lock:
+            for record in records:
+                user_id = record.get("user_id")
+                if isinstance(user_id, int):
+                    self.store.state.get("afk", {}).pop(str(user_id), None)
+            await self.store.flush()
+            self._wake_event.set()
 
     async def _deliver_due_reminders(self, reminders: list[dict]):
         to_remove = []
@@ -765,10 +692,8 @@ class UtilityService:
             reminder_id = record.get("id")
             if isinstance(reminder_id, str):
                 to_remove.append(reminder_id)
-
         if not to_remove:
             return
-
         async with self._lock:
             for reminder_id in to_remove:
                 self.store.state.get("reminders", {}).pop(reminder_id, None)
@@ -780,7 +705,6 @@ class UtilityService:
         embed = build_reminder_delivery_embed(record, delayed=delayed)
         view = build_reminder_delivery_view(record)
         user_id = record.get("user_id")
-
         if record.get("delivery") == "here" and isinstance(record.get("channel_id"), int):
             channel = self.bot.get_channel(record["channel_id"])
             if channel is None:
@@ -788,14 +712,8 @@ class UtilityService:
                     channel = await self.bot.fetch_channel(record["channel_id"])
             if channel is not None:
                 with contextlib.suppress(discord.Forbidden, discord.HTTPException):
-                    await channel.send(
-                        content=f"<@{user_id}>",
-                        embed=embed,
-                        view=view,
-                        allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
-                    )
+                    await channel.send(content=f"<@{user_id}>", embed=embed, allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False))
                     return
-
         user = self.bot.get_user(user_id)
         if user is None:
             with contextlib.suppress(discord.HTTPException, discord.Forbidden, discord.NotFound):
@@ -804,72 +722,12 @@ class UtilityService:
             with contextlib.suppress(discord.Forbidden, discord.HTTPException):
                 await user.send(embed=embed, view=view)
 
-    async def _expire_due_brb(self, records: list[dict]):
-        user_keys = []
-        for record in records:
-            user_id = record.get("user_id")
-            if not isinstance(user_id, int):
-                continue
-            user_keys.append(str(user_id))
-            user = self.bot.get_user(user_id)
-            if user is None:
-                with contextlib.suppress(discord.HTTPException, discord.Forbidden, discord.NotFound):
-                    user = await self.bot.fetch_user(user_id)
-            if user is not None:
-                with contextlib.suppress(discord.Forbidden, discord.HTTPException):
-                    await user.send(
-                        embed=ge.make_status_embed(
-                            "BRB Timer Ended",
-                            "Your BRB timer has expired.",
-                            tone="success",
-                            footer="Babblebox BRB",
-                        )
-                    )
-
-        if not user_keys:
-            return
-
-        async with self._lock:
-            for key in user_keys:
-                self.store.state.get("brb", {}).pop(key, None)
-            await self.store.flush()
-
     async def send_later_marker_dm(self, user: discord.abc.User, marker: dict):
-        embed = build_later_marker_embed(marker)
-        view = build_jump_view(marker["message_jump_url"])
-        await user.send(embed=embed, view=view)
+        await user.send(embed=build_later_marker_embed(marker), view=build_jump_view(marker["message_jump_url"]))
 
-    async def send_capture_dm(
-        self,
-        *,
-        user: discord.abc.User,
-        guild_name: str,
-        channel_name: str,
-        messages: list[discord.Message],
-        requested_count: int,
-    ):
+    async def send_capture_dm(self, *, user: discord.abc.User, guild_name: str, channel_name: str, messages: list[discord.Message], requested_count: int):
         jump_url = messages[-1].jump_url if messages else None
-        preview_lines = []
-        for message in reversed(messages[-4:]):
-            stamp = message.created_at.strftime("%H:%M") if message.created_at else "--:--"
-            preview_lines.append(
-                f"[{stamp}] {ge.display_name_of(message.author)}: "
-                f"{ge.safe_field_text(message.content or '[no text]', limit=80)}"
-            )
-        embed, view = build_capture_delivery_embed(
-            guild_name=guild_name,
-            channel_name=channel_name,
-            captured_count=len(messages),
-            requested_count=requested_count,
-            preview_lines=preview_lines,
-            jump_url=jump_url,
-        )
-        transcript = build_capture_transcript_file(
-            guild_name=guild_name,
-            channel_name=channel_name,
-            messages=messages,
-        )
+        preview_lines = [f"[{message.created_at.strftime('%H:%M') if message.created_at else '--:--'}] {ge.display_name_of(message.author)}: {ge.safe_field_text(message.content or '[no text]', limit=80)}" for message in reversed(messages[-4:])]
+        embed, view = build_capture_delivery_embed(guild_name=guild_name, channel_name=channel_name, captured_count=len(messages), requested_count=requested_count, preview_lines=preview_lines, jump_url=jump_url)
+        transcript = build_capture_transcript_file(guild_name=guild_name, channel_name=channel_name, messages=messages)
         await user.send(embed=embed, view=view, file=transcript)
-
-    def build_brb_status_embed_for(self, user: discord.abc.User, record: dict) -> discord.Embed:
-        return build_brb_status_embed(user, record)

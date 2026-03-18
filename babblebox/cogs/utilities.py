@@ -1,14 +1,11 @@
 from __future__ import annotations
 
-import contextlib
-from typing import Optional
-
 import discord
 from discord import app_commands
 from discord.ext import commands
 
 from babblebox import game_engine as ge
-from babblebox.command_utils import is_command_message, require_channel_permissions, send_hybrid_response
+from babblebox.command_utils import require_channel_permissions, send_hybrid_response
 from babblebox.utility_helpers import deserialize_datetime
 from babblebox.utility_service import WATCH_KEYWORD_LIMIT, UtilityService
 
@@ -79,6 +76,20 @@ class UtilityCog(commands.Cog):
             ctx,
             embed=ge.make_status_embed(title, description, tone="info", footer="Babblebox Utilities"),
         )
+
+    async def _require_storage(self, ctx: commands.Context, feature_name: str) -> bool:
+        if self.service.storage_ready:
+            return True
+        await self._send_private_embed(
+            ctx,
+            embed=ge.make_status_embed(
+                f"{feature_name} Unavailable",
+                self.service.storage_message(feature_name),
+                tone="warning",
+                footer="Babblebox Utilities",
+            ),
+        )
+        return False
 
     def _watch_settings_embed(self, user: discord.abc.User, guild: discord.Guild | None) -> discord.Embed:
         summary = self.service.get_watch_summary(user.id, guild_id=guild.id if guild else None)
@@ -215,14 +226,6 @@ class UtilityCog(commands.Cog):
         )
         return None
 
-    @commands.Cog.listener()
-    async def on_message(self, message: discord.Message):
-        if message.guild is None or message.author.bot or message.webhook_id is not None:
-            return
-        if await is_command_message(self.bot, message):
-            return
-        await self.service.handle_watch_message(message)
-
     @commands.hybrid_group(
         name="watch",
         with_app_command=True,
@@ -236,6 +239,8 @@ class UtilityCog(commands.Cog):
     @app_commands.describe(state="Turn mention alerts on or off", scope="Use this server or global scope")
     @app_commands.choices(state=WATCH_STATE_CHOICES, scope=WATCH_SCOPE_CHOICES)
     async def watch_mentions_command(self, ctx: commands.Context, state: str = "on", scope: str = "server"):
+        if not await self._require_storage(ctx, "Watch"):
+            return
         enabled = state.lower() == "on"
         ok, message = await self.service.set_watch_mentions(
             ctx.author.id,
@@ -264,6 +269,8 @@ class UtilityCog(commands.Cog):
         *,
         phrase: str,
     ):
+        if not await self._require_storage(ctx, "Watch"):
+            return
         ok, message = await self.service.add_watch_keyword(
             ctx.author.id,
             guild_id=ctx.guild.id if ctx.guild else None,
@@ -287,6 +294,8 @@ class UtilityCog(commands.Cog):
         *,
         phrase: str,
     ):
+        if not await self._require_storage(ctx, "Watch"):
+            return
         ok, message = await self.service.remove_watch_keyword(
             ctx.author.id,
             guild_id=ctx.guild.id if ctx.guild else None,
@@ -301,16 +310,22 @@ class UtilityCog(commands.Cog):
 
     @watch_group.command(name="settings", with_app_command=True, description="View watch settings")
     async def watch_settings_command(self, ctx: commands.Context):
+        if not await self._require_storage(ctx, "Watch"):
+            return
         await self._send_private_embed(ctx, embed=self._watch_settings_embed(ctx.author, ctx.guild))
 
     @watch_group.command(name="list", with_app_command=True, description="List watched keywords")
     async def watch_list_command(self, ctx: commands.Context):
+        if not await self._require_storage(ctx, "Watch"):
+            return
         await self._send_private_embed(ctx, embed=self._watch_list_embed(ctx.author, ctx.guild))
 
     @watch_group.command(name="off", with_app_command=True, description="Disable watch settings for a scope")
     @app_commands.describe(scope="Clear this server, global, or all watch settings")
     @app_commands.choices(scope=WATCH_OFF_SCOPE_CHOICES)
     async def watch_off_command(self, ctx: commands.Context, scope: str = "server"):
+        if not await self._require_storage(ctx, "Watch"):
+            return
         ok, message = await self.service.disable_watch(
             ctx.author.id,
             guild_id=ctx.guild.id if ctx.guild else None,
@@ -333,11 +348,19 @@ class UtilityCog(commands.Cog):
 
     @later_group.command(name="mark", with_app_command=True, description="Mark where you stopped reading")
     async def later_mark_command(self, ctx: commands.Context):
+        if not await self._require_storage(ctx, "Later"):
+            return
         target = await self._resolve_later_target(ctx)
         if target is None:
             return
 
-        marker = await self.service.save_later_marker(user=ctx.author, channel=ctx.channel, message=target)
+        ok, marker = await self.service.save_later_marker(user=ctx.author, channel=ctx.channel, message=target)
+        if not ok:
+            await self._send_private_embed(
+                ctx,
+                embed=ge.make_status_embed("Later Unavailable", marker, tone="warning", footer="Babblebox Later"),
+            )
+            return
         try:
             await self.service.send_later_marker_dm(ctx.author, marker)
         except discord.Forbidden:
@@ -361,6 +384,8 @@ class UtilityCog(commands.Cog):
 
     @later_group.command(name="list", with_app_command=True, description="List your saved reading markers")
     async def later_list_command(self, ctx: commands.Context):
+        if not await self._require_storage(ctx, "Later"):
+            return
         markers = self.service.list_later_markers(ctx.author.id, guild_id=ctx.guild.id if ctx.guild else None)
         await self._send_private_embed(
             ctx,
@@ -371,6 +396,8 @@ class UtilityCog(commands.Cog):
     @app_commands.describe(scope="Clear just this channel or all of your markers")
     @app_commands.choices(scope=LATER_CLEAR_CHOICES)
     async def later_clear_command(self, ctx: commands.Context, scope: str = "here"):
+        if not await self._require_storage(ctx, "Later"):
+            return
         if scope == "here" and ctx.guild is None:
             await self._send_private_embed(
                 ctx,
@@ -496,6 +523,8 @@ class UtilityCog(commands.Cog):
         *,
         text: str,
     ):
+        if not await self._require_storage(ctx, "Reminders"):
+            return
         delay_seconds = self.service.parse_relative_duration(when)
         if delay_seconds is None:
             await self._send_private_embed(
@@ -551,93 +580,22 @@ class UtilityCog(commands.Cog):
 
     @remind_group.command(name="list", with_app_command=True, description="List your active reminders")
     async def remind_list_command(self, ctx: commands.Context):
+        if not await self._require_storage(ctx, "Reminders"):
+            return
         reminders = self.service.list_reminders(ctx.author.id)
         await self._send_private_embed(ctx, embed=self._reminder_list_embed(ctx.author, reminders))
 
     @remind_group.command(name="cancel", with_app_command=True, description="Cancel a reminder by ID")
     @app_commands.describe(reminder_id="The 8-character reminder ID shown in /remind list")
     async def remind_cancel_command(self, ctx: commands.Context, reminder_id: str):
+        if not await self._require_storage(ctx, "Reminders"):
+            return
         ok, message = await self.service.cancel_reminder(ctx.author.id, reminder_id)
         tone = "success" if ok else "warning"
         await self._send_private_embed(
             ctx,
             embed=ge.make_status_embed("Reminder Updated", message, tone=tone, footer="Babblebox Remind"),
         )
-
-    @commands.hybrid_group(
-        name="brb",
-        with_app_command=True,
-        description="Set a timed BRB status",
-        invoke_without_command=True,
-        fallback="set",
-    )
-    @app_commands.describe(duration="Relative time like 10m or 2h", reason="Optional short plain-text reason")
-    async def brb_group(self, ctx: commands.Context, duration: str, *, reason: Optional[str] = None):
-        if ctx.guild is None:
-            await self._send_private_embed(
-                ctx,
-                embed=ge.make_status_embed(
-                    "Server Only",
-                    "BRB is only available in servers because it answers mentions there.",
-                    tone="warning",
-                    footer="Babblebox BRB",
-                ),
-            )
-            return
-
-        delay_seconds = self.service.parse_relative_duration(duration)
-        if delay_seconds is None:
-            await self._send_private_embed(
-                ctx,
-                embed=ge.make_status_embed(
-                    "Invalid Duration",
-                    "Use a relative duration like `10m`, `45m`, `2h`, or `1d`.",
-                    tone="warning",
-                    footer="Babblebox BRB",
-                ),
-            )
-            return
-
-        ok, result = await self.service.set_brb(
-            user=ctx.author,
-            delay_seconds=delay_seconds,
-            reason=reason,
-            guild=ctx.guild,
-        )
-        if not ok:
-            await self._send_private_embed(
-                ctx,
-                embed=ge.make_status_embed("BRB Rejected", result, tone="warning", footer="Babblebox BRB"),
-            )
-            return
-
-        await self._send_private_embed(ctx, embed=self.service.build_brb_status_embed_for(ctx.author, result))
-
-    @brb_group.command(name="clear", with_app_command=True, description="Clear your BRB status")
-    async def brb_clear_command(self, ctx: commands.Context):
-        ok, message = await self.service.clear_brb(ctx.author.id)
-        tone = "success" if ok else "warning"
-        await self._send_private_embed(
-            ctx,
-            embed=ge.make_status_embed("BRB Updated", message, tone=tone, footer="Babblebox BRB"),
-        )
-
-    @brb_group.command(name="status", with_app_command=True, description="View your BRB status")
-    async def brb_status_command(self, ctx: commands.Context):
-        record = self.service.get_brb_record(ctx.author.id)
-        if record is None:
-            await self._send_private_embed(
-                ctx,
-                embed=ge.make_status_embed(
-                    "No Active BRB",
-                    "You do not currently have an active BRB timer.",
-                    tone="info",
-                    footer="Babblebox BRB",
-                ),
-            )
-            return
-
-        await self._send_private_embed(ctx, embed=self.service.build_brb_status_embed_for(ctx.author, record))
 
 
 async def setup(bot: commands.Bot):

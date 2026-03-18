@@ -8,8 +8,8 @@ This version of the project includes:
 - A modular backend instead of one giant monolith
 - Dual slash and `bb!` prefix commands
 - A new `Chaos Card` lobby system
-- A utility suite with Watch, Later, Capture, Remind, and BRB
-- Postgres-first utility persistence with JSON fallback for local development
+- A utility suite with Watch, Later, Capture, Remind, and a stronger timed AFK system
+- Postgres-first utility persistence in production, with explicit memory mode for tests and local dev
 - Upgraded embed-driven bot responses
 - A restored blue-themed website with privacy, community, and support sections
 
@@ -73,11 +73,11 @@ Privately DM yourself a structured snapshot of recent channel messages for memor
 
 ### Remind
 
-Create safe one-time reminders using relative durations such as `10m`, `2h`, or `1d12h`. Reminders can arrive in DMs or in the current channel.
+Create safe one-time reminders using relative durations such as `10m`, `2h`, or `1d12h`. Reminders default to DMs, while channel delivery is intentionally stricter to reduce spam and clutter.
 
-### BRB
+### AFK
 
-Set a timed away notice that behaves like a lighter, countdown-based AFK variant. When someone mentions you while BRB is active, Babblebox can reply with the remaining time and optional safe reason.
+AFK now handles both indefinite and timed away states. When someone mentions you or replies to one of your messages while you are AFK, Babblebox can show how long you have been away and, if the AFK is timed, when you are expected back.
 
 ## Dual Command System
 
@@ -89,7 +89,7 @@ Core commands and the new utility features work in both styles:
 | `/ping` | `bb!ping` | Health check |
 | `/play` | `bb!play` | Open a lobby |
 | `/stop` | `bb!stop` | Force stop the active lobby/game |
-| `/afk` | `bb!afk` | Set, schedule, or clear AFK |
+| `/afk` | `bb!afk` | Set, schedule, or clear AFK, including timed away status |
 | `/afkstatus` | `bb!afkstatus` | View AFK status |
 | `/vote` | `bb!vote` | Trigger a Spyfall vote |
 | `/stats` | `bb!stats` | Show session stats |
@@ -103,10 +103,6 @@ Core commands and the new utility features work in both styles:
 | `/capture` | `bb!capture 10` | DM a recent channel snapshot |
 | `/remind set` | `bb!remind set 2h dm take a break` | Schedule a one-time reminder |
 | `/remind list` | `bb!remind list` | List active reminders |
-| `/brb set` | `bb!brb 30m grabbing coffee` | Start a timed BRB notice |
-| `/brb status` | `bb!brb status` | View BRB state |
-
-Discord groups require the slash version of BRB to be exposed as `/brb set`, while the prefix version keeps the shorter `bb!brb <duration> [reason]` form.
 
 ## Chaos Cards
 
@@ -163,15 +159,15 @@ The project now uses a package-based layout:
 ### File overview
 
 - `babblebox/bot.py`: bot bootstrap, dictionary loading, extension loading, command sync
-- `babblebox/game_engine.py`: shared state, views, AFK logic, timers, and core game flow
-- `babblebox/text_safety.py`: shared short-text validation used by AFK, Remind, and BRB
-- `babblebox/utility_store.py`: utility persistence layer with Postgres primary storage, JSON fallback, and one-time JSON seed migration
+- `babblebox/game_engine.py`: shared state, views, timers, and core game flow
+- `babblebox/text_safety.py`: shared short-text validation used by AFK and Remind
+- `babblebox/utility_store.py`: utility persistence layer with Postgres production storage, memory-mode tests/dev, and one-time legacy JSON import support
 - `babblebox/utility_service.py`: utility-state orchestration, delivery scheduling, and watch matching
 - `babblebox/utility_helpers.py`: duration parsing, jump-link helpers, transcript generation, and utility embeds
 - `babblebox/cogs/meta.py`: help, ping, stats, leaderboard
 - `babblebox/cogs/afk.py`: AFK commands
 - `babblebox/cogs/gameplay.py`: play, stop, vote, Chaos Card controls
-- `babblebox/cogs/utilities.py`: Watch, Later, Capture, Remind, and BRB commands plus watch listener
+- `babblebox/cogs/utilities.py`: Watch, Later, Capture, and Remind commands
 - `babblebox/cogs/events.py`: listeners and lifecycle handling
 - `babblebox/web.py`: Flask routes and keep-alive thread
 
@@ -205,11 +201,13 @@ Babblebox is designed to survive on a constrained free Render instance.
 
 ### Persistence note
 
-Babblebox now supports a Postgres-backed utility store for Watch settings, Later markers, reminders, and BRB timers. Supabase Postgres is the recommended hosted option.
+Babblebox now supports a Postgres-backed utility store for Watch settings, Later markers, reminders, and timed AFK state. Supabase Postgres is the recommended hosted option.
 
-If `UTILITY_DATABASE_URL`, `SUPABASE_DB_URL`, or `DATABASE_URL` is configured, Babblebox will try to use Postgres first, create its utility tables automatically, and migrate the existing JSON utility file once if one is present.
+If `UTILITY_DATABASE_URL`, `SUPABASE_DB_URL`, or `DATABASE_URL` is configured, Babblebox will use Postgres, create its utility tables automatically, and optionally import a legacy JSON utility file once if one is present.
 
-If Postgres is not configured or cannot be reached at startup, Babblebox falls back to the local JSON store so the bot can still run. That fallback is convenient for development and local testing, but it is still not the same as guaranteed permanent durability across redeploys, host resets, or filesystem loss.
+Babblebox does not keep writing user utility state to local JSON files in production. For local development and tests you can opt into a non-persistent memory backend instead, but durable runtime continuity depends on the external database.
+
+If no Postgres URL is configured, Babblebox still starts, but storage-backed utility features stay unavailable until the database is configured again.
 
 ## Website and Community
 
@@ -255,16 +253,16 @@ UTILITY_DATABASE_URL=postgresql://...
 # or SUPABASE_DB_URL=postgresql://...
 # or DATABASE_URL=postgresql://...
 # optional:
-# UTILITY_STORAGE_BACKEND=auto
-# UTILITY_JSON_PATH=.cache/utility_state.json
+# UTILITY_STORAGE_BACKEND=memory
+# UTILITY_JSON_MIGRATION_PATH=.cache/utility_state.json
 ```
 
 - `DISCORD_TOKEN` is required
 - `DEV_GUILD_ID` is optional and useful for faster dev slash-command sync
 - `UTILITY_DATABASE_URL` is the preferred Postgres connection string for durable utility storage
 - `SUPABASE_DB_URL` and `DATABASE_URL` are also accepted
-- `UTILITY_STORAGE_BACKEND=json` forces local JSON storage for local/dev workflows
-- `UTILITY_JSON_PATH` lets you override the fallback JSON file path
+- `UTILITY_STORAGE_BACKEND=memory` is for explicit local/dev or test workflows only
+- `UTILITY_JSON_MIGRATION_PATH` can point at an old JSON utility file for one-time import
 
 ### 4. Enable Discord settings
 
@@ -290,8 +288,8 @@ python main.py
 | `UTILITY_DATABASE_URL` | No | Preferred Postgres connection string for utility persistence |
 | `SUPABASE_DB_URL` | No | Alternate Postgres connection string, useful for Supabase-style naming |
 | `DATABASE_URL` | No | Alternate Postgres connection string used by some hosts |
-| `UTILITY_STORAGE_BACKEND` | No | `auto` by default, or `json` to force file storage |
-| `UTILITY_JSON_PATH` | No | Override the local JSON fallback path |
+| `UTILITY_STORAGE_BACKEND` | No | Use `memory` only for explicit local/dev or test runs |
+| `UTILITY_JSON_MIGRATION_PATH` | No | Optional path to an old JSON utility file for one-time import |
 
 ## Recommended Permissions
 

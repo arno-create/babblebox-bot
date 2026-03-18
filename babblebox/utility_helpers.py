@@ -273,19 +273,40 @@ def build_reminder_delivery_view(reminder: dict) -> discord.ui.View | None:
     return build_jump_view(jump_url)
 
 
-def build_brb_status_embed(user: discord.abc.User, record: dict) -> discord.Embed:
-    ends_at = deserialize_datetime(record.get("ends_at"))
+def build_afk_status_embed(user: discord.abc.User, record: dict, *, title: str | None = None) -> discord.Embed:
+    status = record.get("status", "active")
     created_at = deserialize_datetime(record.get("created_at"))
+    set_at = deserialize_datetime(record.get("set_at")) or deserialize_datetime(record.get("starts_at")) or created_at
+    starts_at = deserialize_datetime(record.get("starts_at")) or set_at
+    ends_at = deserialize_datetime(record.get("ends_at"))
     embed = discord.Embed(
-        title="Babblebox BRB",
-        description=f"**{ge.display_name_of(user)}** is temporarily away.",
+        title=title or ("Babblebox AFK Scheduled" if status == "scheduled" else "Babblebox AFK"),
+        description=f"**{ge.display_name_of(user)}**",
         color=ge.EMBED_THEME["warning"],
-        timestamp=ends_at or ge.now_utc(),
+        timestamp=ends_at or starts_at or ge.now_utc(),
     )
     if record.get("reason"):
         embed.add_field(name="Reason", value=ge.safe_field_text(record["reason"], limit=512), inline=False)
-    if created_at is not None:
-        embed.add_field(name="Started", value=ge.format_timestamp(created_at, "R"), inline=True)
+    timing_lines = []
+    if status == "scheduled" and starts_at is not None:
+        timing_lines.append(f"Starts: {ge.format_timestamp(starts_at, 'R')} ({ge.format_timestamp(starts_at, 'f')})")
+    elif set_at is not None:
+        timing_lines.append(f"Away Since: {ge.format_timestamp(set_at, 'R')} ({ge.format_timestamp(set_at, 'f')})")
     if ends_at is not None:
-        embed.add_field(name="Returns", value=ge.format_timestamp(ends_at, "R"), inline=True)
-    return ge.style_embed(embed, footer="Babblebox BRB | Timed away notice, not a Discord profile status.")
+        timing_lines.append(f"Returns: {ge.format_timestamp(ends_at, 'R')} ({ge.format_timestamp(ends_at, 'f')})")
+    if timing_lines:
+        embed.add_field(name="Timing", value="\n".join(timing_lines), inline=False)
+    return ge.style_embed(embed, footer="Babblebox AFK | Away notices show elapsed time and return ETA when available.")
+
+
+def build_afk_notice_line(user: discord.abc.User, record: dict) -> str:
+    parts = [f"**{ge.display_name_of(user)}** is AFK"]
+    set_at = deserialize_datetime(record.get("set_at")) or deserialize_datetime(record.get("starts_at")) or deserialize_datetime(record.get("created_at"))
+    ends_at = deserialize_datetime(record.get("ends_at"))
+    if set_at is not None:
+        parts.append(f"away since {ge.format_timestamp(set_at, 'R')}")
+    if ends_at is not None:
+        parts.append(f"back {ge.format_timestamp(ends_at, 'R')}")
+    if record.get("reason"):
+        parts.append(ge.safe_field_text(record["reason"], limit=120))
+    return " - ".join(parts)

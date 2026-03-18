@@ -2,10 +2,8 @@ import asyncio
 import contextlib
 import io
 import random
-import re
 import traceback
-import unicodedata
-from datetime import datetime, timedelta, timezone
+from datetime import datetime, timezone
 from typing import Optional
 
 import discord
@@ -25,10 +23,6 @@ DICTIONARY_URL = "https://raw.githubusercontent.com/dwyl/english-words/master/wo
 
 VALID_WORDS = set()
 games = {}
-afk_records = {}
-afk_schedule_tasks = {}
-afk_expiry_tasks = {}
-afk_versions = {}
 dm_routes = {}
 session_stats = {}
 games_guard = asyncio.Lock()
@@ -38,124 +32,6 @@ AFK_REASON_MAX_LEN = 160
 AFK_MAX_DURATION_MINUTES = 10080
 AFK_MAX_SCHEDULE_MINUTES = 10080
 AFK_REASON_SENTENCE_LIMIT = 3
-AFK_URL_RE = re.compile(
-    r"(?ix)"
-    r"(?:https?://|ftp://|www\.)\S+"
-    r"|(?:discord(?:app)?\.com/invite/|discord\.gg/)\S+"
-    r"|(?:[a-z0-9-]+\.)+(?:com|net|org|gg|io|me|dev|app|xyz|info|co|ru|am|uk|de|fr|ca|us)(?:/\S*)?"
-)
-
-AFK_EMAIL_RE = re.compile(
-    r"(?i)\b[A-Z0-9._%+-]+@(?:[A-Z0-9-]+\.)+[A-Z]{2,}\b"
-)
-
-AFK_IPV4_RE = re.compile(
-    r"\b(?:(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\.){3}(?:25[0-5]|2[0-4]\d|1\d\d|[1-9]?\d)\b"
-)
-
-AFK_IPV6_RE = re.compile(
-    r"(?i)\b(?:[A-F0-9]{1,4}:){2,7}[A-F0-9]{1,4}\b"
-)
-
-AFK_PHONE_RE = re.compile(
-    r"(?<!\w)(?:\+|00|011)?\s*(?:\(?\d{1,4}\)?[\s.-]*)?(?:\d[\s.-]*){7,14}(?!\w)"
-)
-
-AFK_CARD_RE = re.compile(
-    r"\b(?:\d[ -]?){13,19}\b"
-)
-
-AFK_SSN_RE = re.compile(
-    r"\b\d{3}-\d{2}-\d{4}\b"
-)
-
-AFK_MENTION_RE = re.compile(
-    r"(?i)@(?:everyone|here)|<@!?&?\d+>|<#\d+>"
-)
-
-AFK_MARKDOWN_LINK_RE = re.compile(
-    r"\[[^\]]{1,80}\]\((?:[^)]+)\)"
-)
-AFK_BLOCKLIST = {
-    "anal",
-    "bdsm",
-    "bitch",
-    "blowjob",
-    "boob",
-    "boobs",
-    "breast",
-    "breasts",
-    "cock",
-    "cum",
-    "dick",
-    "fetish",
-    "fuck",
-    "fucked",
-    "fucking",
-    "handjob",
-    "horny",
-    "kink",
-    "masturbate",
-    "masturbation",
-    "naked",
-    "nipple",
-    "nipples",
-    "nsfw",
-    "nude",
-    "nudes",
-    "onlyfans",
-    "orgasm",
-    "penis",
-    "porn",
-    "pornhub",
-    "pussy",
-    "rape",
-    "raped",
-    "raping",
-    "sex",
-    "sexual",
-    "sext",
-    "shit",
-    "slut",
-    "vagina",
-    "whore",
-    "bulimia",
-    "*child grooming*",
-    "chink", 
-    "coon", 
-    "cripple", 
-    "dyke", 
-    "edtwt", 
-    "faggot",
-    "gook",
-    "kike",
-    "killyourself",
-    "kkk", 
-    "loli",
-    "meanspo",
-    "mongoloid",
-    "nigga",
-    "n1gg@",
-    "n1gg3r",
-    "n1gga",
-    "n1gger",
-    "nazi",
-    "paki",
-    "pedophile",
-    "proana",
-    "redroom",
-    "retard",
-    "shemale",
-    "shota",
-    "slut",
-    "snuff",
-    "spic",
-    "terrorism",
-    "thinspo",
-    "tranny",
-    "wetback",
-    "whore",
-}
 CORPSE_STEP_LABELS = [
     "Adjective",
     "Noun",
@@ -1027,34 +903,6 @@ def format_timestamp(value, style="R"):
     return f"<t:{int(value.timestamp())}:{style}>"
 
 
-def is_active_afk_record(record):
-    return bool(record and record.get("status") == "active")
-
-
-def cancel_background_task(task):
-    if task is not None and not task.done():
-        task.cancel()
-
-
-def clear_afk_state(user_id, *, cancel_schedule=True, cancel_expiry=True):
-    record = afk_records.pop(user_id, None)
-
-    if cancel_schedule:
-        task = afk_schedule_tasks.pop(user_id, None)
-        cancel_background_task(task)
-
-    if cancel_expiry:
-        task = afk_expiry_tasks.pop(user_id, None)
-        cancel_background_task(task)
-
-    return record
-
-
-def bump_afk_version(user_id):
-    afk_versions[user_id] = afk_versions.get(user_id, 0) + 1
-    return afk_versions[user_id]
-
-
 def sanitize_afk_reason(reason):
     return sanitize_short_plain_text(
         reason,
@@ -1065,114 +913,6 @@ def sanitize_afk_reason(reason):
         allow_empty=True,
     )
 
-    if reason is None:
-        return True, None
-
-    cleaned = unicodedata.normalize("NFKC", reason or "")
-    cleaned = "".join(ch for ch in cleaned if unicodedata.category(ch) != "Cf")
-    cleaned = cleaned.replace("\n", " ").replace("\r", " ")
-    cleaned = re.sub(r"\s+", " ", cleaned).strip()
-
-    if not cleaned:
-        return True, None
-
-    if len(cleaned) > AFK_REASON_MAX_LEN:
-        return False, f"❌ AFK reason must be at most {AFK_REASON_MAX_LEN} characters."
-
-    sentence_parts = [part.strip() for part in re.split(r"[.!?]+", cleaned) if part.strip()]
-    if len(sentence_parts) > AFK_REASON_SENTENCE_LIMIT:
-        return False, f"❌ AFK reason must be at most {AFK_REASON_SENTENCE_LIMIT} short sentences."
-
-    squashed = re.sub(r"(?<=\w)[\s`~*_.,-]+(?=\w)", "", cleaned)
-
-    private_patterns = (
-        ("links or invites", AFK_URL_RE),
-        ("email addresses", AFK_EMAIL_RE),
-        ("IP addresses", AFK_IPV4_RE),
-        ("IP addresses", AFK_IPV6_RE),
-        ("phone numbers", AFK_PHONE_RE),
-        ("card-like numbers", AFK_CARD_RE),
-        ("sensitive ID numbers", AFK_SSN_RE),
-        ("mentions", AFK_MENTION_RE),
-        ("markdown links", AFK_MARKDOWN_LINK_RE),
-    )
-
-    for label, pattern in private_patterns:
-        if pattern.search(cleaned) or pattern.search(squashed):
-            return False, f"❌ AFK reason cannot contain {label}. Use short plain text only."
-
-    for blocked_word in AFK_BLOCKLIST:
-        blocked_re = re.compile(rf"\b{re.escape(blocked_word)}\b", re.IGNORECASE)
-        if blocked_re.search(cleaned) or blocked_re.search(squashed):
-            return False, "❌ AFK reason contains blocked or inappropriate words. Use short plain text only."
-
-    return True, cleaned
-
-
-
-async def afk_expiry_worker(user_id, version, delay_seconds):
-    try:
-        await asyncio.sleep(delay_seconds)
-    except asyncio.CancelledError:
-        return
-
-    record = afk_records.get(user_id)
-    if not record or record.get("version") != version or record.get("status") != "active":
-        return
-
-    clear_afk_state(user_id, cancel_expiry=False)
-    afk_expiry_tasks.pop(user_id, None)
-
-
-async def afk_schedule_worker(user_id, version, delay_seconds):
-    try:
-        await asyncio.sleep(delay_seconds)
-    except asyncio.CancelledError:
-        return
-
-    record = afk_records.get(user_id)
-    if not record or record.get("version") != version or record.get("status") != "scheduled":
-        return
-
-    record["status"] = "active"
-    record["set_at"] = record.get("starts_at") or now_utc()
-    afk_schedule_tasks.pop(user_id, None)
-
-    ends_at = record.get("ends_at")
-    if ends_at is not None:
-        remaining = max(0.0, (ends_at - now_utc()).total_seconds())
-        afk_expiry_tasks[user_id] = asyncio.create_task(afk_expiry_worker(user_id, version, remaining))
-
-
-def set_afk_record(user, *, reason=None, duration_minutes=None, start_in_minutes=None):
-    user_id = user.id
-    clear_afk_state(user_id)
-
-    version = bump_afk_version(user_id)
-    created_at = now_utc()
-    scheduled = start_in_minutes is not None
-    starts_at = created_at + timedelta(minutes=start_in_minutes) if scheduled else created_at
-    ends_at = starts_at + timedelta(minutes=duration_minutes) if duration_minutes is not None else None
-
-    record = {
-        "user_id": user_id,
-        "status": "scheduled" if scheduled else "active",
-        "reason": reason,
-        "set_at": created_at if not scheduled else None,
-        "starts_at": starts_at,
-        "ends_at": ends_at,
-        "version": version,
-    }
-    afk_records[user_id] = record
-
-    if scheduled:
-        delay_seconds = max(0.0, start_in_minutes * 60)
-        afk_schedule_tasks[user_id] = asyncio.create_task(afk_schedule_worker(user_id, version, delay_seconds))
-    elif ends_at is not None:
-        delay_seconds = max(0.0, (ends_at - created_at).total_seconds())
-        afk_expiry_tasks[user_id] = asyncio.create_task(afk_expiry_worker(user_id, version, delay_seconds))
-
-    return record
 
 
 def build_afk_status_embed(user, record, *, title=None):
@@ -1198,7 +938,7 @@ def build_afk_status_embed(user, record, *, title=None):
     embed.add_field(name="Timing", value="\n".join(timing_lines), inline=False)
 
 
-    return style_embed(embed, footer="Babblebox AFK | AFK clears on your next message. Try /brb for timed away notes.")
+    return style_embed(embed, footer="Babblebox AFK | AFK clears on your next message. Timed away notices live here now.")
 
 
 def build_afk_brief_line(user, record):
@@ -2604,8 +2344,7 @@ def build_help_embed() -> discord.Embed:
         name="Utility Commands",
         value=(
             "`/watch ...` for mention and keyword alerts, `/later mark` to save where you stopped reading, "
-            "`/capture` for a private channel snapshot, `/remind set` for one-time reminders, "
-            "and `/brb set` for timed away notices."
+            "`/capture` for a private channel snapshot, and `/remind set` for one-time reminders."
         ),
         inline=False,
     )

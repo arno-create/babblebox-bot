@@ -28,7 +28,7 @@ class TextSafetyTests(unittest.TestCase):
     def test_rejects_blocklisted_terms(self):
         ok, message = sanitize_short_plain_text(
             "this is nsfw",
-            field_name="BRB reason",
+            field_name="AFK reason",
             max_length=160,
             sentence_limit=3,
             allow_empty=True,

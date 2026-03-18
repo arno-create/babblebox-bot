@@ -43,12 +43,11 @@ class EventsCog(commands.Cog):
             return
 
         utility_service = getattr(self.bot, "utility_service", None)
+        author_afk = None
         if utility_service is not None:
-            await utility_service.clear_brb_on_activity(message.author.id)
+            author_afk = await utility_service.clear_afk_on_activity(message.author.id)
 
-        author_afk = ge.afk_records.get(message.author.id)
-        if ge.is_active_afk_record(author_afk):
-            ge.clear_afk_state(message.author.id)
+        if author_afk is not None:
             with contextlib.suppress(discord.HTTPException):
                 await message.channel.send(
                     embed=ge.make_status_embed(
@@ -62,20 +61,12 @@ class EventsCog(commands.Cog):
                 )
 
         away_targets = _collect_away_targets(message)
-        active_afk_mentions = [
-            (target, ge.afk_records.get(target.id))
-            for target in away_targets
-            if target.id != message.author.id and ge.is_active_afk_record(ge.afk_records.get(target.id))
-        ]
-        notice_lines = [ge.build_afk_brief_line(user, record) for user, record in active_afk_mentions[:5]]
-        if utility_service is not None and len(notice_lines) < 5:
-            remaining = 5 - len(notice_lines)
-            notice_lines.extend(
-                utility_service.build_brb_notice_lines_for_targets(
-                    channel_id=message.channel.id,
-                    author_id=message.author.id,
-                    targets=away_targets,
-                )[:remaining]
+        notice_lines = []
+        if utility_service is not None:
+            notice_lines = utility_service.build_afk_notice_lines_for_targets(
+                channel_id=message.channel.id,
+                author_id=message.author.id,
+                targets=away_targets,
             )
         if notice_lines:
             with contextlib.suppress(discord.HTTPException):
@@ -84,11 +75,14 @@ class EventsCog(commands.Cog):
                         "Away Notice",
                         "\n".join(notice_lines),
                         tone="info",
-                        footer="Babblebox AFK/BRB | Mentions are muted. Try /watch for private mention alerts.",
+                        footer="Babblebox AFK | Mentions are muted. Try /watch for private mention alerts.",
                     ),
                     delete_after=12.0,
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
+
+        if utility_service is not None:
+            await utility_service.handle_watch_message(message)
 
         if isinstance(message.channel, discord.DMChannel):
             guild_id = ge.dm_routes.get(message.author.id)
