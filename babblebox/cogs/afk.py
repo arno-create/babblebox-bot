@@ -6,7 +6,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from babblebox import game_engine as ge
-from babblebox.command_utils import send_hybrid_response
+from babblebox.command_utils import defer_hybrid_response, send_hybrid_response
 
 
 class AfkCog(commands.Cog):
@@ -45,6 +45,7 @@ class AfkCog(commands.Cog):
         duration_minutes: Optional[int] = None,
         start_in_minutes: Optional[int] = None,
     ):
+        await defer_hybrid_response(ctx, ephemeral=True)
         service = self._service()
         if service is None or not service.storage_ready:
             await self._send_storage_unavailable(ctx)
@@ -139,6 +140,7 @@ class AfkCog(commands.Cog):
 
     @commands.hybrid_command(name="afkstatus", with_app_command=True, description="View your current AFK or scheduled AFK status")
     async def afkstatus_command(self, ctx: commands.Context):
+        await defer_hybrid_response(ctx, ephemeral=True)
         service = self._service()
         if service is None or not service.storage_ready:
             await self._send_storage_unavailable(ctx)

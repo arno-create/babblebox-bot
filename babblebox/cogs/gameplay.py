@@ -7,7 +7,7 @@ import discord
 from discord.ext import commands
 
 from babblebox import game_engine as ge
-from babblebox.command_utils import require_channel_permissions, send_hybrid_response
+from babblebox.command_utils import defer_hybrid_response, require_channel_permissions, send_hybrid_response
 
 
 class GameplayCog(commands.Cog):
@@ -29,6 +29,7 @@ class GameplayCog(commands.Cog):
             )
             return
 
+        await defer_hybrid_response(ctx)
         if not await require_channel_permissions(ctx, ge.PLAY_REQUIRED_PERMS, "/play"):
             return
 
@@ -73,6 +74,7 @@ class GameplayCog(commands.Cog):
             )
             return
 
+        await defer_hybrid_response(ctx)
         if not await require_channel_permissions(ctx, ge.VOTE_REQUIRED_PERMS, "/vote"):
             return
 
@@ -97,6 +99,7 @@ class GameplayCog(commands.Cog):
             )
             return
 
+        await defer_hybrid_response(ctx)
         if not await require_channel_permissions(ctx, ge.STOP_REQUIRED_PERMS, "/stop"):
             return
 
@@ -156,6 +159,7 @@ class GameplayCog(commands.Cog):
             )
             return
 
+        await defer_hybrid_response(ctx, ephemeral=True)
         game = ge.games.get(ctx.guild.id)
         if not game:
             await send_hybrid_response(

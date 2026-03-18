@@ -5,7 +5,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from babblebox import game_engine as ge
-from babblebox.command_utils import require_channel_permissions, send_hybrid_response
+from babblebox.command_utils import defer_hybrid_response, require_channel_permissions, send_hybrid_response
 from babblebox.utility_helpers import deserialize_datetime
 from babblebox.utility_service import WATCH_KEYWORD_LIMIT, UtilityService
 
@@ -78,6 +78,7 @@ class UtilityCog(commands.Cog):
         )
 
     async def _require_storage(self, ctx: commands.Context, feature_name: str) -> bool:
+        await defer_hybrid_response(ctx, ephemeral=True)
         if self.service.storage_ready:
             return True
         await self._send_private_embed(
@@ -431,6 +432,7 @@ class UtilityCog(commands.Cog):
                 ),
             )
             return
+        await defer_hybrid_response(ctx, ephemeral=True)
         if not await require_channel_permissions(ctx, CAPTURE_REQUIRED_PERMS, "/capture"):
             return
         if not (5 <= count <= 25):

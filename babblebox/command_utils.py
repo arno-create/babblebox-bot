@@ -8,6 +8,19 @@ from discord.ext import commands
 from babblebox import game_engine as ge
 
 
+async def defer_hybrid_response(
+    ctx: commands.Context,
+    *,
+    ephemeral: bool = False,
+    thinking: bool = True,
+) -> bool:
+    interaction = getattr(ctx, "interaction", None)
+    if interaction is None or interaction.response.is_done():
+        return False
+    await interaction.response.defer(ephemeral=ephemeral, thinking=thinking)
+    return True
+
+
 async def send_hybrid_response(
     ctx: commands.Context,
     content: str | None = None,
@@ -24,18 +37,21 @@ async def send_hybrid_response(
         kwargs["embed"] = embed
     if view is not None:
         kwargs["view"] = view
+    if delete_after is not None:
+        kwargs["delete_after"] = delete_after
 
     interaction = getattr(ctx, "interaction", None)
     if interaction is None:
-        if delete_after is not None:
-            kwargs["delete_after"] = delete_after
         return await ctx.send(**kwargs)
 
     if interaction.response.is_done():
         return await interaction.followup.send(wait=True, ephemeral=ephemeral, **kwargs)
 
-    await interaction.response.send_message(ephemeral=ephemeral, **kwargs)
-    return await interaction.original_response()
+    try:
+        await interaction.response.send_message(ephemeral=ephemeral, **kwargs)
+        return await interaction.original_response()
+    except discord.InteractionResponded:
+        return await interaction.followup.send(wait=True, ephemeral=ephemeral, **kwargs)
 
 
 async def require_channel_permissions(
