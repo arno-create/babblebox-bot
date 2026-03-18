@@ -12,9 +12,18 @@ class EventsCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
+    async def _is_command_message(self, message: discord.Message) -> bool:
+        prefixes = await self.bot.get_prefix(message)
+        if isinstance(prefixes, str):
+            prefixes = [prefixes]
+        return any(message.content.startswith(prefix) for prefix in prefixes)
+
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         if message.author.bot:
+            return
+
+        if await self._is_command_message(message):
             return
 
         author_afk = ge.afk_records.get(message.author.id)
@@ -50,10 +59,6 @@ class EventsCog(commands.Cog):
                     delete_after=12.0,
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
-
-        prefix = self.bot.command_prefix
-        if isinstance(prefix, str) and message.content.startswith(prefix):
-            return
 
         if isinstance(message.channel, discord.DMChannel):
             guild_id = ge.dm_routes.get(message.author.id)
