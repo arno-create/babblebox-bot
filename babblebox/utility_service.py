@@ -70,6 +70,7 @@ class UtilityService:
                 self.store = UtilityStateStore()
             except UtilityStorageUnavailable as exc:
                 # Keep the bot loadable when the utility database is missing or offline.
+                print(f"Utility storage constructor failed: {exc}")
                 self.store = UtilityStateStore(backend="memory")
                 self._startup_storage_error = str(exc)
                 self.storage_error = str(exc)

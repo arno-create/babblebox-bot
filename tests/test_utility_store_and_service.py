@@ -36,6 +36,47 @@ class UtilityStoreAndServiceTests(unittest.IsolatedAsyncioTestCase):
         with self.assertRaises(UtilityStorageUnavailable):
             UtilityStateStore(backend="postgres", database_url="")
 
+    async def test_database_url_env_precedence_prefers_utility_database_url(self):
+        original_backend = os.environ.get("UTILITY_STORAGE_BACKEND")
+        original_db = os.environ.get("UTILITY_DATABASE_URL")
+        original_supabase = os.environ.get("SUPABASE_DB_URL")
+        original_database_url = os.environ.get("DATABASE_URL")
+        try:
+            os.environ["UTILITY_STORAGE_BACKEND"] = "memory"
+            os.environ["UTILITY_DATABASE_URL"] = "postgresql://utility-user:secret@utility.example.com:5432/app"
+            os.environ["SUPABASE_DB_URL"] = "postgresql://supabase-user:secret@supabase.example.com:5432/app"
+            os.environ["DATABASE_URL"] = "postgresql://database-user:secret@database.example.com:5432/app"
+            store = UtilityStateStore()
+            self.assertEqual(store.database_url_source, "UTILITY_DATABASE_URL")
+            self.assertIn("utility.example.com", store.database_url)
+        finally:
+            if original_backend is not None:
+                os.environ["UTILITY_STORAGE_BACKEND"] = original_backend
+            else:
+                os.environ.pop("UTILITY_STORAGE_BACKEND", None)
+            if original_db is not None:
+                os.environ["UTILITY_DATABASE_URL"] = original_db
+            else:
+                os.environ.pop("UTILITY_DATABASE_URL", None)
+            if original_supabase is not None:
+                os.environ["SUPABASE_DB_URL"] = original_supabase
+            else:
+                os.environ.pop("SUPABASE_DB_URL", None)
+            if original_database_url is not None:
+                os.environ["DATABASE_URL"] = original_database_url
+            else:
+                os.environ.pop("DATABASE_URL", None)
+
+    async def test_redacted_database_url_hides_password(self):
+        store = UtilityStateStore(
+            backend="memory",
+            database_url="postgresql://utility-user:super-secret@db.example.com:5432/appdb?sslmode=require",
+        )
+        self.assertEqual(
+            store.redacted_database_url(),
+            "postgresql://utility-user:***@db.example.com:5432/appdb",
+        )
+
     async def test_service_degrades_cleanly_without_database_url(self):
         original_backend = os.environ.get("UTILITY_STORAGE_BACKEND")
         original_db = os.environ.get("UTILITY_DATABASE_URL")

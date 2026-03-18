@@ -8,6 +8,7 @@ from copy import deepcopy
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 
 DEFAULT_LEGACY_JSON_PATH = Path(__file__).resolve().parent.parent / ".cache" / "utility_state.json"
@@ -30,6 +31,35 @@ def _resolve_legacy_json_path(path: Path | None = None) -> Path | None:
         return path
     configured = os.getenv("UTILITY_JSON_MIGRATION_PATH", "").strip() or os.getenv("UTILITY_JSON_PATH", "").strip()
     return Path(configured) if configured else DEFAULT_LEGACY_JSON_PATH
+
+
+def _resolve_database_url(configured: str | None = None) -> tuple[str, str | None]:
+    if configured is not None and configured.strip():
+        return configured.strip(), "argument"
+    for env_name in ("UTILITY_DATABASE_URL", "SUPABASE_DB_URL", "DATABASE_URL"):
+        value = os.getenv(env_name, "").strip()
+        if value:
+            return value, env_name
+    return "", None
+
+
+def _redact_database_url(dsn: str | None) -> str:
+    if not dsn:
+        return "not-configured"
+    try:
+        parsed = urlsplit(dsn)
+    except ValueError:
+        return "[configured]"
+    if not parsed.scheme or not parsed.netloc:
+        return "[configured]"
+    safe_netloc = parsed.netloc
+    if "@" in safe_netloc:
+        userinfo, hostinfo = safe_netloc.rsplit("@", 1)
+        if ":" in userinfo:
+            username, _ = userinfo.split(":", 1)
+            userinfo = f"{username}:***"
+        safe_netloc = f"{userinfo}@{hostinfo}"
+    return urlunsplit((parsed.scheme, safe_netloc, parsed.path, "", ""))
 
 
 class _BaseUtilityStore:
@@ -424,7 +454,7 @@ class UtilityStateStore:
     def __init__(self, legacy_json_path: Path | None = None, *, backend: str | None = None, database_url: str | None = None):
         self.legacy_json_path = _resolve_legacy_json_path(legacy_json_path)
         self.backend_preference = (backend or os.getenv("UTILITY_STORAGE_BACKEND", "postgres")).strip().lower() or "postgres"
-        self.database_url = database_url or os.getenv("UTILITY_DATABASE_URL", "").strip() or os.getenv("SUPABASE_DB_URL", "").strip() or os.getenv("DATABASE_URL", "").strip()
+        self.database_url, self.database_url_source = _resolve_database_url(database_url)
         self.state: dict[str, Any] = default_utility_state()
         self._memory_store = _MemoryUtilityStore()
         self._store: _BaseUtilityStore = self._build_primary_store()
@@ -434,9 +464,28 @@ class UtilityStateStore:
         return getattr(self._store, "backend_name", "unknown")
 
     async def load(self) -> dict[str, Any]:
+        print(
+            "Utility storage init: "
+            f"backend_preference={self.backend_preference}, "
+            f"database_url_configured={'yes' if self.database_url else 'no'}, "
+            f"database_url_source={self.database_url_source or 'none'}, "
+            f"database_target={self.redacted_database_url()}"
+        )
         self._store = self._build_primary_store()
-        self.state = await self._store.load()
+        try:
+            self.state = await self._store.load()
+        except UtilityStorageUnavailable as exc:
+            print(
+                "Utility storage init failed: "
+                f"backend_preference={self.backend_preference}, "
+                f"database_url_configured={'yes' if self.database_url else 'no'}, "
+                f"database_url_source={self.database_url_source or 'none'}, "
+                f"database_target={self.redacted_database_url()}, "
+                f"error={exc}"
+            )
+            raise
         self._store.state = self.state
+        print(f"Utility storage init succeeded: backend={self.backend_name}")
         return self.state
 
     async def flush(self) -> bool:
@@ -445,6 +494,9 @@ class UtilityStateStore:
 
     async def close(self):
         await self._store.close()
+
+    def redacted_database_url(self) -> str:
+        return _redact_database_url(self.database_url)
 
     def _build_primary_store(self) -> _BaseUtilityStore:
         if self.backend_preference in {"memory", "test", "dev"}:
