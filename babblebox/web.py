@@ -32,7 +32,17 @@ def health():
     return jsonify(
         {
             "status": "ok",
-            "commands": ["/play", "bb!play", "/help", "bb!help", "/chaoscard", "bb!chaoscard"],
+            "commands": [
+                "/play",
+                "bb!play",
+                "/help",
+                "bb!help",
+                "/watch settings",
+                "/later mark",
+                "/capture",
+                "/remind set",
+                "/brb set",
+            ],
             "website": "https://arno-create.github.io/babblebox-bot/",
         }
     )

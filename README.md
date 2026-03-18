@@ -8,6 +8,8 @@ This version of the project includes:
 - A modular backend instead of one giant monolith
 - Dual slash and `bb!` prefix commands
 - A new `Chaos Card` lobby system
+- A utility suite with Watch, Later, Capture, Remind, and BRB
+- A lightweight local JSON-backed utility store for reminders and personal settings
 - Upgraded embed-driven bot responses
 - A restored blue-themed website with privacy, community, and support sections
 
@@ -53,9 +55,33 @@ One player is the spy, everyone else knows the location, and the server has to q
 
 Players race to type valid English words containing a required syllable before the timer expires.
 
+## Utility Suite
+
+Babblebox is now more than a game bot. It also includes a quiet, personal utility layer that stays aligned with Discord permissions and keeps channel clutter low.
+
+### Watch
+
+Receive DM alerts when someone mentions you or when watched keywords appear, with jump links back to the message. Mention watches can be server-scoped or global, and keyword watches support server or global scope with contains or whole-word matching.
+
+### Later
+
+Mark where you stopped reading in a channel and get a DM jump link back to that point later. One marker per user per channel is stored, so re-marking simply updates your place.
+
+### Capture
+
+Privately DM yourself a structured snapshot of recent channel messages for memory, moderation context, or reference. Captures respect channel visibility and only work from channels the requester can already access.
+
+### Remind
+
+Create safe one-time reminders using relative durations such as `10m`, `2h`, or `1d12h`. Reminders can arrive in DMs or in the current channel.
+
+### BRB
+
+Set a timed away notice that behaves like a lighter, countdown-based AFK variant. When someone mentions you while BRB is active, Babblebox can reply with the remaining time and optional safe reason.
+
 ## Dual Command System
 
-Core commands now work in both styles:
+Core commands and the new utility features work in both styles:
 
 | Slash | Prefix | Purpose |
 | --- | --- | --- |
@@ -69,6 +95,18 @@ Core commands now work in both styles:
 | `/stats` | `bb!stats` | Show session stats |
 | `/leaderboard` | `bb!leaderboard` | Show leaderboard |
 | `/chaoscard` | `bb!chaoscard` | Cycle the lobby Chaos Card |
+| `/watch mentions` | `bb!watch mentions on server` | Toggle mention alerts |
+| `/watch keyword add` | `bb!watch keyword add server contains project update` | Add a watched keyword |
+| `/watch settings` | `bb!watch settings` | View current watch configuration |
+| `/later mark` | `bb!later mark` | Save a reading marker |
+| `/later list` | `bb!later list` | List saved reading markers |
+| `/capture` | `bb!capture 10` | DM a recent channel snapshot |
+| `/remind set` | `bb!remind set 2h dm take a break` | Schedule a one-time reminder |
+| `/remind list` | `bb!remind list` | List active reminders |
+| `/brb set` | `bb!brb 30m grabbing coffee` | Start a timed BRB notice |
+| `/brb status` | `bb!brb status` | View BRB state |
+
+Discord groups require the slash version of BRB to be exposed as `/brb set`, while the prefix version keeps the shorter `bb!brb <duration> [reason]` form.
 
 ## Chaos Cards
 
@@ -101,28 +139,39 @@ The project now uses a package-based layout:
 |   |-- bot.py
 |   |-- command_utils.py
 |   |-- game_engine.py
+|   |-- text_safety.py
+|   |-- utility_helpers.py
+|   |-- utility_service.py
+|   |-- utility_store.py
 |   |-- web.py
 |   `-- cogs/
 |       |-- __init__.py
 |       |-- afk.py
 |       |-- events.py
 |       |-- gameplay.py
-|       `-- meta.py
+|       |-- meta.py
+|       `-- utilities.py
 |-- assets/
 |-- keep_alive.py
 |-- main.py
 |-- index.html
 |-- requirements.txt
-`-- README.md
+|-- README.md
+`-- tests/
 ```
 
 ### File overview
 
 - `babblebox/bot.py`: bot bootstrap, dictionary loading, extension loading, command sync
 - `babblebox/game_engine.py`: shared state, views, AFK logic, timers, and core game flow
+- `babblebox/text_safety.py`: shared short-text validation used by AFK, Remind, and BRB
+- `babblebox/utility_store.py`: local JSON persistence for watch settings, markers, reminders, and BRB
+- `babblebox/utility_service.py`: utility-state orchestration, delivery scheduling, and watch matching
+- `babblebox/utility_helpers.py`: duration parsing, jump-link helpers, transcript generation, and utility embeds
 - `babblebox/cogs/meta.py`: help, ping, stats, leaderboard
 - `babblebox/cogs/afk.py`: AFK commands
 - `babblebox/cogs/gameplay.py`: play, stop, vote, Chaos Card controls
+- `babblebox/cogs/utilities.py`: Watch, Later, Capture, Remind, and BRB commands plus watch listener
 - `babblebox/cogs/events.py`: listeners and lifecycle handling
 - `babblebox/web.py`: Flask routes and keep-alive thread
 
@@ -150,8 +199,14 @@ Babblebox is designed to survive on a constrained free Render instance.
 
 - No heavy polling loops
 - No background analytics workers
-- No storage-dependent feature added just for novelty
+- One lightweight JSON utility store instead of a full database
+- One wake-on-change scheduler for reminders and BRB expiry instead of many always-on workers
 - Cleanup-first handling for stale game state
+
+### Persistence note
+
+Watch settings, Later markers, reminders, and BRB timers are stored in a local JSON file so they survive normal runtime operation and simple restarts when the disk is still available.
+That is still not the same as a real database or guaranteed durable storage across redeploys, host resets, or filesystem loss, so Babblebox does not claim permanent durability here.
 
 ## Website and Community
 
@@ -171,7 +226,7 @@ That space is where updates can be tested, bugs can be reported, screenshots can
 
 ### Requirements
 
-- Python 3.11+
+- Python 3.9+
 - A Discord bot token
 - A `.env` file in the project root
 
@@ -236,6 +291,10 @@ These features rely on DMs being available:
 - Broken Telephone
 - Exquisite Corpse
 - Spyfall role messages
+- Watch alerts
+- Later markers
+- Capture transcripts
+- DM reminders
 
 ## Screenshots
 

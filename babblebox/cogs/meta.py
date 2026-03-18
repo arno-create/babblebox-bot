@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Optional
+
 import discord
 from discord import app_commands
 from discord.ext import commands
@@ -40,7 +42,7 @@ class MetaCog(commands.Cog):
 
     @commands.hybrid_command(name="stats", with_app_command=True, description="View Babblebox session stats")
     @app_commands.describe(user="Whose session stats to view")
-    async def stats_command(self, ctx: commands.Context, user: discord.User | None = None):
+    async def stats_command(self, ctx: commands.Context, user: Optional[discord.User] = None):
         target = user or ctx.author
         stats = ge.session_stats.get(target.id)
         if not stats:

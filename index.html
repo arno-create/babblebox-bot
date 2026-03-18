@@ -6,14 +6,14 @@
   <title>Babblebox - Discord Party Game Bot</title>
   <meta
     name="description"
-    content="Babblebox is a polished Discord party game bot with Spyfall, Word Bomb, Broken Telephone, Exquisite Corpse, dual slash and bb! commands, Chaos Cards, and a modular Python backend."
+    content="Babblebox is a polished Discord party game and utility bot with Spyfall, Word Bomb, Broken Telephone, Exquisite Corpse, Watch alerts, Later markers, Capture, Remind, BRB, dual slash and bb! commands, and a modular Python backend."
   />
   <meta name="robots" content="index,follow,max-image-preview:large" />
   <link rel="canonical" href="https://arno-create.github.io/babblebox-bot/" />
   <meta property="og:title" content="Babblebox - Discord Party Game Bot" />
   <meta
     property="og:description"
-    content="A polished Discord party bot with social deduction, voice-message chaos, dual commands, and modular backend architecture."
+    content="A polished Discord party and utility bot with social deduction, voice-message chaos, private jump-link tools, dual commands, and modular backend architecture."
   />
   <meta property="og:url" content="https://arno-create.github.io/babblebox-bot/" />
   <meta property="og:type" content="website" />
@@ -22,7 +22,7 @@
   <meta name="twitter:title" content="Babblebox - Discord Party Game Bot" />
   <meta
     name="twitter:description"
-    content="Multiplayer Discord party games, beautiful UX, slash and prefix commands, and Chaos Cards."
+    content="Multiplayer Discord games, private utility tools, beautiful UX, slash and prefix commands, and Chaos Cards."
   />
   <meta name="twitter:image" content="https://arno-create.github.io/babblebox-bot/banner.png" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -314,7 +314,7 @@
       gap: 18px;
     }
 
-    .feature-grid { grid-template-columns: repeat(3, 1fr); }
+    .feature-grid { grid-template-columns: repeat(4, 1fr); }
     .game-grid { grid-template-columns: repeat(2, 1fr); }
     .gallery { grid-template-columns: repeat(3, 1fr); }
     .privacy-grid { grid-template-columns: 1.1fr 0.9fr; align-items: start; }
@@ -341,6 +341,10 @@
       border: 1px solid rgba(255,255,255,0.08);
       font-size: 1.5rem;
       margin-bottom: 16px;
+    }
+
+    .feature-grid .card:nth-child(3) .icon:first-of-type {
+      display: none;
     }
 
     .mode-switch {
@@ -574,7 +578,7 @@
         <p>
           Babblebox is built for the kind of moments people screenshot, quote later, and bring up again a week after the server call ends.
           It mixes voice-message chaos, social deduction, absurd storytelling, interactive views, and fast multiplayer tension into one polished Discord experience.
-          This version also adds a modular backend, dual slash and <code>bb!</code> commands, and Chaos Cards that give every lobby a little more personality without stressing a free-tier Render deployment.
+          This version also adds a modular backend, dual slash and <code>bb!</code> commands, and a quiet utility layer for Watch alerts, Later markers, Capture, Remind, and BRB without stressing a free-tier Render deployment.
         </p>
         <div class="cta-row">
           <a class="btn btn-primary" href="https://discord.com/oauth2/authorize?client_id=1480903089518022739" target="_blank" rel="noreferrer">Invite Babblebox</a>
@@ -582,9 +586,9 @@
           <a class="btn btn-secondary" href="https://github.com/arno-create/babblebox-bot" target="_blank" rel="noreferrer">View Source</a>
         </div>
         <div class="stats">
-          <div class="stat"><b>4+</b><span>Mini-games and modes</span></div>
+          <div class="stat"><b>4</b><span>Party games</span></div>
+          <div class="stat"><b>5</b><span>Private utility tools</span></div>
           <div class="stat"><b>Dual</b><span>Slash and <code>bb!</code> commands</span></div>
-          <div class="stat"><b>Chaos Cards</b><span>Lobby twists with no background cost</span></div>
           <div class="stat"><b>Render-safe</b><span>Modular and free-tier friendly</span></div>
         </div>
       </div>
@@ -605,7 +609,7 @@
       <div class="section-head">
         <div>
           <h2>Built to feel smooth, not brittle.</h2>
-          <p>Babblebox focuses on social fun, but under the hood it now has a cleaner package layout, hybrid command routing, and game-state handling that fits a constrained hosting environment.</p>
+          <p>Babblebox focuses on social fun, but under the hood it now has a cleaner package layout, hybrid command routing, utility-state handling, and game flow management that fits a constrained hosting environment.</p>
         </div>
       </div>
 
@@ -624,6 +628,12 @@
 
         <article class="card">
           <div class="icon">🎴</div>
+          <div class="icon">dY"'</div>
+          <h3>Quiet utility suite</h3>
+          <p>Watch alerts, Later markers, Capture, Remind, and BRB add personal utility features without turning Babblebox into a noisy moderation dashboard.</p>
+        </article>
+
+        <article class="card">
           <h3>Chaos Cards</h3>
           <p>Hosts can set a low-cost lobby modifier like Reverse Order, Lightning Round, or Encore Reveal to make each round feel a little more distinct.</p>
         </article>
@@ -636,7 +646,7 @@
       <div class="section-head">
         <div>
           <h2>Core commands, two ways.</h2>
-          <p>Switch between slash and prefix examples. Every important command now supports both routes.</p>
+          <p>Switch between slash and prefix examples. Core games and the new utility tools both support both routes.</p>
         </div>
       </div>
 
@@ -673,6 +683,30 @@
           <div class="command-row" data-slash="/chaoscard" data-prefix="bb!chaoscard">
             <code>/chaoscard</code>
             <span>Cycle the current lobby twist.</span>
+          </div>
+          <div class="command-row" data-slash="/watch settings" data-prefix="bb!watch settings">
+            <code>/watch settings</code>
+            <span>View your watch alert configuration.</span>
+          </div>
+          <div class="command-row" data-slash="/watch keyword add" data-prefix="bb!watch keyword add server contains project update">
+            <code>/watch keyword add</code>
+            <span>Add a watched keyword or phrase.</span>
+          </div>
+          <div class="command-row" data-slash="/later mark" data-prefix="bb!later mark">
+            <code>/later mark</code>
+            <span>Save your place in the current channel.</span>
+          </div>
+          <div class="command-row" data-slash="/capture" data-prefix="bb!capture 10">
+            <code>/capture</code>
+            <span>DM yourself a private snapshot of recent messages.</span>
+          </div>
+          <div class="command-row" data-slash="/remind set" data-prefix="bb!remind set 2h dm take a break">
+            <code>/remind set</code>
+            <span>Create a one-time reminder.</span>
+          </div>
+          <div class="command-row" data-slash="/brb set" data-prefix="bb!brb 30m grabbing coffee">
+            <code>/brb set</code>
+            <span>Start a timed BRB notice.</span>
           </div>
         </div>
       </div>
@@ -758,7 +792,7 @@
       <div class="section-head">
         <div>
           <h2>Privacy policy</h2>
-          <p>Babblebox is built to do the minimum necessary to provide its features. This section explains that plainly.</p>
+          <p>Babblebox is built to do the minimum necessary to provide its features. That applies to both the party games and the new personal utility tools.</p>
         </div>
       </div>
 
@@ -769,7 +803,7 @@
           <div class="privacy-list">
             <div class="privacy-item"><strong>What may be processed</strong>Command usage, temporary game state, player turns, DM responses used by the games, AFK status information, and content needed to operate the feature a user chooses to use.</div>
             <div class="privacy-item"><strong>What is not the goal</strong>Babblebox is not built to sell personal data, build ad profiles, or act like a surveillance product. It is a party game bot, not a data-mining machine.</div>
-            <div class="privacy-item"><strong>Retention approach</strong>Most gameplay data is temporary and tied to the active session. Lobbies, timers, and AFK entries exist to keep the bot functioning, not to become permanent storage.</div>
+            <div class="privacy-item"><strong>Retention approach</strong>Most gameplay data is temporary and tied to the active session. Utility settings and reminders use a lightweight local JSON store for runtime continuity, but that is still not a guarantee of permanent durability across redeploys or disk loss.</div>
             <div class="privacy-item"><strong>DM usage</strong>Some games rely on direct messages for prompts, replies, or role information. If users disable DMs from server members, those features may not work correctly.</div>
             <div class="privacy-item"><strong>Sensitive information</strong>Do not send passwords, payment details, legal identifiers, or other private information through the bot.</div>
             <div class="privacy-item"><strong>Third-party services</strong>Babblebox may rely on Discord, Render, and other infrastructure providers to operate. Those services have their own policies and limits.</div>
@@ -798,7 +832,7 @@
         <div>
           <h2>Bring chaos to your server.</h2>
           <p>
-            Invite Babblebox, test the games with your friends, try the Chaos Cards, and join the support community to follow updates and shape what gets built next.
+            Invite Babblebox, test the games with your friends, try the Chaos Cards, explore the private utility tools, and join the support community to follow updates and shape what gets built next.
           </p>
         </div>
         <div class="cta-row" style="justify-content:flex-end; margin-top:0;">

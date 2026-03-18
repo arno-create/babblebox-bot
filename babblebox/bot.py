@@ -16,6 +16,7 @@ COGS = (
     "babblebox.cogs.meta",
     "babblebox.cogs.afk",
     "babblebox.cogs.gameplay",
+    "babblebox.cogs.utilities",
     "babblebox.cogs.events",
 )
 

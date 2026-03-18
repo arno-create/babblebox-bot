@@ -15,6 +15,7 @@ async def send_hybrid_response(
     embed: discord.Embed | None = None,
     view: discord.ui.View | None = None,
     ephemeral: bool = False,
+    delete_after: float | None = None,
 ) -> discord.Message | None:
     kwargs: dict[str, Any] = {}
     if content is not None:
@@ -26,6 +27,8 @@ async def send_hybrid_response(
 
     interaction = getattr(ctx, "interaction", None)
     if interaction is None:
+        if delete_after is not None:
+            kwargs["delete_after"] = delete_after
         return await ctx.send(**kwargs)
 
     if interaction.response.is_done():
@@ -47,3 +50,10 @@ async def require_channel_permissions(
 
 def is_slash_invocation(ctx: commands.Context) -> bool:
     return getattr(ctx, "interaction", None) is not None
+
+
+async def is_command_message(bot: commands.Bot, message: discord.Message) -> bool:
+    prefixes = await bot.get_prefix(message)
+    if isinstance(prefixes, str):
+        prefixes = [prefixes]
+    return any(message.content.startswith(prefix) for prefix in prefixes)

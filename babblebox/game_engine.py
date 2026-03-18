@@ -11,6 +11,8 @@ from typing import Optional
 import discord
 from discord.ext import commands
 
+from babblebox.text_safety import sanitize_short_plain_text
+
 # ==========================================
 # GLOBALS & CONSTANTS
 # ==========================================
@@ -1054,6 +1056,15 @@ def bump_afk_version(user_id):
 
 
 def sanitize_afk_reason(reason):
+    return sanitize_short_plain_text(
+        reason,
+        field_name="AFK reason",
+        max_length=AFK_REASON_MAX_LEN,
+        sentence_limit=AFK_REASON_SENTENCE_LIMIT,
+        reject_blocklist=True,
+        allow_empty=True,
+    )
+
     if reason is None:
         return True, None
 
@@ -1187,7 +1198,7 @@ def build_afk_status_embed(user, record, *, title=None):
     embed.add_field(name="Timing", value="\n".join(timing_lines), inline=False)
 
 
-    return style_embed(embed, footer="Babblebox AFK | AFK clears automatically when you send a message.")
+    return style_embed(embed, footer="Babblebox AFK | AFK clears on your next message. Try /brb for timed away notes.")
 
 
 def build_afk_brief_line(user, record):
@@ -2551,7 +2562,7 @@ async def handle_telephone_turn_locked(message, guild_id, game):
 def build_help_embed() -> discord.Embed:
     embed = discord.Embed(
         title="Babblebox Manual",
-        description="Slash commands and the `bb!` prefix both work. Open a lobby, pick a game, and let the server descend into party-game chaos.",
+        description="Slash commands and the `bb!` prefix both work. Host party games, manage away states, save reading markers, and send private utility links without cluttering the channel.",
         color=discord.Color.gold(),
     )
     embed.add_field(
@@ -2586,7 +2597,16 @@ def build_help_embed() -> discord.Embed:
     )
     embed.add_field(
         name="Core Commands",
-        value="`/help` or `bb!help`, `/ping` or `bb!ping`, `/play` or `bb!play`, `/stop` or `bb!stop`, `/afk` or `bb!afk`, `/afkstatus` or `bb!afkstatus`",
+        value="`/help`, `/ping`, `/play`, `/stop`, `/afk`, `/afkstatus`, `/stats`, `/leaderboard`, and their `bb!` prefix equivalents.",
+        inline=False,
+    )
+    embed.add_field(
+        name="Utility Commands",
+        value=(
+            "`/watch ...` for mention and keyword alerts, `/later mark` to save where you stopped reading, "
+            "`/capture` for a private channel snapshot, `/remind set` for one-time reminders, "
+            "and `/brb set` for timed away notices."
+        ),
         inline=False,
     )
     embed.add_field(
@@ -2596,7 +2616,7 @@ def build_help_embed() -> discord.Embed:
     )
     embed.add_field(
         name="DM Requirement",
-        value="Broken Telephone, Exquisite Corpse, and Spyfall role messages require players to allow DMs from server members.",
+        value="Broken Telephone, Exquisite Corpse, Spyfall role messages, Watch alerts, Later markers, Capture, and DM reminders all rely on DMs being open.",
         inline=False,
     )
     return style_embed(embed, footer="Babblebox Manual | /play or bb!play to start")

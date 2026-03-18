@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from typing import Optional
+
 from discord import app_commands
 from discord.ext import commands
 
@@ -20,9 +22,9 @@ class AfkCog(commands.Cog):
     async def afk_command(
         self,
         ctx: commands.Context,
-        reason: str | None = None,
-        duration_minutes: int | None = None,
-        start_in_minutes: int | None = None,
+        reason: Optional[str] = None,
+        duration_minutes: Optional[int] = None,
+        start_in_minutes: Optional[int] = None,
     ):
         if reason and len(reason) > ge.AFK_REASON_MAX_LEN:
             await send_hybrid_response(

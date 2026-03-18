@@ -6,25 +6,24 @@ import discord
 from discord.ext import commands
 
 from babblebox import game_engine as ge
+from babblebox.command_utils import is_command_message
 
 
 class EventsCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    async def _is_command_message(self, message: discord.Message) -> bool:
-        prefixes = await self.bot.get_prefix(message)
-        if isinstance(prefixes, str):
-            prefixes = [prefixes]
-        return any(message.content.startswith(prefix) for prefix in prefixes)
-
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         if message.author.bot:
             return
 
-        if await self._is_command_message(message):
+        if await is_command_message(self.bot, message):
             return
+
+        utility_service = getattr(self.bot, "utility_service", None)
+        if utility_service is not None:
+            await utility_service.clear_brb_on_activity(message.author.id)
 
         author_afk = ge.afk_records.get(message.author.id)
         if ge.is_active_afk_record(author_afk):
@@ -38,7 +37,7 @@ class EventsCog(commands.Cog):
                         footer="Babblebox AFK",
                     ),
                     delete_after=5.0,
-                    allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
+                        allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
                 )
 
         active_afk_mentions = [
@@ -46,15 +45,18 @@ class EventsCog(commands.Cog):
             for mention in message.mentions
             if mention.id != message.author.id and ge.is_active_afk_record(ge.afk_records.get(mention.id))
         ]
-        if active_afk_mentions:
-            lines_to_send = [ge.build_afk_brief_line(user, record) for user, record in active_afk_mentions[:5]]
+        notice_lines = [ge.build_afk_brief_line(user, record) for user, record in active_afk_mentions[:5]]
+        if utility_service is not None and len(notice_lines) < 5:
+            remaining = 5 - len(notice_lines)
+            notice_lines.extend(utility_service.build_brb_notice_lines(message)[:remaining])
+        if notice_lines:
             with contextlib.suppress(discord.HTTPException):
                 await message.channel.send(
                     embed=ge.make_status_embed(
-                        "AFK Notice",
-                        "\n".join(lines_to_send),
+                        "Away Notice",
+                        "\n".join(notice_lines),
                         tone="info",
-                        footer="Babblebox AFK | Mentions are muted to avoid ping spam",
+                        footer="Babblebox AFK/BRB | Mentions are muted. Try /watch for private mention alerts.",
                     ),
                     delete_after=12.0,
                     allowed_mentions=discord.AllowedMentions.none(),
