@@ -12,12 +12,14 @@ async def defer_hybrid_response(
     ctx: commands.Context,
     *,
     ephemeral: bool = False,
-    thinking: bool = True,
 ) -> bool:
     interaction = getattr(ctx, "interaction", None)
-    if interaction is None or interaction.response.is_done():
+    if interaction is None or interaction.is_expired() or interaction.response.is_done():
         return False
-    await interaction.response.defer(ephemeral=ephemeral, thinking=thinking)
+    try:
+        await ctx.defer(ephemeral=ephemeral)
+    except (discord.InteractionResponded, discord.NotFound):
+        return False
     return True
 
 
@@ -39,19 +41,8 @@ async def send_hybrid_response(
         kwargs["view"] = view
     if delete_after is not None:
         kwargs["delete_after"] = delete_after
-
-    interaction = getattr(ctx, "interaction", None)
-    if interaction is None:
-        return await ctx.send(**kwargs)
-
-    if interaction.response.is_done():
-        return await interaction.followup.send(wait=True, ephemeral=ephemeral, **kwargs)
-
-    try:
-        await interaction.response.send_message(ephemeral=ephemeral, **kwargs)
-        return await interaction.original_response()
-    except discord.InteractionResponded:
-        return await interaction.followup.send(wait=True, ephemeral=ephemeral, **kwargs)
+    kwargs["ephemeral"] = ephemeral
+    return await ctx.send(**kwargs)
 
 
 async def require_channel_permissions(
