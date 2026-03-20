@@ -35,6 +35,10 @@ def health():
             "commands": [
                 "/play",
                 "bb!play",
+                "/daily",
+                "/buddy",
+                "/profile",
+                "/vault",
                 "/help",
                 "bb!help",
                 "/watch settings",

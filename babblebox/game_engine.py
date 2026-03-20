@@ -171,6 +171,27 @@ def get_runtime_bot() -> Optional[commands.Bot]:
     return BOT_REF
 
 
+def get_profile_service():
+    runtime_bot = get_runtime_bot()
+    if runtime_bot is None:
+        return None
+    return getattr(runtime_bot, "profile_service", None)
+
+
+def schedule_profile_update(method_name, /, *args, **kwargs):
+    profile_service = get_profile_service()
+    if profile_service is None or not getattr(profile_service, "storage_ready", False):
+        return
+    method = getattr(profile_service, method_name, None)
+    if method is None:
+        return
+    try:
+        loop = asyncio.get_running_loop()
+    except RuntimeError:
+        return
+    loop.create_task(method(*args, **kwargs), name=f"babblebox-profile-{method_name}")
+
+
 # ==========================================
 # HELPERS
 # ==========================================
@@ -531,6 +552,12 @@ def mark_game_started(game):
             stats["bomb_games"] += 1
 
     game["stats_recorded"] = True
+    schedule_profile_update(
+        "record_game_started",
+        game_type=game_type,
+        host_id=game["host"].id,
+        player_ids=[player.id for player in players],
+    )
 
 
 def mark_telephone_completion(game):
@@ -539,6 +566,10 @@ def mark_telephone_completion(game):
     game["result_recorded"] = True
     for player in game.get("starting_players", []):
         get_player_stats(player)["telephone_completions"] += 1
+    schedule_profile_update(
+        "record_telephone_completion",
+        player_ids=[player.id for player in game.get("starting_players", [])],
+    )
 
 
 def mark_corpse_completion(game):
@@ -547,6 +578,10 @@ def mark_corpse_completion(game):
     game["result_recorded"] = True
     for player in game.get("starting_players", []):
         get_player_stats(player)["corpse_masterpieces"] += 1
+    schedule_profile_update(
+        "record_corpse_completion",
+        player_ids=[player.id for player in game.get("starting_players", [])],
+    )
 
 
 def mark_spyfall_result(game, *, village_won):
@@ -566,6 +601,12 @@ def mark_spyfall_result(game, *, village_won):
                 stats["wins"] += 1
                 stats["village_wins"] += 1
                 stats["spies_caught"] += 1
+    schedule_profile_update(
+        "record_spyfall_result",
+        spy_id=spy_id,
+        player_ids=[player.id for player in game.get("starting_players", [])],
+        village_won=village_won,
+    )
 
 
 def mark_bomb_win(game, winner):
@@ -575,6 +616,7 @@ def mark_bomb_win(game, winner):
     stats = get_player_stats(winner)
     stats["wins"] += 1
     stats["bomb_wins"] += 1
+    schedule_profile_update("record_bomb_win", winner_id=winner.id)
 
 
 def record_bomb_word(player, word, elapsed):
@@ -1135,10 +1177,22 @@ def get_lobby_embed(guild_id):
 
     if gt != "none":
         if not players:
-            embed.add_field(name="Players Lobby", value="*No players yet. Click Join!*", inline=False)
+            embed.add_field(
+                name="Players Lobby",
+                value="No players yet. Click **Join** to hop in. If you are solo right now, try `/daily` or `bb!daily` while you wait.",
+                inline=False,
+            )
         else:
             players_list = "\n".join(f"**{i + 1}.** 🎮 {p.display_name}" for i, p in enumerate(players))
             embed.add_field(name=f"Players Lobby ({len(players)}/{MAX_PLAYERS})", value=players_list, inline=False)
+
+        if gt != "none":
+            min_players = 2 if gt == "bomb" else 3
+            embed.add_field(
+                name="Start Guide",
+                value=f"Minimum players: **{min_players}**\nHost picks the game, everyone joins, then the host starts when the lobby is ready.",
+                inline=False,
+            )
 
     return style_embed(embed, footer=f"Babblebox Lobby | Hosted by {host.display_name}")
 
@@ -1371,14 +1425,18 @@ class LobbyView(TrackedView):
             if interaction.user.id != game["host"].id:
                 return await safe_send_interaction(interaction, "❌ Only the Host can start the game!", ephemeral=True)
             if game["game_type"] == "none":
-                return await safe_send_interaction(interaction, "❌ Select a game from the dropdown first!", ephemeral=True)
+                return await safe_send_interaction(interaction, "Select a game from the dropdown first so the lobby knows what to launch.", ephemeral=True)
             runtime_bot = get_runtime_bot()
             if game["game_type"] == "bomb" and (runtime_bot is None or not getattr(runtime_bot, "dictionary_ready", False)):
-                return await safe_send_interaction(interaction, "❌ Word Bomb is unavailable because the dictionary failed to load.", ephemeral=True)
+                return await safe_send_interaction(interaction, "Word Bomb is unavailable right now because the dictionary did not finish loading.", ephemeral=True)
 
             min_players = 2 if game["game_type"] == "bomb" else 3
             if len(game["players"]) < min_players:
-                return await safe_send_interaction(interaction, f"Need at least {min_players} players!", ephemeral=True)
+                return await safe_send_interaction(
+                    interaction,
+                    f"You need at least {min_players} players for this game. If the server is quiet, Babblebox Daily is ready in `/daily`.",
+                    ephemeral=True,
+                )
 
             for child in self.children:
                 child.disabled = True
@@ -2302,50 +2360,54 @@ async def handle_telephone_turn_locked(message, guild_id, game):
 def build_help_embed() -> discord.Embed:
     embed = discord.Embed(
         title="Babblebox Manual",
-        description="Slash commands and the `bb!` prefix both work. Host party games, manage away states, save reading markers, and send private utility links without cluttering the channel.",
+        description=(
+            "Babblebox is a multi-category Discord bot: party games when a group is around, "
+            "quiet utilities for daily life, a shared Daily puzzle for solo moments, and a lightweight Buddy/Profile layer."
+        ),
         color=discord.Color.gold(),
     )
     embed.add_field(
-        name="How to Play",
-        value="Use `/play` or `bb!play` to open the lobby. The player who starts it becomes the host, chooses the game, and can set a Chaos Card before launch.",
-        inline=False,
-    )
-    embed.add_field(
-        name="Broken Telephone (3+ Players)",
-        value="The bot DMs the first player to record a voice message. The next player receives it, listens, and mimics it. The final player types a guess.",
-        inline=False,
-    )
-    embed.add_field(
-        name="Exquisite Corpse (3+ Players)",
-        value="A blind story-building game. The bot DMs players asking for words or phrases, then reveals the final absurd sentence.",
-        inline=False,
-    )
-    embed.add_field(
-        name="Spyfall (3+ Players)",
-        value="The bot DMs everyone a location except one secret spy. Players interrogate each other and vote to catch the spy.",
-        inline=False,
-    )
-    embed.add_field(
-        name="Word Bomb (2+ Players)",
-        value="Type a valid English word containing the required syllable before the timer runs out. Last player standing wins.",
-        inline=False,
-    )
-    embed.add_field(
-        name="Chaos Cards",
-        value="Before the lobby starts, the host can cycle a Chaos Card to add a lightweight twist such as Reverse Order, Lightning Round, or Encore Reveal.",
-        inline=False,
-    )
-    embed.add_field(
-        name="Core Commands",
-        value="`/help`, `/ping`, `/play`, `/stop`, `/afk`, `/afkstatus`, `/stats`, `/leaderboard`, and their `bb!` prefix equivalents.",
-        inline=False,
-    )
-    embed.add_field(
-        name="Utility Commands",
+        name="Party Games",
         value=(
-            "`/watch ...` for mention and keyword alerts, `/later mark` to save where you stopped reading, "
-            "`/capture` for a private channel snapshot, and `/remind set` for one-time reminders."
+            "`/play` or `bb!play` opens the lobby.\n"
+            "`Broken Telephone` and `Exquisite Corpse` need 3+ players.\n"
+            "`Spyfall` needs 3+ players and supports `/vote`.\n"
+            "`Word Bomb` needs 2+ players and supports bomb modes."
         ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Everyday Utilities",
+        value=(
+            "`/watch ...` for mention or keyword alerts.\n"
+            "`/later mark` to save your reading spot.\n"
+            "`/capture` for a private channel snapshot.\n"
+            "`/remind set` for one-time reminders.\n"
+            "`/afk` and `/afkstatus` for away scheduling."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Daily Play",
+        value=(
+            "`/daily` shows today's shared puzzle.\n"
+            "`/daily play <guess>` submits a guess.\n"
+            "`/daily stats`, `/daily share`, and `/daily leaderboard` cover streaks, sharing, and standings."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Buddy And Profile",
+        value=(
+            "`/buddy` opens your companion card.\n"
+            "`/buddy rename`, `/buddy style`, and `/buddy stats` manage identity and progression.\n"
+            "`/profile` and `/vault` pull Daily, utilities, Buddy, and game stats into one compact view."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="If You Are Solo",
+        value="Babblebox is still useful when a lobby is not available. Try `/daily`, `/buddy`, `/profile`, `/remind`, or `/later`.",
         inline=False,
     )
     embed.add_field(
@@ -2355,7 +2417,7 @@ def build_help_embed() -> discord.Embed:
     )
     embed.add_field(
         name="DM Requirement",
-        value="Broken Telephone, Exquisite Corpse, Spyfall role messages, Watch alerts, Later markers, Capture, and DM reminders all rely on DMs being open.",
+        value="Broken Telephone, Exquisite Corpse, Spyfall role messages, Watch alerts, Later markers, Capture, and DM reminders rely on open DMs.",
         inline=False,
     )
-    return style_embed(embed, footer="Babblebox Manual | /play or bb!play to start")
+    return style_embed(embed, footer="Babblebox Manual | /play, /daily, /buddy, or /profile")

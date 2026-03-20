@@ -5,8 +5,11 @@ from unittest.mock import AsyncMock, patch
 
 from babblebox import game_engine as ge
 from babblebox.cogs.gameplay import GameplayCog
+from babblebox.cogs.identity import IdentityCog
 from babblebox.cogs.meta import MetaCog
 from babblebox.cogs.utilities import UtilityCog
+from babblebox.profile_service import ProfileService
+from babblebox.profile_store import ProfileStore
 
 
 class FakeMessage:
@@ -145,6 +148,23 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             ctx = FakeContext(interaction=FakeInteraction(), guild=FakeGuild(), channel=FakeChannel(), author=FakeAuthor())
 
             await UtilityCog.remind_set_command.callback(cog, ctx, "10m", "dm", text="take a break")
+
+            self.assertEqual(len(ctx.defer_calls), 1)
+            self.assertEqual(len(ctx.send_calls), 1)
+            self.assertTrue(ctx.send_calls[0]["ephemeral"])
+        finally:
+            await cog.service.close()
+
+    async def test_daily_group_renders_with_memory_profile_service(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop(), get_user=lambda user_id: None)
+        cog = IdentityCog(bot)
+        memory_service = ProfileService(bot, store=ProfileStore(backend="memory"))
+        try:
+            await memory_service.start()
+            cog.service = memory_service
+            ctx = FakeContext(interaction=FakeInteraction(), guild=FakeGuild(), channel=FakeChannel(), author=FakeAuthor())
+
+            await IdentityCog.daily_group.callback(cog, ctx)
 
             self.assertEqual(len(ctx.defer_calls), 1)
             self.assertEqual(len(ctx.send_calls), 1)

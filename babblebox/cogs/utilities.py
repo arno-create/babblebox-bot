@@ -49,6 +49,15 @@ class UtilityCog(commands.Cog):
             delattr(self.bot, "utility_service")
         self.bot.loop.create_task(self.service.close())
 
+    def _profile_service(self):
+        return getattr(self.bot, "profile_service", None)
+
+    async def _record_utility_action(self, user_id: int, action: str):
+        profile_service = self._profile_service()
+        if profile_service is None or not getattr(profile_service, "storage_ready", False):
+            return
+        await profile_service.record_utility_action(user_id, action)
+
     async def _send_private_embed(
         self,
         ctx: commands.Context,
@@ -284,6 +293,8 @@ class UtilityCog(commands.Cog):
             ctx,
             embed=ge.make_status_embed("Watch Keyword", message, tone=tone, footer="Babblebox Watch"),
         )
+        if ok:
+            await self._record_utility_action(ctx.author.id, "watch_keyword")
 
     @watch_keyword_group.command(name="remove", with_app_command=True, description="Remove a watched keyword")
     @app_commands.describe(scope="Remove from this server or global scope", phrase="The exact saved keyword or phrase")
@@ -382,6 +393,7 @@ class UtilityCog(commands.Cog):
             "Later Marker Saved",
             f"I DM'd you a jump link for **#{ctx.channel.name}**.",
         )
+        await self._record_utility_action(ctx.author.id, "later")
 
     @later_group.command(name="list", with_app_command=True, description="List your saved reading markers")
     async def later_list_command(self, ctx: commands.Context):
@@ -500,6 +512,7 @@ class UtilityCog(commands.Cog):
             "Capture Sent",
             f"I DM'd you a private snapshot of **{len(messages)}** recent messages.",
         )
+        await self._record_utility_action(ctx.author.id, "capture")
 
     @commands.hybrid_group(
         name="remind",
@@ -579,6 +592,7 @@ class UtilityCog(commands.Cog):
                 footer="Babblebox Remind",
             ),
         )
+        await self._record_utility_action(ctx.author.id, "reminder")
 
     @remind_group.command(name="list", with_app_command=True, description="List your active reminders")
     async def remind_list_command(self, ctx: commands.Context):

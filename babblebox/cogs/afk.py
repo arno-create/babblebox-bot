@@ -16,6 +16,9 @@ class AfkCog(commands.Cog):
     def _service(self):
         return getattr(self.bot, "utility_service", None)
 
+    def _profile_service(self):
+        return getattr(self.bot, "profile_service", None)
+
     async def _send_storage_unavailable(self, ctx: commands.Context):
         service = self._service()
         message = "AFK is temporarily unavailable because Babblebox could not reach its utility database."
@@ -137,6 +140,9 @@ class AfkCog(commands.Cog):
             ),
             ephemeral=True,
         )
+        profile_service = self._profile_service()
+        if profile_service is not None and getattr(profile_service, "storage_ready", False):
+            await profile_service.record_utility_action(ctx.author.id, "afk")
 
     @commands.hybrid_command(name="afkstatus", with_app_command=True, description="View your current AFK or scheduled AFK status")
     async def afkstatus_command(self, ctx: commands.Context):

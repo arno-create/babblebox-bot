@@ -1,17 +1,14 @@
 # Babblebox
 
-Babblebox is a multiplayer Discord party game bot built with Python and `discord.py`.
-It is designed around social chaos, polished Discord UX, and replayable mini-games that feel lively instead of disposable.
+Babblebox is a modular Discord bot built with Python and `discord.py`.
+It combines:
 
-This version of the project includes:
+- party games for active groups
+- everyday utility tools that stay lightweight and private
+- a shared Daily micro-challenge for low-activity moments
+- a compact Buddy/Profile identity layer that makes the bot feel cohesive and showable
 
-- A modular backend instead of one giant monolith
-- Dual slash and `bb!` prefix commands
-- A new `Chaos Card` lobby system
-- A utility suite with Watch, Later, Capture, Remind, and a stronger timed AFK system
-- Postgres-first utility persistence in production, with explicit memory mode for tests and local dev
-- Upgraded embed-driven bot responses
-- A restored blue-themed website with privacy, community, and support sections
+Babblebox is designed to stay useful without drifting into a bloated economy bot, moderation suite, or API-heavy novelty project.
 
 ## Official Links
 
@@ -20,113 +17,186 @@ This version of the project includes:
 - GitHub repository: [https://github.com/arno-create/babblebox-bot](https://github.com/arno-create/babblebox-bot)
 - Support server: [https://discord.com/servers/inevitable-friendship-1322933864360050688](https://discord.com/servers/inevitable-friendship-1322933864360050688)
 
-## What Babblebox Feels Like
+## Feature Categories
 
-Babblebox is meant to create the kinds of Discord moments people remember:
+### Party Games
 
-- Voice-message mimicry that spirals into nonsense
-- Social deduction rounds that turn suspicious fast
-- Story prompts that produce ridiculous final reveals
-- Fast typing pressure that makes Word Bomb feel genuinely tense
+- Broken Telephone
+- Exquisite Corpse
+- Spyfall
+- Word Bomb
+- Chaos Cards for lightweight pre-game twists
+- hybrid slash + `bb!` prefix support
+- session stats and leaderboard commands
 
-It is a party bot, but it is built with real engineering discipline:
+### Everyday Utilities
 
-- guild-scoped state
-- timeout cleanup
-- defensive DM handling
-- interactive views
-- Render-friendly runtime behavior
+- Watch: DM alerts for mentions and watched keywords
+- Later: save one reading marker per channel
+- Capture: private recent-message transcript snapshots
+- Remind: safe one-time reminders with bounded limits
+- AFK: scheduled or immediate away status with elapsed and return context
 
-## Games
+### Daily Play
 
-### Broken Telephone
+- `Babblebox Daily`: one shared deterministic Daily Shuffle puzzle per UTC day
+- compact per-user result row storage
+- daily streaks
+- shareable text result output
+- lifetime summary stats plus bounded raw retention
 
-Players pass along a voice message by imitating what they hear. The final player types what they think the original phrase was.
+### Buddy / Profile / Vault
 
-### Exquisite Corpse
+- one lightweight Buddy per user
+- cosmetic-first style and naming
+- XP and level progression tied to real usage
+- anti-farm daily XP caps by category
+- `/profile` and `/vault` views that summarize Daily, utilities, Buddy, and multiplayer activity
 
-Players secretly contribute words and phrases to build one absurd final sentence.
+## Commands
 
-### Spyfall
+Slash commands and the `bb!` prefix both work.
 
-One player is the spy, everyone else knows the location, and the server has to question each other before voting.
-
-### Word Bomb
-
-Players race to type valid English words containing a required syllable before the timer expires.
-
-## Utility Suite
-
-Babblebox is now more than a game bot. It also includes a quiet, personal utility layer that stays aligned with Discord permissions and keeps channel clutter low.
-
-### Watch
-
-Receive DM alerts when someone mentions you or when watched keywords appear, with jump links back to the message. Mention watches can be server-scoped or global, and keyword watches support server or global scope with contains or whole-word matching.
-
-### Later
-
-Mark where you stopped reading in a channel and get a DM jump link back to that point later. One marker per user per channel is stored, so re-marking simply updates your place.
-
-### Capture
-
-Privately DM yourself a structured snapshot of recent channel messages for memory, moderation context, or reference. Captures respect channel visibility and only work from channels the requester can already access.
-
-### Remind
-
-Create safe one-time reminders using relative durations such as `10m`, `2h`, or `1d12h`. Reminders default to DMs, while channel delivery is intentionally stricter to reduce spam and clutter.
-
-### AFK
-
-AFK now handles both indefinite and timed away states. When someone mentions you or replies to one of your messages while you are AFK, Babblebox can show how long you have been away and, if the AFK is timed, when you are expected back.
-
-## Dual Command System
-
-Core commands and the new utility features work in both styles:
+### Core
 
 | Slash | Prefix | Purpose |
 | --- | --- | --- |
-| `/help` | `bb!help` | Show the manual |
+| `/help` | `bb!help` | Open the in-bot manual |
 | `/ping` | `bb!ping` | Health check |
 | `/play` | `bb!play` | Open a lobby |
 | `/stop` | `bb!stop` | Force stop the active lobby/game |
-| `/afk` | `bb!afk` | Set, schedule, or clear AFK, including timed away status |
-| `/afkstatus` | `bb!afkstatus` | View AFK status |
 | `/vote` | `bb!vote` | Trigger a Spyfall vote |
-| `/stats` | `bb!stats` | Show session stats |
-| `/leaderboard` | `bb!leaderboard` | Show leaderboard |
-| `/chaoscard` | `bb!chaoscard` | Cycle the lobby Chaos Card |
-| `/watch mentions` | `bb!watch mentions on server` | Toggle mention alerts |
-| `/watch keyword add` | `bb!watch keyword add server contains project update` | Add a watched keyword |
-| `/watch settings` | `bb!watch settings` | View current watch configuration |
-| `/later mark` | `bb!later mark` | Save a reading marker |
-| `/later list` | `bb!later list` | List saved reading markers |
-| `/capture` | `bb!capture 10` | DM a recent channel snapshot |
-| `/remind set` | `bb!remind set 2h dm take a break` | Schedule a one-time reminder |
-| `/remind list` | `bb!remind list` | List active reminders |
+| `/stats` | `bb!stats` | Session stats |
+| `/leaderboard` | `bb!leaderboard` | Session leaderboard |
+| `/chaoscard` | `bb!chaoscard` | Cycle the current lobby Chaos Card |
 
-## Chaos Cards
+### Everyday Utilities
 
-Chaos Cards are lightweight pre-game lobby modifiers. They change the vibe of a round without adding background workers, polling, or storage-heavy systems.
+| Slash | Prefix | Purpose |
+| --- | --- | --- |
+| `/watch settings` | `bb!watch settings` | View your watch setup |
+| `/watch keyword add` | `bb!watch keyword add server contains project update` | Add a watched phrase |
+| `/watch off` | `bb!watch off server` | Clear watch settings |
+| `/later mark` | `bb!later mark` | Save your current reading spot |
+| `/later list` | `bb!later list` | List saved markers |
+| `/later clear` | `bb!later clear here` | Clear markers |
+| `/capture` | `bb!capture 10` | DM yourself a private snapshot |
+| `/remind set` | `bb!remind set 2h dm take a break` | Create a reminder |
+| `/remind list` | `bb!remind list` | Review active reminders |
+| `/remind cancel` | `bb!remind cancel <id>` | Cancel a reminder |
+| `/afk` | `bb!afk` | Set, schedule, or clear AFK |
+| `/afkstatus` | `bb!afkstatus` | View AFK status |
 
-### Included cards
+### Daily Play
 
-- `Off`: standard rules
-- `Reverse Order`: reverse the shuffled player order
-- `Lightning Round`: shorter DM timers, faster vote timing, tighter Word Bomb pacing
-- `Encore Reveal`: add a dramatic recap headline at the end of the game
+| Slash | Prefix | Purpose |
+| --- | --- | --- |
+| `/daily` | `bb!daily` | View today's Daily |
+| `/daily play <guess>` | `bb!daily play <guess>` | Submit a Daily guess |
+| `/daily stats` | `bb!daily stats` | View Daily streaks and recent runs |
+| `/daily share` | `bb!daily share` | Share your Daily result |
+| `/daily leaderboard` | `bb!daily leaderboard` | View Daily standings |
 
-## Embed UX Upgrade
+### Buddy / Profile
 
-Babblebox now leans harder into embeds across command responses and game presentation:
+| Slash | Prefix | Purpose |
+| --- | --- | --- |
+| `/buddy` | `bb!buddy` | Open your Buddy card |
+| `/buddy rename` | `bb!buddy rename Pebble` | Rename your Buddy |
+| `/buddy style` | `bb!buddy style sunset` | Change Buddy style |
+| `/buddy stats` | `bb!buddy stats` | View XP, badges, and titles |
+| `/profile` | `bb!profile` | View your Babblebox profile |
+| `/vault` | `bb!vault` | Open your personal vault view |
 
-- Consistent color language for info, success, warning, and danger states
-- Shared footer style for better orientation
-- Cleaner AFK, lobby, stats, and vote messaging
-- Improved Word Bomb turn presentation
+## How Daily Works
+
+Babblebox Daily currently ships with one flagship mode: `Daily Shuffle`.
+
+- Each UTC day maps to one deterministic puzzle from local curated data.
+- The challenge content is regenerated from the date, not stored in the database.
+- Each user gets one result row per day and challenge.
+- Users get up to 3 attempts.
+- Only compact outcome data is stored: attempts, solved/failed, timestamps, and solve time.
+- Raw Daily rows are pruned after 180 days.
+- Lifetime streak and clear counters live in the profile row, so long-term stats survive pruning.
+
+## How Buddy Works
+
+Buddy is intentionally lightweight.
+
+- One companion row per user
+- Buddy species, nickname, style, mood, title slot, and featured badge slot
+- XP and level progression
+- No inventory
+- No currency
+- No lootboxes
+- No blob or image storage
+
+Progress comes from real activity:
+
+- Daily participation and clears
+- selected utility use
+- game participation and wins
+
+Anti-farm controls:
+
+- Daily XP bucket cap
+- Utility XP bucket cap
+- Game XP bucket cap
+- No XP for spammy repeated share loops or noisy utility abuse
+
+## Profile / Vault Design
+
+`/profile` and `/vault` pull together:
+
+- Buddy identity
+- Daily streaks and totals
+- utility summary
+- persistent multiplayer summary
+- current session stats when available
+
+Utility-sensitive details remain conservative:
+
+- self-view can show active reminder and Later counts
+- public profile views avoid exposing personal utility details
+
+## Storage Discipline
+
+Babblebox is built with a free-tier database budget in mind.
+
+### Production persistence choices
+
+- no production JSON persistence for the new systems
+- no screenshot storage
+- no image/blob storage
+- no full watched-message archives
+- no long-term capture transcript storage
+- no arbitrary per-message logs
+
+### New compact tables
+
+- `bb_user_profiles`
+  - one row per user
+  - Buddy identity, streaks, XP, and compact counters
+- `bb_daily_results`
+  - one row per user per day per challenge
+  - attempts, solved flag, timestamps, and solve time
+- `bb_identity_meta`
+  - small metadata such as prune bookkeeping
+
+### Existing compact tables
+
+Utility persistence remains in the existing Postgres-first utility tables for Watch, Later, Remind, and AFK.
+
+### Retention
+
+- raw Daily rows prune after 180 days
+- long-term streak and clear counters stay in `bb_user_profiles`
+- reminders are removed after delivery or cancel
+- Later markers remain one-per-user-per-channel
+- Watch state remains bounded by keyword limits
 
 ## Architecture
-
-The project now uses a package-based layout:
 
 ```text
 .
@@ -134,7 +204,10 @@ The project now uses a package-based layout:
 |   |-- __init__.py
 |   |-- bot.py
 |   |-- command_utils.py
+|   |-- daily_challenges.py
 |   |-- game_engine.py
+|   |-- profile_service.py
+|   |-- profile_store.py
 |   |-- text_safety.py
 |   |-- utility_helpers.py
 |   |-- utility_service.py
@@ -145,106 +218,58 @@ The project now uses a package-based layout:
 |       |-- afk.py
 |       |-- events.py
 |       |-- gameplay.py
+|       |-- identity.py
 |       |-- meta.py
 |       `-- utilities.py
 |-- assets/
-|-- keep_alive.py
-|-- main.py
+|-- tests/
 |-- index.html
-|-- requirements.txt
-|-- README.md
-`-- tests/
+|-- main.py
+`-- requirements.txt
 ```
 
-### File overview
+### Important modules
 
-- `babblebox/bot.py`: bot bootstrap, dictionary loading, extension loading, command sync
-- `babblebox/game_engine.py`: shared state, views, timers, and core game flow
-- `babblebox/text_safety.py`: shared short-text validation used by AFK and Remind
-- `babblebox/utility_store.py`: utility persistence layer with Postgres production storage, memory-mode tests/dev, and one-time legacy JSON import support
-- `babblebox/utility_service.py`: utility-state orchestration, delivery scheduling, and watch matching
-- `babblebox/utility_helpers.py`: duration parsing, jump-link helpers, transcript generation, and utility embeds
-- `babblebox/cogs/meta.py`: help, ping, stats, leaderboard
-- `babblebox/cogs/afk.py`: AFK commands
-- `babblebox/cogs/gameplay.py`: play, stop, vote, Chaos Card controls
-- `babblebox/cogs/utilities.py`: Watch, Later, Capture, and Remind commands
-- `babblebox/cogs/events.py`: listeners and lifecycle handling
-- `babblebox/web.py`: Flask routes and keep-alive thread
-
-## Key Fixes In This Version
-
-### Prefix double-trigger bug
-
-The duplicated prefix response bug came from calling `bot.process_commands(message)` manually inside a cog `on_message` listener.
-`commands.Bot` already processes prefix commands through its own `on_message`, so the extra call caused every prefix command to fire twice.
-
-That extra call has been removed.
-
-### Resource-conscious improvements
-
-- The keep-alive thread is daemonized
-- The Word Bomb dictionary is cached to disk
-- Chaos Cards are stateless lobby modifiers
-- No database polling or always-on background worker system was added
+- `babblebox/bot.py`: bot bootstrap, extension loading, dictionary setup, sync
+- `babblebox/game_engine.py`: lobby state, views, timers, game flow, session stats, help embed
+- `babblebox/utility_store.py`: Postgres-first utility persistence with memory backend for tests/dev
+- `babblebox/utility_service.py`: Watch, Later, Capture, Remind, AFK orchestration
+- `babblebox/daily_challenges.py`: deterministic Daily puzzle generation
+- `babblebox/profile_store.py`: compact profile/daily persistence backend
+- `babblebox/profile_service.py`: Daily, Buddy, Profile, Vault logic and anti-farm progression
+- `babblebox/cogs/identity.py`: Daily, Buddy, Profile, Vault commands
 
 ## Hosting Notes
 
-Babblebox is designed to survive on a constrained free Render instance.
+Babblebox is intended to stay friendly to constrained free-tier hosting.
 
-### Safe design choices
+- no always-on polling loop for Daily generation
+- one deterministic Daily per UTC day
+- no external APIs for Daily/Buddy/Profile
+- small connection pools
+- no giant analytics tables
+- no unnecessary user-content retention
 
-- No heavy polling loops
-- No background analytics workers
-- One wake-on-change utility scheduler instead of many always-on workers
-- Postgres storage support without per-message database queries in hot paths
-- Cleanup-first handling for stale game state
+The existing utility scheduler remains wake-on-change rather than polling every feature separately.
 
-### Persistence note
-
-Babblebox now supports a Postgres-backed utility store for Watch settings, Later markers, reminders, and timed AFK state. Supabase Postgres is the recommended hosted option.
-
-If `UTILITY_DATABASE_URL`, `SUPABASE_DB_URL`, or `DATABASE_URL` is configured, Babblebox will use Postgres, create its utility tables automatically, and optionally import a legacy JSON utility file once if one is present.
-
-Babblebox does not keep writing user utility state to local JSON files in production. For local development and tests you can opt into a non-persistent memory backend instead, but durable runtime continuity depends on the external database.
-
-If no Postgres URL is configured, Babblebox still starts, but storage-backed utility features stay unavailable until the database is configured again.
-
-## Website and Community
-
-The website was restored to the original blue visual direction and now also includes:
-
-- a dedicated Privacy Policy section
-- a Support Server section for **inevitable friendship**
-- social links in the footer
-- updated command and architecture content
-
-### inevitable friendship
-
-Babblebox lives alongside the **inevitable friendship** support server.
-That space is where updates can be tested, bugs can be reported, screenshots can be shared, and the next features can be shaped with actual community feedback.
-
-## Local Setup
+## Setup
 
 ### Requirements
 
 - Python 3.9+
 - A Discord bot token
 - A `.env` file in the project root
+- Postgres for durable storage-backed features
 
-### 1. Clone the repository
+### Install
 
 ```bash
 git clone https://github.com/arno-create/babblebox-bot.git
 cd babblebox-bot
-```
-
-### 2. Install dependencies
-
-```bash
 pip install -r requirements.txt
 ```
 
-### 3. Create `.env`
+### Environment
 
 ```env
 DISCORD_TOKEN=your_bot_token_here
@@ -252,44 +277,33 @@ DEV_GUILD_ID=your_test_server_id_here
 UTILITY_DATABASE_URL=postgresql://...
 # or SUPABASE_DB_URL=postgresql://...
 # or DATABASE_URL=postgresql://...
-# optional:
+
+# optional local/test override:
 # UTILITY_STORAGE_BACKEND=memory
-# UTILITY_JSON_MIGRATION_PATH=.cache/utility_state.json
+# PROFILE_STORAGE_BACKEND=memory
 ```
 
+Environment variable notes:
+
 - `DISCORD_TOKEN` is required
-- `DEV_GUILD_ID` is optional and useful for faster dev slash-command sync
-- `UTILITY_DATABASE_URL` is the preferred Postgres connection string for durable utility storage
+- `DEV_GUILD_ID` is optional and helps faster dev sync
+- `UTILITY_DATABASE_URL` is the preferred Postgres connection string
 - `SUPABASE_DB_URL` and `DATABASE_URL` are also accepted
-- `UTILITY_STORAGE_BACKEND=memory` is for explicit local/dev or test workflows only
-- `UTILITY_JSON_MIGRATION_PATH` can point at an old JSON utility file for one-time import
+- `UTILITY_STORAGE_BACKEND=memory` is for explicit local/test work only
+- `PROFILE_STORAGE_BACKEND=memory` is optional if you want the Daily/Buddy/Profile layer in memory for tests/dev
 
-### 4. Enable Discord settings
+### Discord Portal Settings
 
-In the Discord Developer Portal, enable:
+Enable:
 
 - Message Content Intent
 - Server Members Intent
 
-If you want other servers to invite the bot, make sure it is set to Public.
-
-### 5. Run the bot
+### Run
 
 ```bash
 python main.py
 ```
-
-## Environment Variables
-
-| Variable | Required | Description |
-| --- | --- | --- |
-| `DISCORD_TOKEN` | Yes | Discord bot token |
-| `DEV_GUILD_ID` | No | Optional development guild ID |
-| `UTILITY_DATABASE_URL` | No | Preferred Postgres connection string for utility persistence |
-| `SUPABASE_DB_URL` | No | Alternate Postgres connection string, useful for Supabase-style naming |
-| `DATABASE_URL` | No | Alternate Postgres connection string used by some hosts |
-| `UTILITY_STORAGE_BACKEND` | No | Use `memory` only for explicit local/dev or test runs |
-| `UTILITY_JSON_MIGRATION_PATH` | No | Optional path to an old JSON utility file for one-time import |
 
 ## Recommended Permissions
 
@@ -302,7 +316,7 @@ python main.py
 
 ## DM Requirement
 
-These features rely on DMs being available:
+These features rely on DMs being open:
 
 - Broken Telephone
 - Exquisite Corpse
@@ -329,9 +343,3 @@ These features rely on DMs being available:
 ### Exquisite Corpse
 
 ![Exquisite Corpse](assets/exquisite_corpse.png)
-
-## Links
-
-- Official website: [https://arno-create.github.io/babblebox-bot/](https://arno-create.github.io/babblebox-bot/)
-- Add the bot to your server: [https://discord.com/oauth2/authorize?client_id=1480903089518022739](https://discord.com/oauth2/authorize?client_id=1480903089518022739)
-- Support server: [https://discord.com/servers/inevitable-friendship-1322933864360050688](https://discord.com/servers/inevitable-friendship-1322933864360050688)

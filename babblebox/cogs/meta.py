@@ -22,7 +22,7 @@ class MetaCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    @commands.hybrid_command(name="help", with_app_command=True, description="View the Babblebox manual and game rules")
+    @commands.hybrid_command(name="help", with_app_command=True, description="View the Babblebox manual, categories, and command guide")
     async def help_command(self, ctx: commands.Context):
         if not await require_channel_permissions(ctx, ge.HELP_REQUIRED_PERMS, "/help"):
             return
@@ -34,7 +34,7 @@ class MetaCog(commands.Cog):
             ctx,
             embed=ge.make_status_embed(
                 "Pong!",
-                "Babblebox is online, responsive, and ready to party.",
+                "Babblebox is online, responsive, and ready for games, utilities, Daily, and Buddy commands.",
                 tone="success",
             ),
             ephemeral=True,
