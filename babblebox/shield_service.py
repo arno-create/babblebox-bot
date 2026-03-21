@@ -13,6 +13,16 @@ import discord
 from discord.ext import commands
 
 from babblebox import game_engine as ge
+from babblebox.shield_ai import (
+    SHIELD_AI_MIN_CONFIDENCE_CHOICES,
+    SHIELD_AI_REVIEW_PACKS,
+    ShieldAIReviewRequest,
+    ShieldAIReviewResult,
+    build_shield_ai_provider,
+    sanitize_message_for_ai,
+    shield_ai_available_in_guild,
+    summarize_attachment_extensions,
+)
 from babblebox.shield_store import ShieldStateStore, ShieldStorageUnavailable, default_guild_shield_config
 from babblebox.text_safety import (
     CARD_RE,
@@ -65,6 +75,8 @@ SENSITIVITY_LABELS = {"low": "Low", "normal": "Normal", "high": "High"}
 ACTION_STRENGTH = {"disabled": -1, "detect": 0, "log": 1, "delete_log": 2, "timeout_log": 3, "delete_escalate": 4}
 CONFIDENCE_STRENGTH = {"low": 1, "medium": 2, "high": 3, "custom": 4}
 PACK_STRENGTH = {"privacy": 1, "promo": 2, "scam": 3, "advanced": 4}
+AI_PRIORITY_LABELS = {"low": "Low", "normal": "Normal", "high": "High"}
+AI_REVIEW_PACK_SET = frozenset(SHIELD_AI_REVIEW_PACKS)
 
 INVITE_RE = re.compile(r"(?i)(?:https?://)?(?:www\.)?(?:discord(?:app)?\.com/invite|discord\.gg)/([a-z0-9-]{2,32})")
 ETH_WALLET_RE = re.compile(r"\b0x[a-fA-F0-9]{40}\b")
@@ -163,6 +175,9 @@ class CompiledShieldConfig:
     privacy: PackSettings
     promo: PackSettings
     scam: PackSettings
+    ai_enabled: bool
+    ai_min_confidence: str
+    ai_enabled_packs: frozenset[str]
     escalation_threshold: int
     escalation_window_minutes: int
     timeout_minutes: int
@@ -211,6 +226,7 @@ class ShieldDecision:
     timed_out: bool = False
     escalated: bool = False
     action_note: str | None = None
+    ai_review: ShieldAIReviewResult | None = None
 
 
 def _ordered_token_match(text: str, tokens: Sequence[str]) -> bool:
@@ -311,6 +327,7 @@ class ShieldService:
                 self._startup_storage_error = str(exc)
                 self.storage_error = str(exc)
         self._lock = asyncio.Lock()
+        self.ai_provider = build_shield_ai_provider()
         self._compiled_configs: dict[int, CompiledShieldConfig] = {}
         self._alert_dedup: dict[tuple[int, int], float] = {}
         self._strike_windows: dict[tuple[int, int, str], list[float]] = {}
@@ -336,6 +353,7 @@ class ShieldService:
         return True
 
     async def close(self):
+        await self.ai_provider.close()
         await self.store.close()
 
     def storage_message(self, feature_name: str = "Shield") -> str:
@@ -356,9 +374,48 @@ class ShieldService:
             base["allow_domains"] = _sorted_unique_text(base.get("allow_domains", []))
             base["allow_invite_codes"] = _sorted_unique_text(base.get("allow_invite_codes", []))
             base["allow_phrases"] = _sorted_unique_text(base.get("allow_phrases", []))
+            base["ai_enabled"] = bool(base.get("ai_enabled"))
+            base["ai_enabled_packs"] = [
+                value
+                for value in _sorted_unique_text(base.get("ai_enabled_packs", list(SHIELD_AI_REVIEW_PACKS)))
+                if value in AI_REVIEW_PACK_SET
+            ]
+            base["ai_min_confidence"] = (
+                base.get("ai_min_confidence", "high")
+                if base.get("ai_min_confidence", "high") in SHIELD_AI_MIN_CONFIDENCE_CHOICES
+                else "high"
+            )
             base["custom_patterns"] = list(base.get("custom_patterns", []))[:CUSTOM_PATTERN_LIMIT]
             return base
         return default_guild_shield_config(guild_id)
+
+    def is_ai_supported_guild(self, guild_id: int | None) -> bool:
+        return shield_ai_available_in_guild(guild_id)
+
+    def get_ai_status(self, guild_id: int) -> dict[str, Any]:
+        config = self.get_config(guild_id)
+        diagnostics = self.ai_provider.diagnostics()
+        supported = self.is_ai_supported_guild(guild_id)
+        enabled_packs = [pack for pack in config.get("ai_enabled_packs", []) if pack in AI_REVIEW_PACK_SET]
+        status_message = diagnostics["status"]
+        if not supported:
+            status_message = "AI review is not available in this server yet."
+        elif not diagnostics["available"]:
+            status_message = "AI review is disabled because the provider is not configured."
+        elif not config.get("ai_enabled"):
+            status_message = "AI review is configured but currently disabled for this server."
+        return {
+            "supported": supported,
+            "enabled": bool(config.get("ai_enabled")),
+            "enabled_packs": enabled_packs,
+            "min_confidence": config.get("ai_min_confidence", "high"),
+            "provider": diagnostics.get("provider"),
+            "provider_available": bool(diagnostics.get("available")),
+            "model": diagnostics.get("model"),
+            "timeout_seconds": diagnostics.get("timeout_seconds"),
+            "max_chars": diagnostics.get("max_chars"),
+            "status": status_message,
+        }
 
     def test_message(self, guild_id: int, text: str, *, attachments: Sequence[str] | None = None) -> list[ShieldMatch]:
         compiled = self._compiled_configs.get(guild_id) or self._compile_config(guild_id, self.get_config(guild_id))
@@ -532,6 +589,57 @@ class ShieldService:
             ),
         )
 
+    async def set_ai_config(
+        self,
+        guild_id: int,
+        *,
+        enabled: bool | None = None,
+        min_confidence: str | None = None,
+        enabled_packs: Sequence[str] | None = None,
+    ) -> tuple[bool, str]:
+        if not self.is_ai_supported_guild(guild_id):
+            return False, "AI review is not available in this server yet."
+        cleaned_min_confidence = str(min_confidence).strip().lower() if isinstance(min_confidence, str) else None
+        if cleaned_min_confidence is not None and cleaned_min_confidence not in SHIELD_AI_MIN_CONFIDENCE_CHOICES:
+            return False, "AI review confidence threshold must be low, medium, or high."
+        cleaned_packs: list[str] | None = None
+        if enabled_packs is not None:
+            cleaned_packs = []
+            for item in enabled_packs:
+                pack = str(item).strip().lower()
+                if pack not in AI_REVIEW_PACK_SET:
+                    return False, "AI review packs must be privacy, promo, or scam."
+                if pack not in cleaned_packs:
+                    cleaned_packs.append(pack)
+        if enabled is True and not self.ai_provider.diagnostics().get("available"):
+            return False, "AI review cannot be enabled until the provider is configured."
+
+        def mutate(config: dict[str, Any]):
+            if enabled is not None:
+                config["ai_enabled"] = bool(enabled)
+            if cleaned_min_confidence is not None:
+                config["ai_min_confidence"] = cleaned_min_confidence
+            if cleaned_packs is not None:
+                config["ai_enabled_packs"] = cleaned_packs
+
+        current = self.get_config(guild_id)
+        final_enabled = current["ai_enabled"] if enabled is None else bool(enabled)
+        final_min_confidence = current["ai_min_confidence"] if cleaned_min_confidence is None else cleaned_min_confidence
+        final_packs = current["ai_enabled_packs"] if cleaned_packs is None else cleaned_packs
+        if final_enabled and not final_packs:
+            return False, "Select at least one local Shield pack before enabling AI review."
+        pack_summary = ", ".join(PACK_LABELS[pack] for pack in final_packs) if final_packs else "no packs selected"
+        provider_status = self.ai_provider.diagnostics().get("status", "Unavailable.")
+        return await self._update_config(
+            guild_id,
+            mutate,
+            success_message=(
+                f"Shield AI review is now {'enabled' if final_enabled else 'disabled'} "
+                f"at `{final_min_confidence}` local-confidence threshold for {pack_summary}. "
+                f"Provider status: {provider_status}"
+            ),
+        )
+
     async def add_custom_pattern(
         self,
         guild_id: int,
@@ -642,10 +750,60 @@ class ShieldService:
                 elif decision.action_note is None:
                     decision.action_note = "Repeated-hit escalation was configured, but Babblebox could not time out that member."
 
+        if self._should_request_ai_review(compiled, decision):
+            request = self._build_ai_review_request(message, snapshot, decision, repetitive_promo=repetitive_promo)
+            if request is not None:
+                decision.ai_review = await self.ai_provider.review(request)
+
         if best.action not in {"disabled", "detect"}:
             await self._send_alert(message, compiled, decision)
 
         return decision
+
+    def _should_request_ai_review(self, compiled: CompiledShieldConfig, decision: ShieldDecision) -> bool:
+        if decision.action in {"disabled", "detect"}:
+            return False
+        if compiled.log_channel_id is None or not compiled.ai_enabled:
+            return False
+        if not self.is_ai_supported_guild(compiled.guild_id):
+            return False
+        if decision.pack not in compiled.ai_enabled_packs or decision.pack not in AI_REVIEW_PACK_SET:
+            return False
+        if not self.ai_provider.diagnostics().get("available"):
+            return False
+        top_reason = decision.reasons[0] if decision.reasons else None
+        if top_reason is None:
+            return False
+        return CONFIDENCE_STRENGTH.get(top_reason.confidence, 0) >= CONFIDENCE_STRENGTH.get(compiled.ai_min_confidence, 3)
+
+    def _build_ai_review_request(
+        self,
+        message: discord.Message,
+        snapshot: ShieldSnapshot,
+        decision: ShieldDecision,
+        *,
+        repetitive_promo: bool,
+    ) -> ShieldAIReviewRequest | None:
+        top_reason = decision.reasons[0] if decision.reasons else None
+        if top_reason is None or decision.pack is None:
+            return None
+        max_chars = int(self.ai_provider.diagnostics().get("max_chars") or 340)
+        sanitized = sanitize_message_for_ai(message.content, max_chars=max_chars)
+        return ShieldAIReviewRequest(
+            guild_id=message.guild.id,
+            pack=decision.pack,
+            local_confidence=top_reason.confidence,
+            local_action=decision.action,
+            local_labels=tuple(item.label for item in decision.reasons[:3]),
+            local_reasons=tuple(item.reason for item in decision.reasons[:2]),
+            sanitized_content=sanitized.text,
+            has_links=snapshot.has_links,
+            domains=tuple(sorted(snapshot.domains)[:3]),
+            has_suspicious_attachment=snapshot.has_suspicious_attachment,
+            attachment_extensions=summarize_attachment_extensions(snapshot.attachment_names),
+            invite_detected=bool(snapshot.invite_codes),
+            repetitive_promo=repetitive_promo,
+        )
 
     def _allow_phrase_bypass(self, compiled: CompiledShieldConfig, snapshot: ShieldSnapshot) -> bool:
         return any(phrase in snapshot.text for phrase in compiled.allow_phrases)
@@ -1027,11 +1185,10 @@ class ShieldService:
         top_reason = decision.reasons[0] if decision.reasons else None
         alert_title = f"Shield Alert | {PACK_LABELS.get(decision.pack or '', 'Shield')}"
         embed = discord.Embed(
-            title=f"Shield Alert · {PACK_LABELS.get(decision.pack or '', 'Shield')}",
+            title=alert_title,
             description=f"{message.author.mention} in {message.channel.mention}",
             color=ge.EMBED_THEME["danger"] if decision.deleted or decision.timed_out else ge.EMBED_THEME["warning"],
         )
-        embed.title = alert_title
         if top_reason is not None:
             severity = "High" if top_reason.confidence == "high" or decision.deleted or decision.timed_out else "Medium"
             embed.add_field(
@@ -1049,6 +1206,18 @@ class ShieldService:
         embed.add_field(name="Preview", value=preview or "[no text content]", inline=False)
         if attachment_summary:
             embed.add_field(name="Attachments", value="\n".join(attachment_summary[:4]), inline=False)
+        if decision.ai_review is not None:
+            ai_review = decision.ai_review
+            ai_lines = [
+                f"Classification: **{ai_review.classification_label}**",
+                f"Confidence: {ai_review.confidence.title()}",
+                f"Priority: {AI_PRIORITY_LABELS.get(ai_review.priority, ai_review.priority.title())}",
+            ]
+            if ai_review.false_positive:
+                ai_lines.append("Possible false positive: Yes")
+            ai_lines.append(ai_review.explanation)
+            ai_lines.append(f"Model: `{ai_review.model}`")
+            embed.add_field(name="AI Assist", value="\n".join(ai_lines), inline=False)
         embed.add_field(name="Jump", value=f"[Open message]({message.jump_url})", inline=True)
         if top_reason is not None and top_reason.pack == "scam":
             embed.add_field(name="Note", value="Scam detection is heuristic and experimental.", inline=True)
@@ -1143,6 +1312,17 @@ class ShieldService:
                 enabled=bool(raw.get("scam_enabled")),
                 action=str(raw.get("scam_action", "log")).strip().lower(),
                 sensitivity=str(raw.get("scam_sensitivity", "normal")).strip().lower(),
+            ),
+            ai_enabled=bool(raw.get("ai_enabled")),
+            ai_min_confidence=(
+                str(raw.get("ai_min_confidence", "high")).strip().lower()
+                if str(raw.get("ai_min_confidence", "high")).strip().lower() in SHIELD_AI_MIN_CONFIDENCE_CHOICES
+                else "high"
+            ),
+            ai_enabled_packs=frozenset(
+                pack
+                for pack in _sorted_unique_text(raw.get("ai_enabled_packs", list(SHIELD_AI_REVIEW_PACKS)))
+                if pack in AI_REVIEW_PACK_SET
             ),
             escalation_threshold=int(raw.get("escalation_threshold", 3)),
             escalation_window_minutes=int(raw.get("escalation_window_minutes", 15)),

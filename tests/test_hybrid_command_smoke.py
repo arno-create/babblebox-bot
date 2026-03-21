@@ -241,3 +241,43 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(ctx.send_calls[0]["ephemeral"])
         finally:
             await cog.service.close()
+
+    async def test_shield_status_denies_members_privately(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
+        cog = ShieldCog(bot)
+        try:
+            cog.service.storage_ready = True
+            ctx = FakeContext(
+                interaction=FakeInteraction(),
+                guild=FakeGuild(),
+                channel=FakeChannel(),
+                author=FakeAuthor(manage_guild=False),
+            )
+
+            await ShieldCog.shield_status_command.callback(cog, ctx)
+
+            self.assertEqual(len(ctx.send_calls), 1)
+            self.assertTrue(ctx.send_calls[0]["ephemeral"])
+            self.assertIn("Manage Server", ctx.send_calls[0]["embed"].description)
+        finally:
+            await cog.service.close()
+
+    async def test_shield_ai_command_reports_guild_restriction_cleanly(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
+        cog = ShieldCog(bot)
+        try:
+            cog.service.storage_ready = True
+            ctx = FakeContext(
+                interaction=FakeInteraction(),
+                guild=FakeGuild(10),
+                channel=FakeChannel(),
+                author=FakeAuthor(manage_guild=True),
+            )
+
+            await ShieldCog.shield_ai_command.callback(cog, ctx, enabled=True, min_confidence=None, privacy=None, promo=None, scam=None)
+
+            self.assertEqual(len(ctx.send_calls), 1)
+            self.assertTrue(ctx.send_calls[0]["ephemeral"])
+            self.assertIn("not available", ctx.send_calls[0]["embed"].description.lower())
+        finally:
+            await cog.service.close()

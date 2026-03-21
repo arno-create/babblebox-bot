@@ -6,14 +6,14 @@
   <title>Babblebox - Party Games, Everyday Utilities, Daily Arcade, Buddy Profiles, and Shield Safety</title>
   <meta
     name="description"
-    content="Babblebox is a Discord bot with party games, everyday utilities, a Daily Arcade, Buddy/Profile charm, shareable Moment Cards, and an optional Shield safety layer built around compact Postgres-backed persistence."
+    content="Babblebox is a Discord bot with party games, everyday utilities, a Daily Arcade, Buddy/Profile charm, shareable Moment Cards, and an optional Shield safety layer with compact moderation storage and limited AI-assisted review."
   />
   <meta name="robots" content="index,follow,max-image-preview:large" />
   <link rel="canonical" href="https://arno-create.github.io/babblebox-bot/" />
   <meta property="og:title" content="Babblebox - Party Games, Everyday Utilities, Daily Arcade, Buddy Profiles, and Shield Safety" />
   <meta
     property="og:description"
-    content="A multi-category Discord bot with party games, quiet utilities, a Daily Arcade, Buddy/Profile charm, Moment Cards, and an optional Shield safety layer."
+    content="A multi-category Discord bot with party games, quiet utilities, a Daily Arcade, Buddy/Profile charm, Moment Cards, and an optional Shield safety layer with limited AI-assisted review."
   />
   <meta property="og:url" content="https://arno-create.github.io/babblebox-bot/" />
   <meta property="og:type" content="website" />
@@ -22,7 +22,7 @@
   <meta name="twitter:title" content="Babblebox - Party Games, Everyday Utilities, Daily Arcade, Buddy Profiles, and Shield Safety" />
   <meta
     name="twitter:description"
-    content="Party games when a group is around, useful tools when it is not, plus a Daily Arcade, Buddy profiles, Moment Cards, and optional Shield safety."
+    content="Party games when a group is around, useful tools when it is not, plus a Daily Arcade, Buddy profiles, Moment Cards, and optional Shield safety with limited AI-assisted review."
   />
   <meta name="twitter:image" content="https://arno-create.github.io/babblebox-bot/banner.png" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -603,15 +603,17 @@
       <div class="grid double">
         <article class="card">
           <span class="label">Three Packs</span>
-          <h3>Privacy, promo, and scam coverage</h3>
+          <h3>Privacy, promo, scam, and optional AI review</h3>
           <p>
             Babblebox Shield can watch for likely privacy leaks, Discord invite or promo spam, and heuristic scam or malicious-link bait.
-            It is conservative by default and clearly labels experimental scam detection as best-effort.
+            An optional AI second pass can review only messages that local Shield already flagged, and only for moderator context.
+            That AI layer is off by default, admin-only, and currently limited to the support server.
           </p>
           <ul>
             <li>privacy leak pack</li>
             <li>promo / invite pack</li>
             <li>heuristic scam pack</li>
+            <li>AI assist stays off by default and never punishes on its own</li>
             <li>safe advanced patterns without raw user regex</li>
           </ul>
         </article>
@@ -619,8 +621,8 @@
           <span class="label">Admin UX</span>
           <h3>Log-first and compact by design</h3>
           <p>
-            Admins can tune per-pack actions, sensitivities, allowlists, trusted-role bypasses, included or excluded scope,
-            escalation thresholds, and private mod-log delivery without storing a heavy moderation archive in the database.
+            Admins can open `/shield panel` for a compact overview, then use focused commands for rules, filters, allowlists, logs,
+            and optional AI settings without storing a heavy moderation archive in the database.
           </p>
           <ul>
             <li>off until configured</li>
@@ -659,8 +661,11 @@
           <div class="command-row"><code>/remind set</code><span>Create a one-time reminder.</span></div>
           <div class="command-row"><code>/afk</code><span>Set or schedule away status with <code>30m</code>, <code>2h</code>, or <code>2d</code>.</span></div>
           <div class="command-row"><code>/vault</code><span>Open your more personal progress snapshot.</span></div>
-          <div class="command-row"><code>/shield status</code><span>Open the private Shield control panel for admins.</span></div>
-          <div class="command-row"><code>/shield pack</code><span>Tune one Shield pack's action mode and sensitivity.</span></div>
+          <div class="command-row"><code>/shield panel</code><span>Open the private Shield control panel for admins.</span></div>
+          <div class="command-row"><code>/shield rules</code><span>Configure core packs, actions, and escalation.</span></div>
+          <div class="command-row"><code>/shield filters</code><span>Tune included scope, exclusions, and trusted roles.</span></div>
+          <div class="command-row"><code>/shield allowlist</code><span>Manage domain, invite, and phrase allowlists.</span></div>
+          <div class="command-row"><code>/shield ai</code><span>Configure optional AI second-pass review in the allowed server.</span></div>
           <div class="command-row"><code>/shield test</code><span>Dry-run a sample message against the current Shield rules.</span></div>
         </div>
       </div>
@@ -712,6 +717,9 @@
             <li>Gameplay state is primarily temporary session state.</li>
             <li>Utility and profile persistence stay compact and bounded.</li>
             <li>Shield stores configuration and bounded runtime strike state, not a heavy moderation archive.</li>
+            <li>Optional Shield AI only reviews already-flagged messages and only in guild <code>1322933864360050688</code>.</li>
+            <li>Only minimal, sanitized, truncated flagged content is sent for AI second-pass review when that feature is enabled.</li>
+            <li>Babblebox does not persist raw AI-submitted message bodies in Shield storage.</li>
             <li>No screenshot storage, image blobs, or full watched-message archives.</li>
             <li>Capture transcripts are delivered privately and not kept as a long-term archive.</li>
             <li>Daily Arcade booth payloads regenerate from deterministic local data instead of being stored each day.</li>

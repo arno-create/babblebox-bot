@@ -19,7 +19,7 @@ Babblebox is intentionally compact:
 - no lootboxes
 - no production JSON persistence for durable systems
 - no blob/media archives in the database
-- no external AI chat or heavy third-party content APIs
+- no always-on external AI scanning; Shield AI assist is optional and only reviews already-flagged messages
 
 ## Official Links
 
@@ -71,9 +71,12 @@ Babblebox is intentionally compact:
 
 - Babblebox Shield
   - optional, admin-configurable moderation layer
+  - admin-only configuration for administrators or Manage Server users
   - privacy leak pack
   - promo / invite pack
   - scam / malicious-link heuristic pack
+  - optional AI-assisted second-pass review for moderator context only
+  - AI stays off by default and is currently limited to guild `1322933864360050688`
   - log-first defaults
   - trusted-role bypass
   - included / excluded scope controls
@@ -176,22 +179,16 @@ AFK examples:
 
 ### Shield / Safety
 
-Shield commands are private/admin-facing by default.
+Shield commands are private/admin-facing by default. The streamlined slash surface is centered on `/shield panel`.
 
 | Slash | Prefix | Purpose |
 | --- | --- | --- |
-| `/shield status` | `bb!shield status` | View the Shield control panel |
-| `/shield module` | `bb!shield module true` | Enable or disable Shield |
-| `/shield pack` | `bb!shield pack promo true log normal` | Configure one protection pack |
-| `/shield log` | `bb!shield log` | Set the mod-log channel and optional alert role |
-| `/shield scope` | `bb!shield scope only_included` | Switch between all-scope and include-only scanning |
-| `/shield include channel` | `bb!shield include channel on` | Include the current channel in Shield scope |
-| `/shield exclude channel` | `bb!shield exclude channel on` | Exclude the current channel from scanning |
-| `/shield trust role` | `bb!shield trust role on @Mods` | Bypass Shield for a trusted role |
-| `/shield allow domain` | `bb!shield allow domain on example.com` | Allowlist a domain |
-| `/shield allow invite` | `bb!shield allow invite on abc123` | Allowlist an invite code |
-| `/shield allow phrase` | `bb!shield allow phrase on partner drop` | Allowlist a phrase |
-| `/shield escalation` | `bb!shield escalation 3 15 10` | Tune repeated-hit escalation |
+| `/shield panel` | `bb!shield panel` | Open the Shield admin panel |
+| `/shield rules` | `bb!shield rules pack promo enabled true action log sensitivity normal` | Configure module, packs, and escalation |
+| `/shield logs` | `bb!shield logs #shield-log @Mods` | Set the mod-log channel and optional alert role |
+| `/shield filters` | `bb!shield filters only_included trusted_role_ids on @Mods` | Tune scope, includes, excludes, and trusted roles |
+| `/shield allowlist` | `bb!shield allowlist allow_domains on example.com` | Manage domain, invite, and phrase allowlists |
+| `/shield ai` | `bb!shield ai true high true false true` | Configure optional AI second-pass review |
 | `/shield advanced add` | `bb!shield advanced add Gift claim*gift wildcard log` | Add a safe advanced pattern |
 | `/shield advanced list` | `bb!shield advanced list` | Review advanced patterns |
 | `/shield test` | `bb!shield test free nitro claim now https://bit.ly/x` | Dry-run a message through Shield |
@@ -256,6 +253,11 @@ Babblebox Shield is intentionally compact and conservative:
 - moderator context goes to a configured log channel instead of a heavy database log
 - repeated-hit escalation is in-memory and bounded
 - custom regex is intentionally not accepted; advanced mode uses safe text matching only
+- optional AI review never becomes the primary moderation engine
+- AI review only runs after local Shield already flagged a message
+- AI review is currently limited to guild `1322933864360050688`
+- AI review is admin-only, off by default, and never punishes by itself
+- only minimal, sanitized, truncated flagged content is sent to the AI provider
 
 ## Capture and Later Media Handling
 
@@ -329,6 +331,7 @@ Stored data is intentionally small:
 
 - module and pack enabled flags
 - action modes and sensitivities
+- AI enabled state, AI confidence threshold, and AI-eligible pack choices
 - compact include / exclude / trusted lists
 - compact allowlists
 - escalation thresholds
@@ -338,6 +341,7 @@ Not stored:
 
 - full moderation event logs
 - deleted-message bodies
+- raw AI-submitted message bodies in Shield persistence
 - attachment blobs
 - large strike archives
 
@@ -362,6 +366,7 @@ Moment Cards do not introduce a durable archive table.
 |   |-- game_engine.py
 |   |-- profile_service.py
 |   |-- profile_store.py
+|   |-- shield_ai.py
 |   |-- shield_service.py
 |   |-- shield_store.py
 |   |-- text_safety.py
@@ -395,6 +400,7 @@ Moment Cards do not introduce a durable archive table.
 - `babblebox/daily_challenges.py`: deterministic Daily Arcade booth generation
 - `babblebox/profile_store.py`: compact profile and daily persistence
 - `babblebox/profile_service.py`: Daily Arcade, Buddy, Profile, Vault, and anti-farm progression
+- `babblebox/shield_ai.py`: optional AI provider integration, redaction, truncation, and safe parsing
 - `babblebox/shield_store.py`: compact Shield config persistence
 - `babblebox/shield_service.py`: Shield matching, cache rebuilds, actions, and mod-log delivery
 - `babblebox/cogs/identity.py`: Daily Arcade, Buddy, Profile, and Vault commands
@@ -438,9 +444,15 @@ DEV_GUILD_ID=your_test_server_id_here
 UTILITY_DATABASE_URL=postgresql://...
 # or SUPABASE_DB_URL=postgresql://...
 # or DATABASE_URL=postgresql://...
+OPENAI_API_KEY=sk-...
+# optional Shield AI tuning:
+# SHIELD_AI_MODEL=gpt-4.1-mini
+# SHIELD_AI_TIMEOUT_SECONDS=4
+# SHIELD_AI_MAX_CHARS=340
 
 # optional local/test override:
 # UTILITY_STORAGE_BACKEND=memory
+# SHIELD_STORAGE_BACKEND=memory
 # PROFILE_STORAGE_BACKEND=memory
 ```
 
@@ -450,7 +462,10 @@ Environment variable notes:
 - `DEV_GUILD_ID` is optional and helps faster dev sync
 - `UTILITY_DATABASE_URL` is the preferred Postgres connection string
 - `SUPABASE_DB_URL` and `DATABASE_URL` are also accepted
+- `OPENAI_API_KEY` is optional and only needed for Shield AI assist
+- `SHIELD_AI_MODEL`, `SHIELD_AI_TIMEOUT_SECONDS`, and `SHIELD_AI_MAX_CHARS` are optional Shield AI tuning knobs
 - `UTILITY_STORAGE_BACKEND=memory` is for explicit local/test work only
+- `SHIELD_STORAGE_BACKEND=memory` is optional for local/test Shield work
 - `PROFILE_STORAGE_BACKEND=memory` is optional for tests and local development
 
 ### Discord Portal Settings

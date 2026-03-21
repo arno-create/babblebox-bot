@@ -9,6 +9,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
+from babblebox.shield_ai import SHIELD_AI_MIN_CONFIDENCE_CHOICES, SHIELD_AI_REVIEW_PACKS
+
 
 DEFAULT_DATABASE_URL_ENV_ORDER = ("UTILITY_DATABASE_URL", "SUPABASE_DB_URL", "DATABASE_URL")
 DEFAULT_BACKEND = "postgres"
@@ -45,6 +47,9 @@ def default_guild_shield_config(guild_id: int | None = None) -> dict[str, Any]:
         "scam_enabled": False,
         "scam_action": "log",
         "scam_sensitivity": "normal",
+        "ai_enabled": False,
+        "ai_min_confidence": "high",
+        "ai_enabled_packs": list(SHIELD_AI_REVIEW_PACKS),
         "escalation_threshold": 3,
         "escalation_window_minutes": 15,
         "timeout_minutes": 10,
@@ -151,6 +156,20 @@ class _BaseShieldStore:
             cleaned[action_field] = action if action in {"disabled", "detect", "log", "delete_log", "delete_escalate", "timeout_log"} else "log"
             sensitivity = str(config.get(sensitivity_field, "normal")).strip().lower()
             cleaned[sensitivity_field] = sensitivity if sensitivity in {"low", "normal", "high"} else "normal"
+        cleaned["ai_enabled"] = bool(config.get("ai_enabled"))
+        ai_min_confidence = str(config.get("ai_min_confidence", "high")).strip().lower()
+        cleaned["ai_min_confidence"] = ai_min_confidence if ai_min_confidence in SHIELD_AI_MIN_CONFIDENCE_CHOICES else "high"
+        raw_ai_packs = config.get("ai_enabled_packs", list(SHIELD_AI_REVIEW_PACKS))
+        if isinstance(raw_ai_packs, (list, tuple, set)):
+            cleaned["ai_enabled_packs"] = sorted(
+                {
+                    str(value).strip().lower()
+                    for value in raw_ai_packs
+                    if str(value).strip().lower() in SHIELD_AI_REVIEW_PACKS
+                }
+            )
+        else:
+            cleaned["ai_enabled_packs"] = list(SHIELD_AI_REVIEW_PACKS)
         for field, minimum, maximum, default in (
             ("escalation_threshold", 2, 6, 3),
             ("escalation_window_minutes", 5, 120, 15),
@@ -284,6 +303,9 @@ class _PostgresShieldStore(_BaseShieldStore):
                 "scam_enabled BOOLEAN NOT NULL DEFAULT FALSE, "
                 "scam_action TEXT NOT NULL DEFAULT 'log', "
                 "scam_sensitivity TEXT NOT NULL DEFAULT 'normal', "
+                "ai_enabled BOOLEAN NOT NULL DEFAULT FALSE, "
+                "ai_min_confidence TEXT NOT NULL DEFAULT 'high', "
+                "ai_enabled_packs JSONB NOT NULL DEFAULT '[\"privacy\",\"promo\",\"scam\"]'::jsonb, "
                 "escalation_threshold SMALLINT NOT NULL DEFAULT 3, "
                 "escalation_window_minutes SMALLINT NOT NULL DEFAULT 15, "
                 "timeout_minutes SMALLINT NOT NULL DEFAULT 10, "
@@ -293,6 +315,9 @@ class _PostgresShieldStore(_BaseShieldStore):
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS privacy_sensitivity TEXT NOT NULL DEFAULT 'normal'",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS promo_sensitivity TEXT NOT NULL DEFAULT 'normal'",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS scam_sensitivity TEXT NOT NULL DEFAULT 'normal'",
+            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS ai_enabled BOOLEAN NOT NULL DEFAULT FALSE",
+            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS ai_min_confidence TEXT NOT NULL DEFAULT 'high'",
+            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS ai_enabled_packs JSONB NOT NULL DEFAULT '[\"privacy\",\"promo\",\"scam\"]'::jsonb",
             (
                 "CREATE TABLE IF NOT EXISTS shield_custom_patterns ("
                 "pattern_id TEXT PRIMARY KEY, "
@@ -343,6 +368,9 @@ class _PostgresShieldStore(_BaseShieldStore):
                 "scam_enabled": bool(row["scam_enabled"]),
                 "scam_action": row["scam_action"],
                 "scam_sensitivity": row["scam_sensitivity"],
+                "ai_enabled": bool(row["ai_enabled"]),
+                "ai_min_confidence": row["ai_min_confidence"],
+                "ai_enabled_packs": list(row["ai_enabled_packs"] or []),
                 "escalation_threshold": int(row["escalation_threshold"]),
                 "escalation_window_minutes": int(row["escalation_window_minutes"]),
                 "timeout_minutes": int(row["timeout_minutes"]),
@@ -377,12 +405,13 @@ class _PostgresShieldStore(_BaseShieldStore):
                             "privacy_enabled, privacy_action, privacy_sensitivity, "
                             "promo_enabled, promo_action, promo_sensitivity, "
                             "scam_enabled, scam_action, scam_sensitivity, "
+                            "ai_enabled, ai_min_confidence, ai_enabled_packs, "
                             "escalation_threshold, escalation_window_minutes, timeout_minutes, updated_at"
                             ") VALUES ("
                             "$1, $2, $3, $4, $5, "
                             "$6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb, "
                             "$10::jsonb, $11::jsonb, $12::jsonb, $13::jsonb, $14::jsonb, $15::jsonb, "
-                            "$16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27, timezone('utc', now())"
+                            "$16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27::jsonb, $28, $29, $30, timezone('utc', now())"
                             ")"
                         ),
                         config["guild_id"],
@@ -409,6 +438,9 @@ class _PostgresShieldStore(_BaseShieldStore):
                         config["scam_enabled"],
                         config["scam_action"],
                         config["scam_sensitivity"],
+                        config["ai_enabled"],
+                        config["ai_min_confidence"],
+                        json.dumps(config["ai_enabled_packs"]),
                         config["escalation_threshold"],
                         config["escalation_window_minutes"],
                         config["timeout_minutes"],

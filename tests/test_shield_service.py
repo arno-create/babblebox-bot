@@ -1,7 +1,9 @@
 import types
 import unittest
+from typing import Optional
 from unittest.mock import AsyncMock, patch
 
+from babblebox.shield_ai import SHIELD_AI_ALLOWED_GUILD_ID, ShieldAIReviewResult
 from babblebox.shield_service import ShieldDecision, ShieldMatch, ShieldService
 from babblebox.shield_store import ShieldStateStore
 
@@ -109,6 +111,27 @@ class FakeBot:
 
     async def fetch_channel(self, channel_id: int):
         return self._channels.get(channel_id)
+
+
+class FakeAIProvider:
+    def __init__(self, *, available: bool = True, result: Optional[ShieldAIReviewResult] = None):
+        self._available = available
+        self._result = result
+        self.review = AsyncMock(return_value=result)
+
+    def diagnostics(self):
+        return {
+            "provider": "OpenAI",
+            "available": self._available,
+            "configured": self._available,
+            "model": "gpt-4.1-mini" if self._available else None,
+            "timeout_seconds": 4.0,
+            "max_chars": 160,
+            "status": "Ready." if self._available else "OpenAI API key is not configured.",
+        }
+
+    async def close(self):
+        return None
 
 
 class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
@@ -237,3 +260,114 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         embed = log_channel.sent[0]["embed"]
         self.assertEqual(embed.title, "Shield Alert | Privacy Leak")
         self.assertIn("Possible email address", embed.fields[0].value)
+
+    async def test_ai_config_is_restricted_to_allowed_guild(self):
+        ok, message = await self.service.set_ai_config(10, enabled=True)
+
+        self.assertFalse(ok)
+        self.assertIn("not available", message.lower())
+
+    async def test_ai_config_cannot_enable_without_provider(self):
+        self.service.ai_provider = FakeAIProvider(available=False)
+
+        ok, message = await self.service.set_ai_config(SHIELD_AI_ALLOWED_GUILD_ID, enabled=True)
+
+        self.assertFalse(ok)
+        self.assertIn("provider", message.lower())
+
+    async def test_allowed_guild_flagged_message_can_enrich_alert_with_ai_review(self):
+        guild = FakeGuild(SHIELD_AI_ALLOWED_GUILD_ID)
+        public_channel = FakeChannel(20)
+        log_channel = FakeChannel(99, name="shield-log")
+        self.bot.register_channel(log_channel)
+        author = FakeAuthor(42, roles=[FakeRole(11, position=1)])
+        message = FakeMessage(guild=guild, channel=public_channel, author=author, content="Email me at friend@example.com")
+        self.service.ai_provider = FakeAIProvider(
+            result=ShieldAIReviewResult(
+                classification="privacy_leak",
+                confidence="high",
+                priority="high",
+                false_positive=False,
+                explanation="Likely a real contact detail rather than harmless chatter.",
+                model="gpt-4.1-mini",
+            )
+        )
+
+        ok, _ = await self.service.set_module_enabled(guild.id, True)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_pack_config(guild.id, "privacy", enabled=True, action="log", sensitivity="normal")
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_log_channel(guild.id, log_channel.id)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_ai_config(guild.id, enabled=False)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_ai_config(guild.id, enabled=True, enabled_packs=["privacy"], min_confidence="high")
+        self.assertTrue(ok)
+
+        decision = await self.service.handle_message(message)
+
+        self.assertIsNotNone(decision)
+        self.assertIsNotNone(decision.ai_review)
+        self.service.ai_provider.review.assert_awaited_once()
+        self.assertEqual(len(log_channel.sent), 1)
+        embed = log_channel.sent[0]["embed"]
+        ai_field = next(field for field in embed.fields if field.name == "AI Assist")
+        self.assertIn("Likely privacy leak", ai_field.value)
+        self.assertIn("gpt-4.1-mini", ai_field.value)
+
+    async def test_non_allowed_guild_never_calls_ai_provider(self):
+        guild = FakeGuild(10)
+        public_channel = FakeChannel(20)
+        log_channel = FakeChannel(99, name="shield-log")
+        self.bot.register_channel(log_channel)
+        author = FakeAuthor(42, roles=[FakeRole(11, position=1)])
+        message = FakeMessage(guild=guild, channel=public_channel, author=author, content="Email me at friend@example.com")
+        self.service.ai_provider = FakeAIProvider(
+            result=ShieldAIReviewResult(
+                classification="privacy_leak",
+                confidence="high",
+                priority="high",
+                false_positive=False,
+                explanation="Likely a real contact detail rather than harmless chatter.",
+                model="gpt-4.1-mini",
+            )
+        )
+
+        ok, _ = await self.service.set_module_enabled(guild.id, True)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_pack_config(guild.id, "privacy", enabled=True, action="log", sensitivity="normal")
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_log_channel(guild.id, log_channel.id)
+        self.assertTrue(ok)
+
+        decision = await self.service.handle_message(message)
+
+        self.assertIsNotNone(decision)
+        self.assertIsNone(decision.ai_review)
+        self.service.ai_provider.review.assert_not_awaited()
+
+    async def test_ai_review_failure_does_not_block_local_alert(self):
+        guild = FakeGuild(SHIELD_AI_ALLOWED_GUILD_ID)
+        public_channel = FakeChannel(20)
+        log_channel = FakeChannel(99, name="shield-log")
+        self.bot.register_channel(log_channel)
+        author = FakeAuthor(42, roles=[FakeRole(11, position=1)])
+        message = FakeMessage(guild=guild, channel=public_channel, author=author, content="Email me at friend@example.com")
+        self.service.ai_provider = FakeAIProvider(result=None)
+
+        ok, _ = await self.service.set_module_enabled(guild.id, True)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_pack_config(guild.id, "privacy", enabled=True, action="log", sensitivity="normal")
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_log_channel(guild.id, log_channel.id)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_ai_config(guild.id, enabled=False)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_ai_config(guild.id, enabled=True, enabled_packs=["privacy"], min_confidence="high")
+        self.assertTrue(ok)
+
+        decision = await self.service.handle_message(message)
+
+        self.assertIsNotNone(decision)
+        self.assertIsNone(decision.ai_review)
+        self.assertEqual(len(log_channel.sent), 1)

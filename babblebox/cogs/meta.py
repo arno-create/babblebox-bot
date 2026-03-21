@@ -79,9 +79,10 @@ HELP_PAGES: list[dict[str, str]] = [
         "description": "Optional server-side protection with conservative defaults.",
         "body": (
             "Shield can watch for privacy leaks, invite/promo spam, and experimental scam heuristics.\n"
-            "`/shield status`, `/shield pack`, and `/shield test` cover the core admin flow.\n"
+            "`/shield panel`, `/shield rules`, `/shield ai`, and `/shield test` cover the core admin flow.\n"
             "It is off until an admin configures it.\n"
-            "Defaults are log-first, with allowlists, trusted-role bypasses, private mod-log alerts, and safe advanced wildcard patterns instead of raw regex."
+            "Defaults are log-first, with allowlists, trusted-role bypasses, private mod-log alerts, and safe advanced wildcard patterns instead of raw regex.\n"
+            "AI assist is optional, admin-only, support-server limited, and only reviews messages that local Shield already flagged. It never punishes on its own."
         ),
     },
     {
