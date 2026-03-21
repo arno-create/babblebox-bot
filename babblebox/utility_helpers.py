@@ -212,7 +212,7 @@ def make_message_preview(content: str | None, *, attachments=None, limit: int = 
     if preview and media_summary:
         preview = f"{preview}\nMedia: {media_summary}"
     elif not preview:
-        preview = media_summary or "[message preview unavailable]"
+        preview = media_summary or "[quiet message]"
 
     return ge.safe_field_text(preview, limit=limit)
 
@@ -251,7 +251,7 @@ def build_moment_card_embed(
 ) -> discord.Embed:
     preview = make_message_preview(message.content, attachments=message.attachments, limit=500)
     embed = discord.Embed(
-        title=title or "Babblebox Moment Card",
+        title=title or "Babblebox Moment",
         description=_quote_block(preview),
         color=_message_color(message),
         timestamp=message.created_at or ge.now_utc(),
@@ -261,39 +261,27 @@ def build_moment_card_embed(
     display_avatar = getattr(message.author, "display_avatar", None)
     if display_avatar is not None:
         author_icon = getattr(display_avatar, "url", None)
-    embed.set_author(name=f"{ge.display_name_of(message.author)} said:", icon_url=author_icon)
+    embed.set_author(name=f"{ge.display_name_of(message.author)} saved a keepsake", icon_url=author_icon)
 
     channel_name = getattr(message.channel, "mention", "#unknown")
     guild_name = message.guild.name if message.guild else "Direct Messages"
-    scene = f"{guild_name} • {channel_name}"
+    scene = f"{guild_name} | {channel_name}"
     if message.created_at is not None:
         scene += f"\n{ge.format_timestamp(message.created_at, 'f')}"
     embed.add_field(name="Scene", value=scene, inline=False)
-    corrected_scene = f"{guild_name} | {channel_name}"
-    if message.created_at is not None:
-        corrected_scene += f"\n{ge.format_timestamp(message.created_at, 'f')}"
-    embed.set_field_at(len(embed.fields) - 1, name="Scene", value=corrected_scene, inline=False)
 
     if followup is not None:
         echo_preview = make_message_preview(followup.content, attachments=followup.attachments, limit=320)
         embed.add_field(
-            name=f"Echo • {ge.display_name_of(followup.author)}",
-            value=_quote_block(echo_preview),
-            inline=False,
-        )
-
-    if followup is not None:
-        embed.set_field_at(
-            len(embed.fields) - 1,
             name=f"Echo | {ge.display_name_of(followup.author)}",
             value=_quote_block(echo_preview),
             inline=False,
         )
 
     if requested_by is not None and requested_by.id != getattr(message.author, "id", None):
-        embed.add_field(name="Pinned By", value=ge.display_name_of(requested_by), inline=True)
+        embed.add_field(name="Saved By", value=ge.display_name_of(requested_by), inline=True)
 
-    return ge.style_embed(embed, footer="Babblebox Moment | Live link attached, nothing archived")
+    return ge.style_embed(embed, footer="Babblebox Moment | Live link only, never archived")
 
 
 def build_watch_alert_embed(
@@ -305,21 +293,20 @@ def build_watch_alert_embed(
     guild_name = message.guild.name if message.guild else "Direct Messages"
     channel_name = getattr(message.channel, "mention", "#unknown")
     embed = discord.Embed(
-        title="Babblebox Watch Alert",
-        description=f"Something you watch for showed up in **{guild_name}**.",
+        title="Babblebox Watch Ping",
+        description=f"Quiet alert from **{guild_name}** in {channel_name}.",
         color=ge.EMBED_THEME["accent"],
         timestamp=message.created_at or ge.now_utc(),
     )
     embed.add_field(name="From", value=ge.display_name_of(message.author), inline=True)
-    embed.add_field(name="Channel", value=channel_name, inline=True)
-    embed.add_field(name="Triggered By", value=", ".join(trigger_labels), inline=False)
+    embed.add_field(name="Why", value=", ".join(trigger_labels), inline=True)
     if matched_keywords:
         rendered = ", ".join(f"`{keyword}`" for keyword in matched_keywords[:6])
         if len(matched_keywords) > 6:
             rendered += f" and {len(matched_keywords) - 6} more"
         embed.add_field(name="Matched Keywords", value=rendered, inline=False)
     embed.add_field(
-        name="Preview",
+        name="Peek",
         value=make_message_preview(message.content, attachments=message.attachments),
         inline=False,
     )
@@ -329,13 +316,13 @@ def build_watch_alert_embed(
 def build_later_marker_embed(marker: dict) -> discord.Embed:
     embed = discord.Embed(
         title="Later Marker Saved",
-        description=f"Your reading spot in **{marker['guild_name']} / #{marker['channel_name']}** is tucked away.",
+        description=f"Your bookmark for **{marker['guild_name']} / #{marker['channel_name']}** is ready when you are.",
         color=ge.EMBED_THEME["info"],
         timestamp=deserialize_datetime(marker.get("message_created_at")) or ge.now_utc(),
     )
-    embed.add_field(name="From", value=marker.get("author_name", "Unknown"), inline=True)
+    embed.add_field(name="Spot", value=marker.get("author_name", "Unknown"), inline=True)
     embed.add_field(name="Saved", value=ge.format_timestamp(deserialize_datetime(marker.get("saved_at")), "R"), inline=True)
-    embed.add_field(name="Preview", value=marker.get("preview", "[no preview available]"), inline=False)
+    embed.add_field(name="Preview", value=marker.get("preview", "[quiet message]"), inline=False)
     attachment_lines = marker.get("attachment_labels") or []
     if attachment_lines:
         embed.add_field(name="Attachments", value=ge.join_limited_lines(attachment_lines[:4]), inline=False)
@@ -353,13 +340,13 @@ def build_capture_delivery_embed(
 ) -> tuple[discord.Embed, discord.ui.View | None]:
     embed = discord.Embed(
         title="Capture Delivered",
-        description=f"Packed **{captured_count}** recent message(s) from **{guild_name} / #{channel_name}** into your DMs.",
+        description=f"I packed **{captured_count}** recent message(s) from **{guild_name} / #{channel_name}** into your DMs.",
         color=ge.EMBED_THEME["info"],
     )
-    embed.add_field(name="Requested", value=str(requested_count), inline=True)
-    embed.add_field(name="Captured", value=str(captured_count), inline=True)
+    embed.add_field(name="Snapshot", value=f"Asked for **{requested_count}**\nCaptured **{captured_count}**", inline=True)
+    embed.add_field(name="Archive", value="DM only\nNo long-term storage", inline=True)
     if preview_lines:
-        embed.add_field(name="Peek", value=ge.join_limited_lines(preview_lines[:6]), inline=False)
+        embed.add_field(name="Latest Stretch", value=ge.join_limited_lines(preview_lines[:6]), inline=False)
     view = build_jump_view(jump_url, label="Jump Back to Channel") if jump_url else None
     return ge.style_embed(embed, footer="Babblebox Capture | Full transcript attached, no long-term archive"), view
 

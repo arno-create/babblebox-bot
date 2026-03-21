@@ -2,15 +2,12 @@
 
 Babblebox is a modular Discord bot built with Python and `discord.py`.
 
-It aims to feel cohesive in four directions at once:
+It is designed around five clear product lanes:
 
 - Party Games for active voice/text hangouts
 - Everyday Utilities for quiet server life
 - Daily Arcade for low-player-count return visits
 - Buddy / Profile / Vault for identity, streaks, and showable progress
-
-This pass also adds an optional fifth operational layer:
-
 - Babblebox Shield for lightweight, configurable server safety
 
 Babblebox is intentionally compact:
@@ -57,7 +54,7 @@ Babblebox is intentionally compact:
   - DM transcript snapshots of recent messages
   - better media placeholders and attachment context
 - Moment Cards
-  - shareable embed-first quote or exchange cards
+  - live-linked keepsake cards for a message or exchange
   - built from replies, recent messages, or message links
   - no archive table and no generated image pipeline
 - Remind

@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock, patch
 
 from babblebox.shield_ai import SHIELD_AI_ALLOWED_GUILD_ID, ShieldAIReviewResult
 from babblebox.shield_service import ShieldDecision, ShieldMatch, ShieldService
-from babblebox.shield_store import ShieldStateStore
+from babblebox.shield_store import ShieldStateStore, _MemoryShieldStore
 
 
 class FakeRole:
@@ -151,6 +151,31 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(matches)
         self.assertEqual(matches[0].pack, "privacy")
         self.assertIn("email", matches[0].label.lower())
+
+    async def test_legacy_nested_pack_shape_is_respected_by_service_and_compiled_cache(self):
+        self.service.store.state["guilds"]["10"] = {
+            "module_enabled": True,
+            "packs": {
+                "privacy": {"enabled": True, "action": "log", "sensitivity": "high"},
+                "promo": {"tracking": True, "action": "delete_log", "sensitivity": "normal"},
+                "scam": {"enabled": False, "action": "log", "sensitivity": "normal"},
+            },
+            "ai_enabled": True,
+            "ai_enabled_packs": ["privacy", "promo"],
+        }
+
+        config = self.service.get_config(10)
+        self.assertTrue(config["privacy_enabled"])
+        self.assertTrue(config["promo_enabled"])
+        self.assertEqual(config["privacy_sensitivity"], "high")
+        self.assertEqual(config["promo_action"], "delete_log")
+
+        self.service._rebuild_config_cache()
+        compiled = self.service._compiled_configs[10]
+        self.assertTrue(compiled.privacy.enabled)
+        self.assertTrue(compiled.promo.enabled)
+        self.assertEqual(compiled.privacy.sensitivity, "high")
+        self.assertEqual(compiled.promo.action, "delete_log")
 
     async def test_allowlisted_invite_suppresses_promo_match(self):
         ok, _ = await self.service.set_pack_config(10, "promo", enabled=True, action="log", sensitivity="normal")
@@ -371,3 +396,27 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(decision)
         self.assertIsNone(decision.ai_review)
         self.assertEqual(len(log_channel.sent), 1)
+
+
+class ShieldStoreNormalizationTests(unittest.TestCase):
+    def test_normalize_state_migrates_legacy_nested_pack_config(self):
+        store = _MemoryShieldStore()
+        legacy = {
+            "version": 1,
+            "guilds": {
+                "123": {
+                    "module_enabled": True,
+                    "packs": {
+                        "privacy": {"enabled": True, "action": "log", "sensitivity": "high"},
+                        "promo": {"tracking": True, "action": "delete_log", "sensitivity": "normal"},
+                    },
+                }
+            },
+        }
+
+        normalized = store.normalize_state(legacy)
+        config = normalized["guilds"]["123"]
+        self.assertTrue(config["privacy_enabled"])
+        self.assertTrue(config["promo_enabled"])
+        self.assertEqual(config["privacy_sensitivity"], "high")
+        self.assertEqual(config["promo_action"], "delete_log")

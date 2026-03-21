@@ -3,47 +3,50 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Babblebox - Party Games, Everyday Utilities, Daily Arcade, Buddy Profiles, and Shield Safety</title>
+  <title>Babblebox | Party Games, Utilities, Daily Arcade, Buddy Profiles, and Shield Safety</title>
   <meta
     name="description"
-    content="Babblebox is a Discord bot with party games, everyday utilities, a Daily Arcade, Buddy/Profile charm, shareable Moment Cards, and an optional Shield safety layer with compact moderation storage and limited AI-assisted review."
+    content="Babblebox is a polished Discord bot for party games, quiet utilities, a Daily Arcade, Buddy/Profile identity, Moment Cards, and compact optional Shield safety with restricted AI-assisted review."
   />
   <meta name="robots" content="index,follow,max-image-preview:large" />
   <link rel="canonical" href="https://arno-create.github.io/babblebox-bot/" />
-  <meta property="og:title" content="Babblebox - Party Games, Everyday Utilities, Daily Arcade, Buddy Profiles, and Shield Safety" />
+  <meta property="og:title" content="Babblebox | Party Games, Utilities, Daily Arcade, Buddy Profiles, and Shield Safety" />
   <meta
     property="og:description"
-    content="A multi-category Discord bot with party games, quiet utilities, a Daily Arcade, Buddy/Profile charm, Moment Cards, and an optional Shield safety layer with limited AI-assisted review."
+    content="One Discord bot for party nights, quiet server utilities, a compact Daily Arcade, Buddy/Profile charm, and optional Shield safety."
   />
   <meta property="og:url" content="https://arno-create.github.io/babblebox-bot/" />
   <meta property="og:type" content="website" />
   <meta property="og:image" content="https://arno-create.github.io/babblebox-bot/banner.png" />
   <meta name="twitter:card" content="summary_large_image" />
-  <meta name="twitter:title" content="Babblebox - Party Games, Everyday Utilities, Daily Arcade, Buddy Profiles, and Shield Safety" />
+  <meta name="twitter:title" content="Babblebox | Party Games, Utilities, Daily Arcade, Buddy Profiles, and Shield Safety" />
   <meta
     name="twitter:description"
-    content="Party games when a group is around, useful tools when it is not, plus a Daily Arcade, Buddy profiles, Moment Cards, and optional Shield safety with limited AI-assisted review."
+    content="Party games when a group is around, useful tools when it is not, plus Daily Arcade booths, Buddy/Profile identity, Moment Cards, and compact optional Shield safety."
   />
   <meta name="twitter:image" content="https://arno-create.github.io/babblebox-bot/banner.png" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700;800&family=Sora:wght@600;700&display=swap" rel="stylesheet" />
+  <link href="https://fonts.googleapis.com/css2?family=Instrument+Sans:wght@400;500;600;700&family=Space+Grotesk:wght@500;700&display=swap" rel="stylesheet" />
   <style>
     :root {
-      --bg: #07101c;
-      --bg-soft: #0d1b2f;
-      --panel: rgba(12, 25, 44, 0.84);
-      --panel-strong: rgba(16, 32, 56, 0.96);
-      --line: rgba(255, 255, 255, 0.09);
-      --text: #f4f8ff;
-      --muted: #b4c3db;
-      --blue: #5b8fff;
-      --cyan: #39d7ff;
-      --gold: #ffcf6b;
-      --green: #50d48d;
-      --rose: #ff8ca5;
-      --shadow: 0 28px 80px rgba(0, 0, 0, 0.35);
-      --radius: 24px;
+      --bg: #f6efe5;
+      --bg-soft: #fff9f1;
+      --paper: rgba(255, 251, 245, 0.92);
+      --panel: rgba(252, 246, 236, 0.98);
+      --panel-strong: #fffdf8;
+      --ink: #182332;
+      --muted: #59677a;
+      --line: rgba(24, 35, 50, 0.10);
+      --navy: #18324f;
+      --teal: #1f8a8a;
+      --gold: #cc9155;
+      --rose: #ce6a74;
+      --mint: #3e9b74;
+      --shadow: 0 22px 70px rgba(24, 35, 50, 0.10);
+      --radius-xl: 28px;
+      --radius-lg: 22px;
+      --radius-md: 16px;
       --max: 1180px;
     }
 
@@ -51,22 +54,32 @@
     html { scroll-behavior: smooth; }
     body {
       margin: 0;
-      color: var(--text);
-      font-family: "Plus Jakarta Sans", sans-serif;
+      color: var(--ink);
+      font-family: "Instrument Sans", sans-serif;
       background:
-        radial-gradient(circle at 12% 18%, rgba(91, 143, 255, 0.20), transparent 24%),
-        radial-gradient(circle at 85% 22%, rgba(57, 215, 255, 0.16), transparent 20%),
-        radial-gradient(circle at 55% 78%, rgba(255, 140, 165, 0.11), transparent 24%),
-        linear-gradient(180deg, #06101b 0%, #081321 42%, #091726 100%);
+        radial-gradient(circle at 12% 12%, rgba(204, 145, 85, 0.18), transparent 24%),
+        radial-gradient(circle at 88% 18%, rgba(31, 138, 138, 0.12), transparent 20%),
+        radial-gradient(circle at 80% 82%, rgba(206, 106, 116, 0.11), transparent 18%),
+        linear-gradient(180deg, #f8f2e8 0%, #f6efe5 36%, #f3ebdf 100%);
       min-height: 100vh;
     }
 
     a { color: inherit; text-decoration: none; }
-    img { max-width: 100%; display: block; }
+    img { display: block; max-width: 100%; }
+
+    a:focus-visible,
+    .btn:focus-visible {
+      outline: 3px solid rgba(24, 50, 79, 0.22);
+      outline-offset: 3px;
+    }
 
     .container {
       width: min(calc(100% - 32px), var(--max));
       margin: 0 auto;
+    }
+
+    section[id] {
+      scroll-margin-top: 92px;
     }
 
     .nav-shell {
@@ -74,7 +87,7 @@
       top: 0;
       z-index: 20;
       backdrop-filter: blur(16px);
-      background: rgba(4, 10, 18, 0.72);
+      background: rgba(246, 239, 229, 0.82);
       border-bottom: 1px solid var(--line);
     }
 
@@ -83,55 +96,55 @@
       align-items: center;
       justify-content: space-between;
       gap: 18px;
-      padding: 16px 0;
+      padding: 14px 0;
     }
 
     .brand {
       display: inline-flex;
       align-items: center;
       gap: 12px;
-      font-family: "Sora", sans-serif;
+      font-family: "Space Grotesk", sans-serif;
       font-weight: 700;
-      letter-spacing: -0.03em;
+      letter-spacing: -0.04em;
     }
 
     .brand img {
-      width: 46px;
-      height: 46px;
+      width: 44px;
+      height: 44px;
       border-radius: 14px;
       object-fit: cover;
-      border: 1px solid rgba(255,255,255,0.12);
-      box-shadow: 0 14px 30px rgba(91, 143, 255, 0.25);
+      border: 1px solid rgba(24, 35, 50, 0.10);
+      box-shadow: 0 12px 26px rgba(24, 35, 50, 0.14);
     }
 
     .brand small {
       display: block;
-      margin-top: 3px;
-      font-family: "Plus Jakarta Sans", sans-serif;
+      margin-top: 2px;
       color: var(--muted);
-      font-size: 0.72rem;
+      font-family: "Instrument Sans", sans-serif;
+      font-size: 0.74rem;
+      letter-spacing: 0.08em;
       text-transform: uppercase;
-      letter-spacing: 0.12em;
     }
 
     .nav-links {
       display: flex;
-      gap: 18px;
+      gap: 16px;
       flex-wrap: wrap;
       color: var(--muted);
       font-size: 0.95rem;
     }
 
-    .nav-links a:hover { color: var(--text); }
+    .nav-links a:hover { color: var(--ink); }
 
     header {
-      padding: 78px 0 28px;
+      padding: 68px 0 26px;
     }
 
     .hero {
       display: grid;
-      grid-template-columns: 1.08fr 0.92fr;
-      gap: 30px;
+      grid-template-columns: 1.05fr 0.95fr;
+      gap: 34px;
       align-items: center;
     }
 
@@ -139,48 +152,79 @@
       display: inline-flex;
       align-items: center;
       gap: 8px;
-      padding: 10px 14px;
+      padding: 9px 13px;
       border-radius: 999px;
-      border: 1px solid rgba(255,255,255,0.10);
-      background: rgba(255,255,255,0.04);
-      color: #d9e7ff;
-      font-size: 0.92rem;
+      background: rgba(255, 255, 255, 0.72);
+      border: 1px solid rgba(24, 35, 50, 0.08);
+      color: var(--navy);
+      font-size: 0.88rem;
+      font-weight: 600;
       margin-bottom: 18px;
     }
 
-    h1, h2, h3 {
+    h1, h2, h3, h4 {
       margin: 0;
-      font-family: "Sora", sans-serif;
+      font-family: "Space Grotesk", sans-serif;
       letter-spacing: -0.04em;
     }
 
     h1 {
-      font-size: clamp(2.9rem, 6vw, 5.5rem);
-      line-height: 0.98;
+      font-size: clamp(2.8rem, 5vw, 5.2rem);
+      line-height: 0.95;
       margin-bottom: 18px;
     }
 
     h2 {
-      font-size: clamp(1.9rem, 3vw, 2.7rem);
+      font-size: clamp(1.9rem, 3vw, 2.8rem);
       margin-bottom: 10px;
     }
 
+    h3 {
+      font-size: 1.22rem;
+      margin-bottom: 8px;
+    }
+
     p {
+      margin: 0;
       color: var(--muted);
       line-height: 1.75;
     }
 
     .gradient {
-      background: linear-gradient(90deg, #ffffff 0%, #c5d8ff 28%, #a5ecff 60%, #ffd4e1 100%);
+      background: linear-gradient(90deg, var(--navy) 0%, var(--teal) 44%, var(--rose) 100%);
       -webkit-background-clip: text;
       background-clip: text;
       color: transparent;
     }
 
+    .hero-copy p {
+      max-width: 60ch;
+    }
+
+    .tag-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin: 24px 0 0;
+    }
+
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 12px;
+      border-radius: 999px;
+      background: rgba(255, 255, 255, 0.82);
+      border: 1px solid rgba(24, 35, 50, 0.08);
+      color: var(--ink);
+      font-size: 0.9rem;
+      font-weight: 600;
+    }
+
     .cta-row {
       display: flex;
-      gap: 14px;
       flex-wrap: wrap;
+      gap: 12px;
       margin-top: 26px;
     }
 
@@ -188,38 +232,41 @@
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      padding: 14px 18px;
-      border-radius: 16px;
+      min-height: 46px;
+      padding: 12px 16px;
+      border-radius: 999px;
       border: 1px solid transparent;
       font-weight: 700;
-      transition: transform 0.18s ease, background 0.18s ease, border-color 0.18s ease;
+      transition: transform 0.18s ease, box-shadow 0.18s ease, border-color 0.18s ease;
     }
 
-    .btn:hover { transform: translateY(-2px); }
+    .btn:hover {
+      transform: translateY(-1px);
+    }
 
     .btn-primary {
-      background: linear-gradient(135deg, var(--blue), var(--cyan));
-      color: white;
-      box-shadow: 0 20px 50px rgba(91, 143, 255, 0.28);
+      color: #fff;
+      background: linear-gradient(135deg, var(--navy), var(--teal));
+      box-shadow: 0 16px 30px rgba(24, 50, 79, 0.18);
     }
 
     .btn-secondary {
-      background: rgba(255,255,255,0.05);
-      border-color: rgba(255,255,255,0.11);
+      background: rgba(255, 255, 255, 0.84);
+      border-color: rgba(24, 35, 50, 0.10);
     }
 
     .hero-panel,
     .card,
     .gallery-card,
-    .banner {
+    .callout {
+      background: var(--paper);
+      border: 1px solid var(--line);
       box-shadow: var(--shadow);
     }
 
     .hero-panel {
       padding: 18px;
-      border-radius: 28px;
-      background: linear-gradient(180deg, rgba(255,255,255,0.08), rgba(255,255,255,0.03));
-      border: 1px solid rgba(255,255,255,0.09);
+      border-radius: var(--radius-xl);
     }
 
     .hero-panel img {
@@ -227,12 +274,11 @@
       aspect-ratio: 16 / 9;
       object-fit: cover;
       border-radius: 22px;
-      border: 1px solid rgba(255,255,255,0.08);
     }
 
     .hero-note {
-      padding: 16px 6px 4px;
-      color: #d7e5ff;
+      padding: 14px 4px 2px;
+      color: var(--muted);
       line-height: 1.7;
     }
 
@@ -246,19 +292,20 @@
     .stat,
     .card,
     .gallery-card {
-      background: linear-gradient(180deg, rgba(255,255,255,0.06), rgba(255,255,255,0.035));
-      border: 1px solid rgba(255,255,255,0.08);
-      border-radius: var(--radius);
+      border-radius: var(--radius-lg);
     }
 
     .stat {
       padding: 18px;
+      background: rgba(255, 255, 255, 0.74);
+      border: 1px solid rgba(24, 35, 50, 0.08);
     }
 
     .stat b {
       display: block;
       font-size: 1.35rem;
       margin-bottom: 6px;
+      color: var(--navy);
     }
 
     section {
@@ -267,6 +314,7 @@
 
     .section-head {
       margin-bottom: 24px;
+      max-width: 60ch;
     }
 
     .grid {
@@ -274,83 +322,124 @@
       gap: 18px;
     }
 
-    .quad { grid-template-columns: repeat(4, 1fr); }
-    .double { grid-template-columns: repeat(2, 1fr); }
-    .triple { grid-template-columns: repeat(3, 1fr); }
+    .grid-5 { grid-template-columns: repeat(5, 1fr); }
+    .grid-4 { grid-template-columns: repeat(4, 1fr); }
+    .grid-3 { grid-template-columns: repeat(3, 1fr); }
+    .grid-2 { grid-template-columns: repeat(2, 1fr); }
 
     .card {
-      padding: 24px;
+      padding: 22px;
     }
 
     .label {
       display: inline-flex;
       width: fit-content;
-      padding: 8px 12px;
+      padding: 7px 11px;
       border-radius: 999px;
-      font-size: 0.82rem;
+      font-size: 0.8rem;
       font-weight: 700;
       letter-spacing: 0.04em;
       margin-bottom: 14px;
-      background: rgba(91, 143, 255, 0.12);
-      border: 1px solid rgba(91, 143, 255, 0.24);
-      color: #d9e6ff;
+      color: var(--navy);
+      background: rgba(24, 50, 79, 0.07);
+      border: 1px solid rgba(24, 50, 79, 0.10);
     }
 
-    .card ul {
+    ul {
       margin: 14px 0 0;
       padding-left: 18px;
       color: var(--muted);
       line-height: 1.7;
     }
 
+    .split {
+      display: grid;
+      grid-template-columns: 0.95fr 1.05fr;
+      gap: 18px;
+      align-items: start;
+    }
+
+    .feature-stack {
+      display: grid;
+      gap: 14px;
+    }
+
+    .mini-card {
+      padding: 16px 18px;
+      border-radius: var(--radius-md);
+      background: rgba(255, 255, 255, 0.68);
+      border: 1px solid rgba(24, 35, 50, 0.08);
+    }
+
+    .mini-card h4 {
+      margin-bottom: 6px;
+      font-size: 1rem;
+    }
+
     .command-list {
       display: grid;
-      gap: 12px;
+      gap: 10px;
     }
 
     .command-row {
       display: flex;
       justify-content: space-between;
-      gap: 18px;
-      padding: 14px 16px;
-      border-radius: 18px;
-      background: rgba(255,255,255,0.05);
-      border: 1px solid rgba(255,255,255,0.07);
+      gap: 16px;
+      padding: 13px 15px;
+      border-radius: 16px;
+      border: 1px solid rgba(24, 35, 50, 0.08);
+      background: rgba(255, 255, 255, 0.72);
       align-items: center;
     }
 
     code {
-      color: #f3fbff;
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
-      font-size: 0.96rem;
+      color: var(--navy);
+      font-size: 0.95rem;
+    }
+
+    .gallery-card {
+      overflow: hidden;
     }
 
     .gallery-card img {
       width: 100%;
       aspect-ratio: 16 / 10;
       object-fit: cover;
-      border-radius: 22px 22px 0 0;
-      border-bottom: 1px solid rgba(255,255,255,0.08);
+      border-bottom: 1px solid var(--line);
     }
 
     .gallery-copy {
       padding: 18px;
     }
 
-    .banner {
-      display: grid;
-      grid-template-columns: 1.12fr 0.88fr;
-      gap: 18px;
-      padding: 28px;
-      border-radius: 30px;
-      background: linear-gradient(135deg, rgba(91,143,255,0.20), rgba(57,215,255,0.15), rgba(255,140,165,0.10));
-      border: 1px solid rgba(255,255,255,0.10);
+    .callout {
+      padding: 26px;
+      border-radius: var(--radius-xl);
+      background:
+        linear-gradient(135deg, rgba(24, 50, 79, 0.94), rgba(31, 138, 138, 0.92)),
+        linear-gradient(180deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0));
+      color: #f7fbff;
+    }
+
+    .callout p {
+      color: rgba(247, 251, 255, 0.82);
+    }
+
+    .callout .cta-row {
+      margin-top: 22px;
+    }
+
+    .callout .btn-secondary {
+      color: #f7fbff;
+      border-color: rgba(247, 251, 255, 0.18);
+      background: rgba(255, 255, 255, 0.08);
     }
 
     footer {
-      padding: 28px 0 56px;
+      padding: 26px 0 54px;
       color: var(--muted);
-      font-size: 0.95rem;
+      font-size: 0.94rem;
     }
 
     .footer-row {
@@ -359,26 +448,39 @@
       gap: 16px;
       flex-wrap: wrap;
       padding-top: 24px;
-      border-top: 1px solid rgba(255,255,255,0.08);
+      border-top: 1px solid var(--line);
     }
 
-    @media (max-width: 1000px) {
+    @media (max-width: 1100px) {
       .hero,
-      .quad,
-      .double,
-      .triple,
-      .banner,
+      .grid-5,
+      .grid-4,
+      .grid-3,
+      .grid-2,
+      .split,
       .stats {
         grid-template-columns: 1fr;
       }
     }
 
-    @media (max-width: 720px) {
-      nav { flex-direction: column; align-items: flex-start; }
-      .hero { gap: 24px; }
-      .cta-row { flex-direction: column; }
-      .btn { width: 100%; }
-      .command-row { flex-direction: column; align-items: flex-start; }
+    @media (max-width: 760px) {
+      nav {
+        flex-direction: column;
+        align-items: flex-start;
+      }
+
+      .cta-row {
+        flex-direction: column;
+      }
+
+      .btn {
+        width: 100%;
+      }
+
+      .command-row {
+        flex-direction: column;
+        align-items: flex-start;
+      }
     }
   </style>
 </head>
@@ -394,12 +496,13 @@
           </span>
         </a>
         <div class="nav-links">
+          <a href="#product">Product</a>
           <a href="#games">Party Games</a>
           <a href="#utilities">Utilities</a>
           <a href="#daily">Daily Arcade</a>
-          <a href="#buddy">Buddy / Profile / Vault</a>
-          <a href="#shield">Shield / Safety</a>
-          <a href="#privacy">Privacy / Support</a>
+          <a href="#identity">Buddy / Profile / Vault</a>
+          <a href="#shield">Shield</a>
+          <a href="#privacy">Privacy</a>
           <a href="#commands">Commands</a>
         </div>
       </nav>
@@ -408,16 +511,21 @@
 
   <header id="top">
     <div class="container hero">
-      <div>
-        <div class="eyebrow">Python | discord.py | modular architecture | compact Postgres-first persistence | optional Shield safety</div>
-        <h1><span class="gradient">Babblebox</span><br />for party nights, quiet utilities, daily arcade return visits, and low-noise server safety.</h1>
+      <div class="hero-copy">
+        <div class="eyebrow">Python &middot; discord.py &middot; compact Postgres-first persistence &middot; optional Shield safety</div>
+        <h1><span class="gradient">Babblebox</span><br />for party nights, quiet utilities, daily return visits, and low-noise server safety.</h1>
         <p>
-          Babblebox still shines when a group piles into voice chat, but it now earns its place in quieter servers too:
-          Watch V2 alerts, Later and Capture utility flows, Daily Arcade booths, Buddy/Profile charm, and shareable
-          Moment Cards that feel warm and screenshot-worthy without turning into a heavy archive product. For servers
-          that want a little extra protection, Babblebox Shield adds configurable privacy, promo, and heuristic scam checks
-          without turning the bot into a giant moderation suite.
+          Babblebox still shines when a group piles into a lobby, but it now earns its place in quieter servers too:
+          Watch alerts, Later and Capture, a Daily Arcade, Buddy/Profile charm, zero-archive Moment Cards, and an optional
+          Shield layer that stays compact, configurable, and conservative.
         </p>
+        <div class="tag-row">
+          <span class="tag">Party Games</span>
+          <span class="tag">Everyday Utilities</span>
+          <span class="tag">Daily Arcade</span>
+          <span class="tag">Buddy / Profile / Vault</span>
+          <span class="tag">Shield / Safety</span>
+        </div>
         <div class="cta-row">
           <a class="btn btn-primary" href="https://discord.com/oauth2/authorize?client_id=1480903089518022739" target="_blank" rel="noreferrer">Invite Babblebox</a>
           <a class="btn btn-secondary" href="https://discord.com/servers/inevitable-friendship-1322933864360050688" target="_blank" rel="noreferrer">Join Support Server</a>
@@ -425,52 +533,52 @@
         </div>
         <div class="stats">
           <div class="stat"><b>4</b><span>party games</span></div>
-          <div class="stat"><b>6</b><span>everyday utilities</span></div>
-          <div class="stat"><b>3</b><span>Daily Arcade booths</span></div>
-          <div class="stat"><b>3</b><span>Shield protection packs</span></div>
+          <div class="stat"><b>6</b><span>utility lanes</span></div>
+          <div class="stat"><b>3</b><span>Daily booths</span></div>
+          <div class="stat"><b>3</b><span>Shield packs</span></div>
         </div>
       </div>
       <div class="hero-panel">
         <img src="banner.png" alt="Babblebox banner art" />
         <div class="hero-note">
-          The original branding and social energy stay intact, but the product is broader now:
-          multiplayer fun when a group is available, and low-noise utility or arcade features when it is not.
+          The original Babblebox identity stays intact, but the product surface is broader now:
+          multiplayer fun when a group is around, useful solo returns when it is not, and compact optional moderation support for servers that want it.
         </div>
       </div>
     </div>
   </header>
 
-  <section>
+  <section id="product">
     <div class="container">
       <div class="section-head">
         <h2>One bot, five clear reasons to keep it around.</h2>
-        <p>Babblebox is meant to feel cohesive, not like unrelated commands stitched together.</p>
+        <p>Babblebox is designed to feel cohesive instead of like unrelated commands stitched together.</p>
       </div>
-      <div class="grid quad">
+      <div class="grid grid-5">
         <article class="card">
           <span class="label">Party Games</span>
-          <h3>Group-first multiplayer</h3>
-          <p>Host a lobby, pick a game, and run short social rounds with cleaner copy, clearer start states, and more polished recaps.</p>
+          <h3>Group-first energy</h3>
+          <p>Open a lobby, pick a game, and get cleaner start states, better recaps, and less friction when people are still gathering.</p>
         </article>
         <article class="card">
           <span class="label">Utilities</span>
-          <h3>Quiet daily usefulness</h3>
-          <p>Watch V2, Later, Capture, Moment Cards, Remind, and AFK stay compact, private where appropriate, and intentionally bounded.</p>
+          <h3>Quiet usefulness</h3>
+          <p>Watch, Later, Capture, Remind, AFK, and Moment Cards stay compact, private where appropriate, and intentionally bounded.</p>
         </article>
         <article class="card">
           <span class="label">Daily Arcade</span>
-          <h3>Solo-friendly return habit</h3>
-          <p>Three deterministic arcade booths give low-activity servers something to post, compare, and come back for each day.</p>
+          <h3>Solo return habit</h3>
+          <p>Shared deterministic booths give low-activity servers something to compare, post, and come back for every day.</p>
         </article>
         <article class="card">
-          <span class="label">Buddy / Profile</span>
-          <h3>Identity without economy bloat</h3>
-          <p>Your Buddy, streaks, levels, badges, and profile live in one compact layer with anti-farm progression and no inventory grind.</p>
+          <span class="label">Identity</span>
+          <h3>Buddy without bloat</h3>
+          <p>Buddy, Profile, and Vault make progress feel charming and showable without becoming a giant RPG economy.</p>
         </article>
         <article class="card">
           <span class="label">Shield</span>
-          <h3>Optional, compact safety</h3>
-          <p>Privacy leak checks, promo/invite protection, and heuristic scam alerts stay configurable, log-first, and light on storage.</p>
+          <h3>Optional safety</h3>
+          <p>Privacy leak, promo/invite, and heuristic scam checks stay log-first, compact in storage, and conservative in operation.</p>
         </article>
       </div>
     </div>
@@ -480,25 +588,33 @@
     <div class="container">
       <div class="section-head">
         <h2>Party Games</h2>
-        <p>Babblebox still leads with multiplayer fun when people are around.</p>
+        <p>Babblebox still starts with multiplayer fun when the room is alive.</p>
       </div>
-      <div class="grid double">
+      <div class="split">
         <article class="card">
-          <h3>Broken Telephone</h3>
-          <p>Voice-message mimicry through DMs, then a final guess reveal when the chain reaches the end.</p>
+          <span class="label">Current Lineup</span>
+          <h3>Short sessions with clearer lobby flow</h3>
+          <ul>
+            <li>Broken Telephone for voice-message mimic chains</li>
+            <li>Exquisite Corpse for blind collaborative nonsense</li>
+            <li>Spyfall for interrogation and emergency voting</li>
+            <li>Word Bomb for dictionary-backed typing pressure</li>
+          </ul>
         </article>
-        <article class="card">
-          <h3>Exquisite Corpse</h3>
-          <p>Blind collaborative prompt building that lands in one absurd final sentence.</p>
-        </article>
-        <article class="card">
-          <h3>Spyfall</h3>
-          <p>A social deduction round with interrogation flow, emergency voting, and clearer host guidance.</p>
-        </article>
-        <article class="card">
-          <h3>Word Bomb</h3>
-          <p>Dictionary-backed typing survival with clean turn prompts, mode support, and fast recap value.</p>
-        </article>
+        <div class="feature-stack">
+          <div class="mini-card">
+            <h4>Less dead air</h4>
+            <p>Empty lobbies and minimum-player checks now point people toward Daily, Buddy, Profile, or utilities instead of stopping cold.</p>
+          </div>
+          <div class="mini-card">
+            <h4>Cleaner hosting</h4>
+            <p>Lobby copy, Chaos Card guidance, and start-state messaging are tuned to feel more polished and less raw.</p>
+          </div>
+          <div class="mini-card">
+            <h4>Still lightweight</h4>
+            <p>Game state is primarily session memory, not a heavy long-term archive.</p>
+          </div>
+        </div>
       </div>
     </div>
   </section>
@@ -507,24 +623,28 @@
     <div class="container">
       <div class="section-head">
         <h2>Everyday Utilities</h2>
-        <p>Useful Discord tools that try to stay private, dependable, and non-spammy.</p>
+        <p>Useful Discord tools that try to stay dependable, low-noise, and privacy-conscious.</p>
       </div>
-      <div class="grid quad">
+      <div class="grid grid-4">
         <article class="card">
-          <h3>Watch V2</h3>
-          <p>DM alerts for mentions, replies, and watched keywords, with separate controls, channel scope, and ignore lists.</p>
+          <span class="label">Watch V2</span>
+          <h3>Mentions, replies, keywords</h3>
+          <p>Separate mention and reply alerts, scoped keywords, ignored channels and users, and DM-only delivery with dedupe and cooldown protection.</p>
         </article>
         <article class="card">
-          <h3>Later</h3>
-          <p>Save your reading spot in a channel and get a clean DM jump link back to it, now with media-aware previews.</p>
+          <span class="label">Later</span>
+          <h3>Resume the channel cleanly</h3>
+          <p>Save one reading marker per channel, get a DM jump link back, and keep media-aware previews instead of awkward empty placeholders.</p>
         </article>
         <article class="card">
-          <h3>Capture</h3>
-          <p>Privately DM yourself a recent-message snapshot with better attachment summaries and no long-term media archive.</p>
+          <span class="label">Capture</span>
+          <h3>Private snapshots</h3>
+          <p>DM yourself a recent-message transcript with better attachment summaries, no media blob storage, and no long-term archive table.</p>
         </article>
         <article class="card">
-          <h3>Moment, Remind, AFK</h3>
-          <p>Shareable Moment Cards, one-time reminders, and a compact away-status system with `30m`, `2h`, and `2d` parsing.</p>
+          <span class="label">Moment / Remind / AFK</span>
+          <h3>Small but memorable</h3>
+          <p>Moment Cards create live-linked keepsakes, reminders stay bounded and one-time, and AFK handles `30m`, `2h`, `2d`, and compact combos like `1h30m`.</p>
         </article>
       </div>
     </div>
@@ -534,61 +654,51 @@
     <div class="container">
       <div class="section-head">
         <h2>Daily Arcade</h2>
-        <p>Babblebox Daily is now a small arcade: shared, quick, and light on storage.</p>
+        <p>Babblebox Daily is a compact arcade instead of a single puzzle command.</p>
       </div>
-      <div class="grid double">
+      <div class="grid grid-2">
         <article class="card">
-          <span class="label">Arcade Booths</span>
+          <span class="label">Three Booths</span>
           <h3>Shuffle, Emoji, and Signal</h3>
-          <p>
-            Three deterministic booths reset together each UTC day. Everyone gets the same set. Results stay compact:
-            attempts, solved/failed, and solve time.
-          </p>
+          <p>Each UTC day generates the same shared board for everyone. Results stay compact and deterministic, but the presentation still feels rewarding and showable.</p>
           <ul>
-            <li>1-3 minute puzzle flow</li>
-            <li>3 attempts per day</li>
-            <li>shareable text result output</li>
-            <li>streaks, clears, and leaderboard support</li>
+            <li>short booth runs with small attempt limits</li>
+            <li>shareable result output and leaderboard support</li>
+            <li>streak presentation tied back into Buddy/Profile</li>
+            <li>no rerolls and no external content APIs</li>
           </ul>
         </article>
         <article class="card">
           <span class="label">Storage Discipline</span>
-          <h3>Built for small databases</h3>
-          <p>
-            Babblebox does not store puzzle payloads if it can regenerate them from the date.
-            Raw Daily Arcade rows are bounded and pruned. Long-term streaks and totals live in the profile row.
-          </p>
+          <h3>Built for free-tier limits</h3>
+          <p>Daily puzzle payloads regenerate from the date. Persistent rows only keep bounded result data, while streaks and lifetime totals stay in the profile row.</p>
           <ul>
             <li>one result row per user per day per booth</li>
-            <li>no media or blob generation</li>
-            <li>no reroll farming</li>
-            <li>raw Daily rows pruned after 180 days</li>
+            <li>raw rows pruned after 180 days</li>
+            <li>no image generation or heavy archives</li>
+            <li>low write volume and compact leaderboard reads</li>
           </ul>
         </article>
       </div>
     </div>
   </section>
 
-  <section id="buddy">
+  <section id="identity">
     <div class="container">
       <div class="section-head">
         <h2>Buddy / Profile / Vault</h2>
         <p>Identity without turning Babblebox into an economy clone.</p>
       </div>
-      <div class="grid double">
+      <div class="grid grid-2">
         <article class="card">
-          <h3>Babblebox Buddy</h3>
-          <p>
-            Every user gets one lightweight companion with a species, nickname, style, mood, level,
-            title slot, and featured badge. Cosmetics come from local code-defined catalogs, not stored assets.
-          </p>
+          <span class="label">Buddy</span>
+          <h3>Cosmetic-first charm</h3>
+          <p>Each user gets one lightweight companion with a species, nickname, style, mood, title slot, and featured badge. Progress stays tied to real use, not grind loops.</p>
         </article>
         <article class="card">
-          <h3>Profile and Vault</h3>
-          <p>
-            `/profile` and `/vault` pull together Buddy status, Daily Arcade streaks, utility summaries, and multiplayer highlights
-            into one compact overview that stays useful even for lower-activity users.
-          </p>
+          <span class="label">Profile / Vault</span>
+          <h3>One cohesive layer</h3>
+          <p>`/profile` stays public-friendly and showable. `/vault` stays personal, pulling in live utility context without exposing private settings publicly.</p>
         </article>
       </div>
     </div>
@@ -598,37 +708,29 @@
     <div class="container">
       <div class="section-head">
         <h2>Shield / Safety</h2>
-        <p>Optional moderation support that tries to be useful, transparent, and low-noise.</p>
+        <p>Optional moderation support that stays compact, transparent, and conservative by design.</p>
       </div>
-      <div class="grid double">
+      <div class="grid grid-2">
         <article class="card">
-          <span class="label">Three Packs</span>
-          <h3>Privacy, promo, scam, and optional AI review</h3>
-          <p>
-            Babblebox Shield can watch for likely privacy leaks, Discord invite or promo spam, and heuristic scam or malicious-link bait.
-            An optional AI second pass can review only messages that local Shield already flagged, and only for moderator context.
-            That AI layer is off by default, admin-only, and currently limited to the support server.
-          </p>
+          <span class="label">Local First</span>
+          <h3>Privacy, promo, and heuristic scam packs</h3>
+          <p>Shield can watch for likely privacy leaks, Discord invite or promo spam, and scam-style bait. Packs are configurable, log-first by default, and tuned through a private admin panel.</p>
           <ul>
             <li>privacy leak pack</li>
             <li>promo / invite pack</li>
             <li>heuristic scam pack</li>
-            <li>AI assist stays off by default and never punishes on its own</li>
-            <li>safe advanced patterns without raw user regex</li>
+            <li>scope controls, allowlists, trusted-role bypasses, and safe advanced wildcard patterns</li>
           </ul>
         </article>
         <article class="card">
-          <span class="label">Admin UX</span>
-          <h3>Log-first and compact by design</h3>
-          <p>
-            Admins can open `/shield panel` for a compact overview, then use focused commands for rules, filters, allowlists, logs,
-            and optional AI settings without storing a heavy moderation archive in the database.
-          </p>
+          <span class="label">AI Assist</span>
+          <h3>Restricted second pass only</h3>
+          <p>Shield AI assist never acts as the primary moderator. It only reviews messages that local Shield already flagged, only enriches moderator context, and never punishes on its own.</p>
           <ul>
-            <li>off until configured</li>
-            <li>log-only defaults</li>
-            <li>private alert channel support</li>
-            <li>bounded in-memory escalation</li>
+            <li>currently limited to guild <code>1322933864360050688</code></li>
+            <li>disabled outside that guild</li>
+            <li>sanitized and truncated content only</li>
+            <li>no stored AI-submitted message archive in Shield persistence</li>
           </ul>
         </article>
       </div>
@@ -638,36 +740,34 @@
   <section id="commands">
     <div class="container">
       <div class="section-head">
-        <h2>Commands</h2>
-        <p>Slash commands and the `bb!` prefix both work.</p>
+        <h2>Command Highlights</h2>
+        <p>Slash commands and the <code>bb!</code> prefix both work.</p>
       </div>
-      <div class="card">
-        <div class="command-list">
-          <div class="command-row"><code>/play</code><span>Open a party-game lobby.</span></div>
-          <div class="command-row"><code>/daily</code><span>Open today's Daily Arcade overview.</span></div>
-          <div class="command-row"><code>/daily play &lt;guess&gt;</code><span>Submit a Shuffle Booth answer.</span></div>
-          <div class="command-row"><code>/daily play emoji &lt;guess&gt;</code><span>Submit an Emoji Booth answer.</span></div>
-          <div class="command-row"><code>/daily play signal &lt;guess&gt;</code><span>Submit a Signal Booth answer.</span></div>
-          <div class="command-row"><code>/daily share</code><span>Post your Daily result.</span></div>
-          <div class="command-row"><code>/buddy</code><span>Open your Buddy card.</span></div>
-          <div class="command-row"><code>/profile</code><span>View Daily, Buddy, utility, and game stats together.</span></div>
-          <div class="command-row"><code>/watch mentions</code><span>Configure mention alerts separately from replies.</span></div>
-          <div class="command-row"><code>/watch replies</code><span>Configure reply alerts.</span></div>
-          <div class="command-row"><code>/watch keyword add</code><span>Add a watched word or phrase in global, server, or channel scope.</span></div>
-          <div class="command-row"><code>/later mark</code><span>Save your reading spot in a channel.</span></div>
-          <div class="command-row"><code>/capture</code><span>DM yourself a recent-message snapshot.</span></div>
-          <div class="command-row"><code>/moment from-reply</code><span>Turn a reply target into a polished Moment Card.</span></div>
-          <div class="command-row"><code>/moment recent</code><span>Turn a recent exchange into a Moment Card.</span></div>
-          <div class="command-row"><code>/remind set</code><span>Create a one-time reminder.</span></div>
-          <div class="command-row"><code>/afk</code><span>Set or schedule away status with <code>30m</code>, <code>2h</code>, or <code>2d</code>.</span></div>
-          <div class="command-row"><code>/vault</code><span>Open your more personal progress snapshot.</span></div>
-          <div class="command-row"><code>/shield panel</code><span>Open the private Shield control panel for admins.</span></div>
-          <div class="command-row"><code>/shield rules</code><span>Configure core packs, actions, and escalation.</span></div>
-          <div class="command-row"><code>/shield filters</code><span>Tune included scope, exclusions, and trusted roles.</span></div>
-          <div class="command-row"><code>/shield allowlist</code><span>Manage domain, invite, and phrase allowlists.</span></div>
-          <div class="command-row"><code>/shield ai</code><span>Configure optional AI second-pass review in the allowed server.</span></div>
-          <div class="command-row"><code>/shield test</code><span>Dry-run a sample message against the current Shield rules.</span></div>
-        </div>
+      <div class="grid grid-2">
+        <article class="card">
+          <span class="label">Showable</span>
+          <div class="command-list">
+            <div class="command-row"><code>/play</code><span>Open the party-game lobby.</span></div>
+            <div class="command-row"><code>/daily</code><span>Open today&apos;s arcade board.</span></div>
+            <div class="command-row"><code>/daily share</code><span>Post a completed booth result.</span></div>
+            <div class="command-row"><code>/daily leaderboard</code><span>Show the arcade standings.</span></div>
+            <div class="command-row"><code>/buddy</code><span>Open the Buddy card.</span></div>
+            <div class="command-row"><code>/profile</code><span>Show arcade, Buddy, utility, and game progress together.</span></div>
+            <div class="command-row"><code>/moment from-reply</code><span>Turn a replied message into a keepsake card.</span></div>
+          </div>
+        </article>
+        <article class="card">
+          <span class="label">Private / Admin</span>
+          <div class="command-list">
+            <div class="command-row"><code>/watch settings</code><span>Review mention, reply, keyword, and filter state.</span></div>
+            <div class="command-row"><code>/later mark</code><span>Save a reading spot for this channel.</span></div>
+            <div class="command-row"><code>/capture</code><span>DM yourself a recent-message snapshot.</span></div>
+            <div class="command-row"><code>/remind set</code><span>Create a one-time reminder.</span></div>
+            <div class="command-row"><code>/vault</code><span>Open your more personal snapshot.</span></div>
+            <div class="command-row"><code>/shield panel</code><span>Open the private Shield control panel.</span></div>
+            <div class="command-row"><code>/shield test</code><span>Dry-run a sample message through Shield.</span></div>
+          </div>
+        </article>
       </div>
     </div>
   </section>
@@ -675,29 +775,29 @@
   <section>
     <div class="container">
       <div class="section-head">
-        <h2>Screenshots</h2>
-        <p>The bot should still look like a real product in use, not just a command list.</p>
+        <h2>Product In Use</h2>
+        <p>The bot should feel like a real product in screenshots, not just a command list.</p>
       </div>
-      <div class="grid triple">
+      <div class="grid grid-3">
         <article class="gallery-card">
           <img src="assets/lobby.png" alt="Babblebox lobby screenshot" />
           <div class="gallery-copy">
             <h3>Lobby flow</h3>
-            <p>Host picks a game, players join, and the start state stays clear.</p>
+            <p>Clearer start states, stronger empty states, and less friction when a full group is not ready yet.</p>
           </div>
         </article>
         <article class="gallery-card">
-          <img src="assets/spyfall_voting.png" alt="Babblebox Spyfall screenshot" />
+          <img src="assets/help.png" alt="Babblebox help screenshot" />
           <div class="gallery-copy">
-            <h3>Spyfall pressure</h3>
-            <p>Interrogation and vote handling stay readable under pressure.</p>
+            <h3>Compact help</h3>
+            <p>Paginated guidance is organized around real product lanes instead of a giant dump of commands.</p>
           </div>
         </article>
         <article class="gallery-card">
-          <img src="assets/wordbomb_gameplay.png" alt="Babblebox Word Bomb screenshot" />
+          <img src="assets/afk.png" alt="Babblebox AFK screenshot" />
           <div class="gallery-copy">
-            <h3>Word Bomb pacing</h3>
-            <p>Quick turns, valid-word checks, and crowd-friendly tension.</p>
+            <h3>Quiet utility UX</h3>
+            <p>Personal flows stay private-first, compact, and clearer about what they are actually for.</p>
           </div>
         </article>
       </div>
@@ -707,33 +807,28 @@
   <section id="privacy">
     <div class="container">
       <div class="section-head">
-        <h2>Support, Privacy, and Community</h2>
+        <h2>Privacy, Storage, and Support</h2>
         <p>Babblebox tries to stay useful without collecting more than it needs.</p>
       </div>
-      <div class="grid double">
+      <div class="grid grid-2">
         <article class="card">
-          <h3>Data handling</h3>
+          <span class="label">Storage Rules</span>
           <ul>
-            <li>Gameplay state is primarily temporary session state.</li>
             <li>Utility and profile persistence stay compact and bounded.</li>
-            <li>Shield stores configuration and bounded runtime strike state, not a heavy moderation archive.</li>
-            <li>Optional Shield AI only reviews already-flagged messages and only in guild <code>1322933864360050688</code>.</li>
-            <li>Only minimal, sanitized, truncated flagged content is sent for AI second-pass review when that feature is enabled.</li>
-            <li>Babblebox does not persist raw AI-submitted message bodies in Shield storage.</li>
-            <li>No screenshot storage, image blobs, or full watched-message archives.</li>
-            <li>Capture transcripts are delivered privately and not kept as a long-term archive.</li>
-            <li>Daily Arcade booth payloads regenerate from deterministic local data instead of being stored each day.</li>
-            <li>Moment Cards are generated live from visible messages and are not stored as a quote feed.</li>
-            <li>Raw custom regex is intentionally unsupported in Shield advanced mode to avoid unsafe backtracking risks.</li>
+            <li>No media blob storage and no full watched-message archive.</li>
+            <li>Capture transcripts are delivered privately and not stored long-term.</li>
+            <li>Moment Cards are generated live from visible Discord messages and not stored as a quote feed.</li>
+            <li>Daily Arcade rows are compact and pruned after 180 days.</li>
+            <li>Shield stores config and safe pattern metadata, not a heavy moderation event archive.</li>
           </ul>
         </article>
         <article class="card">
-          <h3>Support and community</h3>
+          <span class="label">Support</span>
           <p>
             Babblebox lives alongside the <strong>inevitable friendship</strong> support server.
-            That is the best place to test updates, report issues, share screenshots, and shape future Daily Arcade booths or Buddy polish.
+            That is the best place to test builds, report issues, share screenshots, and shape the next pass of Daily Arcade or Buddy polish.
           </p>
-          <div class="cta-row" style="margin-top: 20px;">
+          <div class="cta-row">
             <a class="btn btn-secondary" href="https://discord.com/servers/inevitable-friendship-1322933864360050688" target="_blank" rel="noreferrer">Join inevitable friendship</a>
           </div>
         </article>
@@ -743,16 +838,14 @@
 
   <section>
     <div class="container">
-      <div class="banner">
-        <div>
-          <h2>Invite Babblebox when you want more than one bot category.</h2>
-          <p>
-            It still shines as a party-game bot, but it now earns its place on quieter days too:
-            utilities, Daily Arcade booths, Buddy identity, Moment Cards, one profile layer that feels cohesive instead of scattered,
-            and an optional Shield safety layer for servers that want compact moderation support.
-          </p>
-        </div>
-        <div class="cta-row" style="justify-content:flex-end; margin-top:0;">
+      <div class="callout">
+        <h2>Invite Babblebox when you want more than one bot category.</h2>
+        <p>
+          It still leads with party games, but it now earns its spot on quieter days too:
+          utilities, Daily Arcade booths, Buddy identity, live-linked Moment Cards, a cohesive Profile/Vault layer,
+          and optional Shield safety that stays honest about its boundaries.
+        </p>
+        <div class="cta-row">
           <a class="btn btn-primary" href="https://discord.com/oauth2/authorize?client_id=1480903089518022739" target="_blank" rel="noreferrer">Invite the Bot</a>
           <a class="btn btn-secondary" href="https://github.com/arno-create/babblebox-bot" target="_blank" rel="noreferrer">Read the Docs</a>
         </div>

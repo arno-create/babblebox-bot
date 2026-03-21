@@ -77,6 +77,33 @@ BUDDY_STYLES = {
     "midnight": {"label": "Midnight", "color": discord.Color.from_rgb(123, 112, 255)},
 }
 
+DAILY_MODE_ICONS = {
+    "shuffle": "\U0001f500",
+    "emoji": "\u2728",
+    "signal": "\U0001f4e1",
+}
+
+BUDDY_SPECIES_ICONS = {
+    "cloudlet": "\u2601\ufe0f",
+    "bytebug": "\U0001f41b",
+    "sprout": "\U0001f331",
+    "puddlefox": "\U0001f98a",
+    "moondrop": "\U0001f319",
+}
+
+BUDDY_MOOD_COPY = {
+    "locked in": "Arcade lights on, eyes forward, already reaching for the next clear.",
+    "celebrating": "Still glowing from a recent win and ready to show it off.",
+    "sparky": "Chatty, bright, and looking for a little momentum.",
+    "steady": "Settled into a calm rhythm with your quieter utility wins.",
+    "proud": "Keeping score in the softest possible way.",
+    "determined": "Regrouping now so tomorrow's board feels better.",
+    "focused": "Leaning over the controls and not wasting an attempt.",
+    "hyped": "Ready for the next party-room moment.",
+    "sleepy": "Resting for now, but still keeping your corner warm.",
+    "curious": "Poking around for the next cozy thing to do.",
+}
+
 TITLE_DEFINITIONS = {
     "day-one": {"label": "Day One", "description": "Completed a first Babblebox Daily."},
     "streak-keeper": {"label": "Streak Keeper", "description": "Built a 3-day Daily streak."},
@@ -241,40 +268,46 @@ def _share_grid(result: dict[str, Any]) -> str:
     cells = []
     for index in range(DAILY_MAX_ATTEMPTS):
         if index >= attempts:
-            cells.append("⬛")
-        elif solved and index == attempts - 1:
-            cells.append("🟩")
-        else:
-            cells.append("🟥")
-    return "".join(cells)
-
-
-def _share_grid(result: dict[str, Any]) -> str:
-    attempts = int(result.get("attempt_count", 0) or 0)
-    solved = bool(result.get("solved"))
-    cells = []
-    for index in range(DAILY_MAX_ATTEMPTS):
-        if index >= attempts:
-            cells.append("⬜")
-        elif solved and index == attempts - 1:
-            cells.append("🟩")
-        else:
-            cells.append("🟨")
-    return "".join(cells)
-
-
-def _share_grid(result: dict[str, Any]) -> str:
-    attempts = int(result.get("attempt_count", 0) or 0)
-    solved = bool(result.get("solved"))
-    cells = []
-    for index in range(DAILY_MAX_ATTEMPTS):
-        if index >= attempts:
             cells.append("\u2b1c")
         elif solved and index == attempts - 1:
             cells.append("\U0001f7e9")
         else:
             cells.append("\U0001f7e8")
     return "".join(cells)
+
+
+def _level_meter(current: int, total: int, *, width: int = 8) -> str:
+    if total <= 0:
+        return "\u25a1" * width
+    ratio = max(0.0, min(1.0, current / total))
+    filled = int(round(ratio * width))
+    if current > 0 and filled == 0:
+        filled = 1
+    return ("\u25a0" * filled) + ("\u25a1" * max(0, width - filled))
+
+
+def _daily_mode_icon(mode: str) -> str:
+    return DAILY_MODE_ICONS.get(mode, "\u2022")
+
+
+def _buddy_icon(profile: dict[str, Any]) -> str:
+    return BUDDY_SPECIES_ICONS.get(str(profile.get("buddy_species", "")), "\u2728")
+
+
+def _buddy_mood_line(profile: dict[str, Any]) -> str:
+    return BUDDY_MOOD_COPY.get(str(profile.get("resolved_mood", "")), "Keeping your corner of Babblebox cozy.")
+
+
+def _level_track(profile: dict[str, Any]) -> str:
+    return (
+        f"Level **{profile['level']}**  {_level_meter(int(profile['xp_into_level']), int(profile['xp_needed_this_level']))}\n"
+        f"**{profile['xp_into_level']} / {profile['xp_needed_this_level']} XP** this level"
+    )
+
+
+def _daily_booth_line(mode: str, puzzle, result: dict[str, Any] | None, *, active_mode: str) -> str:
+    prefix = "\u27a4" if mode == active_mode else "\u2022"
+    return f"{prefix} {_daily_mode_icon(mode)} **{puzzle.label}** - {_daily_progress_line(result)}"
 
 
 def _daily_modes() -> tuple[str, ...]:
@@ -291,10 +324,10 @@ def _daily_progress_line(result: dict[str, Any] | None) -> str:
     attempts = int(result.get("attempt_count", 0) or 0)
     if result.get("solved"):
         solve_seconds = int(result.get("solve_seconds", 0) or 0)
-        return f"Solved in {attempts}/{DAILY_MAX_ATTEMPTS} - {solve_seconds}s"
+        return f"Cleared {attempts}/{DAILY_MAX_ATTEMPTS} | {solve_seconds}s"
     if result.get("completed_at") is not None:
-        return f"Finished {attempts}/{DAILY_MAX_ATTEMPTS}"
-    return f"In progress {attempts}/{DAILY_MAX_ATTEMPTS}"
+        return f"Wrapped {attempts}/{DAILY_MAX_ATTEMPTS}"
+    return f"Live {attempts}/{DAILY_MAX_ATTEMPTS}"
 
 
 class ProfileService:
@@ -598,7 +631,7 @@ class ProfileService:
                 return False, f"Finish {puzzle.label} first, then use `/daily share {active_mode}`."
             self._sync_identity_fields(profile, today)
             share_line = (
-                f"Babblebox Daily Arcade #{puzzle.challenge_number} {puzzle.share_flair} {puzzle.label} | "
+                f"Babblebox Daily Arcade #{puzzle.challenge_number} {_daily_mode_icon(active_mode)} {puzzle.label} | "
                 f"{'Solved' if result.get('solved') else 'Tried'} {int(result.get('attempt_count', 0) or 0)}/{DAILY_MAX_ATTEMPTS}"
             )
             if result.get("solved") and result.get("solve_seconds"):
@@ -736,56 +769,51 @@ class ProfileService:
         result = daily_status["result"]
         embed = discord.Embed(
             title="Babblebox Daily Arcade",
-            description="Three compact solo booths reset together every UTC day. Pick one, solve a few, then share your favorites.",
+            description="Three compact booths reset together every UTC day. Clear one for a shareable post, or work through all three at your own pace.",
             color=profile["style_meta"]["color"],
         )
-        booth_lines = []
-        for mode in _daily_modes():
-            booth_puzzle = puzzles[mode]
-            booth_result = results.get(mode)
-            marker = "->" if mode == active_mode else "  "
-            booth_lines.append(f"{marker} **{booth_puzzle.label}** - {_daily_progress_line(booth_result)}")
-        embed.add_field(name="Today's Booths", value="\n".join(booth_lines), inline=False)
-        embed.add_field(name=puzzle.prompt_label, value=f"`{puzzle.scramble}`", inline=False)
-        embed.add_field(name="Hint", value=puzzle.hint, inline=False)
-        embed.add_field(name="How It Works", value=puzzle.instructions, inline=False)
-        embed.add_field(name="Arcade Streak", value=str(profile["active_streak"]), inline=True)
-        embed.add_field(name="Clears", value=str(profile["total_daily_clears"]), inline=True)
-        embed.add_field(name="Solved Today", value=f"{daily_status['solved_today']} / {len(puzzles)}", inline=True)
+        booth_lines = [
+            _daily_booth_line(mode, puzzles[mode], results.get(mode), active_mode=active_mode)
+            for mode in _daily_modes()
+        ]
+        embed.add_field(name="Arcade Board", value="\n".join(booth_lines), inline=False)
+        embed.add_field(
+            name=f"Now Playing | {_daily_mode_icon(active_mode)} {puzzle.label}",
+            value=f"`{puzzle.scramble}`\nHint: {puzzle.hint}\n{puzzle.instructions}",
+            inline=False,
+        )
+        embed.add_field(
+            name="Arcade Track",
+            value=(
+                f"Streak: **{profile['active_streak']}**\n"
+                f"Lifetime clears: **{profile['total_daily_clears']}**\n"
+                f"Solved today: **{daily_status['solved_today']} / {len(puzzles)}**"
+            ),
+            inline=True,
+        )
+        embed.add_field(name="Buddy Track", value=_level_track(profile), inline=True)
         if result is None:
-            embed.add_field(
-                name="Play Prompt",
-                value=(
-                    f"Use `/daily play {active_mode} <guess>` or `bb!daily play {active_mode} <guess>`.\n"
-                    f"`/daily play <guess>` still defaults to {DAILY_DEFAULT_MODE}."
-                ),
-                inline=False,
+            next_step = (
+                f"Use `/daily play {active_mode} <guess>` or `bb!daily play {active_mode} <guess>`.\n"
+                f"`/daily play <guess>` still defaults to {DAILY_DEFAULT_MODE}."
             )
         elif result.get("solved"):
-            embed.add_field(
-                name="Active Booth Result",
-                value=(
-                    f"Solved in **{result['attempt_count']}** attempt(s) and **{int(result.get('solve_seconds', 0) or 0)}s**.\n"
-                    f"Use `/daily share {active_mode}` to post this booth."
-                ),
-                inline=False,
+            next_step = (
+                f"Cleared in **{result['attempt_count']}** attempt(s) and **{int(result.get('solve_seconds', 0) or 0)}s**.\n"
+                f"Use `/daily share {active_mode}` when you want to post the board."
             )
         elif result.get("completed_at") is not None:
-            embed.add_field(
-                name="Active Booth Result",
-                value=(
-                    f"You used all {DAILY_MAX_ATTEMPTS} attempts. The answer was **{puzzle.answer.upper()}**.\n"
-                    f"Use `/daily share {active_mode}` if you still want to post the run."
-                ),
-                inline=False,
+            next_step = (
+                f"This booth is wrapped for today. The answer was **{puzzle.answer.upper()}**.\n"
+                f"Use `/daily share {active_mode}` if you still want to post the run."
             )
         else:
             remaining = DAILY_MAX_ATTEMPTS - int(result.get("attempt_count", 0) or 0)
-            embed.add_field(
-                name="Active Booth Progress",
-                value=f"Attempts used: **{result['attempt_count']} / {DAILY_MAX_ATTEMPTS}**\nAttempts left: **{remaining}**",
-                inline=False,
+            next_step = (
+                f"Attempts used: **{result['attempt_count']} / {DAILY_MAX_ATTEMPTS}**\n"
+                f"Attempts left: **{remaining}**"
             )
+        embed.add_field(name="Next Step", value=next_step, inline=False)
         return ge.style_embed(embed, footer="Babblebox Daily Arcade | Shared UTC booths, compact rows, no rerolls")
 
     def build_daily_result_embed(self, user: discord.abc.User, payload: dict[str, Any]) -> discord.Embed:
@@ -809,11 +837,21 @@ class ProfileService:
             remaining = DAILY_MAX_ATTEMPTS - int(result.get("attempt_count", 0) or 0)
             description = f"That guess was not it. You still have **{remaining}** attempt(s) left today."
         embed = ge.make_status_embed(title, description, tone=tone, footer="Babblebox Daily Arcade")
-        embed.add_field(name=puzzle.prompt_label, value=f"`{puzzle.scramble}`", inline=False)
-        embed.add_field(name="Hint", value=puzzle.hint, inline=False)
+        embed.add_field(
+            name=f"Booth | {_daily_mode_icon(puzzle.mode)} {puzzle.label}",
+            value=f"`{puzzle.scramble}`\nHint: {puzzle.hint}",
+            inline=False,
+        )
+        embed.add_field(name="Board", value=_share_grid(result), inline=False)
         embed.add_field(name="Arcade Streak", value=str(profile["active_streak"]), inline=True)
         embed.add_field(name="Total Clears", value=str(profile["total_daily_clears"]), inline=True)
-        embed.add_field(name="Share", value=f"`/daily share {puzzle.mode}`", inline=True)
+        embed.add_field(name="Buddy Level", value=str(profile["level"]), inline=True)
+        if payload["status"] == "solved":
+            embed.add_field(name="Tiny Reward", value="Streak protected, buddy mood lifted, and the board is ready to share.", inline=False)
+        elif payload["status"] == "failed":
+            embed.add_field(name="Tomorrow", value="The booth resets with the next UTC day, so there is always another run waiting.", inline=False)
+        else:
+            embed.add_field(name="Next Try", value=f"`/daily play {puzzle.mode} <guess>`", inline=False)
         return embed
 
     def build_daily_stats_embed(self, user: discord.abc.User, stats_payload: dict[str, Any]) -> discord.Embed:
@@ -827,19 +865,29 @@ class ProfileService:
             description=f"Arcade history for **{ge.display_name_of(user)}**.",
             color=profile["style_meta"]["color"],
         )
-        embed.add_field(name="Current Streak", value=str(profile["active_streak"]), inline=True)
-        embed.add_field(name="Best Streak", value=str(profile["best_daily_streak"]), inline=True)
-        embed.add_field(name="Arcade Clears", value=str(profile["total_daily_clears"]), inline=True)
-        embed.add_field(name="Booths Played", value=str(profile["total_daily_participations"]), inline=True)
-        today_lines = [f"**{puzzle.label}** - {_daily_progress_line(today_results.get(mode))}" for mode, puzzle in today_puzzles.items()]
-        embed.add_field(name="Today's Booths", value="\n".join(today_lines), inline=False)
+        embed.add_field(
+            name="Arcade Track",
+            value=(
+                f"Current streak: **{profile['active_streak']}**\n"
+                f"Best streak: **{profile['best_daily_streak']}**\n"
+                f"Clears: **{profile['total_daily_clears']}**\n"
+                f"Booths played: **{profile['total_daily_participations']}**"
+            ),
+            inline=True,
+        )
+        embed.add_field(name="Buddy Track", value=_level_track(profile), inline=True)
+        today_lines = [
+            _daily_booth_line(mode, puzzle, today_results.get(mode), active_mode=mode)
+            for mode, puzzle in today_puzzles.items()
+        ]
+        embed.add_field(name="Today's Board", value="\n".join(today_lines), inline=False)
         recent_lines = []
         for row in recent[:8]:
             mode = challenge_modes.get(row["challenge_id"], "shuffle")
             label = _daily_mode_label(mode)
             marker = "cleared" if row.get("solved") else "tried"
             recent_lines.append(
-                f"**{row['puzzle_date'].isoformat()}** - {label} - {marker} {int(row.get('attempt_count', 0) or 0)}/{DAILY_MAX_ATTEMPTS}"
+                f"**{row['puzzle_date'].isoformat()}** • {_daily_mode_icon(mode)} {label} • {marker} {int(row.get('attempt_count', 0) or 0)}/{DAILY_MAX_ATTEMPTS}"
             )
         embed.add_field(name="Recent Runs", value="\n".join(recent_lines) if recent_lines else "No runs recorded yet.", inline=False)
         return ge.style_embed(embed, footer="Babblebox Daily Arcade | Raw rows prune after 180 days, summary streaks stay")
@@ -851,14 +899,15 @@ class ProfileService:
         lines = []
         for index, entry in enumerate(entries[:10], start=1):
             label = self._resolve_user_label(entry["user_id"])
+            rank = {1: "\U0001f947", 2: "\U0001f948", 3: "\U0001f949"}.get(index, f"{index}.")
             if metric == "streak":
                 lines.append(
-                    f"**{index}.** {label} - streak **{entry['active_streak']}** "
+                    f"**{rank}** {label} - streak **{entry['active_streak']}** "
                     f"(best {entry['best_daily_streak']}, clears {entry['total_daily_clears']})"
                 )
             else:
                 lines.append(
-                    f"**{index}.** {label} - clears **{entry['total_daily_clears']}** "
+                    f"**{rank}** {label} - clears **{entry['total_daily_clears']}** "
                     f"(streak {entry['active_streak']}, best {entry['best_daily_streak']})"
                 )
         embed = discord.Embed(
@@ -871,30 +920,39 @@ class ProfileService:
     def build_buddy_embed(self, user: discord.abc.User, profile: dict[str, Any]) -> discord.Embed:
         species = profile["species_meta"]
         embed = discord.Embed(
-            title=f"Buddy Card - {profile['buddy_name']}",
+            title=f"Buddy | {profile['buddy_name']}",
             description=(
-                f"Your **{species['label']}** companion is feeling **{profile['resolved_mood']}**.\n"
-                f"{species['description']}"
+                f"{_buddy_icon(profile)} **{species['label']}** companion feeling **{profile['resolved_mood']}**.\n"
+                f"{_buddy_mood_line(profile)}"
             ),
             color=profile["style_meta"]["color"],
         )
-        embed.add_field(name="Companion", value=species["badge"], inline=True)
-        embed.add_field(name="Style", value=profile["style_meta"]["label"], inline=True)
-        embed.add_field(name="Featured Title", value=profile["display_title"], inline=True)
         embed.add_field(
-            name="Level Track",
-            value=f"Level **{profile['level']}**\nXP **{profile['xp_into_level']} / {profile['xp_needed_this_level']}**",
+            name="Identity",
+            value=(
+                f"Badge: **{species['badge']}**\n"
+                f"Style: **{profile['style_meta']['label']}**\n"
+                f"Featured title: **{profile['display_title']}**"
+            ),
             inline=True,
         )
-        embed.add_field(name="Arcade Streak", value=str(profile["active_streak"]), inline=True)
-        embed.add_field(name="Lifetime Clears", value=str(profile["total_daily_clears"]), inline=True)
+        embed.add_field(name="Level Track", value=_level_track(profile), inline=True)
+        embed.add_field(
+            name="Arcade Glow",
+            value=(
+                f"Streak: **{profile['active_streak']}**\n"
+                f"Lifetime clears: **{profile['total_daily_clears']}**\n"
+                f"Games won: **{profile['games_won']}**"
+            ),
+            inline=True,
+        )
         embed.add_field(name="Badges", value=_format_badges(profile["badges_unlocked"]), inline=False)
         embed.add_field(
             name="Little Snapshot",
             value=(
                 f"Utilities used: **{_utility_score(profile)}**\n"
                 f"Games played: **{profile['games_played']}**\n"
-                f"Games won: **{profile['games_won']}**"
+                f"Daily booths played: **{profile['total_daily_participations']}**"
             ),
             inline=False,
         )
@@ -902,18 +960,23 @@ class ProfileService:
 
     def build_buddy_stats_embed(self, user: discord.abc.User, profile: dict[str, Any]) -> discord.Embed:
         embed = discord.Embed(
-            title=f"Buddy Stats - {profile['buddy_name']}",
-            description="Compact progression, titles, badges, and the activity mix shaping your companion.",
+            title=f"Buddy Stats | {profile['buddy_name']}",
+            description="Progress, titles, badges, and the activity mix shaping your companion.",
             color=profile["style_meta"]["color"],
         )
-        embed.add_field(name="Level", value=str(profile["level"]), inline=True)
-        embed.add_field(name="Total XP", value=str(profile["xp_total"]), inline=True)
-        embed.add_field(name="Mood", value=profile["resolved_mood"], inline=True)
-        embed.add_field(name="Arcade Clears", value=str(profile["total_daily_clears"]), inline=True)
-        embed.add_field(name="Utilities Used", value=str(_utility_score(profile)), inline=True)
-        embed.add_field(name="Games Won", value=str(profile["games_won"]), inline=True)
+        embed.add_field(name="Level Track", value=_level_track(profile), inline=False)
+        embed.add_field(
+            name="Activity Mix",
+            value=(
+                f"Mood: **{profile['resolved_mood']}**\n"
+                f"Arcade clears: **{profile['total_daily_clears']}**\n"
+                f"Utilities used: **{_utility_score(profile)}**\n"
+                f"Games won: **{profile['games_won']}**"
+            ),
+            inline=True,
+        )
         unlocked_titles = [TITLE_DEFINITIONS[title]["label"] for title in profile["titles_unlocked"]]
-        embed.add_field(name="Unlocked Titles", value=", ".join(unlocked_titles) if unlocked_titles else "None yet", inline=False)
+        embed.add_field(name="Unlocked Titles", value=", ".join(unlocked_titles) if unlocked_titles else "None yet", inline=True)
         embed.add_field(name="Badges", value=_format_badges(profile["badges_unlocked"]), inline=False)
         embed.add_field(
             name="XP Rules",
@@ -932,15 +995,19 @@ class ProfileService:
         title: str = "Babblebox Profile",
     ) -> discord.Embed:
         species = profile["species_meta"]
+        is_vault = title.lower().endswith("vault")
         embed = discord.Embed(
             title=title,
-            description=f"**{ge.display_name_of(target)}** with buddy **{profile['buddy_name']}** in the Babblebox lounge.",
+            description=(
+                f"**{ge.display_name_of(target)}** with buddy **{profile['buddy_name']}** in the Babblebox lounge.\n"
+                f"{'Private snapshot with live utility context.' if is_vault else 'Showable snapshot of arcade, buddy, and party energy.'}"
+            ),
             color=profile["style_meta"]["color"],
         )
         embed.add_field(
-            name="Companion",
+            name="Identity",
             value=(
-                f"{species['label']} | {profile['style_meta']['label']} style\n"
+                f"{_buddy_icon(profile)} {species['label']} | {profile['style_meta']['label']} style\n"
                 f"Mood: **{profile['resolved_mood']}** | Title: **{profile['display_title']}**\n"
                 f"Badges: {_format_badges(profile['badges_unlocked'])}"
             ),
@@ -955,18 +1022,10 @@ class ProfileService:
             ),
             inline=True,
         )
-        embed.add_field(
-            name="Progress",
-            value=(
-                f"Level **{profile['level']}**\n"
-                f"XP this level: **{profile['xp_into_level']} / {profile['xp_needed_this_level']}**\n"
-                f"Games won: **{profile['games_won']}**"
-            ),
-            inline=True,
-        )
+        embed.add_field(name="Level Track", value=_level_track(profile), inline=True)
         if utility_summary is not None:
             embed.add_field(
-                name="Everyday Utility",
+                name="Quiet Utility",
                 value=(
                     f"Watch active: **{'Yes' if utility_summary['watch_enabled'] else 'No'}**\n"
                     f"Later markers: **{utility_summary['active_later_markers']}**\n"
@@ -995,4 +1054,5 @@ class ProfileService:
                 f"Session snapshot: wins **{session_stats.get('wins', 0)}**, bomb words **{session_stats.get('bomb_words', 0)}**"
             )
         embed.add_field(name="Party Games", value="\n".join(game_lines), inline=False)
-        return ge.style_embed(embed, footer="Babblebox Profile | Party games, daily arcade, utilities, and buddy identity together")
+        footer = "Babblebox Vault | Personal snapshot with live utility context" if is_vault else "Babblebox Profile | Party games, daily arcade, utilities, and buddy identity together"
+        return ge.style_embed(embed, footer=footer)

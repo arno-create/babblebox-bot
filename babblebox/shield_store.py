@@ -15,6 +15,9 @@ from babblebox.shield_ai import SHIELD_AI_MIN_CONFIDENCE_CHOICES, SHIELD_AI_REVI
 DEFAULT_DATABASE_URL_ENV_ORDER = ("UTILITY_DATABASE_URL", "SUPABASE_DB_URL", "DATABASE_URL")
 DEFAULT_BACKEND = "postgres"
 DEFAULT_VERSION = 1
+VALID_SCAN_MODES = {"all", "only_included"}
+VALID_SHIELD_ACTIONS = {"disabled", "detect", "log", "delete_log", "delete_escalate", "timeout_log"}
+VALID_SHIELD_SENSITIVITIES = {"low", "normal", "high"}
 
 
 class ShieldStorageUnavailable(RuntimeError):
@@ -59,6 +62,136 @@ def default_guild_shield_config(guild_id: int | None = None) -> dict[str, Any]:
 
 def default_shield_state() -> dict[str, Any]:
     return {"version": DEFAULT_VERSION, "guilds": {}}
+
+
+def _clean_int_list(values: Any) -> list[int]:
+    if not isinstance(values, (list, tuple, set)):
+        return []
+    return sorted({value for value in values if isinstance(value, int) and value > 0})
+
+
+def _clean_text_list(values: Any) -> list[str]:
+    if not isinstance(values, (list, tuple, set)):
+        return []
+    return sorted({str(value).strip().casefold() for value in values if isinstance(value, str) and str(value).strip()})
+
+
+def _legacy_pack_payload(config: dict[str, Any], pack: str) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    sources = []
+    pack_map = config.get("packs")
+    if isinstance(pack_map, dict):
+        sources.append(pack_map.get(pack))
+    sources.append(config.get(pack))
+
+    for candidate in sources:
+        if isinstance(candidate, bool):
+            payload.setdefault("enabled", candidate)
+            continue
+        if not isinstance(candidate, dict):
+            continue
+        if "enabled" in candidate:
+            payload.setdefault("enabled", candidate.get("enabled"))
+        elif "tracking" in candidate:
+            payload.setdefault("enabled", candidate.get("tracking"))
+        if "action" in candidate:
+            payload.setdefault("action", candidate.get("action"))
+        if "sensitivity" in candidate:
+            payload.setdefault("sensitivity", candidate.get("sensitivity"))
+    return payload
+
+
+def normalize_guild_shield_config(guild_id: int, config: Any) -> dict[str, Any]:
+    cleaned = default_guild_shield_config(guild_id)
+    if not isinstance(config, dict):
+        return cleaned
+
+    cleaned["module_enabled"] = bool(config.get("module_enabled"))
+    cleaned["log_channel_id"] = config.get("log_channel_id") if isinstance(config.get("log_channel_id"), int) else None
+    cleaned["alert_role_id"] = config.get("alert_role_id") if isinstance(config.get("alert_role_id"), int) else None
+    scan_mode = config.get("scan_mode", "all")
+    cleaned["scan_mode"] = scan_mode if scan_mode in VALID_SCAN_MODES else "all"
+
+    for field in (
+        "included_channel_ids",
+        "excluded_channel_ids",
+        "included_user_ids",
+        "excluded_user_ids",
+        "included_role_ids",
+        "excluded_role_ids",
+        "trusted_role_ids",
+    ):
+        cleaned[field] = _clean_int_list(config.get(field))
+    for field in ("allow_domains", "allow_invite_codes", "allow_phrases"):
+        cleaned[field] = _clean_text_list(config.get(field))
+
+    for pack in ("privacy", "promo", "scam"):
+        enabled_field = f"{pack}_enabled"
+        action_field = f"{pack}_action"
+        sensitivity_field = f"{pack}_sensitivity"
+        legacy = _legacy_pack_payload(config, pack)
+
+        if enabled_field in config:
+            cleaned[enabled_field] = bool(config.get(enabled_field))
+        else:
+            cleaned[enabled_field] = bool(legacy.get("enabled"))
+
+        action = str(config.get(action_field, legacy.get("action", "log"))).strip().lower()
+        cleaned[action_field] = action if action in VALID_SHIELD_ACTIONS else "log"
+
+        sensitivity = str(config.get(sensitivity_field, legacy.get("sensitivity", "normal"))).strip().lower()
+        cleaned[sensitivity_field] = sensitivity if sensitivity in VALID_SHIELD_SENSITIVITIES else "normal"
+
+    cleaned["ai_enabled"] = bool(config.get("ai_enabled"))
+    ai_min_confidence = str(config.get("ai_min_confidence", "high")).strip().lower()
+    cleaned["ai_min_confidence"] = ai_min_confidence if ai_min_confidence in SHIELD_AI_MIN_CONFIDENCE_CHOICES else "high"
+    raw_ai_packs = config.get("ai_enabled_packs", list(SHIELD_AI_REVIEW_PACKS))
+    if isinstance(raw_ai_packs, (list, tuple, set)):
+        cleaned["ai_enabled_packs"] = sorted(
+            {
+                str(value).strip().lower()
+                for value in raw_ai_packs
+                if str(value).strip().lower() in SHIELD_AI_REVIEW_PACKS
+            }
+        )
+    else:
+        cleaned["ai_enabled_packs"] = list(SHIELD_AI_REVIEW_PACKS)
+
+    for field, minimum, maximum, default in (
+        ("escalation_threshold", 2, 6, 3),
+        ("escalation_window_minutes", 5, 120, 15),
+        ("timeout_minutes", 1, 60, 10),
+    ):
+        value = config.get(field)
+        cleaned[field] = value if isinstance(value, int) and minimum <= value <= maximum else default
+
+    patterns = []
+    for item in config.get("custom_patterns", []):
+        if not isinstance(item, dict):
+            continue
+        pattern_id = item.get("pattern_id")
+        label = item.get("label")
+        pattern = item.get("pattern")
+        mode = item.get("mode", "contains")
+        action = item.get("action", "log")
+        if not all(isinstance(value, str) and value.strip() for value in (pattern_id, label, pattern)):
+            continue
+        if mode not in {"contains", "word", "wildcard"}:
+            continue
+        if action not in VALID_SHIELD_ACTIONS - {"disabled"}:
+            continue
+        patterns.append(
+            {
+                "pattern_id": pattern_id.strip(),
+                "label": label.strip(),
+                "pattern": pattern.strip(),
+                "mode": mode,
+                "action": action,
+                "enabled": bool(item.get("enabled", True)),
+            }
+        )
+    cleaned["custom_patterns"] = patterns[:10]
+    return cleaned
 
 
 def _resolve_database_url(configured: str | None = None) -> tuple[str, str | None]:
@@ -129,81 +262,7 @@ class _BaseShieldStore:
     def normalize_config(self, guild_id: int, config: Any) -> dict[str, Any] | None:
         if not isinstance(config, dict):
             return None
-        cleaned = default_guild_shield_config(guild_id)
-        cleaned["module_enabled"] = bool(config.get("module_enabled"))
-        cleaned["log_channel_id"] = config.get("log_channel_id") if isinstance(config.get("log_channel_id"), int) else None
-        cleaned["alert_role_id"] = config.get("alert_role_id") if isinstance(config.get("alert_role_id"), int) else None
-        scan_mode = config.get("scan_mode", "all")
-        cleaned["scan_mode"] = scan_mode if scan_mode in {"all", "only_included"} else "all"
-        for field in (
-            "included_channel_ids",
-            "excluded_channel_ids",
-            "included_user_ids",
-            "excluded_user_ids",
-            "included_role_ids",
-            "excluded_role_ids",
-            "trusted_role_ids",
-        ):
-            cleaned[field] = sorted({value for value in config.get(field, []) if isinstance(value, int) and value > 0})
-        for field in ("allow_domains", "allow_invite_codes", "allow_phrases"):
-            cleaned[field] = sorted({str(value).strip().casefold() for value in config.get(field, []) if isinstance(value, str) and str(value).strip()})
-        for pack in ("privacy", "promo", "scam"):
-            enabled_field = f"{pack}_enabled"
-            action_field = f"{pack}_action"
-            sensitivity_field = f"{pack}_sensitivity"
-            cleaned[enabled_field] = bool(config.get(enabled_field))
-            action = str(config.get(action_field, "log")).strip().lower()
-            cleaned[action_field] = action if action in {"disabled", "detect", "log", "delete_log", "delete_escalate", "timeout_log"} else "log"
-            sensitivity = str(config.get(sensitivity_field, "normal")).strip().lower()
-            cleaned[sensitivity_field] = sensitivity if sensitivity in {"low", "normal", "high"} else "normal"
-        cleaned["ai_enabled"] = bool(config.get("ai_enabled"))
-        ai_min_confidence = str(config.get("ai_min_confidence", "high")).strip().lower()
-        cleaned["ai_min_confidence"] = ai_min_confidence if ai_min_confidence in SHIELD_AI_MIN_CONFIDENCE_CHOICES else "high"
-        raw_ai_packs = config.get("ai_enabled_packs", list(SHIELD_AI_REVIEW_PACKS))
-        if isinstance(raw_ai_packs, (list, tuple, set)):
-            cleaned["ai_enabled_packs"] = sorted(
-                {
-                    str(value).strip().lower()
-                    for value in raw_ai_packs
-                    if str(value).strip().lower() in SHIELD_AI_REVIEW_PACKS
-                }
-            )
-        else:
-            cleaned["ai_enabled_packs"] = list(SHIELD_AI_REVIEW_PACKS)
-        for field, minimum, maximum, default in (
-            ("escalation_threshold", 2, 6, 3),
-            ("escalation_window_minutes", 5, 120, 15),
-            ("timeout_minutes", 1, 60, 10),
-        ):
-            value = config.get(field)
-            cleaned[field] = value if isinstance(value, int) and minimum <= value <= maximum else default
-        patterns = []
-        for item in config.get("custom_patterns", []):
-            if not isinstance(item, dict):
-                continue
-            pattern_id = item.get("pattern_id")
-            label = item.get("label")
-            pattern = item.get("pattern")
-            mode = item.get("mode", "contains")
-            action = item.get("action", "log")
-            if not all(isinstance(value, str) and value.strip() for value in (pattern_id, label, pattern)):
-                continue
-            if mode not in {"contains", "word", "wildcard"}:
-                continue
-            if action not in {"detect", "log", "delete_log", "delete_escalate", "timeout_log"}:
-                continue
-            patterns.append(
-                {
-                    "pattern_id": pattern_id.strip(),
-                    "label": label.strip(),
-                    "pattern": pattern.strip(),
-                    "mode": mode,
-                    "action": action,
-                    "enabled": bool(item.get("enabled", True)),
-                }
-            )
-        cleaned["custom_patterns"] = patterns[:10]
-        return cleaned
+        return normalize_guild_shield_config(guild_id, config)
 
 
 class _MemoryShieldStore(_BaseShieldStore):

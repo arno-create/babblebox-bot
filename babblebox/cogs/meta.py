@@ -25,12 +25,13 @@ HELP_PAGES: list[dict[str, str]] = [
     {
         "title": "Babblebox Guide",
         "emoji": "\U0001f3e0",
-        "description": "Babblebox works in five cozy lanes: Party Games, Everyday Utilities, Daily Arcade, Buddy/Profile, and Shield.",
+        "description": "Five cozy lanes: Party Games, Utilities, Daily Arcade, Buddy/Profile, and Shield.",
         "body": (
-            "Use the arrows to browse categories.\n"
-            "Most social cards are public-friendly.\n"
-            "Personal utilities and setup flows stay private by default."
+            "Use the arrows to browse by category.\n"
+            "Showable cards lean public by default.\n"
+            "Personal utilities and setup flows stay private."
         ),
+        "try": "`/play`, `/daily`, `/profile`, `/watch`, `/remind`",
     },
     {
         "title": "Party Games",
@@ -39,8 +40,9 @@ HELP_PAGES: list[dict[str, str]] = [
         "body": (
             "`/play` opens the lobby.\n"
             "Broken Telephone, Exquisite Corpse, Spyfall, and Word Bomb all start there.\n"
-            "If the room is too quiet, Babblebox nudges people toward Daily, Profile, and utilities instead of dead-ending."
+            "If the room is quiet, Babblebox points people toward Daily, Profile, and utilities instead of dead-ending."
         ),
+        "try": "`/play`",
     },
     {
         "title": "Everyday Utilities",
@@ -48,10 +50,10 @@ HELP_PAGES: list[dict[str, str]] = [
         "description": "Low-noise tools built for real server life.",
         "body": (
             "`/watch mentions`, `/watch replies`, and `/watch keyword ...` keep private DM alerts tidy.\n"
-            "`/later`, `/capture`, `/remind`, and `/afk` are personal by default.\n"
-            "AFK durations now accept `30m`, `2h`, `2d`, and compact combos like `1h30m`.\n"
-            "`/moment` turns a message or exchange into a shareable card."
+            "`/later`, `/capture`, `/remind`, and `/afk` stay personal by default.\n"
+            "`/moment` turns a message or exchange into a shareable keepsake card with a live link."
         ),
+        "try": "`/watch settings`, `/later mark`, `/capture`, `/moment from-reply`",
     },
     {
         "title": "Daily Arcade",
@@ -62,6 +64,7 @@ HELP_PAGES: list[dict[str, str]] = [
             "`/daily play <guess>` still defaults to Shuffle Booth.\n"
             "`/daily share` and `/daily leaderboard` are built to be shown in-channel."
         ),
+        "try": "`/daily`, `/daily stats`, `/daily share`",
     },
     {
         "title": "Buddy / Profile / Vault",
@@ -72,6 +75,7 @@ HELP_PAGES: list[dict[str, str]] = [
             "`/vault` stays more personal.\n"
             "Buddy style, streaks, titles, badges, utilities, and multiplayer highlights all meet here."
         ),
+        "try": "`/buddy`, `/profile`, `/vault`",
     },
     {
         "title": "Shield / Moderation",
@@ -84,6 +88,7 @@ HELP_PAGES: list[dict[str, str]] = [
             "Defaults are log-first, with allowlists, trusted-role bypasses, private mod-log alerts, and safe advanced wildcard patterns instead of raw regex.\n"
             "AI assist is optional, admin-only, support-server limited, and only reviews messages that local Shield already flagged. It never punishes on its own."
         ),
+        "try": "`/shield panel`, `/shield rules`, `/shield test`",
     },
     {
         "title": "Setup / Tips",
@@ -94,6 +99,7 @@ HELP_PAGES: list[dict[str, str]] = [
             "Use public visibility for showable cards, and private visibility for sensitive utility flows.\n"
             "If you run Shield, start with log-only and tune filters before enabling deletes."
         ),
+        "try": "Open DMs, start with `/help`, then pick one lane to try first.",
     },
 ]
 
@@ -105,15 +111,10 @@ def build_help_page_embed(page_index: int) -> discord.Embed:
         description=page["description"],
         color=ge.EMBED_THEME["accent"] if page_index else discord.Color.gold(),
     )
-    embed.add_field(name="Guide", value=page["body"], inline=False)
-    if page_index == 0:
-        embed.add_field(
-            name="Quick Start",
-            value="`/play` for group energy, `/daily` for solo play, `/profile` for your card, `/watch` or `/remind` for quiet utility.",
-            inline=False,
-        )
+    embed.add_field(name="Overview", value=page["body"], inline=False)
+    embed.add_field(name="Try", value=page.get("try", "`/help`"), inline=False)
     embed.add_field(name="Page", value=f"{page_index + 1}/{len(HELP_PAGES)}", inline=True)
-    embed.add_field(name="Visibility", value="Public by default, private on request.", inline=True)
+    embed.add_field(name="Visibility", value="Showable cards default public. Sensitive utilities stay private.", inline=True)
     return ge.style_embed(embed, footer="Babblebox Manual | Use the arrows to browse")
 
 

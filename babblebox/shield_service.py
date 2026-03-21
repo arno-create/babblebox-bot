@@ -23,7 +23,12 @@ from babblebox.shield_ai import (
     shield_ai_available_in_guild,
     summarize_attachment_extensions,
 )
-from babblebox.shield_store import ShieldStateStore, ShieldStorageUnavailable, default_guild_shield_config
+from babblebox.shield_store import (
+    ShieldStateStore,
+    ShieldStorageUnavailable,
+    default_guild_shield_config,
+    normalize_guild_shield_config,
+)
 from babblebox.text_safety import (
     CARD_RE,
     EMAIL_RE,
@@ -362,31 +367,7 @@ class ShieldService:
     def get_config(self, guild_id: int) -> dict[str, Any]:
         raw = self.store.state.get("guilds", {}).get(str(guild_id))
         if isinstance(raw, dict):
-            base = default_guild_shield_config(guild_id)
-            base.update(raw)
-            base["included_channel_ids"] = _sorted_unique_ints(base.get("included_channel_ids", []))
-            base["excluded_channel_ids"] = _sorted_unique_ints(base.get("excluded_channel_ids", []))
-            base["included_user_ids"] = _sorted_unique_ints(base.get("included_user_ids", []))
-            base["excluded_user_ids"] = _sorted_unique_ints(base.get("excluded_user_ids", []))
-            base["included_role_ids"] = _sorted_unique_ints(base.get("included_role_ids", []))
-            base["excluded_role_ids"] = _sorted_unique_ints(base.get("excluded_role_ids", []))
-            base["trusted_role_ids"] = _sorted_unique_ints(base.get("trusted_role_ids", []))
-            base["allow_domains"] = _sorted_unique_text(base.get("allow_domains", []))
-            base["allow_invite_codes"] = _sorted_unique_text(base.get("allow_invite_codes", []))
-            base["allow_phrases"] = _sorted_unique_text(base.get("allow_phrases", []))
-            base["ai_enabled"] = bool(base.get("ai_enabled"))
-            base["ai_enabled_packs"] = [
-                value
-                for value in _sorted_unique_text(base.get("ai_enabled_packs", list(SHIELD_AI_REVIEW_PACKS)))
-                if value in AI_REVIEW_PACK_SET
-            ]
-            base["ai_min_confidence"] = (
-                base.get("ai_min_confidence", "high")
-                if base.get("ai_min_confidence", "high") in SHIELD_AI_MIN_CONFIDENCE_CHOICES
-                else "high"
-            )
-            base["custom_patterns"] = list(base.get("custom_patterns", []))[:CUSTOM_PATTERN_LIMIT]
-            return base
+            return normalize_guild_shield_config(guild_id, raw)
         return default_guild_shield_config(guild_id)
 
     def is_ai_supported_guild(self, guild_id: int | None) -> bool:
