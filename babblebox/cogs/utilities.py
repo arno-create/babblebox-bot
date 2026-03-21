@@ -1,16 +1,21 @@
 from __future__ import annotations
 
+import contextlib
+from typing import Optional
+
 import discord
 from discord import app_commands
 from discord.ext import commands
 
 from babblebox import game_engine as ge
 from babblebox.command_utils import defer_hybrid_response, require_channel_permissions, send_hybrid_response
-from babblebox.utility_helpers import deserialize_datetime
+from babblebox.text_safety import sanitize_short_plain_text
+from babblebox.utility_helpers import build_jump_view, build_moment_card_embed, deserialize_datetime, parse_message_link
 from babblebox.utility_service import WATCH_KEYWORD_LIMIT, UtilityService
 
 
 WATCH_SCOPE_CHOICES = [
+    app_commands.Choice(name="This channel", value="channel"),
     app_commands.Choice(name="This server", value="server"),
     app_commands.Choice(name="Global", value="global"),
 ]
@@ -22,6 +27,10 @@ WATCH_STATE_CHOICES = [
 WATCH_MODE_CHOICES = [
     app_commands.Choice(name="Contains phrase", value="contains"),
     app_commands.Choice(name="Whole word", value="word"),
+]
+VISIBILITY_CHOICES = [
+    app_commands.Choice(name="Public", value="public"),
+    app_commands.Choice(name="Only me", value="private"),
 ]
 REMINDER_DELIVERY_CHOICES = [
     app_commands.Choice(name="DM me", value="dm"),
@@ -39,6 +48,8 @@ class UtilityCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.service = UtilityService(bot)
+        self._moment_user_cooldowns: dict[int, float] = {}
+        self._moment_channel_cooldowns: dict[int, float] = {}
 
     async def cog_load(self):
         await self.service.start()
@@ -48,6 +59,15 @@ class UtilityCog(commands.Cog):
         if getattr(self.bot, "utility_service", None) is self.service:
             delattr(self.bot, "utility_service")
         self.bot.loop.create_task(self.service.close())
+
+    def _profile_service(self):
+        return getattr(self.bot, "profile_service", None)
+
+    async def _record_utility_action(self, user_id: int, action: str):
+        profile_service = self._profile_service()
+        if profile_service is None or not getattr(profile_service, "storage_ready", False):
+            return
+        await profile_service.record_utility_action(user_id, action)
 
     async def _send_private_embed(
         self,
@@ -92,58 +112,165 @@ class UtilityCog(commands.Cog):
         )
         return False
 
-    def _watch_settings_embed(self, user: discord.abc.User, guild: discord.Guild | None) -> discord.Embed:
-        summary = self.service.get_watch_summary(user.id, guild_id=guild.id if guild else None)
+    def _is_private_visibility(self, visibility: str) -> bool:
+        return visibility == "private"
+
+    def _watch_channel_id(self, channel) -> int | None:
+        return channel.id if isinstance(channel, (discord.TextChannel, discord.Thread)) else None
+
+    def _render_watch_keywords(self, items: list[dict]) -> str:
+        if not items:
+            return "None saved."
+        lines = []
+        for item in items[:10]:
+            scope = "global"
+            if item.get("channel_id") is not None:
+                scope = "channel"
+            elif item.get("guild_id") is not None:
+                scope = "server"
+            mode = "whole word" if item.get("mode") == "word" else "contains"
+            lines.append(f"`{item['phrase']}` - {mode} - {scope}")
+        if len(items) > 10:
+            lines.append(f"...and {len(items) - 10} more")
+        return "\n".join(lines)
+
+    def _resolve_watch_channel_mentions(self, guild: discord.Guild | None, channel_ids: list[int]) -> str:
+        if not channel_ids:
+            return "None"
+        rendered = []
+        for channel_id in channel_ids[:5]:
+            channel = self.bot.get_channel(channel_id) if guild is not None else None
+            if channel is not None and getattr(channel, "mention", None):
+                rendered.append(channel.mention)
+            else:
+                rendered.append(f"`{channel_id}`")
+        if len(channel_ids) > 5:
+            rendered.append(f"+{len(channel_ids) - 5} more")
+        return ", ".join(rendered)
+
+    def _resolve_ignored_user_labels(self, guild: discord.Guild | None, user_ids: list[int]) -> str:
+        if not user_ids:
+            return "None"
+        rendered = []
+        for user_id in user_ids[:5]:
+            member = guild.get_member(user_id) if guild is not None else None
+            user = member or self.bot.get_user(user_id)
+            rendered.append(ge.display_name_of(user) if user is not None else f"`{user_id}`")
+        if len(user_ids) > 5:
+            rendered.append(f"+{len(user_ids) - 5} more")
+        return ", ".join(rendered)
+
+    def _moment_card_cooldown_error(self, ctx: commands.Context, *, visibility: str) -> str | None:
+        if self._is_private_visibility(visibility):
+            return None
+        now = self.bot.loop.time()
+        user_remaining = 12.0 - (now - self._moment_user_cooldowns.get(ctx.author.id, 0.0))
+        channel_key = ctx.channel.id if ctx.channel is not None else 0
+        channel_remaining = 6.0 - (now - self._moment_channel_cooldowns.get(channel_key, 0.0))
+        if user_remaining > 0 or channel_remaining > 0:
+            wait_for = int(max(user_remaining, channel_remaining)) + 1
+            return f"Moment cards are rate-limited in public channels. Try again in about {wait_for} seconds, or use private visibility."
+        self._moment_user_cooldowns[ctx.author.id] = now
+        if channel_key:
+            self._moment_channel_cooldowns[channel_key] = now
+        return None
+
+    def _message_link_hint(self) -> str:
+        return "Use a Discord message link, or run the prefix command as a reply to the message you want to turn into a card."
+
+    def _watch_settings_embed(
+        self,
+        user: discord.abc.User,
+        guild: discord.Guild | None,
+        channel: discord.abc.GuildChannel | discord.Thread | None,
+    ) -> discord.Embed:
+        summary = self.service.get_watch_summary(
+            user.id,
+            guild_id=guild.id if guild else None,
+            channel_id=self._watch_channel_id(channel),
+        )
         embed = discord.Embed(
-            title="Babblebox Watch Settings",
-            description=f"Watch settings for **{ge.display_name_of(user)}**.",
+            title="Watch Settings",
+            description=f"Quiet DM alerts for **{ge.display_name_of(user)}**. Mentions and replies are split, and filters stay compact.",
             color=ge.EMBED_THEME["accent"],
         )
+        mention_lines = [
+            f"Global: **{'On' if summary['mention_global'] else 'Off'}**",
+        ]
+        reply_lines = [
+            f"Global: **{'On' if summary['reply_global'] else 'Off'}**",
+        ]
         if guild is not None:
-            embed.add_field(
-                name="Mention Alerts",
-                value=(
-                    f"This server: {'On' if summary['mention_server_enabled'] else 'Off'}\n"
-                    f"Global: {'On' if summary['mention_global'] else 'Off'}"
-                ),
-                inline=False,
-            )
-            server_keywords = summary["server_keywords"]
-            global_keywords = summary["global_keywords"]
-            embed.add_field(name=f"{guild.name} Keywords", value=str(len(server_keywords)), inline=True)
-            embed.add_field(name="Global Keywords", value=str(len(global_keywords)), inline=True)
-        else:
-            embed.add_field(
-                name="Mention Alerts",
-                value=f"Global: {'On' if summary['mention_global'] else 'Off'}",
-                inline=False,
-            )
-            embed.add_field(name="Global Keywords", value=str(len(summary["global_keywords"])), inline=True)
+            mention_lines.append(f"This server: **{'On' if summary['mention_server_enabled'] else 'Off'}**")
+            reply_lines.append(f"This server: **{'On' if summary['reply_server_enabled'] else 'Off'}**")
+        if channel is not None:
+            mention_lines.append(f"This channel: **{'On' if summary['mention_channel_enabled'] else 'Off'}**")
+            reply_lines.append(f"This channel: **{'On' if summary['reply_channel_enabled'] else 'Off'}**")
+        embed.add_field(name="Mention Alerts", value="\n".join(mention_lines), inline=True)
+        embed.add_field(name="Reply Alerts", value="\n".join(reply_lines), inline=True)
+        embed.add_field(
+            name="Keyword Buckets",
+            value=(
+                f"Global: **{len(summary['global_keywords'])}**\n"
+                f"Server: **{len(summary['server_keywords'])}**\n"
+                f"Channel: **{len(summary['channel_keywords'])}**"
+            ),
+            inline=True,
+        )
+        embed.add_field(
+            name="Ignored Channels",
+            value=self._resolve_watch_channel_mentions(guild, summary["ignored_channel_ids"]),
+            inline=False,
+        )
+        embed.add_field(
+            name="Ignored Users",
+            value=self._resolve_ignored_user_labels(guild, summary["ignored_user_ids"]),
+            inline=False,
+        )
+        counts = summary["recent_counts"]
+        embed.add_field(
+            name="Recent Alerts",
+            value=(
+                f"Mentions: **{counts['mentions']}**\n"
+                f"Replies: **{counts['replies']}**\n"
+                f"Keywords: **{counts['keywords']}**\n"
+                f"Total sent: **{counts['total']}**"
+            ),
+            inline=False,
+        )
         embed.add_field(name="Keyword Limit", value=str(WATCH_KEYWORD_LIMIT), inline=True)
-        return ge.style_embed(embed, footer="Babblebox Watch | Use /watch keyword add or bb!watch keyword add.")
+        return ge.style_embed(embed, footer="Babblebox Watch | DM-only alerts, compact filters, no message archive")
 
-    def _watch_list_embed(self, user: discord.abc.User, guild: discord.Guild | None) -> discord.Embed:
-        summary = self.service.get_watch_summary(user.id, guild_id=guild.id if guild else None)
+    def _watch_list_embed(
+        self,
+        user: discord.abc.User,
+        guild: discord.Guild | None,
+        channel: discord.abc.GuildChannel | discord.Thread | None,
+    ) -> discord.Embed:
+        summary = self.service.get_watch_summary(
+            user.id,
+            guild_id=guild.id if guild else None,
+            channel_id=self._watch_channel_id(channel),
+        )
         embed = discord.Embed(
-            title="Babblebox Watch Keywords",
-            description=f"Saved keyword watches for **{ge.display_name_of(user)}**.",
+            title="Watch List",
+            description=f"Keyword buckets and focused filters for **{ge.display_name_of(user)}**.",
             color=ge.EMBED_THEME["accent"],
         )
-
-        def render(items: list[dict]) -> str:
-            if not items:
-                return "None"
-            lines = []
-            for item in items[:10]:
-                lines.append(f"`{item['phrase']}` ({item.get('mode', 'contains')})")
-            if len(items) > 10:
-                lines.append(f"...and {len(items) - 10} more")
-            return "\n".join(lines)
-
-        embed.add_field(name="Global", value=render(summary["global_keywords"]), inline=False)
+        embed.add_field(name="Global Keywords", value=self._render_watch_keywords(summary["global_keywords"]), inline=False)
         if guild is not None:
-            embed.add_field(name=guild.name, value=render(summary["server_keywords"]), inline=False)
-        return ge.style_embed(embed, footer="Babblebox Watch | Message alerts are DM-only.")
+            embed.add_field(name=f"{guild.name} Keywords", value=self._render_watch_keywords(summary["server_keywords"]), inline=False)
+        if channel is not None:
+            embed.add_field(name="This Channel Keywords", value=self._render_watch_keywords(summary["channel_keywords"]), inline=False)
+        embed.add_field(
+            name="Focused Channels",
+            value=(
+                f"Mentions: {self._resolve_watch_channel_mentions(guild, summary['mention_channel_ids'])}\n"
+                f"Replies: {self._resolve_watch_channel_mentions(guild, summary['reply_channel_ids'])}"
+            ),
+            inline=False,
+        )
+        return ge.style_embed(embed, footer="Babblebox Watch | Use /watch ignore to trim noisy places or people")
 
     def _later_list_embed(self, user: discord.abc.User, markers: list[dict], *, guild: discord.Guild | None) -> discord.Embed:
         embed = discord.Embed(
@@ -227,17 +354,237 @@ class UtilityCog(commands.Cog):
         )
         return None
 
+    def _reply_source_message(self, ctx: commands.Context) -> discord.Message | None:
+        reference = getattr(getattr(ctx, "message", None), "reference", None)
+        resolved = getattr(reference, "resolved", None)
+        cached_message = getattr(reference, "cached_message", None)
+        if isinstance(resolved, discord.Message):
+            return resolved
+        if isinstance(cached_message, discord.Message):
+            return cached_message
+        return None
+
+    async def _resolve_moment_from_link(self, ctx: commands.Context, message_link: str) -> discord.Message | None:
+        parsed = parse_message_link(message_link)
+        if parsed is None:
+            await self._send_private_embed(
+                ctx,
+                embed=ge.make_status_embed(
+                    "Invalid Message Link",
+                    self._message_link_hint(),
+                    tone="warning",
+                    footer="Babblebox Moment",
+                ),
+            )
+            return None
+
+        guild_id, channel_id, message_id = parsed
+        if ctx.guild is None or guild_id != ctx.guild.id:
+            await self._send_private_embed(
+                ctx,
+                embed=ge.make_status_embed(
+                    "Same Server Only",
+                    "Moment cards only support message links from this server so Babblebox can verify access safely.",
+                    tone="warning",
+                    footer="Babblebox Moment",
+                ),
+            )
+            return None
+
+        channel = self.bot.get_channel(channel_id)
+        if channel is None:
+            with contextlib.suppress(discord.Forbidden, discord.HTTPException, discord.NotFound):
+                channel = await self.bot.fetch_channel(channel_id)
+        if channel is None:
+            await self._send_private_embed(
+                ctx,
+                embed=ge.make_status_embed(
+                    "Message Unavailable",
+                    "I could not open that channel.",
+                    tone="warning",
+                    footer="Babblebox Moment",
+                ),
+            )
+            return None
+
+        permissions = channel.permissions_for(ctx.author)
+        if not (permissions.view_channel and permissions.read_message_history):
+            await self._send_private_embed(
+                ctx,
+                embed=ge.make_status_embed(
+                    "Access Denied",
+                    "You need channel access and message history access for that message.",
+                    tone="warning",
+                    footer="Babblebox Moment",
+                ),
+            )
+            return None
+
+        try:
+            message = await channel.fetch_message(message_id)
+        except (discord.Forbidden, discord.HTTPException, discord.NotFound):
+            await self._send_private_embed(
+                ctx,
+                embed=ge.make_status_embed(
+                    "Message Missing",
+                    "I could not fetch that message. The link may be stale or inaccessible.",
+                    tone="warning",
+                    footer="Babblebox Moment",
+                ),
+            )
+            return None
+        return message
+
+    async def _resolve_moment_source(self, ctx: commands.Context, message_link: str | None) -> tuple[discord.Message | None, discord.Message | None]:
+        source = self._reply_source_message(ctx)
+        followup = None
+        if source is None and message_link:
+            source = await self._resolve_moment_from_link(ctx, message_link)
+        if source is None:
+            await self._send_private_embed(
+                ctx,
+                embed=ge.make_status_embed(
+                    "Moment Source Needed",
+                    self._message_link_hint(),
+                    tone="warning",
+                    footer="Babblebox Moment",
+                ),
+            )
+            return None, None
+
+        if source.author.bot or source.webhook_id is not None:
+            await self._send_private_embed(
+                ctx,
+                embed=ge.make_status_embed(
+                    "Not A Social Moment",
+                    "Moment cards are only available for regular user messages.",
+                    tone="warning",
+                    footer="Babblebox Moment",
+                ),
+            )
+            return None, None
+
+        reference = source.reference
+        resolved = getattr(reference, "resolved", None)
+        cached_message = getattr(reference, "cached_message", None)
+        reply_target = resolved if isinstance(resolved, discord.Message) else cached_message
+        if isinstance(reply_target, discord.Message) and not reply_target.author.bot and reply_target.guild == source.guild:
+            followup = source
+            source = reply_target
+        return source, followup
+
+    async def _resolve_recent_moment(self, ctx: commands.Context) -> tuple[discord.Message | None, discord.Message | None]:
+        if ctx.guild is None or ctx.channel is None:
+            await self._send_private_embed(
+                ctx,
+                embed=ge.make_status_embed(
+                    "Server Only",
+                    "Recent moments only work in server channels.",
+                    tone="warning",
+                    footer="Babblebox Moment",
+                ),
+            )
+            return None, None
+
+        history_kwargs = {"limit": 10}
+        if getattr(ctx, "message", None) is not None:
+            history_kwargs["before"] = ctx.message
+
+        recent_messages = [
+            message
+            async for message in ctx.channel.history(**history_kwargs)
+            if message.type in {discord.MessageType.default, discord.MessageType.reply}
+            and not message.author.bot
+            and message.webhook_id is None
+        ]
+        if not recent_messages:
+            await self._send_private_embed(
+                ctx,
+                embed=ge.make_status_embed(
+                    "No Recent Moment",
+                    "I could not find a recent user message in this channel.",
+                    tone="warning",
+                    footer="Babblebox Moment",
+                ),
+            )
+            return None, None
+
+        primary = recent_messages[0]
+        reference = primary.reference
+        resolved = getattr(reference, "resolved", None)
+        cached_message = getattr(reference, "cached_message", None)
+        reply_target = resolved if isinstance(resolved, discord.Message) else cached_message
+        if isinstance(reply_target, discord.Message) and not reply_target.author.bot:
+            return reply_target, primary
+        if len(recent_messages) >= 2 and recent_messages[1].author.id != primary.author.id:
+            return recent_messages[1], primary
+        return primary, None
+
+    async def _send_moment_card(
+        self,
+        ctx: commands.Context,
+        *,
+        source: discord.Message,
+        followup: discord.Message | None,
+        title: str | None,
+        visibility: str,
+    ):
+        if source.guild is None:
+            await self._send_private_embed(
+                ctx,
+                embed=ge.make_status_embed(
+                    "Server Only",
+                    "Moment cards are intended for server conversations.",
+                    tone="warning",
+                    footer="Babblebox Moment",
+                ),
+            )
+            return
+        cooldown_error = self._moment_card_cooldown_error(ctx, visibility=visibility)
+        if cooldown_error is not None:
+            await self._send_private_embed(
+                ctx,
+                embed=ge.make_status_embed("Moment Cooldown", cooldown_error, tone="warning", footer="Babblebox Moment"),
+            )
+            return
+
+        clean_title = None
+        if title:
+            ok, clean_or_error = sanitize_short_plain_text(
+                title,
+                field_name="Moment title",
+                max_length=48,
+                sentence_limit=1,
+                reject_blocklist=True,
+                allow_empty=False,
+            )
+            if not ok:
+                await self._send_private_embed(
+                    ctx,
+                    embed=ge.make_status_embed("Moment Title Rejected", clean_or_error, tone="warning", footer="Babblebox Moment"),
+                )
+                return
+            clean_title = clean_or_error
+
+        embed = build_moment_card_embed(source, followup=followup, title=clean_title, requested_by=ctx.author)
+        await send_hybrid_response(
+            ctx,
+            embed=embed,
+            view=build_jump_view((followup or source).jump_url, label="Open Source Message"),
+            ephemeral=self._is_private_visibility(visibility),
+        )
+
     @commands.hybrid_group(
         name="watch",
         with_app_command=True,
-        description="Configure mention and keyword DM alerts",
+        description="Configure mention, reply, and keyword DM alerts",
         invoke_without_command=True,
     )
     async def watch_group(self, ctx: commands.Context):
         await self.watch_settings_command(ctx)
 
     @watch_group.command(name="mentions", with_app_command=True, description="Enable or disable mention alerts")
-    @app_commands.describe(state="Turn mention alerts on or off", scope="Use this server or global scope")
+    @app_commands.describe(state="Turn mention alerts on or off", scope="Use this channel, server, or global scope")
     @app_commands.choices(state=WATCH_STATE_CHOICES, scope=WATCH_SCOPE_CHOICES)
     async def watch_mentions_command(self, ctx: commands.Context, state: str = "on", scope: str = "server"):
         if not await self._require_storage(ctx, "Watch"):
@@ -246,6 +593,27 @@ class UtilityCog(commands.Cog):
         ok, message = await self.service.set_watch_mentions(
             ctx.author.id,
             guild_id=ctx.guild.id if ctx.guild else None,
+            channel_id=self._watch_channel_id(ctx.channel),
+            scope=scope,
+            enabled=enabled,
+        )
+        tone = "success" if ok else "warning"
+        await self._send_private_embed(
+            ctx,
+            embed=ge.make_status_embed("Watch Mentions", message, tone=tone, footer="Babblebox Watch"),
+        )
+
+    @watch_group.command(name="replies", with_app_command=True, description="Enable or disable reply alerts")
+    @app_commands.describe(state="Turn reply alerts on or off", scope="Use this channel, server, or global scope")
+    @app_commands.choices(state=WATCH_STATE_CHOICES, scope=WATCH_SCOPE_CHOICES)
+    async def watch_replies_command(self, ctx: commands.Context, state: str = "on", scope: str = "server"):
+        if not await self._require_storage(ctx, "Watch"):
+            return
+        enabled = state.lower() == "on"
+        ok, message = await self.service.set_watch_replies(
+            ctx.author.id,
+            guild_id=ctx.guild.id if ctx.guild else None,
+            channel_id=self._watch_channel_id(ctx.channel),
             scope=scope,
             enabled=enabled,
         )
@@ -260,7 +628,7 @@ class UtilityCog(commands.Cog):
         await self.watch_list_command(ctx)
 
     @watch_keyword_group.command(name="add", with_app_command=True, description="Add a watched keyword")
-    @app_commands.describe(scope="Use this server or global scope", mode="Contains phrase or whole word", phrase="The keyword or phrase to watch")
+    @app_commands.describe(scope="Use this channel, server, or global scope", mode="Contains phrase or whole word", phrase="The keyword or phrase to watch")
     @app_commands.choices(scope=WATCH_SCOPE_CHOICES, mode=WATCH_MODE_CHOICES)
     async def watch_keyword_add_command(
         self,
@@ -275,6 +643,7 @@ class UtilityCog(commands.Cog):
         ok, message = await self.service.add_watch_keyword(
             ctx.author.id,
             guild_id=ctx.guild.id if ctx.guild else None,
+            channel_id=self._watch_channel_id(ctx.channel),
             phrase=phrase,
             scope=scope,
             mode=mode,
@@ -284,9 +653,11 @@ class UtilityCog(commands.Cog):
             ctx,
             embed=ge.make_status_embed("Watch Keyword", message, tone=tone, footer="Babblebox Watch"),
         )
+        if ok:
+            await self._record_utility_action(ctx.author.id, "watch_keyword")
 
     @watch_keyword_group.command(name="remove", with_app_command=True, description="Remove a watched keyword")
-    @app_commands.describe(scope="Remove from this server or global scope", phrase="The exact saved keyword or phrase")
+    @app_commands.describe(scope="Remove from this channel, server, or global scope", phrase="The exact saved keyword or phrase")
     @app_commands.choices(scope=WATCH_SCOPE_CHOICES)
     async def watch_keyword_remove_command(
         self,
@@ -300,6 +671,7 @@ class UtilityCog(commands.Cog):
         ok, message = await self.service.remove_watch_keyword(
             ctx.author.id,
             guild_id=ctx.guild.id if ctx.guild else None,
+            channel_id=self._watch_channel_id(ctx.channel),
             phrase=phrase,
             scope=scope,
         )
@@ -309,20 +681,78 @@ class UtilityCog(commands.Cog):
             embed=ge.make_status_embed("Watch Keyword", message, tone=tone, footer="Babblebox Watch"),
         )
 
+    @watch_group.group(name="ignore", with_app_command=True, invoke_without_command=True, description="Ignore noisy channels or users")
+    async def watch_ignore_group(self, ctx: commands.Context):
+        await self.watch_settings_command(ctx)
+
+    @watch_ignore_group.command(name="channel", with_app_command=True, description="Exclude this channel from Watch alerts")
+    async def watch_ignore_channel_command(self, ctx: commands.Context):
+        if not await self._require_storage(ctx, "Watch"):
+            return
+        ok, message = await self.service.add_watch_ignored_channel(
+            ctx.author.id,
+            channel_id=self._watch_channel_id(ctx.channel),
+        )
+        await self._send_private_embed(
+            ctx,
+            embed=ge.make_status_embed("Watch Ignore", message, tone="success" if ok else "warning", footer="Babblebox Watch"),
+        )
+
+    @watch_ignore_group.command(name="channel-remove", with_app_command=True, description="Remove this channel from your ignore list")
+    async def watch_ignore_channel_remove_command(self, ctx: commands.Context):
+        if not await self._require_storage(ctx, "Watch"):
+            return
+        ok, message = await self.service.remove_watch_ignored_channel(
+            ctx.author.id,
+            channel_id=self._watch_channel_id(ctx.channel),
+        )
+        await self._send_private_embed(
+            ctx,
+            embed=ge.make_status_embed("Watch Ignore", message, tone="success" if ok else "warning", footer="Babblebox Watch"),
+        )
+
+    @watch_ignore_group.command(name="user", with_app_command=True, description="Ignore a specific user's messages")
+    @app_commands.describe(user="The user to ignore in Watch alerts")
+    async def watch_ignore_user_command(self, ctx: commands.Context, user: discord.User):
+        if not await self._require_storage(ctx, "Watch"):
+            return
+        if user.bot:
+            await self._send_private_embed(
+                ctx,
+                embed=ge.make_status_embed("Watch Ignore", "Bots are already ignored by Watch.", tone="warning", footer="Babblebox Watch"),
+            )
+            return
+        ok, message = await self.service.add_watch_ignored_user(ctx.author.id, ignored_user_id=user.id)
+        await self._send_private_embed(
+            ctx,
+            embed=ge.make_status_embed("Watch Ignore", message, tone="success" if ok else "warning", footer="Babblebox Watch"),
+        )
+
+    @watch_ignore_group.command(name="user-remove", with_app_command=True, description="Remove a user from your Watch ignore list")
+    @app_commands.describe(user="The user to remove from your ignore list")
+    async def watch_ignore_user_remove_command(self, ctx: commands.Context, user: discord.User):
+        if not await self._require_storage(ctx, "Watch"):
+            return
+        ok, message = await self.service.remove_watch_ignored_user(ctx.author.id, ignored_user_id=user.id)
+        await self._send_private_embed(
+            ctx,
+            embed=ge.make_status_embed("Watch Ignore", message, tone="success" if ok else "warning", footer="Babblebox Watch"),
+        )
+
     @watch_group.command(name="settings", with_app_command=True, description="View watch settings")
     async def watch_settings_command(self, ctx: commands.Context):
         if not await self._require_storage(ctx, "Watch"):
             return
-        await self._send_private_embed(ctx, embed=self._watch_settings_embed(ctx.author, ctx.guild))
+        await self._send_private_embed(ctx, embed=self._watch_settings_embed(ctx.author, ctx.guild, ctx.channel if ctx.guild else None))
 
     @watch_group.command(name="list", with_app_command=True, description="List watched keywords")
     async def watch_list_command(self, ctx: commands.Context):
         if not await self._require_storage(ctx, "Watch"):
             return
-        await self._send_private_embed(ctx, embed=self._watch_list_embed(ctx.author, ctx.guild))
+        await self._send_private_embed(ctx, embed=self._watch_list_embed(ctx.author, ctx.guild, ctx.channel if ctx.guild else None))
 
     @watch_group.command(name="off", with_app_command=True, description="Disable watch settings for a scope")
-    @app_commands.describe(scope="Clear this server, global, or all watch settings")
+    @app_commands.describe(scope="Clear this channel, server, global, or all watch settings")
     @app_commands.choices(scope=WATCH_OFF_SCOPE_CHOICES)
     async def watch_off_command(self, ctx: commands.Context, scope: str = "server"):
         if not await self._require_storage(ctx, "Watch"):
@@ -330,6 +760,7 @@ class UtilityCog(commands.Cog):
         ok, message = await self.service.disable_watch(
             ctx.author.id,
             guild_id=ctx.guild.id if ctx.guild else None,
+            channel_id=self._watch_channel_id(ctx.channel),
             scope=scope,
         )
         tone = "success" if ok else "warning"
@@ -382,6 +813,7 @@ class UtilityCog(commands.Cog):
             "Later Marker Saved",
             f"I DM'd you a jump link for **#{ctx.channel.name}**.",
         )
+        await self._record_utility_action(ctx.author.id, "later")
 
     @later_group.command(name="list", with_app_command=True, description="List your saved reading markers")
     async def later_list_command(self, ctx: commands.Context):
@@ -500,6 +932,66 @@ class UtilityCog(commands.Cog):
             "Capture Sent",
             f"I DM'd you a private snapshot of **{len(messages)}** recent messages.",
         )
+        await self._record_utility_action(ctx.author.id, "capture")
+
+    @commands.hybrid_group(
+        name="moment",
+        with_app_command=True,
+        description="Turn a message or small exchange into a shareable Moment Card",
+        invoke_without_command=True,
+    )
+    async def moment_group(self, ctx: commands.Context):
+        await self._send_usage(
+            ctx,
+            "Babblebox Moment",
+            "Use `/moment create <message_link>` or reply with `bb!moment from-reply` to turn a message into a shareable card.",
+        )
+
+    @moment_group.command(name="create", with_app_command=True, description="Create a Moment Card from a message link or reply")
+    @app_commands.describe(message_link="Optional Discord message link from this server", title="Optional short title", visibility="Show the card publicly or only to you")
+    @app_commands.choices(visibility=VISIBILITY_CHOICES)
+    async def moment_create_command(
+        self,
+        ctx: commands.Context,
+        message_link: Optional[str] = None,
+        title: Optional[str] = None,
+        visibility: str = "public",
+    ):
+        await defer_hybrid_response(ctx, ephemeral=self._is_private_visibility(visibility))
+        source, followup = await self._resolve_moment_source(ctx, message_link)
+        if source is None:
+            return
+        await self._send_moment_card(ctx, source=source, followup=followup, title=title, visibility=visibility)
+
+    @moment_group.command(name="from-reply", with_app_command=True, description="Create a Moment Card from the message you replied to")
+    @app_commands.describe(title="Optional short title", visibility="Show the card publicly or only to you")
+    @app_commands.choices(visibility=VISIBILITY_CHOICES)
+    async def moment_from_reply_command(
+        self,
+        ctx: commands.Context,
+        title: Optional[str] = None,
+        visibility: str = "public",
+    ):
+        await defer_hybrid_response(ctx, ephemeral=self._is_private_visibility(visibility))
+        source, followup = await self._resolve_moment_source(ctx, None)
+        if source is None:
+            return
+        await self._send_moment_card(ctx, source=source, followup=followup, title=title, visibility=visibility)
+
+    @moment_group.command(name="recent", with_app_command=True, description="Turn the latest channel moment into a card")
+    @app_commands.describe(title="Optional short title", visibility="Show the card publicly or only to you")
+    @app_commands.choices(visibility=VISIBILITY_CHOICES)
+    async def moment_recent_command(
+        self,
+        ctx: commands.Context,
+        title: Optional[str] = None,
+        visibility: str = "public",
+    ):
+        await defer_hybrid_response(ctx, ephemeral=self._is_private_visibility(visibility))
+        source, followup = await self._resolve_recent_moment(ctx)
+        if source is None:
+            return
+        await self._send_moment_card(ctx, source=source, followup=followup, title=title, visibility=visibility)
 
     @commands.hybrid_group(
         name="remind",
@@ -579,6 +1071,7 @@ class UtilityCog(commands.Cog):
                 footer="Babblebox Remind",
             ),
         )
+        await self._record_utility_action(ctx.author.id, "reminder")
 
     @remind_group.command(name="list", with_app_command=True, description="List your active reminders")
     async def remind_list_command(self, ctx: commands.Context):

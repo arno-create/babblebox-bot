@@ -116,6 +116,7 @@ class UtilityStoreAndServiceTests(unittest.IsolatedAsyncioTestCase):
         ok, _ = await self.service.add_watch_keyword(
             42,
             guild_id=100,
+            channel_id=None,
             phrase="hello world",
             scope="server",
             mode="contains",
@@ -124,6 +125,25 @@ class UtilityStoreAndServiceTests(unittest.IsolatedAsyncioTestCase):
         summary = self.service.get_watch_summary(42, guild_id=100)
         self.assertEqual(len(summary["server_keywords"]), 1)
         self.assertEqual(summary["server_keywords"][0]["phrase"], "hello world")
+
+    async def test_watch_summary_distinguishes_mentions_replies_and_channel_keywords(self):
+        ok, _ = await self.service.set_watch_mentions(42, guild_id=100, channel_id=200, scope="channel", enabled=True)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_watch_replies(42, guild_id=100, channel_id=200, scope="server", enabled=True)
+        self.assertTrue(ok)
+        ok, _ = await self.service.add_watch_keyword(
+            42,
+            guild_id=100,
+            channel_id=200,
+            phrase="camera",
+            scope="channel",
+            mode="contains",
+        )
+        self.assertTrue(ok)
+        summary = self.service.get_watch_summary(42, guild_id=100, channel_id=200)
+        self.assertTrue(summary["mention_channel_enabled"])
+        self.assertTrue(summary["reply_server_enabled"])
+        self.assertEqual(len(summary["channel_keywords"]), 1)
 
     async def test_channel_reminders_are_strictly_limited(self):
         user = DummyUser(55)
@@ -169,8 +189,8 @@ class UtilityStoreAndServiceTests(unittest.IsolatedAsyncioTestCase):
         ok, _ = await self.service.set_afk(
             user=user,
             reason="Stepped away",
-            duration_minutes=30,
-            start_in_minutes=None,
+            duration_seconds=30 * 60,
+            start_in_seconds=None,
         )
         self.assertTrue(ok)
         lines = self.service.build_afk_notice_lines_for_targets(

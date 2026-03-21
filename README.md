@@ -1,17 +1,25 @@
 # Babblebox
 
-Babblebox is a multiplayer Discord party game bot built with Python and `discord.py`.
-It is designed around social chaos, polished Discord UX, and replayable mini-games that feel lively instead of disposable.
+Babblebox is a modular Discord bot built with Python and `discord.py`.
 
-This version of the project includes:
+It aims to feel cohesive in four directions at once:
 
-- A modular backend instead of one giant monolith
-- Dual slash and `bb!` prefix commands
-- A new `Chaos Card` lobby system
-- A utility suite with Watch, Later, Capture, Remind, and a stronger timed AFK system
-- Postgres-first utility persistence in production, with explicit memory mode for tests and local dev
-- Upgraded embed-driven bot responses
-- A restored blue-themed website with privacy, community, and support sections
+- Party Games for active voice/text hangouts
+- Everyday Utilities for quiet server life
+- Daily Arcade for low-player-count return visits
+- Buddy / Profile / Vault for identity, streaks, and showable progress
+
+This pass also adds an optional fifth operational layer:
+
+- Babblebox Shield for lightweight, configurable server safety
+
+Babblebox is intentionally compact:
+
+- no economy grind
+- no lootboxes
+- no production JSON persistence for durable systems
+- no blob/media archives in the database
+- no always-on external AI scanning; Shield AI assist is optional and only reviews already-flagged messages
 
 ## Official Links
 
@@ -20,113 +28,333 @@ This version of the project includes:
 - GitHub repository: [https://github.com/arno-create/babblebox-bot](https://github.com/arno-create/babblebox-bot)
 - Support server: [https://discord.com/servers/inevitable-friendship-1322933864360050688](https://discord.com/servers/inevitable-friendship-1322933864360050688)
 
-## What Babblebox Feels Like
+## Product Overview
 
-Babblebox is meant to create the kinds of Discord moments people remember:
+### Party Games
 
-- Voice-message mimicry that spirals into nonsense
-- Social deduction rounds that turn suspicious fast
-- Story prompts that produce ridiculous final reveals
-- Fast typing pressure that makes Word Bomb feel genuinely tense
+- Broken Telephone
+- Exquisite Corpse
+- Spyfall
+- Word Bomb
+- Chaos Cards and bomb mode variants
+- hybrid slash + `bb!` prefix support
+- session stats and session leaderboard commands
 
-It is a party bot, but it is built with real engineering discipline:
+### Everyday Utilities
 
-- guild-scoped state
-- timeout cleanup
-- defensive DM handling
-- interactive views
-- Render-friendly runtime behavior
+- Watch V2
+  - separate mention alerts
+  - separate reply alerts
+  - keyword alerts
+  - global, server, or channel scope
+  - ignored channels
+  - ignored users
+  - DM-only delivery with cooldowns and dedupe
+- Later
+  - one saved reading marker per user per channel
+  - media-aware previews
+- Capture
+  - DM transcript snapshots of recent messages
+  - better media placeholders and attachment context
+- Moment Cards
+  - shareable embed-first quote or exchange cards
+  - built from replies, recent messages, or message links
+  - no archive table and no generated image pipeline
+- Remind
+  - safe one-time reminders with small active limits
+- AFK
+  - immediate or scheduled away status
+  - duration parsing for `30m`, `2h`, `2d`, and compact combos like `1h30m`
+  - elapsed and return-time messaging
 
-## Games
+### Shield / Safety
 
-### Broken Telephone
+- Babblebox Shield
+  - optional, admin-configurable moderation layer
+  - admin-only configuration for administrators or Manage Server users
+  - privacy leak pack
+  - promo / invite pack
+  - scam / malicious-link heuristic pack
+  - optional AI-assisted second-pass review for moderator context only
+  - AI stays off by default and is currently limited to guild `1322933864360050688`
+  - log-first defaults
+  - trusted-role bypass
+  - included / excluded scope controls
+  - allowlists for domains, invite codes, and phrases
+  - compact advanced patterns with `contains`, `word`, and safe `wildcard` matching
+  - raw custom regex intentionally unsupported to avoid unsafe hot-path backtracking
 
-Players pass along a voice message by imitating what they hear. The final player types what they think the original phrase was.
+### Daily Arcade
 
-### Exquisite Corpse
+Babblebox Daily is now a small arcade instead of one booth.
 
-Players secretly contribute words and phrases to build one absurd final sentence.
+Current daily modes:
 
-### Spyfall
+- Shuffle Booth
+  - unscramble the word
+- Emoji Booth
+  - decode the emoji clue
+- Signal Booth
+  - decode a shifted word
 
-One player is the spy, everyone else knows the location, and the server has to question each other before voting.
+Daily Arcade design rules:
 
-### Word Bomb
+- deterministic generation from the UTC date
+- one compact result row per `user + date + mode`
+- small attempt limits
+- shareable output
+- no external content APIs
+- raw rows pruned after 180 days
+- streaks and lifetime totals stay in the profile row
 
-Players race to type valid English words containing a required syllable before the timer expires.
+### Buddy / Profile / Vault
 
-## Utility Suite
+- one lightweight Buddy per user
+- cosmetic style + nickname + mood + title + featured badge
+- XP and level progression tied to actual use
+- anti-farm per-day XP caps by category
+- `/profile` is public-friendly by default
+- `/vault` stays the more personal snapshot
 
-Babblebox is now more than a game bot. It also includes a quiet, personal utility layer that stays aligned with Discord permissions and keeps channel clutter low.
+## Commands
 
-### Watch
+Slash commands and the `bb!` prefix both work.
 
-Receive DM alerts when someone mentions you or when watched keywords appear, with jump links back to the message. Mention watches can be server-scoped or global, and keyword watches support server or global scope with contains or whole-word matching.
-
-### Later
-
-Mark where you stopped reading in a channel and get a DM jump link back to that point later. One marker per user per channel is stored, so re-marking simply updates your place.
-
-### Capture
-
-Privately DM yourself a structured snapshot of recent channel messages for memory, moderation context, or reference. Captures respect channel visibility and only work from channels the requester can already access.
-
-### Remind
-
-Create safe one-time reminders using relative durations such as `10m`, `2h`, or `1d12h`. Reminders default to DMs, while channel delivery is intentionally stricter to reduce spam and clutter.
-
-### AFK
-
-AFK now handles both indefinite and timed away states. When someone mentions you or replies to one of your messages while you are AFK, Babblebox can show how long you have been away and, if the AFK is timed, when you are expected back.
-
-## Dual Command System
-
-Core commands and the new utility features work in both styles:
+### Core
 
 | Slash | Prefix | Purpose |
 | --- | --- | --- |
-| `/help` | `bb!help` | Show the manual |
+| `/help` | `bb!help` | Open the in-bot manual |
 | `/ping` | `bb!ping` | Health check |
-| `/play` | `bb!play` | Open a lobby |
+| `/play` | `bb!play` | Open a game lobby |
 | `/stop` | `bb!stop` | Force stop the active lobby/game |
-| `/afk` | `bb!afk` | Set, schedule, or clear AFK, including timed away status |
-| `/afkstatus` | `bb!afkstatus` | View AFK status |
 | `/vote` | `bb!vote` | Trigger a Spyfall vote |
-| `/stats` | `bb!stats` | Show session stats |
-| `/leaderboard` | `bb!leaderboard` | Show leaderboard |
-| `/chaoscard` | `bb!chaoscard` | Cycle the lobby Chaos Card |
-| `/watch mentions` | `bb!watch mentions on server` | Toggle mention alerts |
-| `/watch keyword add` | `bb!watch keyword add server contains project update` | Add a watched keyword |
-| `/watch settings` | `bb!watch settings` | View current watch configuration |
-| `/later mark` | `bb!later mark` | Save a reading marker |
-| `/later list` | `bb!later list` | List saved reading markers |
-| `/capture` | `bb!capture 10` | DM a recent channel snapshot |
-| `/remind set` | `bb!remind set 2h dm take a break` | Schedule a one-time reminder |
-| `/remind list` | `bb!remind list` | List active reminders |
+| `/stats` | `bb!stats` | Session stats |
+| `/leaderboard` | `bb!leaderboard` | Session leaderboard |
+| `/chaoscard` | `bb!chaoscard` | Cycle or inspect the lobby Chaos Card |
 
-## Chaos Cards
+### Party Games
 
-Chaos Cards are lightweight pre-game lobby modifiers. They change the vibe of a round without adding background workers, polling, or storage-heavy systems.
+Party game flow still starts from `/play`.
 
-### Included cards
+- Broken Telephone: 3+ players
+- Exquisite Corpse: 3+ players
+- Spyfall: 3+ players
+- Word Bomb: 2+ players
 
-- `Off`: standard rules
-- `Reverse Order`: reverse the shuffled player order
-- `Lightning Round`: shorter DM timers, faster vote timing, tighter Word Bomb pacing
-- `Encore Reveal`: add a dramatic recap headline at the end of the game
+Babblebox now nudges solo users toward Daily Arcade, Buddy, Profile, and utilities instead of leaving them at dead ends.
 
-## Embed UX Upgrade
+### Everyday Utilities
 
-Babblebox now leans harder into embeds across command responses and game presentation:
+| Slash | Prefix | Purpose |
+| --- | --- | --- |
+| `/watch mentions` | `bb!watch mentions` | Toggle mention alerts by channel, server, or global scope |
+| `/watch replies` | `bb!watch replies` | Toggle reply alerts separately from mentions |
+| `/watch keyword add` | `bb!watch keyword add channel contains camera` | Add a watched keyword in channel/server/global scope |
+| `/watch keyword remove` | `bb!watch keyword remove server camera` | Remove a watched keyword |
+| `/watch ignore channel` | `bb!watch ignore channel` | Exclude the current channel from Watch |
+| `/watch ignore user` | `bb!watch ignore user @name` | Ignore one user's messages in Watch |
+| `/watch list` | `bb!watch list` | See keyword buckets and focused channels |
+| `/watch settings` | `bb!watch settings` | See mention/reply states, ignore lists, and recent counts |
+| `/watch off` | `bb!watch off server` | Clear watch settings by scope |
+| `/later mark` | `bb!later mark` | Save your current reading spot |
+| `/later list` | `bb!later list` | List saved markers |
+| `/later clear` | `bb!later clear here` | Clear markers |
+| `/capture` | `bb!capture 10` | DM yourself a recent-message snapshot |
+| `/moment create` | `bb!moment create <message_link>` | Create a Moment Card from a message |
+| `/moment from-reply` | `bb!moment from-reply` | Create a Moment Card from the replied message |
+| `/moment recent` | `bb!moment recent` | Create a Moment Card from the latest channel moment |
+| `/remind set` | `bb!remind set 2h dm take a break` | Create a reminder |
+| `/remind list` | `bb!remind list` | Review active reminders |
+| `/remind cancel` | `bb!remind cancel <id>` | Cancel a reminder |
+| `/afk` | `bb!afk` | Set, schedule, or clear AFK |
+| `/afkstatus` | `bb!afkstatus` | View AFK status |
 
-- Consistent color language for info, success, warning, and danger states
-- Shared footer style for better orientation
-- Cleaner AFK, lobby, stats, and vote messaging
-- Improved Word Bomb turn presentation
+AFK examples:
+
+- `/afk focus 30m`
+- `/afk lunch 2h`
+- `/afk travel 2d`
+- `bb!afk deep work 1h30m`
+
+### Shield / Safety
+
+Shield commands are private/admin-facing by default. The streamlined slash surface is centered on `/shield panel`.
+
+| Slash | Prefix | Purpose |
+| --- | --- | --- |
+| `/shield panel` | `bb!shield panel` | Open the Shield admin panel |
+| `/shield rules` | `bb!shield rules pack promo enabled true action log sensitivity normal` | Configure module, packs, and escalation |
+| `/shield logs` | `bb!shield logs #shield-log @Mods` | Set the mod-log channel and optional alert role |
+| `/shield filters` | `bb!shield filters only_included trusted_role_ids on @Mods` | Tune scope, includes, excludes, and trusted roles |
+| `/shield allowlist` | `bb!shield allowlist allow_domains on example.com` | Manage domain, invite, and phrase allowlists |
+| `/shield ai` | `bb!shield ai true high true false true` | Configure optional AI second-pass review |
+| `/shield advanced add` | `bb!shield advanced add Gift claim*gift wildcard log` | Add a safe advanced pattern |
+| `/shield advanced list` | `bb!shield advanced list` | Review advanced patterns |
+| `/shield test` | `bb!shield test free nitro claim now https://bit.ly/x` | Dry-run a message through Shield |
+
+### Daily Arcade
+
+| Slash | Prefix | Purpose |
+| --- | --- | --- |
+| `/daily` | `bb!daily` | Open today's arcade overview |
+| `/daily play <guess>` | `bb!daily play <guess>` | Play the default Shuffle Booth |
+| `/daily play emoji <guess>` | `bb!daily play emoji <guess>` | Play Emoji Booth |
+| `/daily play signal <guess>` | `bb!daily play signal <guess>` | Play Signal Booth |
+| `/daily stats` | `bb!daily stats` | View arcade streaks and recent runs |
+| `/daily share` | `bb!daily share` | Share a completed booth result |
+| `/daily leaderboard` | `bb!daily leaderboard` | View arcade standings |
+
+### Buddy / Profile / Vault
+
+| Slash | Prefix | Purpose |
+| --- | --- | --- |
+| `/buddy` | `bb!buddy` | Open your Buddy card |
+| `/buddy profile` | `bb!buddy profile` | Re-open the Buddy card explicitly |
+| `/buddy rename` | `bb!buddy rename Pebble` | Rename your Buddy |
+| `/buddy style` | `bb!buddy style sunset` | Change Buddy style |
+| `/buddy stats` | `bb!buddy stats` | View Buddy progression |
+| `/profile` | `bb!profile` | View a public-friendly profile card |
+| `/vault` | `bb!vault` | Open your more personal vault view |
+
+## Watch V2 Notes
+
+Watch now distinguishes three alert types:
+
+- mentions
+- replies
+- keywords
+
+Important rules:
+
+- replies only trigger when someone replies to a message owned by the watched user
+- bots, webhooks, and self-messages are ignored
+- delivery stays DM-only
+- dedupe and cooldown protection stay in place
+- no message-content archive is stored
+- recent counts in settings are runtime-only, not a long-term inbox table
+
+## Visibility Defaults
+
+Babblebox now treats visibility more intentionally:
+
+- public by default for `/help`, `/profile`, `/buddy`, `/daily share`, and `/daily leaderboard`
+- public-friendly card outputs keep light user/channel cooldowns to avoid spam
+- private by default for Watch setup, reminders, Later, Capture, Shield config, and other sensitive utilities
+- if a command exposes a `visibility` option, public mode now routes through a real visible channel response instead of silently collapsing to only-you
+
+## Shield Notes
+
+Babblebox Shield is intentionally compact and conservative:
+
+- off until an admin enables it
+- no deleted-message archive table
+- no full message-body retention in Postgres
+- moderator context goes to a configured log channel instead of a heavy database log
+- repeated-hit escalation is in-memory and bounded
+- custom regex is intentionally not accepted; advanced mode uses safe text matching only
+- optional AI review never becomes the primary moderation engine
+- AI review only runs after local Shield already flagged a message
+- AI review is currently limited to guild `1322933864360050688`
+- AI review is admin-only, off by default, and never punishes by itself
+- only minimal, sanitized, truncated flagged content is sent to the AI provider
+
+## Capture and Later Media Handling
+
+Capture and Later now treat attachment-only messages more cleanly.
+
+Examples:
+
+- `[image: cat.png]`
+- `[video: clip.mp4]`
+- `[attachment: notes.pdf]`
+- `[media: 2 images, 1 file]`
+
+Important rules:
+
+- no media blobs are stored in Postgres
+- attachment URLs are only used at send time when available
+- Capture transcripts are delivered privately, not archived long-term
+
+## Daily Arcade Storage Discipline
+
+Babblebox is designed for a small free-tier Postgres budget.
+
+### Persistent identity row
+
+- `bb_user_profiles`
+  - one row per user
+  - buddy identity
+  - XP
+  - streaks
+  - aggregate counters
+
+### Daily raw rows
+
+- `bb_daily_results`
+  - one row per `user + date + mode`
+  - attempts
+  - solved flag
+  - timestamps
+  - solve time
+
+Retention:
+
+- raw Daily Arcade rows prune after 180 days
+- streaks and lifetime totals remain in `bb_user_profiles`
+
+### Utility persistence
+
+Utility persistence remains Postgres-first:
+
+- `utility_watch_configs`
+- `utility_watch_keywords`
+- `utility_later_markers`
+- `utility_reminders`
+- `utility_afk`
+
+New Watch V2 storage stays compact:
+
+- booleans for global mention/reply alerts
+- small JSON arrays for guild/channel filters
+- small JSON arrays for ignored channels/users
+- compact keyword rows with optional guild/channel scope
+
+### Shield persistence
+
+Shield stays config-only and compact:
+
+- `shield_guild_configs`
+- `shield_custom_patterns`
+
+Stored data is intentionally small:
+
+- module and pack enabled flags
+- action modes and sensitivities
+- AI enabled state, AI confidence threshold, and AI-eligible pack choices
+- compact include / exclude / trusted lists
+- compact allowlists
+- escalation thresholds
+- safe advanced pattern metadata
+
+Not stored:
+
+- full moderation event logs
+- deleted-message bodies
+- raw AI-submitted message bodies in Shield persistence
+- attachment blobs
+- large strike archives
+
+### Moment Cards
+
+Moment Cards do not introduce a durable archive table.
+
+- no stored generated images
+- no stored quote feed
+- no stored full message transcripts
+- cards are built live from visible Discord messages
 
 ## Architecture
-
-The project now uses a package-based layout:
 
 ```text
 .
@@ -134,7 +362,13 @@ The project now uses a package-based layout:
 |   |-- __init__.py
 |   |-- bot.py
 |   |-- command_utils.py
+|   |-- daily_challenges.py
 |   |-- game_engine.py
+|   |-- profile_service.py
+|   |-- profile_store.py
+|   |-- shield_ai.py
+|   |-- shield_service.py
+|   |-- shield_store.py
 |   |-- text_safety.py
 |   |-- utility_helpers.py
 |   |-- utility_service.py
@@ -145,106 +379,64 @@ The project now uses a package-based layout:
 |       |-- afk.py
 |       |-- events.py
 |       |-- gameplay.py
+|       |-- identity.py
 |       |-- meta.py
+|       |-- shield.py
 |       `-- utilities.py
 |-- assets/
-|-- keep_alive.py
-|-- main.py
+|-- tests/
 |-- index.html
-|-- requirements.txt
-|-- README.md
-`-- tests/
+|-- main.py
+`-- requirements.txt
 ```
 
-### File overview
+### Important modules
 
-- `babblebox/bot.py`: bot bootstrap, dictionary loading, extension loading, command sync
-- `babblebox/game_engine.py`: shared state, views, timers, and core game flow
-- `babblebox/text_safety.py`: shared short-text validation used by AFK and Remind
-- `babblebox/utility_store.py`: utility persistence layer with Postgres production storage, memory-mode tests/dev, and one-time legacy JSON import support
-- `babblebox/utility_service.py`: utility-state orchestration, delivery scheduling, and watch matching
-- `babblebox/utility_helpers.py`: duration parsing, jump-link helpers, transcript generation, and utility embeds
-- `babblebox/cogs/meta.py`: help, ping, stats, leaderboard
-- `babblebox/cogs/afk.py`: AFK commands
-- `babblebox/cogs/gameplay.py`: play, stop, vote, Chaos Card controls
-- `babblebox/cogs/utilities.py`: Watch, Later, Capture, and Remind commands
-- `babblebox/cogs/events.py`: listeners and lifecycle handling
-- `babblebox/web.py`: Flask routes and keep-alive thread
-
-## Key Fixes In This Version
-
-### Prefix double-trigger bug
-
-The duplicated prefix response bug came from calling `bot.process_commands(message)` manually inside a cog `on_message` listener.
-`commands.Bot` already processes prefix commands through its own `on_message`, so the extra call caused every prefix command to fire twice.
-
-That extra call has been removed.
-
-### Resource-conscious improvements
-
-- The keep-alive thread is daemonized
-- The Word Bomb dictionary is cached to disk
-- Chaos Cards are stateless lobby modifiers
-- No database polling or always-on background worker system was added
+- `babblebox/bot.py`: bot bootstrap, extension loading, dictionary setup, sync
+- `babblebox/game_engine.py`: lobby state, gameplay flow, recaps, help/manual, session stats
+- `babblebox/utility_store.py`: Postgres-first utility persistence, including Watch V2 schema
+- `babblebox/utility_service.py`: Watch, Later, Capture, Moment, Remind, AFK orchestration
+- `babblebox/utility_helpers.py`: utility preview rendering, transcript formatting, and Moment Card embeds
+- `babblebox/daily_challenges.py`: deterministic Daily Arcade booth generation
+- `babblebox/profile_store.py`: compact profile and daily persistence
+- `babblebox/profile_service.py`: Daily Arcade, Buddy, Profile, Vault, and anti-farm progression
+- `babblebox/shield_ai.py`: optional AI provider integration, redaction, truncation, and safe parsing
+- `babblebox/shield_store.py`: compact Shield config persistence
+- `babblebox/shield_service.py`: Shield matching, cache rebuilds, actions, and mod-log delivery
+- `babblebox/cogs/identity.py`: Daily Arcade, Buddy, Profile, and Vault commands
+- `babblebox/cogs/shield.py`: admin-facing Shield command surface
+- `babblebox/cogs/utilities.py`: Watch V2, Later, Capture, Moment, and Remind commands
 
 ## Hosting Notes
 
-Babblebox is designed to survive on a constrained free Render instance.
+Babblebox is designed for constrained hosting:
 
-### Safe design choices
+- no giant analytics tables
+- no media/blob storage
+- no giant inventory or economy loops
+- no external Daily APIs
+- small connection pools
+- limited background scheduling
+- deterministic Daily generation from local data
 
-- No heavy polling loops
-- No background analytics workers
-- One wake-on-change utility scheduler instead of many always-on workers
-- Postgres storage support without per-message database queries in hot paths
-- Cleanup-first handling for stale game state
-
-### Persistence note
-
-Babblebox now supports a Postgres-backed utility store for Watch settings, Later markers, reminders, and timed AFK state. Supabase Postgres is the recommended hosted option.
-
-If `UTILITY_DATABASE_URL`, `SUPABASE_DB_URL`, or `DATABASE_URL` is configured, Babblebox will use Postgres, create its utility tables automatically, and optionally import a legacy JSON utility file once if one is present.
-
-Babblebox does not keep writing user utility state to local JSON files in production. For local development and tests you can opt into a non-persistent memory backend instead, but durable runtime continuity depends on the external database.
-
-If no Postgres URL is configured, Babblebox still starts, but storage-backed utility features stay unavailable until the database is configured again.
-
-## Website and Community
-
-The website was restored to the original blue visual direction and now also includes:
-
-- a dedicated Privacy Policy section
-- a Support Server section for **inevitable friendship**
-- social links in the footer
-- updated command and architecture content
-
-### inevitable friendship
-
-Babblebox lives alongside the **inevitable friendship** support server.
-That space is where updates can be tested, bugs can be reported, screenshots can be shared, and the next features can be shaped with actual community feedback.
-
-## Local Setup
+## Setup
 
 ### Requirements
 
 - Python 3.9+
-- A Discord bot token
-- A `.env` file in the project root
+- a Discord bot token
+- a `.env` file in the project root
+- Postgres for durable storage-backed features
 
-### 1. Clone the repository
+### Install
 
 ```bash
 git clone https://github.com/arno-create/babblebox-bot.git
 cd babblebox-bot
-```
-
-### 2. Install dependencies
-
-```bash
 pip install -r requirements.txt
 ```
 
-### 3. Create `.env`
+### Environment
 
 ```env
 DISCORD_TOKEN=your_bot_token_here
@@ -252,44 +444,42 @@ DEV_GUILD_ID=your_test_server_id_here
 UTILITY_DATABASE_URL=postgresql://...
 # or SUPABASE_DB_URL=postgresql://...
 # or DATABASE_URL=postgresql://...
-# optional:
+OPENAI_API_KEY=sk-...
+# optional Shield AI tuning:
+# SHIELD_AI_MODEL=gpt-4.1-mini
+# SHIELD_AI_TIMEOUT_SECONDS=4
+# SHIELD_AI_MAX_CHARS=340
+
+# optional local/test override:
 # UTILITY_STORAGE_BACKEND=memory
-# UTILITY_JSON_MIGRATION_PATH=.cache/utility_state.json
+# SHIELD_STORAGE_BACKEND=memory
+# PROFILE_STORAGE_BACKEND=memory
 ```
 
+Environment variable notes:
+
 - `DISCORD_TOKEN` is required
-- `DEV_GUILD_ID` is optional and useful for faster dev slash-command sync
-- `UTILITY_DATABASE_URL` is the preferred Postgres connection string for durable utility storage
+- `DEV_GUILD_ID` is optional and helps faster dev sync
+- `UTILITY_DATABASE_URL` is the preferred Postgres connection string
 - `SUPABASE_DB_URL` and `DATABASE_URL` are also accepted
-- `UTILITY_STORAGE_BACKEND=memory` is for explicit local/dev or test workflows only
-- `UTILITY_JSON_MIGRATION_PATH` can point at an old JSON utility file for one-time import
+- `OPENAI_API_KEY` is optional and only needed for Shield AI assist
+- `SHIELD_AI_MODEL`, `SHIELD_AI_TIMEOUT_SECONDS`, and `SHIELD_AI_MAX_CHARS` are optional Shield AI tuning knobs
+- `UTILITY_STORAGE_BACKEND=memory` is for explicit local/test work only
+- `SHIELD_STORAGE_BACKEND=memory` is optional for local/test Shield work
+- `PROFILE_STORAGE_BACKEND=memory` is optional for tests and local development
 
-### 4. Enable Discord settings
+### Discord Portal Settings
 
-In the Discord Developer Portal, enable:
+Enable:
 
 - Message Content Intent
 - Server Members Intent
 
-If you want other servers to invite the bot, make sure it is set to Public.
-
-### 5. Run the bot
+### Run
 
 ```bash
 python main.py
 ```
-
-## Environment Variables
-
-| Variable | Required | Description |
-| --- | --- | --- |
-| `DISCORD_TOKEN` | Yes | Discord bot token |
-| `DEV_GUILD_ID` | No | Optional development guild ID |
-| `UTILITY_DATABASE_URL` | No | Preferred Postgres connection string for utility persistence |
-| `SUPABASE_DB_URL` | No | Alternate Postgres connection string, useful for Supabase-style naming |
-| `DATABASE_URL` | No | Alternate Postgres connection string used by some hosts |
-| `UTILITY_STORAGE_BACKEND` | No | Use `memory` only for explicit local/dev or test runs |
-| `UTILITY_JSON_MIGRATION_PATH` | No | Optional path to an old JSON utility file for one-time import |
 
 ## Recommended Permissions
 
@@ -302,7 +492,7 @@ python main.py
 
 ## DM Requirement
 
-These features rely on DMs being available:
+These features rely on DMs being open:
 
 - Broken Telephone
 - Exquisite Corpse
@@ -329,9 +519,3 @@ These features rely on DMs being available:
 ### Exquisite Corpse
 
 ![Exquisite Corpse](assets/exquisite_corpse.png)
-
-## Links
-
-- Official website: [https://arno-create.github.io/babblebox-bot/](https://arno-create.github.io/babblebox-bot/)
-- Add the bot to your server: [https://discord.com/oauth2/authorize?client_id=1480903089518022739](https://discord.com/oauth2/authorize?client_id=1480903089518022739)
-- Support server: [https://discord.com/servers/inevitable-friendship-1322933864360050688](https://discord.com/servers/inevitable-friendship-1322933864360050688)

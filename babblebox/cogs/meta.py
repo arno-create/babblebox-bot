@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import contextlib
 from typing import Optional
 
 import discord
@@ -16,17 +17,210 @@ LEADERBOARD_LABELS = {
     "bomb_words": "Bomb Words",
     "spy_wins": "Spy Wins",
 }
+VISIBILITY_CHOICES = [
+    app_commands.Choice(name="Public", value="public"),
+    app_commands.Choice(name="Only me", value="private"),
+]
+HELP_PAGES: list[dict[str, str]] = [
+    {
+        "title": "Babblebox Guide",
+        "emoji": "\U0001f3e0",
+        "description": "Babblebox works in five cozy lanes: Party Games, Everyday Utilities, Daily Arcade, Buddy/Profile, and Shield.",
+        "body": (
+            "Use the arrows to browse categories.\n"
+            "Most social cards are public-friendly.\n"
+            "Personal utilities and setup flows stay private by default."
+        ),
+    },
+    {
+        "title": "Party Games",
+        "emoji": "\U0001f389",
+        "description": "Short multiplayer rooms for live server energy.",
+        "body": (
+            "`/play` opens the lobby.\n"
+            "Broken Telephone, Exquisite Corpse, Spyfall, and Word Bomb all start there.\n"
+            "If the room is too quiet, Babblebox nudges people toward Daily, Profile, and utilities instead of dead-ending."
+        ),
+    },
+    {
+        "title": "Everyday Utilities",
+        "emoji": "\U0001f9f0",
+        "description": "Low-noise tools built for real server life.",
+        "body": (
+            "`/watch mentions`, `/watch replies`, and `/watch keyword ...` keep private DM alerts tidy.\n"
+            "`/later`, `/capture`, `/remind`, and `/afk` are personal by default.\n"
+            "AFK durations now accept `30m`, `2h`, `2d`, and compact combos like `1h30m`.\n"
+            "`/moment` turns a message or exchange into a shareable card."
+        ),
+    },
+    {
+        "title": "Daily Arcade",
+        "emoji": "\U0001f579\ufe0f",
+        "description": "Three fast daily booths with compact storage.",
+        "body": (
+            "`/daily` opens Shuffle, Emoji, and Signal.\n"
+            "`/daily play <guess>` still defaults to Shuffle Booth.\n"
+            "`/daily share` and `/daily leaderboard` are built to be shown in-channel."
+        ),
+    },
+    {
+        "title": "Buddy / Profile / Vault",
+        "emoji": "\U0001f324\ufe0f",
+        "description": "One identity layer instead of a giant economy system.",
+        "body": (
+            "`/buddy` and `/profile` are public-friendly by default.\n"
+            "`/vault` stays more personal.\n"
+            "Buddy style, streaks, titles, badges, utilities, and multiplayer highlights all meet here."
+        ),
+    },
+    {
+        "title": "Shield / Moderation",
+        "emoji": "\U0001f6e1\ufe0f",
+        "description": "Optional server-side protection with conservative defaults.",
+        "body": (
+            "Shield can watch for privacy leaks, invite/promo spam, and experimental scam heuristics.\n"
+            "`/shield panel`, `/shield rules`, `/shield ai`, and `/shield test` cover the core admin flow.\n"
+            "It is off until an admin configures it.\n"
+            "Defaults are log-first, with allowlists, trusted-role bypasses, private mod-log alerts, and safe advanced wildcard patterns instead of raw regex.\n"
+            "AI assist is optional, admin-only, support-server limited, and only reviews messages that local Shield already flagged. It never punishes on its own."
+        ),
+    },
+    {
+        "title": "Setup / Tips",
+        "emoji": "\u2728",
+        "description": "A few quick habits make Babblebox feel much better.",
+        "body": (
+            "Keep DMs open for Watch, Later, Capture, reminders, and DM-based party games.\n"
+            "Use public visibility for showable cards, and private visibility for sensitive utility flows.\n"
+            "If you run Shield, start with log-only and tune filters before enabling deletes."
+        ),
+    },
+]
+
+
+def build_help_page_embed(page_index: int) -> discord.Embed:
+    page = HELP_PAGES[page_index]
+    embed = discord.Embed(
+        title=f"{page['emoji']} {page['title']}",
+        description=page["description"],
+        color=ge.EMBED_THEME["accent"] if page_index else discord.Color.gold(),
+    )
+    embed.add_field(name="Guide", value=page["body"], inline=False)
+    if page_index == 0:
+        embed.add_field(
+            name="Quick Start",
+            value="`/play` for group energy, `/daily` for solo play, `/profile` for your card, `/watch` or `/remind` for quiet utility.",
+            inline=False,
+        )
+    embed.add_field(name="Page", value=f"{page_index + 1}/{len(HELP_PAGES)}", inline=True)
+    embed.add_field(name="Visibility", value="Public by default, private on request.", inline=True)
+    return ge.style_embed(embed, footer="Babblebox Manual | Use the arrows to browse")
+
+
+class HelpPanelView(discord.ui.View):
+    def __init__(self, *, author_id: int, start_index: int = 0):
+        super().__init__(timeout=180)
+        self.author_id = author_id
+        self.page_index = start_index
+        self.message: discord.Message | None = None
+        self._refresh_buttons()
+
+    def current_embed(self) -> discord.Embed:
+        return build_help_page_embed(self.page_index)
+
+    def _refresh_buttons(self):
+        self.previous_button.disabled = self.page_index <= 0
+        self.home_button.disabled = self.page_index == 0
+        self.next_button.disabled = self.page_index >= len(HELP_PAGES) - 1
+
+    async def _render(self, interaction: discord.Interaction):
+        self._refresh_buttons()
+        await interaction.response.edit_message(embed=self.current_embed(), view=self)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id == self.author_id:
+            return True
+        await interaction.response.send_message(
+            embed=ge.make_status_embed(
+                "This Panel Is Locked",
+                "Use `/help` to open your own help panel.",
+                tone="info",
+                footer="Babblebox Manual",
+            ),
+            ephemeral=True,
+        )
+        return False
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+        if self.message is not None:
+            with contextlib.suppress(discord.HTTPException):
+                await self.message.edit(view=self)
+
+    @discord.ui.button(label="Previous", style=discord.ButtonStyle.secondary, emoji="\u2b05\ufe0f")
+    async def previous_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page_index = max(0, self.page_index - 1)
+        await self._render(interaction)
+
+    @discord.ui.button(label="Home", style=discord.ButtonStyle.primary, emoji="\U0001f3e0")
+    async def home_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page_index = 0
+        await self._render(interaction)
+
+    @discord.ui.button(label="Next", style=discord.ButtonStyle.secondary, emoji="\u27a1\ufe0f")
+    async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.page_index = min(len(HELP_PAGES) - 1, self.page_index + 1)
+        await self._render(interaction)
 
 
 class MetaCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        self._help_user_cooldowns: dict[int, float] = {}
+        self._help_channel_cooldowns: dict[int, float] = {}
 
-    @commands.hybrid_command(name="help", with_app_command=True, description="View the Babblebox manual and game rules")
-    async def help_command(self, ctx: commands.Context):
+    def _is_private(self, visibility: str) -> bool:
+        return visibility == "private"
+
+    def _help_cooldown_error(self, ctx: commands.Context, *, visibility: str) -> str | None:
+        if self._is_private(visibility):
+            return None
+        now = self.bot.loop.time()
+        user_remaining = 15.0 - (now - self._help_user_cooldowns.get(ctx.author.id, 0.0))
+        channel_key = ctx.channel.id if ctx.channel is not None else 0
+        channel_remaining = 8.0 - (now - self._help_channel_cooldowns.get(channel_key, 0.0))
+        if user_remaining > 0 or channel_remaining > 0:
+            wait_for = int(max(user_remaining, channel_remaining)) + 1
+            return f"The public manual is on cooldown. Try again in about {wait_for} seconds, or switch visibility to private."
+        self._help_user_cooldowns[ctx.author.id] = now
+        if channel_key:
+            self._help_channel_cooldowns[channel_key] = now
+        return None
+
+    @commands.hybrid_command(name="help", with_app_command=True, description="View the Babblebox manual, categories, and command guide")
+    @app_commands.describe(visibility="Show the manual publicly or only to you")
+    @app_commands.choices(visibility=VISIBILITY_CHOICES)
+    async def help_command(self, ctx: commands.Context, visibility: str = "public"):
         if not await require_channel_permissions(ctx, ge.HELP_REQUIRED_PERMS, "/help"):
             return
-        await send_hybrid_response(ctx, embed=ge.build_help_embed(), ephemeral=True)
+        cooldown_error = self._help_cooldown_error(ctx, visibility=visibility)
+        if cooldown_error is not None:
+            await send_hybrid_response(
+                ctx,
+                embed=ge.make_status_embed("Help Cooldown", cooldown_error, tone="warning", footer="Babblebox Manual"),
+                ephemeral=True,
+            )
+            return
+        view = HelpPanelView(author_id=ctx.author.id)
+        message = await send_hybrid_response(
+            ctx,
+            embed=view.current_embed(),
+            view=view,
+            ephemeral=self._is_private(visibility),
+        )
+        if message is not None:
+            view.message = message
 
     @commands.hybrid_command(name="ping", with_app_command=True, description="Check if the bot is online and responsive")
     async def ping_command(self, ctx: commands.Context):
@@ -34,7 +228,7 @@ class MetaCog(commands.Cog):
             ctx,
             embed=ge.make_status_embed(
                 "Pong!",
-                "Babblebox is online, responsive, and ready to party.",
+                "Babblebox is online, responsive, and ready for games, utilities, Daily, and Buddy commands.",
                 tone="success",
             ),
             ephemeral=True,

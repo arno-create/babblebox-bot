@@ -43,6 +43,7 @@ class EventsCog(commands.Cog):
             return
 
         utility_service = getattr(self.bot, "utility_service", None)
+        shield_service = getattr(self.bot, "shield_service", None)
         author_afk = None
         if utility_service is not None:
             author_afk = await utility_service.clear_afk_on_activity(message.author.id)
@@ -59,6 +60,11 @@ class EventsCog(commands.Cog):
                     delete_after=5.0,
                     allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
                 )
+
+        if shield_service is not None:
+            shield_decision = await shield_service.handle_message(message)
+            if shield_decision is not None and shield_decision.matched:
+                return
 
         away_targets = _collect_away_targets(message)
         notice_lines = []
