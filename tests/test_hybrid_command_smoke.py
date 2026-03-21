@@ -2,6 +2,7 @@ import asyncio
 import types
 import unittest
 from datetime import datetime, timezone
+from typing import Optional
 from unittest.mock import AsyncMock, patch
 
 import discord
@@ -63,6 +64,69 @@ class FakeChannel:
         self.id = channel_id
         self.name = "general"
         self.mention = "#general"
+
+
+class ShieldPermissionSnapshot:
+    def __init__(self, **overrides):
+        defaults = {
+            "view_channel": True,
+            "send_messages": True,
+            "embed_links": True,
+            "manage_messages": True,
+            "moderate_members": True,
+        }
+        defaults.update(overrides)
+        for name, value in defaults.items():
+            setattr(self, name, value)
+
+
+class ShieldRole:
+    def __init__(self, *, position: int):
+        self.position = position
+
+    def __ge__(self, other):
+        return self.position >= getattr(other, "position", 0)
+
+
+class ShieldAwareChannel(FakeChannel):
+    def __init__(self, channel_id: int, *, name: str = "general", permissions: Optional[ShieldPermissionSnapshot] = None):
+        super().__init__(channel_id)
+        self.name = name
+        self.mention = f"<#{channel_id}>"
+        self._permissions = permissions or ShieldPermissionSnapshot()
+
+    def permissions_for(self, member):
+        return self._permissions
+
+
+class ShieldAwareGuild(FakeGuild):
+    def __init__(self, guild_id: int = 10, *, channels=None):
+        super().__init__(guild_id)
+        self.me = types.SimpleNamespace(id=999, top_role=ShieldRole(position=50))
+        self._channels = {channel.id: channel for channel in (channels or [])}
+
+    def get_channel(self, channel_id: int):
+        return self._channels.get(channel_id)
+
+    def get_member(self, user_id: int):
+        if user_id == self.me.id:
+            return self.me
+        return None
+
+
+class ShieldAwareBot:
+    def __init__(self, guild: ShieldAwareGuild):
+        self.loop = asyncio.get_running_loop()
+        self.user = types.SimpleNamespace(id=999)
+        self._guild = guild
+
+    def get_guild(self, guild_id: int):
+        if guild_id == self._guild.id:
+            return self._guild
+        return None
+
+    def get_channel(self, channel_id: int):
+        return self._guild.get_channel(channel_id)
 
 
 class FakeContext:
@@ -355,5 +419,91 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("**Promo / Invite**", protection_field.value)
             self.assertIn("Enabled: Yes | Action: `log` | Sensitivity: Normal", protection_field.value)
             self.assertIn("**Scam Heuristic**", protection_field.value)
+        finally:
+            await cog.service.close()
+
+    async def test_shield_panel_warns_when_operability_is_missing(self):
+        current_channel = ShieldAwareChannel(20, permissions=ShieldPermissionSnapshot(manage_messages=False, moderate_members=False))
+        log_channel = ShieldAwareChannel(
+            30,
+            name="mod-logs",
+            permissions=ShieldPermissionSnapshot(view_channel=False, send_messages=False, embed_links=False),
+        )
+        guild = ShieldAwareGuild(10, channels=[current_channel, log_channel])
+        bot = ShieldAwareBot(guild)
+        cog = ShieldCog(bot)
+        try:
+            cog.service.storage_ready = True
+            cog.service.store.state["guilds"][str(guild.id)] = {
+                "guild_id": guild.id,
+                "module_enabled": True,
+                "log_channel_id": log_channel.id,
+                "privacy_enabled": True,
+                "privacy_action": "delete_log",
+                "scam_enabled": True,
+                "scam_action": "timeout_log",
+            }
+
+            embed = cog.build_panel_embed(guild.id, "overview", channel_id=current_channel.id)
+            operability = next(field for field in embed.fields if field.name == "Operability")
+
+            self.assertIn("Manage Messages", operability.value)
+            self.assertIn("Moderate Members", operability.value)
+            self.assertIn("View Channel", operability.value)
+            self.assertIn("Send Messages", operability.value)
+            self.assertIn("Embed Links", operability.value)
+        finally:
+            await cog.service.close()
+
+    async def test_shield_logs_command_surfaces_log_channel_permission_warning(self):
+        current_channel = ShieldAwareChannel(20)
+        log_channel = ShieldAwareChannel(30, name="mod-logs", permissions=ShieldPermissionSnapshot(send_messages=False))
+        guild = ShieldAwareGuild(10, channels=[current_channel, log_channel])
+        bot = ShieldAwareBot(guild)
+        cog = ShieldCog(bot)
+        try:
+            cog.service.storage_ready = True
+            ctx = FakeContext(
+                interaction=FakeInteraction(),
+                guild=guild,
+                channel=current_channel,
+                author=FakeAuthor(manage_guild=True),
+            )
+
+            await ShieldCog.shield_logs_command.callback(cog, ctx, channel=log_channel, role=None, clear_channel=False, clear_role=False)
+
+            self.assertEqual(len(ctx.send_calls), 1)
+            operability = next(field for field in ctx.send_calls[0]["embed"].fields if field.name == "Operability")
+            self.assertIn("Send Messages", operability.value)
+        finally:
+            await cog.service.close()
+
+    async def test_shield_test_command_stays_quiet_when_permissions_are_available(self):
+        current_channel = ShieldAwareChannel(20)
+        log_channel = ShieldAwareChannel(30, name="mod-logs")
+        guild = ShieldAwareGuild(10, channels=[current_channel, log_channel])
+        bot = ShieldAwareBot(guild)
+        cog = ShieldCog(bot)
+        try:
+            cog.service.storage_ready = True
+            cog.service.store.state["guilds"][str(guild.id)] = {
+                "guild_id": guild.id,
+                "module_enabled": True,
+                "log_channel_id": log_channel.id,
+                "privacy_enabled": True,
+                "privacy_action": "delete_log",
+            }
+            ctx = FakeContext(
+                interaction=FakeInteraction(),
+                guild=guild,
+                channel=current_channel,
+                author=FakeAuthor(manage_guild=True),
+            )
+
+            await ShieldCog.shield_test_command.callback(cog, ctx, text="Email me at friend@example.com")
+
+            self.assertEqual(len(ctx.send_calls), 1)
+            field_names = [field.name for field in ctx.send_calls[0]["embed"].fields]
+            self.assertNotIn("Operability", field_names)
         finally:
             await cog.service.close()

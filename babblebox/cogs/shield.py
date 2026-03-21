@@ -70,17 +70,18 @@ AI_CONFIDENCE_CHOICES = [
 
 
 class ShieldPanelView(discord.ui.View):
-    def __init__(self, cog: "ShieldCog", *, guild_id: int, author_id: int, section: str = "overview"):
+    def __init__(self, cog: "ShieldCog", *, guild_id: int, author_id: int, channel_id: int | None = None, section: str = "overview"):
         super().__init__(timeout=180)
         self.cog = cog
         self.guild_id = guild_id
         self.author_id = author_id
+        self.channel_id = channel_id
         self.section = section
         self.message: discord.Message | None = None
         self._refresh_buttons()
 
     def current_embed(self) -> discord.Embed:
-        return self.cog.build_panel_embed(self.guild_id, self.section)
+        return self.cog.build_panel_embed(self.guild_id, self.section, channel_id=self.channel_id)
 
     def _refresh_buttons(self):
         statuses = {
@@ -254,6 +255,96 @@ class ShieldCog(commands.Cog):
         if not enabled_packs:
             return "None selected"
         return ", ".join(PACK_LABELS.get(pack, pack.title()) for pack in enabled_packs)
+
+    def _guild_from_bot(self, guild_id: int) -> discord.Guild | None:
+        get_guild = getattr(self.bot, "get_guild", None)
+        if callable(get_guild):
+            return get_guild(guild_id)
+        return None
+
+    def _bot_member(self, guild: discord.Guild | None):
+        if guild is None:
+            return None
+        me = getattr(guild, "me", None)
+        if me is not None:
+            return me
+        bot_user = getattr(self.bot, "user", None)
+        get_member = getattr(guild, "get_member", None)
+        if bot_user is not None and callable(get_member):
+            return get_member(getattr(bot_user, "id", 0))
+        return None
+
+    def _channel_from_guild(self, guild: discord.Guild | None, channel_id: int | None):
+        if guild is None or channel_id is None:
+            return None
+        get_channel = getattr(guild, "get_channel", None)
+        if callable(get_channel):
+            channel = get_channel(channel_id)
+            if channel is not None:
+                return channel
+        bot_get_channel = getattr(self.bot, "get_channel", None)
+        if callable(bot_get_channel):
+            return bot_get_channel(channel_id)
+        return None
+
+    def _shield_operability_lines(self, guild_id: int, *, channel_id: int | None = None) -> list[str]:
+        guild = self._guild_from_bot(guild_id)
+        me = self._bot_member(guild)
+        if guild is None or me is None:
+            return []
+
+        config = self.service.get_config(guild_id)
+        seen: set[str] = set()
+        lines: list[str] = []
+
+        def add(line: str):
+            if line not in seen:
+                seen.add(line)
+                lines.append(line)
+
+        delete_actions_enabled = any(
+            config.get(f"{pack}_enabled") and config.get(f"{pack}_action") in {"delete_log", "delete_escalate"}
+            for pack in ("privacy", "promo", "scam")
+        )
+        timeout_actions_enabled = any(
+            config.get(f"{pack}_enabled") and config.get(f"{pack}_action") in {"timeout_log", "delete_escalate"}
+            for pack in ("privacy", "promo", "scam")
+        )
+
+        focus_channel = self._channel_from_guild(guild, channel_id)
+        if focus_channel is not None:
+            permissions = focus_channel.permissions_for(me)
+            channel_label = getattr(focus_channel, "mention", "#this-channel")
+            if delete_actions_enabled and not getattr(permissions, "manage_messages", False):
+                add(f"Warning: Shield can't delete messages in {channel_label} because I'm missing Manage Messages.")
+            if timeout_actions_enabled and not getattr(permissions, "moderate_members", False):
+                add(f"Warning: Timeout actions can't run in {channel_label} because I'm missing Moderate Members.")
+
+        if timeout_actions_enabled:
+            add("Note: Timeout actions still cannot affect administrators or members whose top role is at or above mine.")
+
+        log_channel_id = config.get("log_channel_id")
+        if isinstance(log_channel_id, int):
+            log_channel = self._channel_from_guild(guild, log_channel_id)
+            if log_channel is None:
+                add("Warning: Shield logging won't work because the configured log channel is missing or I can't access it.")
+            else:
+                log_permissions = log_channel.permissions_for(me)
+                log_label = getattr(log_channel, "mention", f"<#{log_channel_id}>")
+                if not getattr(log_permissions, "view_channel", False):
+                    add(f"Warning: Shield logging won't work in {log_label} because I'm missing View Channel.")
+                if not getattr(log_permissions, "send_messages", False):
+                    add(f"Warning: Shield logging won't work in {log_label} because I'm missing Send Messages.")
+                if not getattr(log_permissions, "embed_links", False):
+                    add(f"Warning: Shield logging won't work in {log_label} because I'm missing Embed Links.")
+
+        return lines
+
+    def _add_operability_field(self, embed: discord.Embed, guild_id: int, *, channel_id: int | None = None) -> discord.Embed:
+        lines = self._shield_operability_lines(guild_id, channel_id=channel_id)
+        if lines:
+            embed.add_field(name="Operability", value="\n".join(lines[:6]), inline=False)
+        return embed
 
     def _overview_embed(self, guild_id: int) -> discord.Embed:
         config = self.service.get_config(guild_id)
@@ -472,26 +563,28 @@ class ShieldCog(commands.Cog):
         )
         return ge.style_embed(embed, footer="Babblebox Shield | Log-first and compact by design")
 
-    def build_panel_embed(self, guild_id: int, section: str) -> discord.Embed:
+    def build_panel_embed(self, guild_id: int, section: str, *, channel_id: int | None = None) -> discord.Embed:
         if section == "rules":
-            return self._rules_embed(guild_id)
-        if section == "scope":
-            return self._scope_embed(guild_id)
-        if section == "ai":
-            return self._ai_embed(guild_id)
-        if section == "logs":
-            return self._logs_embed(guild_id)
-        return self._overview_embed(guild_id)
+            embed = self._rules_embed(guild_id)
+        elif section == "scope":
+            embed = self._scope_embed(guild_id)
+        elif section == "ai":
+            embed = self._ai_embed(guild_id)
+        elif section == "logs":
+            embed = self._logs_embed(guild_id)
+        else:
+            embed = self._overview_embed(guild_id)
+        return self._add_operability_field(embed, guild_id, channel_id=channel_id)
 
     async def _send_result(self, ctx: commands.Context, title: str, message: str, *, ok: bool):
-        await send_hybrid_response(
-            ctx,
-            embed=ge.make_status_embed(title, message, tone="success" if ok else "warning", footer="Babblebox Shield"),
-            ephemeral=True,
-        )
+        embed = ge.make_status_embed(title, message, tone="success" if ok else "warning", footer="Babblebox Shield")
+        channel_id = getattr(ctx.channel, "id", None) if ctx.guild is not None else None
+        self._add_operability_field(embed, ctx.guild.id, channel_id=channel_id)
+        await send_hybrid_response(ctx, embed=embed, ephemeral=True)
 
     async def _send_panel(self, ctx: commands.Context, *, section: str = "overview"):
-        view = ShieldPanelView(self, guild_id=ctx.guild.id, author_id=ctx.author.id, section=section)
+        channel_id = getattr(ctx.channel, "id", None) if ctx.guild is not None else None
+        view = ShieldPanelView(self, guild_id=ctx.guild.id, author_id=ctx.author.id, channel_id=channel_id, section=section)
         message = await send_hybrid_response(ctx, embed=view.current_embed(), view=view, ephemeral=True)
         if message is not None:
             view.message = message
@@ -774,6 +867,8 @@ class ShieldCog(commands.Cog):
                 ),
                 inline=False,
             )
+        channel_id = getattr(ctx.channel, "id", None) if ctx.guild is not None else None
+        self._add_operability_field(embed, ctx.guild.id, channel_id=channel_id)
         await send_hybrid_response(ctx, embed=ge.style_embed(embed, footer="Babblebox Shield | Dry run only"), ephemeral=True)
 
     @shield_group.group(
