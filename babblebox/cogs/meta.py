@@ -16,17 +16,51 @@ LEADERBOARD_LABELS = {
     "bomb_words": "Bomb Words",
     "spy_wins": "Spy Wins",
 }
+VISIBILITY_CHOICES = [
+    app_commands.Choice(name="Public", value="public"),
+    app_commands.Choice(name="Only me", value="private"),
+]
 
 
 class MetaCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
+        self._help_user_cooldowns: dict[int, float] = {}
+        self._help_channel_cooldowns: dict[int, float] = {}
+
+    def _is_private(self, visibility: str) -> bool:
+        return visibility == "private"
+
+    def _help_cooldown_error(self, ctx: commands.Context, *, visibility: str) -> str | None:
+        if self._is_private(visibility):
+            return None
+        now = self.bot.loop.time()
+        user_remaining = 15.0 - (now - self._help_user_cooldowns.get(ctx.author.id, 0.0))
+        channel_key = ctx.channel.id if ctx.channel is not None else 0
+        channel_remaining = 8.0 - (now - self._help_channel_cooldowns.get(channel_key, 0.0))
+        if user_remaining > 0 or channel_remaining > 0:
+            wait_for = int(max(user_remaining, channel_remaining)) + 1
+            return f"The public manual is on cooldown. Try again in about {wait_for} seconds, or switch visibility to private."
+        self._help_user_cooldowns[ctx.author.id] = now
+        if channel_key:
+            self._help_channel_cooldowns[channel_key] = now
+        return None
 
     @commands.hybrid_command(name="help", with_app_command=True, description="View the Babblebox manual, categories, and command guide")
-    async def help_command(self, ctx: commands.Context):
+    @app_commands.describe(visibility="Show the manual publicly or only to you")
+    @app_commands.choices(visibility=VISIBILITY_CHOICES)
+    async def help_command(self, ctx: commands.Context, visibility: str = "public"):
         if not await require_channel_permissions(ctx, ge.HELP_REQUIRED_PERMS, "/help"):
             return
-        await send_hybrid_response(ctx, embed=ge.build_help_embed(), ephemeral=True)
+        cooldown_error = self._help_cooldown_error(ctx, visibility=visibility)
+        if cooldown_error is not None:
+            await send_hybrid_response(
+                ctx,
+                embed=ge.make_status_embed("Help Cooldown", cooldown_error, tone="warning", footer="Babblebox Manual"),
+                ephemeral=True,
+            )
+            return
+        await send_hybrid_response(ctx, embed=ge.build_help_embed(), ephemeral=self._is_private(visibility))
 
     @commands.hybrid_command(name="ping", with_app_command=True, description="Check if the bot is online and responsive")
     async def ping_command(self, ctx: commands.Context):

@@ -39,6 +39,11 @@ DURATION_UNITS = {
     "seconds": 1,
 }
 
+IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
+VIDEO_EXTENSIONS = {".mp4", ".mov", ".webm", ".mkv", ".avi"}
+AUDIO_EXTENSIONS = {".ogg", ".mp3", ".wav", ".m4a", ".flac"}
+MESSAGE_LINK_RE = re.compile(r"https?://(?:canary\.|ptb\.)?discord(?:app)?\.com/channels/(?P<guild>\d+|@me)/(?P<channel>\d+)/(?P<message>\d+)")
+
 
 def parse_duration_string(raw: str | None) -> int | None:
     if raw is None:
@@ -125,28 +130,170 @@ def build_jump_view(url: str, *, label: str = "Jump to Message") -> discord.ui.V
     return view
 
 
-def make_message_preview(content: str | None, *, attachments: list[str] | None = None, limit: int = 260) -> str:
-    preview = (content or "").strip()
-    if not preview:
-        preview = "[no text content]"
+def _attachment_kind(attachment) -> str:
+    content_type = (getattr(attachment, "content_type", "") or "").lower()
+    filename = getattr(attachment, "filename", "") or ""
+    lowered = filename.lower()
+    for suffix in IMAGE_EXTENSIONS:
+        if lowered.endswith(suffix):
+            return "image"
+    for suffix in VIDEO_EXTENSIONS:
+        if lowered.endswith(suffix):
+            return "video"
+    for suffix in AUDIO_EXTENSIONS:
+        if lowered.endswith(suffix):
+            return "audio"
+    if content_type.startswith("image/"):
+        return "image"
+    if content_type.startswith("video/"):
+        return "video"
+    if content_type.startswith("audio/"):
+        return "audio"
+    return "attachment"
 
-    if attachments:
-        attachment_text = ", ".join(attachments[:3])
-        if len(attachments) > 3:
-            attachment_text += f", +{len(attachments) - 3} more"
-        preview = f"{preview}\nAttachments: {attachment_text}"
+
+def _attachment_display_name(attachment) -> str:
+    filename = (getattr(attachment, "filename", "") or "").strip()
+    if filename:
+        return filename
+    return _attachment_kind(attachment)
+
+
+def make_attachment_labels(message: discord.Message, *, include_urls: bool = True) -> list[str]:
+    labels = []
+    for attachment in message.attachments:
+        label = _attachment_display_name(attachment)
+        if include_urls and getattr(attachment, "url", None):
+            label = f"{label} ({attachment.url})"
+        labels.append(label)
+    return labels
+
+
+def build_attachment_summary(attachments, *, include_names: bool = True) -> str | None:
+    if not attachments:
+        return None
+
+    counts = {"image": 0, "video": 0, "audio": 0, "attachment": 0}
+    names: list[str] = []
+    for attachment in attachments:
+        kind = _attachment_kind(attachment)
+        counts[kind] += 1
+        if include_names:
+            names.append(_attachment_display_name(attachment))
+
+    if len(attachments) == 1:
+        kind = _attachment_kind(attachments[0])
+        label = _attachment_display_name(attachments[0])
+        if kind == "attachment":
+            return f"[attachment: {label}]"
+        return f"[{kind}: {label}]"
+
+    parts = []
+    for kind, label in (("image", "image"), ("video", "video"), ("audio", "audio"), ("attachment", "file")):
+        count = counts[kind]
+        if count <= 0:
+            continue
+        suffix = "" if count == 1 else "s"
+        parts.append(f"{count} {label}{suffix}")
+    summary = "[media: " + ", ".join(parts) + "]"
+
+    if include_names and names:
+        rendered_names = ", ".join(names[:3])
+        if len(names) > 3:
+            rendered_names += f", +{len(names) - 3} more"
+        summary += f" {rendered_names}"
+    return summary
+
+
+def make_message_preview(content: str | None, *, attachments=None, limit: int = 260) -> str:
+    preview = (content or "").strip()
+    media_summary = build_attachment_summary(list(attachments or []), include_names=True)
+
+    if preview and media_summary:
+        preview = f"{preview}\nMedia: {media_summary}"
+    elif not preview:
+        preview = media_summary or "[message preview unavailable]"
 
     return ge.safe_field_text(preview, limit=limit)
 
 
-def make_attachment_labels(message: discord.Message) -> list[str]:
-    labels = []
-    for attachment in message.attachments:
-        if attachment.url:
-            labels.append(f"{attachment.filename} ({attachment.url})")
-        else:
-            labels.append(attachment.filename)
-    return labels
+def parse_message_link(raw: str | None) -> tuple[int | None, int, int] | None:
+    if not raw:
+        return None
+    match = MESSAGE_LINK_RE.search(raw.strip())
+    if match is None:
+        return None
+    guild_value = match.group("guild")
+    guild_id = None if guild_value == "@me" else int(guild_value)
+    return guild_id, int(match.group("channel")), int(match.group("message"))
+
+
+def _quote_block(text: str) -> str:
+    lines = [line.strip() for line in text.splitlines() if line.strip()]
+    if not lines:
+        return "> [moment unavailable]"
+    return "\n".join(f"> {line}" for line in lines[:4])
+
+
+def _message_color(message: discord.Message) -> discord.Color:
+    author_color = getattr(message.author, "color", None)
+    if isinstance(author_color, discord.Color) and author_color.value:
+        return author_color
+    return ge.EMBED_THEME["accent"]
+
+
+def build_moment_card_embed(
+    message: discord.Message,
+    *,
+    followup: discord.Message | None = None,
+    title: str | None = None,
+    requested_by: discord.abc.User | None = None,
+) -> discord.Embed:
+    preview = make_message_preview(message.content, attachments=message.attachments, limit=500)
+    embed = discord.Embed(
+        title=title or "Babblebox Moment Card",
+        description=_quote_block(preview),
+        color=_message_color(message),
+        timestamp=message.created_at or ge.now_utc(),
+    )
+
+    author_icon = None
+    display_avatar = getattr(message.author, "display_avatar", None)
+    if display_avatar is not None:
+        author_icon = getattr(display_avatar, "url", None)
+    embed.set_author(name=f"{ge.display_name_of(message.author)} said:", icon_url=author_icon)
+
+    channel_name = getattr(message.channel, "mention", "#unknown")
+    guild_name = message.guild.name if message.guild else "Direct Messages"
+    scene = f"{guild_name} • {channel_name}"
+    if message.created_at is not None:
+        scene += f"\n{ge.format_timestamp(message.created_at, 'f')}"
+    embed.add_field(name="Scene", value=scene, inline=False)
+    corrected_scene = f"{guild_name} | {channel_name}"
+    if message.created_at is not None:
+        corrected_scene += f"\n{ge.format_timestamp(message.created_at, 'f')}"
+    embed.set_field_at(len(embed.fields) - 1, name="Scene", value=corrected_scene, inline=False)
+
+    if followup is not None:
+        echo_preview = make_message_preview(followup.content, attachments=followup.attachments, limit=320)
+        embed.add_field(
+            name=f"Echo • {ge.display_name_of(followup.author)}",
+            value=_quote_block(echo_preview),
+            inline=False,
+        )
+
+    if followup is not None:
+        embed.set_field_at(
+            len(embed.fields) - 1,
+            name=f"Echo | {ge.display_name_of(followup.author)}",
+            value=_quote_block(echo_preview),
+            inline=False,
+        )
+
+    if requested_by is not None and requested_by.id != getattr(message.author, "id", None):
+        embed.add_field(name="Pinned By", value=ge.display_name_of(requested_by), inline=True)
+
+    return ge.style_embed(embed, footer="Babblebox Moment | Live link attached, nothing archived")
 
 
 def build_watch_alert_embed(
@@ -173,23 +320,26 @@ def build_watch_alert_embed(
         embed.add_field(name="Matched Keywords", value=rendered, inline=False)
     embed.add_field(
         name="Preview",
-        value=make_message_preview(message.content, attachments=make_attachment_labels(message)),
+        value=make_message_preview(message.content, attachments=message.attachments),
         inline=False,
     )
-    return ge.style_embed(embed, footer="Babblebox Watch | Link buttons do not ping anyone.")
+    return ge.style_embed(embed, footer="Babblebox Watch | Quiet DM alert with a jump link")
 
 
 def build_later_marker_embed(marker: dict) -> discord.Embed:
     embed = discord.Embed(
-        title="Babblebox Later Marker",
-        description=f"Your reading marker for **{marker['guild_name']}** in **#{marker['channel_name']}** is saved.",
+        title="Later Marker Saved",
+        description=f"Your reading spot in **{marker['guild_name']} / #{marker['channel_name']}** is tucked away.",
         color=ge.EMBED_THEME["info"],
         timestamp=deserialize_datetime(marker.get("message_created_at")) or ge.now_utc(),
     )
-    embed.add_field(name="Author", value=marker.get("author_name", "Unknown"), inline=True)
+    embed.add_field(name="From", value=marker.get("author_name", "Unknown"), inline=True)
     embed.add_field(name="Saved", value=ge.format_timestamp(deserialize_datetime(marker.get("saved_at")), "R"), inline=True)
     embed.add_field(name="Preview", value=marker.get("preview", "[no preview available]"), inline=False)
-    return ge.style_embed(embed, footer="Babblebox Later | Pick up where you left off.")
+    attachment_lines = marker.get("attachment_labels") or []
+    if attachment_lines:
+        embed.add_field(name="Attachments", value=ge.join_limited_lines(attachment_lines[:4]), inline=False)
+    return ge.style_embed(embed, footer="Babblebox Later | Pick up exactly where you left off")
 
 
 def build_capture_delivery_embed(
@@ -202,16 +352,16 @@ def build_capture_delivery_embed(
     jump_url: str | None,
 ) -> tuple[discord.Embed, discord.ui.View | None]:
     embed = discord.Embed(
-        title="Babblebox Capture",
-        description=f"Captured **{captured_count}** recent message(s) from **{guild_name} / #{channel_name}**.",
+        title="Capture Delivered",
+        description=f"Packed **{captured_count}** recent message(s) from **{guild_name} / #{channel_name}** into your DMs.",
         color=ge.EMBED_THEME["info"],
     )
     embed.add_field(name="Requested", value=str(requested_count), inline=True)
     embed.add_field(name="Captured", value=str(captured_count), inline=True)
     if preview_lines:
-        embed.add_field(name="Preview", value=ge.join_limited_lines(preview_lines[:6]), inline=False)
+        embed.add_field(name="Peek", value=ge.join_limited_lines(preview_lines[:6]), inline=False)
     view = build_jump_view(jump_url, label="Jump Back to Channel") if jump_url else None
-    return ge.style_embed(embed, footer="Babblebox Capture | Full transcript attached."), view
+    return ge.style_embed(embed, footer="Babblebox Capture | Full transcript attached, no long-term archive"), view
 
 
 def build_capture_transcript_file(
@@ -224,7 +374,7 @@ def build_capture_transcript_file(
     for message in reversed(messages):
         timestamp = message.created_at.astimezone(timezone.utc).strftime("%Y-%m-%d %H:%M:%S UTC") if message.created_at else "Unknown time"
         author = ge.display_name_of(message.author)
-        content = message.content.strip() or "[no text content]"
+        content = make_message_preview(message.content, attachments=message.attachments, limit=500)
         lines.append(f"[{timestamp}] {author}")
         lines.append(content)
         for attachment in message.attachments:

@@ -1179,7 +1179,10 @@ def get_lobby_embed(guild_id):
         if not players:
             embed.add_field(
                 name="Players Lobby",
-                value="No players yet. Click **Join** to hop in. If you are solo right now, try `/daily` or `bb!daily` while you wait.",
+                value=(
+                    "No players yet. Click **Join** to open the room.\n"
+                    "If the server is quiet right now, try `/daily`, `/profile`, `/buddy`, or `/later` while you wait."
+                ),
                 inline=False,
             )
         else:
@@ -1190,7 +1193,11 @@ def get_lobby_embed(guild_id):
             min_players = 2 if gt == "bomb" else 3
             embed.add_field(
                 name="Start Guide",
-                value=f"Minimum players: **{min_players}**\nHost picks the game, everyone joins, then the host starts when the lobby is ready.",
+                value=(
+                    f"Minimum players: **{min_players}**\n"
+                    "Host picks the game, everyone joins, then the host starts when the room feels ready.\n"
+                    "Need a solo fallback? `/daily` and `/profile` are always available."
+                ),
                 inline=False,
             )
 
@@ -1434,7 +1441,10 @@ class LobbyView(TrackedView):
             if len(game["players"]) < min_players:
                 return await safe_send_interaction(
                     interaction,
-                    f"You need at least {min_players} players for this game. If the server is quiet, Babblebox Daily is ready in `/daily`.",
+                    (
+                        f"You need at least {min_players} players for this game. "
+                        "If the server is quiet, try `/daily`, `/profile`, or `/buddy` while you gather a crew."
+                    ),
                     ephemeral=True,
                 )
 
@@ -2361,8 +2371,7 @@ def build_help_embed() -> discord.Embed:
     embed = discord.Embed(
         title="Babblebox Manual",
         description=(
-            "Babblebox is a multi-category Discord bot: party games when a group is around, "
-            "quiet utilities for daily life, a shared Daily puzzle for solo moments, and a lightweight Buddy/Profile layer."
+            "Babblebox has four clear pillars: Party Games, Everyday Utilities, Daily Arcade, and Buddy/Profile."
         ),
         color=discord.Color.gold(),
     )
@@ -2370,29 +2379,31 @@ def build_help_embed() -> discord.Embed:
         name="Party Games",
         value=(
             "`/play` or `bb!play` opens the lobby.\n"
-            "`Broken Telephone` and `Exquisite Corpse` need 3+ players.\n"
-            "`Spyfall` needs 3+ players and supports `/vote`.\n"
-            "`Word Bomb` needs 2+ players and supports bomb modes."
+            "Broken Telephone and Exquisite Corpse need 3+ players.\n"
+            "Spyfall needs 3+ players and supports `/vote`.\n"
+            "Word Bomb needs 2+ players and supports bomb modes plus Chaos Cards."
         ),
         inline=False,
     )
     embed.add_field(
         name="Everyday Utilities",
         value=(
-            "`/watch ...` for mention or keyword alerts.\n"
+            "`/watch mentions`, `/watch replies`, and `/watch keyword ...` split your alerts cleanly.\n"
             "`/later mark` to save your reading spot.\n"
             "`/capture` for a private channel snapshot.\n"
+            "`/moment create`, `/moment from-reply`, or `/moment recent` make shareable cards.\n"
             "`/remind set` for one-time reminders.\n"
             "`/afk` and `/afkstatus` for away scheduling."
         ),
         inline=False,
     )
     embed.add_field(
-        name="Daily Play",
+        name="Daily Arcade",
         value=(
-            "`/daily` shows today's shared puzzle.\n"
-            "`/daily play <guess>` submits a guess.\n"
-            "`/daily stats`, `/daily share`, and `/daily leaderboard` cover streaks, sharing, and standings."
+            "`/daily` opens today's three booths.\n"
+            "`/daily play <guess>` still defaults to Shuffle Booth.\n"
+            "`/daily play emoji <guess>` and `/daily play signal <guess>` open the other booths.\n"
+            "`/daily share` and `/daily leaderboard` are public-friendly by default."
         ),
         inline=False,
     )
@@ -2401,13 +2412,14 @@ def build_help_embed() -> discord.Embed:
         value=(
             "`/buddy` opens your companion card.\n"
             "`/buddy rename`, `/buddy style`, and `/buddy stats` manage identity and progression.\n"
-            "`/profile` and `/vault` pull Daily, utilities, Buddy, and game stats into one compact view."
+            "`/profile` is showable by default, while `/vault` stays more personal.\n"
+            "Buddy, Daily Arcade, utilities, and multiplayer highlights all live in one compact product layer."
         ),
         inline=False,
     )
     embed.add_field(
         name="If You Are Solo",
-        value="Babblebox is still useful when a lobby is not available. Try `/daily`, `/buddy`, `/profile`, `/remind`, or `/later`.",
+        value="Babblebox is still useful when a lobby is not available. Try `/daily`, `/buddy`, `/profile`, `/moment recent`, `/remind`, or `/later`.",
         inline=False,
     )
     embed.add_field(
@@ -2420,4 +2432,4 @@ def build_help_embed() -> discord.Embed:
         value="Broken Telephone, Exquisite Corpse, Spyfall role messages, Watch alerts, Later markers, Capture, and DM reminders rely on open DMs.",
         inline=False,
     )
-    return style_embed(embed, footer="Babblebox Manual | /play, /daily, /buddy, or /profile")
+    return style_embed(embed, footer="Babblebox Manual | Party Games + Utilities + Daily Arcade + Buddy/Profile")

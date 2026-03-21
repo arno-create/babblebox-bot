@@ -19,11 +19,21 @@ class UtilityStorageUnavailable(RuntimeError):
 
 
 def default_utility_state() -> dict[str, Any]:
-    return {"version": 2, "watch": {}, "later": {}, "reminders": {}, "afk": {}}
+    return {"version": 3, "watch": {}, "later": {}, "reminders": {}, "afk": {}}
 
 
 def _default_watch_config() -> dict[str, Any]:
-    return {"mention_global": False, "mention_guild_ids": [], "keywords": []}
+    return {
+        "mention_global": False,
+        "mention_guild_ids": [],
+        "mention_channel_ids": [],
+        "reply_global": False,
+        "reply_guild_ids": [],
+        "reply_channel_ids": [],
+        "excluded_channel_ids": [],
+        "ignored_user_ids": [],
+        "keywords": [],
+    }
 
 
 def _resolve_legacy_json_path(path: Path | None = None) -> Path | None:
@@ -83,7 +93,7 @@ class _BaseUtilityStore:
             return normalized
 
         version = payload.get("version")
-        normalized["version"] = version if isinstance(version, int) and version > 0 else 2
+        normalized["version"] = version if isinstance(version, int) and version > 0 else 3
 
         watch = payload.get("watch")
         if isinstance(watch, dict):
@@ -100,27 +110,45 @@ class _BaseUtilityStore:
                     if not isinstance(phrase, str) or not phrase.strip() or mode not in {"contains", "word"}:
                         continue
                     guild_id = keyword.get("guild_id")
+                    channel_id = keyword.get("channel_id")
                     created_at = keyword.get("created_at")
                     keywords.append(
                         {
                             "phrase": phrase.strip(),
                             "mode": mode,
                             "guild_id": guild_id if isinstance(guild_id, int) else None,
+                            "channel_id": channel_id if isinstance(channel_id, int) and isinstance(guild_id, int) else None,
                             "created_at": created_at if isinstance(created_at, str) else None,
                         }
                     )
-                mention_guild_ids = sorted(
-                    {
-                        guild_id
-                        for guild_id in config.get("mention_guild_ids", [])
-                        if isinstance(guild_id, int) and guild_id > 0
-                    }
-                )
+                mention_guild_ids = sorted({guild_id for guild_id in config.get("mention_guild_ids", []) if isinstance(guild_id, int) and guild_id > 0})
+                mention_channel_ids = sorted({channel_id for channel_id in config.get("mention_channel_ids", []) if isinstance(channel_id, int) and channel_id > 0})
+                reply_guild_ids = sorted({guild_id for guild_id in config.get("reply_guild_ids", []) if isinstance(guild_id, int) and guild_id > 0})
+                reply_channel_ids = sorted({channel_id for channel_id in config.get("reply_channel_ids", []) if isinstance(channel_id, int) and channel_id > 0})
+                excluded_channel_ids = sorted({channel_id for channel_id in config.get("excluded_channel_ids", []) if isinstance(channel_id, int) and channel_id > 0})
+                ignored_user_ids = sorted({other_user_id for other_user_id in config.get("ignored_user_ids", []) if isinstance(other_user_id, int) and other_user_id > 0})
                 mention_global = bool(config.get("mention_global"))
-                if mention_global or mention_guild_ids or keywords:
+                reply_global = bool(config.get("reply_global"))
+                if (
+                    mention_global
+                    or mention_guild_ids
+                    or mention_channel_ids
+                    or reply_global
+                    or reply_guild_ids
+                    or reply_channel_ids
+                    or excluded_channel_ids
+                    or ignored_user_ids
+                    or keywords
+                ):
                     cleaned_watch[str(user_id)] = {
                         "mention_global": mention_global,
                         "mention_guild_ids": mention_guild_ids,
+                        "mention_channel_ids": mention_channel_ids,
+                        "reply_global": reply_global,
+                        "reply_guild_ids": reply_guild_ids,
+                        "reply_channel_ids": reply_channel_ids,
+                        "excluded_channel_ids": excluded_channel_ids,
+                        "ignored_user_ids": ignored_user_ids,
                         "keywords": keywords,
                     }
             normalized["watch"] = cleaned_watch
@@ -230,7 +258,6 @@ class _PostgresUtilityStore(_BaseUtilityStore):
             "CREATE TABLE IF NOT EXISTS utility_meta (key TEXT PRIMARY KEY, value JSONB NOT NULL DEFAULT '{}'::jsonb, updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc', now()))",
             "CREATE TABLE IF NOT EXISTS utility_watch_configs (user_id BIGINT PRIMARY KEY, mention_global BOOLEAN NOT NULL DEFAULT FALSE, mention_guild_ids JSONB NOT NULL DEFAULT '[]'::jsonb, updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc', now()))",
             "CREATE TABLE IF NOT EXISTS utility_watch_keywords (id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES utility_watch_configs(user_id) ON DELETE CASCADE, guild_id BIGINT NULL, phrase TEXT NOT NULL, mode TEXT NOT NULL, created_at TIMESTAMPTZ NULL)",
-            "CREATE UNIQUE INDEX IF NOT EXISTS ux_utility_watch_keywords_scope ON utility_watch_keywords (user_id, COALESCE(guild_id, 0), mode, phrase)",
             "CREATE TABLE IF NOT EXISTS utility_later_markers (user_id BIGINT NOT NULL, guild_id BIGINT NOT NULL, guild_name TEXT NOT NULL, channel_id BIGINT NOT NULL, channel_name TEXT NOT NULL, message_id BIGINT NOT NULL, message_jump_url TEXT NOT NULL, message_created_at TIMESTAMPTZ NULL, saved_at TIMESTAMPTZ NULL, author_name TEXT NOT NULL, author_id BIGINT NOT NULL, preview TEXT NOT NULL, PRIMARY KEY (user_id, channel_id))",
             "CREATE INDEX IF NOT EXISTS ix_utility_later_markers_user ON utility_later_markers (user_id)",
             "CREATE TABLE IF NOT EXISTS utility_reminders (id TEXT PRIMARY KEY, user_id BIGINT NOT NULL, text TEXT NOT NULL, delivery TEXT NOT NULL, created_at TIMESTAMPTZ NULL, due_at TIMESTAMPTZ NULL, guild_id BIGINT NULL, guild_name TEXT NULL, channel_id BIGINT NULL, channel_name TEXT NULL, origin_jump_url TEXT NULL)",
@@ -244,6 +271,18 @@ class _PostgresUtilityStore(_BaseUtilityStore):
         async with self._pool.acquire() as conn:
             for statement in statements:
                 await conn.execute(statement)
+            await conn.execute("ALTER TABLE utility_watch_configs ADD COLUMN IF NOT EXISTS mention_channel_ids JSONB NOT NULL DEFAULT '[]'::jsonb")
+            await conn.execute("ALTER TABLE utility_watch_configs ADD COLUMN IF NOT EXISTS reply_global BOOLEAN NOT NULL DEFAULT FALSE")
+            await conn.execute("ALTER TABLE utility_watch_configs ADD COLUMN IF NOT EXISTS reply_guild_ids JSONB NOT NULL DEFAULT '[]'::jsonb")
+            await conn.execute("ALTER TABLE utility_watch_configs ADD COLUMN IF NOT EXISTS reply_channel_ids JSONB NOT NULL DEFAULT '[]'::jsonb")
+            await conn.execute("ALTER TABLE utility_watch_configs ADD COLUMN IF NOT EXISTS excluded_channel_ids JSONB NOT NULL DEFAULT '[]'::jsonb")
+            await conn.execute("ALTER TABLE utility_watch_configs ADD COLUMN IF NOT EXISTS ignored_user_ids JSONB NOT NULL DEFAULT '[]'::jsonb")
+            await conn.execute("ALTER TABLE utility_watch_keywords ADD COLUMN IF NOT EXISTS channel_id BIGINT NULL")
+            await conn.execute("DROP INDEX IF EXISTS ux_utility_watch_keywords_scope")
+            await conn.execute(
+                "CREATE UNIQUE INDEX IF NOT EXISTS ux_utility_watch_keywords_scope_v2 "
+                "ON utility_watch_keywords (user_id, COALESCE(guild_id, 0), COALESCE(channel_id, 0), mode, phrase)"
+            )
 
     async def _set_meta(self, key: str, value: dict[str, Any]):
         async with self._pool.acquire() as conn:
@@ -350,16 +389,39 @@ class _PostgresUtilityStore(_BaseUtilityStore):
     async def _reload_from_db(self):
         loaded = default_utility_state()
         async with self._pool.acquire() as conn:
-            watch_rows = await conn.fetch("SELECT user_id, mention_global, mention_guild_ids FROM utility_watch_configs")
-            keyword_rows = await conn.fetch("SELECT user_id, guild_id, phrase, mode, created_at FROM utility_watch_keywords ORDER BY id ASC")
+            watch_rows = await conn.fetch(
+                "SELECT user_id, mention_global, mention_guild_ids, mention_channel_ids, reply_global, reply_guild_ids, "
+                "reply_channel_ids, excluded_channel_ids, ignored_user_ids FROM utility_watch_configs"
+            )
+            keyword_rows = await conn.fetch(
+                "SELECT user_id, guild_id, channel_id, phrase, mode, created_at FROM utility_watch_keywords ORDER BY id ASC"
+            )
             later_rows = await conn.fetch("SELECT user_id, guild_id, guild_name, channel_id, channel_name, message_id, message_jump_url, message_created_at, saved_at, author_name, author_id, preview FROM utility_later_markers")
             reminder_rows = await conn.fetch("SELECT id, user_id, text, delivery, created_at, due_at, guild_id, guild_name, channel_id, channel_name, origin_jump_url FROM utility_reminders")
             afk_rows = await conn.fetch("SELECT user_id, status, reason, created_at, set_at, starts_at, ends_at FROM utility_afk")
 
         for row in watch_rows:
-            loaded["watch"][str(row["user_id"])] = {"mention_global": bool(row["mention_global"]), "mention_guild_ids": [guild_id for guild_id in (row["mention_guild_ids"] or []) if isinstance(guild_id, int)], "keywords": []}
+            loaded["watch"][str(row["user_id"])] = {
+                "mention_global": bool(row["mention_global"]),
+                "mention_guild_ids": [guild_id for guild_id in (row["mention_guild_ids"] or []) if isinstance(guild_id, int)],
+                "mention_channel_ids": [channel_id for channel_id in (row["mention_channel_ids"] or []) if isinstance(channel_id, int)],
+                "reply_global": bool(row["reply_global"]),
+                "reply_guild_ids": [guild_id for guild_id in (row["reply_guild_ids"] or []) if isinstance(guild_id, int)],
+                "reply_channel_ids": [channel_id for channel_id in (row["reply_channel_ids"] or []) if isinstance(channel_id, int)],
+                "excluded_channel_ids": [channel_id for channel_id in (row["excluded_channel_ids"] or []) if isinstance(channel_id, int)],
+                "ignored_user_ids": [ignored_user_id for ignored_user_id in (row["ignored_user_ids"] or []) if isinstance(ignored_user_id, int)],
+                "keywords": [],
+            }
         for row in keyword_rows:
-            loaded["watch"].setdefault(str(row["user_id"]), _default_watch_config())["keywords"].append({"phrase": row["phrase"], "mode": row["mode"], "guild_id": row["guild_id"], "created_at": self._serialize_datetime(row["created_at"])})
+            loaded["watch"].setdefault(str(row["user_id"]), _default_watch_config())["keywords"].append(
+                {
+                    "phrase": row["phrase"],
+                    "mode": row["mode"],
+                    "guild_id": row["guild_id"],
+                    "channel_id": row["channel_id"],
+                    "created_at": self._serialize_datetime(row["created_at"]),
+                }
+            )
         for row in later_rows:
             loaded["later"].setdefault(str(row["user_id"]), {})[str(row["channel_id"])] = {"user_id": row["user_id"], "guild_id": row["guild_id"], "guild_name": row["guild_name"], "channel_id": row["channel_id"], "channel_name": row["channel_name"], "message_id": row["message_id"], "message_jump_url": row["message_jump_url"], "message_created_at": self._serialize_datetime(row["message_created_at"]), "saved_at": self._serialize_datetime(row["saved_at"]), "author_name": row["author_name"], "author_id": row["author_id"], "preview": row["preview"]}
         for row in reminder_rows:
@@ -401,14 +463,37 @@ class _PostgresUtilityStore(_BaseUtilityStore):
                 user_id = int(user_id_text)
             except (TypeError, ValueError):
                 continue
-            config_rows.append((user_id, bool(config.get("mention_global")), json.dumps([guild_id for guild_id in config.get("mention_guild_ids", []) if isinstance(guild_id, int)])))
+            config_rows.append(
+                (
+                    user_id,
+                    bool(config.get("mention_global")),
+                    json.dumps([guild_id for guild_id in config.get("mention_guild_ids", []) if isinstance(guild_id, int)]),
+                    json.dumps([channel_id for channel_id in config.get("mention_channel_ids", []) if isinstance(channel_id, int)]),
+                    bool(config.get("reply_global")),
+                    json.dumps([guild_id for guild_id in config.get("reply_guild_ids", []) if isinstance(guild_id, int)]),
+                    json.dumps([channel_id for channel_id in config.get("reply_channel_ids", []) if isinstance(channel_id, int)]),
+                    json.dumps([channel_id for channel_id in config.get("excluded_channel_ids", []) if isinstance(channel_id, int)]),
+                    json.dumps([ignored_user_id for ignored_user_id in config.get("ignored_user_ids", []) if isinstance(ignored_user_id, int)]),
+                )
+            )
             for keyword in config.get("keywords", []):
                 if isinstance(keyword, dict):
-                    keyword_rows.append((user_id, keyword.get("guild_id") if isinstance(keyword.get("guild_id"), int) else None, keyword.get("phrase"), keyword.get("mode", "contains"), self._parse_iso_datetime(keyword.get("created_at"))))
+                    guild_id = keyword.get("guild_id") if isinstance(keyword.get("guild_id"), int) else None
+                    channel_id = keyword.get("channel_id") if isinstance(keyword.get("channel_id"), int) and guild_id is not None else None
+                    keyword_rows.append((user_id, guild_id, channel_id, keyword.get("phrase"), keyword.get("mode", "contains"), self._parse_iso_datetime(keyword.get("created_at"))))
         if config_rows:
-            await conn.executemany("INSERT INTO utility_watch_configs (user_id, mention_global, mention_guild_ids, updated_at) VALUES ($1, $2, $3::jsonb, timezone('utc', now()))", config_rows)
+            await conn.executemany(
+                "INSERT INTO utility_watch_configs ("
+                "user_id, mention_global, mention_guild_ids, mention_channel_ids, reply_global, reply_guild_ids, "
+                "reply_channel_ids, excluded_channel_ids, ignored_user_ids, updated_at"
+                ") VALUES ($1, $2, $3::jsonb, $4::jsonb, $5, $6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb, timezone('utc', now()))",
+                config_rows,
+            )
         if keyword_rows:
-            await conn.executemany("INSERT INTO utility_watch_keywords (user_id, guild_id, phrase, mode, created_at) VALUES ($1, $2, $3, $4, $5)", keyword_rows)
+            await conn.executemany(
+                "INSERT INTO utility_watch_keywords (user_id, guild_id, channel_id, phrase, mode, created_at) VALUES ($1, $2, $3, $4, $5, $6)",
+                keyword_rows,
+            )
 
     async def _replace_later_data(self, conn, later_state: dict[str, Any]):
         await conn.execute("DELETE FROM utility_later_markers")

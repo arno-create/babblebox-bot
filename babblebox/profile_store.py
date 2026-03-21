@@ -139,7 +139,7 @@ class _BaseProfileStore:
     async def set_meta(self, key: str, value: dict[str, Any]):
         raise NotImplementedError
 
-    async def prune_daily_results(self, *, challenge_id: str, keep_after: date) -> int:
+    async def prune_daily_results(self, *, keep_after: date, challenge_id: str | None = None) -> int:
         raise NotImplementedError
 
 
@@ -204,11 +204,11 @@ class _MemoryProfileStore(_BaseProfileStore):
     async def set_meta(self, key: str, value: dict[str, Any]):
         self.state["meta"][key] = _copy_payload(value)
 
-    async def prune_daily_results(self, *, challenge_id: str, keep_after: date) -> int:
+    async def prune_daily_results(self, *, keep_after: date, challenge_id: str | None = None) -> int:
         keys_to_remove = [
             key
             for key, row in self.state["daily_results"].items()
-            if key[0] == challenge_id and row["puzzle_date"] < keep_after
+            if row["puzzle_date"] < keep_after and (challenge_id is None or key[0] == challenge_id)
         ]
         for key in keys_to_remove:
             self.state["daily_results"].pop(key, None)
@@ -428,14 +428,20 @@ class _PostgresProfileStore(_BaseProfileStore):
                     json.dumps(value),
                 )
 
-    async def prune_daily_results(self, *, challenge_id: str, keep_after: date) -> int:
+    async def prune_daily_results(self, *, keep_after: date, challenge_id: str | None = None) -> int:
         async with self._io_lock:
             async with self._pool.acquire() as conn:
-                result = await conn.execute(
-                    "DELETE FROM bb_daily_results WHERE challenge_id = $1 AND puzzle_date < $2",
-                    challenge_id,
-                    keep_after,
-                )
+                if challenge_id is None:
+                    result = await conn.execute(
+                        "DELETE FROM bb_daily_results WHERE puzzle_date < $1",
+                        keep_after,
+                    )
+                else:
+                    result = await conn.execute(
+                        "DELETE FROM bb_daily_results WHERE challenge_id = $1 AND puzzle_date < $2",
+                        challenge_id,
+                        keep_after,
+                    )
         try:
             return int(str(result).split()[-1])
         except (ValueError, IndexError):
@@ -504,7 +510,7 @@ class ProfileStore:
     async def set_meta(self, key: str, value: dict[str, Any]):
         await self._store.set_meta(key, value)
 
-    async def prune_daily_results(self, *, challenge_id: str, keep_after: date) -> int:
+    async def prune_daily_results(self, *, keep_after: date, challenge_id: str | None = None) -> int:
         return await self._store.prune_daily_results(challenge_id=challenge_id, keep_after=keep_after)
 
     def redacted_database_url(self) -> str:

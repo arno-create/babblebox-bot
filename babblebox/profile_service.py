@@ -8,7 +8,16 @@ import discord
 from discord.ext import commands
 
 from babblebox import game_engine as ge
-from babblebox.daily_challenges import DAILY_MAX_ATTEMPTS, build_daily_shuffle, normalize_daily_guess
+from babblebox.daily_challenges import (
+    DAILY_DEFAULT_MODE,
+    DAILY_MAX_ATTEMPTS,
+    build_daily_arcade,
+    build_daily_puzzle,
+    build_daily_shuffle,
+    list_daily_modes,
+    normalize_daily_guess,
+    resolve_daily_mode,
+)
 from babblebox.profile_store import ProfileStorageUnavailable, ProfileStore
 from babblebox.text_safety import sanitize_short_plain_text
 
@@ -240,6 +249,54 @@ def _share_grid(result: dict[str, Any]) -> str:
     return "".join(cells)
 
 
+def _share_grid(result: dict[str, Any]) -> str:
+    attempts = int(result.get("attempt_count", 0) or 0)
+    solved = bool(result.get("solved"))
+    cells = []
+    for index in range(DAILY_MAX_ATTEMPTS):
+        if index >= attempts:
+            cells.append("⬜")
+        elif solved and index == attempts - 1:
+            cells.append("🟩")
+        else:
+            cells.append("🟨")
+    return "".join(cells)
+
+
+def _share_grid(result: dict[str, Any]) -> str:
+    attempts = int(result.get("attempt_count", 0) or 0)
+    solved = bool(result.get("solved"))
+    cells = []
+    for index in range(DAILY_MAX_ATTEMPTS):
+        if index >= attempts:
+            cells.append("\u2b1c")
+        elif solved and index == attempts - 1:
+            cells.append("\U0001f7e9")
+        else:
+            cells.append("\U0001f7e8")
+    return "".join(cells)
+
+
+def _daily_modes() -> tuple[str, ...]:
+    return list_daily_modes()
+
+
+def _daily_mode_label(mode: str) -> str:
+    return build_daily_puzzle(ge.now_utc().date(), mode).label
+
+
+def _daily_progress_line(result: dict[str, Any] | None) -> str:
+    if result is None:
+        return "Fresh board"
+    attempts = int(result.get("attempt_count", 0) or 0)
+    if result.get("solved"):
+        solve_seconds = int(result.get("solve_seconds", 0) or 0)
+        return f"Solved in {attempts}/{DAILY_MAX_ATTEMPTS} - {solve_seconds}s"
+    if result.get("completed_at") is not None:
+        return f"Finished {attempts}/{DAILY_MAX_ATTEMPTS}"
+    return f"In progress {attempts}/{DAILY_MAX_ATTEMPTS}"
+
+
 class ProfileService:
     def __init__(self, bot: commands.Bot, store: ProfileStore | None = None):
         self.bot = bot
@@ -288,10 +345,7 @@ class ProfileService:
         if isinstance(meta, dict) and meta.get("last_pruned_date") == today.isoformat():
             return
         keep_after = today - timedelta(days=PROFILE_DAILY_RETENTION_DAYS)
-        removed = await self.store.prune_daily_results(
-            challenge_id=build_daily_shuffle(today).challenge_id,
-            keep_after=keep_after,
-        )
+        removed = await self.store.prune_daily_results(keep_after=keep_after)
         await self.store.set_meta(
             PROFILE_PRUNE_META_KEY,
             {"last_pruned_date": today.isoformat(), "removed_rows": removed, "retention_days": PROFILE_DAILY_RETENTION_DAYS},
@@ -404,22 +458,54 @@ class ProfileService:
             await self.store.save_profile(profile)
         return True, f"Buddy style set to **{BUDDY_STYLES[style_id]['label']}**."
 
-    async def get_daily_status(self, user_id: int) -> dict[str, Any] | None:
-        if not self.storage_ready:
-            return None
-        async with self._lock:
-            today = ge.now_utc().date()
-            profile = await self._ensure_profile(user_id)
-            self._sync_identity_fields(profile, today)
-            puzzle = build_daily_shuffle(today)
-            result = await self.store.fetch_daily_result(
+    def _resolve_daily_mode_or_default(self, mode: str | None) -> str:
+        return resolve_daily_mode(mode) or DAILY_DEFAULT_MODE
+
+    def _blank_daily_result(self, *, challenge_id: str, puzzle_date: date, user_id: int, now: datetime) -> dict[str, Any]:
+        return {
+            "challenge_id": challenge_id,
+            "puzzle_date": puzzle_date,
+            "user_id": user_id,
+            "attempt_count": 0,
+            "solved": False,
+            "first_attempt_at": now,
+            "completed_at": None,
+            "solve_seconds": None,
+        }
+
+    async def _fetch_daily_arcade_state(self, user_id: int, *, mode: str | None = None) -> dict[str, Any]:
+        today = ge.now_utc().date()
+        profile = await self._ensure_profile(user_id)
+        self._sync_identity_fields(profile, today)
+        puzzles = build_daily_arcade(today)
+        results: dict[str, dict[str, Any] | None] = {}
+        for mode_id, puzzle in puzzles.items():
+            results[mode_id] = await self.store.fetch_daily_result(
                 challenge_id=puzzle.challenge_id,
                 puzzle_date=today,
                 user_id=user_id,
             )
-            return {"profile": self._enrich_profile(profile), "puzzle": puzzle, "result": result}
+        active_mode = self._resolve_daily_mode_or_default(mode)
+        solved_today = sum(1 for result in results.values() if isinstance(result, dict) and result.get("solved"))
+        finished_today = sum(1 for result in results.values() if isinstance(result, dict) and result.get("completed_at") is not None)
+        return {
+            "profile": self._enrich_profile(profile),
+            "puzzles": puzzles,
+            "results": results,
+            "active_mode": active_mode,
+            "puzzle": puzzles[active_mode],
+            "result": results.get(active_mode),
+            "solved_today": solved_today,
+            "finished_today": finished_today,
+        }
 
-    async def submit_daily_guess(self, user_id: int, guess: str) -> tuple[bool, dict[str, Any] | str]:
+    async def get_daily_status(self, user_id: int, *, mode: str | None = None) -> dict[str, Any] | None:
+        if not self.storage_ready:
+            return None
+        async with self._lock:
+            return await self._fetch_daily_arcade_state(user_id, mode=mode)
+
+    async def submit_daily_guess(self, user_id: int, guess: str, *, mode: str = DAILY_DEFAULT_MODE) -> tuple[bool, dict[str, Any] | str]:
         if not self.storage_ready:
             return False, self.storage_message("Daily")
         normalized = normalize_daily_guess(guess)
@@ -428,7 +514,8 @@ class ProfileService:
         async with self._lock:
             now = ge.now_utc()
             today = now.date()
-            puzzle = build_daily_shuffle(today)
+            active_mode = self._resolve_daily_mode_or_default(mode)
+            puzzle = build_daily_puzzle(today, active_mode)
             profile = await self._ensure_profile(user_id)
             result = await self.store.fetch_daily_result(
                 challenge_id=puzzle.challenge_id,
@@ -436,20 +523,16 @@ class ProfileService:
                 user_id=user_id,
             )
             if result is None:
-                result = {
-                    "challenge_id": puzzle.challenge_id,
-                    "puzzle_date": today,
-                    "user_id": user_id,
-                    "attempt_count": 0,
-                    "solved": False,
-                    "first_attempt_at": now,
-                    "completed_at": None,
-                    "solve_seconds": None,
-                }
+                result = self._blank_daily_result(
+                    challenge_id=puzzle.challenge_id,
+                    puzzle_date=today,
+                    user_id=user_id,
+                    now=now,
+                )
             if result.get("solved"):
-                return False, "You already solved today's Daily. Use `/daily share` to post the result."
+                return False, f"You already solved {puzzle.label}. Use `/daily share {active_mode}` to post it."
             if result.get("completed_at") is not None or int(result.get("attempt_count", 0) or 0) >= DAILY_MAX_ATTEMPTS:
-                return False, "You already finished today's Daily. Come back at the next UTC reset."
+                return False, f"You already finished {puzzle.label} today. Come back at the next UTC reset."
 
             first_attempt = int(result.get("attempt_count", 0) or 0) == 0
             result["attempt_count"] = int(result.get("attempt_count", 0) or 0) + 1
@@ -483,7 +566,6 @@ class ProfileService:
                 remaining = DAILY_MAX_ATTEMPTS - int(result["attempt_count"])
                 if remaining <= 0:
                     result["completed_at"] = now
-                    profile["current_daily_streak"] = 0
                     self._touch_profile(profile, mood="determined")
                     status = "failed"
                 else:
@@ -493,14 +575,17 @@ class ProfileService:
             self._sync_identity_fields(profile, today)
             await self.store.save_daily_result(result)
             await self.store.save_profile(profile)
-            return True, {"status": status, "profile": self._enrich_profile(profile), "puzzle": puzzle, "result": result}
+            arcade_state = await self._fetch_daily_arcade_state(user_id, mode=active_mode)
+            arcade_state.update({"status": status, "puzzle": puzzle, "result": result})
+            return True, arcade_state
 
-    async def build_daily_share(self, user_id: int) -> tuple[bool, str]:
+    async def build_daily_share(self, user_id: int, *, mode: str = DAILY_DEFAULT_MODE) -> tuple[bool, str]:
         if not self.storage_ready:
             return False, self.storage_message("Daily")
         async with self._lock:
             today = ge.now_utc().date()
-            puzzle = build_daily_shuffle(today)
+            active_mode = self._resolve_daily_mode_or_default(mode)
+            puzzle = build_daily_puzzle(today, active_mode)
             profile = await self._ensure_profile(user_id)
             result = await self.store.fetch_daily_result(
                 challenge_id=puzzle.challenge_id,
@@ -508,14 +593,13 @@ class ProfileService:
                 user_id=user_id,
             )
             if result is None:
-                return False, "You have not played today's Daily yet."
+                return False, f"You have not played {puzzle.label} yet."
             if not result.get("solved") and result.get("completed_at") is None:
-                return False, "Finish today's Daily first, then use `/daily share`."
+                return False, f"Finish {puzzle.label} first, then use `/daily share {active_mode}`."
             self._sync_identity_fields(profile, today)
             share_line = (
-                f"Babblebox Daily #{puzzle.challenge_number} | "
-                f"{'Solved' if result.get('solved') else 'Tried'} "
-                f"{int(result.get('attempt_count', 0) or 0)}/{DAILY_MAX_ATTEMPTS}"
+                f"Babblebox Daily Arcade #{puzzle.challenge_number} {puzzle.share_flair} {puzzle.label} | "
+                f"{'Solved' if result.get('solved') else 'Tried'} {int(result.get('attempt_count', 0) or 0)}/{DAILY_MAX_ATTEMPTS}"
             )
             if result.get("solved") and result.get("solve_seconds"):
                 share_line += f" | {int(result['solve_seconds'])}s"
@@ -528,9 +612,24 @@ class ProfileService:
         async with self._lock:
             today = ge.now_utc().date()
             profile = await self._ensure_profile(user_id)
-            recent = await self.store.fetch_recent_daily_results(user_id=user_id, limit=5)
+            recent = await self.store.fetch_recent_daily_results(user_id=user_id, limit=9)
             self._sync_identity_fields(profile, today)
-            return {"profile": self._enrich_profile(profile), "recent_results": recent, "today_puzzle": build_daily_shuffle(today)}
+            arcade = build_daily_arcade(today)
+            challenge_ids = {puzzle.challenge_id: mode for mode, puzzle in arcade.items()}
+            today_results = {}
+            for mode, puzzle in arcade.items():
+                today_results[mode] = await self.store.fetch_daily_result(
+                    challenge_id=puzzle.challenge_id,
+                    puzzle_date=today,
+                    user_id=user_id,
+                )
+            return {
+                "profile": self._enrich_profile(profile),
+                "recent_results": recent,
+                "today_puzzles": arcade,
+                "today_results": today_results,
+                "challenge_modes": challenge_ids,
+            }
 
     async def get_daily_leaderboard(self, *, metric: str = "clears", limit: int = 10) -> list[dict[str, Any]]:
         if not self.storage_ready:
@@ -630,63 +729,78 @@ class ProfileService:
 
     def build_daily_embed(self, user: discord.abc.User, daily_status: dict[str, Any]) -> discord.Embed:
         profile = daily_status["profile"]
+        puzzles = daily_status["puzzles"]
+        results = daily_status["results"]
+        active_mode = daily_status["active_mode"]
         puzzle = daily_status["puzzle"]
         result = daily_status["result"]
         embed = discord.Embed(
-            title="Babblebox Daily",
-            description="Today's shared solo puzzle is a lightweight word shuffle. Everyone gets the same one per UTC day.",
+            title="Babblebox Daily Arcade",
+            description="Three compact solo booths reset together every UTC day. Pick one, solve a few, then share your favorites.",
             color=profile["style_meta"]["color"],
         )
-        embed.add_field(name="Puzzle", value=f"`{puzzle.scramble}`", inline=False)
+        booth_lines = []
+        for mode in _daily_modes():
+            booth_puzzle = puzzles[mode]
+            booth_result = results.get(mode)
+            marker = "->" if mode == active_mode else "  "
+            booth_lines.append(f"{marker} **{booth_puzzle.label}** - {_daily_progress_line(booth_result)}")
+        embed.add_field(name="Today's Booths", value="\n".join(booth_lines), inline=False)
+        embed.add_field(name=puzzle.prompt_label, value=f"`{puzzle.scramble}`", inline=False)
         embed.add_field(name="Hint", value=puzzle.hint, inline=False)
-        embed.add_field(name="Length", value=str(puzzle.length), inline=True)
-        embed.add_field(name="Streak", value=str(profile["active_streak"]), inline=True)
+        embed.add_field(name="How It Works", value=puzzle.instructions, inline=False)
+        embed.add_field(name="Arcade Streak", value=str(profile["active_streak"]), inline=True)
+        embed.add_field(name="Clears", value=str(profile["total_daily_clears"]), inline=True)
+        embed.add_field(name="Solved Today", value=f"{daily_status['solved_today']} / {len(puzzles)}", inline=True)
         if result is None:
             embed.add_field(
-                name="How To Play",
-                value=f"Use `/daily play <guess>` or `bb!daily play <guess>`. You get {DAILY_MAX_ATTEMPTS} attempts.",
+                name="Play Prompt",
+                value=(
+                    f"Use `/daily play {active_mode} <guess>` or `bb!daily play {active_mode} <guess>`.\n"
+                    f"`/daily play <guess>` still defaults to {DAILY_DEFAULT_MODE}."
+                ),
                 inline=False,
             )
         elif result.get("solved"):
             embed.add_field(
-                name="Today's Result",
+                name="Active Booth Result",
                 value=(
-                    f"Solved in **{result['attempt_count']}** attempt(s) and "
-                    f"**{int(result.get('solve_seconds', 0) or 0)}s**.\nUse `/daily share` to post it."
+                    f"Solved in **{result['attempt_count']}** attempt(s) and **{int(result.get('solve_seconds', 0) or 0)}s**.\n"
+                    f"Use `/daily share {active_mode}` to post this booth."
                 ),
                 inline=False,
             )
         elif result.get("completed_at") is not None:
             embed.add_field(
-                name="Today's Result",
+                name="Active Booth Result",
                 value=(
                     f"You used all {DAILY_MAX_ATTEMPTS} attempts. The answer was **{puzzle.answer.upper()}**.\n"
-                    "Use `/daily share` if you still want to post the run."
+                    f"Use `/daily share {active_mode}` if you still want to post the run."
                 ),
                 inline=False,
             )
         else:
             remaining = DAILY_MAX_ATTEMPTS - int(result.get("attempt_count", 0) or 0)
             embed.add_field(
-                name="Progress",
+                name="Active Booth Progress",
                 value=f"Attempts used: **{result['attempt_count']} / {DAILY_MAX_ATTEMPTS}**\nAttempts left: **{remaining}**",
                 inline=False,
             )
-        return ge.style_embed(embed, footer="Babblebox Daily | Shared UTC puzzle, compact results, no rerolls")
+        return ge.style_embed(embed, footer="Babblebox Daily Arcade | Shared UTC booths, compact rows, no rerolls")
 
     def build_daily_result_embed(self, user: discord.abc.User, payload: dict[str, Any]) -> discord.Embed:
         profile = payload["profile"]
         puzzle = payload["puzzle"]
         result = payload["result"]
         if payload["status"] == "solved":
-            title = "Daily Cleared"
+            title = f"{puzzle.label} Cleared"
             tone = "success"
             description = (
-                f"**{ge.display_name_of(user)}** solved Daily #{puzzle.challenge_number} in "
+                f"**{ge.display_name_of(user)}** solved Daily Arcade #{puzzle.challenge_number} in "
                 f"**{result['attempt_count']}** attempt(s) and **{int(result.get('solve_seconds', 0) or 0)}s**."
             )
         elif payload["status"] == "failed":
-            title = "Daily Finished"
+            title = f"{puzzle.label} Finished"
             tone = "warning"
             description = f"That was the last attempt for today. The answer was **{puzzle.answer.upper()}**."
         else:
@@ -694,36 +808,46 @@ class ProfileService:
             tone = "info"
             remaining = DAILY_MAX_ATTEMPTS - int(result.get("attempt_count", 0) or 0)
             description = f"That guess was not it. You still have **{remaining}** attempt(s) left today."
-        embed = ge.make_status_embed(title, description, tone=tone, footer="Babblebox Daily")
-        embed.add_field(name="Puzzle", value=f"`{puzzle.scramble}`", inline=False)
+        embed = ge.make_status_embed(title, description, tone=tone, footer="Babblebox Daily Arcade")
+        embed.add_field(name=puzzle.prompt_label, value=f"`{puzzle.scramble}`", inline=False)
         embed.add_field(name="Hint", value=puzzle.hint, inline=False)
-        embed.add_field(name="Current Streak", value=str(profile["active_streak"]), inline=True)
+        embed.add_field(name="Arcade Streak", value=str(profile["active_streak"]), inline=True)
         embed.add_field(name="Total Clears", value=str(profile["total_daily_clears"]), inline=True)
+        embed.add_field(name="Share", value=f"`/daily share {puzzle.mode}`", inline=True)
         return embed
 
     def build_daily_stats_embed(self, user: discord.abc.User, stats_payload: dict[str, Any]) -> discord.Embed:
         profile = stats_payload["profile"]
         recent = stats_payload["recent_results"]
+        today_puzzles = stats_payload["today_puzzles"]
+        today_results = stats_payload["today_results"]
+        challenge_modes = stats_payload["challenge_modes"]
         embed = discord.Embed(
-            title="Babblebox Daily Stats",
-            description=f"Daily puzzle history for **{ge.display_name_of(user)}**.",
+            title="Daily Arcade Stats",
+            description=f"Arcade history for **{ge.display_name_of(user)}**.",
             color=profile["style_meta"]["color"],
         )
         embed.add_field(name="Current Streak", value=str(profile["active_streak"]), inline=True)
         embed.add_field(name="Best Streak", value=str(profile["best_daily_streak"]), inline=True)
-        embed.add_field(name="Total Clears", value=str(profile["total_daily_clears"]), inline=True)
-        embed.add_field(name="Participations", value=str(profile["total_daily_participations"]), inline=True)
+        embed.add_field(name="Arcade Clears", value=str(profile["total_daily_clears"]), inline=True)
+        embed.add_field(name="Booths Played", value=str(profile["total_daily_participations"]), inline=True)
+        today_lines = [f"**{puzzle.label}** - {_daily_progress_line(today_results.get(mode))}" for mode, puzzle in today_puzzles.items()]
+        embed.add_field(name="Today's Booths", value="\n".join(today_lines), inline=False)
         recent_lines = []
-        for row in recent[:5]:
+        for row in recent[:8]:
+            mode = challenge_modes.get(row["challenge_id"], "shuffle")
+            label = _daily_mode_label(mode)
             marker = "cleared" if row.get("solved") else "tried"
-            recent_lines.append(f"**{row['puzzle_date'].isoformat()}** - {marker} {int(row.get('attempt_count', 0) or 0)}/{DAILY_MAX_ATTEMPTS}")
+            recent_lines.append(
+                f"**{row['puzzle_date'].isoformat()}** - {label} - {marker} {int(row.get('attempt_count', 0) or 0)}/{DAILY_MAX_ATTEMPTS}"
+            )
         embed.add_field(name="Recent Runs", value="\n".join(recent_lines) if recent_lines else "No runs recorded yet.", inline=False)
-        return ge.style_embed(embed, footer="Babblebox Daily | Raw rows prune after 180 days, summary stats stay")
+        return ge.style_embed(embed, footer="Babblebox Daily Arcade | Raw rows prune after 180 days, summary streaks stay")
 
     def build_daily_leaderboard_embed(self, entries: list[dict[str, Any]], *, metric: str) -> discord.Embed:
-        title = "Babblebox Daily Leaderboard"
+        title = "Daily Arcade Leaderboard"
         if not entries:
-            return ge.make_status_embed(title, "No Daily results are on the board yet.", tone="info", footer="Babblebox Daily")
+            return ge.make_status_embed(title, "No Daily Arcade results are on the board yet.", tone="info", footer="Babblebox Daily Arcade")
         lines = []
         for index, entry in enumerate(entries[:10], start=1):
             label = self._resolve_user_label(entry["user_id"])
@@ -742,46 +866,61 @@ class ProfileService:
             description="\n".join(lines),
             color=ge.EMBED_THEME["accent"],
         )
-        return ge.style_embed(embed, footer="Babblebox Daily | Shared UTC challenge, compact lifetime stats")
+        return ge.style_embed(embed, footer="Babblebox Daily Arcade | Shared UTC booths, compact lifetime stats")
 
     def build_buddy_embed(self, user: discord.abc.User, profile: dict[str, Any]) -> discord.Embed:
         species = profile["species_meta"]
         embed = discord.Embed(
-            title="Babblebox Buddy",
-            description=f"**{profile['buddy_name']}** is your {species['label'].lower()} companion.",
+            title=f"Buddy Card - {profile['buddy_name']}",
+            description=(
+                f"Your **{species['label']}** companion is feeling **{profile['resolved_mood']}**.\n"
+                f"{species['description']}"
+            ),
             color=profile["style_meta"]["color"],
         )
-        embed.add_field(name="Type", value=species["badge"], inline=True)
-        embed.add_field(name="Mood", value=profile["resolved_mood"], inline=True)
+        embed.add_field(name="Companion", value=species["badge"], inline=True)
         embed.add_field(name="Style", value=profile["style_meta"]["label"], inline=True)
-        embed.add_field(name="Title", value=profile["display_title"], inline=True)
+        embed.add_field(name="Featured Title", value=profile["display_title"], inline=True)
         embed.add_field(
-            name="Level",
-            value=f"Level **{profile['level']}**\nXP: **{profile['xp_into_level']} / {profile['xp_needed_this_level']}**",
+            name="Level Track",
+            value=f"Level **{profile['level']}**\nXP **{profile['xp_into_level']} / {profile['xp_needed_this_level']}**",
             inline=True,
         )
-        embed.add_field(name="Streak", value=str(profile["active_streak"]), inline=True)
+        embed.add_field(name="Arcade Streak", value=str(profile["active_streak"]), inline=True)
+        embed.add_field(name="Lifetime Clears", value=str(profile["total_daily_clears"]), inline=True)
         embed.add_field(name="Badges", value=_format_badges(profile["badges_unlocked"]), inline=False)
-        embed.add_field(name="Buddy Note", value=species["description"], inline=False)
-        return ge.style_embed(embed, footer="Babblebox Buddy | Lightweight, cosmetic-first, anti-farm progression")
+        embed.add_field(
+            name="Little Snapshot",
+            value=(
+                f"Utilities used: **{_utility_score(profile)}**\n"
+                f"Games played: **{profile['games_played']}**\n"
+                f"Games won: **{profile['games_won']}**"
+            ),
+            inline=False,
+        )
+        return ge.style_embed(embed, footer="Babblebox Buddy | Cosmetic-first progression with daily caps")
 
     def build_buddy_stats_embed(self, user: discord.abc.User, profile: dict[str, Any]) -> discord.Embed:
         embed = discord.Embed(
-            title="Buddy Stats",
-            description=f"Progress summary for **{profile['buddy_name']}**.",
+            title=f"Buddy Stats - {profile['buddy_name']}",
+            description="Compact progression, titles, badges, and the activity mix shaping your companion.",
             color=profile["style_meta"]["color"],
         )
         embed.add_field(name="Level", value=str(profile["level"]), inline=True)
         embed.add_field(name="Total XP", value=str(profile["xp_total"]), inline=True)
-        embed.add_field(name="Daily Clears", value=str(profile["total_daily_clears"]), inline=True)
+        embed.add_field(name="Mood", value=profile["resolved_mood"], inline=True)
+        embed.add_field(name="Arcade Clears", value=str(profile["total_daily_clears"]), inline=True)
         embed.add_field(name="Utilities Used", value=str(_utility_score(profile)), inline=True)
-        embed.add_field(name="Games Played", value=str(profile["games_played"]), inline=True)
         embed.add_field(name="Games Won", value=str(profile["games_won"]), inline=True)
         unlocked_titles = [TITLE_DEFINITIONS[title]["label"] for title in profile["titles_unlocked"]]
         embed.add_field(name="Unlocked Titles", value=", ".join(unlocked_titles) if unlocked_titles else "None yet", inline=False)
         embed.add_field(name="Badges", value=_format_badges(profile["badges_unlocked"]), inline=False)
-        embed.add_field(name="XP Rules", value="Daily, utility, and game XP are all capped per UTC day to keep progression fair.", inline=False)
-        return ge.style_embed(embed, footer="Babblebox Buddy | No inventory grind, no economy spam")
+        embed.add_field(
+            name="XP Rules",
+            value="Daily, utility, and game XP are capped per UTC day so progress stays cozy instead of grindy.",
+            inline=False,
+        )
+        return ge.style_embed(embed, footer="Babblebox Buddy | No inventory, no economy spam, no lootbox grind")
 
     def build_profile_embed(
         self,
@@ -795,11 +934,11 @@ class ProfileService:
         species = profile["species_meta"]
         embed = discord.Embed(
             title=title,
-            description=f"**{ge.display_name_of(target)}** with buddy **{profile['buddy_name']}**.",
+            description=f"**{ge.display_name_of(target)}** with buddy **{profile['buddy_name']}** in the Babblebox lounge.",
             color=profile["style_meta"]["color"],
         )
         embed.add_field(
-            name="Buddy",
+            name="Companion",
             value=(
                 f"{species['label']} | {profile['style_meta']['label']} style\n"
                 f"Mood: **{profile['resolved_mood']}** | Title: **{profile['display_title']}**\n"
@@ -808,7 +947,7 @@ class ProfileService:
             inline=False,
         )
         embed.add_field(
-            name="Daily",
+            name="Daily Arcade",
             value=(
                 f"Streak: **{profile['active_streak']}**\n"
                 f"Best: **{profile['best_daily_streak']}**\n"
@@ -827,7 +966,7 @@ class ProfileService:
         )
         if utility_summary is not None:
             embed.add_field(
-                name="Utilities",
+                name="Everyday Utility",
                 value=(
                     f"Watch active: **{'Yes' if utility_summary['watch_enabled'] else 'No'}**\n"
                     f"Later markers: **{utility_summary['active_later_markers']}**\n"
@@ -838,7 +977,7 @@ class ProfileService:
             )
         else:
             embed.add_field(
-                name="Utilities",
+                name="Everyday Utility",
                 value=(
                     f"Later saves: **{profile['later_saves']}**\n"
                     f"Reminders made: **{profile['reminders_created']}**\n"
@@ -856,4 +995,4 @@ class ProfileService:
                 f"Session snapshot: wins **{session_stats.get('wins', 0)}**, bomb words **{session_stats.get('bomb_words', 0)}**"
             )
         embed.add_field(name="Party Games", value="\n".join(game_lines), inline=False)
-        return ge.style_embed(embed, footer="Babblebox Profile | Utilities, Daily, Buddy, and games in one compact view")
+        return ge.style_embed(embed, footer="Babblebox Profile | Party games, daily arcade, utilities, and buddy identity together")

@@ -24,7 +24,7 @@ class ProfileServiceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_daily_guess_flow_updates_profile_and_share_output(self):
         status = await self.service.get_daily_status(11)
-        puzzle = status["puzzle"]
+        puzzle = status["puzzles"]["shuffle"]
 
         ok, payload = await self.service.submit_daily_guess(11, puzzle.answer)
         self.assertTrue(ok)
@@ -37,8 +37,9 @@ class ProfileServiceTests(unittest.IsolatedAsyncioTestCase):
 
         ok, share_text = await self.service.build_daily_share(11)
         self.assertTrue(ok)
-        self.assertIn("Babblebox Daily", share_text)
+        self.assertIn("Babblebox Daily Arcade", share_text)
         self.assertIn("1/3", share_text)
+        self.assertIn("\U0001f7e9", share_text)
 
     async def test_daily_duplicate_submission_is_blocked_after_solve(self):
         puzzle = build_daily_shuffle(ge.now_utc().date())
@@ -48,6 +49,17 @@ class ProfileServiceTests(unittest.IsolatedAsyncioTestCase):
         ok, message = await self.service.submit_daily_guess(22, puzzle.answer)
         self.assertFalse(ok)
         self.assertIn("already solved", message)
+
+    async def test_daily_arcade_supports_multiple_modes(self):
+        status = await self.service.get_daily_status(77)
+        self.assertEqual(set(status["puzzles"].keys()), {"shuffle", "emoji", "signal"})
+        emoji_puzzle = status["puzzles"]["emoji"]
+        ok, payload = await self.service.submit_daily_guess(77, emoji_puzzle.answer, mode="emoji")
+        self.assertTrue(ok)
+        self.assertEqual(payload["puzzle"].mode, "emoji")
+        ok, share_text = await self.service.build_daily_share(77, mode="emoji")
+        self.assertTrue(ok)
+        self.assertIn("Emoji Booth", share_text)
 
     async def test_buddy_defaults_and_style_change_work(self):
         profile = await self.service.get_profile(33)

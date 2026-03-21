@@ -8,12 +8,22 @@ from discord.ext import commands
 
 from babblebox import game_engine as ge
 from babblebox.command_utils import defer_hybrid_response, send_hybrid_response
+from babblebox.daily_challenges import DAILY_DEFAULT_MODE
 from babblebox.profile_service import BUDDY_STYLES, ProfileService
 
 
 DAILY_LEADERBOARD_CHOICES = [
     app_commands.Choice(name="Total clears", value="clears"),
     app_commands.Choice(name="Current streak", value="streak"),
+]
+DAILY_MODE_CHOICES = [
+    app_commands.Choice(name="Shuffle Booth", value="shuffle"),
+    app_commands.Choice(name="Emoji Booth", value="emoji"),
+    app_commands.Choice(name="Signal Booth", value="signal"),
+]
+VISIBILITY_CHOICES = [
+    app_commands.Choice(name="Public", value="public"),
+    app_commands.Choice(name="Only me", value="private"),
 ]
 
 BUDDY_STYLE_CHOICES = [
@@ -26,6 +36,8 @@ class IdentityCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.service = ProfileService(bot)
+        self._public_user_cooldowns: dict[tuple[str, int], float] = {}
+        self._public_channel_cooldowns: dict[tuple[str, int], float] = {}
 
     async def cog_load(self):
         await self.service.start()
@@ -63,28 +75,62 @@ class IdentityCog(commands.Cog):
             "active_reminders": len(utility_service.list_reminders(user_id)),
         }
 
+    def _is_private(self, visibility: str) -> bool:
+        return visibility == "private"
+
+    def _public_cooldown_error(
+        self,
+        ctx: commands.Context,
+        *,
+        bucket: str,
+        visibility: str,
+        user_seconds: float,
+        channel_seconds: float,
+    ) -> str | None:
+        if self._is_private(visibility):
+            return None
+        now = self.bot.loop.time()
+        user_key = (bucket, ctx.author.id)
+        channel_key = (bucket, ctx.channel.id if ctx.channel is not None else 0)
+        user_remaining = user_seconds - (now - self._public_user_cooldowns.get(user_key, 0.0))
+        channel_remaining = channel_seconds - (now - self._public_channel_cooldowns.get(channel_key, 0.0))
+        if user_remaining > 0 or channel_remaining > 0:
+            wait_for = int(max(user_remaining, channel_remaining)) + 1
+            return f"That public card is on cooldown. Try again in about {wait_for} seconds, or switch visibility to private."
+        self._public_user_cooldowns[user_key] = now
+        if channel_key[1]:
+            self._public_channel_cooldowns[channel_key] = now
+        return None
+
     @commands.hybrid_group(
         name="daily",
         with_app_command=True,
-        description="Play today's shared Babblebox Daily challenge",
+        description="Step into today's Babblebox Daily Arcade",
         invoke_without_command=True,
     )
-    async def daily_group(self, ctx: commands.Context):
+    @app_commands.describe(mode="Optional arcade booth to open first")
+    @app_commands.choices(mode=DAILY_MODE_CHOICES)
+    async def daily_group(self, ctx: commands.Context, mode: Optional[str] = None):
         if not await self._require_storage(ctx, "Daily"):
             return
-        payload = await self.service.get_daily_status(ctx.author.id)
+        payload = await self.service.get_daily_status(ctx.author.id, mode=mode)
         await send_hybrid_response(ctx, embed=self.service.build_daily_embed(ctx.author, payload), ephemeral=True)
 
-    @daily_group.command(name="play", with_app_command=True, description="View today's Daily or submit a guess")
-    @app_commands.describe(guess="Your Daily answer guess")
-    async def daily_play_command(self, ctx: commands.Context, *, guess: Optional[str] = None):
+    @daily_group.command(name="play", with_app_command=True, description="Open a booth or submit a guess")
+    @app_commands.describe(mode="Shuffle, Emoji, or Signal", guess="Your answer guess")
+    @app_commands.choices(mode=DAILY_MODE_CHOICES)
+    async def daily_play_command(self, ctx: commands.Context, mode: Optional[str] = None, *, guess: Optional[str] = None):
         if not await self._require_storage(ctx, "Daily"):
             return
+        if guess is None and mode is not None and mode not in {"shuffle", "emoji", "signal"}:
+            guess = mode
+            mode = DAILY_DEFAULT_MODE
+        resolved_mode = mode or DAILY_DEFAULT_MODE
         if guess is None:
-            payload = await self.service.get_daily_status(ctx.author.id)
+            payload = await self.service.get_daily_status(ctx.author.id, mode=resolved_mode)
             await send_hybrid_response(ctx, embed=self.service.build_daily_embed(ctx.author, payload), ephemeral=True)
             return
-        ok, payload_or_message = await self.service.submit_daily_guess(ctx.author.id, guess)
+        ok, payload_or_message = await self.service.submit_daily_guess(ctx.author.id, guess, mode=resolved_mode)
         if not ok:
             await send_hybrid_response(
                 ctx,
@@ -110,11 +156,27 @@ class IdentityCog(commands.Cog):
             return
         await send_hybrid_response(ctx, embed=self.service.build_daily_stats_embed(target, payload), ephemeral=True)
 
-    @daily_group.command(name="share", with_app_command=True, description="Share your completed Daily result")
-    async def daily_share_command(self, ctx: commands.Context):
+    @daily_group.command(name="share", with_app_command=True, description="Share a completed Daily Arcade booth")
+    @app_commands.describe(mode="Which booth result to share", visibility="Post publicly or keep the result private")
+    @app_commands.choices(mode=DAILY_MODE_CHOICES, visibility=VISIBILITY_CHOICES)
+    async def daily_share_command(self, ctx: commands.Context, mode: str = DAILY_DEFAULT_MODE, visibility: str = "public"):
         if not await self._require_storage(ctx, "Daily"):
             return
-        ok, share_text = await self.service.build_daily_share(ctx.author.id)
+        cooldown_error = self._public_cooldown_error(
+            ctx,
+            bucket="daily_share",
+            visibility=visibility,
+            user_seconds=18.0,
+            channel_seconds=8.0,
+        )
+        if cooldown_error is not None:
+            await send_hybrid_response(
+                ctx,
+                embed=ge.make_status_embed("Daily Share Cooldown", cooldown_error, tone="warning", footer="Babblebox Daily Arcade"),
+                ephemeral=True,
+            )
+            return
+        ok, share_text = await self.service.build_daily_share(ctx.author.id, mode=mode)
         if not ok:
             await send_hybrid_response(
                 ctx,
@@ -123,17 +185,35 @@ class IdentityCog(commands.Cog):
             )
             return
         embed = discord.Embed(
-            title="Babblebox Daily Share",
+            title="Daily Arcade Share",
             description=share_text,
             color=ge.EMBED_THEME["accent"],
         )
-        await send_hybrid_response(ctx, embed=ge.style_embed(embed, footer="Babblebox Daily | Shared result"), ephemeral=False)
+        await send_hybrid_response(
+            ctx,
+            embed=ge.style_embed(embed, footer="Babblebox Daily Arcade | Shared result"),
+            ephemeral=self._is_private(visibility),
+        )
 
     @daily_group.command(name="leaderboard", with_app_command=True, description="View the Babblebox Daily leaderboard")
     @app_commands.describe(metric="Rank by total clears or current streak")
     @app_commands.choices(metric=DAILY_LEADERBOARD_CHOICES)
     async def daily_leaderboard_command(self, ctx: commands.Context, metric: str = "clears"):
         if not await self._require_storage(ctx, "Daily"):
+            return
+        cooldown_error = self._public_cooldown_error(
+            ctx,
+            bucket="daily_leaderboard",
+            visibility="public",
+            user_seconds=12.0,
+            channel_seconds=6.0,
+        )
+        if cooldown_error is not None:
+            await send_hybrid_response(
+                ctx,
+                embed=ge.make_status_embed("Leaderboard Cooldown", cooldown_error, tone="warning", footer="Babblebox Daily Arcade"),
+                ephemeral=True,
+            )
             return
         entries = await self.service.get_daily_leaderboard(metric=metric)
         await send_hybrid_response(ctx, embed=self.service.build_daily_leaderboard_embed(entries, metric=metric), ephemeral=False)
@@ -144,18 +224,50 @@ class IdentityCog(commands.Cog):
         description="View and customize your Babblebox Buddy",
         invoke_without_command=True,
     )
-    async def buddy_group(self, ctx: commands.Context):
+    @app_commands.describe(visibility="Show your Buddy publicly or only to you")
+    @app_commands.choices(visibility=VISIBILITY_CHOICES)
+    async def buddy_group(self, ctx: commands.Context, visibility: str = "public"):
         if not await self._require_storage(ctx, "Buddy"):
             return
+        cooldown_error = self._public_cooldown_error(
+            ctx,
+            bucket="buddy",
+            visibility=visibility,
+            user_seconds=15.0,
+            channel_seconds=7.0,
+        )
+        if cooldown_error is not None:
+            await send_hybrid_response(
+                ctx,
+                embed=ge.make_status_embed("Buddy Cooldown", cooldown_error, tone="warning", footer="Babblebox Buddy"),
+                ephemeral=True,
+            )
+            return
         profile = await self.service.get_profile(ctx.author.id)
-        await send_hybrid_response(ctx, embed=self.service.build_buddy_embed(ctx.author, profile), ephemeral=True)
+        await send_hybrid_response(ctx, embed=self.service.build_buddy_embed(ctx.author, profile), ephemeral=self._is_private(visibility))
 
     @buddy_group.command(name="profile", with_app_command=True, description="Open your Buddy card")
-    async def buddy_profile_command(self, ctx: commands.Context):
+    @app_commands.describe(visibility="Show your Buddy publicly or only to you")
+    @app_commands.choices(visibility=VISIBILITY_CHOICES)
+    async def buddy_profile_command(self, ctx: commands.Context, visibility: str = "public"):
         if not await self._require_storage(ctx, "Buddy"):
             return
+        cooldown_error = self._public_cooldown_error(
+            ctx,
+            bucket="buddy_profile",
+            visibility=visibility,
+            user_seconds=15.0,
+            channel_seconds=7.0,
+        )
+        if cooldown_error is not None:
+            await send_hybrid_response(
+                ctx,
+                embed=ge.make_status_embed("Buddy Cooldown", cooldown_error, tone="warning", footer="Babblebox Buddy"),
+                ephemeral=True,
+            )
+            return
         profile = await self.service.get_profile(ctx.author.id)
-        await send_hybrid_response(ctx, embed=self.service.build_buddy_embed(ctx.author, profile), ephemeral=True)
+        await send_hybrid_response(ctx, embed=self.service.build_buddy_embed(ctx.author, profile), ephemeral=self._is_private(visibility))
 
     @buddy_group.command(name="rename", with_app_command=True, description="Rename your Babblebox Buddy")
     @app_commands.describe(nickname="A short safe name for your buddy")
@@ -183,21 +295,52 @@ class IdentityCog(commands.Cog):
         )
 
     @buddy_group.command(name="stats", with_app_command=True, description="See buddy XP, badges, and progression")
-    async def buddy_stats_command(self, ctx: commands.Context):
+    @app_commands.describe(visibility="Show your Buddy stats publicly or only to you")
+    @app_commands.choices(visibility=VISIBILITY_CHOICES)
+    async def buddy_stats_command(self, ctx: commands.Context, visibility: str = "public"):
         if not await self._require_storage(ctx, "Buddy"):
             return
+        cooldown_error = self._public_cooldown_error(
+            ctx,
+            bucket="buddy_stats",
+            visibility=visibility,
+            user_seconds=15.0,
+            channel_seconds=7.0,
+        )
+        if cooldown_error is not None:
+            await send_hybrid_response(
+                ctx,
+                embed=ge.make_status_embed("Buddy Cooldown", cooldown_error, tone="warning", footer="Babblebox Buddy"),
+                ephemeral=True,
+            )
+            return
         profile = await self.service.get_profile(ctx.author.id)
-        await send_hybrid_response(ctx, embed=self.service.build_buddy_stats_embed(ctx.author, profile), ephemeral=True)
+        await send_hybrid_response(ctx, embed=self.service.build_buddy_stats_embed(ctx.author, profile), ephemeral=self._is_private(visibility))
 
     @commands.hybrid_command(name="profile", with_app_command=True, description="View a Babblebox profile with Daily, Buddy, utilities, and game stats")
-    @app_commands.describe(user="Whose profile to view")
-    async def profile_command(self, ctx: commands.Context, user: Optional[discord.User] = None):
+    @app_commands.describe(user="Whose profile to view", visibility="Show the profile publicly or only to you")
+    @app_commands.choices(visibility=VISIBILITY_CHOICES)
+    async def profile_command(self, ctx: commands.Context, user: Optional[discord.User] = None, visibility: str = "public"):
         if not await self._require_storage(ctx, "Profile"):
+            return
+        cooldown_error = self._public_cooldown_error(
+            ctx,
+            bucket="profile",
+            visibility=visibility,
+            user_seconds=15.0,
+            channel_seconds=7.0,
+        )
+        if cooldown_error is not None:
+            await send_hybrid_response(
+                ctx,
+                embed=ge.make_status_embed("Profile Cooldown", cooldown_error, tone="warning", footer="Babblebox Profile"),
+                ephemeral=True,
+            )
             return
         target = user or ctx.author
         profile = await self.service.get_profile(target.id)
         utility_summary = None
-        if target.id == ctx.author.id:
+        if target.id == ctx.author.id and self._is_private(visibility):
             utility_summary = self._utility_summary_for(user_id=target.id, guild_id=ctx.guild.id if ctx.guild else None)
         session_stats = ge.session_stats.get(target.id)
         await send_hybrid_response(
@@ -209,7 +352,7 @@ class IdentityCog(commands.Cog):
                 session_stats=session_stats,
                 title="Babblebox Profile",
             ),
-            ephemeral=True,
+            ephemeral=self._is_private(visibility),
         )
 
     @commands.hybrid_command(name="vault", with_app_command=True, description="Open your personal Babblebox vault view")
