@@ -1,7 +1,10 @@
 import asyncio
 import types
 import unittest
+from datetime import datetime, timezone
 from unittest.mock import AsyncMock, patch
+
+import discord
 
 from babblebox import game_engine as ge
 from babblebox.cogs.gameplay import GameplayCog
@@ -212,6 +215,23 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await cog.service.close()
 
+    async def test_buddy_public_does_not_ephemeral_defer(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop(), get_user=lambda user_id: None)
+        cog = IdentityCog(bot)
+        memory_service = ProfileService(bot, store=ProfileStore(backend="memory"))
+        try:
+            await memory_service.start()
+            cog.service = memory_service
+            ctx = FakeContext(interaction=FakeInteraction(), guild=FakeGuild(), channel=FakeChannel(), author=FakeAuthor())
+
+            await IdentityCog.buddy_group.callback(cog, ctx, visibility="public")
+
+            self.assertEqual(ctx.defer_calls, [])
+            self.assertEqual(len(ctx.send_calls), 1)
+            self.assertFalse(ctx.send_calls[0]["ephemeral"])
+        finally:
+            await cog.service.close()
+
     async def test_help_public_uses_view_and_public_visibility(self):
         cog = MetaCog(types.SimpleNamespace(loop=asyncio.get_running_loop()))
         ctx = FakeContext(interaction=FakeInteraction(), guild=FakeGuild(), channel=FakeChannel(), author=FakeAuthor())
@@ -279,5 +299,61 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(ctx.send_calls), 1)
             self.assertTrue(ctx.send_calls[0]["ephemeral"])
             self.assertIn("not available", ctx.send_calls[0]["embed"].description.lower())
+        finally:
+            await cog.service.close()
+
+    async def test_moment_public_card_uses_public_visibility(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
+        cog = UtilityCog(bot)
+        try:
+            source_author = types.SimpleNamespace(
+                id=5,
+                display_name="Mira",
+                color=discord.Color.blue(),
+                display_avatar=types.SimpleNamespace(url="https://cdn.example/avatar.png"),
+            )
+            source_message = types.SimpleNamespace(
+                content="That one line deserved a card.",
+                attachments=[],
+                author=source_author,
+                channel=types.SimpleNamespace(mention="#general"),
+                guild=types.SimpleNamespace(name="Guild"),
+                created_at=datetime(2026, 3, 21, 12, 0, tzinfo=timezone.utc),
+                jump_url="https://discord.com/channels/10/20/30",
+            )
+            ctx = FakeContext(interaction=FakeInteraction(), guild=FakeGuild(), channel=FakeChannel(), author=FakeAuthor())
+
+            with patch.object(cog, "_resolve_moment_source", new=AsyncMock(return_value=(source_message, None))):
+                await UtilityCog.moment_create_command.callback(cog, ctx, message_link=None, title="Best Line", visibility="public")
+
+            self.assertEqual(len(ctx.defer_calls), 1)
+            self.assertFalse(ctx.defer_calls[0]["ephemeral"])
+            self.assertEqual(len(ctx.send_calls), 1)
+            self.assertFalse(ctx.send_calls[0]["ephemeral"])
+        finally:
+            await cog.service.close()
+
+    async def test_shield_panel_overview_reflects_legacy_pack_state(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
+        cog = ShieldCog(bot)
+        try:
+            guild_id = 10
+            cog.service.store.state["guilds"][str(guild_id)] = {
+                "guild_id": guild_id,
+                "packs": {
+                    "privacy": {"enabled": True, "action": "delete_log", "sensitivity": "high"},
+                    "promo": {"tracking": True},
+                },
+                "scam_enabled": True,
+            }
+
+            embed = cog.build_panel_embed(guild_id, "overview")
+            protection_field = next(field for field in embed.fields if field.name == "Protection Packs")
+
+            self.assertIn("**Privacy Leak**", protection_field.value)
+            self.assertIn("Enabled: Yes | Action: `delete_log` | Sensitivity: High", protection_field.value)
+            self.assertIn("**Promo / Invite**", protection_field.value)
+            self.assertIn("Enabled: Yes | Action: `log` | Sensitivity: Normal", protection_field.value)
+            self.assertIn("**Scam Heuristic**", protection_field.value)
         finally:
             await cog.service.close()

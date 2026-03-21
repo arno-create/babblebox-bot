@@ -191,45 +191,47 @@ class UtilityCog(commands.Cog):
         )
         embed = discord.Embed(
             title="Watch Settings",
-            description=f"Quiet DM alerts for **{ge.display_name_of(user)}**. Mentions and replies are split, and filters stay compact.",
+            description=f"Quiet DM alerts for **{ge.display_name_of(user)}**. Mentions, replies, and keywords stay split and compact.",
             color=ge.EMBED_THEME["accent"],
         )
-        mention_lines = [
-            f"Global: **{'On' if summary['mention_global'] else 'Off'}**",
-        ]
-        reply_lines = [
-            f"Global: **{'On' if summary['reply_global'] else 'Off'}**",
+        alert_lines = [
+            f"Mentions: global **{'On' if summary['mention_global'] else 'Off'}**",
+            f"Replies: global **{'On' if summary['reply_global'] else 'Off'}**",
         ]
         if guild is not None:
-            mention_lines.append(f"This server: **{'On' if summary['mention_server_enabled'] else 'Off'}**")
-            reply_lines.append(f"This server: **{'On' if summary['reply_server_enabled'] else 'Off'}**")
+            alert_lines.append(f"This server: mentions **{'On' if summary['mention_server_enabled'] else 'Off'}** | replies **{'On' if summary['reply_server_enabled'] else 'Off'}**")
         if channel is not None:
-            mention_lines.append(f"This channel: **{'On' if summary['mention_channel_enabled'] else 'Off'}**")
-            reply_lines.append(f"This channel: **{'On' if summary['reply_channel_enabled'] else 'Off'}**")
-        embed.add_field(name="Mention Alerts", value="\n".join(mention_lines), inline=True)
-        embed.add_field(name="Reply Alerts", value="\n".join(reply_lines), inline=True)
+            alert_lines.append(f"This channel: mentions **{'On' if summary['mention_channel_enabled'] else 'Off'}** | replies **{'On' if summary['reply_channel_enabled'] else 'Off'}**")
+        embed.add_field(name="Alert Modes", value="\n".join(alert_lines), inline=False)
         embed.add_field(
             name="Keyword Buckets",
             value=(
                 f"Global: **{len(summary['global_keywords'])}**\n"
                 f"Server: **{len(summary['server_keywords'])}**\n"
-                f"Channel: **{len(summary['channel_keywords'])}**"
+                f"Channel: **{len(summary['channel_keywords'])}**\n"
+                f"Saved total: **{summary['total_keywords']} / {WATCH_KEYWORD_LIMIT}**"
             ),
             inline=True,
         )
         embed.add_field(
-            name="Ignored Channels",
-            value=self._resolve_watch_channel_mentions(guild, summary["ignored_channel_ids"]),
-            inline=False,
-        )
-        embed.add_field(
-            name="Ignored Users",
-            value=self._resolve_ignored_user_labels(guild, summary["ignored_user_ids"]),
-            inline=False,
+            name="Focused Channels",
+            value=(
+                f"Mentions: {self._resolve_watch_channel_mentions(guild, summary['mention_channel_ids'])}\n"
+                f"Replies: {self._resolve_watch_channel_mentions(guild, summary['reply_channel_ids'])}"
+            ),
+            inline=True,
         )
         counts = summary["recent_counts"]
         embed.add_field(
-            name="Recent Alerts",
+            name="Filters",
+            value=(
+                f"Ignored channels: {self._resolve_watch_channel_mentions(guild, summary['ignored_channel_ids'])}\n"
+                f"Ignored users: {self._resolve_ignored_user_labels(guild, summary['ignored_user_ids'])}"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Recent Pings",
             value=(
                 f"Mentions: **{counts['mentions']}**\n"
                 f"Replies: **{counts['replies']}**\n"
@@ -238,7 +240,15 @@ class UtilityCog(commands.Cog):
             ),
             inline=False,
         )
-        embed.add_field(name="Keyword Limit", value=str(WATCH_KEYWORD_LIMIT), inline=True)
+        embed.add_field(
+            name="Quick Use",
+            value=(
+                "`/watch mentions on server`\n"
+                "`/watch replies on channel`\n"
+                "`/watch keyword add channel contains camera`"
+            ),
+            inline=False,
+        )
         return ge.style_embed(embed, footer="Babblebox Watch | DM-only alerts, compact filters, no message archive")
 
     def _watch_list_embed(
@@ -253,15 +263,15 @@ class UtilityCog(commands.Cog):
             channel_id=self._watch_channel_id(channel),
         )
         embed = discord.Embed(
-            title="Watch List",
-            description=f"Keyword buckets and focused filters for **{ge.display_name_of(user)}**.",
+            title="Watch Keywords",
+            description=f"What can trigger a Watch DM for **{ge.display_name_of(user)}**.",
             color=ge.EMBED_THEME["accent"],
         )
-        embed.add_field(name="Global Keywords", value=self._render_watch_keywords(summary["global_keywords"]), inline=False)
+        embed.add_field(name="Global", value=self._render_watch_keywords(summary["global_keywords"]), inline=False)
         if guild is not None:
-            embed.add_field(name=f"{guild.name} Keywords", value=self._render_watch_keywords(summary["server_keywords"]), inline=False)
+            embed.add_field(name=f"{guild.name}", value=self._render_watch_keywords(summary["server_keywords"]), inline=False)
         if channel is not None:
-            embed.add_field(name="This Channel Keywords", value=self._render_watch_keywords(summary["channel_keywords"]), inline=False)
+            embed.add_field(name="This Channel", value=self._render_watch_keywords(summary["channel_keywords"]), inline=False)
         embed.add_field(
             name="Focused Channels",
             value=(
@@ -270,6 +280,7 @@ class UtilityCog(commands.Cog):
             ),
             inline=False,
         )
+        embed.add_field(name="Note", value="Watch stays DM-only and never stores a message archive.", inline=False)
         return ge.style_embed(embed, footer="Babblebox Watch | Use /watch ignore to trim noisy places or people")
 
     def _later_list_embed(self, user: discord.abc.User, markers: list[dict], *, guild: discord.Guild | None) -> discord.Embed:
@@ -279,19 +290,21 @@ class UtilityCog(commands.Cog):
             color=ge.EMBED_THEME["info"],
         )
         if not markers:
-            embed.description += "\n\nYou do not have any saved markers."
+            embed.description += "\n\nNo markers yet. Use `/later mark` when you want a clean jump-back link."
             return ge.style_embed(embed, footer="Babblebox Later | Mark a channel with /later mark.")
 
         lines = []
-        for marker in markers[:10]:
+        for marker in markers[:8]:
             saved_at = ge.format_timestamp(deserialize_datetime(marker.get("saved_at")), "R")
             location = f"{marker.get('guild_name', 'Unknown server')} / #{marker.get('channel_name', 'unknown')}"
             if guild is not None:
                 location = f"#{marker.get('channel_name', 'unknown')}"
-            lines.append(f"**{location}** - {marker.get('author_name', 'Unknown')} - saved {saved_at}")
-        if len(markers) > 10:
-            lines.append(f"...and {len(markers) - 10} more")
+            preview = ge.safe_field_text(marker.get("preview", "[quiet message]"), limit=80)
+            lines.append(f"**{location}** • {saved_at}\n{marker.get('author_name', 'Unknown')} • {preview}")
+        if len(markers) > 8:
+            lines.append(f"...and {len(markers) - 8} more")
         embed.add_field(name="Markers", value="\n".join(lines), inline=False)
+        embed.add_field(name="Quick Use", value="`/later mark` to refresh a channel\n`/later clear here` to remove just this one", inline=False)
         return ge.style_embed(embed, footer="Babblebox Later | Use /later clear or bb!later clear.")
 
     def _reminder_list_embed(self, user: discord.abc.User, reminders: list[dict]) -> discord.Embed:
@@ -944,7 +957,7 @@ class UtilityCog(commands.Cog):
         await self._send_usage(
             ctx,
             "Babblebox Moment",
-            "Use `/moment create <message_link>` or reply with `bb!moment from-reply` to turn a message into a shareable card.",
+            "Turn a message into a shareable keepsake card with a live jump link. Try `/moment from-reply`, `/moment recent`, or `/moment create <message_link>`.",
         )
 
     @moment_group.command(name="create", with_app_command=True, description="Create a Moment Card from a message link or reply")

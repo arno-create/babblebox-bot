@@ -1155,51 +1155,50 @@ def get_lobby_embed(guild_id):
     host = game["host"]
 
     titles = {
-        "none": ("🎮 Babblebox Menu", "Select a mini-game from the dropdown below!", discord.Color.dark_theme()),
-        "telephone": ("🎙️ Broken Telephone", "Voice mimicry game! (3+ players)", discord.Color.blue()),
-        "corpse": ("📝 Exquisite Corpse", "Absurd collaborative story! (3+ players)", discord.Color.purple()),
-        "spyfall": ("🕵️ Spyfall", "Find the spy among you! (3+ players)", discord.Color.dark_gray()),
-        "bomb": ("💣 Word Bomb", "Battle Royale typing game! (2+ players)", discord.Color.red()),
+        "none": ("🎮 Babblebox Lobby", "Pick a party game from the menu below.", discord.Color.dark_theme()),
+        "telephone": ("🎙️ Broken Telephone", "Voice mimicry relay for 3+ players.", discord.Color.blue()),
+        "corpse": ("📝 Exquisite Corpse", "Blind collaborative nonsense for 3+ players.", discord.Color.purple()),
+        "spyfall": ("🕵️ Spyfall", "Find the spy before the room turns on itself. 3+ players.", discord.Color.dark_gray()),
+        "bomb": ("💣 Word Bomb", "Fast typing survival for 2+ players.", discord.Color.red()),
     }
 
     title, desc, color = titles.get(gt, titles["none"])
     embed = discord.Embed(title=title, description=desc, color=color)
-    embed.set_footer(text=f"Hosted by {host.display_name} | Use /stop or bb!stop to cancel | /help or bb!help for rules")
     embed.add_field(name="Chaos Card", value=build_chaos_card_line(game), inline=False)
 
     if gt == "bomb":
         config = get_bomb_mode_config(game.get("bomb_mode", "classic"))
         embed.add_field(
             name="Bomb Mode",
-            value=f"**{config['label']}** — {config['description']}",
+            value=f"**{config['label']}** | {config['description']}",
             inline=False,
         )
 
     if gt != "none":
+        min_players = 2 if gt == "bomb" else 3
         if not players:
-            embed.add_field(
-                name="Players Lobby",
-                value=(
-                    "No players yet. Click **Join** to open the room.\n"
-                    "If the server is quiet right now, try `/daily`, `/profile`, `/buddy`, or `/later` while you wait."
-                ),
-                inline=False,
+            lobby_value = (
+                "No players yet. Tap **Join** to open the room.\n"
+                "Waiting on a crowd? Try `/daily`, `/buddy`, `/profile`, or `/later` while the lobby warms up."
             )
         else:
-            players_list = "\n".join(f"**{i + 1}.** 🎮 {p.display_name}" for i, p in enumerate(players))
-            embed.add_field(name=f"Players Lobby ({len(players)}/{MAX_PLAYERS})", value=players_list, inline=False)
-
-        if gt != "none":
-            min_players = 2 if gt == "bomb" else 3
-            embed.add_field(
-                name="Start Guide",
-                value=(
-                    f"Minimum players: **{min_players}**\n"
-                    "Host picks the game, everyone joins, then the host starts when the room feels ready.\n"
-                    "Need a solo fallback? `/daily` and `/profile` are always available."
-                ),
-                inline=False,
-            )
+            roster = "\n".join(f"**{i + 1}.** 🎮 {p.display_name}" for i, p in enumerate(players))
+            needed = max(0, min_players - len(players))
+            lobby_value = roster
+            if needed > 0:
+                lobby_value += f"\n\nNeed **{needed}** more to start."
+            else:
+                lobby_value += "\n\nThe host can start whenever the room feels ready."
+        embed.add_field(name=f"Players ({len(players)}/{MAX_PLAYERS})", value=lobby_value, inline=False)
+        embed.add_field(
+            name="Start Guide",
+            value=(
+                f"Minimum players: **{min_players}**\n"
+                "Host picks the game, everyone joins, then the host starts.\n"
+                "Solo fallback: `/daily`, `/profile`, `/buddy`, or `/watch settings`."
+            ),
+            inline=False,
+        )
 
     return style_embed(embed, footer=f"Babblebox Lobby | Hosted by {host.display_name}")
 
@@ -1443,7 +1442,7 @@ class LobbyView(TrackedView):
                     interaction,
                     (
                         f"You need at least {min_players} players for this game. "
-                        "If the server is quiet, try `/daily`, `/profile`, or `/buddy` while you gather a crew."
+                        "Use **Join** to gather a crew, or pivot to `/daily`, `/profile`, `/buddy`, or `/later` while you wait."
                     ),
                     ephemeral=True,
                 )
