@@ -941,16 +941,23 @@ class UtilityService:
         record = self.get_afk_record(user_id, include_scheduled=False)
         return record if record is not None and record.get("status") == "active" else None
 
-    async def set_afk(self, *, user: discord.abc.User, reason: str | None, duration_minutes: int | None, start_in_minutes: int | None) -> tuple[bool, str | dict]:
+    async def set_afk(
+        self,
+        *,
+        user: discord.abc.User,
+        reason: str | None,
+        duration_seconds: int | None,
+        start_in_seconds: int | None,
+    ) -> tuple[bool, str | dict]:
         if not self._has_storage():
             return False, self.storage_message("AFK")
         valid, cleaned_or_error = ge.sanitize_afk_reason(reason)
         if not valid:
             return False, cleaned_or_error
         created_at = ge.now_utc()
-        scheduled = start_in_minutes is not None
-        starts_at = created_at + timedelta(minutes=start_in_minutes) if scheduled else created_at
-        ends_at = starts_at + timedelta(minutes=duration_minutes) if duration_minutes is not None else None
+        scheduled = start_in_seconds is not None
+        starts_at = created_at + timedelta(seconds=start_in_seconds) if scheduled else created_at
+        ends_at = starts_at + timedelta(seconds=duration_seconds) if duration_seconds is not None else None
         record = {"user_id": user.id, "status": "scheduled" if scheduled else "active", "reason": cleaned_or_error, "created_at": serialize_datetime(created_at), "set_at": None if scheduled else serialize_datetime(created_at), "starts_at": serialize_datetime(starts_at), "ends_at": serialize_datetime(ends_at)}
         async with self._lock:
             self.store.state.setdefault("afk", {})[str(user.id)] = record

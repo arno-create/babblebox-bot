@@ -3,26 +3,26 @@
 <head>
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-  <title>Babblebox - Party Games, Everyday Utilities, Daily Arcade, and Buddy Profiles</title>
+  <title>Babblebox - Party Games, Everyday Utilities, Daily Arcade, Buddy Profiles, and Shield Safety</title>
   <meta
     name="description"
-    content="Babblebox is a Discord bot with party games, everyday utilities, a Daily Arcade, Buddy/Profile charm, and shareable Moment Cards built around compact Postgres-backed persistence."
+    content="Babblebox is a Discord bot with party games, everyday utilities, a Daily Arcade, Buddy/Profile charm, shareable Moment Cards, and an optional Shield safety layer built around compact Postgres-backed persistence."
   />
   <meta name="robots" content="index,follow,max-image-preview:large" />
   <link rel="canonical" href="https://arno-create.github.io/babblebox-bot/" />
-  <meta property="og:title" content="Babblebox - Party Games, Everyday Utilities, Daily Arcade, and Buddy Profiles" />
+  <meta property="og:title" content="Babblebox - Party Games, Everyday Utilities, Daily Arcade, Buddy Profiles, and Shield Safety" />
   <meta
     property="og:description"
-    content="A multi-category Discord bot with party games, quiet utilities, a Daily Arcade, Buddy/Profile charm, and shareable Moment Cards."
+    content="A multi-category Discord bot with party games, quiet utilities, a Daily Arcade, Buddy/Profile charm, Moment Cards, and an optional Shield safety layer."
   />
   <meta property="og:url" content="https://arno-create.github.io/babblebox-bot/" />
   <meta property="og:type" content="website" />
   <meta property="og:image" content="https://arno-create.github.io/babblebox-bot/banner.png" />
   <meta name="twitter:card" content="summary_large_image" />
-  <meta name="twitter:title" content="Babblebox - Party Games, Everyday Utilities, Daily Arcade, and Buddy Profiles" />
+  <meta name="twitter:title" content="Babblebox - Party Games, Everyday Utilities, Daily Arcade, Buddy Profiles, and Shield Safety" />
   <meta
     name="twitter:description"
-    content="Party games when a group is around, useful tools when it is not, plus a Daily Arcade, Buddy profiles, and Moment Cards."
+    content="Party games when a group is around, useful tools when it is not, plus a Daily Arcade, Buddy profiles, Moment Cards, and optional Shield safety."
   />
   <meta name="twitter:image" content="https://arno-create.github.io/babblebox-bot/banner.png" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -390,7 +390,7 @@
           <img src="logo.jpg" alt="Babblebox logo" />
           <span>
             <span>Babblebox</span>
-            <small>party games + utilities + daily arcade</small>
+            <small>party games + utilities + daily arcade + shield</small>
           </span>
         </a>
         <div class="nav-links">
@@ -398,7 +398,8 @@
           <a href="#utilities">Utilities</a>
           <a href="#daily">Daily Arcade</a>
           <a href="#buddy">Buddy / Profile / Vault</a>
-          <a href="#privacy">Support / Privacy</a>
+          <a href="#shield">Shield / Safety</a>
+          <a href="#privacy">Privacy / Support</a>
           <a href="#commands">Commands</a>
         </div>
       </nav>
@@ -408,12 +409,14 @@
   <header id="top">
     <div class="container hero">
       <div>
-        <div class="eyebrow">Python | discord.py | modular architecture | compact Postgres-first persistence</div>
-        <h1><span class="gradient">Babblebox</span><br />for party nights, quiet utilities, and daily arcade return visits.</h1>
+        <div class="eyebrow">Python | discord.py | modular architecture | compact Postgres-first persistence | optional Shield safety</div>
+        <h1><span class="gradient">Babblebox</span><br />for party nights, quiet utilities, daily arcade return visits, and low-noise server safety.</h1>
         <p>
           Babblebox still shines when a group piles into voice chat, but it now earns its place in quieter servers too:
           Watch V2 alerts, Later and Capture utility flows, Daily Arcade booths, Buddy/Profile charm, and shareable
-          Moment Cards that feel warm and screenshot-worthy without turning into a heavy archive product.
+          Moment Cards that feel warm and screenshot-worthy without turning into a heavy archive product. For servers
+          that want a little extra protection, Babblebox Shield adds configurable privacy, promo, and heuristic scam checks
+          without turning the bot into a giant moderation suite.
         </p>
         <div class="cta-row">
           <a class="btn btn-primary" href="https://discord.com/oauth2/authorize?client_id=1480903089518022739" target="_blank" rel="noreferrer">Invite Babblebox</a>
@@ -424,7 +427,7 @@
           <div class="stat"><b>4</b><span>party games</span></div>
           <div class="stat"><b>6</b><span>everyday utilities</span></div>
           <div class="stat"><b>3</b><span>Daily Arcade booths</span></div>
-          <div class="stat"><b>1</b><span>compact Buddy per user</span></div>
+          <div class="stat"><b>3</b><span>Shield protection packs</span></div>
         </div>
       </div>
       <div class="hero-panel">
@@ -440,7 +443,7 @@
   <section>
     <div class="container">
       <div class="section-head">
-        <h2>One bot, four clear reasons to keep it around.</h2>
+        <h2>One bot, five clear reasons to keep it around.</h2>
         <p>Babblebox is meant to feel cohesive, not like unrelated commands stitched together.</p>
       </div>
       <div class="grid quad">
@@ -463,6 +466,11 @@
           <span class="label">Buddy / Profile</span>
           <h3>Identity without economy bloat</h3>
           <p>Your Buddy, streaks, levels, badges, and profile live in one compact layer with anti-farm progression and no inventory grind.</p>
+        </article>
+        <article class="card">
+          <span class="label">Shield</span>
+          <h3>Optional, compact safety</h3>
+          <p>Privacy leak checks, promo/invite protection, and heuristic scam alerts stay configurable, log-first, and light on storage.</p>
         </article>
       </div>
     </div>
@@ -516,7 +524,7 @@
         </article>
         <article class="card">
           <h3>Moment, Remind, AFK</h3>
-          <p>Shareable Moment Cards, one-time reminders, and a compact away-status system with elapsed and return context.</p>
+          <p>Shareable Moment Cards, one-time reminders, and a compact away-status system with `30m`, `2h`, and `2d` parsing.</p>
         </article>
       </div>
     </div>
@@ -586,6 +594,45 @@
     </div>
   </section>
 
+  <section id="shield">
+    <div class="container">
+      <div class="section-head">
+        <h2>Shield / Safety</h2>
+        <p>Optional moderation support that tries to be useful, transparent, and low-noise.</p>
+      </div>
+      <div class="grid double">
+        <article class="card">
+          <span class="label">Three Packs</span>
+          <h3>Privacy, promo, and scam coverage</h3>
+          <p>
+            Babblebox Shield can watch for likely privacy leaks, Discord invite or promo spam, and heuristic scam or malicious-link bait.
+            It is conservative by default and clearly labels experimental scam detection as best-effort.
+          </p>
+          <ul>
+            <li>privacy leak pack</li>
+            <li>promo / invite pack</li>
+            <li>heuristic scam pack</li>
+            <li>safe advanced patterns without raw user regex</li>
+          </ul>
+        </article>
+        <article class="card">
+          <span class="label">Admin UX</span>
+          <h3>Log-first and compact by design</h3>
+          <p>
+            Admins can tune per-pack actions, sensitivities, allowlists, trusted-role bypasses, included or excluded scope,
+            escalation thresholds, and private mod-log delivery without storing a heavy moderation archive in the database.
+          </p>
+          <ul>
+            <li>off until configured</li>
+            <li>log-only defaults</li>
+            <li>private alert channel support</li>
+            <li>bounded in-memory escalation</li>
+          </ul>
+        </article>
+      </div>
+    </div>
+  </section>
+
   <section id="commands">
     <div class="container">
       <div class="section-head">
@@ -610,8 +657,11 @@
           <div class="command-row"><code>/moment from-reply</code><span>Turn a reply target into a polished Moment Card.</span></div>
           <div class="command-row"><code>/moment recent</code><span>Turn a recent exchange into a Moment Card.</span></div>
           <div class="command-row"><code>/remind set</code><span>Create a one-time reminder.</span></div>
-          <div class="command-row"><code>/afk</code><span>Set or schedule away status.</span></div>
+          <div class="command-row"><code>/afk</code><span>Set or schedule away status with <code>30m</code>, <code>2h</code>, or <code>2d</code>.</span></div>
           <div class="command-row"><code>/vault</code><span>Open your more personal progress snapshot.</span></div>
+          <div class="command-row"><code>/shield status</code><span>Open the private Shield control panel for admins.</span></div>
+          <div class="command-row"><code>/shield pack</code><span>Tune one Shield pack's action mode and sensitivity.</span></div>
+          <div class="command-row"><code>/shield test</code><span>Dry-run a sample message against the current Shield rules.</span></div>
         </div>
       </div>
     </div>
@@ -661,10 +711,12 @@
           <ul>
             <li>Gameplay state is primarily temporary session state.</li>
             <li>Utility and profile persistence stay compact and bounded.</li>
+            <li>Shield stores configuration and bounded runtime strike state, not a heavy moderation archive.</li>
             <li>No screenshot storage, image blobs, or full watched-message archives.</li>
             <li>Capture transcripts are delivered privately and not kept as a long-term archive.</li>
             <li>Daily Arcade booth payloads regenerate from deterministic local data instead of being stored each day.</li>
             <li>Moment Cards are generated live from visible messages and are not stored as a quote feed.</li>
+            <li>Raw custom regex is intentionally unsupported in Shield advanced mode to avoid unsafe backtracking risks.</li>
           </ul>
         </article>
         <article class="card">
@@ -688,7 +740,8 @@
           <h2>Invite Babblebox when you want more than one bot category.</h2>
           <p>
             It still shines as a party-game bot, but it now earns its place on quieter days too:
-            utilities, Daily Arcade booths, Buddy identity, Moment Cards, and one profile layer that makes the bot feel cohesive instead of scattered.
+            utilities, Daily Arcade booths, Buddy identity, Moment Cards, one profile layer that feels cohesive instead of scattered,
+            and an optional Shield safety layer for servers that want compact moderation support.
           </p>
         </div>
         <div class="cta-row" style="justify-content:flex-end; margin-top:0;">

@@ -18,6 +18,7 @@ COGS = (
     "babblebox.cogs.gameplay",
     "babblebox.cogs.utilities",
     "babblebox.cogs.identity",
+    "babblebox.cogs.shield",
     "babblebox.cogs.events",
 )
 

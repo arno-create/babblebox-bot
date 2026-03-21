@@ -19,6 +19,7 @@ class UtilityHelperTests(unittest.TestCase):
     def test_parse_duration_string_accepts_compound_values(self):
         self.assertEqual(parse_duration_string("1h 30m"), 5400)
         self.assertEqual(parse_duration_string("1d12h"), 129600)
+        self.assertEqual(parse_duration_string("2d"), 172800)
 
     def test_parse_duration_string_rejects_invalid_text(self):
         self.assertIsNone(parse_duration_string("tomorrow"))

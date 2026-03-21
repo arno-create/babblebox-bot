@@ -7,6 +7,7 @@ from babblebox import game_engine as ge
 from babblebox.cogs.gameplay import GameplayCog
 from babblebox.cogs.identity import IdentityCog
 from babblebox.cogs.meta import MetaCog
+from babblebox.cogs.shield import ShieldCog
 from babblebox.cogs.utilities import UtilityCog
 from babblebox.profile_service import ProfileService
 from babblebox.profile_store import ProfileStore
@@ -28,6 +29,7 @@ class FakeInteraction:
     def __init__(self, *, expired: bool = False):
         self.response = FakeResponse()
         self._expired = expired
+        self.user = FakeAuthor()
 
     def is_expired(self):
         return self._expired
@@ -35,14 +37,16 @@ class FakeInteraction:
 
 class FakeGuildPermissions:
     administrator = False
+    manage_guild = False
 
 
 class FakeAuthor:
-    def __init__(self, user_id: int = 1):
+    def __init__(self, user_id: int = 1, *, manage_guild: bool = False):
         self.id = user_id
         self.display_name = f"User {user_id}"
         self.mention = f"<@{user_id}>"
         self.guild_permissions = FakeGuildPermissions()
+        self.guild_permissions.manage_guild = manage_guild
 
 
 class FakeGuild:
@@ -167,6 +171,72 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             await IdentityCog.daily_group.callback(cog, ctx)
 
             self.assertEqual(len(ctx.defer_calls), 1)
+            self.assertEqual(len(ctx.send_calls), 1)
+            self.assertTrue(ctx.send_calls[0]["ephemeral"])
+        finally:
+            await cog.service.close()
+
+    async def test_profile_public_does_not_ephemeral_defer(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop(), get_user=lambda user_id: None)
+        cog = IdentityCog(bot)
+        memory_service = ProfileService(bot, store=ProfileStore(backend="memory"))
+        try:
+            await memory_service.start()
+            cog.service = memory_service
+            ctx = FakeContext(interaction=FakeInteraction(), guild=FakeGuild(), channel=FakeChannel(), author=FakeAuthor())
+
+            await IdentityCog.profile_command.callback(cog, ctx, user=None, visibility="public")
+
+            self.assertEqual(ctx.defer_calls, [])
+            self.assertEqual(len(ctx.send_calls), 1)
+            self.assertFalse(ctx.send_calls[0]["ephemeral"])
+        finally:
+            await cog.service.close()
+
+    async def test_daily_share_public_does_not_ephemeral_defer(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop(), get_user=lambda user_id: None)
+        cog = IdentityCog(bot)
+        memory_service = ProfileService(bot, store=ProfileStore(backend="memory"))
+        try:
+            await memory_service.start()
+            cog.service = memory_service
+            status = await cog.service.get_daily_status(1)
+            await cog.service.submit_daily_guess(1, status["puzzles"]["shuffle"].answer, mode="shuffle")
+            ctx = FakeContext(interaction=FakeInteraction(), guild=FakeGuild(), channel=FakeChannel(), author=FakeAuthor())
+
+            await IdentityCog.daily_share_command.callback(cog, ctx, mode="shuffle", visibility="public")
+
+            self.assertEqual(ctx.defer_calls, [])
+            self.assertEqual(len(ctx.send_calls), 1)
+            self.assertFalse(ctx.send_calls[0]["ephemeral"])
+        finally:
+            await cog.service.close()
+
+    async def test_help_public_uses_view_and_public_visibility(self):
+        cog = MetaCog(types.SimpleNamespace(loop=asyncio.get_running_loop()))
+        ctx = FakeContext(interaction=FakeInteraction(), guild=FakeGuild(), channel=FakeChannel(), author=FakeAuthor())
+
+        with patch("babblebox.cogs.meta.require_channel_permissions", new=AsyncMock(return_value=True)):
+            await MetaCog.help_command.callback(cog, ctx, visibility="public")
+
+        self.assertEqual(len(ctx.send_calls), 1)
+        self.assertFalse(ctx.send_calls[0]["ephemeral"])
+        self.assertIsNotNone(ctx.send_calls[0]["view"])
+
+    async def test_shield_status_is_private_for_admins(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
+        cog = ShieldCog(bot)
+        try:
+            cog.service.storage_ready = True
+            ctx = FakeContext(
+                interaction=FakeInteraction(),
+                guild=FakeGuild(),
+                channel=FakeChannel(),
+                author=FakeAuthor(manage_guild=True),
+            )
+
+            await ShieldCog.shield_status_command.callback(cog, ctx)
+
             self.assertEqual(len(ctx.send_calls), 1)
             self.assertTrue(ctx.send_calls[0]["ephemeral"])
         finally:

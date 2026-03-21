@@ -48,8 +48,16 @@ class IdentityCog(commands.Cog):
             delattr(self.bot, "profile_service")
         self.bot.loop.create_task(self.service.close())
 
-    async def _require_storage(self, ctx: commands.Context, feature_name: str) -> bool:
-        await defer_hybrid_response(ctx, ephemeral=True)
+    async def _require_storage(
+        self,
+        ctx: commands.Context,
+        feature_name: str,
+        *,
+        defer_response: bool = True,
+        defer_ephemeral: bool = True,
+    ) -> bool:
+        if defer_response:
+            await defer_hybrid_response(ctx, ephemeral=defer_ephemeral)
         if self.service.storage_ready:
             return True
         await send_hybrid_response(
@@ -160,7 +168,7 @@ class IdentityCog(commands.Cog):
     @app_commands.describe(mode="Which booth result to share", visibility="Post publicly or keep the result private")
     @app_commands.choices(mode=DAILY_MODE_CHOICES, visibility=VISIBILITY_CHOICES)
     async def daily_share_command(self, ctx: commands.Context, mode: str = DAILY_DEFAULT_MODE, visibility: str = "public"):
-        if not await self._require_storage(ctx, "Daily"):
+        if not await self._require_storage(ctx, "Daily", defer_response=False):
             return
         cooldown_error = self._public_cooldown_error(
             ctx,
@@ -199,7 +207,7 @@ class IdentityCog(commands.Cog):
     @app_commands.describe(metric="Rank by total clears or current streak")
     @app_commands.choices(metric=DAILY_LEADERBOARD_CHOICES)
     async def daily_leaderboard_command(self, ctx: commands.Context, metric: str = "clears"):
-        if not await self._require_storage(ctx, "Daily"):
+        if not await self._require_storage(ctx, "Daily", defer_response=False):
             return
         cooldown_error = self._public_cooldown_error(
             ctx,
@@ -227,7 +235,7 @@ class IdentityCog(commands.Cog):
     @app_commands.describe(visibility="Show your Buddy publicly or only to you")
     @app_commands.choices(visibility=VISIBILITY_CHOICES)
     async def buddy_group(self, ctx: commands.Context, visibility: str = "public"):
-        if not await self._require_storage(ctx, "Buddy"):
+        if not await self._require_storage(ctx, "Buddy", defer_response=False):
             return
         cooldown_error = self._public_cooldown_error(
             ctx,
@@ -250,7 +258,7 @@ class IdentityCog(commands.Cog):
     @app_commands.describe(visibility="Show your Buddy publicly or only to you")
     @app_commands.choices(visibility=VISIBILITY_CHOICES)
     async def buddy_profile_command(self, ctx: commands.Context, visibility: str = "public"):
-        if not await self._require_storage(ctx, "Buddy"):
+        if not await self._require_storage(ctx, "Buddy", defer_response=False):
             return
         cooldown_error = self._public_cooldown_error(
             ctx,
@@ -298,7 +306,7 @@ class IdentityCog(commands.Cog):
     @app_commands.describe(visibility="Show your Buddy stats publicly or only to you")
     @app_commands.choices(visibility=VISIBILITY_CHOICES)
     async def buddy_stats_command(self, ctx: commands.Context, visibility: str = "public"):
-        if not await self._require_storage(ctx, "Buddy"):
+        if not await self._require_storage(ctx, "Buddy", defer_response=False):
             return
         cooldown_error = self._public_cooldown_error(
             ctx,
@@ -321,7 +329,7 @@ class IdentityCog(commands.Cog):
     @app_commands.describe(user="Whose profile to view", visibility="Show the profile publicly or only to you")
     @app_commands.choices(visibility=VISIBILITY_CHOICES)
     async def profile_command(self, ctx: commands.Context, user: Optional[discord.User] = None, visibility: str = "public"):
-        if not await self._require_storage(ctx, "Profile"):
+        if not await self._require_storage(ctx, "Profile", defer_response=False):
             return
         cooldown_error = self._public_cooldown_error(
             ctx,

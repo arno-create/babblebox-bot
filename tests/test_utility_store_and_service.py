@@ -189,8 +189,8 @@ class UtilityStoreAndServiceTests(unittest.IsolatedAsyncioTestCase):
         ok, _ = await self.service.set_afk(
             user=user,
             reason="Stepped away",
-            duration_minutes=30,
-            start_in_minutes=None,
+            duration_seconds=30 * 60,
+            start_in_seconds=None,
         )
         self.assertTrue(ok)
         lines = self.service.build_afk_notice_lines_for_targets(
