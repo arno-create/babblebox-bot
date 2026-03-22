@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import io
 import re
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 import discord
 
@@ -43,6 +43,50 @@ IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".webm", ".mkv", ".avi"}
 AUDIO_EXTENSIONS = {".ogg", ".mp3", ".wav", ".m4a", ".flac"}
 MESSAGE_LINK_RE = re.compile(r"https?://(?:canary\.|ptb\.)?discord(?:app)?\.com/channels/(?P<guild>\d+|@me)/(?P<channel>\d+)/(?P<message>\d+)")
+AFK_CLOCK_RE = re.compile(r"^(?P<hour>\d{1,2})(?::(?P<minute>\d{2}))?\s*(?P<ampm>am|pm)?$")
+
+AFK_QUICK_REASONS = {
+    "sleeping": {
+        "emoji": "💤",
+        "label": "Sleeping",
+        "color": discord.Color.from_rgb(86, 119, 173),
+    },
+    "studying": {
+        "emoji": "📚",
+        "label": "Studying",
+        "color": discord.Color.from_rgb(86, 146, 111),
+    },
+    "working": {
+        "emoji": "💼",
+        "label": "Working",
+        "color": discord.Color.from_rgb(90, 132, 176),
+    },
+    "gaming": {
+        "emoji": "🎮",
+        "label": "Gaming",
+        "color": discord.Color.from_rgb(89, 161, 193),
+    },
+    "busy": {
+        "emoji": "⏳",
+        "label": "Busy",
+        "color": discord.Color.from_rgb(207, 140, 78),
+    },
+    "eating": {
+        "emoji": "🍽️",
+        "label": "Eating",
+        "color": discord.Color.from_rgb(208, 126, 88),
+    },
+    "outside": {
+        "emoji": "🌿",
+        "label": "Outside",
+        "color": discord.Color.from_rgb(83, 160, 130),
+    },
+    "resting": {
+        "emoji": "🛋️",
+        "label": "Resting",
+        "color": discord.Color.from_rgb(163, 122, 133),
+    },
+}
 
 
 def parse_duration_string(raw: str | None) -> int | None:
@@ -122,6 +166,99 @@ def deserialize_datetime(value: str | None) -> datetime | None:
     if parsed.tzinfo is None:
         return parsed.replace(tzinfo=timezone.utc)
     return parsed.astimezone(timezone.utc)
+
+
+def get_afk_quick_reason(key: str | None) -> dict | None:
+    if key is None:
+        return None
+    return AFK_QUICK_REASONS.get(str(key).strip().casefold())
+
+
+def build_afk_reason_text(*, preset: str | None = None, custom_reason: str | None = None) -> str | None:
+    details = (custom_reason or "").strip()
+    quick_reason = get_afk_quick_reason(preset)
+    if quick_reason is None:
+        return details or None
+    base = f"{quick_reason['emoji']} {quick_reason['label']}"
+    return f"{base} - {details}" if details else base
+
+
+def resolve_afk_reason_style(reason: str | None) -> dict | None:
+    cleaned = (reason or "").strip().casefold()
+    if not cleaned:
+        return None
+    for payload in AFK_QUICK_REASONS.values():
+        emoji_prefix = f"{payload['emoji']} {payload['label']}".casefold()
+        label_prefix = payload["label"].casefold()
+        if cleaned == emoji_prefix or cleaned.startswith(f"{emoji_prefix} - ") or cleaned == label_prefix or cleaned.startswith(f"{label_prefix} - "):
+            return payload
+    return None
+
+
+def _parse_afk_clock(text: str) -> tuple[int, int] | None:
+    match = AFK_CLOCK_RE.fullmatch(text.strip().lower())
+    if match is None:
+        return None
+    hour = int(match.group("hour"))
+    minute = int(match.group("minute") or "0")
+    ampm = match.group("ampm")
+    if minute > 59:
+        return None
+    if ampm is None:
+        if hour > 23:
+            return None
+        return hour, minute
+    if not (1 <= hour <= 12):
+        return None
+    if ampm == "am":
+        return 0 if hour == 12 else hour, minute
+    return (12 if hour == 12 else hour + 12), minute
+
+
+def parse_afk_start_at(raw: str | None, *, now: datetime | None = None) -> tuple[bool, datetime | str | None]:
+    if raw is None:
+        return True, None
+    text = raw.strip()
+    if not text:
+        return False, "Use `start_at` like `23:00`, `tomorrow 08:30`, or `2026-03-22 23:00` (UTC)."
+    now_utc = (now or ge.now_utc()).astimezone(timezone.utc)
+    lowered = text.casefold()
+
+    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S"):
+        try:
+            parsed = datetime.strptime(text, fmt).replace(tzinfo=timezone.utc)
+        except ValueError:
+            continue
+        if parsed <= now_utc:
+            return False, "`start_at` must be in the future."
+        return True, parsed
+
+    for prefix, day_offset in (("today ", 0), ("tomorrow ", 1)):
+        if lowered.startswith(prefix):
+            clock = _parse_afk_clock(lowered[len(prefix):].strip())
+            if clock is None:
+                return False, "Use `start_at` like `23:00`, `tomorrow 08:30`, or `2026-03-22 23:00` (UTC)."
+            target_date = (now_utc + timedelta(days=day_offset)).date()
+            parsed = datetime(
+                target_date.year,
+                target_date.month,
+                target_date.day,
+                clock[0],
+                clock[1],
+                tzinfo=timezone.utc,
+            )
+            if parsed <= now_utc:
+                return False, "`start_at` must be in the future."
+            return True, parsed
+
+    clock = _parse_afk_clock(lowered)
+    if clock is not None:
+        parsed = now_utc.replace(hour=clock[0], minute=clock[1], second=0, microsecond=0)
+        if parsed <= now_utc:
+            parsed += timedelta(days=1)
+        return True, parsed
+
+    return False, "Use `start_at` like `23:00`, `tomorrow 08:30`, or `2026-03-22 23:00` (UTC)."
 
 
 def build_jump_view(url: str, *, label: str = "Jump to Message") -> discord.ui.View:
@@ -416,12 +553,18 @@ def build_afk_status_embed(user: discord.abc.User, record: dict, *, title: str |
     set_at = deserialize_datetime(record.get("set_at")) or deserialize_datetime(record.get("starts_at")) or created_at
     starts_at = deserialize_datetime(record.get("starts_at")) or set_at
     ends_at = deserialize_datetime(record.get("ends_at"))
+    style = resolve_afk_reason_style(record.get("reason"))
+    accent_emoji = style["emoji"] if style is not None else ("🗓️" if status == "scheduled" else "💤")
     embed = discord.Embed(
-        title=title or ("Babblebox AFK Scheduled" if status == "scheduled" else "Babblebox AFK"),
+        title=title or (f"{accent_emoji} AFK Scheduled" if status == "scheduled" else f"{accent_emoji} AFK Enabled"),
         description=f"**{ge.display_name_of(user)}**",
-        color=ge.EMBED_THEME["warning"],
+        color=style["color"] if style is not None else ge.EMBED_THEME["warning"],
         timestamp=ends_at or starts_at or ge.now_utc(),
     )
+    status_text = "Scheduled away status" if status == "scheduled" else "Away status is active"
+    if style is not None:
+        status_text = f"{style['emoji']} {style['label']}"
+    embed.add_field(name="Status", value=status_text, inline=False)
     if record.get("reason"):
         embed.add_field(name="Reason", value=ge.safe_field_text(record["reason"], limit=512), inline=False)
     timing_lines = []
@@ -433,11 +576,13 @@ def build_afk_status_embed(user: discord.abc.User, record: dict, *, title: str |
         timing_lines.append(f"Returns: {ge.format_timestamp(ends_at, 'R')} ({ge.format_timestamp(ends_at, 'f')})")
     if timing_lines:
         embed.add_field(name="Timing", value="\n".join(timing_lines), inline=False)
-    return ge.style_embed(embed, footer="Babblebox AFK | Away notices show elapsed time and return ETA when available.")
+    return ge.style_embed(embed, footer="Babblebox AFK | Away notices stay compact and show return timing when available.")
 
 
 def build_afk_notice_line(user: discord.abc.User, record: dict) -> str:
-    parts = [f"**{ge.display_name_of(user)}** is AFK"]
+    style = resolve_afk_reason_style(record.get("reason"))
+    prefix = f"{style['emoji']} " if style is not None else "💤 "
+    parts = [f"{prefix}**{ge.display_name_of(user)}** is AFK"]
     set_at = deserialize_datetime(record.get("set_at")) or deserialize_datetime(record.get("starts_at")) or deserialize_datetime(record.get("created_at"))
     ends_at = deserialize_datetime(record.get("ends_at"))
     if set_at is not None:

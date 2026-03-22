@@ -1,10 +1,13 @@
 import unittest
 import os
+from datetime import timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Optional
 
+from babblebox import game_engine as ge
 from babblebox.utility_service import UtilityService
+from babblebox.utility_helpers import serialize_datetime
 from babblebox.utility_store import UtilityStateStore, UtilityStorageUnavailable
 
 
@@ -201,6 +204,46 @@ class UtilityStoreAndServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(lines), 1)
         self.assertIn("CoffeeUser", lines[0])
         self.assertIn("Stepped away", lines[0])
+
+    async def test_scheduled_afk_activates_when_due(self):
+        user = DummyUser(88)
+        ok, _ = await self.service.set_afk(
+            user=user,
+            reason="💤 Sleeping",
+            duration_seconds=30 * 60,
+            start_in_seconds=10 * 60,
+        )
+        self.assertTrue(ok)
+        record = self.service.store.state["afk"][str(user.id)]
+        now = ge.now_utc()
+        record["starts_at"] = serialize_datetime(now - timedelta(minutes=1))
+        record["ends_at"] = serialize_datetime(now + timedelta(minutes=29))
+
+        _, afk_to_activate, _, _ = self.service._collect_due_records()
+        self.assertEqual(len(afk_to_activate), 1)
+
+        await self.service._activate_due_afk(afk_to_activate)
+
+        self.assertEqual(self.service.store.state["afk"][str(user.id)]["status"], "active")
+
+    async def test_active_afk_expires_when_due(self):
+        user = DummyUser(89)
+        ok, _ = await self.service.set_afk(
+            user=user,
+            reason="📚 Studying",
+            duration_seconds=30 * 60,
+            start_in_seconds=None,
+        )
+        self.assertTrue(ok)
+        record = self.service.store.state["afk"][str(user.id)]
+        record["ends_at"] = serialize_datetime(ge.now_utc() - timedelta(minutes=1))
+
+        _, _, afk_to_expire, _ = self.service._collect_due_records()
+        self.assertEqual(len(afk_to_expire), 1)
+
+        await self.service._expire_due_afk(afk_to_expire)
+
+        self.assertNotIn(str(user.id), self.service.store.state["afk"])
 
     async def test_legacy_json_path_is_import_source_only(self):
         with TemporaryDirectory() as temp_dir:

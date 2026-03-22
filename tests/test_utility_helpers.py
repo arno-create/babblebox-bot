@@ -5,7 +5,15 @@ from types import SimpleNamespace
 
 import discord
 
-from babblebox.utility_helpers import build_reminder_delivery_view, format_duration_brief, make_message_preview, parse_duration_string
+from babblebox.utility_helpers import (
+    build_afk_reason_text,
+    build_afk_status_embed,
+    build_reminder_delivery_view,
+    format_duration_brief,
+    make_message_preview,
+    parse_afk_start_at,
+    parse_duration_string,
+)
 
 
 class DummyAttachment:
@@ -51,6 +59,42 @@ class UtilityHelperTests(unittest.TestCase):
                 }
             )
         )
+
+    def test_afk_reason_builder_formats_quick_presets(self):
+        self.assertEqual(build_afk_reason_text(preset="sleeping", custom_reason=None), "💤 Sleeping")
+        self.assertEqual(build_afk_reason_text(preset="working", custom_reason="Heads-down block"), "💼 Working - Heads-down block")
+
+    def test_parse_afk_start_at_accepts_clock_and_absolute_utc_times(self):
+        now = datetime(2026, 3, 22, 20, 15, tzinfo=timezone.utc)
+        ok, parsed = parse_afk_start_at("23:00", now=now)
+        self.assertTrue(ok)
+        self.assertEqual(parsed, datetime(2026, 3, 22, 23, 0, tzinfo=timezone.utc))
+
+        ok, parsed = parse_afk_start_at("tomorrow 08:30", now=now)
+        self.assertTrue(ok)
+        self.assertEqual(parsed, datetime(2026, 3, 23, 8, 30, tzinfo=timezone.utc))
+
+        ok, parsed = parse_afk_start_at("2026-03-24 07:45", now=now)
+        self.assertTrue(ok)
+        self.assertEqual(parsed, datetime(2026, 3, 24, 7, 45, tzinfo=timezone.utc))
+
+    def test_afk_status_embed_uses_reason_aware_styling(self):
+        user = SimpleNamespace(display_name="Ari")
+        record = {
+            "status": "active",
+            "reason": "📚 Studying - Finals tonight",
+            "created_at": "2026-03-22T18:00:00+00:00",
+            "set_at": "2026-03-22T18:00:00+00:00",
+            "starts_at": "2026-03-22T18:00:00+00:00",
+            "ends_at": "2026-03-22T20:00:00+00:00",
+        }
+
+        embed = build_afk_status_embed(user, record)
+
+        self.assertIn("📚", embed.title)
+        self.assertEqual(embed.fields[0].name, "Status")
+        self.assertIn("Studying", embed.fields[0].value)
+        self.assertNotEqual(embed.color.value, 0)
 
     def test_moment_card_embed_uses_clean_scene_and_echo_labels(self):
         created_at = datetime(2026, 3, 21, 9, 15, tzinfo=timezone.utc)

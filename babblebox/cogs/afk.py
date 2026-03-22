@@ -7,6 +7,13 @@ from discord.ext import commands
 
 from babblebox import game_engine as ge
 from babblebox.command_utils import defer_hybrid_response, send_hybrid_response
+from babblebox.utility_helpers import AFK_QUICK_REASONS, build_afk_reason_text, parse_afk_start_at
+
+
+AFK_PRESET_CHOICES = [
+    app_commands.Choice(name=f"{payload['emoji']} {payload['label']}", value=key)
+    for key, payload in AFK_QUICK_REASONS.items()
+]
 
 
 class AfkCog(commands.Cog):
@@ -47,18 +54,33 @@ class AfkCog(commands.Cog):
             return False, f"`{field_name}` must be between 1 minute and {max_minutes // (24 * 60)} days."
         return True, seconds
 
+    def _resolve_afk_reason(self, reason: Optional[str], preset: Optional[str]) -> str | None:
+        chosen_preset = preset
+        custom_reason = reason
+        if chosen_preset is None and isinstance(reason, str):
+            lowered = reason.strip().casefold()
+            if lowered in AFK_QUICK_REASONS:
+                chosen_preset = lowered
+                custom_reason = None
+        return build_afk_reason_text(preset=chosen_preset, custom_reason=custom_reason)
+
     @commands.hybrid_command(name="afk", with_app_command=True, description="Set, schedule, or clear your AFK status safely")
     @app_commands.describe(
         reason="Short safe AFK reason (1-3 sentences, no links)",
         duration="Optional auto-clear timer like 30m, 2h, or 2d",
         start_in="Optional delayed start like 30m, 2h, or 2d",
+        start_at="Optional UTC clock time like 23:00 or tomorrow 08:30",
+        preset="Optional quick AFK preset with emoji and styling",
     )
+    @app_commands.choices(preset=AFK_PRESET_CHOICES)
     async def afk_command(
         self,
         ctx: commands.Context,
         reason: Optional[str] = None,
         duration: Optional[str] = None,
         start_in: Optional[str] = None,
+        start_at: Optional[str] = None,
+        preset: Optional[str] = None,
     ):
         await defer_hybrid_response(ctx, ephemeral=True)
         service = self._service()
@@ -66,13 +88,27 @@ class AfkCog(commands.Cog):
             await self._send_storage_unavailable(ctx)
             return
 
-        if duration is None and start_in is None and reason is not None:
+        if duration is None and start_in is None and start_at is None and reason is not None and preset is None:
             inferred_seconds = service.parse_relative_duration(reason)
             if inferred_seconds is not None:
                 duration = reason
                 reason = None
 
-        if reason and len(reason) > ge.AFK_REASON_MAX_LEN:
+        if start_in is not None and start_at is not None:
+            await send_hybrid_response(
+                ctx,
+                embed=ge.make_status_embed(
+                    "Invalid Schedule",
+                    "Use either `start_in` or `start_at`, not both.",
+                    tone="warning",
+                    footer="Babblebox AFK",
+                ),
+                ephemeral=True,
+            )
+            return
+
+        resolved_reason = self._resolve_afk_reason(reason, preset)
+        if resolved_reason and len(resolved_reason) > ge.AFK_REASON_MAX_LEN:
             await send_hybrid_response(
                 ctx,
                 embed=ge.make_status_embed(
@@ -113,11 +149,40 @@ class AfkCog(commands.Cog):
             )
             return
 
+        ok, start_at_or_error = parse_afk_start_at(start_at)
+        if not ok:
+            await send_hybrid_response(
+                ctx,
+                embed=ge.make_status_embed(
+                    "Invalid Schedule",
+                    str(start_at_or_error),
+                    tone="warning",
+                    footer="Babblebox AFK",
+                ),
+                ephemeral=True,
+            )
+            return
+
         user_id = ctx.author.id
         existing = service.get_afk_record(user_id)
         duration_seconds = duration_seconds_or_error if isinstance(duration_seconds_or_error, int) else None
         start_in_seconds = start_in_seconds_or_error if isinstance(start_in_seconds_or_error, int) else None
-        has_custom_payload = any(value is not None for value in (reason, duration_seconds, start_in_seconds))
+        if start_at_or_error is not None:
+            start_in_seconds = max(60, int((start_at_or_error - ge.now_utc()).total_seconds()))
+            max_schedule_seconds = ge.AFK_MAX_SCHEDULE_MINUTES * 60
+            if start_in_seconds > max_schedule_seconds:
+                await send_hybrid_response(
+                    ctx,
+                    embed=ge.make_status_embed(
+                        "Invalid Schedule",
+                        f"`start_at` must be within {ge.AFK_MAX_SCHEDULE_MINUTES // (24 * 60)} days.",
+                        tone="warning",
+                        footer="Babblebox AFK",
+                    ),
+                    ephemeral=True,
+                )
+                return
+        has_custom_payload = any(value is not None for value in (resolved_reason, duration_seconds, start_in_seconds, preset))
 
         if existing and not has_custom_payload:
             await service.clear_afk(user_id)
@@ -136,7 +201,7 @@ class AfkCog(commands.Cog):
 
         ok, result = await service.set_afk(
             user=ctx.author,
-            reason=reason,
+            reason=resolved_reason,
             duration_seconds=duration_seconds,
             start_in_seconds=start_in_seconds,
         )
