@@ -37,8 +37,8 @@ HELP_MIN_CONTENT_LEN = 4
 
 FOLLOWUP_MODE_LABELS = {"auto_remove": "Auto-remove", "review": "Moderator review"}
 VERIFICATION_LOGIC_LABELS = {
-    "must_have_role": "Must have role",
-    "must_not_have_role": "Must not have role",
+    "must_have_role": "Unverified if member DOES NOT have this role",
+    "must_not_have_role": "Unverified if member DOES have this role",
 }
 REVIEW_ACTION_LABELS = {
     "remove": "Remove role now",
@@ -282,7 +282,11 @@ class AdminService:
         if config["followup_mode"] not in VALID_FOLLOWUP_MODES:
             return "Follow-up mode must be `auto_remove` or `review`."
         if config["verification_logic"] not in VALID_VERIFICATION_LOGIC:
-            return "Verification logic must be `must_have_role` or `must_not_have_role`."
+            return (
+                "Verification logic must be `must_have_role` "
+                "(unverified if the member is missing the role) or `must_not_have_role` "
+                "(unverified if the member has the role)."
+            )
         if config["followup_duration_unit"] == "months" and config["followup_duration_value"] > 12:
             return "Follow-up month durations can be at most 12 months."
         if config["verification_warning_lead_seconds"] >= config["verification_kick_after_seconds"]:
@@ -355,7 +359,12 @@ class AdminService:
     ) -> tuple[bool, str]:
         cleaned_logic = logic.strip().lower() if isinstance(logic, str) else None
         if cleaned_logic is not None and cleaned_logic not in VALID_VERIFICATION_LOGIC:
-            return False, "Verification logic must be `must_have_role` or `must_not_have_role`."
+            return (
+                False,
+                "Verification logic must be `must_have_role` "
+                "(unverified if the member is missing the role) or `must_not_have_role` "
+                "(unverified if the member has the role).",
+            )
         parsed_kick_after = parse_duration_string(kick_after_text) if kick_after_text is not None else None
         if kick_after_text is not None and parsed_kick_after is None:
             return False, "Kick timer must use a duration like `7d` or `24h`."

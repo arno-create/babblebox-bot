@@ -52,8 +52,9 @@ class FakePermissionSnapshot:
 
 
 class FakeRole:
-    def __init__(self, role_id: int, *, position: int = 1, mentionable: bool = True):
+    def __init__(self, role_id: int, *, position: int = 1, mentionable: bool = True, name: str | None = None):
         self.id = role_id
+        self.name = name or f"Role {role_id}"
         self.position = position
         self.mention = f"<@&{role_id}>"
         self.mentionable = mentionable
@@ -149,8 +150,8 @@ class AdminCogSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.guild = FakeGuild(10)
         self.log_channel = FakeChannel(30, name="admin-log")
         self.guild.channels[self.log_channel.id] = self.log_channel
-        self.followup_role = FakeRole(70, position=10)
-        self.verified_role = FakeRole(80, position=10)
+        self.followup_role = FakeRole(70, position=10, name="Probation")
+        self.verified_role = FakeRole(80, position=10, name="Verified")
         self.guild.roles[self.followup_role.id] = self.followup_role
         self.guild.roles[self.verified_role.id] = self.verified_role
         self.bot = FakeBot(self.guild)
@@ -217,6 +218,53 @@ class AdminCogSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(config["followup_mode"], "review")
         self.assertEqual(len(ctx.send_calls), 1)
         self.assertTrue(ctx.send_calls[0]["ephemeral"])
+
+    async def test_verification_panel_spells_out_verified_and_unverified_members(self):
+        ok, _ = await self.cog.service.set_verification_config(
+            self.guild.id,
+            enabled=True,
+            role_id=self.verified_role.id,
+            logic="must_have_role",
+            kick_after_text="7d",
+            warning_lead_text="2d",
+            help_channel_id=None,
+            help_extension_text="1d",
+            max_extensions=1,
+        )
+        self.assertTrue(ok)
+
+        embed = await self.cog.build_panel_embed(self.guild.id, "verification")
+        current_rule = next(field for field in embed.fields if field.name == "Current Rule")
+        target = next(field for field in embed.fields if field.name == "Warn / Kick Target")
+
+        self.assertIn("Members are considered verified only if they HAVE <@&80>.", current_rule.value)
+        self.assertIn("Users WITHOUT <@&80> are treated as unverified.", current_rule.value)
+        self.assertIn("users who do NOT have <@&80> will be warned after 5 days and kicked after 1 week.", target.value)
+        self.assertIn("Exempt from warning/kick", target.value)
+
+    async def test_verification_panel_adds_review_note_for_confusing_role_name(self):
+        not_verified_role = FakeRole(81, position=10, name="Not Verified")
+        self.guild.roles[not_verified_role.id] = not_verified_role
+        ok, _ = await self.cog.service.set_verification_config(
+            self.guild.id,
+            enabled=True,
+            role_id=not_verified_role.id,
+            logic="must_not_have_role",
+            kick_after_text="7d",
+            warning_lead_text="2d",
+            help_channel_id=None,
+            help_extension_text="1d",
+            max_extensions=1,
+        )
+        self.assertTrue(ok)
+
+        embed = await self.cog.build_panel_embed(self.guild.id, "verification")
+        review = next(field for field in embed.fields if field.name == "Please Review Carefully")
+        target = next(field for field in embed.fields if field.name == "Warn / Kick Target")
+
+        self.assertIn("sounds like an unverified-state role", review.value)
+        self.assertIn("users WITH <@&81> should be warned and kicked", review.value)
+        self.assertIn("users who still have <@&81> will be warned after 5 days and kicked after 1 week.", target.value)
 
     async def test_admin_panel_warns_when_operability_is_missing(self):
         blocked_log_channel = FakeChannel(
