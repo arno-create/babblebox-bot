@@ -4,29 +4,63 @@ import asyncio
 import types
 import unittest
 
+from babblebox import game_engine as ge
 from babblebox.cogs.admin import AdminCog
 from babblebox.admin_service import AdminService
 from babblebox.admin_store import AdminStore
 
 
 class FakeMessage:
-    pass
+    def __init__(self, **kwargs):
+        self.embed = kwargs.get("embed")
+        self.view = kwargs.get("view")
+        self.ephemeral = kwargs.get("ephemeral")
+        self.edits = []
+
+    async def edit(self, **kwargs):
+        self.edits.append(kwargs)
+        if "embed" in kwargs:
+            self.embed = kwargs["embed"]
+        if "view" in kwargs:
+            self.view = kwargs["view"]
+        return self
 
 
 class FakeResponse:
-    def __init__(self):
+    def __init__(self, interaction=None):
+        self._interaction = interaction
         self._done = False
+        self.edits = []
+        self.sent_messages = []
 
     def is_done(self):
         return self._done
 
+    async def edit_message(self, **kwargs):
+        self._done = True
+        self.edits.append(kwargs)
+        if self._interaction is not None and self._interaction.message is not None:
+            await self._interaction.message.edit(**kwargs)
+
+    async def send_message(self, *args, **kwargs):
+        self._done = True
+        self.sent_messages.append({"args": args, "kwargs": kwargs})
+
 
 class FakeInteraction:
-    def __init__(self):
-        self.response = FakeResponse()
+    def __init__(self, *, user=None, guild=None, message=None):
+        self.user = user
+        self.guild = guild
+        self.message = message
+        self.response = FakeResponse(self)
+        self.followup = types.SimpleNamespace(send=self._followup_send)
+        self.followup_calls = []
 
     def is_expired(self):
         return False
+
+    async def _followup_send(self, *args, **kwargs):
+        self.followup_calls.append({"args": args, "kwargs": kwargs})
 
 
 class FakeGuildPermissions:
@@ -67,6 +101,30 @@ class FakeAuthor:
         self.mention = f"<@{user_id}>"
         self.guild_permissions = FakeGuildPermissions()
         self.guild_permissions.manage_guild = manage_guild
+        self.sent = []
+
+    async def send(self, *, embed=None):
+        self.sent.append(embed)
+
+
+class FakeMember(FakeAuthor):
+    def __init__(
+        self,
+        user_id: int,
+        guild,
+        *,
+        roles=None,
+        manage_guild: bool = False,
+        administrator: bool = False,
+        joined_at=None,
+    ):
+        super().__init__(user_id=user_id, manage_guild=manage_guild)
+        self.guild = guild
+        self.roles = list(roles or [])
+        self.top_role = self.roles[0] if self.roles else FakeRole(0, position=1)
+        self.guild_permissions = FakePermissionSnapshot(manage_guild=manage_guild, administrator=administrator)
+        self.joined_at = joined_at or ge.now_utc()
+        self.bot = False
 
 
 class FakeChannel:
@@ -85,6 +143,7 @@ class FakeGuild:
         self.id = guild_id
         self.name = "Guild"
         self.owner_id = 1
+        self.chunked = True
         self.channels: dict[int, FakeChannel] = {}
         self.roles: dict[int, FakeRole] = {}
         self.members: dict[int, object] = {}
@@ -104,6 +163,9 @@ class FakeGuild:
         if user_id == self.me.id:
             return self.me
         return self.members.get(user_id)
+
+    async def chunk(self, cache=True):
+        self.chunked = True
 
 
 class FakeBot:
@@ -137,7 +199,7 @@ class FakeContext:
 
     async def send(self, **kwargs):
         self.send_calls.append(kwargs)
-        return FakeMessage()
+        return FakeMessage(**kwargs)
 
     async def defer(self, **kwargs):
         self.defer_calls.append(kwargs)
@@ -315,3 +377,135 @@ class AdminCogSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("cannot see", operability.value)
         self.assertIn("cannot send", operability.value)
         self.assertIn("cannot embed", operability.value)
+
+    async def test_admin_sync_command_opens_confirmation_panel_with_preview_count(self):
+        ok, _ = await self.cog.service.set_verification_config(
+            self.guild.id,
+            enabled=True,
+            role_id=self.verified_role.id,
+            logic="must_have_role",
+            kick_after_text="7d",
+            warning_lead_text="2d",
+            help_channel_id=None,
+            help_extension_text="1d",
+            max_extensions=1,
+        )
+        self.assertTrue(ok)
+        self.guild.members[101] = FakeMember(101, self.guild, roles=[])
+        self.guild.members[102] = FakeMember(102, self.guild, roles=[self.verified_role])
+        ctx = FakeContext(
+            interaction=FakeInteraction(),
+            guild=self.guild,
+            channel=FakeChannel(20),
+            author=FakeAuthor(manage_guild=True),
+        )
+
+        await AdminCog.admin_sync_command.callback(self.cog, ctx)
+
+        self.assertEqual(len(ctx.send_calls), 1)
+        self.assertTrue(ctx.send_calls[0]["ephemeral"])
+        embed = ctx.send_calls[0]["embed"]
+        view = ctx.send_calls[0]["view"]
+        dry_run = next(field for field in embed.fields if field.name == "Dry Run")
+        self.assertIn("Currently **1** members match this rule.", dry_run.value)
+        self.assertIsNotNone(view)
+        labels = [child.label for child in view.children]
+        self.assertIn("Start Sync", labels)
+        self.assertIn("Cancel", labels)
+
+    async def test_sync_view_cancel_before_start_makes_no_changes(self):
+        ok, _ = await self.cog.service.set_verification_config(
+            self.guild.id,
+            enabled=True,
+            role_id=self.verified_role.id,
+            logic="must_have_role",
+            kick_after_text="7d",
+            warning_lead_text="2d",
+            help_channel_id=None,
+            help_extension_text="1d",
+            max_extensions=1,
+        )
+        self.assertTrue(ok)
+        self.guild.members[103] = FakeMember(103, self.guild, roles=[])
+        author = FakeAuthor(manage_guild=True)
+        ctx = FakeContext(
+            interaction=FakeInteraction(),
+            guild=self.guild,
+            channel=FakeChannel(20),
+            author=author,
+        )
+
+        await AdminCog.admin_sync_command.callback(self.cog, ctx)
+
+        message = FakeMessage(**ctx.send_calls[0])
+        view = ctx.send_calls[0]["view"]
+        view.message = message
+        interaction = FakeInteraction(user=author, guild=self.guild, message=message)
+        cancel_button = next(child for child in view.children if child.label == "Cancel")
+
+        await cancel_button.callback(interaction)
+
+        self.assertEqual(message.embed.title, "Verification Sync Cancelled")
+        counts = await self.cog.service.get_counts(self.guild.id)
+        self.assertEqual(counts["verification_pending"], 0)
+        self.assertTrue(all(child.disabled for child in view.children))
+
+    async def test_admin_test_warning_preview_renders_placeholders_safely(self):
+        ok, _ = await self.cog.service.set_verification_config(
+            self.guild.id,
+            enabled=True,
+            role_id=self.verified_role.id,
+            logic="must_have_role",
+            kick_after_text="7d",
+            warning_lead_text="2d",
+            help_channel_id=self.log_channel.id,
+            help_extension_text="1d",
+            max_extensions=1,
+        )
+        self.assertTrue(ok)
+        ok, _ = await self.cog.service.set_templates(
+            self.guild.id,
+            warning_template="Hi {member}, finish verification in {guild} before {deadline_relative}. Use {help_channel}. {invite_link}",
+            invite_link="https://discord.gg/example",
+        )
+        self.assertTrue(ok)
+        ctx = FakeContext(
+            interaction=FakeInteraction(),
+            guild=self.guild,
+            channel=FakeChannel(20),
+            author=FakeAuthor(manage_guild=True),
+        )
+
+        await AdminCog.admin_test_command.callback(self.cog, ctx, kind="warning_dm", member=None, dm_self=False, post_log=False)
+
+        self.assertEqual(len(ctx.send_calls), 1)
+        embed = ctx.send_calls[0]["embed"]
+        resolved = next(field for field in embed.fields if field.name == "Resolved Placeholders")
+        delivery = next(field for field in embed.fields if field.name == "Delivery")
+        self.assertIn("Guild", resolved.value)
+        self.assertIn("Invite link", resolved.value)
+        self.assertIn("Bulk sends started: **No**", delivery.value)
+
+    async def test_admin_test_logs_surfaces_log_delivery_failure(self):
+        blocked_log_channel = FakeChannel(
+            40,
+            name="verification-logs",
+            permissions=FakePermissionSnapshot(view_channel=True, send_messages=False, embed_links=False),
+        )
+        self.guild.channels[blocked_log_channel.id] = blocked_log_channel
+        ok, _ = await self.cog.service.set_logs_config(self.guild.id, channel_id=blocked_log_channel.id, alert_role_id=None)
+        self.assertTrue(ok)
+        ctx = FakeContext(
+            interaction=FakeInteraction(),
+            guild=self.guild,
+            channel=FakeChannel(20),
+            author=FakeAuthor(manage_guild=True),
+        )
+
+        await AdminCog.admin_test_command.callback(self.cog, ctx, kind="logs", member=None, dm_self=False, post_log=True)
+
+        embed = ctx.send_calls[0]["embed"]
+        delivery = next(field for field in embed.fields if field.name == "Delivery")
+        prechecks = next(field for field in embed.fields if field.name == "Prechecks")
+        self.assertIn("Could not post", delivery.value)
+        self.assertIn("cannot send messages", prechecks.value.lower())

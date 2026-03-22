@@ -1,8 +1,10 @@
 from __future__ import annotations
 
+import asyncio
 import types
 import unittest
 from datetime import timedelta
+from unittest.mock import patch
 
 from babblebox import game_engine as ge
 from babblebox.admin_service import AdminService
@@ -401,3 +403,162 @@ class AdminServiceTests(unittest.IsolatedAsyncioTestCase):
         state, reason = self.service._verification_status(member, self.service.get_compiled_config(self.guild.id))
         self.assertEqual(state, "unverified")
         self.assertIn("still has", reason.lower())
+
+    async def test_build_verification_sync_preview_counts_matches_and_due_warnings(self):
+        ok, _ = await self.service.set_verification_config(
+            self.guild.id,
+            enabled=True,
+            role_id=self.verified_role.id,
+            logic="must_have_role",
+            kick_after_text="7d",
+            warning_lead_text="2d",
+            help_channel_id=None,
+            help_extension_text="1d",
+            max_extensions=1,
+        )
+        self.assertTrue(ok)
+        unverified = FakeMember(60, self.guild, roles=[], top_role=FakeRole(5, position=5), joined_at=ge.now_utc() - timedelta(days=9))
+        verified = FakeMember(61, self.guild, roles=[self.verified_role], top_role=FakeRole(5, position=5))
+        self.guild.members[unverified.id] = unverified
+        self.guild.members[verified.id] = verified
+        await self.store.upsert_verification_state(
+            {
+                "guild_id": self.guild.id,
+                "user_id": verified.id,
+                "joined_at": serialize_datetime(ge.now_utc() - timedelta(days=2)),
+                "warning_at": serialize_datetime(ge.now_utc() - timedelta(days=1)),
+                "kick_at": serialize_datetime(ge.now_utc() + timedelta(days=1)),
+                "warning_sent_at": None,
+                "extension_count": 0,
+            }
+        )
+
+        preview = await self.service.build_verification_sync_preview(self.guild)
+
+        self.assertEqual(preview.matched_unverified, 1)
+        self.assertEqual(preview.newly_tracked, 1)
+        self.assertEqual(preview.stale_rows_to_clear, 1)
+        self.assertEqual(preview.warnings_due_now, 1)
+        self.assertTrue(any("verification-help channel" in check.message for check in preview.prechecks))
+
+    async def test_run_verification_sync_session_processes_due_warnings_and_clears_stale_rows(self):
+        ok, _ = await self.service.set_logs_config(self.guild.id, channel_id=self.log_channel.id, alert_role_id=None)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_verification_config(
+            self.guild.id,
+            enabled=True,
+            role_id=self.verified_role.id,
+            logic="must_have_role",
+            kick_after_text="7d",
+            warning_lead_text="2d",
+            help_channel_id=self.help_channel.id,
+            help_extension_text="1d",
+            max_extensions=1,
+        )
+        self.assertTrue(ok)
+        unverified = FakeMember(62, self.guild, roles=[], top_role=FakeRole(5, position=5), joined_at=ge.now_utc() - timedelta(days=9))
+        verified = FakeMember(63, self.guild, roles=[self.verified_role], top_role=FakeRole(5, position=5))
+        self.guild.members[unverified.id] = unverified
+        self.guild.members[verified.id] = verified
+        await self.store.upsert_verification_state(
+            {
+                "guild_id": self.guild.id,
+                "user_id": verified.id,
+                "joined_at": serialize_datetime(ge.now_utc() - timedelta(days=2)),
+                "warning_at": serialize_datetime(ge.now_utc() - timedelta(days=1)),
+                "kick_at": serialize_datetime(ge.now_utc() + timedelta(days=1)),
+                "warning_sent_at": None,
+                "extension_count": 0,
+            }
+        )
+        preview = await self.service.build_verification_sync_preview(self.guild)
+        created, session = await self.service.create_verification_sync_session(self.guild, actor_id=2, preview=preview)
+        self.assertTrue(created)
+
+        with patch("babblebox.admin_service.VERIFICATION_SYNC_DM_PACE_SECONDS", new=0):
+            summary = await self.service.run_verification_sync_session(self.guild, session)
+
+        self.assertEqual(summary.scanned_members, 2)
+        self.assertEqual(summary.matched_unverified, 1)
+        self.assertEqual(summary.tracked_count, 1)
+        self.assertEqual(summary.cleared_count, 1)
+        self.assertEqual(summary.warned_count, 1)
+        self.assertEqual(summary.failed_dm_count, 0)
+        self.assertFalse(summary.manually_stopped)
+        self.assertEqual(len(unverified.sent), 1)
+        updated = await self.store.fetch_verification_state(self.guild.id, unverified.id)
+        self.assertIsNotNone(updated)
+        self.assertIsNotNone(updated["warning_sent_at"])
+        self.assertIsNone(await self.store.fetch_verification_state(self.guild.id, verified.id))
+        self.assertEqual(self.log_channel.sent[-1]["embed"].title, "Verification Sync Complete")
+
+    async def test_run_verification_sync_session_stop_requested_halts_remaining_members(self):
+        ok, _ = await self.service.set_verification_config(
+            self.guild.id,
+            enabled=True,
+            role_id=self.verified_role.id,
+            logic="must_have_role",
+            kick_after_text="7d",
+            warning_lead_text="2d",
+            help_channel_id=self.help_channel.id,
+            help_extension_text="1d",
+            max_extensions=1,
+        )
+        self.assertTrue(ok)
+        for user_id in (70, 71, 72):
+            self.guild.members[user_id] = FakeMember(
+                user_id,
+                self.guild,
+                roles=[],
+                top_role=FakeRole(5, position=5),
+                joined_at=ge.now_utc() - timedelta(days=9),
+            )
+        preview = await self.service.build_verification_sync_preview(self.guild)
+        created, session = await self.service.create_verification_sync_session(self.guild, actor_id=2, preview=preview)
+        self.assertTrue(created)
+
+        with patch("babblebox.admin_service.VERIFICATION_SYNC_DM_PACE_SECONDS", new=0.05):
+            task = asyncio.create_task(self.service.run_verification_sync_session(self.guild, session))
+            await asyncio.sleep(0.01)
+            self.assertTrue(await self.service.request_verification_sync_stop(self.guild.id))
+            summary = await task
+
+        self.assertTrue(summary.manually_stopped)
+        self.assertLess(summary.scanned_members, 3)
+        self.assertLess(summary.warned_count, 3)
+
+    async def test_due_warning_sweep_skips_guild_with_active_sync_session(self):
+        ok, _ = await self.service.set_verification_config(
+            self.guild.id,
+            enabled=True,
+            role_id=self.verified_role.id,
+            logic="must_have_role",
+            kick_after_text="7d",
+            warning_lead_text="2d",
+            help_channel_id=self.help_channel.id,
+            help_extension_text="1d",
+            max_extensions=1,
+        )
+        self.assertTrue(ok)
+        member = FakeMember(80, self.guild, roles=[], top_role=FakeRole(5, position=5))
+        self.guild.members[member.id] = member
+        await self.store.upsert_verification_state(
+            {
+                "guild_id": self.guild.id,
+                "user_id": member.id,
+                "joined_at": serialize_datetime(ge.now_utc() - timedelta(days=8)),
+                "warning_at": serialize_datetime(ge.now_utc() - timedelta(minutes=1)),
+                "kick_at": serialize_datetime(ge.now_utc() + timedelta(days=1)),
+                "warning_sent_at": None,
+                "extension_count": 0,
+            }
+        )
+        preview = await self.service.build_verification_sync_preview(self.guild)
+        created, session = await self.service.create_verification_sync_session(self.guild, actor_id=2, preview=preview)
+        self.assertTrue(created)
+
+        processed = await self.service._process_due_verification_warnings(ge.now_utc())
+
+        self.assertFalse(processed)
+        self.assertEqual(len(member.sent), 0)
+        await self.service.clear_verification_sync_session(self.guild.id, session)

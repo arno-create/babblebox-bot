@@ -4,7 +4,7 @@ import asyncio
 import calendar
 import contextlib
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
 from urllib.parse import urlsplit
@@ -34,6 +34,10 @@ OPERATION_BACKOFF_SECONDS = 3600
 TEMPLATE_MAX_LEN = 700
 EXCLUSION_LIMIT = 20
 HELP_MIN_CONTENT_LEN = 4
+VERIFICATION_SYNC_DM_PACE_SECONDS = 1.0
+VERIFICATION_SYNC_PROGRESS_INTERVAL = 10
+VERIFICATION_SYNC_YIELD_INTERVAL = 25
+VERIFICATION_SYNC_RUNTIME_ISSUE_LIMIT = 5
 
 FOLLOWUP_MODE_LABELS = {"auto_remove": "Auto-remove", "review": "Moderator review"}
 VERIFICATION_LOGIC_LABELS = {
@@ -76,6 +80,68 @@ class CompiledAdminConfig:
     followup_exempt_staff: bool
     verification_exempt_staff: bool
     verification_exempt_bots: bool
+
+
+@dataclass(frozen=True)
+class VerificationPrecheck:
+    severity: str
+    message: str
+
+
+@dataclass(frozen=True)
+class VerificationSyncPreview:
+    scanned_members: int
+    matched_unverified: int
+    newly_tracked: int
+    stale_rows_to_clear: int
+    already_tracked: int
+    warnings_due_now: int
+    blocked_kick_matches: int
+    total_existing_rows: int
+    warning_template_label: str
+    warning_template_preview: str
+    prechecks: tuple[VerificationPrecheck, ...]
+    exact_member_scan: bool
+
+    @property
+    def blocking_prechecks(self) -> tuple[VerificationPrecheck, ...]:
+        return tuple(check for check in self.prechecks if check.severity == "blocked")
+
+
+@dataclass(frozen=True)
+class VerificationSyncSummary:
+    scanned_members: int
+    matched_unverified: int
+    tracked_count: int
+    cleared_count: int
+    warned_count: int
+    failed_dm_count: int
+    skipped_count: int
+    manually_stopped: bool
+    issues: tuple[str, ...]
+    partial_failure: str | None = None
+
+
+@dataclass
+class VerificationSyncSession:
+    guild_id: int
+    actor_id: int
+    created_at: datetime
+    preview: VerificationSyncPreview
+    stop_requested: bool = False
+    running: bool = False
+    finished_at: datetime | None = None
+    current_member_id: int | None = None
+    scanned_members: int = 0
+    matched_unverified: int = 0
+    tracked_count: int = 0
+    cleared_count: int = 0
+    warned_count: int = 0
+    failed_dm_count: int = 0
+    skipped_count: int = 0
+    runtime_issues: list[str] = field(default_factory=list)
+    partial_failure: str | None = None
+    summary: VerificationSyncSummary | None = None
 
 
 def _compile_config(raw: dict[str, Any]) -> CompiledAdminConfig:
@@ -204,6 +270,8 @@ class AdminService:
         self._scheduler_task: asyncio.Task | None = None
         self._compiled_configs: dict[int, CompiledAdminConfig] = {}
         self._log_dedup: dict[tuple[int, str], float] = {}
+        self._verification_sync_sessions: dict[int, VerificationSyncSession] = {}
+        self._verification_sync_lock = asyncio.Lock()
 
     async def start(self) -> bool:
         if self._startup_storage_error is not None:
@@ -555,6 +623,247 @@ class AdminService:
         get_global = getattr(self.bot, "get_channel", None)
         return get_global(channel_id) if callable(get_global) else None
 
+    def _iter_guild_members(self, guild: discord.Guild):
+        members = getattr(guild, "members", [])
+        iterable = members.values() if isinstance(members, dict) else members
+        for member in iterable:
+            if getattr(member, "id", None) is None:
+                continue
+            if getattr(member, "guild", guild) is not guild:
+                continue
+            yield member
+
+    def _warning_template_summary(self, compiled: CompiledAdminConfig) -> tuple[str, str]:
+        default_text = (
+            "You are still waiting on server verification in {guild}. Please finish verification before {deadline_relative}. "
+            "If you need help, use {help_channel}."
+        )
+        source = compiled.warning_template or default_text
+        label = "Custom warning DM" if compiled.warning_template else "Default warning DM"
+        return label, ge.safe_field_text(" ".join(source.split()), limit=180)
+
+    def _verification_prechecks(
+        self,
+        guild: discord.Guild,
+        *,
+        matched_unverified: int = -1,
+        blocked_kick_matches: int = 0,
+        exact_member_scan: bool = True,
+    ) -> list[VerificationPrecheck]:
+        compiled = self.get_compiled_config(guild.id)
+        me = self._bot_member(guild)
+        if me is None:
+            return [VerificationPrecheck("blocked", "Babblebox could not resolve its own server member for verification checks.")]
+
+        checks: list[VerificationPrecheck] = []
+        if not compiled.verification_enabled:
+            checks.append(VerificationPrecheck("blocked", "Verification cleanup is disabled. Turn it on before running a sync."))
+        if compiled.verification_role_id is None:
+            checks.append(VerificationPrecheck("blocked", "No verification role is configured, so Babblebox cannot tell who counts as unverified."))
+        elif self._guild_role(guild, compiled.verification_role_id) is None:
+            checks.append(VerificationPrecheck("blocked", "The configured verification role is missing or no longer accessible."))
+
+        if compiled.verification_help_channel_id is None:
+            checks.append(
+                VerificationPrecheck(
+                    "warning",
+                    "No verification-help channel is configured, so warning DMs will fall back to a generic help reference.",
+                )
+            )
+        elif self._guild_channel(guild, compiled.verification_help_channel_id) is None:
+            checks.append(
+                VerificationPrecheck(
+                    "warning",
+                    f"I cannot access the configured verification-help channel <#{compiled.verification_help_channel_id}>, so warning DMs will fall back to a generic help reference.",
+                )
+            )
+
+        if compiled.admin_log_channel_id is None:
+            checks.append(
+                VerificationPrecheck(
+                    "warning",
+                    "No admin log channel is configured, so sync and test summaries will only be shown privately to the admin who runs them.",
+                )
+            )
+        else:
+            channel = self._guild_channel(guild, compiled.admin_log_channel_id)
+            if channel is None:
+                checks.append(
+                    VerificationPrecheck(
+                        "warning",
+                        f"I cannot access the configured admin log channel <#{compiled.admin_log_channel_id}>.",
+                    )
+                )
+            else:
+                perms = channel.permissions_for(me)
+                if not getattr(perms, "view_channel", False):
+                    checks.append(VerificationPrecheck("warning", f"I cannot view {channel.mention}."))
+                if not getattr(perms, "send_messages", False):
+                    checks.append(VerificationPrecheck("warning", f"I cannot send messages in {channel.mention}."))
+                if not getattr(perms, "embed_links", False):
+                    checks.append(VerificationPrecheck("warning", f"I cannot embed messages in {channel.mention}."))
+
+        perms = getattr(me, "guild_permissions", None)
+        if perms is None or not getattr(perms, "kick_members", False):
+            checks.append(
+                VerificationPrecheck(
+                    "warning",
+                    "Kick enforcement is enabled, but Babblebox is missing Kick Members. Sync can still track and warn members, but later kicks will fail.",
+                )
+            )
+        elif blocked_kick_matches > 0:
+            noun = "member is" if blocked_kick_matches == 1 else "members are"
+            checks.append(
+                VerificationPrecheck(
+                    "warning",
+                    f"{blocked_kick_matches} currently matched {noun} above Babblebox's role or protected by administrator or owner rules, so later kicks will be blocked for them.",
+                )
+            )
+
+        if not exact_member_scan:
+            checks.append(
+                VerificationPrecheck(
+                    "note",
+                    "Member cache is incomplete, so preview counts use the currently cached members only and unseen stale rows will not be cleared in this run.",
+                )
+            )
+        checks.append(
+            VerificationPrecheck(
+                "note",
+                "DM delivery is never guaranteed. Members with closed DMs or privacy settings may still fail warning delivery.",
+            )
+        )
+        if matched_unverified == 0:
+            checks.append(VerificationPrecheck("note", "No currently cached members match the unverified rule."))
+        return checks
+
+    async def build_verification_sync_preview(self, guild: discord.Guild) -> VerificationSyncPreview:
+        compiled = self.get_compiled_config(guild.id)
+        existing_rows = {
+            int(row["user_id"]): row
+            for row in await self.store.list_verification_states_for_guild(guild.id)
+        } if self.storage_ready else {}
+        exact_member_scan = bool(getattr(guild, "chunked", True))
+        now = ge.now_utc()
+        scanned_members = 0
+        matched_unverified = 0
+        newly_tracked = 0
+        stale_rows_to_clear = 0
+        already_tracked = 0
+        warnings_due_now = 0
+        blocked_kick_matches = 0
+        seen_member_ids: set[int] = set()
+
+        for member in self._iter_guild_members(guild):
+            scanned_members += 1
+            seen_member_ids.add(int(member.id))
+            status, _ = self._verification_status(member, compiled)
+            existing = existing_rows.get(int(member.id))
+            if status == "unverified":
+                matched_unverified += 1
+                preview_record = existing
+                if preview_record is None:
+                    newly_tracked += 1
+                    preview_record = self._build_verification_state(member, compiled, now=now)
+                else:
+                    already_tracked += 1
+                warning_at = deserialize_datetime(preview_record.get("warning_at")) if preview_record is not None else None
+                if preview_record is not None and preview_record.get("warning_sent_at") is None and (warning_at is None or warning_at <= now):
+                    warnings_due_now += 1
+                if self._kick_hierarchy_issue(guild, member) is not None:
+                    blocked_kick_matches += 1
+                continue
+            if existing is not None:
+                stale_rows_to_clear += 1
+
+        if exact_member_scan:
+            stale_rows_to_clear += len(set(existing_rows).difference(seen_member_ids))
+
+        warning_template_label, warning_template_preview = self._warning_template_summary(compiled)
+        prechecks = tuple(
+            self._verification_prechecks(
+                guild,
+                matched_unverified=matched_unverified,
+                blocked_kick_matches=blocked_kick_matches,
+                exact_member_scan=exact_member_scan,
+            )
+        )
+        return VerificationSyncPreview(
+            scanned_members=scanned_members,
+            matched_unverified=matched_unverified,
+            newly_tracked=newly_tracked,
+            stale_rows_to_clear=stale_rows_to_clear,
+            already_tracked=already_tracked,
+            warnings_due_now=warnings_due_now,
+            blocked_kick_matches=blocked_kick_matches,
+            total_existing_rows=len(existing_rows),
+            warning_template_label=warning_template_label,
+            warning_template_preview=warning_template_preview,
+            prechecks=prechecks,
+            exact_member_scan=exact_member_scan,
+        )
+
+    def get_verification_prechecks(
+        self,
+        guild: discord.Guild,
+        *,
+        matched_unverified: int = -1,
+        blocked_kick_matches: int = 0,
+        exact_member_scan: bool = True,
+    ) -> tuple[VerificationPrecheck, ...]:
+        return tuple(
+            self._verification_prechecks(
+                guild,
+                matched_unverified=matched_unverified,
+                blocked_kick_matches=blocked_kick_matches,
+                exact_member_scan=exact_member_scan,
+            )
+        )
+
+    def get_verification_sync_session(self, guild_id: int) -> VerificationSyncSession | None:
+        return self._verification_sync_sessions.get(guild_id)
+
+    async def create_verification_sync_session(
+        self,
+        guild: discord.Guild,
+        *,
+        actor_id: int,
+        preview: VerificationSyncPreview | None = None,
+    ) -> tuple[bool, VerificationSyncSession]:
+        async with self._verification_sync_lock:
+            existing = self._verification_sync_sessions.get(guild.id)
+            if existing is not None and existing.running:
+                return False, existing
+            session = VerificationSyncSession(
+                guild_id=guild.id,
+                actor_id=actor_id,
+                created_at=ge.now_utc(),
+                preview=preview or await self.build_verification_sync_preview(guild),
+                running=True,
+            )
+            self._verification_sync_sessions[guild.id] = session
+            return True, session
+
+    async def request_verification_sync_stop(self, guild_id: int) -> bool:
+        async with self._verification_sync_lock:
+            session = self._verification_sync_sessions.get(guild_id)
+            if session is None or not session.running:
+                return False
+            session.stop_requested = True
+            return True
+
+    async def clear_verification_sync_session(self, guild_id: int, session: VerificationSyncSession):
+        async with self._verification_sync_lock:
+            if self._verification_sync_sessions.get(guild_id) is session:
+                self._verification_sync_sessions.pop(guild_id, None)
+
+    def _record_verification_sync_issue(self, session: VerificationSyncSession, message: str):
+        if message in session.runtime_issues:
+            return
+        if len(session.runtime_issues) >= VERIFICATION_SYNC_RUNTIME_ISSUE_LIMIT:
+            return
+        session.runtime_issues.append(message)
+
     def _role_ids_for(self, member: discord.Member | discord.abc.User) -> set[int]:
         return {
             int(role.id)
@@ -631,19 +940,38 @@ class AdminService:
             else "You were removed from {guild} because verification was not completed in time."
         )
         text = template or default_text
-        replacements = {
-            "{member}": ge.display_name_of(member),
-            "{guild}": guild.name,
-            "{deadline}": ge.format_timestamp(deadline, "f"),
-            "{deadline_relative}": ge.format_timestamp(deadline, "R"),
-            "{help_channel}": getattr(help_channel, "mention", "the server's verification-help channel"),
-            "{invite_link}": invite_link or "",
-        }
+        replacements = self.verification_template_placeholders(
+            member,
+            guild=guild,
+            deadline=deadline,
+            help_channel=help_channel,
+            invite_link=invite_link,
+            preview=False,
+        )
         for placeholder, value in replacements.items():
             text = text.replace(placeholder, value)
         if final and invite_link:
             text = f"{text}\n\nRejoin: {invite_link}"
         return text.strip()
+
+    def verification_template_placeholders(
+        self,
+        member: discord.Member,
+        *,
+        guild: discord.Guild,
+        deadline: datetime,
+        help_channel: discord.abc.GuildChannel | discord.Thread | None,
+        invite_link: str | None,
+        preview: bool,
+    ) -> dict[str, str]:
+        return {
+            "{member}": ge.display_name_of(member),
+            "{guild}": guild.name,
+            "{deadline}": ge.format_timestamp(deadline, "f"),
+            "{deadline_relative}": ge.format_timestamp(deadline, "R"),
+            "{help_channel}": getattr(help_channel, "mention", "the server's verification-help channel"),
+            "{invite_link}": invite_link or ("[not set]" if preview else ""),
+        }
 
     def build_warning_embed(self, member: discord.Member, *, guild: discord.Guild, deadline: datetime, compiled: CompiledAdminConfig) -> discord.Embed:
         help_channel = self._guild_channel(guild, compiled.verification_help_channel_id)
@@ -730,13 +1058,10 @@ class AdminService:
             return f"{member.mention} is at or above Babblebox's top role."
         return None
 
-    def _kick_issue(self, guild: discord.Guild, member: discord.Member) -> str | None:
+    def _kick_hierarchy_issue(self, guild: discord.Guild, member: discord.Member) -> str | None:
         me = self._bot_member(guild)
         if me is None:
             return "Babblebox could not resolve its server member for kicks."
-        perms = getattr(me, "guild_permissions", None)
-        if perms is None or not getattr(perms, "kick_members", False):
-            return "Babblebox is missing Kick Members."
         if getattr(member.guild_permissions, "administrator", False):
             return "Babblebox cannot kick administrators."
         if getattr(guild, "owner_id", None) == member.id:
@@ -744,6 +1069,51 @@ class AdminService:
         if getattr(getattr(member, "top_role", None), "position", 0) >= getattr(getattr(me, "top_role", None), "position", 0):
             return f"{member.mention} is at or above Babblebox's top role."
         return None
+
+    def _kick_issue(self, guild: discord.Guild, member: discord.Member) -> str | None:
+        me = self._bot_member(guild)
+        if me is None:
+            return "Babblebox could not resolve its server member for kicks."
+        perms = getattr(me, "guild_permissions", None)
+        if perms is None or not getattr(perms, "kick_members", False):
+            return "Babblebox is missing Kick Members."
+        return self._kick_hierarchy_issue(guild, member)
+
+    async def _deliver_verification_warning(
+        self,
+        guild: discord.Guild,
+        member: discord.Member,
+        compiled: CompiledAdminConfig,
+        record: dict[str, Any],
+        *,
+        now: datetime,
+        log_result: bool,
+    ) -> tuple[dict[str, Any], bool]:
+        warning_deadline = deserialize_datetime(record.get("kick_at")) or (now + timedelta(seconds=compiled.verification_warning_lead_seconds))
+        dm_sent = False
+        with contextlib.suppress(discord.Forbidden, discord.HTTPException):
+            await member.send(embed=self.build_warning_embed(member, guild=guild, deadline=warning_deadline, compiled=compiled))
+            dm_sent = True
+        updated_record = dict(record)
+        updated_record["warning_sent_at"] = serialize_datetime(now)
+        await self.store.upsert_verification_state(updated_record)
+        if log_result:
+            await self.send_log(
+                guild,
+                compiled,
+                embed=ge.make_status_embed(
+                    "Verification Warning Sent",
+                    (
+                        f"Babblebox warned {member.mention} about pending verification cleanup.\n"
+                        f"Kick deadline: {ge.format_timestamp(warning_deadline, 'R')}.\n"
+                        f"DM status: {'sent' if dm_sent else 'failed'}."
+                    ),
+                    tone="warning",
+                    footer="Babblebox Admin | Verification cleanup",
+                ),
+                alert=False,
+            )
+        return updated_record, dm_sent
 
     def can_ping_alert_role(self, guild: discord.Guild, compiled: CompiledAdminConfig) -> bool:
         if compiled.admin_alert_role_id is None:
@@ -1033,6 +1403,167 @@ class AdminService:
         await self.store.upsert_verification_state(self._build_verification_state(member, compiled, now=ge.now_utc()))
         self._wake_event.set()
 
+    def build_verification_sync_summary_embed(self, summary: VerificationSyncSummary) -> discord.Embed:
+        stopped = summary.manually_stopped
+        title = "Verification Sync Stopped" if stopped else "Verification Sync Complete"
+        description = (
+            "Manual verification sync scanned the current member list, updated compact verification state, and processed warning DMs that were already due."
+        )
+        tone = "warning" if stopped or summary.partial_failure or summary.failed_dm_count else "success"
+        embed = ge.make_status_embed(title, description, tone=tone, footer="Babblebox Admin | Verification cleanup")
+        embed.add_field(
+            name="Run Summary",
+            value=(
+                f"Scanned members: **{summary.scanned_members}**\n"
+                f"Matched unverified: **{summary.matched_unverified}**\n"
+                f"Newly tracked: **{summary.tracked_count}**\n"
+                f"Stale rows cleared: **{summary.cleared_count}**\n"
+                f"Warnings processed: **{summary.warned_count}**\n"
+                f"Failed DMs: **{summary.failed_dm_count}**\n"
+                f"Skipped without change: **{summary.skipped_count}**\n"
+                f"Manually stopped: **{'Yes' if summary.manually_stopped else 'No'}**"
+            ),
+            inline=False,
+        )
+        issue_lines = list(summary.issues)
+        if summary.partial_failure and summary.partial_failure not in issue_lines:
+            issue_lines.append(summary.partial_failure)
+        if issue_lines:
+            embed.add_field(name="Issues", value=ge.join_limited_lines(issue_lines, limit=1024), inline=False)
+        return embed
+
+    async def run_verification_sync_session(
+        self,
+        guild: discord.Guild,
+        session: VerificationSyncSession,
+        *,
+        progress_callback=None,
+    ) -> VerificationSyncSummary:
+        compiled = self.get_compiled_config(guild.id)
+        if session.preview.blocking_prechecks:
+            session.running = False
+            session.finished_at = ge.now_utc()
+            precheck_issues = tuple(check.message for check in session.preview.prechecks if check.severity in {"blocked", "warning"})
+            session.summary = VerificationSyncSummary(
+                scanned_members=0,
+                matched_unverified=0,
+                tracked_count=0,
+                cleared_count=0,
+                warned_count=0,
+                failed_dm_count=0,
+                skipped_count=0,
+                manually_stopped=False,
+                issues=precheck_issues,
+                partial_failure="Sync was blocked by configuration or permission prechecks.",
+            )
+            if progress_callback is not None:
+                with contextlib.suppress(Exception):
+                    await progress_callback(session, True)
+            await self.clear_verification_sync_session(guild.id, session)
+            return session.summary
+
+        existing_rows = {
+            int(row["user_id"]): row
+            for row in await self.store.list_verification_states_for_guild(guild.id)
+        }
+        seen_member_ids: set[int] = set()
+        now = ge.now_utc()
+        try:
+            for member in self._iter_guild_members(guild):
+                if session.stop_requested:
+                    break
+                member_id = int(member.id)
+                session.current_member_id = member_id
+                session.scanned_members += 1
+                seen_member_ids.add(member_id)
+                changed = False
+                try:
+                    status, status_reason = self._verification_status(member, compiled)
+                    existing = existing_rows.get(member_id)
+                    if status == "unverified":
+                        session.matched_unverified += 1
+                        record = existing
+                        if record is None:
+                            record = self._build_verification_state(member, compiled, now=now)
+                            await self.store.upsert_verification_state(record)
+                            existing_rows[member_id] = dict(record)
+                            session.tracked_count += 1
+                            changed = True
+                        warning_at = deserialize_datetime(record.get("warning_at")) if record is not None else None
+                        if record is not None and record.get("warning_sent_at") is None and (warning_at is None or warning_at <= now):
+                            updated_record, dm_sent = await self._deliver_verification_warning(
+                                guild,
+                                member,
+                                compiled,
+                                record,
+                                now=now,
+                                log_result=False,
+                            )
+                            existing_rows[member_id] = updated_record
+                            session.warned_count += 1
+                            if not dm_sent:
+                                session.failed_dm_count += 1
+                            changed = True
+                            await asyncio.sleep(VERIFICATION_SYNC_DM_PACE_SECONDS)
+                        if not changed:
+                            session.skipped_count += 1
+                    else:
+                        if existing is not None:
+                            await self.store.delete_verification_state(guild.id, member_id)
+                            existing_rows.pop(member_id, None)
+                            session.cleared_count += 1
+                            changed = True
+                        elif status == "ambiguous":
+                            session.skipped_count += 1
+                            self._record_verification_sync_issue(session, f"Skipped {member.mention} because {status_reason}")
+                except Exception as exc:
+                    session.skipped_count += 1
+                    mention = getattr(member, "mention", f"<@{member_id}>")
+                    self._record_verification_sync_issue(session, f"Skipped {mention} because {exc}")
+                if progress_callback is not None and (changed or session.scanned_members % VERIFICATION_SYNC_PROGRESS_INTERVAL == 0 or session.stop_requested):
+                    with contextlib.suppress(Exception):
+                        await progress_callback(session, False)
+                if session.scanned_members % VERIFICATION_SYNC_YIELD_INTERVAL == 0:
+                    await asyncio.sleep(0)
+
+            if not session.stop_requested and session.preview.exact_member_scan:
+                for stale_user_id in list(set(existing_rows).difference(seen_member_ids)):
+                    await self.store.delete_verification_state(guild.id, stale_user_id)
+                    existing_rows.pop(stale_user_id, None)
+                    session.cleared_count += 1
+                    if progress_callback is not None and session.cleared_count % VERIFICATION_SYNC_PROGRESS_INTERVAL == 0:
+                        with contextlib.suppress(Exception):
+                            await progress_callback(session, False)
+                    if session.cleared_count % VERIFICATION_SYNC_YIELD_INTERVAL == 0:
+                        await asyncio.sleep(0)
+        except Exception as exc:
+            session.partial_failure = f"Unexpected sync error: {exc}"
+            self._record_verification_sync_issue(session, session.partial_failure)
+        finally:
+            session.running = False
+            session.finished_at = ge.now_utc()
+            session.current_member_id = None
+            precheck_issues = [check.message for check in session.preview.prechecks if check.severity in {"blocked", "warning"}]
+            issues = tuple(dict.fromkeys([*precheck_issues, *session.runtime_issues]))
+            session.summary = VerificationSyncSummary(
+                scanned_members=session.scanned_members,
+                matched_unverified=session.matched_unverified,
+                tracked_count=session.tracked_count,
+                cleared_count=session.cleared_count,
+                warned_count=session.warned_count,
+                failed_dm_count=session.failed_dm_count,
+                skipped_count=session.skipped_count,
+                manually_stopped=bool(session.stop_requested),
+                issues=issues,
+                partial_failure=session.partial_failure,
+            )
+            await self.send_log(guild, compiled, embed=self.build_verification_sync_summary_embed(session.summary), alert=False)
+            if progress_callback is not None:
+                with contextlib.suppress(Exception):
+                    await progress_callback(session, True)
+            await self.clear_verification_sync_session(guild.id, session)
+        return session.summary
+
     async def sync_verification_guild(self, guild: discord.Guild) -> tuple[int, int]:
         if not self.storage_ready:
             return 0, 0
@@ -1043,9 +1574,7 @@ class AdminService:
         }
         tracked = 0
         cleared = 0
-        for member in getattr(guild, "members", []):
-            if not isinstance(member, discord.Member):
-                continue
+        for member in self._iter_guild_members(guild):
             status, _ = self._verification_status(member, compiled)
             if status == "unverified":
                 if member.id not in existing_rows:
@@ -1322,6 +1851,8 @@ class AdminService:
                 await self.store.delete_verification_state(int(record["guild_id"]), int(record["user_id"]))
                 processed = True
                 continue
+            if self.get_verification_sync_session(guild.id) is not None:
+                continue
             member = guild.get_member(int(record["user_id"]))
             if member is None:
                 await self.store.delete_verification_state(guild.id, int(record["user_id"]))
@@ -1345,27 +1876,13 @@ class AdminService:
                     message=f"Babblebox skipped a verification warning for {member.mention}. {status_reason}",
                 )
                 continue
-            warning_deadline = deserialize_datetime(record.get("kick_at")) or (now + timedelta(seconds=compiled.verification_warning_lead_seconds))
-            dm_sent = False
-            with contextlib.suppress(discord.Forbidden, discord.HTTPException):
-                await member.send(embed=self.build_warning_embed(member, guild=guild, deadline=warning_deadline, compiled=compiled))
-                dm_sent = True
-            record["warning_sent_at"] = serialize_datetime(now)
-            await self.store.upsert_verification_state(record)
-            await self.send_log(
+            await self._deliver_verification_warning(
                 guild,
+                member,
                 compiled,
-                embed=ge.make_status_embed(
-                    "Verification Warning Sent",
-                    (
-                        f"Babblebox warned {member.mention} about pending verification cleanup.\n"
-                        f"Kick deadline: {ge.format_timestamp(warning_deadline, 'R')}.\n"
-                        f"DM status: {'sent' if dm_sent else 'failed'}."
-                    ),
-                    tone="warning",
-                    footer="Babblebox Admin | Verification cleanup",
-                ),
-                alert=False,
+                record,
+                now=now,
+                log_result=True,
             )
             processed = True
         return processed
@@ -1377,6 +1894,8 @@ class AdminService:
             if guild is None:
                 await self.store.delete_verification_state(int(record["guild_id"]), int(record["user_id"]))
                 processed = True
+                continue
+            if self.get_verification_sync_session(guild.id) is not None:
                 continue
             member = guild.get_member(int(record["user_id"]))
             if member is None:
