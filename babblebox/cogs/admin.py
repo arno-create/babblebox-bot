@@ -24,8 +24,8 @@ FOLLOWUP_MODE_CHOICES = [
     app_commands.Choice(name="Moderator review", value="review"),
 ]
 VERIFICATION_LOGIC_CHOICES = [
-    app_commands.Choice(name="Must have role", value="must_have_role"),
-    app_commands.Choice(name="Must not have role", value="must_not_have_role"),
+    app_commands.Choice(name="Unverified if member DOES NOT have this role", value="must_have_role"),
+    app_commands.Choice(name="Unverified if member DOES have this role", value="must_not_have_role"),
 ]
 STATE_CHOICES = [
     app_commands.Choice(name="On", value="on"),
@@ -285,6 +285,68 @@ class AdminCog(commands.Cog):
     def _channel_mention(self, channel_id: int | None) -> str:
         return f"<#{channel_id}>" if channel_id else "Not set"
 
+    def _verification_rule_details(self, guild_id: int) -> dict[str, object]:
+        config = self.service.get_config(guild_id)
+        guild = self._guild(guild_id)
+        role = self.service._guild_role(guild, config["verification_role_id"]) if guild is not None else None
+        role_text = role.mention if role is not None else self._role_mention(config["verification_role_id"])
+        role_name = str(getattr(role, "name", "") or "").strip()
+        warning_after = format_duration_brief(config["verification_kick_after_seconds"] - config["verification_warning_lead_seconds"])
+        kick_after = format_duration_brief(config["verification_kick_after_seconds"])
+        if config["verification_role_id"] is None:
+            verified_sentence = "Members cannot be evaluated until a verification role is configured."
+            unverified_sentence = "Babblebox will not warn or kick anyone until the verification role is configured."
+            preview_sentence = "Current rule: incomplete, because no verification role is configured yet."
+        elif config["verification_logic"] == "must_have_role":
+            verified_sentence = f"Members are considered verified only if they HAVE {role_text}."
+            unverified_sentence = f"Users WITHOUT {role_text} are treated as unverified."
+            preview_sentence = f"Current rule: users who do NOT have {role_text} will be warned after {warning_after} and kicked after {kick_after}."
+        else:
+            verified_sentence = f"Members are considered verified only if they DO NOT HAVE {role_text}."
+            unverified_sentence = f"Users WITH {role_text} are treated as unverified."
+            preview_sentence = f"Current rule: users who still have {role_text} will be warned after {warning_after} and kicked after {kick_after}."
+
+        exempt_parts: list[str] = []
+        if config["excluded_user_ids"] or config["excluded_role_ids"]:
+            exempt_parts.append("listed exclusions")
+        if config["verification_exempt_staff"]:
+            exempt_parts.append("staff or trusted roles")
+        if config["verification_exempt_bots"]:
+            exempt_parts.append("bots")
+        if exempt_parts:
+            exempt_sentence = f"Exempt from warning/kick: {', '.join(exempt_parts)}."
+        else:
+            exempt_sentence = "Exempt from warning/kick: only members Babblebox cannot safely moderate."
+
+        review_lines: list[str] = []
+        role_name_lower = role_name.lower()
+        negative_tokens = ("not verified", "unverified", "guest", "pending", "visitor")
+        positive_tokens = ("verified", "approved", "member")
+        has_negative_name = any(token in role_name_lower for token in negative_tokens)
+        has_positive_name = any(token in role_name_lower for token in positive_tokens)
+        if role_name and has_negative_name:
+            if config["verification_logic"] == "must_have_role":
+                review_lines.append(
+                    f"Please review carefully: `{role_name}` sounds like an unverified-state role, but users WITHOUT {role_text} are currently targeted."
+                )
+            else:
+                review_lines.append(
+                    f"Please review carefully: `{role_name}` sounds like an unverified-state role. Confirm that users WITH {role_text} should be warned and kicked."
+                )
+        elif role_name and has_positive_name and config["verification_logic"] == "must_not_have_role":
+            review_lines.append(
+                f"Please review carefully: `{role_name}` sounds like a verified-state role, but users WITH {role_text} are currently treated as unverified."
+            )
+
+        return {
+            "role_text": role_text,
+            "verified_sentence": verified_sentence,
+            "unverified_sentence": unverified_sentence,
+            "preview_sentence": preview_sentence,
+            "exempt_sentence": exempt_sentence,
+            "review_lines": review_lines,
+        }
+
     def _operability_lines(self, guild_id: int) -> list[str]:
         guild = self._guild(guild_id)
         if guild is None:
@@ -346,6 +408,7 @@ class AdminCog(commands.Cog):
     async def _overview_embed(self, guild_id: int) -> discord.Embed:
         config = self.service.get_config(guild_id)
         counts = await self.service.get_counts(guild_id)
+        verification_rule = self._verification_rule_details(guild_id)
         embed = discord.Embed(
             title="Admin Systems Overview",
             description="Compact server-lifecycle helpers for returned-after-ban follow-up roles and long-unverified cleanup.",
@@ -365,7 +428,8 @@ class AdminCog(commands.Cog):
             name="Verification Cleanup",
             value=(
                 f"Enabled: **{'Yes' if config['verification_enabled'] else 'No'}**\n"
-                f"Role logic: {VERIFICATION_LOGIC_LABELS[config['verification_logic']]}\n"
+                f"Rule: {VERIFICATION_LOGIC_LABELS[config['verification_logic']]}\n"
+                f"{verification_rule['unverified_sentence']}\n"
                 f"Kick timer: {format_duration_brief(config['verification_kick_after_seconds'])}\n"
                 f"Warn lead: {format_duration_brief(config['verification_warning_lead_seconds'])}"
             ),
@@ -429,19 +493,28 @@ class AdminCog(commands.Cog):
 
     async def _verification_embed(self, guild_id: int) -> discord.Embed:
         config = self.service.get_config(guild_id)
+        rule = self._verification_rule_details(guild_id)
         embed = discord.Embed(
             title="Verification Cleanup",
             description="Warn and then kick members who stay unverified too long, with a verification-help extension path.",
             color=ge.EMBED_THEME["danger"],
         )
         embed.add_field(
-            name="Policy",
+            name="Current Rule",
             value=(
                 f"Enabled: **{'Yes' if config['verification_enabled'] else 'No'}**\n"
                 f"Role: {self._role_mention(config['verification_role_id'])}\n"
-                f"Logic: {VERIFICATION_LOGIC_LABELS[config['verification_logic']]}\n"
-                f"Kick timer: {format_duration_brief(config['verification_kick_after_seconds'])}\n"
-                f"Warn lead: {format_duration_brief(config['verification_warning_lead_seconds'])}"
+                f"Logic label: {VERIFICATION_LOGIC_LABELS[config['verification_logic']]}\n"
+                f"{rule['verified_sentence']}\n"
+                f"{rule['unverified_sentence']}"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Warn / Kick Target",
+            value=(
+                f"{rule['preview_sentence']}\n"
+                f"{rule['exempt_sentence']}"
             ),
             inline=False,
         )
@@ -463,9 +536,14 @@ class AdminCog(commands.Cog):
             ),
             inline=False,
         )
+        if rule["review_lines"]:
+            embed.add_field(name="Please Review Carefully", value="\n".join(rule["review_lines"]), inline=False)
         embed.add_field(
-            name="Quick Use",
-            value="`/admin verification enabled:true role:@Verified logic:must_have_role kick_after:7d warning_lead:2d`",
+            name="Examples",
+            value=(
+                "`@Verified + must_have_role` -> users WITHOUT `@Verified` are warned/kicked.\n"
+                "`@Not Verified + must_not_have_role` -> users WITH `@Not Verified` are warned/kicked."
+            ),
             inline=False,
         )
         return embed
@@ -586,6 +664,7 @@ class AdminCog(commands.Cog):
 
     async def _member_status_embed(self, member: discord.Member) -> discord.Embed:
         status = await self.service.get_member_status(member)
+        rule = self._verification_rule_details(member.guild.id)
         followup_role_text = f"<@&{status['followup']['role_id']}>" if status["followup"] else "None"
         embed = discord.Embed(
             title="Admin Member Status",
@@ -602,20 +681,24 @@ class AdminCog(commands.Cog):
             inline=False,
         )
         verification_state = status["verification"]
+        verification_lines = [
+            f"{rule['preview_sentence']}",
+            f"This member currently counts as: {status['verified_state'].title()}",
+            f"Why: {status['verified_reason']}",
+        ]
+        exempt_reason = status.get("verification_exempt_reason")
+        if exempt_reason:
+            verification_lines.append(f"Exempt: {exempt_reason}")
         if verification_state is None:
-            verification_lines = [
-                f"Verification state: {status['verified_state'].title()}",
-                f"Reason: {status['verified_reason']}",
-                "Tracked deadline: None",
-            ]
+            verification_lines.append("Tracked deadline: None")
         else:
-            verification_lines = [
-                f"Verification state: {status['verified_state'].title()}",
-                f"Reason: {status['verified_reason']}",
-                f"Warn at: {ge.format_timestamp(deserialize_datetime(verification_state.get('warning_at')), 'R')}",
-                f"Kick at: {ge.format_timestamp(deserialize_datetime(verification_state.get('kick_at')), 'R')}",
-                f"Extensions used: {verification_state.get('extension_count', 0)}",
-            ]
+            verification_lines.extend(
+                [
+                    f"Warn at: {ge.format_timestamp(deserialize_datetime(verification_state.get('warning_at')), 'R')}",
+                    f"Kick at: {ge.format_timestamp(deserialize_datetime(verification_state.get('kick_at')), 'R')}",
+                    f"Extensions used: {verification_state.get('extension_count', 0)}",
+                ]
+            )
         embed.add_field(name="Verification", value="\n".join(verification_lines), inline=False)
         return ge.style_embed(embed, footer="Babblebox Admin | Member automation status")
 
@@ -686,7 +769,7 @@ class AdminCog(commands.Cog):
     @app_commands.describe(
         enabled="Turn verification cleanup on or off",
         role="Verification role to evaluate",
-        logic="Whether verified members must have or must not have that role",
+        logic="Choose whether users missing this role or users still holding this role are treated as unverified",
         kick_after="Full time before kick, like 7d",
         warning_lead="How long before the kick Babblebox should warn, like 2d",
         help_channel="Verification-help channel where messages can extend the deadline",
