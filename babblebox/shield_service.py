@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import ipaddress
 import re
 import uuid
 from dataclasses import dataclass
@@ -87,13 +88,20 @@ INVITE_RE = re.compile(r"(?i)(?:https?://)?(?:www\.)?(?:discord(?:app)?\.com/inv
 ETH_WALLET_RE = re.compile(r"\b0x[a-fA-F0-9]{40}\b")
 BTC_WALLET_RE = re.compile(r"\b(?:bc1|[13])[a-zA-HJ-NP-Z0-9]{25,59}\b")
 IP_CONTEXT_RE = re.compile(r"(?i)\b(?:ip|address|server|host|router|login)\b")
+EMAIL_CONTEXT_RE = re.compile(r"(?i)\b(?:email|e-mail|mail|contact|reach me|write to|send(?: me)?(?: an)? email)\b")
 PHONE_CONTEXT_RE = re.compile(r"(?i)\b(?:call|text|phone|contact|whatsapp|telegram|reach me)\b")
 PAYMENT_CONTEXT_RE = re.compile(
     r"(?i)\b(?:card|credit|debit|cvv|cvc|expiry|routing|bank|account|iban|payment|paypal|cashapp|venmo|zelle|wire)\b"
 )
-ID_CONTEXT_RE = re.compile(r"(?i)\b(?:ssn|social security|passport|tax id|routing|account|verification code|otp)\b")
+OTP_CONTEXT_RE = re.compile(
+    r"(?i)\b(?:otp|2fa|verification code|auth(?:entication)? code|login code|security code|one[- ]time code|sms code)\b"
+)
+ROUTING_CONTEXT_RE = re.compile(r"(?i)\b(?:routing|aba)\b")
+ACCOUNT_ID_CONTEXT_RE = re.compile(r"(?i)\b(?:account(?: number)?|passport|tax id|taxpayer|member id|customer id)\b")
+CRYPTO_CONTEXT_RE = re.compile(r"(?i)\b(?:wallet|address|seed phrase|crypto|bitcoin|btc|ethereum|eth|usdt)\b")
 PROMO_CTA_RE = re.compile(r"(?i)\b(?:join|check out|follow|subscribe|support|buy|shop|hire|order|commission(?:s)? open)\b")
 INVITE_CTA_RE = re.compile(r"(?i)\b(?:join|check out|new|growing|active|friendly)\b.{0,24}\b(?:server|community)\b")
+PROMO_CONTEXT_RE = re.compile(r"(?i)\b(?:server|community|channel|stream|shop|store|commission(?:s)?|prices|portfolio|page)\b")
 MONETIZED_PROMO_RE = re.compile(
     r"(?i)\b(?:commission(?:s)? open|patreon|ko-fi|gumroad|etsy|shop|store|prices|paid promo|sponsored)\b"
 )
@@ -103,6 +111,8 @@ SCAM_BAIT_RE = re.compile(
 )
 BRAND_BAIT_RE = re.compile(r"(?i)\b(?:discord|nitro|steam|epic|wallet|crypto|gift)\b")
 SUSPICIOUS_FILE_RE = re.compile(r"(?i)\.(?:exe|scr|bat|cmd|msi|zip|rar|7z|iso)(?:$|[?#])")
+SCAM_WARNING_RE = re.compile(r"(?i)\b(?:beware|warning|avoid|do not|don't|never|fake|phish(?:ing)?|report(?:ed)?|heads up)\b")
+GENERIC_DIGIT_RE = re.compile(r"\b\d{4,12}\b")
 SOCIAL_PROMO_DOMAINS = {
     "instagram.com",
     "tiktok.com",
@@ -313,6 +323,98 @@ def _build_snapshot(text: str | None, attachments: Sequence[Any] | None = None) 
         has_links=bool(urls),
         has_suspicious_attachment=any(SUSPICIOUS_FILE_RE.search(name) for name in attachment_names),
     )
+
+
+def _candidate_window(text: str, start: int, end: int, *, radius: int = 28) -> str:
+    return text[max(0, start - radius):min(len(text), end + radius)]
+
+
+def _candidate_is_standalone(text: str, start: int, end: int) -> bool:
+    remainder = (text[:start] + text[end:]).strip(" \t\r\n-:;,.!?/\\|()[]{}<>\"'")
+    return not remainder
+
+
+def _sensitivity_threshold(sensitivity: str, *, low: int, normal: int, high: int) -> int:
+    return {"low": low, "normal": normal, "high": high}.get(sensitivity, normal)
+
+
+def _confidence_from_score(score: int) -> str:
+    if score >= 3:
+        return "high"
+    if score >= 2:
+        return "medium"
+    return "low"
+
+
+def _validate_email_candidate(candidate: str) -> str | None:
+    cleaned = candidate.strip().strip("()[]{}<>,;:\"'")
+    if "@" not in cleaned or cleaned.count("@") != 1:
+        return None
+    local_part, domain = cleaned.split("@", 1)
+    if not (1 <= len(local_part) <= 64 and 4 <= len(domain) <= 255):
+        return None
+    if local_part.startswith(".") or local_part.endswith(".") or ".." in local_part or ".." in domain:
+        return None
+    labels = domain.split(".")
+    if len(labels) < 2:
+        return None
+    tld = labels[-1]
+    if not (2 <= len(tld) <= 24 and tld.isalpha()):
+        return None
+    for label in labels:
+        if not label or len(label) > 63:
+            return None
+        if label.startswith("-") or label.endswith("-"):
+            return None
+        if not re.fullmatch(r"[a-z0-9-]+", label):
+            return None
+    if not re.fullmatch(r"[a-z0-9.!#$%&'*+/=?^_`{|}~-]+", local_part):
+        return None
+    return f"{local_part}@{domain}"
+
+
+def _passes_luhn(number: str) -> bool:
+    if not number.isdigit():
+        return False
+    checksum = 0
+    double = False
+    for digit in reversed(number):
+        value = int(digit)
+        if double:
+            value *= 2
+            if value > 9:
+                value -= 9
+        checksum += value
+        double = not double
+    return checksum % 10 == 0
+
+
+def _is_valid_ssn(candidate: str) -> bool:
+    try:
+        area, group, serial = (int(part) for part in candidate.split("-"))
+    except ValueError:
+        return False
+    if area == 0 or group == 0 or serial == 0:
+        return False
+    if area == 666 or area >= 900:
+        return False
+    return True
+
+
+def _is_valid_routing_number(candidate: str) -> bool:
+    if not re.fullmatch(r"\d{9}", candidate):
+        return False
+    digits = [int(char) for char in candidate]
+    checksum = 3 * (digits[0] + digits[3] + digits[6]) + 7 * (digits[1] + digits[4] + digits[7]) + (digits[2] + digits[5] + digits[8])
+    return checksum % 10 == 0
+
+
+def _candidate_appears_in_url(candidate: str, urls: Sequence[str]) -> bool:
+    return any(candidate in url for url in urls)
+
+
+def _looks_like_scam_warning(text: str) -> bool:
+    return bool(SCAM_WARNING_RE.search(text))
 
 
 class ShieldService:
@@ -837,78 +939,254 @@ class ShieldService:
         if not settings.enabled or settings.action == "disabled":
             return []
         matches: list[ShieldMatch] = []
-        if EMAIL_RE.search(snapshot.text) or EMAIL_RE.search(snapshot.squashed):
-            matches.append(
-                ShieldMatch(
-                    pack="privacy",
-                    label="Possible email address",
-                    reason="Looks like an email address was posted in chat.",
-                    action=settings.action,
-                    confidence="high",
-                    heuristic=False,
-                )
+        email_match = self._detect_privacy_email(settings, snapshot)
+        if email_match is not None:
+            matches.append(email_match)
+        phone_match = self._detect_privacy_phone(settings, snapshot)
+        if phone_match is not None:
+            matches.append(phone_match)
+        ip_match = self._detect_privacy_ip(settings, snapshot)
+        if ip_match is not None:
+            matches.append(ip_match)
+        crypto_match = self._detect_privacy_crypto(settings, snapshot)
+        if crypto_match is not None:
+            matches.append(crypto_match)
+        payment_match = self._detect_privacy_payment(settings, snapshot)
+        if payment_match is not None:
+            matches.append(payment_match)
+        matches.extend(self._detect_privacy_sensitive_ids(settings, snapshot))
+        return self._dedupe_matches(matches)
+
+    def _detect_privacy_email(self, settings: PackSettings, snapshot: ShieldSnapshot) -> ShieldMatch | None:
+        seen: set[str] = set()
+        for match in EMAIL_RE.finditer(snapshot.text):
+            candidate = _validate_email_candidate(match.group(0))
+            if candidate is None or candidate in seen:
+                continue
+            seen.add(candidate)
+            nearby = _candidate_window(snapshot.text, *match.span())
+            score = 2
+            if EMAIL_CONTEXT_RE.search(nearby):
+                score += 1
+            if _candidate_is_standalone(snapshot.text, *match.span()):
+                score += 1
+            return ShieldMatch(
+                pack="privacy",
+                label="Possible email address",
+                reason="A structured email address was posted in chat.",
+                action=settings.action,
+                confidence=_confidence_from_score(score),
+                heuristic=False,
             )
-        phone_match = PHONE_RE.search(snapshot.text)
-        if phone_match:
-            digits = re.sub(r"\D", "", phone_match.group(0))
-            if settings.sensitivity == "high" or PHONE_CONTEXT_RE.search(snapshot.text) or len(digits) >= 10:
+        return None
+
+    def _detect_privacy_phone(self, settings: PackSettings, snapshot: ShieldSnapshot) -> ShieldMatch | None:
+        threshold = _sensitivity_threshold(settings.sensitivity, low=2, normal=2, high=3)
+        best_score = 0
+        for match in PHONE_RE.finditer(snapshot.text):
+            candidate = match.group(0).strip()
+            digits = re.sub(r"\D", "", candidate)
+            if not (7 <= len(digits) <= 15):
+                continue
+            if len(set(digits)) == 1:
+                continue
+            nearby = _candidate_window(snapshot.text, *match.span())
+            has_context = bool(PHONE_CONTEXT_RE.search(nearby))
+            if len(digits) < 10 and not has_context:
+                continue
+            if candidate.count(".") >= 2 and not has_context:
+                continue
+            score = 0
+            if len(digits) >= 10:
+                score += 1
+            if any(token in candidate for token in ("+", "-", "(", ")", " ")):
+                score += 1
+            if has_context:
+                score += 1
+            if _candidate_is_standalone(snapshot.text, *match.span()) and len(digits) >= 10:
+                score += 1
+            best_score = max(best_score, score)
+        if best_score < threshold:
+            return None
+        return ShieldMatch(
+            pack="privacy",
+            label="Possible phone number",
+            reason="A phone-like number passed structure checks and looked like a contact detail.",
+            action=settings.action,
+            confidence=_confidence_from_score(best_score),
+            heuristic=False,
+        )
+
+    def _detect_privacy_ip(self, settings: PackSettings, snapshot: ShieldSnapshot) -> ShieldMatch | None:
+        threshold = _sensitivity_threshold(settings.sensitivity, low=2, normal=2, high=3)
+        best_score = 0
+        for pattern in (IPV4_RE, IPV6_RE):
+            for match in pattern.finditer(snapshot.text):
+                candidate = match.group(0)
+                try:
+                    parsed = ipaddress.ip_address(candidate)
+                except ValueError:
+                    continue
+                nearby = _candidate_window(snapshot.text, *match.span())
+                in_url = _candidate_appears_in_url(candidate, snapshot.urls)
+                score = 0
+                if not in_url:
+                    score += 1
+                if IP_CONTEXT_RE.search(nearby):
+                    score += 1
+                if not parsed.is_global:
+                    score += 1
+                if _candidate_is_standalone(snapshot.text, *match.span()):
+                    score += 1
+                best_score = max(best_score, score)
+        if best_score < threshold:
+            return None
+        return ShieldMatch(
+            pack="privacy",
+            label="Possible IP or host detail",
+            reason="A validated network address appeared with signals that looked more private than harmless.",
+            action=settings.action,
+            confidence=_confidence_from_score(best_score),
+            heuristic=True,
+        )
+
+    def _detect_privacy_crypto(self, settings: PackSettings, snapshot: ShieldSnapshot) -> ShieldMatch | None:
+        threshold = _sensitivity_threshold(settings.sensitivity, low=2, normal=2, high=3)
+        best_score = 0
+        patterns = [ETH_WALLET_RE]
+        if settings.sensitivity != "low":
+            patterns.append(BTC_WALLET_RE)
+        for pattern in patterns:
+            for match in pattern.finditer(snapshot.text):
+                nearby = _candidate_window(snapshot.text, *match.span())
+                score = 2
+                if CRYPTO_CONTEXT_RE.search(nearby):
+                    score += 1
+                if _candidate_is_standalone(snapshot.text, *match.span()):
+                    score += 1
+                best_score = max(best_score, score)
+        if best_score < threshold:
+            return None
+        return ShieldMatch(
+            pack="privacy",
+            label="Possible crypto wallet",
+            reason="A wallet-style address was posted with enough structure and context to look intentional.",
+            action=settings.action,
+            confidence=_confidence_from_score(best_score),
+            heuristic=True,
+        )
+
+    def _detect_privacy_payment(self, settings: PackSettings, snapshot: ShieldSnapshot) -> ShieldMatch | None:
+        threshold = _sensitivity_threshold(settings.sensitivity, low=2, normal=3, high=3)
+        best_score = 0
+        for match in CARD_RE.finditer(snapshot.text):
+            candidate = match.group(0)
+            digits = re.sub(r"\D", "", candidate)
+            if not (13 <= len(digits) <= 19):
+                continue
+            if len(set(digits)) == 1 or not _passes_luhn(digits):
+                continue
+            nearby = _candidate_window(snapshot.text, *match.span())
+            score = 2
+            if PAYMENT_CONTEXT_RE.search(nearby):
+                score += 1
+            if _candidate_is_standalone(snapshot.text, *match.span()) and any(token in candidate for token in (" ", "-")):
+                score += 1
+            best_score = max(best_score, score)
+        if best_score < threshold:
+            return None
+        return ShieldMatch(
+            pack="privacy",
+            label="Possible payment detail",
+            reason="A card-like number passed checksum validation and matched payment-style context.",
+            action=settings.action,
+            confidence=_confidence_from_score(best_score),
+            heuristic=False,
+        )
+
+    def _detect_privacy_sensitive_ids(self, settings: PackSettings, snapshot: ShieldSnapshot) -> list[ShieldMatch]:
+        matches: list[ShieldMatch] = []
+        for match in SSN_RE.finditer(snapshot.text):
+            if _is_valid_ssn(match.group(0)):
                 matches.append(
                     ShieldMatch(
                         pack="privacy",
-                        label="Possible phone number",
-                        reason="Looks like a phone number or direct contact detail was posted.",
+                        label="Possible sensitive ID number",
+                        reason="A structured SSN-style number passed basic validity checks.",
                         action=settings.action,
-                        confidence="medium",
+                        confidence="high",
                         heuristic=False,
                     )
                 )
-        if (IPV4_RE.search(snapshot.text) or IPV6_RE.search(snapshot.text)) and (
-            settings.sensitivity == "high" or IP_CONTEXT_RE.search(snapshot.text)
-        ):
-            matches.append(
-                ShieldMatch(
-                    pack="privacy",
-                    label="Possible IP or host detail",
-                    reason="A network address or host-style string appeared with context that looks private.",
-                    action=settings.action,
-                    confidence="low",
-                    heuristic=True,
+                break
+
+        routing_threshold = _sensitivity_threshold(settings.sensitivity, low=2, normal=2, high=3)
+        otp_threshold = _sensitivity_threshold(settings.sensitivity, low=2, normal=2, high=3)
+        account_threshold = _sensitivity_threshold(settings.sensitivity, low=2, normal=2, high=3)
+        for match in GENERIC_DIGIT_RE.finditer(snapshot.text):
+            candidate = match.group(0)
+            nearby = _candidate_window(snapshot.text, *match.span())
+            if len(candidate) == 9 and ROUTING_CONTEXT_RE.search(nearby) and _is_valid_routing_number(candidate):
+                score = 2
+                if _candidate_is_standalone(snapshot.text, *match.span()):
+                    score += 1
+                if score >= routing_threshold:
+                    matches.append(
+                        ShieldMatch(
+                            pack="privacy",
+                            label="Possible routing number",
+                            reason="A 9-digit number matched routing context and a checksum-style validation.",
+                            action=settings.action,
+                            confidence=_confidence_from_score(score),
+                            heuristic=False,
+                        )
+                    )
+                    break
+
+        for match in GENERIC_DIGIT_RE.finditer(snapshot.text):
+            candidate = match.group(0)
+            nearby = _candidate_window(snapshot.text, *match.span())
+            if not OTP_CONTEXT_RE.search(nearby):
+                continue
+            score = 2
+            if _candidate_is_standalone(snapshot.text, *match.span()) or ":" in nearby or "#" in nearby:
+                score += 1
+            if score >= otp_threshold:
+                matches.append(
+                    ShieldMatch(
+                        pack="privacy",
+                        label="Possible verification code",
+                        reason="A short code appeared next to OTP or verification wording.",
+                        action=settings.action,
+                        confidence=_confidence_from_score(score),
+                        heuristic=True,
+                    )
                 )
-            )
-        if ETH_WALLET_RE.search(snapshot.text) or (settings.sensitivity != "low" and BTC_WALLET_RE.search(snapshot.text)):
-            matches.append(
-                ShieldMatch(
-                    pack="privacy",
-                    label="Possible crypto wallet",
-                    reason="Looks like a wallet address was posted publicly.",
-                    action=settings.action,
-                    confidence="medium",
-                    heuristic=True,
+                break
+
+        for match in GENERIC_DIGIT_RE.finditer(snapshot.text):
+            candidate = match.group(0)
+            if not (8 <= len(candidate) <= 12):
+                continue
+            nearby = _candidate_window(snapshot.text, *match.span())
+            if not ACCOUNT_ID_CONTEXT_RE.search(nearby):
+                continue
+            score = 1
+            if _candidate_is_standalone(snapshot.text, *match.span()) or ":" in nearby or "#" in nearby:
+                score += 1
+            if score >= account_threshold:
+                matches.append(
+                    ShieldMatch(
+                        pack="privacy",
+                        label="Possible sensitive ID number",
+                        reason="A long ID-like number appeared with account, passport, or tax-ID context.",
+                        action=settings.action,
+                        confidence=_confidence_from_score(score),
+                        heuristic=True,
+                    )
                 )
-            )
-        if CARD_RE.search(snapshot.text) and PAYMENT_CONTEXT_RE.search(snapshot.text):
-            matches.append(
-                ShieldMatch(
-                    pack="privacy",
-                    label="Possible payment detail",
-                    reason="A long card-like number appeared next to payment or bank wording.",
-                    action=settings.action,
-                    confidence="high",
-                    heuristic=False,
-                )
-            )
-        if SSN_RE.search(snapshot.text) or (ID_CONTEXT_RE.search(snapshot.text) and settings.sensitivity == "high" and re.search(r"\b\d{8,12}\b", snapshot.text)):
-            matches.append(
-                ShieldMatch(
-                    pack="privacy",
-                    label="Possible sensitive ID number",
-                    reason="A sensitive-looking number appeared next to ID or verification wording.",
-                    action=settings.action,
-                    confidence="high",
-                    heuristic=True,
-                )
-            )
-        return self._dedupe_matches(matches)
+                break
+        return matches
 
     def _detect_promo(self, compiled: CompiledShieldConfig, snapshot: ShieldSnapshot, *, repetitive_promo: bool) -> list[ShieldMatch]:
         settings = compiled.promo
@@ -920,6 +1198,7 @@ class ShieldService:
         cta = bool(PROMO_CTA_RE.search(snapshot.text) or PROMO_CTA_RE.search(snapshot.squashed))
         invite_cta = bool(INVITE_CTA_RE.search(snapshot.text))
         monetized = bool(MONETIZED_PROMO_RE.search(snapshot.text))
+        promo_context = bool(PROMO_CONTEXT_RE.search(snapshot.text))
         social_domains = [domain for domain in unallowlisted_domains if domain in SOCIAL_PROMO_DOMAINS]
 
         if unallowlisted_invites:
@@ -955,14 +1234,14 @@ class ShieldService:
                     heuristic=True,
                 )
             )
-        if settings.sensitivity == "high" and cta and unallowlisted_domains:
+        if settings.sensitivity == "high" and cta and unallowlisted_domains and (social_domains or monetized or promo_context or len(unallowlisted_domains) > 1):
             matches.append(
                 ShieldMatch(
                     pack="promo",
-                    label="Call-to-action link",
-                    reason="A direct call to action was paired with an external link.",
+                    label="Call-to-action promo link",
+                    reason="A promo-style call to action was paired with external links and other promotion signals.",
                     action=settings.action,
-                    confidence="low",
+                    confidence="medium",
                     heuristic=True,
                 )
             )
@@ -982,6 +1261,8 @@ class ShieldService:
     def _detect_scam(self, compiled: CompiledShieldConfig, snapshot: ShieldSnapshot) -> list[ShieldMatch]:
         settings = compiled.scam
         if not settings.enabled or settings.action == "disabled":
+            return []
+        if _looks_like_scam_warning(snapshot.text):
             return []
         matches: list[ShieldMatch] = []
         unallowlisted_domains = [domain for domain in snapshot.domains if domain not in compiled.allow_domains]
@@ -1024,6 +1305,17 @@ class ShieldService:
                     heuristic=True,
                 )
             )
+        if dangerous_link and social_engineering:
+            matches.append(
+                ShieldMatch(
+                    pack="scam",
+                    label="Executable download link",
+                    reason="A download-style instruction pointed to an executable or archive-style URL.",
+                    action=settings.action,
+                    confidence="high",
+                    heuristic=True,
+                )
+            )
         if brand_bait and social_engineering and unallowlisted_domains:
             matches.append(
                 ShieldMatch(
@@ -1035,12 +1327,12 @@ class ShieldService:
                     heuristic=True,
                 )
             )
-        if settings.sensitivity == "high" and bait:
+        if settings.sensitivity == "high" and bait and (social_engineering or brand_bait):
             matches.append(
                 ShieldMatch(
                     pack="scam",
                     label="Scam bait wording",
-                    reason="The message contains known claim or gift-bait wording, even without a linked payload.",
+                    reason="The message contains known claim or gift-bait wording reinforced by scam-style instructions or branding.",
                     action=settings.action,
                     confidence="low",
                     heuristic=True,

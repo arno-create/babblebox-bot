@@ -152,6 +152,46 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(matches[0].pack, "privacy")
         self.assertIn("email", matches[0].label.lower())
 
+    async def test_privacy_high_sensitivity_does_not_flag_random_long_number_as_phone(self):
+        ok, _ = await self.service.set_pack_config(10, "privacy", enabled=True, action="log", sensitivity="high")
+        self.assertTrue(ok)
+
+        matches = self.service.test_message(10, "Build number 1234567890 finished successfully.")
+
+        self.assertFalse([match for match in matches if match.pack == "privacy" and "phone" in match.label.lower()])
+
+    async def test_privacy_high_sensitivity_still_detects_phone_with_contact_context(self):
+        ok, _ = await self.service.set_pack_config(10, "privacy", enabled=True, action="log", sensitivity="high")
+        self.assertTrue(ok)
+
+        matches = self.service.test_message(10, "Call me at +1 (555) 123-4567 when you are free.")
+
+        self.assertTrue([match for match in matches if match.pack == "privacy" and "phone" in match.label.lower()])
+
+    async def test_privacy_card_requires_more_than_a_raw_number_on_high(self):
+        ok, _ = await self.service.set_pack_config(10, "privacy", enabled=True, action="log", sensitivity="high")
+        self.assertTrue(ok)
+
+        matches = self.service.test_message(10, "Reference 4111 1111 1111 1111 for the test fixture.")
+
+        self.assertFalse([match for match in matches if match.pack == "privacy" and "payment" in match.label.lower()])
+
+    async def test_privacy_card_with_payment_context_still_detects(self):
+        ok, _ = await self.service.set_pack_config(10, "privacy", enabled=True, action="log", sensitivity="high")
+        self.assertTrue(ok)
+
+        matches = self.service.test_message(10, "Card 4111 1111 1111 1111 expires next month.")
+
+        self.assertTrue([match for match in matches if match.pack == "privacy" and "payment" in match.label.lower()])
+
+    async def test_privacy_ip_inside_link_does_not_overtrigger(self):
+        ok, _ = await self.service.set_pack_config(10, "privacy", enabled=True, action="log", sensitivity="high")
+        self.assertTrue(ok)
+
+        matches = self.service.test_message(10, "Local docs run at http://127.0.0.1:8000/health during development.")
+
+        self.assertFalse([match for match in matches if match.pack == "privacy" and "ip" in match.label.lower()])
+
     async def test_legacy_nested_pack_shape_is_respected_by_service_and_compiled_cache(self):
         self.service.store.state["guilds"]["10"] = {
             "module_enabled": True,
@@ -187,6 +227,22 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse([match for match in matches if match.pack == "promo"])
 
+    async def test_promo_high_sensitivity_skips_generic_info_link(self):
+        ok, _ = await self.service.set_pack_config(10, "promo", enabled=True, action="log", sensitivity="high")
+        self.assertTrue(ok)
+
+        matches = self.service.test_message(10, "Check out the docs at https://example.com/guide for setup details.")
+
+        self.assertFalse([match for match in matches if match.pack == "promo"])
+
+    async def test_promo_invite_still_detects_without_allowlist(self):
+        ok, _ = await self.service.set_pack_config(10, "promo", enabled=True, action="log", sensitivity="normal")
+        self.assertTrue(ok)
+
+        matches = self.service.test_message(10, "Join us here https://discord.gg/notallowed")
+
+        self.assertTrue([match for match in matches if match.pack == "promo"])
+
     async def test_custom_wildcard_pattern_matches_safely(self):
         ok, _ = await self.service.add_custom_pattern(
             10,
@@ -201,6 +257,14 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(matches)
         self.assertEqual(matches[0].pack, "advanced")
+
+    async def test_scam_warning_message_is_not_flagged(self):
+        ok, _ = await self.service.set_pack_config(10, "scam", enabled=True, action="log", sensitivity="high")
+        self.assertTrue(ok)
+
+        matches = self.service.test_message(10, "Warning: fake free nitro link here, do not click https://bit.ly/bait")
+
+        self.assertFalse([match for match in matches if match.pack == "scam"])
 
     async def test_trusted_role_bypass_skips_live_scan(self):
         guild = FakeGuild(10)
