@@ -1,13 +1,13 @@
-import unittest
 import os
+import unittest
 from datetime import timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Optional
 
 from babblebox import game_engine as ge
+from babblebox.utility_helpers import build_afk_reason_text, compute_next_afk_schedule_start, serialize_datetime
 from babblebox.utility_service import UtilityService
-from babblebox.utility_helpers import serialize_datetime
 from babblebox.utility_store import UtilityStateStore, UtilityStorageUnavailable
 
 
@@ -34,6 +34,8 @@ class UtilityStoreAndServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.store.backend_name, "memory")
         self.assertEqual(self.store.state["watch"], {})
         self.assertEqual(self.store.state["afk"], {})
+        self.assertEqual(self.store.state["afk_settings"], {})
+        self.assertEqual(self.store.state["afk_schedules"], {})
 
     async def test_postgres_backend_requires_database_url(self):
         with self.assertRaises(UtilityStorageUnavailable):
@@ -209,7 +211,8 @@ class UtilityStoreAndServiceTests(unittest.IsolatedAsyncioTestCase):
         user = DummyUser(88)
         ok, _ = await self.service.set_afk(
             user=user,
-            reason="💤 Sleeping",
+            reason=build_afk_reason_text(preset="sleeping", custom_reason=None),
+            preset="sleeping",
             duration_seconds=30 * 60,
             start_in_seconds=10 * 60,
         )
@@ -219,7 +222,7 @@ class UtilityStoreAndServiceTests(unittest.IsolatedAsyncioTestCase):
         record["starts_at"] = serialize_datetime(now - timedelta(minutes=1))
         record["ends_at"] = serialize_datetime(now + timedelta(minutes=29))
 
-        _, afk_to_activate, _, _ = self.service._collect_due_records()
+        _, afk_to_activate, _, _, _ = self.service._collect_due_records()
         self.assertEqual(len(afk_to_activate), 1)
 
         await self.service._activate_due_afk(afk_to_activate)
@@ -230,7 +233,8 @@ class UtilityStoreAndServiceTests(unittest.IsolatedAsyncioTestCase):
         user = DummyUser(89)
         ok, _ = await self.service.set_afk(
             user=user,
-            reason="📚 Studying",
+            reason=build_afk_reason_text(preset="studying", custom_reason=None),
+            preset="studying",
             duration_seconds=30 * 60,
             start_in_seconds=None,
         )
@@ -238,12 +242,79 @@ class UtilityStoreAndServiceTests(unittest.IsolatedAsyncioTestCase):
         record = self.service.store.state["afk"][str(user.id)]
         record["ends_at"] = serialize_datetime(ge.now_utc() - timedelta(minutes=1))
 
-        _, _, afk_to_expire, _ = self.service._collect_due_records()
+        _, _, afk_to_expire, _, _ = self.service._collect_due_records()
         self.assertEqual(len(afk_to_expire), 1)
 
         await self.service._expire_due_afk(afk_to_expire)
 
         self.assertNotIn(str(user.id), self.service.store.state["afk"])
+
+    async def test_afk_timezone_can_be_saved_and_cleared(self):
+        ok, timezone_name = await self.service.set_afk_timezone(90, "utc+4")
+        self.assertTrue(ok)
+        self.assertEqual(timezone_name, "UTC+04:00")
+        self.assertEqual(self.service.get_afk_timezone(90), "UTC+04:00")
+
+        ok, message = await self.service.clear_afk_timezone(90)
+        self.assertTrue(ok)
+        self.assertIn("cleared", message.lower())
+        self.assertIsNone(self.service.get_afk_timezone(90))
+
+    async def test_recurring_afk_schedule_can_be_created_and_removed(self):
+        user = DummyUser(91)
+        ok, schedule = await self.service.create_afk_schedule(
+            user=user,
+            repeat="weekly",
+            timezone_name="UTC+04:00",
+            local_hour=9,
+            local_minute=0,
+            weekday=0,
+            reason=build_afk_reason_text(preset="working", custom_reason="Office hours"),
+            preset="working",
+            duration_seconds=8 * 3600,
+        )
+        self.assertTrue(ok)
+        self.assertEqual(len(self.service.list_afk_schedules(user.id)), 1)
+        self.assertEqual(schedule["repeat"], "weekly")
+        self.assertEqual(schedule["timezone"], "UTC+04:00")
+
+        ok, message = await self.service.remove_afk_schedule(user.id, schedule["id"][:8])
+        self.assertTrue(ok)
+        self.assertIn("removed", message.lower())
+        self.assertEqual(self.service.list_afk_schedules(user.id), [])
+
+    async def test_recurring_afk_schedule_activates_and_advances_next_start(self):
+        user = DummyUser(92)
+        now = ge.now_utc().replace(second=0, microsecond=0)
+        local_start = now - timedelta(minutes=30)
+        schedule = {
+            "id": "sched1234",
+            "user_id": user.id,
+            "reason": build_afk_reason_text(preset="gaming", custom_reason="Raid night"),
+            "preset": "gaming",
+            "timezone": "UTC+00:00",
+            "repeat": "daily",
+            "weekday_mask": 127,
+            "local_hour": local_start.hour,
+            "local_minute": local_start.minute,
+            "duration_seconds": 2 * 3600,
+            "created_at": serialize_datetime(now - timedelta(days=1)),
+            "next_start_at": serialize_datetime(now - timedelta(minutes=30)),
+        }
+        self.service.store.state["afk_schedules"][schedule["id"]] = dict(schedule)
+
+        _, _, _, afk_schedule_candidates, _ = self.service._collect_due_records()
+        self.assertEqual(len(afk_schedule_candidates), 1)
+
+        await self.service._activate_due_afk_schedules(afk_schedule_candidates)
+
+        afk_record = self.service.store.state["afk"][str(user.id)]
+        self.assertEqual(afk_record["schedule_id"], schedule["id"])
+        self.assertEqual(afk_record["preset"], "gaming")
+        self.assertEqual(
+            self.service.store.state["afk_schedules"][schedule["id"]]["next_start_at"],
+            serialize_datetime(compute_next_afk_schedule_start(schedule, after=now)),
+        )
 
     async def test_legacy_json_path_is_import_source_only(self):
         with TemporaryDirectory() as temp_dir:

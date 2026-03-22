@@ -22,8 +22,17 @@ from babblebox.utility_helpers import (
     build_reminder_delivery_embed,
     build_reminder_delivery_view,
     build_watch_alert_embed,
+    canonicalize_afk_timezone,
+    compute_latest_afk_schedule_start,
+    compute_next_afk_schedule_start,
+    default_afk_weekday_mask,
     deserialize_datetime,
+    format_afk_clock,
+    format_afk_repeat_label,
+    format_afk_timezone_label,
+    format_afk_weekday,
     format_duration_brief,
+    get_afk_preset_default_duration,
     make_attachment_labels,
     make_message_preview,
     parse_duration_string,
@@ -46,6 +55,7 @@ REMINDER_MIN_SECONDS = 5 * 60
 REMINDER_PUBLIC_MIN_SECONDS = 15 * 60
 REMINDER_MAX_SECONDS = 14 * 24 * 3600
 AFK_NOTICE_COOLDOWN_SECONDS = 30.0
+AFK_SCHEDULE_LIMIT = 6
 
 
 def _watch_default_config() -> dict:
@@ -1154,3 +1164,438 @@ class UtilityService:
         embed, view = build_capture_delivery_embed(guild_name=guild_name, channel_name=channel_name, captured_count=len(messages), requested_count=requested_count, preview_lines=preview_lines, jump_url=jump_url)
         transcript = build_capture_transcript_file(guild_name=guild_name, channel_name=channel_name, messages=messages)
         await user.send(embed=embed, view=view, file=transcript)
+
+    def _afk_settings_record(self, user_id: int, *, create: bool = False) -> dict | None:
+        settings = self.store.state.setdefault("afk_settings", {})
+        key = str(user_id)
+        record = settings.get(key)
+        if record is None and create:
+            record = {}
+            settings[key] = record
+        return record if isinstance(record, dict) else None
+
+    def get_afk_timezone(self, user_id: int) -> str | None:
+        record = self._afk_settings_record(user_id)
+        timezone_name = record.get("timezone") if isinstance(record, dict) else None
+        return timezone_name if isinstance(timezone_name, str) and timezone_name.strip() else None
+
+    async def set_afk_timezone(self, user_id: int, timezone_name: str) -> tuple[bool, str]:
+        if not self._has_storage():
+            return False, self.storage_message("AFK")
+        ok, canonical, error = canonicalize_afk_timezone(timezone_name)
+        if not ok or canonical is None:
+            return False, error or "That timezone could not be saved."
+        async with self._lock:
+            record = self._afk_settings_record(user_id, create=True)
+            if record is None:
+                return False, "Your AFK timezone could not be saved right now."
+            record["timezone"] = canonical
+            await self.store.flush()
+        return True, canonical
+
+    async def clear_afk_timezone(self, user_id: int) -> tuple[bool, str]:
+        if not self._has_storage():
+            return False, self.storage_message("AFK")
+        async with self._lock:
+            removed = self.store.state.get("afk_settings", {}).pop(str(user_id), None)
+            if removed is None:
+                return False, "You do not have an AFK timezone saved."
+            await self.store.flush()
+        return True, "Your AFK timezone was cleared."
+
+    def list_afk_schedules(self, user_id: int) -> list[dict]:
+        schedules = [
+            dict(record)
+            for record in self.store.state.get("afk_schedules", {}).values()
+            if isinstance(record, dict) and record.get("user_id") == user_id
+        ]
+        schedules.sort(key=lambda item: item.get("next_start_at") or "")
+        return schedules
+
+    def get_next_afk_schedule(self, user_id: int) -> dict | None:
+        schedules = self.list_afk_schedules(user_id)
+        return schedules[0] if schedules else None
+
+    def build_afk_schedule_summary_line(self, schedule: dict) -> str:
+        schedule_id = str(schedule.get("id", ""))[:8]
+        repeat_text = format_afk_repeat_label(schedule.get("repeat"), int(schedule.get("weekday_mask", 0) or 0))
+        clock_text = format_afk_clock(int(schedule.get("local_hour", 0) or 0), int(schedule.get("local_minute", 0) or 0))
+        timezone_text = format_afk_timezone_label(schedule.get("timezone"))
+        next_start = deserialize_datetime(schedule.get("next_start_at"))
+        duration_seconds = schedule.get("duration_seconds")
+        parts = [f"`{schedule_id}`", f"{repeat_text} at **{clock_text}**", f"({timezone_text})"]
+        if isinstance(duration_seconds, int) and duration_seconds > 0:
+            parts.append(f"for {format_duration_brief(duration_seconds)}")
+        if next_start is not None:
+            parts.append(f"next {ge.format_timestamp(next_start, 'R')}")
+        if schedule.get("reason"):
+            parts.append(ge.safe_field_text(schedule["reason"], limit=90))
+        return " - ".join(parts)
+
+    def _make_afk_record(
+        self,
+        *,
+        user_id: int,
+        status: str,
+        reason: str | None,
+        preset: str | None,
+        created_at: datetime,
+        starts_at: datetime,
+        ends_at: datetime | None,
+        schedule_id: str | None = None,
+        occurrence_at: datetime | None = None,
+    ) -> dict:
+        return {
+            "user_id": user_id,
+            "status": status,
+            "reason": reason,
+            "preset": preset,
+            "created_at": serialize_datetime(created_at),
+            "set_at": None if status == "scheduled" else serialize_datetime(starts_at),
+            "starts_at": serialize_datetime(starts_at),
+            "ends_at": serialize_datetime(ends_at),
+            "schedule_id": schedule_id,
+            "occurrence_at": serialize_datetime(occurrence_at),
+        }
+
+    def _afk_record_window(self, record: dict) -> tuple[datetime | None, datetime | None]:
+        starts_at = deserialize_datetime(record.get("starts_at")) or deserialize_datetime(record.get("set_at")) or deserialize_datetime(record.get("created_at"))
+        ends_at = deserialize_datetime(record.get("ends_at"))
+        return starts_at, ends_at
+
+    def _afk_record_is_live(self, record: dict | None, *, now: datetime | None = None) -> bool:
+        if not isinstance(record, dict):
+            return False
+        current_time = now or ge.now_utc()
+        starts_at, ends_at = self._afk_record_window(record)
+        if ends_at is not None and ends_at <= current_time:
+            return False
+        if record.get("status") == "scheduled":
+            return starts_at is not None and starts_at > current_time
+        return True
+
+    def _afk_record_matches_schedule_occurrence(self, record: dict | None, schedule_id: str, occurrence_at: datetime) -> bool:
+        if not isinstance(record, dict) or record.get("schedule_id") != schedule_id or record.get("status") != "active":
+            return False
+        current_occurrence = deserialize_datetime(record.get("occurrence_at"))
+        return current_occurrence == occurrence_at
+
+    def get_afk_record(self, user_id: int, *, include_scheduled: bool = True) -> dict | None:
+        if not self.storage_ready:
+            return None
+        record = self.store.state.get("afk", {}).get(str(user_id))
+        if not isinstance(record, dict):
+            return None
+        now = ge.now_utc()
+        starts_at, ends_at = self._afk_record_window(record)
+        if ends_at is not None and ends_at <= now:
+            return None
+        if record.get("status") == "scheduled":
+            if starts_at is not None and starts_at <= now:
+                activated = dict(record)
+                activated["status"] = "active"
+                activated["set_at"] = activated.get("starts_at") or activated.get("set_at") or serialize_datetime(now)
+                return activated
+            return record if include_scheduled and starts_at and starts_at > now else None
+        return record
+
+    def get_active_afk_record(self, user_id: int) -> dict | None:
+        record = self.get_afk_record(user_id, include_scheduled=False)
+        return record if record is not None and record.get("status") == "active" else None
+
+    async def set_afk(
+        self,
+        *,
+        user: discord.abc.User,
+        reason: str | None,
+        duration_seconds: int | None,
+        start_in_seconds: int | None,
+        start_at: datetime | None = None,
+        preset: str | None = None,
+        schedule_id: str | None = None,
+        occurrence_at: datetime | None = None,
+    ) -> tuple[bool, str | dict]:
+        if not self._has_storage():
+            return False, self.storage_message("AFK")
+        valid, cleaned_or_error = ge.sanitize_afk_reason(reason)
+        if not valid:
+            return False, cleaned_or_error
+        created_at = ge.now_utc()
+        scheduled = start_in_seconds is not None or start_at is not None
+        starts_at = start_at or (created_at + timedelta(seconds=start_in_seconds) if start_in_seconds is not None else created_at)
+        ends_at = starts_at + timedelta(seconds=duration_seconds) if duration_seconds is not None else None
+        record = self._make_afk_record(
+            user_id=user.id,
+            status="scheduled" if scheduled else "active",
+            reason=cleaned_or_error,
+            preset=preset,
+            created_at=created_at,
+            starts_at=starts_at,
+            ends_at=ends_at,
+            schedule_id=schedule_id,
+            occurrence_at=occurrence_at,
+        )
+        async with self._lock:
+            self.store.state.setdefault("afk", {})[str(user.id)] = record
+            await self.store.flush()
+            self._wake_event.set()
+        return True, record
+
+    async def create_afk_schedule(
+        self,
+        *,
+        user: discord.abc.User,
+        repeat: str,
+        timezone_name: str,
+        local_hour: int,
+        local_minute: int,
+        weekday: int | None,
+        reason: str | None,
+        preset: str | None,
+        duration_seconds: int | None,
+    ) -> tuple[bool, str | dict]:
+        if not self._has_storage():
+            return False, self.storage_message("AFK")
+        if duration_seconds is None:
+            return False, "Recurring AFK schedules need a duration so Babblebox can activate and clear them reliably."
+        valid, cleaned_or_error = ge.sanitize_afk_reason(reason)
+        if not valid:
+            return False, cleaned_or_error
+        ok, canonical_timezone, error = canonicalize_afk_timezone(timezone_name)
+        if not ok or canonical_timezone is None:
+            return False, error or "That AFK timezone is invalid."
+        repeat_rule = str(repeat or "").strip().casefold()
+        weekday_mask = default_afk_weekday_mask(repeat_rule, weekday=weekday)
+        if repeat_rule not in {"daily", "weekdays", "weekly"} or weekday_mask <= 0:
+            return False, "Recurring AFK supports `daily`, `weekdays`, and `weekly` schedules."
+        if not (0 <= local_hour <= 23 and 0 <= local_minute <= 59):
+            return False, "Use a valid local schedule time."
+
+        created_at = ge.now_utc()
+        schedule = {
+            "id": uuid.uuid4().hex,
+            "user_id": user.id,
+            "reason": cleaned_or_error,
+            "preset": preset,
+            "timezone": canonical_timezone,
+            "repeat": repeat_rule,
+            "weekday_mask": weekday_mask,
+            "local_hour": local_hour,
+            "local_minute": local_minute,
+            "duration_seconds": duration_seconds,
+            "created_at": serialize_datetime(created_at),
+            "next_start_at": None,
+        }
+        schedule["next_start_at"] = serialize_datetime(compute_next_afk_schedule_start(schedule, after=created_at))
+
+        async with self._lock:
+            user_schedules = [item for item in self.store.state.get("afk_schedules", {}).values() if isinstance(item, dict) and item.get("user_id") == user.id]
+            if len(user_schedules) >= AFK_SCHEDULE_LIMIT:
+                return False, f"You can keep up to {AFK_SCHEDULE_LIMIT} recurring AFK schedules."
+            duplicate = next(
+                (
+                    item
+                    for item in user_schedules
+                    if item.get("repeat") == schedule["repeat"]
+                    and item.get("weekday_mask") == schedule["weekday_mask"]
+                    and item.get("local_hour") == schedule["local_hour"]
+                    and item.get("local_minute") == schedule["local_minute"]
+                    and item.get("timezone") == schedule["timezone"]
+                    and item.get("duration_seconds") == schedule["duration_seconds"]
+                    and item.get("preset") == schedule["preset"]
+                    and item.get("reason") == schedule["reason"]
+                ),
+                None,
+            )
+            if duplicate is not None:
+                return False, "You already have that AFK schedule saved."
+            self.store.state.setdefault("afk_schedules", {})[schedule["id"]] = schedule
+            await self.store.flush()
+            self._wake_event.set()
+        return True, schedule
+
+    async def remove_afk_schedule(self, user_id: int, schedule_id_prefix: str) -> tuple[bool, str]:
+        if not self._has_storage():
+            return False, self.storage_message("AFK")
+        schedule_id_prefix = schedule_id_prefix.strip().lower()
+        if not schedule_id_prefix:
+            return False, "Provide the schedule ID from `/afkschedule list`."
+        async with self._lock:
+            matches = [
+                schedule_id
+                for schedule_id, record in self.store.state.get("afk_schedules", {}).items()
+                if isinstance(record, dict) and record.get("user_id") == user_id and schedule_id.lower().startswith(schedule_id_prefix)
+            ]
+            if not matches:
+                return False, "No recurring AFK schedule matched that ID."
+            if len(matches) > 1:
+                return False, "That schedule ID prefix matches multiple schedules. Use a longer ID."
+            removed_id = matches[0]
+            self.store.state.get("afk_schedules", {}).pop(removed_id, None)
+            await self.store.flush()
+            self._wake_event.set()
+        return True, f"Recurring AFK schedule `{removed_id[:8]}` was removed."
+
+    async def clear_all_afk_schedules(self, user_id: int) -> tuple[bool, str]:
+        if not self._has_storage():
+            return False, self.storage_message("AFK")
+        async with self._lock:
+            matches = [
+                schedule_id
+                for schedule_id, record in self.store.state.get("afk_schedules", {}).items()
+                if isinstance(record, dict) and record.get("user_id") == user_id
+            ]
+            if not matches:
+                return False, "You do not have any recurring AFK schedules saved."
+            for schedule_id in matches:
+                self.store.state.get("afk_schedules", {}).pop(schedule_id, None)
+            await self.store.flush()
+            self._wake_event.set()
+        return True, f"Cleared {len(matches)} recurring AFK schedule(s)."
+
+    async def _scheduler_loop(self):
+        if not await self._wait_for_ready_state():
+            return
+        while True:
+            self._wake_event.clear()
+            due_reminders, afk_to_activate, afk_to_expire, afk_schedule_candidates, next_due = self._collect_due_records()
+            if due_reminders or afk_to_activate or afk_to_expire or afk_schedule_candidates:
+                if afk_to_activate:
+                    await self._activate_due_afk(afk_to_activate)
+                if afk_schedule_candidates:
+                    await self._activate_due_afk_schedules(afk_schedule_candidates)
+                if due_reminders:
+                    await self._deliver_due_reminders(due_reminders)
+                if afk_to_expire:
+                    await self._expire_due_afk(afk_to_expire)
+                continue
+            timeout = max(1.0, (next_due - ge.now_utc()).total_seconds()) if next_due is not None else None
+            try:
+                if timeout is None:
+                    await self._wake_event.wait()
+                else:
+                    await asyncio.wait_for(self._wake_event.wait(), timeout=timeout)
+            except asyncio.TimeoutError:
+                continue
+
+    def _collect_due_records(self) -> tuple[list[dict], list[dict], list[dict], list[dict], datetime | None]:
+        now = ge.now_utc()
+        due_reminders: list[dict] = []
+        afk_to_activate: list[dict] = []
+        afk_to_expire: list[dict] = []
+        afk_schedule_candidates: list[dict] = []
+        next_due = None
+        for record in self.store.state.get("reminders", {}).values():
+            if not isinstance(record, dict):
+                continue
+            due_at = deserialize_datetime(record.get("due_at"))
+            if due_at is None:
+                continue
+            if due_at <= now:
+                due_reminders.append(record)
+            elif next_due is None or due_at < next_due:
+                next_due = due_at
+        for record in self.store.state.get("afk", {}).values():
+            if not isinstance(record, dict):
+                continue
+            status = record.get("status", "active")
+            starts_at, ends_at = self._afk_record_window(record)
+            if status == "scheduled":
+                if starts_at is not None and starts_at <= now:
+                    if ends_at is not None and ends_at <= now:
+                        afk_to_expire.append(record)
+                    else:
+                        afk_to_activate.append(record)
+                else:
+                    for candidate in (starts_at, ends_at):
+                        if candidate is not None and (next_due is None or candidate < next_due):
+                            next_due = candidate
+            else:
+                if ends_at is not None and ends_at <= now:
+                    afk_to_expire.append(record)
+                elif ends_at is not None and (next_due is None or ends_at < next_due):
+                    next_due = ends_at
+        for schedule in self.store.state.get("afk_schedules", {}).values():
+            if not isinstance(schedule, dict):
+                continue
+            next_start_at = deserialize_datetime(schedule.get("next_start_at"))
+            if next_start_at is None or next_start_at <= now:
+                afk_schedule_candidates.append(schedule)
+            elif next_due is None or next_start_at < next_due:
+                next_due = next_start_at
+        return due_reminders, afk_to_activate, afk_to_expire, afk_schedule_candidates, next_due
+
+    async def _activate_due_afk(self, records: list[dict]):
+        async with self._lock:
+            dirty = False
+            for record in records:
+                user_id = record.get("user_id")
+                if not isinstance(user_id, int):
+                    continue
+                current = self.store.state.get("afk", {}).get(str(user_id))
+                if not isinstance(current, dict) or current.get("status") != "scheduled":
+                    continue
+                current["status"] = "active"
+                current["set_at"] = current.get("starts_at") or serialize_datetime(ge.now_utc())
+                dirty = True
+            if dirty:
+                await self.store.flush()
+                self._wake_event.set()
+
+    async def _activate_due_afk_schedules(self, schedules: list[dict]):
+        async with self._lock:
+            now = ge.now_utc()
+            dirty = False
+            for schedule in schedules:
+                schedule_id = schedule.get("id")
+                if not isinstance(schedule_id, str):
+                    continue
+                current_schedule = self.store.state.get("afk_schedules", {}).get(schedule_id)
+                if not isinstance(current_schedule, dict):
+                    continue
+                next_start_at = compute_next_afk_schedule_start(current_schedule, after=now)
+                serialized_next = serialize_datetime(next_start_at)
+                if current_schedule.get("next_start_at") != serialized_next:
+                    current_schedule["next_start_at"] = serialized_next
+                    dirty = True
+
+                latest_start = compute_latest_afk_schedule_start(current_schedule, at_or_before=now)
+                duration_seconds = current_schedule.get("duration_seconds")
+                user_id = current_schedule.get("user_id")
+                if latest_start is None or not isinstance(duration_seconds, int) or not isinstance(user_id, int):
+                    continue
+                ends_at = latest_start + timedelta(seconds=duration_seconds)
+                if ends_at <= now:
+                    continue
+                current_afk = self.store.state.get("afk", {}).get(str(user_id))
+                if self._afk_record_matches_schedule_occurrence(current_afk, schedule_id, latest_start):
+                    continue
+                if self._afk_record_is_live(current_afk, now=now):
+                    continue
+                self.store.state.setdefault("afk", {})[str(user_id)] = self._make_afk_record(
+                    user_id=user_id,
+                    status="active",
+                    reason=current_schedule.get("reason"),
+                    preset=current_schedule.get("preset"),
+                    created_at=now,
+                    starts_at=latest_start,
+                    ends_at=ends_at,
+                    schedule_id=schedule_id,
+                    occurrence_at=latest_start,
+                )
+                dirty = True
+            if dirty:
+                await self.store.flush()
+                self._wake_event.set()
+
+    async def _expire_due_afk(self, records: list[dict]):
+        async with self._lock:
+            dirty = False
+            for record in records:
+                user_id = record.get("user_id")
+                if isinstance(user_id, int):
+                    self.store.state.get("afk", {}).pop(str(user_id), None)
+                    dirty = True
+            if dirty:
+                await self.store.flush()
+                self._wake_event.set()

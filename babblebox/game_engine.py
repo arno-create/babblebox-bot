@@ -2392,7 +2392,7 @@ def build_help_embed() -> discord.Embed:
             "`/capture` for a private channel snapshot.\n"
             "`/moment create`, `/moment from-reply`, or `/moment recent` make shareable cards.\n"
             "`/remind set` for one-time reminders.\n"
-            "`/afk` and `/afkstatus` for away scheduling."
+            "`/afk`, `/afkstatus`, `/afktimezone`, and `/afkschedule` cover away status, local clock scheduling, and recurring routines."
         ),
         inline=False,
     )

@@ -60,7 +60,9 @@ Babblebox is intentionally compact:
 - Remind
   - safe one-time reminders with small active limits
 - AFK
-  - immediate or scheduled away status
+  - immediate, scheduled, or recurring away status
+  - timezone-aware `start_at` and recurring local clock scheduling
+  - preset reasons with default durations for common routines
   - duration parsing for `30m`, `2h`, `2d`, and compact combos like `1h30m`
   - elapsed and return-time messaging
 
@@ -166,12 +168,19 @@ Babblebox now nudges solo users toward Daily Arcade, Buddy, Profile, and utiliti
 | `/remind cancel` | `bb!remind cancel <id>` | Cancel a reminder |
 | `/afk` | `bb!afk` | Set, schedule, or clear AFK |
 | `/afkstatus` | `bb!afkstatus` | View AFK status |
+| `/afktimezone set` | `bb!afktimezone set UTC+04:00` | Save your AFK timezone |
+| `/afktimezone view` | `bb!afktimezone view` | View your AFK timezone |
+| `/afkschedule add` | `bb!afkschedule add daily 23:30` | Create a recurring AFK schedule |
+| `/afkschedule list` | `bb!afkschedule list` | Review recurring AFK schedules |
+| `/afkschedule remove` | `bb!afkschedule remove <id>` | Remove a recurring AFK schedule |
 
 AFK examples:
 
 - `/afk focus 30m`
-- `/afk lunch 2h`
-- `/afk travel 2d`
+- `/afk preset:sleeping`
+- `/afk start_at:23:00 preset:sleeping`
+- `/afktimezone set America/New_York`
+- `/afkschedule add repeat:weekdays at:18:00 preset:studying`
 - `bb!afk deep work 1h30m`
 
 ### Shield / Safety

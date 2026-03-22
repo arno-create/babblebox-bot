@@ -19,7 +19,15 @@ class UtilityStorageUnavailable(RuntimeError):
 
 
 def default_utility_state() -> dict[str, Any]:
-    return {"version": 3, "watch": {}, "later": {}, "reminders": {}, "afk": {}}
+    return {
+        "version": 4,
+        "watch": {},
+        "later": {},
+        "reminders": {},
+        "afk": {},
+        "afk_settings": {},
+        "afk_schedules": {},
+    }
 
 
 def _default_watch_config() -> dict[str, Any]:
@@ -93,7 +101,7 @@ class _BaseUtilityStore:
             return normalized
 
         version = payload.get("version")
-        normalized["version"] = version if isinstance(version, int) and version > 0 else 3
+        normalized["version"] = version if isinstance(version, int) and version > 0 else 4
 
         watch = payload.get("watch")
         if isinstance(watch, dict):
@@ -153,10 +161,13 @@ class _BaseUtilityStore:
                     }
             normalized["watch"] = cleaned_watch
 
-        for section in ("later", "reminders", "afk"):
+        for section in ("later", "reminders"):
             value = payload.get(section)
             if isinstance(value, dict):
                 normalized[section] = deepcopy(value)
+        normalized["afk"] = self._normalize_afk_state(payload.get("afk"))
+        normalized["afk_settings"] = self._normalize_afk_settings(payload.get("afk_settings"))
+        normalized["afk_schedules"] = self._normalize_afk_schedules(payload.get("afk_schedules"))
         return normalized
 
     def _parse_iso_datetime(self, value: Any):
@@ -174,6 +185,91 @@ class _BaseUtilityStore:
         if isinstance(value, str):
             return value
         return value.astimezone(timezone.utc).isoformat()
+
+    def _normalize_afk_state(self, payload: Any) -> dict[str, Any]:
+        cleaned: dict[str, Any] = {}
+        if not isinstance(payload, dict):
+            return cleaned
+        for user_id_text, record in payload.items():
+            if not isinstance(record, dict):
+                continue
+            try:
+                user_id = int(user_id_text)
+            except (TypeError, ValueError):
+                continue
+            status = "scheduled" if record.get("status") == "scheduled" else "active"
+            normalized_record = {
+                "user_id": user_id,
+                "status": status,
+                "reason": record.get("reason").strip() if isinstance(record.get("reason"), str) and record.get("reason").strip() else None,
+                "preset": record.get("preset").strip().casefold() if isinstance(record.get("preset"), str) and record.get("preset").strip() else None,
+                "created_at": self._serialize_datetime(self._parse_iso_datetime(record.get("created_at"))),
+                "set_at": self._serialize_datetime(self._parse_iso_datetime(record.get("set_at"))),
+                "starts_at": self._serialize_datetime(self._parse_iso_datetime(record.get("starts_at"))),
+                "ends_at": self._serialize_datetime(self._parse_iso_datetime(record.get("ends_at"))),
+                "schedule_id": record.get("schedule_id").strip() if isinstance(record.get("schedule_id"), str) and record.get("schedule_id").strip() else None,
+                "occurrence_at": self._serialize_datetime(self._parse_iso_datetime(record.get("occurrence_at"))),
+            }
+            cleaned[str(user_id)] = normalized_record
+        return cleaned
+
+    def _normalize_afk_settings(self, payload: Any) -> dict[str, Any]:
+        cleaned: dict[str, Any] = {}
+        if not isinstance(payload, dict):
+            return cleaned
+        for user_id_text, record in payload.items():
+            if not isinstance(record, dict):
+                continue
+            try:
+                user_id = int(user_id_text)
+            except (TypeError, ValueError):
+                continue
+            timezone_name = record.get("timezone")
+            if not isinstance(timezone_name, str) or not timezone_name.strip():
+                continue
+            cleaned[str(user_id)] = {"timezone": timezone_name.strip()}
+        return cleaned
+
+    def _normalize_afk_schedules(self, payload: Any) -> dict[str, Any]:
+        cleaned: dict[str, Any] = {}
+        if not isinstance(payload, dict):
+            return cleaned
+        for schedule_id, record in payload.items():
+            if not isinstance(record, dict) or not isinstance(schedule_id, str) or not schedule_id.strip():
+                continue
+            try:
+                user_id = int(record.get("user_id"))
+                weekday_mask = int(record.get("weekday_mask", 0))
+                local_hour = int(record.get("local_hour"))
+                local_minute = int(record.get("local_minute"))
+            except (TypeError, ValueError):
+                continue
+            repeat_rule = str(record.get("repeat") or "").strip().casefold()
+            timezone_name = record.get("timezone")
+            if repeat_rule not in {"daily", "weekdays", "weekly", "custom"}:
+                continue
+            if not isinstance(timezone_name, str) or not timezone_name.strip():
+                continue
+            if not (1 <= weekday_mask <= 127 and 0 <= local_hour <= 23 and 0 <= local_minute <= 59):
+                continue
+            duration_seconds = record.get("duration_seconds")
+            if not isinstance(duration_seconds, int) or duration_seconds <= 0:
+                duration_seconds = None
+            cleaned[schedule_id] = {
+                "id": schedule_id,
+                "user_id": user_id,
+                "reason": record.get("reason").strip() if isinstance(record.get("reason"), str) and record.get("reason").strip() else None,
+                "preset": record.get("preset").strip().casefold() if isinstance(record.get("preset"), str) and record.get("preset").strip() else None,
+                "timezone": timezone_name.strip(),
+                "repeat": repeat_rule,
+                "weekday_mask": weekday_mask,
+                "local_hour": local_hour,
+                "local_minute": local_minute,
+                "duration_seconds": duration_seconds,
+                "created_at": self._serialize_datetime(self._parse_iso_datetime(record.get("created_at"))),
+                "next_start_at": self._serialize_datetime(self._parse_iso_datetime(record.get("next_start_at"))),
+            }
+        return cleaned
 
 
 class _MemoryUtilityStore(_BaseUtilityStore):
@@ -267,6 +363,10 @@ class _PostgresUtilityStore(_BaseUtilityStore):
             "CREATE INDEX IF NOT EXISTS ix_utility_afk_status ON utility_afk (status)",
             "CREATE INDEX IF NOT EXISTS ix_utility_afk_starts_at ON utility_afk (starts_at)",
             "CREATE INDEX IF NOT EXISTS ix_utility_afk_ends_at ON utility_afk (ends_at)",
+            "CREATE TABLE IF NOT EXISTS utility_afk_settings (user_id BIGINT PRIMARY KEY, timezone TEXT NULL, updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc', now()))",
+            "CREATE TABLE IF NOT EXISTS utility_afk_schedules (id TEXT PRIMARY KEY, user_id BIGINT NOT NULL, reason TEXT NULL, preset TEXT NULL, timezone TEXT NOT NULL, repeat_rule TEXT NOT NULL, weekday_mask INTEGER NOT NULL, local_hour SMALLINT NOT NULL, local_minute SMALLINT NOT NULL, duration_seconds INTEGER NULL, created_at TIMESTAMPTZ NULL, next_start_at TIMESTAMPTZ NULL)",
+            "CREATE INDEX IF NOT EXISTS ix_utility_afk_schedules_user ON utility_afk_schedules (user_id)",
+            "CREATE INDEX IF NOT EXISTS ix_utility_afk_schedules_next_start ON utility_afk_schedules (next_start_at)",
         ]
         async with self._pool.acquire() as conn:
             for statement in statements:
@@ -278,6 +378,9 @@ class _PostgresUtilityStore(_BaseUtilityStore):
             await conn.execute("ALTER TABLE utility_watch_configs ADD COLUMN IF NOT EXISTS excluded_channel_ids JSONB NOT NULL DEFAULT '[]'::jsonb")
             await conn.execute("ALTER TABLE utility_watch_configs ADD COLUMN IF NOT EXISTS ignored_user_ids JSONB NOT NULL DEFAULT '[]'::jsonb")
             await conn.execute("ALTER TABLE utility_watch_keywords ADD COLUMN IF NOT EXISTS channel_id BIGINT NULL")
+            await conn.execute("ALTER TABLE utility_afk ADD COLUMN IF NOT EXISTS preset TEXT NULL")
+            await conn.execute("ALTER TABLE utility_afk ADD COLUMN IF NOT EXISTS schedule_id TEXT NULL")
+            await conn.execute("ALTER TABLE utility_afk ADD COLUMN IF NOT EXISTS occurrence_at TIMESTAMPTZ NULL")
             await conn.execute("DROP INDEX IF EXISTS ux_utility_watch_keywords_scope")
             await conn.execute(
                 "CREATE UNIQUE INDEX IF NOT EXISTS ux_utility_watch_keywords_scope_v2 "
@@ -326,7 +429,16 @@ class _PostgresUtilityStore(_BaseUtilityStore):
         async with self._pool.acquire() as conn:
             if await conn.fetchval("SELECT 1 FROM utility_meta WHERE key = $1", "legacy_json_seed_v2"):
                 return
-            has_rows = await conn.fetchval("SELECT EXISTS (SELECT 1 FROM utility_watch_configs UNION ALL SELECT 1 FROM utility_later_markers UNION ALL SELECT 1 FROM utility_reminders UNION ALL SELECT 1 FROM utility_afk)")
+            has_rows = await conn.fetchval(
+                "SELECT EXISTS ("
+                "SELECT 1 FROM utility_watch_configs "
+                "UNION ALL SELECT 1 FROM utility_later_markers "
+                "UNION ALL SELECT 1 FROM utility_reminders "
+                "UNION ALL SELECT 1 FROM utility_afk "
+                "UNION ALL SELECT 1 FROM utility_afk_settings "
+                "UNION ALL SELECT 1 FROM utility_afk_schedules"
+                ")"
+            )
             if has_rows:
                 await self._set_meta("legacy_json_seed_v2", {"status": "skipped_existing_db_state"})
                 return
@@ -398,7 +510,12 @@ class _PostgresUtilityStore(_BaseUtilityStore):
             )
             later_rows = await conn.fetch("SELECT user_id, guild_id, guild_name, channel_id, channel_name, message_id, message_jump_url, message_created_at, saved_at, author_name, author_id, preview FROM utility_later_markers")
             reminder_rows = await conn.fetch("SELECT id, user_id, text, delivery, created_at, due_at, guild_id, guild_name, channel_id, channel_name, origin_jump_url FROM utility_reminders")
-            afk_rows = await conn.fetch("SELECT user_id, status, reason, created_at, set_at, starts_at, ends_at FROM utility_afk")
+            afk_rows = await conn.fetch("SELECT user_id, status, reason, preset, created_at, set_at, starts_at, ends_at, schedule_id, occurrence_at FROM utility_afk")
+            afk_setting_rows = await conn.fetch("SELECT user_id, timezone FROM utility_afk_settings")
+            afk_schedule_rows = await conn.fetch(
+                "SELECT id, user_id, reason, preset, timezone, repeat_rule, weekday_mask, local_hour, local_minute, duration_seconds, created_at, next_start_at "
+                "FROM utility_afk_schedules"
+            )
 
         for row in watch_rows:
             loaded["watch"][str(row["user_id"])] = {
@@ -427,11 +544,43 @@ class _PostgresUtilityStore(_BaseUtilityStore):
         for row in reminder_rows:
             loaded["reminders"][row["id"]] = {"id": row["id"], "user_id": row["user_id"], "text": row["text"], "delivery": row["delivery"], "created_at": self._serialize_datetime(row["created_at"]), "due_at": self._serialize_datetime(row["due_at"]), "guild_id": row["guild_id"], "guild_name": row["guild_name"], "channel_id": row["channel_id"], "channel_name": row["channel_name"], "origin_jump_url": row["origin_jump_url"]}
         for row in afk_rows:
-            loaded["afk"][str(row["user_id"])] = {"user_id": row["user_id"], "status": row["status"], "reason": row["reason"], "created_at": self._serialize_datetime(row["created_at"]), "set_at": self._serialize_datetime(row["set_at"]), "starts_at": self._serialize_datetime(row["starts_at"]), "ends_at": self._serialize_datetime(row["ends_at"])}
+            loaded["afk"][str(row["user_id"])] = {
+                "user_id": row["user_id"],
+                "status": row["status"],
+                "reason": row["reason"],
+                "preset": row["preset"],
+                "created_at": self._serialize_datetime(row["created_at"]),
+                "set_at": self._serialize_datetime(row["set_at"]),
+                "starts_at": self._serialize_datetime(row["starts_at"]),
+                "ends_at": self._serialize_datetime(row["ends_at"]),
+                "schedule_id": row["schedule_id"],
+                "occurrence_at": self._serialize_datetime(row["occurrence_at"]),
+            }
+        for row in afk_setting_rows:
+            loaded["afk_settings"][str(row["user_id"])] = {"timezone": row["timezone"]}
+        for row in afk_schedule_rows:
+            loaded["afk_schedules"][row["id"]] = {
+                "id": row["id"],
+                "user_id": row["user_id"],
+                "reason": row["reason"],
+                "preset": row["preset"],
+                "timezone": row["timezone"],
+                "repeat": row["repeat_rule"],
+                "weekday_mask": row["weekday_mask"],
+                "local_hour": row["local_hour"],
+                "local_minute": row["local_minute"],
+                "duration_seconds": row["duration_seconds"],
+                "created_at": self._serialize_datetime(row["created_at"]),
+                "next_start_at": self._serialize_datetime(row["next_start_at"]),
+            }
         self.state = self.normalize_state(loaded)
 
     async def _flush_snapshot(self, snapshot: dict[str, Any]):
-        changed_sections = [section for section in ("watch", "later", "reminders", "afk") if snapshot.get(section) != self._last_flushed_state.get(section)]
+        changed_sections = [
+            section
+            for section in ("watch", "later", "reminders", "afk", "afk_settings", "afk_schedules")
+            if snapshot.get(section) != self._last_flushed_state.get(section)
+        ]
         if not changed_sections:
             return
         async with self._pool.acquire() as conn:
@@ -444,12 +593,18 @@ class _PostgresUtilityStore(_BaseUtilityStore):
                     await self._replace_reminders_data(conn, snapshot.get("reminders", {}))
                 if "afk" in changed_sections:
                     await self._replace_afk_data(conn, snapshot.get("afk", {}))
+                if "afk_settings" in changed_sections:
+                    await self._replace_afk_settings_data(conn, snapshot.get("afk_settings", {}))
+                if "afk_schedules" in changed_sections:
+                    await self._replace_afk_schedules_data(conn, snapshot.get("afk_schedules", {}))
 
     async def _replace_all_data(self, conn, state: dict[str, Any]):
         await self._replace_watch_data(conn, state.get("watch", {}))
         await self._replace_later_data(conn, state.get("later", {}))
         await self._replace_reminders_data(conn, state.get("reminders", {}))
         await self._replace_afk_data(conn, state.get("afk", {}))
+        await self._replace_afk_settings_data(conn, state.get("afk_settings", {}))
+        await self._replace_afk_schedules_data(conn, state.get("afk_schedules", {}))
 
     async def _replace_watch_data(self, conn, watch_state: dict[str, Any]):
         await conn.execute("DELETE FROM utility_watch_keywords")
@@ -530,9 +685,75 @@ class _PostgresUtilityStore(_BaseUtilityStore):
                 user_id = int(user_id_text)
             except (TypeError, ValueError):
                 continue
-            rows.append((user_id, record.get("status", "active"), record.get("reason"), self._parse_iso_datetime(record.get("created_at")), self._parse_iso_datetime(record.get("set_at")), self._parse_iso_datetime(record.get("starts_at")), self._parse_iso_datetime(record.get("ends_at"))))
+            rows.append(
+                (
+                    user_id,
+                    record.get("status", "active"),
+                    record.get("reason"),
+                    record.get("preset"),
+                    self._parse_iso_datetime(record.get("created_at")),
+                    self._parse_iso_datetime(record.get("set_at")),
+                    self._parse_iso_datetime(record.get("starts_at")),
+                    self._parse_iso_datetime(record.get("ends_at")),
+                    record.get("schedule_id"),
+                    self._parse_iso_datetime(record.get("occurrence_at")),
+                )
+            )
         if rows:
-            await conn.executemany("INSERT INTO utility_afk (user_id, status, reason, created_at, set_at, starts_at, ends_at) VALUES ($1, $2, $3, $4, $5, $6, $7)", rows)
+            await conn.executemany(
+                "INSERT INTO utility_afk (user_id, status, reason, preset, created_at, set_at, starts_at, ends_at, schedule_id, occurrence_at) "
+                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)",
+                rows,
+            )
+
+    async def _replace_afk_settings_data(self, conn, afk_settings_state: dict[str, Any]):
+        await conn.execute("DELETE FROM utility_afk_settings")
+        rows = []
+        for user_id_text, record in afk_settings_state.items():
+            if not isinstance(record, dict):
+                continue
+            try:
+                user_id = int(user_id_text)
+            except (TypeError, ValueError):
+                continue
+            timezone_name = record.get("timezone")
+            if not isinstance(timezone_name, str) or not timezone_name.strip():
+                continue
+            rows.append((user_id, timezone_name.strip()))
+        if rows:
+            await conn.executemany(
+                "INSERT INTO utility_afk_settings (user_id, timezone, updated_at) VALUES ($1, $2, timezone('utc', now()))",
+                rows,
+            )
+
+    async def _replace_afk_schedules_data(self, conn, afk_schedules_state: dict[str, Any]):
+        await conn.execute("DELETE FROM utility_afk_schedules")
+        rows = []
+        for schedule_id, record in afk_schedules_state.items():
+            if not isinstance(record, dict):
+                continue
+            rows.append(
+                (
+                    schedule_id,
+                    record.get("user_id"),
+                    record.get("reason"),
+                    record.get("preset"),
+                    record.get("timezone"),
+                    record.get("repeat"),
+                    record.get("weekday_mask"),
+                    record.get("local_hour"),
+                    record.get("local_minute"),
+                    record.get("duration_seconds"),
+                    self._parse_iso_datetime(record.get("created_at")),
+                    self._parse_iso_datetime(record.get("next_start_at")),
+                )
+            )
+        if rows:
+            await conn.executemany(
+                "INSERT INTO utility_afk_schedules (id, user_id, reason, preset, timezone, repeat_rule, weekday_mask, local_hour, local_minute, duration_seconds, created_at, next_start_at) "
+                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)",
+                rows,
+            )
 
 
 class UtilityStateStore:

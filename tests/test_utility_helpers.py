@@ -6,9 +6,14 @@ from types import SimpleNamespace
 import discord
 
 from babblebox.utility_helpers import (
+    AFK_QUICK_REASONS,
     build_afk_reason_text,
     build_afk_status_embed,
     build_reminder_delivery_view,
+    canonicalize_afk_timezone,
+    compute_latest_afk_schedule_start,
+    compute_next_afk_schedule_start,
+    default_afk_weekday_mask,
     format_duration_brief,
     make_message_preview,
     parse_afk_start_at,
@@ -61,28 +66,56 @@ class UtilityHelperTests(unittest.TestCase):
         )
 
     def test_afk_reason_builder_formats_quick_presets(self):
-        self.assertEqual(build_afk_reason_text(preset="sleeping", custom_reason=None), "💤 Sleeping")
-        self.assertEqual(build_afk_reason_text(preset="working", custom_reason="Heads-down block"), "💼 Working - Heads-down block")
+        self.assertEqual(
+            build_afk_reason_text(preset="sleeping", custom_reason=None),
+            f"{AFK_QUICK_REASONS['sleeping']['emoji']} Sleeping",
+        )
+        self.assertEqual(
+            build_afk_reason_text(preset="working", custom_reason="Heads-down block"),
+            f"{AFK_QUICK_REASONS['working']['emoji']} Working - Heads-down block",
+        )
 
-    def test_parse_afk_start_at_accepts_clock_and_absolute_utc_times(self):
-        now = datetime(2026, 3, 22, 20, 15, tzinfo=timezone.utc)
-        ok, parsed = parse_afk_start_at("23:00", now=now)
+    def test_parse_afk_start_at_uses_saved_timezone(self):
+        now = datetime(2026, 3, 22, 16, 0, tzinfo=timezone.utc)
+        ok, parsed = parse_afk_start_at("23:00", timezone_name="UTC+04:00", now=now)
         self.assertTrue(ok)
-        self.assertEqual(parsed, datetime(2026, 3, 22, 23, 0, tzinfo=timezone.utc))
+        self.assertEqual(parsed, datetime(2026, 3, 22, 19, 0, tzinfo=timezone.utc))
 
-        ok, parsed = parse_afk_start_at("tomorrow 08:30", now=now)
+        ok, parsed = parse_afk_start_at("tomorrow 08:30", timezone_name="UTC+04:00", now=now)
         self.assertTrue(ok)
-        self.assertEqual(parsed, datetime(2026, 3, 23, 8, 30, tzinfo=timezone.utc))
+        self.assertEqual(parsed, datetime(2026, 3, 23, 4, 30, tzinfo=timezone.utc))
 
-        ok, parsed = parse_afk_start_at("2026-03-24 07:45", now=now)
+        ok, parsed = parse_afk_start_at("2026-03-24 07:45", timezone_name="UTC+04:00", now=now)
         self.assertTrue(ok)
-        self.assertEqual(parsed, datetime(2026, 3, 24, 7, 45, tzinfo=timezone.utc))
+        self.assertEqual(parsed, datetime(2026, 3, 24, 3, 45, tzinfo=timezone.utc))
+
+    def test_timezone_helpers_accept_fixed_offsets(self):
+        ok, canonical, error = canonicalize_afk_timezone("utc+4")
+        self.assertTrue(ok)
+        self.assertEqual(canonical, "UTC+04:00")
+        self.assertIsNone(error)
+
+    def test_recurring_afk_helpers_compute_latest_and_next_occurrence(self):
+        schedule = {
+            "timezone": "UTC+00:00",
+            "repeat": "weekdays",
+            "weekday_mask": default_afk_weekday_mask("weekdays"),
+            "local_hour": 18,
+            "local_minute": 0,
+            "created_at": "2026-03-20T12:00:00+00:00",
+        }
+
+        next_start = compute_next_afk_schedule_start(schedule, after=datetime(2026, 3, 22, 20, 0, tzinfo=timezone.utc))
+        latest_start = compute_latest_afk_schedule_start(schedule, at_or_before=datetime(2026, 3, 24, 19, 0, tzinfo=timezone.utc))
+
+        self.assertEqual(next_start, datetime(2026, 3, 23, 18, 0, tzinfo=timezone.utc))
+        self.assertEqual(latest_start, datetime(2026, 3, 24, 18, 0, tzinfo=timezone.utc))
 
     def test_afk_status_embed_uses_reason_aware_styling(self):
         user = SimpleNamespace(display_name="Ari")
         record = {
             "status": "active",
-            "reason": "📚 Studying - Finals tonight",
+            "reason": f"{AFK_QUICK_REASONS['studying']['emoji']} Studying - Finals tonight",
             "created_at": "2026-03-22T18:00:00+00:00",
             "set_at": "2026-03-22T18:00:00+00:00",
             "starts_at": "2026-03-22T18:00:00+00:00",
@@ -91,7 +124,7 @@ class UtilityHelperTests(unittest.TestCase):
 
         embed = build_afk_status_embed(user, record)
 
-        self.assertIn("📚", embed.title)
+        self.assertIn(AFK_QUICK_REASONS["studying"]["emoji"], embed.title)
         self.assertEqual(embed.fields[0].name, "Status")
         self.assertIn("Studying", embed.fields[0].value)
         self.assertNotEqual(embed.color.value, 0)
