@@ -50,7 +50,7 @@ HELP_PAGES: list[dict[str, str]] = [
         "description": "Low-noise tools built for real server life.",
         "body": (
             "`/watch mentions`, `/watch replies`, and `/watch keyword ...` keep private DM alerts tidy.\n"
-            "`/later`, `/capture`, `/remind`, and `/afk` stay personal by default.\n"
+            "`/later`, `/capture`, `/remind`, `/afk`, `/afktimezone`, and `/afkschedule` stay personal by default.\n"
             "`/moment` turns a message or exchange into a shareable keepsake card with a live link."
         ),
         "try": "`/watch settings`, `/later mark`, `/capture`, `/moment from-reply`",
