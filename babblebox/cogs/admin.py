@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import asyncio
 import contextlib
+from datetime import timedelta
 from typing import Optional
 
 import discord
@@ -13,6 +15,10 @@ from babblebox.admin_service import (
     REVIEW_ACTION_LABELS,
     VERIFICATION_LOGIC_LABELS,
     AdminService,
+    VerificationPrecheck,
+    VerificationSyncPreview,
+    VerificationSyncSession,
+    VerificationSyncSummary,
     _followup_duration_label,
 )
 from babblebox.command_utils import defer_hybrid_response, send_hybrid_response
@@ -35,6 +41,11 @@ EXCLUSION_TARGET_CHOICES = [
     app_commands.Choice(name="Exclude member", value="excluded_user_ids"),
     app_commands.Choice(name="Exclude role", value="excluded_role_ids"),
     app_commands.Choice(name="Trusted role", value="trusted_role_ids"),
+]
+ADMIN_TEST_CHOICES = [
+    app_commands.Choice(name="Warning DM", value="warning_dm"),
+    app_commands.Choice(name="Final kick DM", value="kick_dm"),
+    app_commands.Choice(name="Logs channel", value="logs"),
 ]
 
 
@@ -204,6 +215,144 @@ class AdminPanelView(discord.ui.View):
     async def refresh_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._render(interaction, note="Admin panel refreshed.")
 
+
+class VerificationSyncView(discord.ui.View):
+    def __init__(self, cog: "AdminCog", *, guild_id: int, author_id: int):
+        super().__init__(timeout=None)
+        self.cog = cog
+        self.guild_id = guild_id
+        self.author_id = author_id
+        self.message: discord.Message | None = None
+        self.static_embed: discord.Embed | None = None
+        self._last_edit_at = 0.0
+        self._refresh_buttons()
+
+    def _session(self) -> VerificationSyncSession | None:
+        return self.cog.service.get_verification_sync_session(self.guild_id)
+
+    def _disable_all(self):
+        for child in self.children:
+            child.disabled = True
+
+    def _refresh_buttons(self):
+        session = self._session()
+        running = session is not None and session.running
+        stopping = running and session.stop_requested
+        finished = self.static_embed is not None
+        self.start_button.disabled = running or finished
+        self.refresh_button.disabled = finished
+        self.stop_button.label = "Stopping" if stopping else ("Stop" if running else "Cancel")
+        self.stop_button.disabled = finished or stopping
+
+    async def current_embed(self) -> discord.Embed:
+        if self.static_embed is not None:
+            return self.static_embed
+        guild = self.cog._guild(self.guild_id)
+        if guild is None:
+            return ge.make_status_embed(
+                "Verification Sync Unavailable",
+                "This server is no longer available to Babblebox, so the sync panel cannot load.",
+                tone="warning",
+                footer="Babblebox Admin | Verification cleanup",
+            )
+        session = self._session()
+        if session is not None:
+            return self.cog.build_sync_session_embed(guild, session)
+        preview = await self.cog.service.build_verification_sync_preview(guild)
+        return self.cog.build_sync_preview_embed(guild, preview)
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message(
+                embed=ge.make_status_embed(
+                    "This Sync Panel Is Locked",
+                    "Use `/admin sync` to open your own verification sync panel.",
+                    tone="info",
+                    footer="Babblebox Admin",
+                ),
+                ephemeral=True,
+            )
+            return False
+        if not self.cog.user_can_manage_admin(interaction.user):
+            await interaction.response.send_message(
+                embed=ge.make_status_embed(
+                    "Admin Only",
+                    "You need **Manage Server** or administrator access to run verification sync tools.",
+                    tone="warning",
+                    footer="Babblebox Admin",
+                ),
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    async def _safe_edit(self, *, force: bool = False):
+        if self.message is None:
+            return
+        now = asyncio.get_running_loop().time()
+        if not force and now - self._last_edit_at < 1.5:
+            return
+        self._last_edit_at = now
+        self._refresh_buttons()
+        with contextlib.suppress(discord.HTTPException, AttributeError):
+            await self.message.edit(embed=await self.current_embed(), view=self)
+
+    async def _handle_progress(self, session: VerificationSyncSession, force: bool):
+        await self._safe_edit(force=force)
+
+    async def _run_session(self, guild: discord.Guild, session: VerificationSyncSession):
+        summary = await self.cog.service.run_verification_sync_session(
+            guild,
+            session,
+            progress_callback=self._handle_progress,
+        )
+        self.static_embed = self.cog.build_sync_summary_embed(summary)
+        self._disable_all()
+        await self._safe_edit(force=True)
+
+    @discord.ui.button(label="Start Sync", style=discord.ButtonStyle.success)
+    async def start_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message("This verification sync only works inside a server.", ephemeral=True)
+            return
+        self.message = interaction.message or self.message
+        preview = await self.cog.service.build_verification_sync_preview(guild)
+        if preview.blocking_prechecks:
+            await interaction.response.edit_message(embed=self.cog.build_sync_preview_embed(guild, preview), view=self)
+            return
+        created, session = await self.cog.service.create_verification_sync_session(
+            guild,
+            actor_id=interaction.user.id,
+            preview=preview,
+        )
+        self._refresh_buttons()
+        await interaction.response.edit_message(embed=self.cog.build_sync_session_embed(guild, session), view=self)
+        if created:
+            asyncio.create_task(self._run_session(guild, session), name=f"babblebox-admin-sync-{guild.id}")
+
+    @discord.ui.button(label="Refresh", style=discord.ButtonStyle.secondary)
+    async def refresh_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.message = interaction.message or self.message
+        await interaction.response.edit_message(embed=await self.current_embed(), view=self)
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.danger)
+    async def stop_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.message = interaction.message or self.message
+        session = self._session()
+        if session is None:
+            self.static_embed = ge.make_status_embed(
+                "Verification Sync Cancelled",
+                "No verification sync was started, and no member state was changed.",
+                tone="info",
+                footer="Babblebox Admin | Verification cleanup",
+            )
+            self._disable_all()
+            await interaction.response.edit_message(embed=self.static_embed, view=self)
+            return
+        await self.cog.service.request_verification_sync_stop(self.guild_id)
+        self._refresh_buttons()
+        await interaction.response.edit_message(embed=self.cog.build_sync_session_embed(interaction.guild, session), view=self)
 
 class AdminCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
@@ -404,6 +553,112 @@ class AdminCog(commands.Cog):
         if compiled.admin_alert_role_id is not None and not self.service.can_ping_alert_role(guild, compiled):
             add("Warning: Babblebox may not be able to ping the configured admin alert role.")
         return lines
+
+    def _format_precheck_lines(self, checks: tuple[VerificationPrecheck, ...], *, include_notes: bool = True) -> str:
+        labels = {
+            "blocked": "Blocked",
+            "warning": "Warning",
+            "note": "Note",
+        }
+        lines = [
+            f"{labels.get(check.severity, 'Note')}: {check.message}"
+            for check in checks
+            if include_notes or check.severity != "note"
+        ]
+        return ge.join_limited_lines(lines[:6], limit=1024, empty="No preflight issues detected.")
+
+    def build_sync_preview_embed(self, guild: discord.Guild, preview: VerificationSyncPreview) -> discord.Embed:
+        blocked = bool(preview.blocking_prechecks)
+        rule = self._verification_rule_details(guild.id)
+        embed = discord.Embed(
+            title="Verification Sync Review",
+            description=(
+                "Review this one-time bulk action before Babblebox touches current verification rows or sends any due warning DMs."
+                if not blocked
+                else "Start is blocked until the blocking items below are fixed."
+            ),
+            color=ge.EMBED_THEME["warning"] if blocked else ge.EMBED_THEME["info"],
+        )
+        embed.add_field(
+            name="Bulk Action",
+            value=(
+                "This sync scans the current member list against the active verification rule.\n"
+                "It updates compact verification state, clears stale rows, and sends warning DMs that are already due.\n"
+                f"{rule['preview_sentence']}"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Dry Run",
+            value=(
+                f"Currently **{preview.matched_unverified}** members match this rule.\n"
+                f"New rows to track: **{preview.newly_tracked}**\n"
+                f"Already tracked: **{preview.already_tracked}**\n"
+                f"Rows to clear: **{preview.stale_rows_to_clear}**\n"
+                f"Warning DMs due now: **{preview.warnings_due_now}**\n"
+                f"Member scan: **{'Exact' if preview.exact_member_scan else 'Cached only'}**"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="DM Template",
+            value=(
+                f"Warning DM: **{preview.warning_template_label}**\n"
+                f"Snippet: {preview.warning_template_preview}\n"
+                "Internal state updates: **compact verification rows only**\n"
+                "Stop control: **Babblebox finishes the current member and then halts the remaining batch**"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Preflight",
+            value=self._format_precheck_lines(preview.prechecks),
+            inline=False,
+        )
+        return ge.style_embed(embed, footer="Babblebox Admin | /admin sync")
+
+    def build_sync_session_embed(self, guild: discord.Guild | None, session: VerificationSyncSession) -> discord.Embed:
+        stopping = session.stop_requested
+        title = "Verification Sync Stopping" if stopping else "Verification Sync Running"
+        description = (
+            "Stop requested. Babblebox will finish the current member and then halt the remaining batch."
+            if stopping
+            else "Babblebox is scanning current members, updating compact verification state, and sending warning DMs that are already due."
+        )
+        embed = discord.Embed(
+            title=title,
+            description=description,
+            color=ge.EMBED_THEME["warning"] if stopping else ge.EMBED_THEME["info"],
+        )
+        embed.add_field(
+            name="Progress",
+            value=(
+                f"Scanned members: **{session.scanned_members}**\n"
+                f"Matched unverified: **{session.matched_unverified}**\n"
+                f"Newly tracked: **{session.tracked_count}**\n"
+                f"Stale rows cleared: **{session.cleared_count}**\n"
+                f"Warnings processed: **{session.warned_count}**\n"
+                f"Failed DMs: **{session.failed_dm_count}**\n"
+                f"Skipped without change: **{session.skipped_count}**"
+            ),
+            inline=False,
+        )
+        current_member = f"<@{session.current_member_id}>" if session.current_member_id is not None else "Between members"
+        state_lines = [
+            f"Started: {ge.format_timestamp(session.created_at, 'R')}",
+            f"Current member: {current_member}",
+            f"Stop requested: {'Yes' if session.stop_requested else 'No'}",
+        ]
+        if session.preview.warnings_due_now:
+            state_lines.append(f"Warnings due at start: **{session.preview.warnings_due_now}**")
+        embed.add_field(name="State", value="\n".join(state_lines), inline=False)
+        preflight = tuple(check for check in session.preview.prechecks if check.severity != "note")
+        if preflight:
+            embed.add_field(name="Preflight", value=self._format_precheck_lines(preflight, include_notes=False), inline=False)
+        return ge.style_embed(embed, footer="Babblebox Admin | /admin sync")
+
+    def build_sync_summary_embed(self, summary: VerificationSyncSummary) -> discord.Embed:
+        return self.service.build_verification_sync_summary_embed(summary)
 
     async def _overview_embed(self, guild_id: int) -> discord.Embed:
         config = self.service.get_config(guild_id)
@@ -647,7 +902,7 @@ class AdminCog(commands.Cog):
         operability = self._operability_lines(guild_id)
         if operability:
             embed.add_field(name="Operability", value="\n".join(operability[:6]), inline=False)
-        return ge.style_embed(embed, footer="Babblebox Admin | /admin panel, status, followup, verification, logs, exclusions, templates, or sync")
+        return ge.style_embed(embed, footer="Babblebox Admin | /admin panel, status, followup, verification, logs, exclusions, templates, sync, or test")
 
     async def _send_result(self, ctx: commands.Context, title: str, message: str, *, ok: bool):
         embed = ge.make_status_embed(title, message, tone="success" if ok else "warning", footer="Babblebox Admin")
@@ -658,6 +913,12 @@ class AdminCog(commands.Cog):
 
     async def _send_panel(self, ctx: commands.Context, *, section: str = "overview"):
         view = AdminPanelView(self, guild_id=ctx.guild.id, author_id=ctx.author.id, section=section)
+        message = await send_hybrid_response(ctx, embed=await view.current_embed(), view=view, ephemeral=True)
+        if message is not None:
+            view.message = message
+
+    async def _send_sync_panel(self, ctx: commands.Context):
+        view = VerificationSyncView(self, guild_id=ctx.guild.id, author_id=ctx.author.id)
         message = await send_hybrid_response(ctx, embed=await view.current_embed(), view=view, ephemeral=True)
         if message is not None:
             view.message = message
@@ -701,6 +962,24 @@ class AdminCog(commands.Cog):
             )
         embed.add_field(name="Verification", value="\n".join(verification_lines), inline=False)
         return ge.style_embed(embed, footer="Babblebox Admin | Member automation status")
+
+    def _copy_embed(self, embed: discord.Embed) -> discord.Embed:
+        return discord.Embed.from_dict(embed.to_dict())
+
+    def _placeholder_lines(self, placeholders: dict[str, str]) -> str:
+        labels = {
+            "{member}": "Member",
+            "{guild}": "Guild",
+            "{deadline}": "Deadline",
+            "{deadline_relative}": "Deadline (relative)",
+            "{help_channel}": "Help channel",
+            "{invite_link}": "Invite link",
+        }
+        return ge.join_limited_lines(
+            [f"{labels.get(name, name)}: {value}" for name, value in placeholders.items()],
+            limit=1024,
+            empty="No placeholders were rendered.",
+        )
 
     @commands.hybrid_group(
         name="admin",
@@ -923,20 +1202,152 @@ class AdminCog(commands.Cog):
         await self._send_result(ctx, "Admin Templates", message, ok=ok)
 
     @app_commands.default_permissions(manage_guild=True)
-    @admin_group.command(name="sync", with_app_command=True, description="One-time catch-up scan for current verification members")
+    @admin_group.command(name="test", with_app_command=True, description="Safely preview verification templates and log delivery")
+    @app_commands.describe(
+        kind="Choose whether to preview the warning DM, final kick DM, or logs channel output",
+        member="Optional member to use for placeholder rendering in the preview",
+        dm_self="DM the selected preview to you as a self-test",
+        post_log="For log tests, also post the test embed to the configured admin log channel",
+    )
+    @app_commands.choices(kind=ADMIN_TEST_CHOICES)
+    async def admin_test_command(
+        self,
+        ctx: commands.Context,
+        kind: Optional[str] = None,
+        member: Optional[discord.Member] = None,
+        dm_self: bool = False,
+        post_log: bool = False,
+    ):
+        if not await self._guard(ctx):
+            return
+        if kind is None:
+            embed = discord.Embed(
+                title="Verification Test Tools",
+                description="Safely preview verification DMs and logs without changing any member state.",
+                color=ge.EMBED_THEME["info"],
+            )
+            embed.add_field(
+                name="Available Tests",
+                value=(
+                    "`warning_dm` previews the warning template.\n"
+                    "`kick_dm` previews the final removal template.\n"
+                    "`logs` previews or posts a safe log message to the configured admin log channel."
+                ),
+                inline=False,
+            )
+            embed.add_field(
+                name="Safety",
+                value="These tests do not mark members as warned, do not start a sync, and do not kick or mass-DM anyone.",
+                inline=False,
+            )
+            await send_hybrid_response(ctx, embed=ge.style_embed(embed, footer="Babblebox Admin | /admin test"), ephemeral=True)
+            return
+
+        compiled = self.service.get_compiled_config(ctx.guild.id)
+        target = member or ctx.author
+        help_channel = self.service._guild_channel(ctx.guild, compiled.verification_help_channel_id)
+        preview_deadline = ge.now_utc() + timedelta(seconds=max(compiled.verification_warning_lead_seconds, 3600))
+        log_result = "Preview only"
+        dm_result = "Not requested"
+        checks = self.service.get_verification_prechecks(
+            ctx.guild,
+            blocked_kick_matches=0,
+            exact_member_scan=bool(getattr(ctx.guild, "chunked", True)),
+        )
+
+        if kind == "logs":
+            preview_embed = ge.make_status_embed(
+                "Verification Log Test",
+                f"This is a safe verification log test requested by {ctx.author.mention}. No member state was changed.",
+                tone="info",
+                footer="Babblebox Admin | Verification cleanup test",
+            )
+            preview_embed.add_field(
+                name="Current Templates",
+                value=(
+                    f"Warning template: **{'Custom' if compiled.warning_template else 'Default'}**\n"
+                    f"Final kick template: **{'Custom' if compiled.kick_template else 'Default'}**\n"
+                    f"Log channel: {self._channel_mention(compiled.admin_log_channel_id)}"
+                ),
+                inline=False,
+            )
+            if post_log:
+                sent = await self.service.send_log(ctx.guild, compiled, embed=self._copy_embed(preview_embed), alert=False)
+                log_result = (
+                    f"Posted to {self._channel_mention(compiled.admin_log_channel_id)}."
+                    if sent
+                    else "Could not post to the configured admin log channel."
+                )
+            elif dm_self:
+                dm_result = "DM self is only used for warning and final kick previews."
+            preview_embed.add_field(
+                name="Delivery",
+                value=(
+                    f"Private preview: **Shown here**\n"
+                    f"Log channel test: **{log_result}**\n"
+                    "Member side effects: **None**"
+                ),
+                inline=False,
+            )
+            preview_embed.add_field(name="Prechecks", value=self._format_precheck_lines(checks), inline=False)
+            await send_hybrid_response(ctx, embed=preview_embed, ephemeral=True)
+            return
+
+        final = kind == "kick_dm"
+        preview_embed = (
+            self.service.build_kick_embed(target, guild=ctx.guild, deadline=preview_deadline, compiled=compiled)
+            if final
+            else self.service.build_warning_embed(target, guild=ctx.guild, deadline=preview_deadline, compiled=compiled)
+        )
+        placeholders = self.service.verification_template_placeholders(
+            target,
+            guild=ctx.guild,
+            deadline=preview_deadline,
+            help_channel=help_channel,
+            invite_link=compiled.invite_link,
+            preview=True,
+        )
+        if dm_self:
+            if hasattr(ctx.author, "send"):
+                try:
+                    await ctx.author.send(embed=self._copy_embed(preview_embed))
+                    dm_result = "Sent to your DMs"
+                except (discord.Forbidden, discord.HTTPException):
+                    dm_result = "DM failed"
+            else:
+                dm_result = "DM route unavailable for this test context"
+        preview_embed = self._copy_embed(preview_embed)
+        preview_embed.add_field(
+            name="Test Mode",
+            value=(
+                f"Template: **{'Final kick DM' if final else 'Warning DM'}**\n"
+                f"Rendered member: {getattr(target, 'mention', ge.display_name_of(target))}\n"
+                "Member side effects: **None**"
+            ),
+            inline=False,
+        )
+        preview_embed.add_field(name="Resolved Placeholders", value=self._placeholder_lines(placeholders), inline=False)
+        preview_embed.add_field(
+            name="Delivery",
+            value=(
+                "Private preview: **Shown here**\n"
+                f"DM self-test: **{dm_result}**\n"
+                "Bulk sends started: **No**"
+            ),
+            inline=False,
+        )
+        preview_embed.add_field(name="Prechecks", value=self._format_precheck_lines(checks), inline=False)
+        await send_hybrid_response(ctx, embed=preview_embed, ephemeral=True)
+
+    @app_commands.default_permissions(manage_guild=True)
+    @admin_group.command(name="sync", with_app_command=True, description="Review, preview, and safely run a verification catch-up sync")
     async def admin_sync_command(self, ctx: commands.Context):
         if not await self._guard(ctx):
             return
         if not getattr(ctx.guild, "chunked", True) and hasattr(ctx.guild, "chunk"):
             with contextlib.suppress(discord.HTTPException):
                 await ctx.guild.chunk(cache=True)
-        tracked, cleared = await self.service.sync_verification_guild(ctx.guild)
-        await self._send_result(
-            ctx,
-            "Verification Sync",
-            f"Tracked **{tracked}** current unverified members and cleared **{cleared}** stale verification rows.",
-            ok=True,
-        )
+        await self._send_sync_panel(ctx)
 
     @commands.Cog.listener()
     async def on_member_ban(self, guild: discord.Guild, user: discord.abc.User):
