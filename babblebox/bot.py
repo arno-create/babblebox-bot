@@ -19,6 +19,7 @@ COGS = (
     "babblebox.cogs.utilities",
     "babblebox.cogs.identity",
     "babblebox.cogs.shield",
+    "babblebox.cogs.admin",
     "babblebox.cogs.events",
 )
 

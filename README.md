@@ -8,7 +8,7 @@ It is designed around five clear product lanes:
 - Everyday Utilities for quiet server life
 - Daily Arcade for low-player-count return visits
 - Buddy / Profile / Vault for identity, streaks, and showable progress
-- Babblebox Shield for lightweight, configurable server safety
+- Babblebox Shield plus compact admin lifecycle helpers for lightweight, configurable server safety
 
 Babblebox is intentionally compact:
 
@@ -82,6 +82,13 @@ Babblebox is intentionally compact:
   - allowlists for domains, invite codes, and phrases
   - compact advanced patterns with `contains`, `word`, and safe `wildcard` matching
   - raw custom regex intentionally unsupported to avoid unsafe hot-path backtracking
+- Admin lifecycle helpers
+  - returned-after-ban follow-up role assignment within a clear 30-day return window
+  - auto-remove or moderator-review follow-up role expiry
+  - review alerts with compact action buttons instead of a case system
+  - verification retention with warning-before-kick cleanup
+  - verification-help channel deadline extensions with a small extension cap
+  - shared exclusions, trusted-role bypasses, templates, and compact admin logs
 
 ### Daily Arcade
 
@@ -198,6 +205,21 @@ Shield commands are private/admin-facing by default. The streamlined slash surfa
 | `/shield advanced add` | `bb!shield advanced add Gift claim*gift wildcard log` | Add a safe advanced pattern |
 | `/shield advanced list` | `bb!shield advanced list` | Review advanced patterns |
 | `/shield test` | `bb!shield test free nitro claim now https://bit.ly/x` | Dry-run a message through Shield |
+
+### Admin Lifecycle
+
+Admin lifecycle commands are private/admin-facing by default. The streamlined surface is centered on `/admin panel`.
+
+| Slash | Prefix | Purpose |
+| --- | --- | --- |
+| `/admin panel` | `bb!admin panel` | Open the admin lifecycle control panel |
+| `/admin status` | `bb!admin status` | View overview counts or inspect one member |
+| `/admin followup` | `bb!admin followup enabled true @Probation review 30d` | Configure returned-after-ban follow-up roles |
+| `/admin verification` | `bb!admin verification enabled true @Verified must_have_role 7d 2d` | Configure warning-before-kick verification cleanup |
+| `/admin logs` | `bb!admin logs #admin-log @Mods` | Set the shared admin log channel and alert role |
+| `/admin exclusions` | `bb!admin exclusions trusted_role_ids on @Mods` | Configure shared exclusions and trusted roles |
+| `/admin templates` | `bb!admin templates invite_link https://discord.gg/example` | Configure warning/kick DMs and optional rejoin link |
+| `/admin sync` | `bb!admin sync` | One-time catch-up scan for current unverified members |
 
 ### Daily Arcade
 
@@ -351,6 +373,31 @@ Not stored:
 - attachment blobs
 - large strike archives
 
+### Admin lifecycle persistence
+
+Admin lifecycle storage stays row-based and compact:
+
+- `admin_guild_configs`
+- `admin_ban_return_candidates`
+- `admin_followup_roles`
+- `admin_verification_states`
+
+Stored data is intentionally small:
+
+- one shared config row per guild
+- short-lived ban-return candidates with a 30-day purge window
+- active follow-up role rows only while Babblebox still manages that follow-up
+- pending verification rows only while someone is still unverified
+- review message IDs only while a moderator review is currently pending
+
+Not stored:
+
+- Babblebox ban / kick / timeout case history
+- full join / leave archives
+- per-member scheduler tasks
+- long-term punishment event logs
+- message transcripts or DM bodies
+
 ### Moment Cards
 
 Moment Cards do not introduce a durable archive table.
@@ -366,6 +413,8 @@ Moment Cards do not introduce a durable archive table.
 .
 |-- babblebox/
 |   |-- __init__.py
+|   |-- admin_service.py
+|   |-- admin_store.py
 |   |-- bot.py
 |   |-- command_utils.py
 |   |-- daily_challenges.py
@@ -383,6 +432,7 @@ Moment Cards do not introduce a durable archive table.
 |   `-- cogs/
 |       |-- __init__.py
 |       |-- afk.py
+|       |-- admin.py
 |       |-- events.py
 |       |-- gameplay.py
 |       |-- identity.py
@@ -406,9 +456,12 @@ Moment Cards do not introduce a durable archive table.
 - `babblebox/daily_challenges.py`: deterministic Daily Arcade booth generation
 - `babblebox/profile_store.py`: compact profile and daily persistence
 - `babblebox/profile_service.py`: Daily Arcade, Buddy, Profile, Vault, and anti-farm progression
+- `babblebox/admin_store.py`: compact admin lifecycle config and pending-state persistence
+- `babblebox/admin_service.py`: returned-after-ban follow-up logic, verification cleanup, and bounded sweeping
 - `babblebox/shield_ai.py`: optional AI provider integration, redaction, truncation, and safe parsing
 - `babblebox/shield_store.py`: compact Shield config persistence
 - `babblebox/shield_service.py`: Shield matching, cache rebuilds, actions, and mod-log delivery
+- `babblebox/cogs/admin.py`: admin-facing lifecycle panel, grouped commands, and review buttons
 - `babblebox/cogs/identity.py`: Daily Arcade, Buddy, Profile, and Vault commands
 - `babblebox/cogs/shield.py`: admin-facing Shield command surface
 - `babblebox/cogs/utilities.py`: Watch V2, Later, Capture, Moment, and Remind commands
@@ -458,6 +511,7 @@ OPENAI_API_KEY=sk-...
 
 # optional local/test override:
 # UTILITY_STORAGE_BACKEND=memory
+# ADMIN_STORAGE_BACKEND=memory
 # SHIELD_STORAGE_BACKEND=memory
 # PROFILE_STORAGE_BACKEND=memory
 ```
@@ -471,6 +525,7 @@ Environment variable notes:
 - `OPENAI_API_KEY` is optional and only needed for Shield AI assist
 - `SHIELD_AI_MODEL`, `SHIELD_AI_TIMEOUT_SECONDS`, and `SHIELD_AI_MAX_CHARS` are optional Shield AI tuning knobs
 - `UTILITY_STORAGE_BACKEND=memory` is for explicit local/test work only
+- `ADMIN_STORAGE_BACKEND=memory` is optional for local/test admin lifecycle work
 - `SHIELD_STORAGE_BACKEND=memory` is optional for local/test Shield work
 - `PROFILE_STORAGE_BACKEND=memory` is optional for tests and local development
 

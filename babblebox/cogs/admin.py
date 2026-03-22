@@ -1,0 +1,886 @@
+from __future__ import annotations
+
+import contextlib
+from typing import Optional
+
+import discord
+from discord import app_commands
+from discord.ext import commands
+
+from babblebox import game_engine as ge
+from babblebox.admin_service import (
+    FOLLOWUP_MODE_LABELS,
+    REVIEW_ACTION_LABELS,
+    VERIFICATION_LOGIC_LABELS,
+    AdminService,
+    _followup_duration_label,
+)
+from babblebox.command_utils import defer_hybrid_response, send_hybrid_response
+from babblebox.utility_helpers import deserialize_datetime, format_duration_brief
+
+
+FOLLOWUP_MODE_CHOICES = [
+    app_commands.Choice(name="Auto remove", value="auto_remove"),
+    app_commands.Choice(name="Moderator review", value="review"),
+]
+VERIFICATION_LOGIC_CHOICES = [
+    app_commands.Choice(name="Must have role", value="must_have_role"),
+    app_commands.Choice(name="Must not have role", value="must_not_have_role"),
+]
+STATE_CHOICES = [
+    app_commands.Choice(name="On", value="on"),
+    app_commands.Choice(name="Off", value="off"),
+]
+EXCLUSION_TARGET_CHOICES = [
+    app_commands.Choice(name="Exclude member", value="excluded_user_ids"),
+    app_commands.Choice(name="Exclude role", value="excluded_role_ids"),
+    app_commands.Choice(name="Trusted role", value="trusted_role_ids"),
+]
+
+
+class FollowupReviewView(discord.ui.View):
+    def __init__(self, *, guild_id: int, user_id: int, version: int):
+        super().__init__(timeout=None)
+        self.guild_id = guild_id
+        self.user_id = user_id
+        self.version = version
+        self.add_item(self._make_button("remove", discord.ButtonStyle.danger))
+        self.add_item(self._make_button("delay_week", discord.ButtonStyle.secondary))
+        self.add_item(self._make_button("delay_month", discord.ButtonStyle.secondary))
+        self.add_item(self._make_button("keep", discord.ButtonStyle.success))
+
+    def _make_button(self, action: str, style: discord.ButtonStyle) -> discord.ui.Button:
+        button = discord.ui.Button(
+            label=REVIEW_ACTION_LABELS[action],
+            style=style,
+            custom_id=f"bb-admin-followup:{action}:{self.guild_id}:{self.user_id}:{self.version}",
+        )
+        async def _callback(interaction: discord.Interaction):
+            await self._handle_action(interaction, action)
+
+        button.callback = _callback
+        return button
+
+    async def _handle_action(self, interaction: discord.Interaction, action: str):
+        if interaction.guild is None or interaction.user is None:
+            await interaction.response.send_message("This review action only works inside a server.", ephemeral=True)
+            return
+        perms = getattr(interaction.user, "guild_permissions", None)
+        if not (getattr(perms, "administrator", False) or getattr(perms, "manage_guild", False)):
+            await interaction.response.send_message(
+                embed=ge.make_status_embed(
+                    "Admin Only",
+                    "You need **Manage Server** or administrator access to use follow-up review actions.",
+                    tone="warning",
+                    footer="Babblebox Admin",
+                ),
+                ephemeral=True,
+            )
+            return
+        service = getattr(interaction.client, "admin_service", None)
+        if service is None:
+            await interaction.response.send_message("Babblebox admin systems are unavailable right now.", ephemeral=True)
+            return
+        ok, message, record = await service.handle_review_action(
+            guild_id=self.guild_id,
+            user_id=self.user_id,
+            version=self.version,
+            action=action,
+            actor=interaction.user,
+        )
+        if not ok:
+            if "stale" in message.lower() or "closed" in message.lower():
+                for child in self.children:
+                    child.disabled = True
+                embed = service.build_followup_resolution_embed(
+                    record or {"user_id": self.user_id, "role_id": 0},
+                    message=message,
+                    success=False,
+                )
+                await interaction.response.edit_message(embed=embed, view=self)
+                return
+            await interaction.response.send_message(message, ephemeral=True)
+            return
+        for child in self.children:
+            child.disabled = True
+        embed = service.build_followup_resolution_embed(record or {"user_id": self.user_id, "role_id": 0}, message=message, success=True)
+        await interaction.response.edit_message(embed=embed, view=self)
+
+
+class AdminPanelView(discord.ui.View):
+    def __init__(self, cog: "AdminCog", *, guild_id: int, author_id: int, section: str = "overview"):
+        super().__init__(timeout=180)
+        self.cog = cog
+        self.guild_id = guild_id
+        self.author_id = author_id
+        self.section = section
+        self.message: discord.Message | None = None
+        self._refresh_buttons()
+
+    async def current_embed(self) -> discord.Embed:
+        return await self.cog.build_panel_embed(self.guild_id, self.section)
+
+    def _refresh_buttons(self):
+        mapping = {
+            "overview": self.overview_button,
+            "followup": self.followup_button,
+            "verification": self.verification_button,
+            "exclusions": self.exclusions_button,
+            "logs": self.logs_button,
+            "templates": self.templates_button,
+        }
+        for name, button in mapping.items():
+            button.style = discord.ButtonStyle.primary if self.section == name else discord.ButtonStyle.secondary
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.author_id:
+            await interaction.response.send_message(
+                embed=ge.make_status_embed(
+                    "This Panel Is Locked",
+                    "Use `/admin panel` to open your own admin panel.",
+                    tone="info",
+                    footer="Babblebox Admin",
+                ),
+                ephemeral=True,
+            )
+            return False
+        if not self.cog.user_can_manage_admin(interaction.user):
+            await interaction.response.send_message(
+                embed=ge.make_status_embed(
+                    "Admin Only",
+                    "You need **Manage Server** or administrator access to configure these admin systems.",
+                    tone="warning",
+                    footer="Babblebox Admin",
+                ),
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    async def on_timeout(self):
+        for child in self.children:
+            child.disabled = True
+        if self.message is not None:
+            with contextlib.suppress(discord.HTTPException):
+                await self.message.edit(view=self)
+
+    async def _render(self, interaction: discord.Interaction, *, note: str | None = None):
+        self._refresh_buttons()
+        await interaction.response.edit_message(embed=await self.current_embed(), view=self)
+        if note:
+            await interaction.followup.send(note, ephemeral=True)
+
+    @discord.ui.button(label="Overview", style=discord.ButtonStyle.primary, row=0)
+    async def overview_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.section = "overview"
+        await self._render(interaction)
+
+    @discord.ui.button(label="Follow-up", style=discord.ButtonStyle.secondary, row=0)
+    async def followup_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.section = "followup"
+        await self._render(interaction)
+
+    @discord.ui.button(label="Verification", style=discord.ButtonStyle.secondary, row=0)
+    async def verification_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.section = "verification"
+        await self._render(interaction)
+
+    @discord.ui.button(label="Exclusions", style=discord.ButtonStyle.secondary, row=0)
+    async def exclusions_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.section = "exclusions"
+        await self._render(interaction)
+
+    @discord.ui.button(label="Logs", style=discord.ButtonStyle.secondary, row=0)
+    async def logs_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.section = "logs"
+        await self._render(interaction)
+
+    @discord.ui.button(label="Templates", style=discord.ButtonStyle.secondary, row=1)
+    async def templates_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.section = "templates"
+        await self._render(interaction)
+
+    @discord.ui.button(label="Refresh", style=discord.ButtonStyle.secondary, row=1)
+    async def refresh_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._render(interaction, note="Admin panel refreshed.")
+
+
+class AdminCog(commands.Cog):
+    def __init__(self, bot: commands.Bot):
+        self.bot = bot
+        self.service = AdminService(bot)
+
+    async def cog_load(self):
+        await self.service.start()
+        setattr(self.bot, "admin_service", self.service)
+        for record in await self.service.list_review_views():
+            message_id = record.get("review_message_id")
+            if not isinstance(message_id, int):
+                continue
+            with contextlib.suppress(Exception):
+                self.bot.add_view(
+                    FollowupReviewView(
+                        guild_id=int(record["guild_id"]),
+                        user_id=int(record["user_id"]),
+                        version=int(record.get("review_version", 0) or 0),
+                    ),
+                    message_id=message_id,
+                )
+
+    def cog_unload(self):
+        if getattr(self.bot, "admin_service", None) is self.service:
+            delattr(self.bot, "admin_service")
+        self.bot.loop.create_task(self.service.close())
+
+    def user_can_manage_admin(self, actor: object) -> bool:
+        perms = getattr(actor, "guild_permissions", None)
+        return bool(getattr(perms, "administrator", False) or getattr(perms, "manage_guild", False))
+
+    async def _guard(self, ctx: commands.Context) -> bool:
+        await defer_hybrid_response(ctx, ephemeral=True)
+        if ctx.guild is None:
+            await send_hybrid_response(
+                ctx,
+                embed=ge.make_status_embed("Server Only", "These admin systems can only be configured inside a server.", tone="warning", footer="Babblebox Admin"),
+                ephemeral=True,
+            )
+            return False
+        if not self.user_can_manage_admin(ctx.author):
+            await send_hybrid_response(
+                ctx,
+                embed=ge.make_status_embed(
+                    "Admin Only",
+                    "You need **Manage Server** or administrator access to configure these admin systems.",
+                    tone="warning",
+                    footer="Babblebox Admin",
+                ),
+                ephemeral=True,
+            )
+            return False
+        if not self.service.storage_ready:
+            await send_hybrid_response(
+                ctx,
+                embed=ge.make_status_embed("Admin Systems Unavailable", self.service.storage_message(), tone="warning", footer="Babblebox Admin"),
+                ephemeral=True,
+            )
+            return False
+        return True
+
+    def _format_mentions(self, ids: list[int], *, kind: str) -> str:
+        if not ids:
+            return "None"
+        prefix = {"user": "<@", "role": "<@&"}[kind]
+        rendered = [f"{prefix}{value}>" for value in ids[:6]]
+        if len(ids) > 6:
+            rendered.append(f"+{len(ids) - 6} more")
+        return ", ".join(rendered)
+
+    def _guild(self, guild_id: int) -> discord.Guild | None:
+        get_guild = getattr(self.bot, "get_guild", None)
+        return get_guild(guild_id) if callable(get_guild) else None
+
+    def _role_mention(self, role_id: int | None) -> str:
+        return f"<@&{role_id}>" if role_id else "Not set"
+
+    def _channel_mention(self, channel_id: int | None) -> str:
+        return f"<#{channel_id}>" if channel_id else "Not set"
+
+    def _operability_lines(self, guild_id: int) -> list[str]:
+        guild = self._guild(guild_id)
+        if guild is None:
+            return []
+        compiled = self.service.get_compiled_config(guild_id)
+        config = self.service.get_config(guild_id)
+        me = self.service._bot_member(guild)
+        if me is None:
+            return ["Warning: Babblebox could not resolve its own server member for admin automations."]
+        lines: list[str] = []
+        seen: set[str] = set()
+
+        def add(line: str):
+            if line not in seen:
+                seen.add(line)
+                lines.append(line)
+
+        if compiled.followup_enabled:
+            role = self.service._guild_role(guild, compiled.followup_role_id)
+            if compiled.followup_role_id is None:
+                add("Warning: Punishment follow-up is enabled but no follow-up role is configured.")
+            elif role is None:
+                add("Warning: The configured follow-up role no longer exists.")
+            else:
+                perms = getattr(me, "guild_permissions", None)
+                if perms is None or not getattr(perms, "manage_roles", False):
+                    add("Warning: Punishment follow-up cannot manage roles because Babblebox is missing Manage Roles.")
+                elif getattr(role, "position", 0) >= getattr(getattr(me, "top_role", None), "position", 0):
+                    add(f"Warning: Babblebox cannot manage {role.mention} because it is at or above Babblebox's top role.")
+            if compiled.followup_mode == "review" and compiled.admin_log_channel_id is None:
+                add("Warning: Review-mode follow-ups need an admin log channel so Babblebox can send review alerts.")
+
+        if compiled.verification_enabled:
+            if compiled.verification_role_id is None:
+                add("Warning: Verification cleanup is enabled but no verification role is configured.")
+            elif self.service._guild_role(guild, compiled.verification_role_id) is None:
+                add("Warning: The configured verification role no longer exists.")
+            perms = getattr(me, "guild_permissions", None)
+            if perms is None or not getattr(perms, "kick_members", False):
+                add("Warning: Verification cleanup cannot kick members because Babblebox is missing Kick Members.")
+            add("Note: Verification cleanup still cannot kick administrators or members whose top role is at or above Babblebox.")
+
+        if compiled.admin_log_channel_id is not None:
+            channel = self.service._guild_channel(guild, compiled.admin_log_channel_id)
+            if channel is None:
+                add("Warning: The configured admin log channel is missing or inaccessible.")
+            else:
+                perms = channel.permissions_for(me)
+                if not getattr(perms, "view_channel", False):
+                    add(f"Warning: Babblebox cannot see {channel.mention}.")
+                if not getattr(perms, "send_messages", False):
+                    add(f"Warning: Babblebox cannot send admin alerts in {channel.mention}.")
+                if not getattr(perms, "embed_links", False):
+                    add(f"Warning: Babblebox cannot embed admin alerts in {channel.mention}.")
+        if compiled.admin_alert_role_id is not None and not self.service.can_ping_alert_role(guild, compiled):
+            add("Warning: Babblebox may not be able to ping the configured admin alert role.")
+        return lines
+
+    async def _overview_embed(self, guild_id: int) -> discord.Embed:
+        config = self.service.get_config(guild_id)
+        counts = await self.service.get_counts(guild_id)
+        embed = discord.Embed(
+            title="Admin Systems Overview",
+            description="Compact server-lifecycle helpers for returned-after-ban follow-up roles and long-unverified cleanup.",
+            color=ge.EMBED_THEME["accent"],
+        )
+        embed.add_field(
+            name="Punishment Follow-up",
+            value=(
+                f"Enabled: **{'Yes' if config['followup_enabled'] else 'No'}**\n"
+                f"Role: {self._role_mention(config['followup_role_id'])}\n"
+                f"Mode: {FOLLOWUP_MODE_LABELS[config['followup_mode']]}\n"
+                f"Duration: {_followup_duration_label(config['followup_duration_value'], config['followup_duration_unit'])}"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Verification Cleanup",
+            value=(
+                f"Enabled: **{'Yes' if config['verification_enabled'] else 'No'}**\n"
+                f"Role logic: {VERIFICATION_LOGIC_LABELS[config['verification_logic']]}\n"
+                f"Kick timer: {format_duration_brief(config['verification_kick_after_seconds'])}\n"
+                f"Warn lead: {format_duration_brief(config['verification_warning_lead_seconds'])}"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Live Counts",
+            value=(
+                f"Pending ban-return candidates: **{counts['ban_candidates']}**\n"
+                f"Active follow-up roles: **{counts['active_followups']}**\n"
+                f"Pending follow-up reviews: **{counts['pending_reviews']}**\n"
+                f"Tracked unverified members: **{counts['verification_pending']}**\n"
+                f"Warned and waiting: **{counts['verification_warned']}**"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Logs",
+            value=(
+                f"Channel: {self._channel_mention(config['admin_log_channel_id'])}\n"
+                f"Alert role: {self._role_mention(config['admin_alert_role_id'])}"
+            ),
+            inline=False,
+        )
+        return embed
+
+    async def _followup_embed(self, guild_id: int) -> discord.Embed:
+        config = self.service.get_config(guild_id)
+        embed = discord.Embed(
+            title="Punishment Follow-up",
+            description="When someone returns within 30 days of a ban event, Babblebox can apply one configured follow-up role.",
+            color=ge.EMBED_THEME["warning"],
+        )
+        embed.add_field(
+            name="Policy",
+            value=(
+                f"Enabled: **{'Yes' if config['followup_enabled'] else 'No'}**\n"
+                f"Role: {self._role_mention(config['followup_role_id'])}\n"
+                f"Return window: **30 days after a ban event**\n"
+                f"Mode: {FOLLOWUP_MODE_LABELS[config['followup_mode']]}\n"
+                f"Duration: {_followup_duration_label(config['followup_duration_value'], config['followup_duration_unit'])}"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Behavior",
+            value=(
+                "Babblebox does not know the original ban length.\n"
+                "It only reacts when a member returns within 30 days of a ban event.\n"
+                "Auto-remove removes the role on expiry.\n"
+                "Review mode sends moderator buttons to the admin log channel."
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Quick Use",
+            value="`/admin followup enabled:true role:@Probation mode:review duration:30d`",
+            inline=False,
+        )
+        return embed
+
+    async def _verification_embed(self, guild_id: int) -> discord.Embed:
+        config = self.service.get_config(guild_id)
+        embed = discord.Embed(
+            title="Verification Cleanup",
+            description="Warn and then kick members who stay unverified too long, with a verification-help extension path.",
+            color=ge.EMBED_THEME["danger"],
+        )
+        embed.add_field(
+            name="Policy",
+            value=(
+                f"Enabled: **{'Yes' if config['verification_enabled'] else 'No'}**\n"
+                f"Role: {self._role_mention(config['verification_role_id'])}\n"
+                f"Logic: {VERIFICATION_LOGIC_LABELS[config['verification_logic']]}\n"
+                f"Kick timer: {format_duration_brief(config['verification_kick_after_seconds'])}\n"
+                f"Warn lead: {format_duration_brief(config['verification_warning_lead_seconds'])}"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Help Channel Path",
+            value=(
+                f"Help channel: {self._channel_mention(config['verification_help_channel_id'])}\n"
+                f"Extension: {format_duration_brief(config['verification_help_extension_seconds'])}\n"
+                f"Max extensions: **{config['verification_max_extensions']}**"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Behavior",
+            value=(
+                "Babblebox tracks compact pending member state only.\n"
+                "Any non-trivial message in the verification-help channel can extend the deadline.\n"
+                "If someone is already deep into the timer when tracking starts, Babblebox gives them a fresh warning window instead of kicking instantly."
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Quick Use",
+            value="`/admin verification enabled:true role:@Verified logic:must_have_role kick_after:7d warning_lead:2d`",
+            inline=False,
+        )
+        return embed
+
+    async def _exclusions_embed(self, guild_id: int) -> discord.Embed:
+        config = self.service.get_config(guild_id)
+        embed = discord.Embed(
+            title="Exclusions And Trusted Roles",
+            description="Shared exclusions keep these automations compact and predictable instead of layering many per-feature lists.",
+            color=ge.EMBED_THEME["info"],
+        )
+        embed.add_field(
+            name="Shared Buckets",
+            value=(
+                f"Excluded members: {self._format_mentions(config['excluded_user_ids'], kind='user')}\n"
+                f"Excluded roles: {self._format_mentions(config['excluded_role_ids'], kind='role')}\n"
+                f"Trusted roles: {self._format_mentions(config['trusted_role_ids'], kind='role')}"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Toggles",
+            value=(
+                f"Follow-up exempts staff/trusted: **{'Yes' if config['followup_exempt_staff'] else 'No'}**\n"
+                f"Verification exempts staff/trusted: **{'Yes' if config['verification_exempt_staff'] else 'No'}**\n"
+                f"Verification exempts bots: **{'Yes' if config['verification_exempt_bots'] else 'No'}**"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Quick Use",
+            value="`/admin exclusions target:trusted_role_ids state:on role:@Mods`\n`/admin exclusions verification_exempt_bots:false`",
+            inline=False,
+        )
+        return embed
+
+    async def _logs_embed(self, guild_id: int) -> discord.Embed:
+        config = self.service.get_config(guild_id)
+        embed = discord.Embed(
+            title="Logs And Alerts",
+            description="Both admin systems share one compact mod-facing log path instead of keeping a big internal archive.",
+            color=ge.EMBED_THEME["info"],
+        )
+        embed.add_field(
+            name="Delivery",
+            value=(
+                f"Channel: {self._channel_mention(config['admin_log_channel_id'])}\n"
+                f"Alert role: {self._role_mention(config['admin_alert_role_id'])}\n"
+                "Logs cover follow-up role assignments, review deadlines, verification warnings, kicks, help extensions, and clear operability failures."
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Quick Use",
+            value="`/admin logs channel:#admin-log role:@Mods`",
+            inline=False,
+        )
+        return embed
+
+    async def _templates_embed(self, guild_id: int) -> discord.Embed:
+        config = self.service.get_config(guild_id)
+        embed = discord.Embed(
+            title="Templates And Messages",
+            description="Verification DMs stay configurable, but Babblebox only supports a small safe placeholder set.",
+            color=ge.EMBED_THEME["info"],
+        )
+        embed.add_field(
+            name="Current Settings",
+            value=(
+                f"Warning template: {'Custom' if config['warning_template'] else 'Default'}\n"
+                f"Kick template: {'Custom' if config['kick_template'] else 'Default'}\n"
+                f"Invite link: {config['invite_link'] or 'None'}"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Placeholders",
+            value="`{guild}`  `{deadline}`  `{deadline_relative}`  `{help_channel}`  `{invite_link}`",
+            inline=False,
+        )
+        embed.add_field(
+            name="Quick Use",
+            value="`/admin templates invite_link:https://discord.gg/example`",
+            inline=False,
+        )
+        return embed
+
+    async def build_panel_embed(self, guild_id: int, section: str) -> discord.Embed:
+        if section == "followup":
+            embed = await self._followup_embed(guild_id)
+        elif section == "verification":
+            embed = await self._verification_embed(guild_id)
+        elif section == "exclusions":
+            embed = await self._exclusions_embed(guild_id)
+        elif section == "logs":
+            embed = await self._logs_embed(guild_id)
+        elif section == "templates":
+            embed = await self._templates_embed(guild_id)
+        else:
+            embed = await self._overview_embed(guild_id)
+        operability = self._operability_lines(guild_id)
+        if operability:
+            embed.add_field(name="Operability", value="\n".join(operability[:6]), inline=False)
+        return ge.style_embed(embed, footer="Babblebox Admin | /admin panel, status, followup, verification, logs, exclusions, templates, or sync")
+
+    async def _send_result(self, ctx: commands.Context, title: str, message: str, *, ok: bool):
+        embed = ge.make_status_embed(title, message, tone="success" if ok else "warning", footer="Babblebox Admin")
+        operability = self._operability_lines(ctx.guild.id)
+        if operability:
+            embed.add_field(name="Operability", value="\n".join(operability[:6]), inline=False)
+        await send_hybrid_response(ctx, embed=embed, ephemeral=True)
+
+    async def _send_panel(self, ctx: commands.Context, *, section: str = "overview"):
+        view = AdminPanelView(self, guild_id=ctx.guild.id, author_id=ctx.author.id, section=section)
+        message = await send_hybrid_response(ctx, embed=await view.current_embed(), view=view, ephemeral=True)
+        if message is not None:
+            view.message = message
+
+    async def _member_status_embed(self, member: discord.Member) -> discord.Embed:
+        status = await self.service.get_member_status(member)
+        followup_role_text = f"<@&{status['followup']['role_id']}>" if status["followup"] else "None"
+        embed = discord.Embed(
+            title="Admin Member Status",
+            description=f"Current automation state for {member.mention}.",
+            color=ge.EMBED_THEME["accent"],
+        )
+        embed.add_field(
+            name="Follow-up",
+            value=(
+                f"Exempt: {status['followup_exempt_reason'] or 'No'}\n"
+                f"Ban-return candidate: {'Yes' if status['candidate'] else 'No'}\n"
+                f"Active follow-up role: {followup_role_text}"
+            ),
+            inline=False,
+        )
+        verification_state = status["verification"]
+        if verification_state is None:
+            verification_lines = [
+                f"Verification state: {status['verified_state'].title()}",
+                f"Reason: {status['verified_reason']}",
+                "Tracked deadline: None",
+            ]
+        else:
+            verification_lines = [
+                f"Verification state: {status['verified_state'].title()}",
+                f"Reason: {status['verified_reason']}",
+                f"Warn at: {ge.format_timestamp(deserialize_datetime(verification_state.get('warning_at')), 'R')}",
+                f"Kick at: {ge.format_timestamp(deserialize_datetime(verification_state.get('kick_at')), 'R')}",
+                f"Extensions used: {verification_state.get('extension_count', 0)}",
+            ]
+        embed.add_field(name="Verification", value="\n".join(verification_lines), inline=False)
+        return ge.style_embed(embed, footer="Babblebox Admin | Member automation status")
+
+    @commands.hybrid_group(
+        name="admin",
+        with_app_command=True,
+        description="Configure Babblebox admin lifecycle automations",
+        invoke_without_command=True,
+    )
+    async def admin_group(self, ctx: commands.Context):
+        if not await self._guard(ctx):
+            return
+        await self._send_panel(ctx, section="overview")
+
+    @admin_group.command(name="status", with_app_command=True, description="View the admin overview or inspect one member's state")
+    async def admin_status_command(self, ctx: commands.Context, member: Optional[discord.Member] = None):
+        if not await self._guard(ctx):
+            return
+        if member is None:
+            await send_hybrid_response(ctx, embed=await self.build_panel_embed(ctx.guild.id, "overview"), ephemeral=True)
+            return
+        await send_hybrid_response(ctx, embed=await self._member_status_embed(member), ephemeral=True)
+
+    @app_commands.default_permissions(manage_guild=True)
+    @admin_group.command(name="panel", with_app_command=True, description="Open the private admin panel")
+    async def admin_panel_command(self, ctx: commands.Context):
+        if not await self._guard(ctx):
+            return
+        await self._send_panel(ctx, section="overview")
+
+    @app_commands.default_permissions(manage_guild=True)
+    @admin_group.command(name="followup", with_app_command=True, description="Configure returned-after-ban follow-up roles")
+    @app_commands.describe(
+        enabled="Turn punishment follow-up on or off",
+        role="Role to assign when someone returns within 30 days of a ban event",
+        mode="Remove automatically later or send a moderator review alert",
+        duration="How long the follow-up role should stay, like 30d, 6w, or 3mo",
+        clear_role="Clear the configured follow-up role",
+    )
+    @app_commands.choices(mode=FOLLOWUP_MODE_CHOICES)
+    async def admin_followup_command(
+        self,
+        ctx: commands.Context,
+        enabled: Optional[bool] = None,
+        role: Optional[discord.Role] = None,
+        mode: Optional[str] = None,
+        duration: Optional[str] = None,
+        clear_role: bool = False,
+    ):
+        if not await self._guard(ctx):
+            return
+        if all(value is None for value in (enabled, role, mode, duration)) and not clear_role:
+            await send_hybrid_response(ctx, embed=await self.build_panel_embed(ctx.guild.id, "followup"), ephemeral=True)
+            return
+        current = self.service.get_config(ctx.guild.id)
+        resolved_role_id = None if clear_role else (role.id if role is not None else current["followup_role_id"])
+        ok, message = await self.service.set_followup_config(
+            ctx.guild.id,
+            enabled=enabled,
+            role_id=resolved_role_id,
+            mode=mode,
+            duration_text=duration,
+        )
+        await self._send_result(ctx, "Punishment Follow-up", message, ok=ok)
+
+    @app_commands.default_permissions(manage_guild=True)
+    @admin_group.command(name="verification", with_app_command=True, description="Configure verification retention and cleanup")
+    @app_commands.describe(
+        enabled="Turn verification cleanup on or off",
+        role="Verification role to evaluate",
+        logic="Whether verified members must have or must not have that role",
+        kick_after="Full time before kick, like 7d",
+        warning_lead="How long before the kick Babblebox should warn, like 2d",
+        help_channel="Verification-help channel where messages can extend the deadline",
+        help_extension="How much time a help message adds, like 2d",
+        max_extensions="How many help-channel extensions each member can use",
+        clear_role="Clear the configured verification role",
+        clear_help_channel="Clear the verification-help channel",
+    )
+    @app_commands.choices(logic=VERIFICATION_LOGIC_CHOICES)
+    async def admin_verification_command(
+        self,
+        ctx: commands.Context,
+        enabled: Optional[bool] = None,
+        role: Optional[discord.Role] = None,
+        logic: Optional[str] = None,
+        kick_after: Optional[str] = None,
+        warning_lead: Optional[str] = None,
+        help_channel: Optional[discord.TextChannel] = None,
+        help_extension: Optional[str] = None,
+        max_extensions: Optional[int] = None,
+        clear_role: bool = False,
+        clear_help_channel: bool = False,
+    ):
+        if not await self._guard(ctx):
+            return
+        if all(value is None for value in (enabled, role, logic, kick_after, warning_lead, help_channel, help_extension, max_extensions)) and not clear_role and not clear_help_channel:
+            await send_hybrid_response(ctx, embed=await self.build_panel_embed(ctx.guild.id, "verification"), ephemeral=True)
+            return
+        current = self.service.get_config(ctx.guild.id)
+        resolved_role_id = None if clear_role else (role.id if role is not None else current["verification_role_id"])
+        resolved_help_channel_id = None if clear_help_channel else (help_channel.id if help_channel is not None else current["verification_help_channel_id"])
+        ok, message = await self.service.set_verification_config(
+            ctx.guild.id,
+            enabled=enabled,
+            role_id=resolved_role_id,
+            logic=logic,
+            kick_after_text=kick_after,
+            warning_lead_text=warning_lead,
+            help_channel_id=resolved_help_channel_id,
+            help_extension_text=help_extension,
+            max_extensions=max_extensions,
+        )
+        await self._send_result(ctx, "Verification Cleanup", message, ok=ok)
+
+    @app_commands.default_permissions(manage_guild=True)
+    @admin_group.command(name="logs", with_app_command=True, description="Configure admin log delivery and alert pings")
+    async def admin_logs_command(
+        self,
+        ctx: commands.Context,
+        channel: Optional[discord.TextChannel] = None,
+        role: Optional[discord.Role] = None,
+        clear_channel: bool = False,
+        clear_role: bool = False,
+    ):
+        if not await self._guard(ctx):
+            return
+        if channel is None and role is None and not clear_channel and not clear_role:
+            await send_hybrid_response(ctx, embed=await self.build_panel_embed(ctx.guild.id, "logs"), ephemeral=True)
+            return
+        current = self.service.get_config(ctx.guild.id)
+        resolved_channel_id = None if clear_channel else (channel.id if channel is not None else current["admin_log_channel_id"])
+        resolved_role_id = None if clear_role else (role.id if role is not None else current["admin_alert_role_id"])
+        ok, message = await self.service.set_logs_config(ctx.guild.id, channel_id=resolved_channel_id, alert_role_id=resolved_role_id)
+        await self._send_result(ctx, "Admin Logs", message, ok=ok)
+
+    @app_commands.default_permissions(manage_guild=True)
+    @admin_group.command(name="exclusions", with_app_command=True, description="Configure shared exclusions and trusted-role behavior")
+    @app_commands.choices(target=EXCLUSION_TARGET_CHOICES, state=STATE_CHOICES)
+    async def admin_exclusions_command(
+        self,
+        ctx: commands.Context,
+        target: Optional[str] = None,
+        state: Optional[str] = None,
+        member: Optional[discord.Member] = None,
+        role: Optional[discord.Role] = None,
+        followup_exempt_staff: Optional[bool] = None,
+        verification_exempt_staff: Optional[bool] = None,
+        verification_exempt_bots: Optional[bool] = None,
+    ):
+        if not await self._guard(ctx):
+            return
+        if (
+            target is None
+            and state is None
+            and followup_exempt_staff is None
+            and verification_exempt_staff is None
+            and verification_exempt_bots is None
+        ):
+            await send_hybrid_response(ctx, embed=await self.build_panel_embed(ctx.guild.id, "exclusions"), ephemeral=True)
+            return
+        messages: list[str] = []
+        ok = True
+        if target is not None or state is not None:
+            if target is None or state is None:
+                ok = False
+                messages.append("Choose both a target bucket and on/off state when updating exclusions.")
+            else:
+                if target == "excluded_user_ids":
+                    target_id = getattr(member, "id", None)
+                    if not isinstance(target_id, int):
+                        ok = False
+                        messages.append("Select a member for member exclusions.")
+                    else:
+                        part_ok, part_message = await self.service.set_exclusion_target(ctx.guild.id, target, target_id, state == "on")
+                        ok = ok and part_ok
+                        messages.append(part_message)
+                else:
+                    target_id = getattr(role, "id", None)
+                    if not isinstance(target_id, int):
+                        ok = False
+                        messages.append("Select a role for role exclusions or trusted roles.")
+                    else:
+                        part_ok, part_message = await self.service.set_exclusion_target(ctx.guild.id, target, target_id, state == "on")
+                        ok = ok and part_ok
+                        messages.append(part_message)
+        for field, value in (
+            ("followup_exempt_staff", followup_exempt_staff),
+            ("verification_exempt_staff", verification_exempt_staff),
+            ("verification_exempt_bots", verification_exempt_bots),
+        ):
+            if value is None:
+                continue
+            part_ok, part_message = await self.service.set_exemption_toggle(ctx.guild.id, field, value)
+            ok = ok and part_ok
+            messages.append(part_message)
+        await self._send_result(ctx, "Admin Exclusions", "\n".join(messages), ok=ok)
+
+    @app_commands.default_permissions(manage_guild=True)
+    @admin_group.command(name="templates", with_app_command=True, description="Configure verification DM templates and invite link")
+    async def admin_templates_command(
+        self,
+        ctx: commands.Context,
+        warning_template: Optional[str] = None,
+        kick_template: Optional[str] = None,
+        invite_link: Optional[str] = None,
+        clear_warning: bool = False,
+        clear_kick: bool = False,
+        clear_invite: bool = False,
+    ):
+        if not await self._guard(ctx):
+            return
+        if warning_template is None and kick_template is None and invite_link is None and not clear_warning and not clear_kick and not clear_invite:
+            await send_hybrid_response(ctx, embed=await self.build_panel_embed(ctx.guild.id, "templates"), ephemeral=True)
+            return
+        ok, message = await self.service.set_templates(
+            ctx.guild.id,
+            warning_template=None if clear_warning else (warning_template if warning_template is not None else ...),
+            kick_template=None if clear_kick else (kick_template if kick_template is not None else ...),
+            invite_link=None if clear_invite else (invite_link if invite_link is not None else ...),
+        )
+        await self._send_result(ctx, "Admin Templates", message, ok=ok)
+
+    @app_commands.default_permissions(manage_guild=True)
+    @admin_group.command(name="sync", with_app_command=True, description="One-time catch-up scan for current verification members")
+    async def admin_sync_command(self, ctx: commands.Context):
+        if not await self._guard(ctx):
+            return
+        if not getattr(ctx.guild, "chunked", True) and hasattr(ctx.guild, "chunk"):
+            with contextlib.suppress(discord.HTTPException):
+                await ctx.guild.chunk(cache=True)
+        tracked, cleared = await self.service.sync_verification_guild(ctx.guild)
+        await self._send_result(
+            ctx,
+            "Verification Sync",
+            f"Tracked **{tracked}** current unverified members and cleared **{cleared}** stale verification rows.",
+            ok=True,
+        )
+
+    @commands.Cog.listener()
+    async def on_member_ban(self, guild: discord.Guild, user: discord.abc.User):
+        await self.service.handle_member_ban(guild, user)
+
+    @commands.Cog.listener()
+    async def on_member_join(self, member: discord.Member):
+        await self.service.handle_member_join(member)
+
+    @commands.Cog.listener()
+    async def on_member_remove(self, member: discord.Member):
+        await self.service.handle_member_remove(member)
+
+    @commands.Cog.listener()
+    async def on_member_update(self, before: discord.Member, after: discord.Member):
+        await self.service.handle_member_update(before, after)
+
+    @commands.Cog.listener()
+    async def on_message(self, message: discord.Message):
+        if message.guild is None or message.author.bot or message.webhook_id is not None:
+            return
+        from babblebox.command_utils import is_command_message
+
+        if await is_command_message(self.bot, message):
+            return
+        await self.service.handle_message(message)
+
+
+async def setup(bot: commands.Bot):
+    await bot.add_cog(AdminCog(bot))

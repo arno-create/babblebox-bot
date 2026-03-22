@@ -78,17 +78,19 @@ HELP_PAGES: list[dict[str, str]] = [
         "try": "`/buddy`, `/profile`, `/vault`",
     },
     {
-        "title": "Shield / Moderation",
+        "title": "Shield / Admin Safety",
         "emoji": "\U0001f6e1\ufe0f",
-        "description": "Optional server-side protection with conservative defaults.",
+        "description": "Optional server-side protection and compact admin automations with conservative defaults.",
         "body": (
             "Shield can watch for privacy leaks, invite/promo spam, and experimental scam heuristics.\n"
             "`/shield panel`, `/shield rules`, `/shield ai`, and `/shield test` cover the core admin flow.\n"
-            "It is off until an admin configures it.\n"
+            "`/admin panel`, `/admin followup`, `/admin verification`, and `/admin sync` cover returned-after-ban follow-up roles and unverified cleanup.\n"
+            "Everything stays off until an admin configures it.\n"
             "Defaults are log-first, with allowlists, trusted-role bypasses, private mod-log alerts, and safe advanced wildcard patterns instead of raw regex.\n"
-            "AI assist is optional, admin-only, support-server limited, and only reviews messages that local Shield already flagged. It never punishes on its own."
+            "AI assist is optional, admin-only, support-server limited, and only reviews messages that local Shield already flagged. It never punishes on its own.\n"
+            "Admin lifecycle helpers stay compact: no Babblebox ban/kick command suite, no giant case archive, and no per-member task explosion."
         ),
-        "try": "`/shield panel`, `/shield rules`, `/shield test`",
+        "try": "`/shield panel`, `/admin panel`, `/admin verification`, `/admin sync`",
     },
     {
         "title": "Setup / Tips",
