@@ -306,6 +306,10 @@
       align-items: center;
     }
 
+    .hero-copy {
+      max-width: 640px;
+    }
+
     .eyebrow {
       display: inline-flex;
       align-items: center;
@@ -441,12 +445,12 @@
     .hero-stage {
       position: relative;
       display: grid;
-      grid-template-columns: 1.08fr 0.92fr;
-      gap: 16px;
+      grid-template-columns: 1fr;
+      gap: 14px;
       align-content: start;
-      min-height: 640px;
+      min-height: 0;
       overflow: hidden;
-      padding: 28px;
+      padding: 22px;
       border-radius: 36px;
       border: 1px solid rgba(169, 190, 255, 0.16);
       background: linear-gradient(180deg, rgba(12, 20, 35, 0.86), rgba(9, 15, 28, 0.94));
@@ -484,33 +488,31 @@
     }
 
     .hero-daily {
-      grid-row: 1 / span 2;
       padding: 18px;
       border-radius: 28px;
     }
 
+    .hero-support-row {
+      position: relative;
+      z-index: 1;
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+    }
+
     .hero-identity {
-      align-self: start;
       padding: 16px;
       border-radius: 26px;
-      transform: translateY(34px);
     }
 
     .hero-moment {
-      max-width: 360px;
-      margin-left: 22px;
       padding: 16px;
-      border-radius: 24px;
-      align-self: end;
-      transform: translateY(-18px);
+      border-radius: 26px;
     }
 
     .hero-lobby {
-      align-self: end;
-      margin-right: 6px;
       overflow: hidden;
-      border-radius: 22px;
-      transform: translate(-14px, -22px) rotate(-2deg);
+      border-radius: 24px;
     }
 
     .window-chrome {
@@ -550,9 +552,10 @@
     }
 
     .daily-title {
-      font-size: 1.05rem;
+      font-size: 0.9rem;
       font-weight: 800;
-      letter-spacing: -0.04em;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
     }
 
     .daily-note {
@@ -574,8 +577,8 @@
     }
 
     .booth-card {
-      min-height: 158px;
-      padding: 16px;
+      min-height: 0;
+      padding: 16px 14px;
       border-radius: 20px;
       border: 1px solid rgba(169, 190, 255, 0.12);
       background: linear-gradient(180deg, rgba(21, 31, 55, 0.94), rgba(11, 18, 31, 0.94));
@@ -609,8 +612,8 @@
 
     .booth-card p {
       color: var(--muted);
-      font-size: 0.92rem;
-      line-height: 1.65;
+      font-size: 0.84rem;
+      line-height: 1.55;
     }
 
     .booth-card.shuffle .booth-clue {
@@ -692,7 +695,7 @@
 
     .identity-main {
       display: grid;
-      gap: 12px;
+      gap: 10px;
     }
 
     .profile-plate {
@@ -756,7 +759,7 @@
 
     .profile-surface {
       display: grid;
-      gap: 10px;
+      gap: 8px;
       margin-top: 12px;
     }
 
@@ -764,7 +767,7 @@
       display: flex;
       justify-content: space-between;
       gap: 12px;
-      padding: 10px 12px;
+      padding: 9px 12px;
       border-radius: 14px;
       background: rgba(255, 255, 255, 0.04);
       color: var(--muted);
@@ -777,7 +780,6 @@
     }
 
     .private-vault {
-      margin-top: 12px;
       padding: 12px 14px;
       border-radius: 16px;
       border: 1px solid rgba(255, 187, 112, 0.16);
@@ -799,6 +801,25 @@
     .moment-card-shell {
       display: grid;
       gap: 10px;
+    }
+
+    .hero-panel-head {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: flex-start;
+      margin-bottom: 14px;
+    }
+
+    .hero-panel-head h4 {
+      margin: 6px 0 0;
+      font-size: 1.3rem;
+    }
+
+    .hero-panel-copy {
+      color: var(--muted);
+      font-size: 0.92rem;
+      line-height: 1.65;
     }
 
     .message-bubble {
@@ -857,7 +878,7 @@
 
     .hero-lobby img {
       width: 100%;
-      aspect-ratio: 4 / 3;
+      aspect-ratio: 16 / 10;
       object-fit: cover;
     }
 
@@ -1850,20 +1871,10 @@
 
     @media (max-width: 920px) {
       .hero-stage {
-        grid-template-columns: 1fr;
         min-height: auto;
       }
 
-      .hero-daily,
-      .hero-identity,
-      .hero-moment,
-      .hero-lobby {
-        grid-row: auto;
-        margin: 0;
-        transform: none;
-        animation: none;
-      }
-
+      .hero-support-row,
       .booth-grid,
       .mini-booth-grid,
       .module-grid,
@@ -2004,7 +2015,7 @@
   <header id="top" class="hero-wrap">
     <div class="container">
       <div class="hero">
-        <div>
+        <div class="hero-copy">
           <div class="eyebrow">Open-source Discord bot for social servers</div>
           <h1>Make your Discord feel alive.</h1>
           <p class="hero-subhead">
@@ -2020,20 +2031,6 @@
             <a class="btn btn-secondary" href="https://discord.com/servers/inevitable-friendship-1322933864360050688" target="_blank" rel="noopener noreferrer">Join Support Server</a>
             <a class="link-quiet" href="https://github.com/arno-create/babblebox-bot" target="_blank" rel="noopener noreferrer">View GitHub</a>
           </div>
-          <div class="hero-meta" aria-label="Babblebox value pillars">
-            <div class="meta-chip">
-              <strong>Starts the room</strong>
-              <span>Broken Telephone, Exquisite Corpse, Spyfall, and Word Bomb lead when people are around.</span>
-            </div>
-            <div class="meta-chip">
-              <strong>Brings people back</strong>
-              <span>Daily Arcade, Buddy, and public-friendly <code>/profile</code> keep the bot visible between game nights.</span>
-            </div>
-            <div class="meta-chip">
-              <strong>Stays useful quietly</strong>
-              <span>Watch, Later, Capture, Remind, and AFK stay compact while Shield stays optional for admins.</span>
-            </div>
-          </div>
           <div class="command-ribbon" aria-label="Command highlights">
             <span class="command-pill"><code>/play</code></span>
             <span class="command-pill"><code>/daily</code></span>
@@ -2044,116 +2041,82 @@
           </div>
         </div>
 
-        <div class="hero-stage" aria-label="Babblebox product collage">
+        <div class="hero-stage" aria-label="Babblebox product preview">
           <article class="hero-card hero-daily">
-            <div class="window-chrome">
-              <div class="window-dots" aria-hidden="true">
-                <span></span>
-                <span></span>
-                <span></span>
-              </div>
-              <div class="window-label">Daily Arcade</div>
-            </div>
             <div class="daily-top">
-              <div class="daily-title">Same UTC board for everyone</div>
+              <div class="daily-title">Daily Arcade</div>
               <div class="daily-note">Public by default</div>
             </div>
             <div class="booth-grid">
               <div class="booth-card shuffle">
-                <div class="booth-tag">Shuffle Booth</div>
-                <strong>Unscramble one word</strong>
+                <div class="booth-tag">Shuffle</div>
                 <div class="booth-clue">T E A L T</div>
-                <p>Three tries, same board, and easy to compare in-channel.</p>
+                <p>Same UTC board for everyone.</p>
               </div>
               <div class="booth-card emoji">
-                <div class="booth-tag">Emoji Booth</div>
-                <strong>Read the emoji clue</strong>
+                <div class="booth-tag">Emoji</div>
                 <div class="booth-clue">&#128247; &#10024;</div>
-                <p>Public cards stay spoiler-safe and keep failed guesses out of channel.</p>
+                <p>Shared results stay spoiler-safe.</p>
               </div>
               <div class="booth-card signal">
-                <div class="booth-tag">Signal Booth</div>
-                <strong>Decode the shifted word</strong>
+                <div class="booth-tag">Signal</div>
                 <div class="booth-clue">D P A Z</div>
-                <p>Shared UTC booth format, small attempt limits, and no rerolls.</p>
-              </div>
-            </div>
-            <div class="daily-footer">
-              <div class="share-strip">
-                <strong>Public-friendly cards</strong>
-                <div class="share-row">
-                  <span class="tiny-pill">Spoiler-safe output</span>
-                  <span class="tiny-pill">Completed booth sharing</span>
-                  <span class="tiny-pill">Buddy + /profile</span>
-                </div>
-              </div>
-              <div class="streak-card">
-                <strong>Clears carry over</strong>
-                <p>Daily clears, streaks, and level progress roll back into Buddy and <code>/profile</code>.</p>
-                <div class="streak-bar" aria-hidden="true">
-                  <span class="active"></span>
-                  <span class="active"></span>
-                  <span class="active"></span>
-                  <span></span>
-                </div>
+                <p>Small attempt limits, no rerolls.</p>
               </div>
             </div>
           </article>
 
-          <article class="hero-card hero-identity">
-            <div class="window-chrome">
-              <div class="window-dots" aria-hidden="true">
-                <span></span>
-                <span></span>
-                <span></span>
-              </div>
-              <div class="window-label">Buddy / Profile</div>
-            </div>
-            <div class="identity-main">
-              <div class="profile-plate">
-                <div class="profile-row">
-                  <div class="avatar-orb" aria-hidden="true"></div>
-                  <div class="profile-name">
-                    <strong>Buddy and profile</strong>
-                    <span>Public-friendly by default</span>
+          <div class="hero-support-row">
+            <article class="hero-card hero-identity">
+              <div class="identity-main">
+                <div class="profile-plate">
+                  <div class="mini-label">Buddy &amp; Profile</div>
+                  <div class="profile-row">
+                    <div class="avatar-orb" aria-hidden="true"></div>
+                    <div class="profile-name">
+                      <strong>Public-friendly by default</strong>
+                      <span>Identity without the economy grind</span>
+                    </div>
+                  </div>
+                  <div class="badge-row">
+                    <span class="badge">Style</span>
+                    <span class="badge">Mood</span>
+                    <span class="badge">Badges</span>
+                  </div>
+                  <div class="profile-surface">
+                    <div class="profile-line">
+                      <strong>Buddy</strong>
+                      <span>Style, mood, title, featured badge</span>
+                    </div>
+                    <div class="profile-line">
+                      <strong>/profile</strong>
+                      <span>Daily, party, and utility totals together</span>
+                    </div>
                   </div>
                 </div>
-                <div class="badge-row">
-                  <span class="badge">Public-friendly</span>
-                  <span class="badge">Buddy identity</span>
-                  <span class="badge">No economy grind</span>
-                </div>
-                <div class="profile-surface">
-                  <div class="profile-line">
-                    <strong>Buddy</strong>
-                    <span>style, mood, title, and featured badge</span>
-                  </div>
-                  <div class="profile-line">
-                    <strong>Profile</strong>
-                    <span>daily, party, and everyday totals together</span>
-                  </div>
+                <div class="private-vault">
+                  <span>Vault</span>
+                  <div>Private view stays personal and can include live utility context.</div>
                 </div>
               </div>
-              <div class="private-vault">
-                <span>Vault</span>
-                <div>Vault stays personal and can show live utility context without exposing private settings in the public card.</div>
-              </div>
-            </div>
-          </article>
+            </article>
 
-          <article class="hero-card hero-moment">
-            <div class="moment-card-shell">
-              <div class="moment-link">Live-linked keepsake</div>
-              <div class="message-bubble">
-                <strong>From a visible server message</strong>
-                <p>&quot;Save that one instead of losing it in scrollback.&quot;</p>
+            <article class="hero-card hero-moment">
+              <div class="moment-card-shell">
+                <div class="hero-panel-head">
+                  <div>
+                    <div class="moment-link">Moment Card</div>
+                    <h4>Live-linked keepsake</h4>
+                  </div>
+                </div>
+                <div class="message-bubble">
+                  <strong>&quot;Save that one instead of losing it in scrollback.&quot;</strong>
+                  <p>Built from a visible server message and linked back to the original moment.</p>
+                </div>
+                <p class="hero-panel-copy">Not a quote archive, and not a private note dump.</p>
               </div>
-              <div class="moment-keepsake">
-                <strong>Moment Card</strong>
-                <p>Built live from visible server messages and linked back to the original moment. Not a quote-feed archive.</p>
-              </div>
-            </div>
-          </article>
+            </article>
+          </div>
 
           <figure class="hero-card hero-lobby">
             <img src="assets/lobby.png" alt="Babblebox party-game lobby in Discord" />
@@ -2162,6 +2125,20 @@
               <span>Open <code>/play</code>, choose a game, and get people moving instead of staring at setup friction.</span>
             </figcaption>
           </figure>
+        </div>
+      </div>
+      <div class="hero-meta" aria-label="Babblebox value pillars">
+        <div class="meta-chip">
+          <strong>Starts the room</strong>
+          <span>Broken Telephone, Exquisite Corpse, Spyfall, and Word Bomb lead when people are around.</span>
+        </div>
+        <div class="meta-chip">
+          <strong>Brings people back</strong>
+          <span>Daily Arcade, Buddy, and public-friendly <code>/profile</code> keep the bot visible between game nights.</span>
+        </div>
+        <div class="meta-chip">
+          <strong>Stays useful quietly</strong>
+          <span>Watch, Later, Capture, Remind, and AFK stay compact while Shield stays optional for admins.</span>
         </div>
       </div>
     </div>
