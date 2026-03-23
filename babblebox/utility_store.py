@@ -394,9 +394,9 @@ class _PostgresUtilityStore(_BaseUtilityStore):
             "CREATE UNIQUE INDEX IF NOT EXISTS ux_utility_return_watches_dedupe ON utility_return_watches (watcher_user_id, guild_id, target_type, target_id)",
             "CREATE INDEX IF NOT EXISTS ix_utility_return_watches_target ON utility_return_watches (guild_id, target_type, target_id)",
             "CREATE INDEX IF NOT EXISTS ix_utility_return_watches_expires_at ON utility_return_watches (expires_at)",
-            "CREATE TABLE IF NOT EXISTS utility_later_markers (user_id BIGINT NOT NULL, guild_id BIGINT NOT NULL, guild_name TEXT NOT NULL, channel_id BIGINT NOT NULL, channel_name TEXT NOT NULL, message_id BIGINT NOT NULL, message_jump_url TEXT NOT NULL, message_created_at TIMESTAMPTZ NULL, saved_at TIMESTAMPTZ NULL, author_name TEXT NOT NULL, author_id BIGINT NOT NULL, preview TEXT NOT NULL, PRIMARY KEY (user_id, channel_id))",
+            "CREATE TABLE IF NOT EXISTS utility_later_markers (user_id BIGINT NOT NULL, guild_id BIGINT NOT NULL, guild_name TEXT NOT NULL, channel_id BIGINT NOT NULL, channel_name TEXT NOT NULL, message_id BIGINT NOT NULL, message_jump_url TEXT NOT NULL, message_created_at TIMESTAMPTZ NULL, saved_at TIMESTAMPTZ NULL, author_name TEXT NOT NULL, author_id BIGINT NOT NULL, preview TEXT NOT NULL, attachment_labels JSONB NOT NULL DEFAULT '[]'::jsonb, PRIMARY KEY (user_id, channel_id))",
             "CREATE INDEX IF NOT EXISTS ix_utility_later_markers_user ON utility_later_markers (user_id)",
-            "CREATE TABLE IF NOT EXISTS utility_reminders (id TEXT PRIMARY KEY, user_id BIGINT NOT NULL, text TEXT NOT NULL, delivery TEXT NOT NULL, created_at TIMESTAMPTZ NULL, due_at TIMESTAMPTZ NULL, guild_id BIGINT NULL, guild_name TEXT NULL, channel_id BIGINT NULL, channel_name TEXT NULL, origin_jump_url TEXT NULL)",
+            "CREATE TABLE IF NOT EXISTS utility_reminders (id TEXT PRIMARY KEY, user_id BIGINT NOT NULL, text TEXT NOT NULL, delivery TEXT NOT NULL, created_at TIMESTAMPTZ NULL, due_at TIMESTAMPTZ NULL, guild_id BIGINT NULL, guild_name TEXT NULL, channel_id BIGINT NULL, channel_name TEXT NULL, origin_jump_url TEXT NULL, delivery_attempts INTEGER NOT NULL DEFAULT 0, last_attempt_at TIMESTAMPTZ NULL, retry_after TIMESTAMPTZ NULL)",
             "CREATE INDEX IF NOT EXISTS ix_utility_reminders_due_at ON utility_reminders (due_at)",
             "CREATE INDEX IF NOT EXISTS ix_utility_reminders_user ON utility_reminders (user_id)",
             "CREATE TABLE IF NOT EXISTS utility_afk (user_id BIGINT PRIMARY KEY, status TEXT NOT NULL, reason TEXT NULL, created_at TIMESTAMPTZ NULL, set_at TIMESTAMPTZ NULL, starts_at TIMESTAMPTZ NULL, ends_at TIMESTAMPTZ NULL)",
@@ -418,6 +418,10 @@ class _PostgresUtilityStore(_BaseUtilityStore):
             await conn.execute("ALTER TABLE utility_watch_configs ADD COLUMN IF NOT EXISTS excluded_channel_ids JSONB NOT NULL DEFAULT '[]'::jsonb")
             await conn.execute("ALTER TABLE utility_watch_configs ADD COLUMN IF NOT EXISTS ignored_user_ids JSONB NOT NULL DEFAULT '[]'::jsonb")
             await conn.execute("ALTER TABLE utility_watch_keywords ADD COLUMN IF NOT EXISTS channel_id BIGINT NULL")
+            await conn.execute("ALTER TABLE utility_later_markers ADD COLUMN IF NOT EXISTS attachment_labels JSONB NOT NULL DEFAULT '[]'::jsonb")
+            await conn.execute("ALTER TABLE utility_reminders ADD COLUMN IF NOT EXISTS delivery_attempts INTEGER NOT NULL DEFAULT 0")
+            await conn.execute("ALTER TABLE utility_reminders ADD COLUMN IF NOT EXISTS last_attempt_at TIMESTAMPTZ NULL")
+            await conn.execute("ALTER TABLE utility_reminders ADD COLUMN IF NOT EXISTS retry_after TIMESTAMPTZ NULL")
             await conn.execute("ALTER TABLE utility_afk ADD COLUMN IF NOT EXISTS preset TEXT NULL")
             await conn.execute("ALTER TABLE utility_afk ADD COLUMN IF NOT EXISTS schedule_id TEXT NULL")
             await conn.execute("ALTER TABLE utility_afk ADD COLUMN IF NOT EXISTS occurrence_at TIMESTAMPTZ NULL")
@@ -552,8 +556,8 @@ class _PostgresUtilityStore(_BaseUtilityStore):
             return_watch_rows = await conn.fetch(
                 "SELECT id, watcher_user_id, guild_id, target_type, target_id, created_at, expires_at, created_from FROM utility_return_watches"
             )
-            later_rows = await conn.fetch("SELECT user_id, guild_id, guild_name, channel_id, channel_name, message_id, message_jump_url, message_created_at, saved_at, author_name, author_id, preview FROM utility_later_markers")
-            reminder_rows = await conn.fetch("SELECT id, user_id, text, delivery, created_at, due_at, guild_id, guild_name, channel_id, channel_name, origin_jump_url FROM utility_reminders")
+            later_rows = await conn.fetch("SELECT user_id, guild_id, guild_name, channel_id, channel_name, message_id, message_jump_url, message_created_at, saved_at, author_name, author_id, preview, attachment_labels FROM utility_later_markers")
+            reminder_rows = await conn.fetch("SELECT id, user_id, text, delivery, created_at, due_at, guild_id, guild_name, channel_id, channel_name, origin_jump_url, delivery_attempts, last_attempt_at, retry_after FROM utility_reminders")
             afk_rows = await conn.fetch("SELECT user_id, status, reason, preset, created_at, set_at, starts_at, ends_at, schedule_id, occurrence_at FROM utility_afk")
             afk_setting_rows = await conn.fetch("SELECT user_id, timezone FROM utility_afk_settings")
             afk_schedule_rows = await conn.fetch(
@@ -595,9 +599,38 @@ class _PostgresUtilityStore(_BaseUtilityStore):
                 "created_from": row["created_from"],
             }
         for row in later_rows:
-            loaded["later"].setdefault(str(row["user_id"]), {})[str(row["channel_id"])] = {"user_id": row["user_id"], "guild_id": row["guild_id"], "guild_name": row["guild_name"], "channel_id": row["channel_id"], "channel_name": row["channel_name"], "message_id": row["message_id"], "message_jump_url": row["message_jump_url"], "message_created_at": self._serialize_datetime(row["message_created_at"]), "saved_at": self._serialize_datetime(row["saved_at"]), "author_name": row["author_name"], "author_id": row["author_id"], "preview": row["preview"]}
+            loaded["later"].setdefault(str(row["user_id"]), {})[str(row["channel_id"])] = {
+                "user_id": row["user_id"],
+                "guild_id": row["guild_id"],
+                "guild_name": row["guild_name"],
+                "channel_id": row["channel_id"],
+                "channel_name": row["channel_name"],
+                "message_id": row["message_id"],
+                "message_jump_url": row["message_jump_url"],
+                "message_created_at": self._serialize_datetime(row["message_created_at"]),
+                "saved_at": self._serialize_datetime(row["saved_at"]),
+                "author_name": row["author_name"],
+                "author_id": row["author_id"],
+                "preview": row["preview"],
+                "attachment_labels": [label for label in (row["attachment_labels"] or []) if isinstance(label, str) and label.strip()],
+            }
         for row in reminder_rows:
-            loaded["reminders"][row["id"]] = {"id": row["id"], "user_id": row["user_id"], "text": row["text"], "delivery": row["delivery"], "created_at": self._serialize_datetime(row["created_at"]), "due_at": self._serialize_datetime(row["due_at"]), "guild_id": row["guild_id"], "guild_name": row["guild_name"], "channel_id": row["channel_id"], "channel_name": row["channel_name"], "origin_jump_url": row["origin_jump_url"]}
+            loaded["reminders"][row["id"]] = {
+                "id": row["id"],
+                "user_id": row["user_id"],
+                "text": row["text"],
+                "delivery": row["delivery"],
+                "created_at": self._serialize_datetime(row["created_at"]),
+                "due_at": self._serialize_datetime(row["due_at"]),
+                "guild_id": row["guild_id"],
+                "guild_name": row["guild_name"],
+                "channel_id": row["channel_id"],
+                "channel_name": row["channel_name"],
+                "origin_jump_url": row["origin_jump_url"],
+                "delivery_attempts": row["delivery_attempts"] if isinstance(row["delivery_attempts"], int) and row["delivery_attempts"] >= 0 else 0,
+                "last_attempt_at": self._serialize_datetime(row["last_attempt_at"]),
+                "retry_after": self._serialize_datetime(row["retry_after"]),
+            }
         for row in afk_rows:
             loaded["afk"][str(row["user_id"])] = {
                 "user_id": row["user_id"],
@@ -745,18 +778,59 @@ class _PostgresUtilityStore(_BaseUtilityStore):
                 continue
             for marker in markers.values():
                 if isinstance(marker, dict):
-                    rows.append((user_id, marker.get("guild_id"), marker.get("guild_name"), marker.get("channel_id"), marker.get("channel_name"), marker.get("message_id"), marker.get("message_jump_url"), self._parse_iso_datetime(marker.get("message_created_at")), self._parse_iso_datetime(marker.get("saved_at")), marker.get("author_name"), marker.get("author_id"), marker.get("preview")))
+                    rows.append(
+                        (
+                            user_id,
+                            marker.get("guild_id"),
+                            marker.get("guild_name"),
+                            marker.get("channel_id"),
+                            marker.get("channel_name"),
+                            marker.get("message_id"),
+                            marker.get("message_jump_url"),
+                            self._parse_iso_datetime(marker.get("message_created_at")),
+                            self._parse_iso_datetime(marker.get("saved_at")),
+                            marker.get("author_name"),
+                            marker.get("author_id"),
+                            marker.get("preview"),
+                            json.dumps([label for label in marker.get("attachment_labels", []) if isinstance(label, str) and label.strip()]),
+                        )
+                    )
         if rows:
-            await conn.executemany("INSERT INTO utility_later_markers (user_id, guild_id, guild_name, channel_id, channel_name, message_id, message_jump_url, message_created_at, saved_at, author_name, author_id, preview) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)", rows)
+            await conn.executemany(
+                "INSERT INTO utility_later_markers (user_id, guild_id, guild_name, channel_id, channel_name, message_id, message_jump_url, message_created_at, saved_at, author_name, author_id, preview, attachment_labels) "
+                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13::jsonb)",
+                rows,
+            )
 
     async def _replace_reminders_data(self, conn, reminders_state: dict[str, Any]):
         await conn.execute("DELETE FROM utility_reminders")
         rows = []
         for reminder_id, record in reminders_state.items():
             if isinstance(record, dict):
-                rows.append((reminder_id, record.get("user_id"), record.get("text"), record.get("delivery"), self._parse_iso_datetime(record.get("created_at")), self._parse_iso_datetime(record.get("due_at")), record.get("guild_id"), record.get("guild_name"), record.get("channel_id"), record.get("channel_name"), record.get("origin_jump_url")))
+                rows.append(
+                    (
+                        reminder_id,
+                        record.get("user_id"),
+                        record.get("text"),
+                        record.get("delivery"),
+                        self._parse_iso_datetime(record.get("created_at")),
+                        self._parse_iso_datetime(record.get("due_at")),
+                        record.get("guild_id"),
+                        record.get("guild_name"),
+                        record.get("channel_id"),
+                        record.get("channel_name"),
+                        record.get("origin_jump_url"),
+                        record.get("delivery_attempts", 0),
+                        self._parse_iso_datetime(record.get("last_attempt_at")),
+                        self._parse_iso_datetime(record.get("retry_after")),
+                    )
+                )
         if rows:
-            await conn.executemany("INSERT INTO utility_reminders (id, user_id, text, delivery, created_at, due_at, guild_id, guild_name, channel_id, channel_name, origin_jump_url) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)", rows)
+            await conn.executemany(
+                "INSERT INTO utility_reminders (id, user_id, text, delivery, created_at, due_at, guild_id, guild_name, channel_id, channel_name, origin_jump_url, delivery_attempts, last_attempt_at, retry_after) "
+                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
+                rows,
+            )
 
     async def _replace_afk_data(self, conn, afk_state: dict[str, Any]):
         await conn.execute("DELETE FROM utility_afk")

@@ -55,6 +55,8 @@ REMINDER_TEXT_MAX_LEN = 120
 REMINDER_MIN_SECONDS = 5 * 60
 REMINDER_PUBLIC_MIN_SECONDS = 15 * 60
 REMINDER_MAX_SECONDS = 14 * 24 * 3600
+REMINDER_RETRY_BASE_SECONDS = 10 * 60
+REMINDER_RETRY_MAX_SECONDS = 6 * 3600
 AFK_NOTICE_COOLDOWN_SECONDS = 30.0
 AFK_SCHEDULE_LIMIT = 6
 
@@ -1085,6 +1087,9 @@ class UtilityService:
             "channel_id": getattr(channel, "id", None) if delivery == "here" else None,
             "channel_name": getattr(channel, "name", None) if delivery == "here" else None,
             "origin_jump_url": origin_jump_url if delivery == "dm" else None,
+            "delivery_attempts": 0,
+            "last_attempt_at": None,
+            "retry_after": None,
         }
         async with self._lock:
             self.store.state.setdefault("reminders", {})[reminder_id] = record
@@ -1109,55 +1114,6 @@ class UtilityService:
             await self.store.flush()
             self._wake_event.set()
         return True, f"Reminder `{matches[0][:8]}` was cancelled."
-
-    def get_afk_record(self, user_id: int, *, include_scheduled: bool = True) -> dict | None:
-        if not self.storage_ready:
-            return None
-        record = self.store.state.get("afk", {}).get(str(user_id))
-        if not isinstance(record, dict):
-            return None
-        now = ge.now_utc()
-        status = record.get("status", "active")
-        starts_at = deserialize_datetime(record.get("starts_at")) or deserialize_datetime(record.get("set_at")) or deserialize_datetime(record.get("created_at"))
-        ends_at = deserialize_datetime(record.get("ends_at"))
-        if ends_at is not None and ends_at <= now:
-            return None
-        if status == "scheduled":
-            if starts_at is not None and starts_at <= now:
-                activated = dict(record)
-                activated["status"] = "active"
-                activated["set_at"] = activated.get("starts_at") or activated.get("set_at") or serialize_datetime(now)
-                return activated
-            return record if include_scheduled and starts_at and starts_at > now else None
-        return record
-
-    def get_active_afk_record(self, user_id: int) -> dict | None:
-        record = self.get_afk_record(user_id, include_scheduled=False)
-        return record if record is not None and record.get("status") == "active" else None
-
-    async def set_afk(
-        self,
-        *,
-        user: discord.abc.User,
-        reason: str | None,
-        duration_seconds: int | None,
-        start_in_seconds: int | None,
-    ) -> tuple[bool, str | dict]:
-        if not self._has_storage():
-            return False, self.storage_message("AFK")
-        valid, cleaned_or_error = ge.sanitize_afk_reason(reason)
-        if not valid:
-            return False, cleaned_or_error
-        created_at = ge.now_utc()
-        scheduled = start_in_seconds is not None
-        starts_at = created_at + timedelta(seconds=start_in_seconds) if scheduled else created_at
-        ends_at = starts_at + timedelta(seconds=duration_seconds) if duration_seconds is not None else None
-        record = {"user_id": user.id, "status": "scheduled" if scheduled else "active", "reason": cleaned_or_error, "created_at": serialize_datetime(created_at), "set_at": None if scheduled else serialize_datetime(created_at), "starts_at": serialize_datetime(starts_at), "ends_at": serialize_datetime(ends_at)}
-        async with self._lock:
-            self.store.state.setdefault("afk", {})[str(user.id)] = record
-            await self.store.flush()
-            self._wake_event.set()
-        return True, record
 
     async def clear_afk(self, user_id: int, *, active_only: bool = False) -> tuple[bool, dict | None]:
         if not self._has_storage():
@@ -1223,106 +1179,52 @@ class UtilityService:
                     return False
                 await asyncio.sleep(0.5)
 
-    async def _scheduler_loop(self):
-        if not await self._wait_for_ready_state():
-            return
-        while True:
-            self._wake_event.clear()
-            due_reminders, afk_to_activate, afk_to_expire, next_due = self._collect_due_records()
-            if due_reminders or afk_to_activate or afk_to_expire:
-                if afk_to_activate:
-                    await self._activate_due_afk(afk_to_activate)
-                if due_reminders:
-                    await self._deliver_due_reminders(due_reminders)
-                if afk_to_expire:
-                    await self._expire_due_afk(afk_to_expire)
-                continue
-            timeout = max(1.0, (next_due - ge.now_utc()).total_seconds()) if next_due is not None else None
-            try:
-                if timeout is None:
-                    await self._wake_event.wait()
-                else:
-                    await asyncio.wait_for(self._wake_event.wait(), timeout=timeout)
-            except asyncio.TimeoutError:
-                continue
-
-    def _collect_due_records(self) -> tuple[list[dict], list[dict], list[dict], datetime | None]:
-        now = ge.now_utc()
-        due_reminders: list[dict] = []
-        afk_to_activate: list[dict] = []
-        afk_to_expire: list[dict] = []
-        next_due = None
-        for record in self.store.state.get("reminders", {}).values():
-            if not isinstance(record, dict):
-                continue
-            due_at = deserialize_datetime(record.get("due_at"))
-            if due_at is None:
-                continue
-            if due_at <= now:
-                due_reminders.append(record)
-            elif next_due is None or due_at < next_due:
-                next_due = due_at
-        for record in self.store.state.get("afk", {}).values():
-            if not isinstance(record, dict):
-                continue
-            status = record.get("status", "active")
-            starts_at = deserialize_datetime(record.get("starts_at")) or deserialize_datetime(record.get("set_at")) or deserialize_datetime(record.get("created_at"))
-            ends_at = deserialize_datetime(record.get("ends_at"))
-            if status == "scheduled":
-                if starts_at is not None and starts_at <= now:
-                    if ends_at is not None and ends_at <= now:
-                        afk_to_expire.append(record)
-                    else:
-                        afk_to_activate.append(record)
-                else:
-                    for candidate in (starts_at, ends_at):
-                        if candidate is not None and (next_due is None or candidate < next_due):
-                            next_due = candidate
-            else:
-                if ends_at is not None and ends_at <= now:
-                    afk_to_expire.append(record)
-                elif ends_at is not None and (next_due is None or ends_at < next_due):
-                    next_due = ends_at
-        return due_reminders, afk_to_activate, afk_to_expire, next_due
-
-    async def _activate_due_afk(self, records: list[dict]):
-        async with self._lock:
-            for record in records:
-                user_id = record.get("user_id")
-                if not isinstance(user_id, int):
-                    continue
-                current = self.store.state.get("afk", {}).get(str(user_id))
-                if not isinstance(current, dict) or current.get("status") != "scheduled":
-                    continue
-                current["status"] = "active"
-                current["set_at"] = current.get("starts_at") or serialize_datetime(ge.now_utc())
-            await self.store.flush()
-            self._wake_event.set()
-
-    async def _expire_due_afk(self, records: list[dict]):
-        async with self._lock:
-            for record in records:
-                user_id = record.get("user_id")
-                if isinstance(user_id, int):
-                    self.store.state.get("afk", {}).pop(str(user_id), None)
-            await self.store.flush()
-            self._wake_event.set()
+    def _build_reminder_retry_update(self, record: dict, *, now: datetime | None = None) -> dict[str, int | str | None]:
+        current_time = now or ge.now_utc()
+        previous_attempts = record.get("delivery_attempts", 0)
+        attempts = int(previous_attempts) if isinstance(previous_attempts, int) and previous_attempts >= 0 else 0
+        attempts += 1
+        backoff_seconds = min(
+            REMINDER_RETRY_MAX_SECONDS,
+            REMINDER_RETRY_BASE_SECONDS * (2 ** min(attempts - 1, 5)),
+        )
+        return {
+            "delivery_attempts": attempts,
+            "last_attempt_at": serialize_datetime(current_time),
+            "retry_after": serialize_datetime(current_time + timedelta(seconds=backoff_seconds)),
+        }
 
     async def _deliver_due_reminders(self, reminders: list[dict]):
-        to_remove = []
+        delivered_ids: list[str] = []
+        retry_updates: dict[str, dict[str, int | str | None]] = {}
+        now = ge.now_utc()
         for record in reminders:
-            await self._deliver_single_reminder(record)
             reminder_id = record.get("id")
-            if isinstance(reminder_id, str):
-                to_remove.append(reminder_id)
-        if not to_remove:
+            if not isinstance(reminder_id, str):
+                continue
+            if await self._deliver_single_reminder(record):
+                delivered_ids.append(reminder_id)
+            else:
+                retry_updates[reminder_id] = self._build_reminder_retry_update(record, now=now)
+        if not delivered_ids and not retry_updates:
             return
         async with self._lock:
-            for reminder_id in to_remove:
-                self.store.state.get("reminders", {}).pop(reminder_id, None)
-            await self.store.flush()
+            reminders_state = self.store.state.get("reminders", {})
+            dirty = False
+            for reminder_id in delivered_ids:
+                if reminders_state.pop(reminder_id, None) is not None:
+                    dirty = True
+            for reminder_id, update in retry_updates.items():
+                current = reminders_state.get(reminder_id)
+                if not isinstance(current, dict):
+                    continue
+                current.update(update)
+                dirty = True
+            if dirty:
+                await self.store.flush()
+                self._wake_event.set()
 
-    async def _deliver_single_reminder(self, record: dict):
+    async def _deliver_single_reminder(self, record: dict) -> bool:
         due_at = deserialize_datetime(record.get("due_at"))
         delayed = bool(due_at is not None and (ge.now_utc() - due_at).total_seconds() > 120)
         embed = build_reminder_delivery_embed(record, delayed=delayed)
@@ -1336,7 +1238,7 @@ class UtilityService:
             if channel is not None:
                 with contextlib.suppress(discord.Forbidden, discord.HTTPException):
                     await channel.send(content=f"<@{user_id}>", embed=embed, allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False))
-                    return
+                    return True
         user = self.bot.get_user(user_id)
         if user is None:
             with contextlib.suppress(discord.HTTPException, discord.Forbidden, discord.NotFound):
@@ -1344,6 +1246,8 @@ class UtilityService:
         if user is not None:
             with contextlib.suppress(discord.Forbidden, discord.HTTPException):
                 await user.send(embed=embed, view=view)
+                return True
+        return False
 
     async def send_later_marker_dm(self, user: discord.abc.User, marker: dict):
         await user.send(embed=build_later_marker_embed(marker), view=build_jump_view(marker["message_jump_url"]))
@@ -1685,10 +1589,13 @@ class UtilityService:
             due_at = deserialize_datetime(record.get("due_at"))
             if due_at is None:
                 continue
-            if due_at <= now:
+            retry_after = deserialize_datetime(record.get("retry_after"))
+            if due_at <= now and (retry_after is None or retry_after <= now):
                 due_reminders.append(record)
-            elif next_due is None or due_at < next_due:
-                next_due = due_at
+                continue
+            candidate = retry_after if retry_after is not None and retry_after > now else due_at
+            if candidate > now and (next_due is None or candidate < next_due):
+                next_due = candidate
         for record in self.store.state.get("afk", {}).values():
             if not isinstance(record, dict):
                 continue

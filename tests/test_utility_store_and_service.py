@@ -10,9 +10,10 @@ from unittest.mock import AsyncMock
 import discord
 
 from babblebox import game_engine as ge
-from babblebox.utility_helpers import build_afk_reason_text, compute_next_afk_schedule_start, serialize_datetime
+from babblebox.cogs.utilities import UtilityCog
+from babblebox.utility_helpers import build_afk_reason_text, compute_next_afk_schedule_start, deserialize_datetime, serialize_datetime
 from babblebox.utility_service import UtilityService
-from babblebox.utility_store import UtilityStateStore, UtilityStorageUnavailable
+from babblebox.utility_store import UtilityStateStore, UtilityStorageUnavailable, _PostgresUtilityStore
 
 
 class DummyUser:
@@ -41,10 +42,14 @@ class DummyChannel:
         self.name = name
         self.mention = f"#{name}"
         self._visible_user_ids = set(visible_user_ids or set())
+        self.sent = []
 
     def permissions_for(self, member):
         allowed = getattr(member, "id", None) in self._visible_user_ids
         return types.SimpleNamespace(view_channel=allowed, read_message_history=allowed)
+
+    async def send(self, *args, **kwargs):
+        self.sent.append((args, kwargs))
 
 
 class DummyGuild:
@@ -74,12 +79,69 @@ class DummyMessage:
 class DummyBot:
     def __init__(self):
         self._users = {}
+        self._channels = {}
 
     def add_user(self, user):
         self._users[user.id] = user
 
     def get_user(self, user_id: int):
         return self._users.get(user_id)
+
+    async def fetch_user(self, user_id: int):
+        return self.get_user(user_id)
+
+    def add_channel(self, channel):
+        self._channels[channel.id] = channel
+
+    def get_channel(self, channel_id: int):
+        return self._channels.get(channel_id)
+
+    async def fetch_channel(self, channel_id: int):
+        return self.get_channel(channel_id)
+
+
+class FakeAcquire:
+    def __init__(self, connection):
+        self.connection = connection
+
+    async def __aenter__(self):
+        return self.connection
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class FakePool:
+    def __init__(self, connection):
+        self.connection = connection
+
+    def acquire(self):
+        return FakeAcquire(self.connection)
+
+
+class FakeReloadConnection:
+    def __init__(self, *, later_rows=None, reminder_rows=None):
+        self._later_rows = later_rows or []
+        self._reminder_rows = reminder_rows or []
+
+    async def fetch(self, query):
+        if "FROM utility_watch_configs" in query:
+            return []
+        if "FROM utility_watch_keywords" in query:
+            return []
+        if "FROM utility_return_watches" in query:
+            return []
+        if "FROM utility_later_markers" in query:
+            return self._later_rows
+        if "FROM utility_reminders" in query:
+            return self._reminder_rows
+        if "FROM utility_afk_settings" in query:
+            return []
+        if "FROM utility_afk_schedules" in query:
+            return []
+        if "FROM utility_afk" in query:
+            return []
+        raise AssertionError(f"Unexpected fetch query: {query}")
 
 
 class UtilityStoreAndServiceTests(unittest.IsolatedAsyncioTestCase):
@@ -249,6 +311,81 @@ class UtilityStoreAndServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(ok)
         self.assertIn("at least", message)
+
+    async def test_failed_reminder_delivery_is_retried_instead_of_removed(self):
+        user = DummyMember(57, display_name="Mira")
+        guild = DummyGuild(1, members=[user])
+        channel = DummyChannel(2, guild=guild, visible_user_ids={user.id})
+        response = types.SimpleNamespace(status=403, reason="Forbidden", text="Forbidden")
+        channel.send = AsyncMock(side_effect=discord.Forbidden(response=response, message="missing perms"))
+        user.send = AsyncMock(side_effect=discord.Forbidden(response=response, message="closed dms"))
+        self.bot.add_user(user)
+        self.bot.add_channel(channel)
+
+        ok, reminder = await self.service.create_reminder(
+            user=user,
+            text="Retry me later.",
+            delay_seconds=20 * 60,
+            delivery="here",
+            guild=guild,
+            channel=channel,
+            origin_jump_url=None,
+        )
+        self.assertTrue(ok)
+        reminder["due_at"] = serialize_datetime(ge.now_utc() - timedelta(minutes=1))
+
+        due_reminders, _, _, _, _ = self.service._collect_due_records()
+        await self.service._deliver_due_reminders(due_reminders)
+
+        stored = self.service.store.state["reminders"][reminder["id"]]
+        self.assertEqual(stored["delivery_attempts"], 1)
+        self.assertIsNotNone(stored["last_attempt_at"])
+        self.assertGreater(deserialize_datetime(stored["retry_after"]), ge.now_utc())
+
+    async def test_retrying_reminder_waits_until_retry_after(self):
+        user = DummyUser(58)
+        ok, reminder = await self.service.create_reminder(
+            user=user,
+            text="Wait to retry.",
+            delay_seconds=20 * 60,
+            delivery="dm",
+            guild=None,
+            channel=None,
+            origin_jump_url=None,
+        )
+        self.assertTrue(ok)
+        reminder["due_at"] = serialize_datetime(ge.now_utc() - timedelta(minutes=1))
+        retry_after = ge.now_utc() + timedelta(minutes=15)
+        reminder["retry_after"] = serialize_datetime(retry_after)
+        reminder["delivery_attempts"] = 1
+
+        due_reminders, _, _, _, next_due = self.service._collect_due_records()
+
+        self.assertEqual(due_reminders, [])
+        self.assertEqual(next_due, retry_after)
+
+    async def test_successful_retry_delivery_removes_reminder(self):
+        user = DummyMember(59, display_name="Ari")
+        self.bot.add_user(user)
+        ok, reminder = await self.service.create_reminder(
+            user=user,
+            text="Deliver on retry.",
+            delay_seconds=20 * 60,
+            delivery="dm",
+            guild=None,
+            channel=None,
+            origin_jump_url="https://discord.com/channels/1/2/3",
+        )
+        self.assertTrue(ok)
+        reminder["due_at"] = serialize_datetime(ge.now_utc() - timedelta(minutes=5))
+        reminder["retry_after"] = serialize_datetime(ge.now_utc() - timedelta(minutes=1))
+        reminder["delivery_attempts"] = 2
+
+        due_reminders, _, _, _, _ = self.service._collect_due_records()
+        await self.service._deliver_due_reminders(due_reminders)
+
+        user.send.assert_awaited_once()
+        self.assertNotIn(reminder["id"], self.service.store.state["reminders"])
 
     async def test_afk_notice_lines_cover_reply_targets(self):
         user = DummyUser(77)
@@ -455,6 +592,75 @@ class UtilityStoreAndServiceTests(unittest.IsolatedAsyncioTestCase):
         reloaded_service.storage_ready = True
         reloaded_service._rebuild_return_watch_indexes()
         self.assertIn((10, 15), reloaded_service._return_user_watch_ids_by_target)
+
+    async def test_postgres_reload_preserves_later_attachments_and_reminder_retry_fields(self):
+        now = ge.now_utc()
+        connection = FakeReloadConnection(
+            later_rows=[
+                {
+                    "user_id": 1,
+                    "guild_id": 10,
+                    "guild_name": "Guild",
+                    "channel_id": 20,
+                    "channel_name": "clips",
+                    "message_id": 30,
+                    "message_jump_url": "https://discord.com/channels/10/20/30",
+                    "message_created_at": now,
+                    "saved_at": now,
+                    "author_name": "Mira",
+                    "author_id": 1,
+                    "preview": "Saved message",
+                    "attachment_labels": ["image.png", "clip.mp4"],
+                }
+            ],
+            reminder_rows=[
+                {
+                    "id": "reminder1",
+                    "user_id": 1,
+                    "text": "Retry later",
+                    "delivery": "dm",
+                    "created_at": now,
+                    "due_at": now,
+                    "guild_id": 10,
+                    "guild_name": "Guild",
+                    "channel_id": None,
+                    "channel_name": None,
+                    "origin_jump_url": "https://discord.com/channels/10/20/30",
+                    "delivery_attempts": 2,
+                    "last_attempt_at": now - timedelta(minutes=5),
+                    "retry_after": now + timedelta(minutes=10),
+                }
+            ],
+        )
+        store = _PostgresUtilityStore("postgresql://utility-user:secret@db.example.com:5432/app")
+        store._pool = FakePool(connection)
+
+        await store._reload_from_db()
+
+        marker = store.state["later"]["1"]["20"]
+        reminder = store.state["reminders"]["reminder1"]
+        self.assertEqual(marker["attachment_labels"], ["image.png", "clip.mp4"])
+        self.assertEqual(reminder["delivery_attempts"], 2)
+        self.assertEqual(reminder["retry_after"], serialize_datetime(now + timedelta(minutes=10)))
+
+    def test_reminder_list_embed_marks_retrying_delivery(self):
+        cog = object.__new__(UtilityCog)
+        user = DummyTarget(60, display_name="Mira")
+        embed = UtilityCog._reminder_list_embed(
+            cog,
+            user,
+            [
+                {
+                    "id": "abcdef123456",
+                    "delivery": "dm",
+                    "due_at": serialize_datetime(ge.now_utc() - timedelta(minutes=2)),
+                    "retry_after": serialize_datetime(ge.now_utc() + timedelta(minutes=8)),
+                    "text": "Retry status visible",
+                }
+            ],
+        )
+
+        self.assertIn("Retrying delivery", embed.fields[0].value)
 
     async def test_user_return_watch_triggers_on_next_message_after_creation(self):
         watcher = DummyMember(41, display_name="Mira")
