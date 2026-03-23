@@ -6,14 +6,14 @@
   <title>Babblebox | Make Your Discord Feel Alive</title>
   <meta
     name="description"
-    content="Party games when the server is active. Useful tools when it is not. Babblebox brings Daily Arcade, public-friendly profiles, Moment Cards, private-first utilities, and optional compact Shield safety to Discord."
+    content="Party games when the server is active. Useful tools when it is not. Babblebox brings Daily Arcade, Buddy and public-friendly profile cards, live-linked Moment Cards, private-first utilities, and optional compact Shield safety to Discord."
   />
   <meta name="robots" content="index,follow,max-image-preview:large" />
   <link rel="canonical" href="https://arno-create.github.io/babblebox-bot/" />
   <meta property="og:title" content="Babblebox | Make Your Discord Feel Alive" />
   <meta
     property="og:description"
-    content="Babblebox gives Discord servers party games, Daily Arcade, showable profiles, Moment Cards, quiet utilities, and optional compact safety without the usual bot clutter."
+    content="Babblebox gives Discord servers party games, Daily Arcade, public-friendly Buddy and profile cards, live-linked Moment Cards, quiet utilities, and optional compact safety without the usual bot clutter."
   />
   <meta property="og:url" content="https://arno-create.github.io/babblebox-bot/" />
   <meta property="og:type" content="website" />
@@ -22,7 +22,7 @@
   <meta name="twitter:title" content="Babblebox | Make Your Discord Feel Alive" />
   <meta
     name="twitter:description"
-    content="Party games when the server is active. Useful tools when it is not. Daily Arcade, profiles, Moment Cards, and compact optional Shield safety for Discord."
+    content="Party games when the server is active. Useful tools when it is not. Daily Arcade, Buddy, profile cards, Moment Cards, and compact optional Shield safety for Discord."
   />
   <meta name="twitter:image" content="https://arno-create.github.io/babblebox-bot/banner.png" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
@@ -2005,15 +2005,15 @@
     <div class="container">
       <div class="hero">
         <div>
-          <div class="eyebrow">Premium Discord bot for social servers</div>
+          <div class="eyebrow">Open-source Discord bot for social servers</div>
           <h1>Make your Discord feel alive.</h1>
           <p class="hero-subhead">
-            Babblebox starts game night when people are around, gives people something worth posting when they come back,
-            and stays quietly useful when the server slows down.
+            Babblebox starts game night when people are around, gives small groups something clean to open or share when
+            they come back, and stays quietly useful when the server slows down.
           </p>
           <p class="hero-body">
-            Party games, Daily Arcade, public-friendly profiles, live-linked Moment Cards, and private-first utilities -
-            without economy grind, lootbox junk, or bloated general-bot clutter.
+            Party games, Daily Arcade, Buddy, public-friendly <code>/profile</code>, live-linked Moment Cards, and
+            private-first utilities - without economy grind, lootbox junk, or bloated general-bot clutter.
           </p>
           <div class="hero-actions">
             <a class="btn btn-primary" href="https://discord.com/oauth2/authorize?client_id=1480903089518022739" target="_blank" rel="noopener noreferrer">Invite Babblebox</a>
@@ -2027,20 +2027,20 @@
             </div>
             <div class="meta-chip">
               <strong>Brings people back</strong>
-              <span>Daily Arcade, Buddy, and <code>/profile</code> keep the bot visible between game nights.</span>
+              <span>Daily Arcade, Buddy, and public-friendly <code>/profile</code> keep the bot visible between game nights.</span>
             </div>
             <div class="meta-chip">
               <strong>Stays useful quietly</strong>
-              <span>Watch, Later, Capture, Remind, AFK, and optional Shield stay compact and low-noise.</span>
+              <span>Watch, Later, Capture, Remind, and AFK stay compact while Shield stays optional for admins.</span>
             </div>
           </div>
           <div class="command-ribbon" aria-label="Command highlights">
             <span class="command-pill"><code>/play</code></span>
             <span class="command-pill"><code>/daily</code></span>
             <span class="command-pill"><code>/daily share</code></span>
+            <span class="command-pill"><code>/buddy</code></span>
             <span class="command-pill"><code>/profile</code></span>
             <span class="command-pill"><code>/moment from-reply</code></span>
-            <span class="command-pill"><code>/shield panel</code></span>
           </div>
         </div>
 
@@ -2055,41 +2055,41 @@
               <div class="window-label">Daily Arcade</div>
             </div>
             <div class="daily-top">
-              <div class="daily-title">A shared board for the whole server</div>
-              <div class="daily-note">Showable by default</div>
+              <div class="daily-title">Same UTC board for everyone</div>
+              <div class="daily-note">Public by default</div>
             </div>
             <div class="booth-grid">
               <div class="booth-card shuffle">
                 <div class="booth-tag">Shuffle Booth</div>
-                <strong>Unscramble the clue</strong>
-                <div class="booth-clue">letters out of place</div>
-                <p>Short, shared, and easy to compare without turning the channel into a docs page.</p>
+                <strong>Unscramble one word</strong>
+                <div class="booth-clue">T E A L T</div>
+                <p>Three tries, same board, and easy to compare in-channel.</p>
               </div>
               <div class="booth-card emoji">
                 <div class="booth-tag">Emoji Booth</div>
-                <strong>Decode the hint</strong>
-                <div class="booth-clue">emoji clue</div>
-                <p>Clean public cards for people who want to show the result without spoiling the answer.</p>
+                <strong>Read the emoji clue</strong>
+                <div class="booth-clue">&#128247; &#10024;</div>
+                <p>Public cards stay spoiler-safe and keep failed guesses out of channel.</p>
               </div>
               <div class="booth-card signal">
                 <div class="booth-tag">Signal Booth</div>
-                <strong>Shift it back</strong>
-                <div class="booth-clue">shifted word</div>
-                <p>Daily return energy with small attempt limits and no rerolls.</p>
+                <strong>Decode the shifted word</strong>
+                <div class="booth-clue">D P A Z</div>
+                <p>Shared UTC booth format, small attempt limits, and no rerolls.</p>
               </div>
             </div>
             <div class="daily-footer">
               <div class="share-strip">
-                <strong>Showable by design</strong>
+                <strong>Public-friendly cards</strong>
                 <div class="share-row">
-                  <span class="tiny-pill">Public-friendly cards</span>
-                  <span class="tiny-pill">Clean result sharing</span>
-                  <span class="tiny-pill">Buddy and profile tie-in</span>
+                  <span class="tiny-pill">Spoiler-safe output</span>
+                  <span class="tiny-pill">Completed booth sharing</span>
+                  <span class="tiny-pill">Buddy + /profile</span>
                 </div>
               </div>
               <div class="streak-card">
-                <strong>Daily rhythm</strong>
-                <p>Daily Arcade feeds back into Buddy and <code>/profile</code> instead of a separate grind loop.</p>
+                <strong>Clears carry over</strong>
+                <p>Daily clears, streaks, and level progress roll back into Buddy and <code>/profile</code>.</p>
                 <div class="streak-bar" aria-hidden="true">
                   <span class="active"></span>
                   <span class="active"></span>
@@ -2107,7 +2107,7 @@
                 <span></span>
                 <span></span>
               </div>
-              <div class="window-label">Profile</div>
+              <div class="window-label">Buddy / Profile</div>
             </div>
             <div class="identity-main">
               <div class="profile-plate">
@@ -2115,11 +2115,11 @@
                   <div class="avatar-orb" aria-hidden="true"></div>
                   <div class="profile-name">
                     <strong>Buddy and profile</strong>
-                    <span>Public-friendly and worth opening in-channel</span>
+                    <span>Public-friendly by default</span>
                   </div>
                 </div>
                 <div class="badge-row">
-                  <span class="badge">Showable</span>
+                  <span class="badge">Public-friendly</span>
                   <span class="badge">Buddy identity</span>
                   <span class="badge">No economy grind</span>
                 </div>
@@ -2130,13 +2130,13 @@
                   </div>
                   <div class="profile-line">
                     <strong>Profile</strong>
-                    <span>daily, party, and utility activity together</span>
+                    <span>daily, party, and everyday totals together</span>
                   </div>
                 </div>
               </div>
               <div class="private-vault">
-                <span>Private snapshot</span>
-                <div>Vault stays personal and can pull in utility context without exposing private settings publicly.</div>
+                <span>Vault</span>
+                <div>Vault stays personal and can show live utility context without exposing private settings in the public card.</div>
               </div>
             </div>
           </article>
@@ -2145,12 +2145,12 @@
             <div class="moment-card-shell">
               <div class="moment-link">Live-linked keepsake</div>
               <div class="message-bubble">
-                <strong>From a visible Discord message</strong>
+                <strong>From a visible server message</strong>
                 <p>&quot;Save that one instead of losing it in scrollback.&quot;</p>
               </div>
               <div class="moment-keepsake">
                 <strong>Moment Card</strong>
-                <p>Built from visible messages and linked back to the original moment. Not a quote-feed archive.</p>
+                <p>Built live from visible server messages and linked back to the original moment. Not a quote-feed archive.</p>
               </div>
             </div>
           </article>
@@ -2172,10 +2172,10 @@
       <div class="container">
         <div class="section-intro">
           <div class="section-kicker">Why servers keep Babblebox</div>
-          <h2>It earns a permanent slot for three different reasons.</h2>
+          <h2>It earns a permanent slot across the whole server rhythm.</h2>
           <p>
-            Babblebox is not trying to be an all-in-one blob. It is built around social energy, visible return loops,
-            and quiet usefulness that does not take over the server.
+            Babblebox is built around party games, Daily Arcade, Buddy / Profile / Vault, everyday utilities, and optional
+            compact safety instead of trying to be an all-in-one blob.
           </p>
         </div>
 
@@ -2204,7 +2204,7 @@
               </div>
               <div class="flow-item">
                 <strong>When the room is quiet</strong>
-                <span>Babblebox points people toward Daily, Buddy, or <code>/profile</code> instead of dead-ending.</span>
+                <span>Babblebox nudges people toward Daily, Buddy, or <code>/profile</code> instead of dead-ending.</span>
               </div>
             </div>
           </article>
@@ -2213,13 +2213,13 @@
             <div class="section-kicker">Brings people back</div>
             <h3>Daily Arcade and public-friendly identity keep the bot visible.</h3>
             <p>
-              People have something to open, compare, and post even when only a few are online. The visible surfaces are
-              part of the product, not an afterthought.
+              People have something clean to open, compare, and share even when only a few are online. Those visible
+              surfaces are part of the product, not an afterthought.
             </p>
             <div class="flow-strip">
               <div class="flow-item">
                 <strong><code>/daily</code></strong>
-                <span>A shared arcade board for the day.</span>
+                <span>The same UTC arcade board for the day.</span>
               </div>
               <div class="flow-item">
                 <strong><code>/profile</code></strong>
@@ -2227,7 +2227,7 @@
               </div>
               <div class="flow-item">
                 <strong><code>/daily share</code></strong>
-                <span>Clean results that feel made for the channel.</span>
+                <span>Clean completed-booth results for the channel.</span>
               </div>
             </div>
           </article>
@@ -2261,8 +2261,8 @@
           <div class="section-kicker">Showcase</div>
           <h2>The surfaces that make Babblebox feel like a real product.</h2>
           <p>
-            The best parts of Babblebox are the ones people actually see: a shared daily board, a profile that looks worth
-            opening, a keepsake pulled from a real message, or a lobby that makes people join instead of scroll past.
+            The best parts of Babblebox are the ones people actually see: a shared daily board, a public-friendly profile
+            card, a keepsake pulled from a real server message, or a lobby that makes people join instead of scroll past.
           </p>
         </div>
 
@@ -2270,15 +2270,15 @@
           <div class="showcase-nav" role="tablist" aria-label="Babblebox showcase">
             <button class="showcase-tab active" id="tab-daily" role="tab" aria-selected="true" aria-controls="panel-daily" data-target="daily">
               <strong>Daily Arcade</strong>
-              <span>Shared daily booths that stay compact, public-friendly, and worth posting.</span>
+              <span>Shared UTC booths with public-friendly cards and clean completed-run sharing.</span>
             </button>
             <button class="showcase-tab" id="tab-profile" role="tab" aria-selected="false" aria-controls="panel-profile" data-target="profile">
               <strong>Profile and Buddy</strong>
-              <span>Identity that feels showable without becoming an economy grind.</span>
+              <span>Buddy, public-friendly <code>/profile</code>, and personal Vault views without an economy grind.</span>
             </button>
             <button class="showcase-tab" id="tab-moment" role="tab" aria-selected="false" aria-controls="panel-moment" data-target="moment">
               <strong>Moment Cards</strong>
-              <span>Live-linked keepsakes built from visible messages, not a quote archive.</span>
+              <span>Live-linked keepsakes built from visible server messages, not a quote archive.</span>
             </button>
             <button class="showcase-tab" id="tab-party" role="tab" aria-selected="false" aria-controls="panel-party" data-target="party">
               <strong>Game Night</strong>
@@ -2291,15 +2291,15 @@
               <div class="panel-grid">
                 <div class="panel-copy">
                   <div class="section-kicker">Daily Arcade</div>
-                  <h3>Three booths. One shared board. A reason to check back tomorrow.</h3>
+                  <h3>Three booths. One UTC board. A reason to check back tomorrow.</h3>
                   <p>
-                    Shuffle, Emoji, and Signal generate the same board for everyone each UTC day. The result is a clean
-                    return loop that feels visible in the room instead of buried in a private utility command.
+                    Shuffle, Emoji, and Signal generate the same board for everyone each UTC day. The public card flow
+                    stays spoiler-safe, and private visibility is still there when you want the old only-you view.
                   </p>
                   <div class="panel-points">
-                    <div class="panel-point">Shared daily board for the whole server.</div>
-                    <div class="panel-point">Public-friendly default cards and clean result sharing.</div>
-                    <div class="panel-point">Daily runs feed back into Buddy and <code>/profile</code> instead of a separate grind lane.</div>
+                    <div class="panel-point">Same UTC board for everyone, easy to compare in-server.</div>
+                    <div class="panel-point">Public by default, with private visibility still available.</div>
+                    <div class="panel-point">Clears, streaks, and totals feed back into Buddy and <code>/profile</code>.</div>
                   </div>
                   <div class="panel-commands">
                     <span class="command-pill"><code>/daily</code></span>
@@ -2317,42 +2317,42 @@
                   </div>
                   <div class="board-head">
                     <div>
-                      <span class="mini-label">Shared today</span>
+                      <span class="mini-label">Same UTC board</span>
                       <h4>Daily Arcade board</h4>
                     </div>
-                    <div class="quiet-badge">Public-friendly</div>
+                    <div class="quiet-badge">Public by default</div>
                   </div>
                   <div class="mini-booth-grid">
                     <div class="mini-booth">
                       <strong>Shuffle</strong>
-                      <span class="clue" style="color: var(--amber);">unscramble it</span>
-                      <p>Fast to open. Fast to compare. Built for short returns.</p>
+                      <span class="clue" style="color: var(--amber);">T E A L T</span>
+                      <p>Quick to open, easy to compare, and still tied to the same daily board.</p>
                     </div>
                     <div class="mini-booth">
                       <strong>Emoji</strong>
-                      <span class="clue" style="color: var(--mint);">decode the clue</span>
-                      <p>Showable output without posting failed guesses in-channel.</p>
+                      <span class="clue" style="color: var(--mint);">&#128247; &#10024;</span>
+                      <p>Public cards stay spoiler-safe and do not post failed guesses in-channel.</p>
                     </div>
                     <div class="mini-booth">
                       <strong>Signal</strong>
-                      <span class="clue" style="color: var(--cyan);">shift it back</span>
-                      <p>Same board for everyone today, with no reroll nonsense.</p>
+                      <span class="clue" style="color: var(--cyan);">D P A Z</span>
+                      <p>Same UTC booth for everyone today, with small attempt limits and no rerolls.</p>
                     </div>
                   </div>
                   <div class="ledger-strip">
                     <div class="ledger-card">
                       <span class="mini-label">Share</span>
                       <h4>Clean result cards</h4>
-                      <p>Made to post in the channel after a run, not hidden away in a private-only flow.</p>
+                      <p>Share a completed booth cleanly without revealing failed guesses in-channel.</p>
                       <div class="mini-command"><code>/daily share</code></div>
                     </div>
                     <div class="activity-card">
                       <span class="mini-label">Profile tie-in</span>
-                      <h4>Visible progress</h4>
+                      <h4>Clears carry over</h4>
                       <div class="activity-rows">
                         <div class="activity-row">
                           <strong>Daily Arcade</strong>
-                          <span>recent runs and streak presentation</span>
+                          <span>streaks, bests, and lifetime clears</span>
                         </div>
                         <div class="activity-row">
                           <strong>Profile</strong>
@@ -2371,47 +2371,48 @@
                   <div class="section-kicker">Profile and Buddy</div>
                   <h3>Public-friendly identity without becoming an economy grind.</h3>
                   <p>
-                    Buddy, <code>/profile</code>, and Vault make Babblebox feel personal and showable. The public layer looks
-                    worth opening. The more sensitive snapshot stays personal.
+                    Buddy gives each user a lightweight companion, <code>/profile</code> is public-friendly by default,
+                    and <code>/vault</code> keeps the more personal snapshot private.
                   </p>
                   <div class="panel-points">
-                    <div class="panel-point">Buddy is a lightweight companion layer, not a lootbox treadmill.</div>
+                    <div class="panel-point">Buddy is one lightweight companion per user, cosmetic-first and tied to real use.</div>
                     <div class="panel-point"><code>/profile</code> is designed to be public-friendly and clean in-channel.</div>
                     <div class="panel-point">Vault stays personal while pulling in utility context without exposing private settings.</div>
                   </div>
                   <div class="panel-commands">
+                    <span class="command-pill"><code>/buddy</code></span>
                     <span class="command-pill"><code>/profile</code></span>
                   </div>
                 </div>
                 <div class="visual-card">
                   <div class="profile-showcase">
                     <div class="profile-showcase-main">
-                      <span class="mini-label">Public-friendly</span>
-                      <h4>Profile that feels worth opening</h4>
+                      <span class="mini-label">Public-friendly by default</span>
+                      <h4>A clean in-channel profile</h4>
                       <div class="profile-row" style="margin-top: 12px;">
                         <div class="avatar-orb" aria-hidden="true"></div>
                         <div class="profile-name">
                           <strong>Buddy and profile</strong>
-                          <span>daily, party, and quiet utility history in one clean surface</span>
+                          <span>daily, party, and buddy identity in one clean surface</span>
                         </div>
                       </div>
                       <div class="badge-row">
+                        <span class="badge">Featured title</span>
                         <span class="badge">Featured badge</span>
                         <span class="badge">Buddy mood</span>
-                        <span class="badge">Showable progress</span>
                       </div>
                       <div class="profile-surface">
                         <div class="profile-line">
                           <strong>Buddy</strong>
-                          <span>style, nickname, mood, title, and featured badge</span>
+                          <span>species, style, mood, title, and badges</span>
                         </div>
                         <div class="profile-line">
                           <strong>Daily Arcade</strong>
-                          <span>recent runs and streak presentation</span>
+                          <span>streak, best, and lifetime clears</span>
                         </div>
                         <div class="profile-line">
                           <strong>Party games</strong>
-                          <span>activity without turning into a giant stats dump</span>
+                          <span>rounds and highlights without a giant stats dump</span>
                         </div>
                       </div>
                     </div>
@@ -2419,12 +2420,12 @@
                       <div class="profile-showcase-side">
                         <span class="mini-label">Buddy</span>
                         <h4>Lightweight charm</h4>
-                        <p>One companion per user, cosmetic-first, and tied to real use instead of grind loops.</p>
+                        <p>One companion per user, cosmetic-first, with daily XP caps so it does not turn grindy.</p>
                       </div>
                       <div class="profile-showcase-side">
                         <span class="mini-label">Vault</span>
                         <h4>Private by design</h4>
-                        <p>The personal view can stay more intimate without forcing private utility state into the public card.</p>
+                        <p>The personal view can include live utility context without pushing private settings into the public card.</p>
                       </div>
                     </div>
                   </div>
@@ -2436,17 +2437,18 @@
               <div class="panel-grid">
                 <div class="panel-copy">
                   <div class="section-kicker">Moment Cards</div>
-                  <h3>Keepsakes from visible messages, not a quote feed.</h3>
+                  <h3>Keepsakes from visible server messages, not a quote feed.</h3>
                   <p>
-                    Moment Cards turn a real Discord message into something memorable without becoming a stored archive.
-                    They stay linked to the original context, which keeps them honest and lightweight.
+                    Moment Cards turn a real server message or small exchange into something memorable without becoming a
+                    stored archive. They stay linked to the original context, which keeps them honest and lightweight.
                   </p>
                   <div class="panel-points">
-                    <div class="panel-point">Built from visible Discord messages, including reply flow.</div>
+                    <div class="panel-point">Built from a reply, a message link, or a recent server moment.</div>
                     <div class="panel-point">Live-linked back to the original message instead of becoming a quote database.</div>
-                    <div class="panel-point">Memorable enough to share, bounded enough to trust.</div>
+                    <div class="panel-point">Shareable in-channel, but still built live from server messages.</div>
                   </div>
                   <div class="panel-commands">
+                    <span class="command-pill"><code>/moment create</code></span>
                     <span class="command-pill"><code>/moment from-reply</code></span>
                   </div>
                 </div>
@@ -2462,7 +2464,7 @@
                     </div>
                     <div class="link-card">
                       <strong>Live-linked</strong>
-                      <p>Moment Cards stay connected to the message that made them worth saving in the first place.</p>
+                      <p>Moment Cards stay connected to the original message and channel scene that made them worth saving.</p>
                     </div>
                     <div class="keepsake-card">
                       <span class="mini-label">Moment Card</span>
@@ -2542,7 +2544,7 @@
               <h3>DM-only signal for mentions, replies, and keywords.</h3>
               <p>
                 Watch keeps up with the server without turning into a public alarm system. Mentions, replies, and scoped
-                keywords stay compact, cooldown-aware, and private on delivery.
+                keywords stay compact, deduped, and DM-only on delivery.
               </p>
               <div class="utility-pill-row">
                 <span class="utility-pill">Mentions</span>
@@ -2557,13 +2559,13 @@
               <div class="section-kicker">Later, Capture, Remind</div>
               <h3>Pick a channel back up without archiving the world.</h3>
               <p>
-                Save a reading marker, DM yourself a compact recent snapshot, or set a one-time reminder without turning
-                Babblebox into a giant archive or inbox clone.
+                Save a reading marker, DM yourself recent context, or set a one-time reminder without turning Babblebox
+                into a giant archive or inbox clone.
               </p>
               <div class="utility-pill-row">
                 <span class="utility-pill">Jump back cleanly</span>
                 <span class="utility-pill">Private snapshots</span>
-                <span class="utility-pill">Bounded reminders</span>
+                <span class="utility-pill">One-time reminders</span>
               </div>
             </article>
 
@@ -2571,12 +2573,13 @@
               <div class="section-kicker">AFK</div>
               <h3>Clear status windows for work, sleep, study, or a short break.</h3>
               <p>
-                AFK stays clean about time and presence, with quick durations, scheduled windows, and a calmer utility flow
-                than a pile of status commands.
+                AFK stays clear about time and return windows, with quick durations, scheduled starts, recurring
+                local-time schedules, and saved timezones.
               </p>
               <div class="utility-pill-row">
                 <span class="utility-pill">Quick durations</span>
-                <span class="utility-pill">Scheduled windows</span>
+                <span class="utility-pill">Scheduled starts</span>
+                <span class="utility-pill">Recurring schedules</span>
                 <span class="utility-pill">Timezone-aware</span>
               </div>
             </article>
@@ -2592,15 +2595,16 @@
             <div class="section-kicker">For server owners</div>
             <h2>If you need moderation help, Babblebox keeps it compact.</h2>
             <p>
-              Shield is optional, conservative, and admin-facing. It is there for servers that want a compact safety layer,
-              not as the whole reason to invite the bot.
+              Shield is optional, conservative, and admin-facing. It sits alongside compact admin lifecycle helpers for
+              follow-up roles and verification cleanup, not as a sprawling moderation suite.
             </p>
             <p>
-              It can watch for likely privacy leaks, promo or invite spam, and scam-style bait. AI assist stays off by
-              default and only works as a limited second pass after local Shield already flags something.
+              It covers likely privacy leaks, promo or invite spam, and scam or malicious-link bait. AI assist stays off
+              by default, only reviews messages local Shield already flagged, and is currently limited to the support server.
             </p>
             <div class="panel-commands" style="margin-top: 20px;">
               <span class="command-pill"><code>/shield panel</code></span>
+              <span class="command-pill"><code>/admin panel</code></span>
             </div>
           </div>
 
@@ -2622,22 +2626,22 @@
                 <p>Keep common spam pressure under control with bounded rules and allowlists.</p>
               </div>
               <div class="module-card">
-                <strong>Scam bait</strong>
+                <strong>Scam heuristics</strong>
                 <p>Compact heuristic coverage for obvious bad patterns without promising magic.</p>
               </div>
             </div>
             <div class="shield-lines">
               <div class="shield-line">
-                <strong>Admin-facing controls</strong>
-                <span>Private panel, filters, trusted roles, and compact config.</span>
+                <strong>Lifecycle helpers</strong>
+                <span>Optional <code>/admin panel</code> covers follow-up roles and verification cleanup.</span>
               </div>
               <div class="shield-line">
                 <strong>Log-first behavior</strong>
                 <span>Moderator context goes where admins need it instead of a giant moderation warehouse.</span>
               </div>
               <div class="shield-line">
-                <strong>AI assist</strong>
-                <span>Off by default, limited, and never the main moderation hook.</span>
+                <strong>AI second pass</strong>
+                <span>Off by default, second-pass only, and never the main moderation hook.</span>
               </div>
             </div>
           </div>
@@ -2654,15 +2658,14 @@
               <h2>Built to stay bounded.</h2>
             </div>
             <p>
-              Babblebox is intentionally compact. No economy grind. No lootboxes. No blob archives. No giant moderation
-              database pretending to be a lifestyle product. The goal is a bot that earns its place every day without
-              sprawling out of control.
+              Babblebox is intentionally compact. No economy grind. No lootboxes. No media/blob archive. No giant
+              moderation event warehouse. The goal is a bot that earns its place every day without sprawling out of control.
             </p>
           </div>
           <div class="trust-grid">
             <article class="trust-card">
-              <h3>No general-bot bloat</h3>
-              <p>Babblebox keeps a clear lane: social energy, everyday usefulness, and optional compact safety.</p>
+              <h3>Five clear lanes</h3>
+              <p>Party games, everyday utilities, Daily Arcade, Buddy / Profile / Vault, and optional compact safety stay distinct.</p>
             </article>
             <article class="trust-card">
               <h3>Private-first where it matters</h3>
@@ -2670,13 +2673,13 @@
             </article>
             <article class="trust-card">
               <h3>Moment Cards stay honest</h3>
-              <p>They are live-linked keepsakes built from visible Discord messages, not a stored quote-feed archive.</p>
+              <p>They are live-linked keepsakes built from visible server messages, not a stored quote-feed archive.</p>
             </article>
           </div>
           <div class="support-bar">
             <p>
               Babblebox is open source and lives alongside the inevitable friendship support server for issues, feedback,
-              and screenshots from real servers.
+              and server setup help.
             </p>
             <div class="support-links">
               <a class="btn btn-secondary" href="https://discord.com/servers/inevitable-friendship-1322933864360050688" target="_blank" rel="noopener noreferrer">Join Support Server</a>
@@ -2694,8 +2697,8 @@
             <div class="section-kicker">Invite Babblebox</div>
             <h2>One bot that starts the room and still earns quiet days.</h2>
             <p>
-              If your server wants party energy and everyday usefulness without economy spam or all-purpose bot clutter,
-              Babblebox is built for that exact lane.
+              If your server wants party energy, clean return surfaces, and everyday usefulness without economy spam or
+              all-purpose bot clutter, Babblebox is built for that exact mix.
             </p>
           </div>
           <div class="final-actions">
@@ -2713,7 +2716,7 @@
       <div class="footer-row">
         <div>
           <strong>Babblebox</strong>
-          <div>Open source Discord bot by Arno.</div>
+          <div>Open-source Discord bot by Arno.</div>
         </div>
         <div class="footer-links">
           <a href="https://discord.com/oauth2/authorize?client_id=1480903089518022739" target="_blank" rel="noopener noreferrer">Invite</a>
