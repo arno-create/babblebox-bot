@@ -46,6 +46,7 @@ WATCH_FILTER_LIMIT = 8
 WATCH_KEYWORD_MAX_LEN = 40
 WATCH_DM_COOLDOWN_SECONDS = 20.0
 WATCH_DEDUP_TTL_SECONDS = 300.0
+RETURN_WATCH_ALLOWED_SECONDS = (3600, 6 * 3600, 24 * 3600)
 CAPTURE_COOLDOWN_SECONDS = 45.0
 REMINDER_COOLDOWN_SECONDS = 60.0
 REMINDER_MAX_ACTIVE = 3
@@ -112,6 +113,9 @@ class UtilityService:
         self._keywords_by_channel: dict[int, dict[int, list[dict]]] = {}
         self._excluded_channels_by_user: dict[int, set[int]] = {}
         self._ignored_users_by_user: dict[int, set[int]] = {}
+        self._return_user_watch_ids_by_target: dict[tuple[int, int], set[str]] = {}
+        self._return_channel_watch_ids_by_target: dict[int, set[str]] = {}
+        self._return_watch_id_by_dedupe_key: dict[tuple[int, int, str, int], str] = {}
 
         self._watch_dm_cooldowns: dict[int, float] = {}
         self._watch_dedup: dict[tuple[int, int], float] = {}
@@ -136,6 +140,7 @@ class UtilityService:
         self.storage_ready = True
         self.storage_error = None
         self._rebuild_watch_indexes()
+        self._rebuild_return_watch_indexes()
         self._scheduler_task = asyncio.create_task(self._scheduler_loop(), name="babblebox-utility-scheduler")
         self._wake_event.set()
         return True
@@ -255,6 +260,111 @@ class UtilityService:
         self._keywords_by_channel = {channel_id: {user_id: list(entries) for user_id, entries in by_user.items()} for channel_id, by_user in keywords_by_channel.items()}
         self._excluded_channels_by_user = excluded_channels_by_user
         self._ignored_users_by_user = ignored_users_by_user
+
+    def _rebuild_return_watch_indexes(self):
+        user_targets: defaultdict[tuple[int, int], set[str]] = defaultdict(set)
+        channel_targets: defaultdict[int, set[str]] = defaultdict(set)
+        dedupe_keys: dict[tuple[int, int, str, int], str] = {}
+        for watch_id, record in self.store.state.get("return_watches", {}).items():
+            if not isinstance(record, dict):
+                continue
+            try:
+                watcher_user_id = int(record.get("watcher_user_id"))
+                guild_id = int(record.get("guild_id"))
+                target_id = int(record.get("target_id"))
+            except (TypeError, ValueError):
+                continue
+            target_type = record.get("target_type")
+            if target_type == "user":
+                user_targets[(guild_id, target_id)].add(watch_id)
+            elif target_type == "channel":
+                channel_targets[target_id].add(watch_id)
+            else:
+                continue
+            dedupe_keys[(watcher_user_id, guild_id, target_type, target_id)] = watch_id
+        self._return_user_watch_ids_by_target = {key: set(value) for key, value in user_targets.items()}
+        self._return_channel_watch_ids_by_target = {key: set(value) for key, value in channel_targets.items()}
+        self._return_watch_id_by_dedupe_key = dedupe_keys
+
+    def _make_return_watch_record(
+        self,
+        *,
+        watch_id: str,
+        watcher_user_id: int,
+        guild_id: int,
+        target_type: str,
+        target_id: int,
+        created_at: datetime,
+        expires_at: datetime,
+        created_from: str | None,
+    ) -> dict:
+        return {
+            "id": watch_id,
+            "watcher_user_id": watcher_user_id,
+            "guild_id": guild_id,
+            "target_type": target_type,
+            "target_id": target_id,
+            "created_at": serialize_datetime(created_at),
+            "expires_at": serialize_datetime(expires_at),
+            "created_from": created_from,
+        }
+
+    def _return_watch_is_expired(self, record: dict, *, now: datetime | None = None) -> bool:
+        expires_at = deserialize_datetime(record.get("expires_at"))
+        if expires_at is None:
+            return True
+        return expires_at <= (now or ge.now_utc())
+
+    async def upsert_return_watch(
+        self,
+        *,
+        watcher_user_id: int,
+        guild_id: int,
+        target_type: str,
+        target_id: int,
+        duration_seconds: int,
+        created_from: str | None = None,
+    ) -> tuple[bool, str | dict, bool]:
+        if not self._has_storage():
+            return False, self.storage_message("Watch"), False
+        if target_type not in {"user", "channel"}:
+            return False, "Unknown one-shot watch target.", False
+        if duration_seconds not in RETURN_WATCH_ALLOWED_SECONDS:
+            return False, "Pick 1 hour, 6 hours, or 24 hours for this alert.", False
+
+        now = ge.now_utc()
+        expires_at = now + timedelta(seconds=duration_seconds)
+        created_from_value = created_from.strip() if isinstance(created_from, str) and created_from.strip() else None
+        dedupe_key = (watcher_user_id, guild_id, target_type, target_id)
+
+        async with self._lock:
+            watches = self.store.state.setdefault("return_watches", {})
+            existing_id = self._return_watch_id_by_dedupe_key.get(dedupe_key)
+            existing = watches.get(existing_id) if existing_id is not None else None
+            refreshed = isinstance(existing, dict) and not self._return_watch_is_expired(existing, now=now)
+            if refreshed:
+                existing["created_at"] = serialize_datetime(now)
+                existing["expires_at"] = serialize_datetime(expires_at)
+                existing["created_from"] = created_from_value
+                record = dict(existing)
+            else:
+                if existing_id is not None:
+                    watches.pop(existing_id, None)
+                watch_id = uuid.uuid4().hex
+                record = self._make_return_watch_record(
+                    watch_id=watch_id,
+                    watcher_user_id=watcher_user_id,
+                    guild_id=guild_id,
+                    target_type=target_type,
+                    target_id=target_id,
+                    created_at=now,
+                    expires_at=expires_at,
+                    created_from=created_from_value,
+                )
+                watches[watch_id] = record
+            self._rebuild_return_watch_indexes()
+            await self.store.flush()
+        return True, record, refreshed
 
     def validate_watch_keyword(self, raw_keyword: str) -> tuple[bool, str]:
         cleaned = normalize_plain_text(raw_keyword)
@@ -688,6 +798,80 @@ class UtilityService:
         perms = message.channel.permissions_for(member)
         return perms.view_channel and perms.read_message_history
 
+    def _member_can_access_channel(self, member: discord.Member, channel) -> bool:
+        perms = channel.permissions_for(member)
+        return perms.view_channel and perms.read_message_history
+
+    def _build_return_watch_alert_embed(self, message: discord.Message, *, watch_types: set[str]) -> discord.Embed:
+        channel_name = getattr(message.channel, "mention", "#unknown")
+        guild_name = message.guild.name if message.guild else "Direct Messages"
+        description = f"{channel_name} has a new message."
+        if "user" in watch_types:
+            description = f"{ge.display_name_of(message.author)} is active again in {channel_name}."
+        embed = discord.Embed(
+            title="Babblebox Return Ping",
+            description=description,
+            color=ge.EMBED_THEME["accent"],
+            timestamp=message.created_at or ge.now_utc(),
+        )
+        embed.add_field(name="Server", value=guild_name, inline=True)
+        embed.add_field(name="From", value=ge.display_name_of(message.author), inline=True)
+        embed.add_field(name="Peek", value=make_message_preview(message.content, attachments=message.attachments), inline=False)
+        return ge.style_embed(embed, footer="Babblebox Watch | One-shot DM alert with a jump link")
+
+    async def handle_return_watch_message(self, message: discord.Message):
+        if not self.storage_ready or message.guild is None:
+            return
+        candidate_ids = set(self._return_channel_watch_ids_by_target.get(message.channel.id, set()))
+        candidate_ids.update(self._return_user_watch_ids_by_target.get((message.guild.id, message.author.id), set()))
+        if not candidate_ids:
+            return
+
+        message_time = message.created_at or ge.now_utc()
+        matched_by_watcher: defaultdict[int, set[str]] = defaultdict(set)
+        remove_ids: set[str] = set()
+
+        async with self._lock:
+            watches = self.store.state.get("return_watches", {})
+            for watch_id in candidate_ids:
+                record = watches.get(watch_id)
+                if not isinstance(record, dict):
+                    remove_ids.add(watch_id)
+                    continue
+                target_type = record.get("target_type")
+                if target_type not in {"user", "channel"}:
+                    remove_ids.add(watch_id)
+                    continue
+                if int(record.get("guild_id", 0) or 0) != message.guild.id:
+                    continue
+                if self._return_watch_is_expired(record, now=message_time):
+                    remove_ids.add(watch_id)
+                    continue
+                created_at = deserialize_datetime(record.get("created_at"))
+                if created_at is None or message_time <= created_at:
+                    continue
+                remove_ids.add(watch_id)
+                watcher_user_id = record.get("watcher_user_id")
+                if isinstance(watcher_user_id, int):
+                    matched_by_watcher[watcher_user_id].add(target_type)
+
+            if remove_ids:
+                for watch_id in remove_ids:
+                    watches.pop(watch_id, None)
+                self._rebuild_return_watch_indexes()
+                await self.store.flush()
+
+        if not matched_by_watcher:
+            return
+
+        for watcher_user_id, watch_types in matched_by_watcher.items():
+            watcher = message.guild.get_member(watcher_user_id)
+            if watcher is None or not self._member_can_access_channel(watcher, message.channel):
+                continue
+            embed = self._build_return_watch_alert_embed(message, watch_types=watch_types)
+            with contextlib.suppress(discord.Forbidden, discord.HTTPException):
+                await watcher.send(embed=embed, view=build_jump_view(message.jump_url, label="Open Message"))
+
     def _prune_hot_path_caches(self, now: float):
         if len(self._watch_dedup) > 512:
             self._watch_dedup = {key: timestamp for key, timestamp in self._watch_dedup.items() if now - timestamp < WATCH_DEDUP_TTL_SECONDS}
@@ -996,12 +1180,12 @@ class UtilityService:
     def build_afk_status_embed_for(self, user: discord.abc.User, record: dict, *, title: str | None = None) -> discord.Embed:
         return build_afk_status_embed(user, record, title=title)
 
-    def build_afk_notice_lines_for_targets(self, *, channel_id: int, author_id: int, targets: list[discord.abc.User]) -> list[str]:
+    def collect_afk_notice_targets(self, *, channel_id: int, author_id: int, targets: list[discord.abc.User]) -> list[tuple[discord.abc.User, dict]]:
         if not self.storage_ready:
             return []
         now = asyncio.get_running_loop().time()
         self._prune_hot_path_caches(now)
-        lines = []
+        notices: list[tuple[discord.abc.User, dict]] = []
         seen: set[int] = set()
         for member in targets:
             if member.id == author_id or member.bot or member.id in seen:
@@ -1014,10 +1198,20 @@ class UtilityService:
                 continue
             self._afk_notice_cooldowns[cooldown_key] = now
             seen.add(member.id)
-            lines.append(build_afk_notice_line(member, record))
-            if len(lines) >= 5:
+            notices.append((member, record))
+            if len(notices) >= 5:
                 break
-        return lines
+        return notices
+
+    def build_afk_notice_lines_for_targets(self, *, channel_id: int, author_id: int, targets: list[discord.abc.User]) -> list[str]:
+        return [
+            build_afk_notice_line(member, record)
+            for member, record in self.collect_afk_notice_targets(
+                channel_id=channel_id,
+                author_id=author_id,
+                targets=targets,
+            )
+        ]
 
     async def _wait_for_ready_state(self) -> bool:
         while True:

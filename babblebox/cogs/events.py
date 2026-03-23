@@ -7,6 +7,7 @@ from discord.ext import commands
 
 from babblebox import game_engine as ge
 from babblebox.command_utils import is_command_message
+from babblebox.utility_helpers import build_afk_notice_line
 
 
 def _collect_away_targets(message: discord.Message) -> list[discord.abc.User]:
@@ -67,14 +68,22 @@ class EventsCog(commands.Cog):
                 return
 
         away_targets = _collect_away_targets(message)
-        notice_lines = []
+        afk_notice_targets = []
         if utility_service is not None:
-            notice_lines = utility_service.build_afk_notice_lines_for_targets(
+            afk_notice_targets = utility_service.collect_afk_notice_targets(
                 channel_id=message.channel.id,
                 author_id=message.author.id,
                 targets=away_targets,
             )
+        notice_lines = [build_afk_notice_line(member, record) for member, record in afk_notice_targets]
         if notice_lines:
+            view = None
+            utilities_cog = self.bot.get_cog("UtilityCog")
+            if len(afk_notice_targets) == 1 and utilities_cog is not None and message.guild is not None:
+                target_member, _ = afk_notice_targets[0]
+                build_view = getattr(utilities_cog, "build_afk_return_watch_view", None)
+                if callable(build_view):
+                    view = build_view(guild_id=message.guild.id, target_user_id=target_member.id)
             with contextlib.suppress(discord.HTTPException):
                 await message.channel.send(
                     embed=ge.make_status_embed(
@@ -83,12 +92,14 @@ class EventsCog(commands.Cog):
                         tone="info",
                         footer="Babblebox AFK | Mentions are muted. Try /watch for private mention alerts.",
                     ),
+                    view=view,
                     delete_after=12.0,
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
 
         if utility_service is not None:
             await utility_service.handle_watch_message(message)
+            await utility_service.handle_return_watch_message(message)
 
         if isinstance(message.channel, discord.DMChannel):
             guild_id = ge.dm_routes.get(message.author.id)

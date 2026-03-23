@@ -1,9 +1,13 @@
 import os
+import types
 import unittest
 from datetime import timedelta
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from typing import Optional
+from unittest.mock import AsyncMock
+
+import discord
 
 from babblebox import game_engine as ge
 from babblebox.utility_helpers import build_afk_reason_text, compute_next_afk_schedule_start, serialize_datetime
@@ -23,16 +27,73 @@ class DummyTarget(DummyUser):
         self.display_name = display_name or f"User {user_id}"
 
 
+class DummyMember(DummyTarget):
+    def __init__(self, user_id: int, *, bot: bool = False, display_name: Optional[str] = None):
+        super().__init__(user_id, bot=bot, display_name=display_name)
+        self.mention = f"<@{user_id}>"
+        self.send = AsyncMock()
+
+
+class DummyChannel:
+    def __init__(self, channel_id: int, *, guild, name: str = "general", visible_user_ids: Optional[set[int]] = None):
+        self.id = channel_id
+        self.guild = guild
+        self.name = name
+        self.mention = f"#{name}"
+        self._visible_user_ids = set(visible_user_ids or set())
+
+    def permissions_for(self, member):
+        allowed = getattr(member, "id", None) in self._visible_user_ids
+        return types.SimpleNamespace(view_channel=allowed, read_message_history=allowed)
+
+
+class DummyGuild:
+    def __init__(self, guild_id: int, *, name: str = "Guild", members: Optional[list[DummyMember]] = None):
+        self.id = guild_id
+        self.name = name
+        self._members = {member.id: member for member in (members or [])}
+
+    def get_member(self, user_id: int):
+        return self._members.get(user_id)
+
+
+class DummyMessage:
+    def __init__(self, *, message_id: int, author, guild, channel, content: str, created_at):
+        self.id = message_id
+        self.author = author
+        self.guild = guild
+        self.channel = channel
+        self.content = content
+        self.attachments = []
+        self.created_at = created_at
+        self.jump_url = f"https://discord.com/channels/{guild.id}/{channel.id}/{message_id}"
+        self.mentions = []
+        self.reference = None
+
+
+class DummyBot:
+    def __init__(self):
+        self._users = {}
+
+    def add_user(self, user):
+        self._users[user.id] = user
+
+    def get_user(self, user_id: int):
+        return self._users.get(user_id)
+
+
 class UtilityStoreAndServiceTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.store = UtilityStateStore(backend="memory")
         await self.store.load()
-        self.service = UtilityService(object(), store=self.store)
+        self.bot = DummyBot()
+        self.service = UtilityService(self.bot, store=self.store)
         self.service.storage_ready = True
 
     async def test_memory_store_loads_clean_state(self):
         self.assertEqual(self.store.backend_name, "memory")
         self.assertEqual(self.store.state["watch"], {})
+        self.assertEqual(self.store.state["return_watches"], {})
         self.assertEqual(self.store.state["afk"], {})
         self.assertEqual(self.store.state["afk_settings"], {})
         self.assertEqual(self.store.state["afk_schedules"], {})
@@ -324,3 +385,305 @@ class UtilityStoreAndServiceTests(unittest.IsolatedAsyncioTestCase):
             await store.load()
             self.assertEqual(store.backend_name, "memory")
             self.assertFalse(store.state["reminders"])
+
+    async def test_create_user_return_watch_dedupes_and_refreshes(self):
+        ok, record, refreshed = await self.service.upsert_return_watch(
+            watcher_user_id=11,
+            guild_id=22,
+            target_type="user",
+            target_id=33,
+            duration_seconds=3600,
+            created_from="slash_command",
+        )
+        self.assertTrue(ok)
+        self.assertFalse(refreshed)
+        watch_id = record["id"]
+        self.service.store.state["return_watches"][watch_id]["created_at"] = serialize_datetime(ge.now_utc() - timedelta(hours=3))
+        self.service.store.state["return_watches"][watch_id]["expires_at"] = serialize_datetime(ge.now_utc() + timedelta(minutes=30))
+        self.service._rebuild_return_watch_indexes()
+
+        ok, updated, refreshed = await self.service.upsert_return_watch(
+            watcher_user_id=11,
+            guild_id=22,
+            target_type="user",
+            target_id=33,
+            duration_seconds=6 * 3600,
+            created_from="afk_button",
+        )
+
+        self.assertTrue(ok)
+        self.assertTrue(refreshed)
+        self.assertEqual(updated["id"], watch_id)
+        self.assertEqual(len(self.service.store.state["return_watches"]), 1)
+        self.assertEqual(updated["created_from"], "afk_button")
+
+    async def test_create_channel_return_watch(self):
+        ok, record, refreshed = await self.service.upsert_return_watch(
+            watcher_user_id=90,
+            guild_id=100,
+            target_type="channel",
+            target_id=200,
+            duration_seconds=24 * 3600,
+            created_from="slash_command",
+        )
+
+        self.assertTrue(ok)
+        self.assertFalse(refreshed)
+        self.assertEqual(record["target_type"], "channel")
+        self.assertEqual(record["target_id"], 200)
+
+    async def test_return_watch_normalization_is_restart_safe(self):
+        payload = {
+            "version": 5,
+            "return_watches": {
+                "watch1": {
+                    "watcher_user_id": 5,
+                    "guild_id": 10,
+                    "target_type": "user",
+                    "target_id": 15,
+                    "created_at": serialize_datetime(ge.now_utc()),
+                    "expires_at": serialize_datetime(ge.now_utc() + timedelta(hours=1)),
+                    "created_from": "slash_command",
+                }
+            },
+        }
+        normalized = self.store._store.normalize_state(payload)
+        self.assertIn("watch1", normalized["return_watches"])
+
+        reloaded_service = UtilityService(self.bot, store=self.store)
+        reloaded_service.store.state = normalized
+        reloaded_service.storage_ready = True
+        reloaded_service._rebuild_return_watch_indexes()
+        self.assertIn((10, 15), reloaded_service._return_user_watch_ids_by_target)
+
+    async def test_user_return_watch_triggers_on_next_message_after_creation(self):
+        watcher = DummyMember(41, display_name="Mira")
+        target = DummyMember(42, display_name="Alex")
+        guild = DummyGuild(10, members=[watcher, target])
+        channel = DummyChannel(20, guild=guild, visible_user_ids={watcher.id, target.id})
+        message = DummyMessage(
+            message_id=30,
+            author=target,
+            guild=guild,
+            channel=channel,
+            content="I'm back.",
+            created_at=ge.now_utc() + timedelta(seconds=5),
+        )
+        self.bot.add_user(watcher)
+        ok, _, _ = await self.service.upsert_return_watch(
+            watcher_user_id=watcher.id,
+            guild_id=guild.id,
+            target_type="user",
+            target_id=target.id,
+            duration_seconds=3600,
+            created_from="afk_button",
+        )
+        self.assertTrue(ok)
+
+        await self.service.handle_return_watch_message(message)
+
+        watcher.send.assert_awaited_once()
+        self.assertEqual(self.service.store.state["return_watches"], {})
+
+    async def test_user_return_watch_does_not_trigger_on_message_before_creation(self):
+        watcher = DummyMember(51, display_name="Mira")
+        target = DummyMember(52, display_name="Alex")
+        guild = DummyGuild(11, members=[watcher, target])
+        channel = DummyChannel(21, guild=guild, visible_user_ids={watcher.id, target.id})
+        message_time = ge.now_utc()
+        message = DummyMessage(
+            message_id=31,
+            author=target,
+            guild=guild,
+            channel=channel,
+            content="Almost back.",
+            created_at=message_time,
+        )
+        ok, record, _ = await self.service.upsert_return_watch(
+            watcher_user_id=watcher.id,
+            guild_id=guild.id,
+            target_type="user",
+            target_id=target.id,
+            duration_seconds=3600,
+            created_from="slash_command",
+        )
+        self.assertTrue(ok)
+        self.service.store.state["return_watches"][record["id"]]["created_at"] = serialize_datetime(message_time + timedelta(seconds=1))
+        self.service._rebuild_return_watch_indexes()
+
+        await self.service.handle_return_watch_message(message)
+
+        watcher.send.assert_not_awaited()
+        self.assertIn(record["id"], self.service.store.state["return_watches"])
+
+    async def test_channel_return_watch_triggers_once_and_deletes(self):
+        watcher = DummyMember(61, display_name="Mira")
+        author = DummyMember(62, display_name="Nina")
+        guild = DummyGuild(12, members=[watcher, author])
+        channel = DummyChannel(22, guild=guild, visible_user_ids={watcher.id, author.id})
+        message = DummyMessage(
+            message_id=32,
+            author=author,
+            guild=guild,
+            channel=channel,
+            content="Fresh message.",
+            created_at=ge.now_utc() + timedelta(seconds=5),
+        )
+        ok, record, _ = await self.service.upsert_return_watch(
+            watcher_user_id=watcher.id,
+            guild_id=guild.id,
+            target_type="channel",
+            target_id=channel.id,
+            duration_seconds=3600,
+            created_from="slash_command",
+        )
+        self.assertTrue(ok)
+
+        await self.service.handle_return_watch_message(message)
+        await self.service.handle_return_watch_message(message)
+
+        watcher.send.assert_awaited_once()
+        self.assertNotIn(record["id"], self.service.store.state["return_watches"])
+
+    async def test_expired_return_watch_does_not_trigger(self):
+        watcher = DummyMember(71, display_name="Mira")
+        target = DummyMember(72, display_name="Alex")
+        guild = DummyGuild(13, members=[watcher, target])
+        channel = DummyChannel(23, guild=guild, visible_user_ids={watcher.id, target.id})
+        message = DummyMessage(
+            message_id=33,
+            author=target,
+            guild=guild,
+            channel=channel,
+            content="Too late.",
+            created_at=ge.now_utc(),
+        )
+        ok, record, _ = await self.service.upsert_return_watch(
+            watcher_user_id=watcher.id,
+            guild_id=guild.id,
+            target_type="user",
+            target_id=target.id,
+            duration_seconds=3600,
+            created_from="slash_command",
+        )
+        self.assertTrue(ok)
+        self.service.store.state["return_watches"][record["id"]]["expires_at"] = serialize_datetime(ge.now_utc() - timedelta(minutes=1))
+        self.service._rebuild_return_watch_indexes()
+
+        await self.service.handle_return_watch_message(message)
+
+        watcher.send.assert_not_awaited()
+        self.assertNotIn(record["id"], self.service.store.state["return_watches"])
+
+    async def test_dm_failure_cleans_up_return_watch(self):
+        watcher = DummyMember(81, display_name="Mira")
+        target = DummyMember(82, display_name="Alex")
+        guild = DummyGuild(14, members=[watcher, target])
+        channel = DummyChannel(24, guild=guild, visible_user_ids={watcher.id, target.id})
+        message = DummyMessage(
+            message_id=34,
+            author=target,
+            guild=guild,
+            channel=channel,
+            content="Back again.",
+            created_at=ge.now_utc() + timedelta(seconds=5),
+        )
+        response = types.SimpleNamespace(status=403, reason="Forbidden", text="Forbidden")
+        watcher.send = AsyncMock(side_effect=discord.Forbidden(response=response, message="closed"))
+        ok, record, _ = await self.service.upsert_return_watch(
+            watcher_user_id=watcher.id,
+            guild_id=guild.id,
+            target_type="user",
+            target_id=target.id,
+            duration_seconds=3600,
+            created_from="slash_command",
+        )
+        self.assertTrue(ok)
+
+        await self.service.handle_return_watch_message(message)
+
+        self.assertNotIn(record["id"], self.service.store.state["return_watches"])
+
+    async def test_channel_return_watch_respects_channel_access(self):
+        watcher = DummyMember(91, display_name="Mira")
+        author = DummyMember(92, display_name="Nina")
+        guild = DummyGuild(15, members=[watcher, author])
+        channel = DummyChannel(25, guild=guild, visible_user_ids={author.id})
+        message = DummyMessage(
+            message_id=35,
+            author=author,
+            guild=guild,
+            channel=channel,
+            content="Private update.",
+            created_at=ge.now_utc() + timedelta(seconds=5),
+        )
+        ok, record, _ = await self.service.upsert_return_watch(
+            watcher_user_id=watcher.id,
+            guild_id=guild.id,
+            target_type="channel",
+            target_id=channel.id,
+            duration_seconds=3600,
+            created_from="slash_command",
+        )
+        self.assertTrue(ok)
+
+        await self.service.handle_return_watch_message(message)
+
+        watcher.send.assert_not_awaited()
+        self.assertNotIn(record["id"], self.service.store.state["return_watches"])
+
+    async def test_user_return_watch_is_guild_scoped(self):
+        watcher = DummyMember(101, display_name="Mira")
+        target = DummyMember(102, display_name="Alex")
+        watched_guild = DummyGuild(16, members=[watcher, target])
+        other_guild = DummyGuild(17, members=[watcher, target])
+        watched_channel = DummyChannel(26, guild=watched_guild, visible_user_ids={watcher.id, target.id})
+        other_channel = DummyChannel(27, guild=other_guild, visible_user_ids={watcher.id, target.id})
+        message = DummyMessage(
+            message_id=36,
+            author=target,
+            guild=other_guild,
+            channel=other_channel,
+            content="Different server.",
+            created_at=ge.now_utc() + timedelta(seconds=5),
+        )
+        ok, record, _ = await self.service.upsert_return_watch(
+            watcher_user_id=watcher.id,
+            guild_id=watched_guild.id,
+            target_type="user",
+            target_id=target.id,
+            duration_seconds=3600,
+            created_from="slash_command",
+        )
+        self.assertTrue(ok)
+
+        await self.service.handle_return_watch_message(message)
+
+        watcher.send.assert_not_awaited()
+        self.assertIn(record["id"], self.service.store.state["return_watches"])
+
+    async def test_clearing_afk_does_not_trigger_return_watch(self):
+        watcher = DummyMember(111, display_name="Mira")
+        target = DummyMember(112, display_name="Alex")
+        ok, _ = await self.service.set_afk(
+            user=target,
+            reason="Stepped away",
+            duration_seconds=30 * 60,
+            start_in_seconds=None,
+        )
+        self.assertTrue(ok)
+        ok, record, _ = await self.service.upsert_return_watch(
+            watcher_user_id=watcher.id,
+            guild_id=18,
+            target_type="user",
+            target_id=target.id,
+            duration_seconds=3600,
+            created_from="afk_button",
+        )
+        self.assertTrue(ok)
+
+        removed = await self.service.clear_afk_on_activity(target.id)
+
+        self.assertIsNotNone(removed)
+        watcher.send.assert_not_awaited()
+        self.assertIn(record["id"], self.service.store.state["return_watches"])
