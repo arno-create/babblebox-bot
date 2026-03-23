@@ -250,12 +250,6 @@ def deserialize_datetime(value: str | None) -> datetime | None:
     return parsed.astimezone(timezone.utc)
 
 
-def get_afk_quick_reason(key: str | None) -> dict | None:
-    if key is None:
-        return None
-    return AFK_QUICK_REASONS.get(str(key).strip().casefold())
-
-
 def build_afk_reason_text(*, preset: str | None = None, custom_reason: str | None = None) -> str | None:
     details = (custom_reason or "").strip()
     quick_reason = get_afk_quick_reason(preset)
@@ -295,52 +289,6 @@ def _parse_afk_clock(text: str) -> tuple[int, int] | None:
     if ampm == "am":
         return 0 if hour == 12 else hour, minute
     return (12 if hour == 12 else hour + 12), minute
-
-
-def parse_afk_start_at(raw: str | None, *, now: datetime | None = None) -> tuple[bool, datetime | str | None]:
-    if raw is None:
-        return True, None
-    text = raw.strip()
-    if not text:
-        return False, "Use `start_at` like `23:00`, `tomorrow 08:30`, or `2026-03-22 23:00` (UTC)."
-    now_utc = (now or ge.now_utc()).astimezone(timezone.utc)
-    lowered = text.casefold()
-
-    for fmt in ("%Y-%m-%d %H:%M", "%Y-%m-%d %H:%M:%S"):
-        try:
-            parsed = datetime.strptime(text, fmt).replace(tzinfo=timezone.utc)
-        except ValueError:
-            continue
-        if parsed <= now_utc:
-            return False, "`start_at` must be in the future."
-        return True, parsed
-
-    for prefix, day_offset in (("today ", 0), ("tomorrow ", 1)):
-        if lowered.startswith(prefix):
-            clock = _parse_afk_clock(lowered[len(prefix):].strip())
-            if clock is None:
-                return False, "Use `start_at` like `23:00`, `tomorrow 08:30`, or `2026-03-22 23:00` (UTC)."
-            target_date = (now_utc + timedelta(days=day_offset)).date()
-            parsed = datetime(
-                target_date.year,
-                target_date.month,
-                target_date.day,
-                clock[0],
-                clock[1],
-                tzinfo=timezone.utc,
-            )
-            if parsed <= now_utc:
-                return False, "`start_at` must be in the future."
-            return True, parsed
-
-    clock = _parse_afk_clock(lowered)
-    if clock is not None:
-        parsed = now_utc.replace(hour=clock[0], minute=clock[1], second=0, microsecond=0)
-        if parsed <= now_utc:
-            parsed += timedelta(days=1)
-        return True, parsed
-
-    return False, "Use `start_at` like `23:00`, `tomorrow 08:30`, or `2026-03-22 23:00` (UTC)."
 
 
 def normalize_afk_preset_key(key: str | None) -> str | None:

@@ -524,9 +524,13 @@ class UtilityCog(commands.Cog):
         lines = []
         for reminder in reminders[:10]:
             due_at = deserialize_datetime(reminder.get("due_at"))
+            retry_after = deserialize_datetime(reminder.get("retry_after"))
             destination = "DM" if reminder.get("delivery") == "dm" else f"#{reminder.get('channel_name', 'unknown')}"
+            timing = ge.format_timestamp(due_at, "R")
+            if retry_after is not None and retry_after > ge.now_utc():
+                timing = f"Retrying delivery {ge.format_timestamp(retry_after, 'R')}"
             lines.append(
-                f"`{reminder['id'][:8]}` - {ge.format_timestamp(due_at, 'R')} - {destination} - "
+                f"`{reminder['id'][:8]}` - {timing} - {destination} - "
                 f"{ge.safe_field_text(reminder.get('text', ''), limit=70)}"
             )
         if len(reminders) > 10:
