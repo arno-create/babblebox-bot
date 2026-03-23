@@ -372,10 +372,10 @@
 
     .hero-body {
       max-width: 56ch;
-      margin-top: 16px;
+      margin-top: 14px;
       color: var(--muted);
-      font-size: 1.02rem;
-      line-height: 1.8;
+      font-size: 0.98rem;
+      line-height: 1.7;
     }
 
     .hero-actions {
@@ -424,6 +424,15 @@
       margin-top: 26px;
     }
 
+    .hero-quiet-links {
+      margin-top: 14px;
+    }
+
+    .hero-quiet-links .link-quiet {
+      color: rgba(217, 223, 255, 0.72);
+      font-size: 0.94rem;
+    }
+
     .command-pill {
       display: inline-flex;
       align-items: center;
@@ -453,7 +462,7 @@
       padding: 22px;
       border-radius: 36px;
       border: 1px solid rgba(169, 190, 255, 0.16);
-      background: linear-gradient(180deg, rgba(12, 20, 35, 0.86), rgba(9, 15, 28, 0.94));
+      background: linear-gradient(180deg, rgba(10, 15, 27, 0.94), rgba(8, 12, 22, 0.98));
       box-shadow: var(--shadow);
     }
 
@@ -462,19 +471,20 @@
       position: absolute;
       inset: 0;
       background:
-        linear-gradient(180deg, rgba(4, 8, 16, 0.18), rgba(4, 8, 16, 0.78)),
-        radial-gradient(circle at 18% 18%, rgba(125, 220, 255, 0.18), transparent 28%),
-        radial-gradient(circle at 84% 22%, rgba(255, 131, 155, 0.16), transparent 24%),
+        linear-gradient(180deg, rgba(4, 8, 16, 0.44), rgba(4, 8, 16, 0.82)),
+        radial-gradient(circle at 18% 18%, rgba(125, 220, 255, 0.1), transparent 26%),
+        radial-gradient(circle at 84% 22%, rgba(255, 131, 155, 0.08), transparent 22%),
         url("banner.png") center 14% / cover no-repeat;
-      opacity: 0.92;
+      opacity: 0.44;
     }
 
     .hero-stage::after {
       content: "";
       position: absolute;
       inset: 0;
-      background: linear-gradient(135deg, rgba(125, 220, 255, 0.06), transparent 40%, rgba(255, 187, 112, 0.08));
+      background: linear-gradient(135deg, rgba(125, 220, 255, 0.03), transparent 42%, rgba(255, 187, 112, 0.04));
       mix-blend-mode: screen;
+      opacity: 0.65;
       pointer-events: none;
     }
 
@@ -2019,25 +2029,25 @@
           <div class="eyebrow">Open-source Discord bot for social servers</div>
           <h1>Make your Discord feel alive.</h1>
           <p class="hero-subhead">
-            Babblebox starts game night when people are around, gives small groups something clean to open or share when
-            they come back, and stays quietly useful when the server slows down.
+            Babblebox starts game night fast, gives people something to share between sessions, and stays useful when the
+            room goes quiet.
           </p>
           <p class="hero-body">
-            Party games, Daily Arcade, Buddy, public-friendly <code>/profile</code>, live-linked Moment Cards, and
-            private-first utilities - without economy grind, lootbox junk, or bloated general-bot clutter.
+            Party games, Daily Arcade, Buddy, <code>/profile</code>, live-linked Moment Cards, and quiet utilities that
+            stay out of the way.
           </p>
           <div class="hero-actions">
             <a class="btn btn-primary" href="https://discord.com/oauth2/authorize?client_id=1480903089518022739" target="_blank" rel="noopener noreferrer">Invite Babblebox</a>
             <a class="btn btn-secondary" href="https://discord.com/servers/inevitable-friendship-1322933864360050688" target="_blank" rel="noopener noreferrer">Join Support Server</a>
-            <a class="link-quiet" href="https://github.com/arno-create/babblebox-bot" target="_blank" rel="noopener noreferrer">View GitHub</a>
           </div>
           <div class="command-ribbon" aria-label="Command highlights">
             <span class="command-pill"><code>/play</code></span>
             <span class="command-pill"><code>/daily</code></span>
-            <span class="command-pill"><code>/daily share</code></span>
-            <span class="command-pill"><code>/buddy</code></span>
             <span class="command-pill"><code>/profile</code></span>
             <span class="command-pill"><code>/moment from-reply</code></span>
+          </div>
+          <div class="hero-quiet-links">
+            <a class="link-quiet" href="https://github.com/arno-create/babblebox-bot" target="_blank" rel="noopener noreferrer">View GitHub</a>
           </div>
         </div>
 
@@ -2074,7 +2084,7 @@
                   <div class="profile-row">
                     <div class="avatar-orb" aria-hidden="true"></div>
                     <div class="profile-name">
-                      <strong>Public-friendly by default</strong>
+                      <strong>Made to be shared</strong>
                       <span>Identity without the economy grind</span>
                     </div>
                   </div>
@@ -2134,11 +2144,11 @@
         </div>
         <div class="meta-chip">
           <strong>Brings people back</strong>
-          <span>Daily Arcade, Buddy, and public-friendly <code>/profile</code> keep the bot visible between game nights.</span>
+          <span>Daily Arcade, Buddy, and <code>/profile</code> are made to be shared between game nights.</span>
         </div>
         <div class="meta-chip">
           <strong>Stays useful quietly</strong>
-          <span>Watch, Later, Capture, Remind, and AFK stay compact while Shield stays optional for admins.</span>
+          <span>Watch, Later, Capture, Remind, and AFK stay compact while admins get lightweight safety controls when needed.</span>
         </div>
       </div>
     </div>
