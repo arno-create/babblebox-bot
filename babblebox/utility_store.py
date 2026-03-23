@@ -20,8 +20,9 @@ class UtilityStorageUnavailable(RuntimeError):
 
 def default_utility_state() -> dict[str, Any]:
     return {
-        "version": 4,
+        "version": 5,
         "watch": {},
+        "return_watches": {},
         "later": {},
         "reminders": {},
         "afk": {},
@@ -101,7 +102,7 @@ class _BaseUtilityStore:
             return normalized
 
         version = payload.get("version")
-        normalized["version"] = version if isinstance(version, int) and version > 0 else 4
+        normalized["version"] = version if isinstance(version, int) and version > 0 else 5
 
         watch = payload.get("watch")
         if isinstance(watch, dict):
@@ -160,6 +161,8 @@ class _BaseUtilityStore:
                         "keywords": keywords,
                     }
             normalized["watch"] = cleaned_watch
+
+        normalized["return_watches"] = self._normalize_return_watches(payload.get("return_watches"))
 
         for section in ("later", "reminders"):
             value = payload.get(section)
@@ -271,6 +274,39 @@ class _BaseUtilityStore:
             }
         return cleaned
 
+    def _normalize_return_watches(self, payload: Any) -> dict[str, Any]:
+        cleaned: dict[str, Any] = {}
+        if not isinstance(payload, dict):
+            return cleaned
+        for watch_id, record in payload.items():
+            if not isinstance(record, dict) or not isinstance(watch_id, str) or not watch_id.strip():
+                continue
+            try:
+                watcher_user_id = int(record.get("watcher_user_id"))
+                guild_id = int(record.get("guild_id"))
+                target_id = int(record.get("target_id"))
+            except (TypeError, ValueError):
+                continue
+            target_type = str(record.get("target_type") or "").strip().casefold()
+            if target_type not in {"user", "channel"}:
+                continue
+            created_at = self._serialize_datetime(self._parse_iso_datetime(record.get("created_at")))
+            expires_at = self._serialize_datetime(self._parse_iso_datetime(record.get("expires_at")))
+            if created_at is None or expires_at is None:
+                continue
+            created_from = record.get("created_from")
+            cleaned[watch_id] = {
+                "id": watch_id,
+                "watcher_user_id": watcher_user_id,
+                "guild_id": guild_id,
+                "target_type": target_type,
+                "target_id": target_id,
+                "created_at": created_at,
+                "expires_at": expires_at,
+                "created_from": created_from.strip() if isinstance(created_from, str) and created_from.strip() else None,
+            }
+        return cleaned
+
 
 class _MemoryUtilityStore(_BaseUtilityStore):
     backend_name = "memory"
@@ -354,6 +390,10 @@ class _PostgresUtilityStore(_BaseUtilityStore):
             "CREATE TABLE IF NOT EXISTS utility_meta (key TEXT PRIMARY KEY, value JSONB NOT NULL DEFAULT '{}'::jsonb, updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc', now()))",
             "CREATE TABLE IF NOT EXISTS utility_watch_configs (user_id BIGINT PRIMARY KEY, mention_global BOOLEAN NOT NULL DEFAULT FALSE, mention_guild_ids JSONB NOT NULL DEFAULT '[]'::jsonb, updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc', now()))",
             "CREATE TABLE IF NOT EXISTS utility_watch_keywords (id BIGSERIAL PRIMARY KEY, user_id BIGINT NOT NULL REFERENCES utility_watch_configs(user_id) ON DELETE CASCADE, guild_id BIGINT NULL, phrase TEXT NOT NULL, mode TEXT NOT NULL, created_at TIMESTAMPTZ NULL)",
+            "CREATE TABLE IF NOT EXISTS utility_return_watches (id TEXT PRIMARY KEY, watcher_user_id BIGINT NOT NULL, guild_id BIGINT NOT NULL, target_type TEXT NOT NULL, target_id BIGINT NOT NULL, created_at TIMESTAMPTZ NOT NULL, expires_at TIMESTAMPTZ NOT NULL, created_from TEXT NULL)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_utility_return_watches_dedupe ON utility_return_watches (watcher_user_id, guild_id, target_type, target_id)",
+            "CREATE INDEX IF NOT EXISTS ix_utility_return_watches_target ON utility_return_watches (guild_id, target_type, target_id)",
+            "CREATE INDEX IF NOT EXISTS ix_utility_return_watches_expires_at ON utility_return_watches (expires_at)",
             "CREATE TABLE IF NOT EXISTS utility_later_markers (user_id BIGINT NOT NULL, guild_id BIGINT NOT NULL, guild_name TEXT NOT NULL, channel_id BIGINT NOT NULL, channel_name TEXT NOT NULL, message_id BIGINT NOT NULL, message_jump_url TEXT NOT NULL, message_created_at TIMESTAMPTZ NULL, saved_at TIMESTAMPTZ NULL, author_name TEXT NOT NULL, author_id BIGINT NOT NULL, preview TEXT NOT NULL, PRIMARY KEY (user_id, channel_id))",
             "CREATE INDEX IF NOT EXISTS ix_utility_later_markers_user ON utility_later_markers (user_id)",
             "CREATE TABLE IF NOT EXISTS utility_reminders (id TEXT PRIMARY KEY, user_id BIGINT NOT NULL, text TEXT NOT NULL, delivery TEXT NOT NULL, created_at TIMESTAMPTZ NULL, due_at TIMESTAMPTZ NULL, guild_id BIGINT NULL, guild_name TEXT NULL, channel_id BIGINT NULL, channel_name TEXT NULL, origin_jump_url TEXT NULL)",
@@ -436,7 +476,8 @@ class _PostgresUtilityStore(_BaseUtilityStore):
                 "UNION ALL SELECT 1 FROM utility_reminders "
                 "UNION ALL SELECT 1 FROM utility_afk "
                 "UNION ALL SELECT 1 FROM utility_afk_settings "
-                "UNION ALL SELECT 1 FROM utility_afk_schedules"
+                "UNION ALL SELECT 1 FROM utility_afk_schedules "
+                "UNION ALL SELECT 1 FROM utility_return_watches"
                 ")"
             )
             if has_rows:
@@ -508,6 +549,9 @@ class _PostgresUtilityStore(_BaseUtilityStore):
             keyword_rows = await conn.fetch(
                 "SELECT user_id, guild_id, channel_id, phrase, mode, created_at FROM utility_watch_keywords ORDER BY id ASC"
             )
+            return_watch_rows = await conn.fetch(
+                "SELECT id, watcher_user_id, guild_id, target_type, target_id, created_at, expires_at, created_from FROM utility_return_watches"
+            )
             later_rows = await conn.fetch("SELECT user_id, guild_id, guild_name, channel_id, channel_name, message_id, message_jump_url, message_created_at, saved_at, author_name, author_id, preview FROM utility_later_markers")
             reminder_rows = await conn.fetch("SELECT id, user_id, text, delivery, created_at, due_at, guild_id, guild_name, channel_id, channel_name, origin_jump_url FROM utility_reminders")
             afk_rows = await conn.fetch("SELECT user_id, status, reason, preset, created_at, set_at, starts_at, ends_at, schedule_id, occurrence_at FROM utility_afk")
@@ -539,6 +583,17 @@ class _PostgresUtilityStore(_BaseUtilityStore):
                     "created_at": self._serialize_datetime(row["created_at"]),
                 }
             )
+        for row in return_watch_rows:
+            loaded["return_watches"][row["id"]] = {
+                "id": row["id"],
+                "watcher_user_id": row["watcher_user_id"],
+                "guild_id": row["guild_id"],
+                "target_type": row["target_type"],
+                "target_id": row["target_id"],
+                "created_at": self._serialize_datetime(row["created_at"]),
+                "expires_at": self._serialize_datetime(row["expires_at"]),
+                "created_from": row["created_from"],
+            }
         for row in later_rows:
             loaded["later"].setdefault(str(row["user_id"]), {})[str(row["channel_id"])] = {"user_id": row["user_id"], "guild_id": row["guild_id"], "guild_name": row["guild_name"], "channel_id": row["channel_id"], "channel_name": row["channel_name"], "message_id": row["message_id"], "message_jump_url": row["message_jump_url"], "message_created_at": self._serialize_datetime(row["message_created_at"]), "saved_at": self._serialize_datetime(row["saved_at"]), "author_name": row["author_name"], "author_id": row["author_id"], "preview": row["preview"]}
         for row in reminder_rows:
@@ -578,7 +633,7 @@ class _PostgresUtilityStore(_BaseUtilityStore):
     async def _flush_snapshot(self, snapshot: dict[str, Any]):
         changed_sections = [
             section
-            for section in ("watch", "later", "reminders", "afk", "afk_settings", "afk_schedules")
+            for section in ("watch", "return_watches", "later", "reminders", "afk", "afk_settings", "afk_schedules")
             if snapshot.get(section) != self._last_flushed_state.get(section)
         ]
         if not changed_sections:
@@ -587,6 +642,8 @@ class _PostgresUtilityStore(_BaseUtilityStore):
             async with conn.transaction():
                 if "watch" in changed_sections:
                     await self._replace_watch_data(conn, snapshot.get("watch", {}))
+                if "return_watches" in changed_sections:
+                    await self._replace_return_watches_data(conn, snapshot.get("return_watches", {}))
                 if "later" in changed_sections:
                     await self._replace_later_data(conn, snapshot.get("later", {}))
                 if "reminders" in changed_sections:
@@ -600,6 +657,7 @@ class _PostgresUtilityStore(_BaseUtilityStore):
 
     async def _replace_all_data(self, conn, state: dict[str, Any]):
         await self._replace_watch_data(conn, state.get("watch", {}))
+        await self._replace_return_watches_data(conn, state.get("return_watches", {}))
         await self._replace_later_data(conn, state.get("later", {}))
         await self._replace_reminders_data(conn, state.get("reminders", {}))
         await self._replace_afk_data(conn, state.get("afk", {}))
@@ -648,6 +706,31 @@ class _PostgresUtilityStore(_BaseUtilityStore):
             await conn.executemany(
                 "INSERT INTO utility_watch_keywords (user_id, guild_id, channel_id, phrase, mode, created_at) VALUES ($1, $2, $3, $4, $5, $6)",
                 keyword_rows,
+            )
+
+    async def _replace_return_watches_data(self, conn, return_watch_state: dict[str, Any]):
+        await conn.execute("DELETE FROM utility_return_watches")
+        rows = []
+        for watch_id, record in return_watch_state.items():
+            if not isinstance(record, dict):
+                continue
+            rows.append(
+                (
+                    watch_id,
+                    record.get("watcher_user_id"),
+                    record.get("guild_id"),
+                    record.get("target_type"),
+                    record.get("target_id"),
+                    self._parse_iso_datetime(record.get("created_at")),
+                    self._parse_iso_datetime(record.get("expires_at")),
+                    record.get("created_from"),
+                )
+            )
+        if rows:
+            await conn.executemany(
+                "INSERT INTO utility_return_watches (id, watcher_user_id, guild_id, target_type, target_id, created_at, expires_at, created_from) "
+                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8)",
+                rows,
             )
 
     async def _replace_later_data(self, conn, later_state: dict[str, Any]):

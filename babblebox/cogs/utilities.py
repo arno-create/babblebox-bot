@@ -42,6 +42,126 @@ LATER_CLEAR_CHOICES = [
 ]
 CAPTURE_REQUIRED_PERMS = ("view_channel", "read_message_history", "send_messages", "embed_links")
 LATER_REQUIRED_PERMS = ("view_channel", "read_message_history", "send_messages", "embed_links")
+RETURN_WATCH_DURATION_SECONDS = {
+    "1h": 3600,
+    "6h": 6 * 3600,
+    "24h": 24 * 3600,
+}
+RETURN_WATCH_DURATION_CHOICES = [
+    app_commands.Choice(name="1 hour", value="1h"),
+    app_commands.Choice(name="6 hours", value="6h"),
+    app_commands.Choice(name="24 hours", value="24h"),
+]
+
+
+class AfkReturnWatchDurationSelect(discord.ui.Select):
+    def __init__(self, cog: "UtilityCog", *, guild_id: int, target_user_id: int, target_name: str):
+        super().__init__(
+            placeholder="Keep this return ping for...",
+            min_values=1,
+            max_values=1,
+            options=[
+                discord.SelectOption(label="1 hour", value="1h", description="Quiet one-shot ping"),
+                discord.SelectOption(label="6 hours", value="6h", description="Good for the rest of the day"),
+                discord.SelectOption(label="24 hours", value="24h", description="Longest V1 window"),
+            ],
+        )
+        self.cog = cog
+        self.guild_id = guild_id
+        self.target_user_id = target_user_id
+        self.target_name = target_name
+
+    async def callback(self, interaction: discord.Interaction):
+        guild = interaction.guild or interaction.client.get_guild(self.guild_id)
+        watcher = guild.get_member(interaction.user.id) if guild is not None else None
+        target = guild.get_member(self.target_user_id) if guild is not None else None
+        if watcher is None or target is None:
+            await interaction.response.edit_message(
+                embed=ge.make_status_embed(
+                    "Return Ping Unavailable",
+                    "I couldn't confirm that alert safely in this server anymore.",
+                    tone="warning",
+                    footer="Babblebox Watch",
+                ),
+                view=None,
+            )
+            return
+        ok, message = await self.cog._create_user_return_watch(
+            watcher=watcher,
+            guild=guild,
+            target=target,
+            duration_key=self.values[0],
+            created_from="afk_button",
+        )
+        await interaction.response.edit_message(
+            embed=ge.make_status_embed(
+                "Return Ping Ready" if ok else "Return Ping Unavailable",
+                message,
+                tone="success" if ok else "warning",
+                footer="Babblebox Watch",
+            ),
+            view=None,
+        )
+
+
+class AfkReturnWatchDurationView(discord.ui.View):
+    def __init__(self, cog: "UtilityCog", *, guild_id: int, target_user_id: int, target_name: str):
+        super().__init__(timeout=60)
+        self.add_item(
+            AfkReturnWatchDurationSelect(
+                cog,
+                guild_id=guild_id,
+                target_user_id=target_user_id,
+                target_name=target_name,
+            )
+        )
+
+
+class AfkReturnWatchButton(discord.ui.Button):
+    def __init__(self, cog: "UtilityCog", *, guild_id: int, target_user_id: int):
+        super().__init__(
+            label="Notify me when they're back",
+            style=discord.ButtonStyle.secondary,
+        )
+        self.cog = cog
+        self.guild_id = guild_id
+        self.target_user_id = target_user_id
+
+    async def callback(self, interaction: discord.Interaction):
+        guild = interaction.guild or interaction.client.get_guild(self.guild_id)
+        target = guild.get_member(self.target_user_id) if guild is not None else None
+        if target is None:
+            await interaction.response.send_message(
+                embed=ge.make_status_embed(
+                    "Return Ping Unavailable",
+                    "I couldn't find that person in this server anymore.",
+                    tone="warning",
+                    footer="Babblebox Watch",
+                ),
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_message(
+            embed=ge.make_status_embed(
+                "Return Ping",
+                f"I'll keep a quiet one-shot alert ready for **{ge.display_name_of(target)}**. Pick how long it should stay active.",
+                tone="info",
+                footer="Babblebox Watch",
+            ),
+            view=AfkReturnWatchDurationView(
+                self.cog,
+                guild_id=self.guild_id,
+                target_user_id=self.target_user_id,
+                target_name=ge.display_name_of(target),
+            ),
+            ephemeral=True,
+        )
+
+
+class AfkReturnWatchView(discord.ui.View):
+    def __init__(self, cog: "UtilityCog", *, guild_id: int, target_user_id: int):
+        super().__init__(timeout=30)
+        self.add_item(AfkReturnWatchButton(cog, guild_id=guild_id, target_user_id=target_user_id))
 
 
 class UtilityCog(commands.Cog):
@@ -117,6 +237,90 @@ class UtilityCog(commands.Cog):
 
     def _watch_channel_id(self, channel) -> int | None:
         return channel.id if isinstance(channel, (discord.TextChannel, discord.Thread)) else None
+
+    def _parse_return_watch_duration(self, raw: str) -> tuple[bool, int | str]:
+        duration_seconds = RETURN_WATCH_DURATION_SECONDS.get(str(raw or "").strip().lower())
+        if duration_seconds is None:
+            return False, "Pick 1 hour, 6 hours, or 24 hours for this alert."
+        return True, duration_seconds
+
+    def _return_watch_duration_text(self, duration_seconds: int) -> str:
+        if duration_seconds == 3600:
+            return "1 hour"
+        if duration_seconds == 6 * 3600:
+            return "6 hours"
+        if duration_seconds == 24 * 3600:
+            return "24 hours"
+        return f"{duration_seconds // 3600} hours"
+
+    async def _create_user_return_watch(
+        self,
+        *,
+        watcher: discord.abc.User,
+        guild: discord.Guild | None,
+        target: discord.abc.User,
+        duration_key: str,
+        created_from: str,
+    ) -> tuple[bool, str]:
+        if guild is None:
+            return False, "User return pings only work inside a server."
+        if target.id == watcher.id:
+            return False, "I'll only ping you when someone else speaks again."
+        if target.bot:
+            return False, "Bots don't need a return ping."
+        ok, duration_or_error = self._parse_return_watch_duration(duration_key)
+        if not ok:
+            return False, str(duration_or_error)
+        duration_seconds = int(duration_or_error)
+        ok, record_or_error, refreshed = await self.service.upsert_return_watch(
+            watcher_user_id=watcher.id,
+            guild_id=guild.id,
+            target_type="user",
+            target_id=target.id,
+            duration_seconds=duration_seconds,
+            created_from=created_from,
+        )
+        if not ok:
+            return False, str(record_or_error)
+        duration_text = self._return_watch_duration_text(duration_seconds)
+        if refreshed:
+            return True, f"I'll keep that return ping for **{ge.display_name_of(target)}** active for another {duration_text}."
+        return True, f"I'll DM you when **{ge.display_name_of(target)}** sends their next message in this server. This return ping expires in {duration_text}."
+
+    async def _create_channel_return_watch(
+        self,
+        *,
+        watcher: discord.Member,
+        channel: discord.TextChannel | discord.Thread | None,
+        duration_key: str,
+        created_from: str,
+    ) -> tuple[bool, str]:
+        if channel is None:
+            return False, "Channel alerts only work in server text channels and threads."
+        perms = channel.permissions_for(watcher)
+        if not (perms.view_channel and perms.read_message_history):
+            return False, "You need access to that channel before I can keep a private alert for it."
+        ok, duration_or_error = self._parse_return_watch_duration(duration_key)
+        if not ok:
+            return False, str(duration_or_error)
+        duration_seconds = int(duration_or_error)
+        ok, record_or_error, refreshed = await self.service.upsert_return_watch(
+            watcher_user_id=watcher.id,
+            guild_id=channel.guild.id,
+            target_type="channel",
+            target_id=channel.id,
+            duration_seconds=duration_seconds,
+            created_from=created_from,
+        )
+        if not ok:
+            return False, str(record_or_error)
+        duration_text = self._return_watch_duration_text(duration_seconds)
+        if refreshed:
+            return True, f"I'll keep that channel alert for {channel.mention} active for another {duration_text}."
+        return True, f"I'll DM you when {channel.mention} gets its next message. This alert expires in {duration_text}."
+
+    def build_afk_return_watch_view(self, *, guild_id: int, target_user_id: int) -> discord.ui.View:
+        return AfkReturnWatchView(self, guild_id=guild_id, target_user_id=target_user_id)
 
     def _render_watch_keywords(self, items: list[dict]) -> str:
         if not items:
@@ -590,7 +794,7 @@ class UtilityCog(commands.Cog):
     @commands.hybrid_group(
         name="watch",
         with_app_command=True,
-        description="Configure mention, reply, and keyword DM alerts",
+        description="Set quiet one-shot alerts plus mention, reply, and keyword DMs",
         invoke_without_command=True,
     )
     async def watch_group(self, ctx: commands.Context):
@@ -634,6 +838,59 @@ class UtilityCog(commands.Cog):
         await self._send_private_embed(
             ctx,
             embed=ge.make_status_embed("Watch Mentions", message, tone=tone, footer="Babblebox Watch"),
+        )
+
+    @watch_group.command(name="user", with_app_command=True, description="Ping me when someone's next message comes through")
+    @app_commands.describe(user="The person to quietly ping you about", duration="How long this one-shot alert should stay active")
+    @app_commands.choices(duration=RETURN_WATCH_DURATION_CHOICES)
+    async def watch_user_command(self, ctx: commands.Context, user: discord.Member, duration: str = "6h"):
+        if not await self._require_storage(ctx, "Watch"):
+            return
+        ok, message = await self._create_user_return_watch(
+            watcher=ctx.author,
+            guild=ctx.guild,
+            target=user,
+            duration_key=duration,
+            created_from="slash_command",
+        )
+        await self._send_private_embed(
+            ctx,
+            embed=ge.make_status_embed(
+                "Return Ping Ready" if ok else "Return Ping Unavailable",
+                message,
+                tone="success" if ok else "warning",
+                footer="Babblebox Watch",
+            ),
+        )
+
+    @watch_group.command(name="channel", with_app_command=True, description="Alert me when this channel is active again")
+    @app_commands.describe(channel="Leave blank to use this channel", duration="How long this one-shot alert should stay active")
+    @app_commands.choices(duration=RETURN_WATCH_DURATION_CHOICES)
+    async def watch_channel_command(
+        self,
+        ctx: commands.Context,
+        channel: Optional[discord.TextChannel] = None,
+        duration: str = "6h",
+    ):
+        if not await self._require_storage(ctx, "Watch"):
+            return
+        target_channel = channel
+        if target_channel is None and isinstance(ctx.channel, (discord.TextChannel, discord.Thread)):
+            target_channel = ctx.channel
+        ok, message = await self._create_channel_return_watch(
+            watcher=ctx.author,
+            channel=target_channel,
+            duration_key=duration,
+            created_from="slash_command",
+        )
+        await self._send_private_embed(
+            ctx,
+            embed=ge.make_status_embed(
+                "Channel Alert Ready" if ok else "Channel Alert Unavailable",
+                message,
+                tone="success" if ok else "warning",
+                footer="Babblebox Watch",
+            ),
         )
 
     @watch_group.group(name="keyword", with_app_command=True, invoke_without_command=True, description="Manage keyword alerts")

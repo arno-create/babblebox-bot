@@ -12,7 +12,7 @@ from babblebox.cogs.gameplay import GameplayCog
 from babblebox.cogs.identity import IdentityCog
 from babblebox.cogs.meta import MetaCog
 from babblebox.cogs.shield import ShieldCog
-from babblebox.cogs.utilities import UtilityCog
+from babblebox.cogs.utilities import AfkReturnWatchDurationSelect, UtilityCog
 from babblebox.profile_service import ProfileService
 from babblebox.profile_store import ProfileStore
 
@@ -24,16 +24,28 @@ class FakeMessage:
 class FakeResponse:
     def __init__(self):
         self._done = False
+        self.send_calls = []
+        self.edit_calls = []
 
     def is_done(self):
         return self._done
 
+    async def send_message(self, *args, **kwargs):
+        self._done = True
+        self.send_calls.append((args, kwargs))
+
+    async def edit_message(self, *args, **kwargs):
+        self._done = True
+        self.edit_calls.append((args, kwargs))
+
 
 class FakeInteraction:
-    def __init__(self, *, expired: bool = False):
+    def __init__(self, *, expired: bool = False, user=None, guild=None, client=None):
         self.response = FakeResponse()
         self._expired = expired
-        self.user = FakeAuthor()
+        self.user = user or FakeAuthor()
+        self.guild = guild
+        self.client = client or types.SimpleNamespace(get_guild=lambda guild_id: guild)
 
     def is_expired(self):
         return self._expired
@@ -54,16 +66,25 @@ class FakeAuthor:
 
 
 class FakeGuild:
-    def __init__(self, guild_id: int = 10):
+    def __init__(self, guild_id: int = 10, *, members=None):
         self.id = guild_id
         self.name = "Guild"
+        self._members = {member.id: member for member in (members or [])}
+
+    def get_member(self, user_id: int):
+        return self._members.get(user_id)
 
 
 class FakeChannel:
-    def __init__(self, channel_id: int = 20):
+    def __init__(self, channel_id: int = 20, *, allowed_user_ids=None):
         self.id = channel_id
         self.name = "general"
         self.mention = "#general"
+        self._allowed_user_ids = set(allowed_user_ids or set())
+
+    def permissions_for(self, member):
+        allowed = not self._allowed_user_ids or getattr(member, "id", None) in self._allowed_user_ids
+        return types.SimpleNamespace(view_channel=allowed, read_message_history=allowed)
 
 
 class ShieldPermissionSnapshot:
@@ -207,6 +228,69 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(ctx.defer_calls), 1)
             self.assertEqual(len(ctx.send_calls), 1)
             self.assertTrue(ctx.send_calls[0]["ephemeral"])
+        finally:
+            await cog.service.close()
+
+    async def test_watch_user_rejects_self_watch_privately(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
+        cog = UtilityCog(bot)
+        try:
+            cog.service.storage_ready = True
+            author = FakeAuthor(user_id=7)
+            guild = FakeGuild(members=[author])
+            ctx = FakeContext(interaction=FakeInteraction(user=author, guild=guild), guild=guild, channel=FakeChannel(), author=author)
+
+            await UtilityCog.watch_user_command.callback(cog, ctx, author, "6h")
+
+            self.assertEqual(len(ctx.send_calls), 1)
+            self.assertTrue(ctx.send_calls[0]["ephemeral"])
+            self.assertIn("someone else", ctx.send_calls[0]["embed"].description.lower())
+        finally:
+            await cog.service.close()
+
+    async def test_watch_user_rejects_bot_target_privately(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
+        cog = UtilityCog(bot)
+        try:
+            cog.service.storage_ready = True
+            author = FakeAuthor(user_id=7)
+            bot_target = types.SimpleNamespace(id=8, bot=True, display_name="Reminder Bot", mention="<@8>")
+            guild = FakeGuild(members=[author])
+            ctx = FakeContext(interaction=FakeInteraction(user=author, guild=guild), guild=guild, channel=FakeChannel(), author=author)
+
+            await UtilityCog.watch_user_command.callback(cog, ctx, bot_target, "6h")
+
+            self.assertEqual(len(ctx.send_calls), 1)
+            self.assertTrue(ctx.send_calls[0]["ephemeral"])
+            self.assertIn("bots", ctx.send_calls[0]["embed"].description.lower())
+        finally:
+            await cog.service.close()
+
+    async def test_afk_return_duration_select_creates_user_watch(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
+        cog = UtilityCog(bot)
+        try:
+            cog.service.storage_ready = True
+            watcher = FakeAuthor(user_id=11)
+            target = FakeAuthor(user_id=12)
+            target.bot = False
+            guild = FakeGuild(10, members=[watcher, target])
+            interaction = FakeInteraction(
+                user=watcher,
+                guild=guild,
+                client=types.SimpleNamespace(get_guild=lambda guild_id: guild),
+            )
+            select = AfkReturnWatchDurationSelect(cog, guild_id=guild.id, target_user_id=target.id, target_name=target.display_name)
+            select._values = ["6h"]
+
+            await select.callback(interaction)
+
+            self.assertEqual(len(interaction.response.edit_calls), 1)
+            self.assertEqual(len(cog.service.store.state["return_watches"]), 1)
+            record = next(iter(cog.service.store.state["return_watches"].values()))
+            self.assertEqual(record["watcher_user_id"], watcher.id)
+            self.assertEqual(record["target_type"], "user")
+            self.assertEqual(record["target_id"], target.id)
         finally:
             await cog.service.close()
 
