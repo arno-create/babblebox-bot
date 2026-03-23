@@ -225,13 +225,20 @@ Admin lifecycle commands are private/admin-facing by default. The streamlined su
 
 | Slash | Prefix | Purpose |
 | --- | --- | --- |
-| `/daily` | `bb!daily` | Open today's arcade overview |
-| `/daily play <guess>` | `bb!daily play <guess>` | Play the default Shuffle Booth |
+| `/daily` | `bb!daily` | Open today's public-friendly arcade overview |
+| `/daily play <guess>` | `bb!daily play <guess>` | Open or play the default Shuffle Booth |
 | `/daily play emoji <guess>` | `bb!daily play emoji <guess>` | Play Emoji Booth |
 | `/daily play signal <guess>` | `bb!daily play signal <guess>` | Play Signal Booth |
-| `/daily stats` | `bb!daily stats` | View arcade streaks and recent runs |
+| `/daily stats` | `bb!daily stats` | View compact arcade streaks and recent runs |
 | `/daily share` | `bb!daily share` | Share a completed booth result |
 | `/daily leaderboard` | `bb!daily leaderboard` | View arcade standings |
+
+Daily visibility notes:
+
+- `/daily`, `/daily play`, and `/daily stats` now default to public showable cards
+- choose `visibility: private` whenever you want the old only-you flow
+- cooldowns only apply to real public cards; storage errors, validation issues, state mismatches, and cooldown warnings stay private
+- public Daily cards stay spoiler-safe and do not reveal failed answers in-channel
 
 ### Buddy / Profile / Vault
 
@@ -266,7 +273,7 @@ Important rules:
 
 Babblebox now treats visibility more intentionally:
 
-- public by default for `/help`, `/profile`, `/buddy`, `/daily share`, and `/daily leaderboard`
+- public by default for `/help`, `/profile`, `/buddy`, `/daily`, `/daily play`, `/daily stats`, `/daily share`, and `/daily leaderboard`
 - public-friendly card outputs keep light user/channel cooldowns to avoid spam
 - private by default for Watch setup, reminders, Later, Capture, Shield config, and other sensitive utilities
 - if a command exposes a `visibility` option, public mode now routes through a real visible channel response instead of silently collapsing to only-you

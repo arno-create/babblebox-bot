@@ -62,7 +62,8 @@ HELP_PAGES: list[dict[str, str]] = [
         "body": (
             "`/daily` opens Shuffle, Emoji, and Signal.\n"
             "`/daily play <guess>` still defaults to Shuffle Booth.\n"
-            "`/daily share` and `/daily leaderboard` are built to be shown in-channel."
+            "`/daily`, `/daily play`, `/daily stats`, `/daily share`, and `/daily leaderboard` all lean public by default.\n"
+            "Public Daily cards stay spoiler-safe, while warnings and storage issues stay private."
         ),
         "try": "`/daily`, `/daily stats`, `/daily share`",
     },

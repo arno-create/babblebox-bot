@@ -321,9 +321,219 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
 
             await IdentityCog.daily_group.callback(cog, ctx)
 
-            self.assertEqual(len(ctx.defer_calls), 1)
+            self.assertEqual(ctx.defer_calls, [])
+            self.assertEqual(len(ctx.send_calls), 1)
+            self.assertFalse(ctx.send_calls[0]["ephemeral"])
+        finally:
+            await cog.service.close()
+
+    async def test_daily_group_private_stays_ephemeral(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop(), get_user=lambda user_id: None)
+        cog = IdentityCog(bot)
+        memory_service = ProfileService(bot, store=ProfileStore(backend="memory"))
+        try:
+            await memory_service.start()
+            cog.service = memory_service
+            ctx = FakeContext(interaction=FakeInteraction(), guild=FakeGuild(), channel=FakeChannel(), author=FakeAuthor())
+
+            await IdentityCog.daily_group.callback(cog, ctx, mode=None, visibility="private")
+
+            self.assertEqual(ctx.defer_calls, [])
             self.assertEqual(len(ctx.send_calls), 1)
             self.assertTrue(ctx.send_calls[0]["ephemeral"])
+        finally:
+            await cog.service.close()
+
+    async def test_daily_group_storage_unavailable_stays_private(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop(), get_user=lambda user_id: None)
+        cog = IdentityCog(bot)
+        try:
+            cog.service.storage_ready = False
+            ctx = FakeContext(interaction=FakeInteraction(), guild=FakeGuild(), channel=FakeChannel(), author=FakeAuthor())
+
+            await IdentityCog.daily_group.callback(cog, ctx, mode=None, visibility="public")
+
+            self.assertEqual(ctx.defer_calls, [])
+            self.assertEqual(len(ctx.send_calls), 1)
+            self.assertTrue(ctx.send_calls[0]["ephemeral"])
+        finally:
+            await cog.service.close()
+
+    async def test_daily_play_open_state_public_default_is_non_ephemeral(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop(), get_user=lambda user_id: None)
+        cog = IdentityCog(bot)
+        memory_service = ProfileService(bot, store=ProfileStore(backend="memory"))
+        try:
+            await memory_service.start()
+            cog.service = memory_service
+            ctx = FakeContext(interaction=FakeInteraction(), guild=FakeGuild(), channel=FakeChannel(), author=FakeAuthor())
+
+            await IdentityCog.daily_play_command.callback(cog, ctx, mode="emoji", guess=None, visibility="public")
+
+            self.assertEqual(ctx.defer_calls, [])
+            self.assertEqual(len(ctx.send_calls), 1)
+            self.assertFalse(ctx.send_calls[0]["ephemeral"])
+        finally:
+            await cog.service.close()
+
+    async def test_daily_play_open_state_private_is_ephemeral(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop(), get_user=lambda user_id: None)
+        cog = IdentityCog(bot)
+        memory_service = ProfileService(bot, store=ProfileStore(backend="memory"))
+        try:
+            await memory_service.start()
+            cog.service = memory_service
+            ctx = FakeContext(interaction=FakeInteraction(), guild=FakeGuild(), channel=FakeChannel(), author=FakeAuthor())
+
+            await IdentityCog.daily_play_command.callback(cog, ctx, mode="emoji", guess=None, visibility="private")
+
+            self.assertEqual(len(ctx.send_calls), 1)
+            self.assertTrue(ctx.send_calls[0]["ephemeral"])
+        finally:
+            await cog.service.close()
+
+    async def test_daily_play_success_public_default_is_non_ephemeral(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop(), get_user=lambda user_id: None)
+        cog = IdentityCog(bot)
+        memory_service = ProfileService(bot, store=ProfileStore(backend="memory"))
+        try:
+            await memory_service.start()
+            cog.service = memory_service
+            status = await cog.service.get_daily_status(1)
+            answer = status["puzzles"]["shuffle"].answer
+            ctx = FakeContext(interaction=FakeInteraction(), guild=FakeGuild(), channel=FakeChannel(), author=FakeAuthor())
+
+            await IdentityCog.daily_play_command.callback(cog, ctx, mode="shuffle", guess=answer, visibility="public")
+
+            self.assertEqual(len(ctx.send_calls), 1)
+            self.assertFalse(ctx.send_calls[0]["ephemeral"])
+        finally:
+            await cog.service.close()
+
+    async def test_daily_play_prefix_guess_still_defaults_to_shuffle(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop(), get_user=lambda user_id: None)
+        cog = IdentityCog(bot)
+        memory_service = ProfileService(bot, store=ProfileStore(backend="memory"))
+        try:
+            await memory_service.start()
+            cog.service = memory_service
+            status = await cog.service.get_daily_status(1)
+            answer = status["puzzles"]["shuffle"].answer
+            ctx = FakeContext(guild=FakeGuild(), channel=FakeChannel(), author=FakeAuthor())
+
+            await IdentityCog.daily_play_command.callback(cog, ctx, mode=answer, guess=None, visibility="public")
+
+            self.assertEqual(ctx.defer_calls, [])
+            self.assertEqual(len(ctx.send_calls), 1)
+            self.assertFalse(ctx.send_calls[0]["ephemeral"])
+        finally:
+            await cog.service.close()
+
+    async def test_daily_play_retry_warning_stays_private_even_when_public_requested(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop(), get_user=lambda user_id: None)
+        cog = IdentityCog(bot)
+        memory_service = ProfileService(bot, store=ProfileStore(backend="memory"))
+        try:
+            await memory_service.start()
+            cog.service = memory_service
+            ctx = FakeContext(interaction=FakeInteraction(), guild=FakeGuild(), channel=FakeChannel(), author=FakeAuthor())
+
+            await IdentityCog.daily_play_command.callback(cog, ctx, mode="shuffle", guess="wrong", visibility="public")
+
+            self.assertEqual(len(ctx.send_calls), 1)
+            self.assertTrue(ctx.send_calls[0]["ephemeral"])
+        finally:
+            await cog.service.close()
+
+    async def test_daily_play_final_failed_result_can_be_public_without_spoiler(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop(), get_user=lambda user_id: None)
+        cog = IdentityCog(bot)
+        memory_service = ProfileService(bot, store=ProfileStore(backend="memory"))
+        try:
+            await memory_service.start()
+            cog.service = memory_service
+            status = await cog.service.get_daily_status(1)
+            answer = status["puzzle"].answer.upper()
+            ctx = FakeContext(interaction=FakeInteraction(), guild=FakeGuild(), channel=FakeChannel(), author=FakeAuthor())
+
+            await IdentityCog.daily_play_command.callback(cog, ctx, mode="shuffle", guess="wrong one", visibility="public")
+            await IdentityCog.daily_play_command.callback(cog, ctx, mode="shuffle", guess="wrong two", visibility="public")
+            await IdentityCog.daily_play_command.callback(cog, ctx, mode="shuffle", guess="wrong three", visibility="public")
+
+            self.assertEqual(len(ctx.send_calls), 3)
+            self.assertFalse(ctx.send_calls[2]["ephemeral"])
+            self.assertNotIn(answer, ctx.send_calls[2]["embed"].description)
+        finally:
+            await cog.service.close()
+
+    async def test_daily_stats_public_default_is_non_ephemeral(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop(), get_user=lambda user_id: None)
+        cog = IdentityCog(bot)
+        memory_service = ProfileService(bot, store=ProfileStore(backend="memory"))
+        try:
+            await memory_service.start()
+            cog.service = memory_service
+            ctx = FakeContext(interaction=FakeInteraction(), guild=FakeGuild(), channel=FakeChannel(), author=FakeAuthor())
+
+            await IdentityCog.daily_stats_command.callback(cog, ctx, user=None, visibility="public")
+
+            self.assertEqual(len(ctx.send_calls), 1)
+            self.assertFalse(ctx.send_calls[0]["ephemeral"])
+        finally:
+            await cog.service.close()
+
+    async def test_daily_stats_private_is_ephemeral(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop(), get_user=lambda user_id: None)
+        cog = IdentityCog(bot)
+        memory_service = ProfileService(bot, store=ProfileStore(backend="memory"))
+        try:
+            await memory_service.start()
+            cog.service = memory_service
+            ctx = FakeContext(interaction=FakeInteraction(), guild=FakeGuild(), channel=FakeChannel(), author=FakeAuthor())
+
+            await IdentityCog.daily_stats_command.callback(cog, ctx, user=None, visibility="private")
+
+            self.assertEqual(len(ctx.send_calls), 1)
+            self.assertTrue(ctx.send_calls[0]["ephemeral"])
+        finally:
+            await cog.service.close()
+
+    async def test_daily_public_panel_cooldown_stays_private(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop(), get_user=lambda user_id: None)
+        cog = IdentityCog(bot)
+        memory_service = ProfileService(bot, store=ProfileStore(backend="memory"))
+        try:
+            await memory_service.start()
+            cog.service = memory_service
+            ctx_one = FakeContext(interaction=FakeInteraction(), guild=FakeGuild(), channel=FakeChannel(), author=FakeAuthor())
+            ctx_two = FakeContext(interaction=FakeInteraction(), guild=ctx_one.guild, channel=ctx_one.channel, author=ctx_one.author)
+
+            await IdentityCog.daily_group.callback(cog, ctx_one, mode=None, visibility="public")
+            await IdentityCog.daily_group.callback(cog, ctx_two, mode=None, visibility="public")
+
+            self.assertFalse(ctx_one.send_calls[0]["ephemeral"])
+            self.assertTrue(ctx_two.send_calls[0]["ephemeral"])
+            self.assertIn("cooldown", ctx_two.send_calls[0]["embed"].description.lower())
+        finally:
+            await cog.service.close()
+
+    async def test_daily_share_invalid_public_request_does_not_consume_public_cooldown(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop(), get_user=lambda user_id: None)
+        cog = IdentityCog(bot)
+        memory_service = ProfileService(bot, store=ProfileStore(backend="memory"))
+        try:
+            await memory_service.start()
+            cog.service = memory_service
+            first_ctx = FakeContext(interaction=FakeInteraction(), guild=FakeGuild(), channel=FakeChannel(), author=FakeAuthor())
+            second_ctx = FakeContext(interaction=FakeInteraction(), guild=first_ctx.guild, channel=first_ctx.channel, author=first_ctx.author)
+            status = await cog.service.get_daily_status(1)
+            await cog.service.submit_daily_guess(1, status["puzzles"]["shuffle"].answer, mode="shuffle")
+
+            await IdentityCog.daily_share_command.callback(cog, first_ctx, mode="emoji", visibility="public")
+            await IdentityCog.daily_share_command.callback(cog, second_ctx, mode="shuffle", visibility="public")
+
+            self.assertTrue(first_ctx.send_calls[0]["ephemeral"])
+            self.assertFalse(second_ctx.send_calls[0]["ephemeral"])
         finally:
             await cog.service.close()
 
