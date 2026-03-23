@@ -61,6 +61,26 @@ class ProfileServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(ok)
         self.assertIn("Emoji Booth", share_text)
 
+    async def test_public_daily_embeds_hide_failed_answer(self):
+        status = await self.service.get_daily_status(80, mode="shuffle")
+        puzzle = status["puzzle"]
+        await self.service.submit_daily_guess(80, "wrong", mode="shuffle")
+        await self.service.submit_daily_guess(80, "still wrong", mode="shuffle")
+        ok, payload = await self.service.submit_daily_guess(80, "last wrong", mode="shuffle")
+        self.assertTrue(ok)
+        self.assertEqual(payload["status"], "failed")
+
+        user = types.SimpleNamespace(display_name="User 80")
+        public_open = self.service.build_daily_embed(user, payload, public=True)
+        private_open = self.service.build_daily_embed(user, payload, public=False)
+        public_result = self.service.build_daily_result_embed(user, payload, public=True)
+        private_result = self.service.build_daily_result_embed(user, payload, public=False)
+
+        self.assertNotIn(puzzle.answer.upper(), public_open.description)
+        self.assertIn(puzzle.answer.upper(), private_open.description)
+        self.assertNotIn(puzzle.answer.upper(), public_result.description)
+        self.assertIn(puzzle.answer.upper(), private_result.description)
+
     async def test_buddy_defaults_and_style_change_work(self):
         profile = await self.service.get_profile(33)
         self.assertIsNotNone(profile)
