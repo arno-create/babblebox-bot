@@ -1,0 +1,838 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Babblebox Privacy Policy</title>
+  <meta
+    name="description"
+    content="Babblebox privacy policy covering what data the bot uses, how it is stored, how long it is kept, and the privacy-first limits built into the product."
+  />
+  <meta name="robots" content="index,follow,max-image-preview:large" />
+  <link rel="canonical" href="https://arno-create.github.io/babblebox-bot/privacy.html" />
+  <meta property="og:title" content="Babblebox Privacy Policy" />
+  <meta property="og:description" content="Read how Babblebox handles Discord data, private-first features, compact storage, retention, and optional moderation review." />
+  <meta property="og:url" content="https://arno-create.github.io/babblebox-bot/privacy.html" />
+  <meta property="og:type" content="website" />
+  <meta property="og:image" content="https://arno-create.github.io/babblebox-bot/banner.png" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="Babblebox Privacy Policy" />
+  <meta name="twitter:description" content="Babblebox privacy policy for Discord servers, including storage discipline, retention, limited data use, and user controls." />
+  <meta name="twitter:image" content="https://arno-create.github.io/babblebox-bot/banner.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Sora:wght@500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --line: rgba(169, 190, 255, 0.14);
+      --text: #f5f7ff;
+      --soft: #e2e9ff;
+      --muted: #a4aec3;
+      --cyan: #7ddcff;
+      --mint: #81f0bb;
+      --rose: #ff839b;
+      --shadow: 0 40px 110px rgba(1, 4, 10, 0.55);
+      --radius-xl: 34px;
+      --radius-lg: 28px;
+      --radius-md: 22px;
+      --max-width: 1180px;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--text);
+      font-family: "Manrope", sans-serif;
+      line-height: 1.7;
+      background:
+        radial-gradient(circle at 12% 10%, rgba(125, 220, 255, 0.18), transparent 32%),
+        radial-gradient(circle at 86% 12%, rgba(255, 131, 155, 0.16), transparent 24%),
+        radial-gradient(circle at 56% 72%, rgba(129, 240, 187, 0.12), transparent 26%),
+        linear-gradient(180deg, #060a14 0%, #08101b 28%, #050913 100%);
+    }
+
+    body::before,
+    body::after {
+      content: "";
+      position: fixed;
+      width: 34rem;
+      height: 34rem;
+      border-radius: 50%;
+      filter: blur(100px);
+      opacity: 0.18;
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    body::before {
+      top: -10rem;
+      left: -8rem;
+      background: rgba(125, 220, 255, 0.56);
+    }
+
+    body::after {
+      right: -10rem;
+      bottom: -14rem;
+      background: rgba(255, 131, 155, 0.48);
+    }
+
+    a {
+      color: inherit;
+      text-decoration: none;
+    }
+
+    img {
+      display: block;
+      max-width: 100%;
+    }
+
+    a:focus-visible,
+    .btn:focus-visible {
+      outline: 3px solid rgba(125, 220, 255, 0.38);
+      outline-offset: 3px;
+    }
+
+    .container {
+      width: min(var(--max-width), calc(100% - 40px));
+      margin: 0 auto;
+      position: relative;
+      z-index: 1;
+    }
+
+    .nav-shell {
+      position: sticky;
+      top: 0;
+      z-index: 30;
+      backdrop-filter: blur(18px);
+      background: rgba(6, 10, 19, 0.74);
+      border-bottom: 1px solid rgba(169, 190, 255, 0.1);
+    }
+
+    nav {
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      gap: 24px;
+      align-items: center;
+      padding: 16px 0;
+    }
+
+    .brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 14px;
+      min-width: 0;
+    }
+
+    .brand img {
+      width: 48px;
+      height: 48px;
+      border-radius: 16px;
+      object-fit: cover;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      box-shadow: 0 18px 36px rgba(0, 0, 0, 0.28);
+    }
+
+    .brand-title {
+      display: block;
+      font-family: "Sora", sans-serif;
+      font-size: 1.04rem;
+      font-weight: 700;
+      letter-spacing: -0.05em;
+    }
+
+    .brand-subtitle {
+      display: block;
+      margin-top: 3px;
+      color: var(--muted);
+      font-size: 0.72rem;
+      font-weight: 700;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+    }
+
+    .nav-links {
+      display: flex;
+      justify-content: center;
+      gap: 22px;
+      flex-wrap: wrap;
+    }
+
+    .nav-links a,
+    .nav-quiet {
+      color: var(--muted);
+      font-size: 0.95rem;
+      transition: color 0.18s ease;
+    }
+
+    .nav-links a:hover,
+    .nav-quiet:hover {
+      color: var(--text);
+    }
+
+    .nav-actions {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 48px;
+      padding: 0 20px;
+      border-radius: 999px;
+      border: 1px solid transparent;
+      font-weight: 800;
+      transition: transform 0.18s ease, border-color 0.18s ease, background 0.18s ease, color 0.18s ease;
+    }
+
+    .btn:hover {
+      transform: translateY(-1px);
+    }
+
+    .btn-primary {
+      color: #08101b;
+      background: linear-gradient(135deg, var(--cyan), #c4f1ff);
+      box-shadow: 0 20px 44px rgba(125, 220, 255, 0.22);
+    }
+
+    .btn-secondary {
+      color: var(--soft);
+      background: rgba(14, 24, 40, 0.68);
+      border-color: rgba(169, 190, 255, 0.16);
+    }
+
+    .page-shell {
+      padding: clamp(40px, 6vw, 74px) 0 36px;
+    }
+
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1.15fr) minmax(280px, 0.85fr);
+      gap: 24px;
+      padding: clamp(28px, 5vw, 52px);
+      border-radius: var(--radius-xl);
+      border: 1px solid var(--line);
+      background:
+        linear-gradient(180deg, rgba(13, 21, 36, 0.9), rgba(9, 15, 27, 0.92)),
+        radial-gradient(circle at top right, rgba(125, 220, 255, 0.12), transparent 30%);
+      box-shadow: var(--shadow);
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      color: var(--cyan);
+      font-size: 0.82rem;
+      font-weight: 800;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+    }
+
+    .eyebrow::before {
+      content: "";
+      width: 32px;
+      height: 1px;
+      background: rgba(125, 220, 255, 0.6);
+    }
+
+    h1,
+    h2,
+    h3 {
+      margin: 0;
+      font-family: "Sora", sans-serif;
+      letter-spacing: -0.04em;
+    }
+
+    h1 {
+      margin-top: 18px;
+      max-width: 10ch;
+      font-size: clamp(2.7rem, 7vw, 5rem);
+      line-height: 0.98;
+    }
+
+    .hero p,
+    .policy-card p,
+    .policy-card li {
+      color: rgba(245, 247, 255, 0.82);
+    }
+
+    .hero-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      margin-top: 24px;
+    }
+
+    .hero-side,
+    .policy-card {
+      border-radius: var(--radius-lg);
+      border: 1px solid var(--line);
+      background: linear-gradient(180deg, rgba(12, 19, 33, 0.82), rgba(9, 15, 27, 0.88));
+      box-shadow: var(--shadow);
+    }
+
+    .hero-side {
+      padding: 24px;
+      display: grid;
+      gap: 14px;
+      align-content: start;
+    }
+
+    .kicker {
+      color: rgba(226, 233, 255, 0.7);
+      font-size: 0.74rem;
+      font-weight: 800;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+    }
+
+    .hero-side ul,
+    .policy-card ul {
+      margin: 0;
+      padding-left: 18px;
+    }
+
+    .mini-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 18px;
+      margin-top: 24px;
+    }
+
+    .mini-card {
+      padding: 22px;
+      border-radius: var(--radius-md);
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.03);
+      box-shadow: var(--shadow);
+    }
+
+    .mini-card h2 {
+      font-size: 1.1rem;
+      margin-bottom: 10px;
+    }
+
+    .mini-card p {
+      margin: 0;
+      color: var(--muted);
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(250px, 0.76fr) minmax(0, 1.24fr);
+      gap: 22px;
+      margin-top: 28px;
+      align-items: start;
+    }
+
+    .side-stack,
+    .content-stack {
+      display: grid;
+      gap: 18px;
+    }
+
+    .side-stack {
+      position: sticky;
+      top: 94px;
+    }
+
+    .policy-card {
+      padding: 28px;
+    }
+
+    .policy-card h2 {
+      font-size: 1.45rem;
+      margin-bottom: 14px;
+    }
+
+    .policy-card h3 {
+      font-size: 1rem;
+      color: var(--soft);
+      margin-top: 20px;
+      margin-bottom: 8px;
+    }
+
+    .anchor-list {
+      display: grid;
+      gap: 10px;
+    }
+
+    .anchor-list a {
+      padding: 14px 16px;
+      border-radius: 18px;
+      border: 1px solid rgba(169, 190, 255, 0.12);
+      background: rgba(255, 255, 255, 0.02);
+      color: rgba(245, 247, 255, 0.78);
+      transition: border-color 0.18s ease, background 0.18s ease, color 0.18s ease, transform 0.18s ease;
+    }
+
+    .anchor-list a:hover {
+      color: var(--text);
+      transform: translateX(2px);
+      border-color: rgba(125, 220, 255, 0.24);
+      background: rgba(125, 220, 255, 0.05);
+    }
+
+    .info-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+      margin-top: 18px;
+    }
+
+    .info-tile {
+      padding: 18px 20px;
+      border-radius: 20px;
+      border: 1px solid rgba(169, 190, 255, 0.12);
+      background: rgba(255, 255, 255, 0.02);
+    }
+
+    .info-tile strong {
+      display: block;
+      margin-bottom: 8px;
+      color: var(--soft);
+    }
+
+    .info-tile span {
+      color: var(--muted);
+      word-break: break-word;
+    }
+
+    footer {
+      padding: 28px 0 46px;
+    }
+
+    .footer-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 18px;
+      flex-wrap: wrap;
+      padding-top: 24px;
+      border-top: 1px solid rgba(169, 190, 255, 0.1);
+      color: var(--muted);
+      font-size: 0.95rem;
+    }
+
+    .footer-row strong {
+      color: var(--soft);
+      font-family: "Sora", sans-serif;
+      letter-spacing: -0.04em;
+    }
+
+    .footer-meta {
+      display: grid;
+      gap: 16px;
+      justify-items: end;
+    }
+
+    .footer-group {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      align-items: flex-end;
+    }
+
+    .footer-label {
+      color: rgba(226, 233, 255, 0.7);
+      font-size: 0.72rem;
+      font-weight: 800;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+    }
+
+    .footer-links {
+      display: flex;
+      gap: 16px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    .footer-links a:hover {
+      color: var(--text);
+    }
+
+    @media (max-width: 1120px) {
+      nav {
+        grid-template-columns: auto 1fr;
+      }
+
+      .nav-links {
+        justify-content: flex-start;
+      }
+
+      .nav-actions {
+        grid-column: 1 / -1;
+        justify-content: space-between;
+      }
+
+      .hero,
+      .layout {
+        grid-template-columns: 1fr;
+      }
+
+      .side-stack {
+        position: static;
+      }
+
+      .footer-meta {
+        justify-items: start;
+      }
+
+      .footer-group {
+        align-items: flex-start;
+      }
+
+      .footer-links {
+        justify-content: flex-start;
+      }
+    }
+
+    @media (max-width: 860px) {
+      .mini-grid,
+      .info-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    @media (max-width: 720px) {
+      html {
+        scroll-behavior: auto;
+      }
+
+      .container {
+        width: min(var(--max-width), calc(100% - 24px));
+      }
+
+      nav {
+        grid-template-columns: 1fr;
+      }
+
+      .nav-links {
+        display: none;
+      }
+
+      .nav-actions {
+        width: 100%;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+
+      .hero,
+      .policy-card {
+        padding: 22px;
+      }
+
+      h1 {
+        max-width: none;
+      }
+
+      .hero-actions {
+        flex-direction: column;
+        align-items: stretch;
+      }
+
+      .hero-actions .btn {
+        width: 100%;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *,
+      *::before,
+      *::after {
+        animation: none !important;
+        transition: none !important;
+        scroll-behavior: auto !important;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="nav-shell">
+    <div class="container">
+      <nav aria-label="Primary">
+        <a class="brand" href="index.html" aria-label="Babblebox home">
+          <img src="logo.jpg" alt="Babblebox logo" />
+          <span>
+            <span class="brand-title">Babblebox</span>
+            <span class="brand-subtitle">Privacy Policy</span>
+          </span>
+        </a>
+        <div class="nav-links">
+          <a href="#overview">Overview</a>
+          <a href="#collection">Collection</a>
+          <a href="#use">Use</a>
+          <a href="#retention">Retention</a>
+          <a href="#controls">Controls</a>
+          <a href="#contact">Contact</a>
+        </div>
+        <div class="nav-actions">
+          <a class="nav-quiet" href="https://github.com/arno-create/babblebox-bot" target="_blank" rel="noopener noreferrer">GitHub</a>
+          <a class="btn btn-secondary" href="index.html">Back to Website</a>
+        </div>
+      </nav>
+    </div>
+  </div>
+
+  <main class="page-shell">
+    <div class="container">
+      <section id="overview" class="hero">
+        <div>
+          <div class="eyebrow">Privacy Policy</div>
+          <h1>Built to stay useful without sprawling.</h1>
+          <p>
+            This Privacy Policy explains what Babblebox can access, what it stores, how that information is used, and the
+            limits designed to keep storage and exposure bounded. Babblebox is built for Discord servers and aims to stay
+            compact instead of turning into an everything archive.
+          </p>
+          <p>
+            Effective date: <strong>March 26, 2026</strong>. By using Babblebox in a Discord server or through Babblebox's
+            Discord-based features, you agree to the practices described on this page.
+          </p>
+          <div class="hero-actions">
+            <a class="btn btn-primary" href="index.html">Return Home</a>
+            <a class="btn btn-secondary" href="https://github.com/arno-create/babblebox-bot" target="_blank" rel="noopener noreferrer">View GitHub</a>
+          </div>
+        </div>
+        <aside class="hero-side" aria-label="Privacy summary">
+          <div class="kicker">At a glance</div>
+          <h2>Bounded by design.</h2>
+          <ul>
+            <li>No full quote-feed archive.</li>
+            <li>No media or attachment blob storage in the database.</li>
+            <li>No always-on AI scanning by default.</li>
+            <li>Private-first delivery for sensitive utility flows.</li>
+            <li>Feature data is kept small and purpose-bound.</li>
+          </ul>
+        </aside>
+      </section>
+
+      <section class="mini-grid" aria-label="Core principles">
+        <article class="mini-card">
+          <h2>Bounded storage</h2>
+          <p>Babblebox stores what the feature needs, not a broad historical warehouse of server activity.</p>
+        </article>
+        <article class="mini-card">
+          <h2>Discord-first visibility</h2>
+          <p>Some surfaces are public by design, while Watch, reminders, Later, Capture, and setup flows are private-first.</p>
+        </article>
+        <article class="mini-card">
+          <h2>Compact moderation model</h2>
+          <p>Shield and admin helpers prefer configuration, configured logs, and short-lived state over heavy moderation archives.</p>
+        </article>
+      </section>
+
+      <section class="layout">
+        <aside class="side-stack">
+          <div class="policy-card">
+            <h2>Sections</h2>
+            <div class="anchor-list">
+              <a href="#collection">1. Information Babblebox Collects</a>
+              <a href="#use">2. How Information Is Used</a>
+              <a href="#visibility">3. Public vs Private Behavior</a>
+              <a href="#sharing">4. Sharing and Third Parties</a>
+              <a href="#retention">5. Retention and Deletion</a>
+              <a href="#security">6. Security</a>
+              <a href="#controls">7. Choices and Requests</a>
+              <a href="#contact">8. Contact and Policy Updates</a>
+            </div>
+          </div>
+          <div class="policy-card">
+            <h2>Scope</h2>
+            <p>
+              This policy applies to the Babblebox website and the Babblebox Discord bot where the bot is invited and given
+              permission to operate.
+            </p>
+          </div>
+        </aside>
+
+        <div class="content-stack">
+          <article id="collection" class="policy-card">
+            <h2>1. Information Babblebox Collects</h2>
+            <p>
+              Babblebox only works inside the Discord context it is invited into and only with the permissions granted to it.
+              Depending on the feature used, Babblebox may process or store the following categories of information.
+            </p>
+            <h3>Discord account and server identifiers</h3>
+            <ul>
+              <li>User IDs, guild IDs, channel IDs, message IDs, role IDs, and timestamps.</li>
+              <li>Basic metadata needed to route commands, produce links, respect scopes, or associate stored feature state with the right user or server.</li>
+            </ul>
+            <h3>Feature configuration and compact state</h3>
+            <ul>
+              <li>Watch preferences, filters, ignored channels or users, and scoped keywords.</li>
+              <li>Later markers, reminders, AFK state, AFK schedules, and related user preferences.</li>
+              <li>Daily Arcade scores, attempts, streak counters, Buddy and profile state, and other compact identity or progression fields.</li>
+              <li>Shield and admin configuration such as enabled modules, scope controls, allowlists, trusted roles, log destinations, and short-lived admin lifecycle state.</li>
+            </ul>
+            <h3>Limited message and attachment context</h3>
+            <ul>
+              <li>Babblebox may read message content or metadata needed to respond to commands, deliver Watch alerts, build Moment Cards from visible messages, process Capture requests, or evaluate locally flagged Shield events.</li>
+              <li>Attachment names or URLs may be used at send time when needed for previews or private transcript delivery.</li>
+            </ul>
+            <h3>What Babblebox is designed not to store durably</h3>
+            <ul>
+              <li>No general-purpose message archive.</li>
+              <li>No media or attachment blob storage in Postgres.</li>
+              <li>No durable quote-feed database for Moment Cards.</li>
+              <li>No full deleted-message archive table.</li>
+              <li>No long-term storage of DM bodies or full Capture transcript archives.</li>
+            </ul>
+          </article>
+
+          <article id="use" class="policy-card">
+            <h2>2. How Information Is Used</h2>
+            <p>Babblebox uses information only to operate its Discord features and to keep those features reliable, low-noise, and reasonably safe.</p>
+            <div class="info-grid">
+              <div class="info-tile">
+                <strong>Feature delivery</strong>
+                <span>Running commands, building replies, sending Watch alerts, delivering reminders, and maintaining lightweight feature state.</span>
+              </div>
+              <div class="info-tile">
+                <strong>Server safety</strong>
+                <span>Applying optional Shield rules, admin lifecycle helpers, configured log delivery, and bounded moderation context where administrators enable those features.</span>
+              </div>
+              <div class="info-tile">
+                <strong>State continuity</strong>
+                <span>Preserving Daily progress, compact user identity data, Later markers, AFK schedules, and other small pieces of state across restarts.</span>
+              </div>
+              <div class="info-tile">
+                <strong>Operational reliability</strong>
+                <span>Keeping storage compact, avoiding unnecessary churn, and limiting what is retained so the bot remains practical on constrained infrastructure.</span>
+              </div>
+            </div>
+            <h3>No advertising profile</h3>
+            <p>Babblebox is not built as an ad network, data brokerage product, or engagement farm. Stored data exists to operate the bot, not to build a separate marketing profile about users.</p>
+          </article>
+
+          <article id="visibility" class="policy-card">
+            <h2>3. Public vs Private Behavior</h2>
+            <p>
+              Babblebox deliberately treats visibility differently depending on the feature. Some commands are designed for
+              public, shareable output. Others are intentionally private-first because they can contain personal context,
+              reminders, server reading position, or moderation setup details.
+            </p>
+            <ul>
+              <li>Public profile-style surfaces, Daily Arcade sharing, and similar outputs are intended to be visible in-server.</li>
+              <li>Moment Cards are built from visible server messages and remain tied to visible Discord context instead of becoming a hidden archive.</li>
+              <li>Watch alerts are delivered through Discord DMs.</li>
+              <li>Capture transcripts are delivered privately rather than kept as a long-term database archive.</li>
+              <li>Later markers, reminders, and sensitive setup flows are designed to avoid unnecessary public exposure.</li>
+              <li>Shield and admin configuration flows are intended for administrators and moderators, not general public broadcast.</li>
+            </ul>
+          </article>
+
+          <article id="sharing" class="policy-card">
+            <h2>4. Sharing and Third Parties</h2>
+            <p>
+              Babblebox may rely on infrastructure providers necessary to run the bot, such as Discord for platform delivery
+              and Supabase or Postgres-backed storage for durable feature state.
+            </p>
+            <h3>Optional AI-assisted Shield review</h3>
+            <p>
+              Babblebox does not perform always-on AI scanning by default. If optional AI-assisted Shield review is enabled
+              where available, it only runs after local Shield logic has already flagged content. In that flow, only minimal,
+              sanitized, and truncated flagged content needed for that review is intended to be sent to the configured AI provider.
+            </p>
+            <h3>No sale of personal information</h3>
+            <p>Babblebox is not designed to sell user data. Information is shared only when needed to operate the service, comply with law, protect the service, or deliver optional integrations that a specific feature requires.</p>
+          </article>
+
+          <article id="retention" class="policy-card">
+            <h2>5. Retention and Deletion</h2>
+            <p>Babblebox aims to keep durable data small, specific, and tied to live product needs instead of retaining broad historical records.</p>
+            <ul>
+              <li>Daily Arcade raw result rows are designed to prune after 180 days while streak and lifetime totals remain in the profile row.</li>
+              <li>Short-lived admin lifecycle records are kept only while they are operationally relevant, such as pending verification or active follow-up role management.</li>
+              <li>Ban-return candidate records are intended to have a bounded purge window rather than indefinite retention.</li>
+              <li>Watch configuration, Later markers, reminders, AFK settings, and similar utility records remain until changed, cleared, expired, or removed.</li>
+            </ul>
+            <p>Deletion timing can depend on when a reminder expires, a schedule ends, a configuration is removed, or a short-lived moderation workflow finishes.</p>
+          </article>
+
+          <article id="security" class="policy-card">
+            <h2>6. Security</h2>
+            <p>Babblebox takes a data-minimization approach because the safest archive is often the one that was never created. Even so, no internet-connected service can promise absolute security.</p>
+            <ul>
+              <li>Storage is intended to be compact and purpose-limited.</li>
+              <li>High-volume or high-risk archive behavior is intentionally avoided where possible.</li>
+              <li>Private-first flows are used for utilities and other sensitive feature surfaces when appropriate.</li>
+              <li>Administrators remain responsible for the Discord permissions, channels, and server practices they configure around the bot.</li>
+            </ul>
+          </article>
+
+          <article id="controls" class="policy-card">
+            <h2>7. Choices and Requests</h2>
+            <p>
+              Users and server administrators can often control Babblebox directly through the feature itself, such as clearing
+              Later markers, removing reminders, disabling Shield, or changing Watch settings. Server owners also control
+              whether Babblebox is invited, where it can see content, and which channels are used for logs or moderation workflows.
+            </p>
+            <p>
+              If you need help with a privacy-related request, a correction, or a removal question related to Babblebox-managed
+              state, use the support or repository contact points listed below and include enough context to identify the relevant server, user, or feature state.
+            </p>
+          </article>
+
+          <article id="contact" class="policy-card">
+            <h2>8. Contact and Policy Updates</h2>
+            <p>
+              Babblebox may update this policy when the product, storage model, or privacy practices materially change. When
+              this page is updated, the effective date at the top will also be updated.
+            </p>
+            <div class="info-grid">
+              <div class="info-tile">
+                <strong>GitHub</strong>
+                <span><a href="https://github.com/arno-create/babblebox-bot" target="_blank" rel="noopener noreferrer">github.com/arno-create/babblebox-bot</a></span>
+              </div>
+              <div class="info-tile">
+                <strong>Support server</strong>
+                <span><a href="https://discord.com/servers/inevitable-friendship-1322933864360050688" target="_blank" rel="noopener noreferrer">discord.com/servers/inevitable-friendship-1322933864360050688</a></span>
+              </div>
+            </div>
+          </article>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <footer>
+    <div class="container">
+      <div class="footer-row">
+        <div>
+          <strong>Babblebox</strong>
+          <div>Open-source Discord bot by Arno.</div>
+        </div>
+        <div class="footer-meta">
+          <div class="footer-group">
+            <div class="footer-label">Links</div>
+            <div class="footer-links">
+              <a href="index.html">Main Website</a>
+              <a href="https://github.com/arno-create/babblebox-bot" target="_blank" rel="noopener noreferrer">GitHub</a>
+              <a href="https://arno-create.github.io/Bdayblaze/" target="_blank" rel="noopener noreferrer">Bdayzblaze</a>
+            </div>
+          </div>
+          <div class="footer-group">
+            <div class="footer-label">Social</div>
+            <div class="footer-links">
+              <a href="https://x.com/arno__if" target="_blank" rel="noopener noreferrer">X</a>
+              <a href="https://instagram.com/arno.if" target="_blank" rel="noopener noreferrer">Instagram</a>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </footer>
+</body>
+</html>
