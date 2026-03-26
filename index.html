@@ -1829,10 +1829,32 @@
       letter-spacing: -0.04em;
     }
 
+    .footer-meta {
+      display: grid;
+      gap: 16px;
+      justify-items: end;
+    }
+
+    .footer-group {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      align-items: flex-end;
+    }
+
+    .footer-label {
+      color: rgba(226, 233, 255, 0.7);
+      font-size: 0.72rem;
+      font-weight: 800;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+    }
+
     .footer-links {
       display: flex;
       gap: 16px;
       flex-wrap: wrap;
+      justify-content: flex-end;
     }
 
     .footer-links a:hover {
@@ -1876,6 +1898,18 @@
 
       .utility-lead {
         position: static;
+      }
+
+      .footer-meta {
+        justify-items: start;
+      }
+
+      .footer-group {
+        align-items: flex-start;
+      }
+
+      .footer-links {
+        justify-content: flex-start;
       }
     }
 
@@ -2705,10 +2739,24 @@
           <strong>Babblebox</strong>
           <div>Open-source Discord bot by Arno.</div>
         </div>
-        <div class="footer-links">
-          <a href="https://discord.com/oauth2/authorize?client_id=1480903089518022739" target="_blank" rel="noopener noreferrer">Invite</a>
-          <a href="https://discord.com/servers/inevitable-friendship-1322933864360050688" target="_blank" rel="noopener noreferrer">Support Server</a>
-          <a href="https://github.com/arno-create/babblebox-bot" target="_blank" rel="noopener noreferrer">GitHub</a>
+        <div class="footer-meta">
+          <div class="footer-group">
+            <div class="footer-label">Links</div>
+            <div class="footer-links">
+              <a href="https://discord.com/oauth2/authorize?client_id=1480903089518022739" target="_blank" rel="noopener noreferrer">Invite</a>
+              <a href="https://discord.com/servers/inevitable-friendship-1322933864360050688" target="_blank" rel="noopener noreferrer">Support Server</a>
+              <a href="https://github.com/arno-create/babblebox-bot" target="_blank" rel="noopener noreferrer">GitHub</a>
+              <a href="privacy.html">Privacy Policy</a>
+              <a href="https://arno-create.github.io/Bdayblaze/" target="_blank" rel="noopener noreferrer">Bdayzblaze</a>
+            </div>
+          </div>
+          <div class="footer-group">
+            <div class="footer-label">Social</div>
+            <div class="footer-links">
+              <a href="https://x.com/arno__if" target="_blank" rel="noopener noreferrer">X</a>
+              <a href="https://instagram.com/arno.if" target="_blank" rel="noopener noreferrer">Instagram</a>
+            </div>
+          </div>
         </div>
       </div>
     </div>

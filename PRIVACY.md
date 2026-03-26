@@ -1,0 +1,129 @@
+# Babblebox Privacy Policy
+
+Effective date: March 26, 2026
+
+This document is the repository copy of the Babblebox privacy policy. It explains what Babblebox may access, what it stores, how that information is used, and the product limits intended to keep storage and exposure bounded.
+
+Babblebox is intentionally compact and privacy-aware by design:
+
+- no general-purpose message archive
+- no media or attachment blob storage in Postgres
+- no durable quote-feed archive for Moment Cards
+- no always-on AI scanning by default
+- private-first handling for sensitive utility flows such as Watch, reminders, Later, Capture, and Shield configuration
+
+## Scope
+
+This policy applies to:
+
+- the Babblebox website
+- the Babblebox Discord bot
+- Babblebox-managed feature state stored to support bot functionality
+
+This policy does not replace Discord's own privacy practices. Discord controls the platform account, direct platform messaging, guild membership, and many visibility rules outside Babblebox itself.
+
+## Information Babblebox May Collect
+
+Depending on the feature being used, Babblebox may process or store:
+
+- Discord identifiers such as user IDs, guild IDs, channel IDs, message IDs, role IDs, and timestamps
+- compact feature configuration and state, including Watch preferences, ignored channels or users, Later markers, reminders, AFK state, AFK schedules, Daily Arcade results, Buddy or profile state, and Shield or admin configuration
+- limited message or attachment context needed to respond to commands, build Moment Cards from visible messages, deliver Watch alerts, process Capture requests, or evaluate locally flagged Shield events
+
+## Information Babblebox Intentionally Avoids Storing Durably
+
+Babblebox is designed not to keep certain high-churn or high-risk data as long-term durable records. Examples include:
+
+- a general-purpose message-content archive
+- media or attachment blobs in Postgres
+- a durable quote-feed database for Moment Cards
+- a full deleted-message archive table
+- long-term archives of DM bodies or Capture transcript bodies
+- heavy moderation warehouse-style event history
+
+## How Information Is Used
+
+Babblebox uses information to operate the bot and its features, including:
+
+- running commands and building Discord responses
+- delivering Watch alerts, reminders, Later markers, Capture output, AFK behavior, and similar utilities
+- maintaining Daily Arcade progress, compact identity state, and other restart-safe feature state
+- applying optional Shield and admin lifecycle workflows where server administrators enable them
+- keeping the service reliable on constrained infrastructure through compact, purpose-bound persistence
+
+Babblebox is not designed as an ad network, data brokerage system, or marketing profile builder.
+
+## Public and Private Behavior
+
+Babblebox intentionally uses different visibility defaults depending on the feature:
+
+- some features are public-friendly by design, such as profile-style surfaces or Daily sharing
+- Moment Cards are built from visible Discord messages and remain tied to visible message context instead of becoming a hidden archive
+- Watch alerts are DM-only
+- Capture transcripts are delivered privately rather than kept as long-term database archives
+- Later markers, reminders, and sensitive setup flows are private-first
+- Shield and admin configuration flows are intended for administrators or moderators rather than general public display
+
+Server administrators still influence visibility through Discord permissions, log channels, review channels, and command usage in their own server.
+
+## Infrastructure and Third Parties
+
+Babblebox may rely on necessary service providers to operate, including:
+
+- Discord, for platform delivery and bot operation
+- Supabase or Postgres-backed storage, for durable feature state
+
+### Optional AI-assisted Shield review
+
+Babblebox does not perform always-on AI scanning by default.
+
+If optional AI-assisted Shield review is enabled where available, it only runs after local Shield logic has already flagged content. In that flow, only minimal, sanitized, and truncated flagged content intended for that review should be sent to the configured AI provider.
+
+Babblebox is not designed to sell personal information.
+
+## Retention
+
+Babblebox keeps durable data small and tied to feature needs.
+
+Examples:
+
+- Daily Arcade raw result rows are designed to prune after 180 days while streak and lifetime totals remain in profile-level storage
+- short-lived admin lifecycle rows remain only while they are operationally relevant
+- ban-return candidate records are intended to have a bounded purge window
+- Watch settings, reminders, AFK settings, and Later markers remain until changed, cleared, expired, or removed
+
+Deletion timing may depend on the feature. Some state expires naturally, some is replaced by newer state, and some is removed when a user or administrator clears it.
+
+## Security
+
+Babblebox follows a data-minimization approach because reducing durable storage also reduces privacy risk. Even so, no internet-connected service can promise absolute security.
+
+Babblebox is intended to:
+
+- keep persistence compact and purpose-limited
+- avoid large archive behavior where possible
+- use private-first flows for sensitive utilities
+- rely on server administrators to configure Discord permissions and channels responsibly
+
+## User and Admin Controls
+
+Users and administrators can often control Babblebox directly through the bot by changing or clearing relevant feature state, such as:
+
+- removing reminders
+- clearing Later markers
+- changing Watch settings
+- disabling Shield
+- reconfiguring admin log or review behavior
+
+If you have a privacy-related request about Babblebox-managed data, include enough detail to identify the relevant server, user, and feature state.
+
+## Contact
+
+For privacy questions or support:
+
+- GitHub: https://github.com/arno-create/babblebox-bot
+- Support server: https://discord.com/servers/inevitable-friendship-1322933864360050688
+
+## Policy Updates
+
+This policy may be updated if Babblebox's product behavior, storage model, or privacy practices materially change. When that happens, the effective date at the top of this file should be updated as well.
