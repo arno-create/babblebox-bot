@@ -1,0 +1,963 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Babblebox Terms of Service</title>
+  <meta
+    name="description"
+    content="Babblebox terms of service covering acceptable use, admin responsibilities, content limits, third-party dependencies, disclaimers, and the operating boundaries of the Discord bot."
+  />
+  <meta name="robots" content="index,follow,max-image-preview:large" />
+  <link rel="canonical" href="https://arno-create.github.io/babblebox-bot/terms.html" />
+  <meta property="og:title" content="Babblebox Terms of Service" />
+  <meta property="og:description" content="Read the terms that govern use of the Babblebox Discord bot, including responsibilities, prohibited misuse, service limits, and privacy links." />
+  <meta property="og:url" content="https://arno-create.github.io/babblebox-bot/terms.html" />
+  <meta property="og:type" content="website" />
+  <meta property="og:image" content="https://arno-create.github.io/babblebox-bot/banner.png" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="Babblebox Terms of Service" />
+  <meta name="twitter:description" content="Babblebox terms for Discord server use, including acceptable use, admin obligations, content restrictions, third-party dependencies, and legal disclaimers." />
+  <meta name="twitter:image" content="https://arno-create.github.io/babblebox-bot/banner.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Sora:wght@500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --line: rgba(169, 190, 255, 0.14);
+      --text: #f5f7ff;
+      --soft: #e2e9ff;
+      --muted: #a4aec3;
+      --cyan: #7ddcff;
+      --mint: #81f0bb;
+      --rose: #ff839b;
+      --shadow: 0 40px 110px rgba(1, 4, 10, 0.55);
+      --radius-xl: 34px;
+      --radius-lg: 28px;
+      --radius-md: 22px;
+      --max-width: 1180px;
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
+    html {
+      scroll-behavior: smooth;
+    }
+
+    body {
+      margin: 0;
+      min-height: 100vh;
+      color: var(--text);
+      font-family: "Manrope", sans-serif;
+      line-height: 1.7;
+      background:
+        radial-gradient(circle at 12% 10%, rgba(125, 220, 255, 0.18), transparent 32%),
+        radial-gradient(circle at 86% 12%, rgba(255, 131, 155, 0.16), transparent 24%),
+        radial-gradient(circle at 56% 72%, rgba(129, 240, 187, 0.12), transparent 26%),
+        linear-gradient(180deg, #060a14 0%, #08101b 28%, #050913 100%);
+    }
+
+    body::before,
+    body::after {
+      content: "";
+      position: fixed;
+      width: 34rem;
+      height: 34rem;
+      border-radius: 50%;
+      filter: blur(100px);
+      opacity: 0.18;
+      pointer-events: none;
+      z-index: 0;
+    }
+
+    body::before {
+      top: -10rem;
+      left: -8rem;
+      background: rgba(125, 220, 255, 0.56);
+    }
+
+    body::after {
+      right: -10rem;
+      bottom: -14rem;
+      background: rgba(255, 131, 155, 0.48);
+    }
+
+    a {
+      color: inherit;
+      text-decoration: none;
+    }
+
+    img {
+      display: block;
+      max-width: 100%;
+    }
+
+    a:focus-visible,
+    .btn:focus-visible {
+      outline: 3px solid rgba(125, 220, 255, 0.38);
+      outline-offset: 3px;
+    }
+
+    .container {
+      width: min(var(--max-width), calc(100% - 40px));
+      margin: 0 auto;
+      position: relative;
+      z-index: 1;
+    }
+
+    .nav-shell {
+      position: sticky;
+      top: 0;
+      z-index: 30;
+      backdrop-filter: blur(18px);
+      background: rgba(6, 10, 19, 0.74);
+      border-bottom: 1px solid rgba(169, 190, 255, 0.1);
+    }
+
+    nav {
+      display: grid;
+      grid-template-columns: auto 1fr auto;
+      gap: 24px;
+      align-items: center;
+      padding: 16px 0;
+    }
+
+    .brand {
+      display: inline-flex;
+      align-items: center;
+      gap: 14px;
+      min-width: 0;
+    }
+
+    .brand img {
+      width: 48px;
+      height: 48px;
+      border-radius: 16px;
+      object-fit: cover;
+      border: 1px solid rgba(255, 255, 255, 0.08);
+      box-shadow: 0 18px 36px rgba(0, 0, 0, 0.28);
+    }
+
+    .brand-title {
+      display: block;
+      font-family: "Sora", sans-serif;
+      font-size: 1.04rem;
+      font-weight: 700;
+      letter-spacing: -0.05em;
+    }
+
+    .brand-subtitle {
+      display: block;
+      margin-top: 3px;
+      color: var(--muted);
+      font-size: 0.72rem;
+      font-weight: 700;
+      letter-spacing: 0.14em;
+      text-transform: uppercase;
+    }
+
+    .nav-links {
+      display: flex;
+      justify-content: center;
+      gap: 22px;
+      flex-wrap: wrap;
+    }
+
+    .nav-links a,
+    .nav-quiet {
+      color: var(--muted);
+      font-size: 0.95rem;
+      transition: color 0.18s ease;
+    }
+
+    .nav-links a:hover,
+    .nav-quiet:hover {
+      color: var(--text);
+    }
+
+    .nav-actions {
+      display: flex;
+      align-items: center;
+      gap: 14px;
+    }
+
+    .btn {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      min-height: 48px;
+      padding: 0 20px;
+      border-radius: 999px;
+      border: 1px solid transparent;
+      font-weight: 800;
+      transition: transform 0.18s ease, border-color 0.18s ease, background 0.18s ease, color 0.18s ease;
+    }
+
+    .btn:hover {
+      transform: translateY(-1px);
+    }
+
+    .btn-primary {
+      color: #08101b;
+      background: linear-gradient(135deg, var(--cyan), #c4f1ff);
+      box-shadow: 0 20px 44px rgba(125, 220, 255, 0.22);
+    }
+
+    .btn-secondary {
+      color: var(--soft);
+      background: rgba(14, 24, 40, 0.68);
+      border-color: rgba(169, 190, 255, 0.16);
+    }
+
+    .page-shell {
+      padding: clamp(40px, 6vw, 74px) 0 36px;
+    }
+
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1.15fr) minmax(280px, 0.85fr);
+      gap: 24px;
+      padding: clamp(28px, 5vw, 52px);
+      border-radius: var(--radius-xl);
+      border: 1px solid var(--line);
+      background:
+        linear-gradient(180deg, rgba(13, 21, 36, 0.9), rgba(9, 15, 27, 0.92)),
+        radial-gradient(circle at top right, rgba(125, 220, 255, 0.12), transparent 30%);
+      box-shadow: var(--shadow);
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      color: var(--cyan);
+      font-size: 0.82rem;
+      font-weight: 800;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+    }
+
+    .eyebrow::before {
+      content: "";
+      width: 32px;
+      height: 1px;
+      background: rgba(125, 220, 255, 0.6);
+    }
+
+    h1,
+    h2,
+    h3 {
+      margin: 0;
+      font-family: "Sora", sans-serif;
+      letter-spacing: -0.04em;
+    }
+
+    h1 {
+      margin-top: 18px;
+      max-width: 10ch;
+      font-size: clamp(2.7rem, 7vw, 5rem);
+      line-height: 0.98;
+    }
+
+    .hero p,
+    .policy-card p,
+    .policy-card li {
+      color: rgba(245, 247, 255, 0.82);
+    }
+
+    .hero-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 14px;
+      margin-top: 24px;
+    }
+
+    .hero-side,
+    .policy-card {
+      border-radius: var(--radius-lg);
+      border: 1px solid var(--line);
+      background: linear-gradient(180deg, rgba(12, 19, 33, 0.82), rgba(9, 15, 27, 0.88));
+      box-shadow: var(--shadow);
+    }
+
+    .hero-side {
+      padding: 24px;
+      display: grid;
+      gap: 14px;
+      align-content: start;
+    }
+
+    .kicker {
+      color: rgba(226, 233, 255, 0.7);
+      font-size: 0.74rem;
+      font-weight: 800;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+    }
+
+    .hero-side ul,
+    .policy-card ul {
+      margin: 0;
+      padding-left: 18px;
+    }
+
+    .mini-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 18px;
+      margin-top: 24px;
+    }
+
+    .mini-card {
+      padding: 22px;
+      border-radius: var(--radius-md);
+      border: 1px solid var(--line);
+      background: rgba(255, 255, 255, 0.03);
+      box-shadow: var(--shadow);
+    }
+
+    .mini-card h2 {
+      font-size: 1.1rem;
+      margin-bottom: 10px;
+    }
+
+    .mini-card p {
+      margin: 0;
+      color: var(--muted);
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(250px, 0.76fr) minmax(0, 1.24fr);
+      gap: 22px;
+      margin-top: 28px;
+      align-items: start;
+    }
+
+    .side-stack,
+    .content-stack {
+      display: grid;
+      gap: 18px;
+    }
+
+    .side-stack {
+      position: sticky;
+      top: 94px;
+    }
+
+    .policy-card {
+      padding: 28px;
+    }
+
+    .policy-card h2 {
+      font-size: 1.45rem;
+      margin-bottom: 14px;
+    }
+
+    .policy-card h3 {
+      font-size: 1rem;
+      color: var(--soft);
+      margin-top: 20px;
+      margin-bottom: 8px;
+    }
+
+    .anchor-list {
+      display: grid;
+      gap: 10px;
+    }
+
+    .anchor-list a {
+      padding: 14px 16px;
+      border-radius: 18px;
+      border: 1px solid rgba(169, 190, 255, 0.12);
+      background: rgba(255, 255, 255, 0.02);
+      color: rgba(245, 247, 255, 0.78);
+      transition: border-color 0.18s ease, background 0.18s ease, color 0.18s ease, transform 0.18s ease;
+    }
+
+    .anchor-list a:hover {
+      color: var(--text);
+      transform: translateX(2px);
+      border-color: rgba(125, 220, 255, 0.24);
+      background: rgba(125, 220, 255, 0.05);
+    }
+
+    .info-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 14px;
+      margin-top: 18px;
+    }
+
+    .info-tile {
+      padding: 18px 20px;
+      border-radius: 20px;
+      border: 1px solid rgba(169, 190, 255, 0.12);
+      background: rgba(255, 255, 255, 0.02);
+    }
+
+    .info-tile strong {
+      display: block;
+      margin-bottom: 8px;
+      color: var(--soft);
+    }
+
+    .info-tile span {
+      color: var(--muted);
+      word-break: break-word;
+    }
+
+    footer {
+      padding: 28px 0 46px;
+    }
+
+    .footer-row {
+      display: flex;
+      justify-content: space-between;
+      gap: 18px;
+      flex-wrap: wrap;
+      padding-top: 24px;
+      border-top: 1px solid rgba(169, 190, 255, 0.1);
+      color: var(--muted);
+      font-size: 0.95rem;
+    }
+
+    .footer-row strong {
+      color: var(--soft);
+      font-family: "Sora", sans-serif;
+      letter-spacing: -0.04em;
+    }
+
+    .footer-meta {
+      display: grid;
+      gap: 16px;
+      justify-items: end;
+    }
+
+    .footer-group {
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+      align-items: flex-end;
+    }
+
+    .footer-label {
+      color: rgba(226, 233, 255, 0.7);
+      font-size: 0.72rem;
+      font-weight: 800;
+      letter-spacing: 0.18em;
+      text-transform: uppercase;
+    }
+
+    .footer-links {
+      display: flex;
+      gap: 16px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    .footer-links a:hover {
+      color: var(--text);
+    }
+
+    @media (max-width: 1120px) {
+      nav {
+        grid-template-columns: auto 1fr;
+      }
+
+      .nav-links {
+        justify-content: flex-start;
+      }
+
+      .nav-actions {
+        grid-column: 1 / -1;
+        justify-content: space-between;
+      }
+
+      .hero,
+      .layout {
+        grid-template-columns: 1fr;
+      }
+
+      .side-stack {
+        position: static;
+      }
+
+      .footer-meta {
+        justify-items: start;
+      }
+
+      .footer-group {
+        align-items: flex-start;
+      }
+
+      .footer-links {
+        justify-content: flex-start;
+      }
+    }
+
+    @media (max-width: 860px) {
+      .mini-grid,
+      .info-grid {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    @media (max-width: 720px) {
+      html {
+        scroll-behavior: auto;
+      }
+
+      .container {
+        width: min(var(--max-width), calc(100% - 24px));
+      }
+
+      nav {
+        grid-template-columns: 1fr;
+      }
+
+      .nav-links {
+        display: none;
+      }
+
+      .nav-actions {
+        width: 100%;
+        gap: 10px;
+        flex-wrap: wrap;
+      }
+
+      .hero,
+      .policy-card {
+        padding: 22px;
+      }
+
+      h1 {
+        max-width: none;
+      }
+
+      .hero-actions {
+        flex-direction: column;
+        align-items: stretch;
+      }
+
+      .hero-actions .btn {
+        width: 100%;
+      }
+    }
+
+    @media (prefers-reduced-motion: reduce) {
+      *,
+      *::before,
+      *::after {
+        animation: none !important;
+        transition: none !important;
+        scroll-behavior: auto !important;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="nav-shell">
+    <div class="container">
+      <nav aria-label="Primary">
+        <a class="brand" href="index.html" aria-label="Babblebox home">
+          <img src="logo.jpg" alt="Babblebox logo" />
+          <span>
+            <span class="brand-title">Babblebox</span>
+            <span class="brand-subtitle">Terms of Service</span>
+          </span>
+        </a>
+        <div class="nav-links">
+          <a href="#overview">Overview</a>
+          <a href="#service">Service</a>
+          <a href="#responsibilities">Responsibilities</a>
+          <a href="#content">Content</a>
+          <a href="#availability">Availability</a>
+          <a href="#contact">Contact</a>
+        </div>
+        <div class="nav-actions">
+          <a class="nav-quiet" href="privacy.html">Privacy Policy</a>
+          <a class="btn btn-secondary" href="index.html">Back to Website</a>
+        </div>
+      </nav>
+    </div>
+  </div>
+
+  <main class="page-shell">
+    <div class="container">
+      <section id="overview" class="hero">
+        <div>
+          <div class="eyebrow">Terms of Service</div>
+          <h1>Clear terms for a compact Discord product.</h1>
+          <p>
+            These Terms of Service govern use of the Babblebox website and the Babblebox Discord bot. Babblebox is built
+            for Discord servers and combines party games, Daily Arcade, public-friendly identity surfaces, private-first
+            utilities, and optional compact safety tools.
+          </p>
+          <p>
+            Last updated: <strong>March 26, 2026</strong>. By inviting, installing, accessing, or using Babblebox, you agree
+            to these Terms. If you use Babblebox on behalf of a server, team, or community, you represent that you have
+            authority to do so for that Discord environment.
+          </p>
+          <div class="hero-actions">
+            <a class="btn btn-primary" href="privacy.html">Read Privacy Policy</a>
+            <a class="btn btn-secondary" href="index.html">Return Home</a>
+          </div>
+        </div>
+        <aside class="hero-side" aria-label="Terms summary">
+          <div class="kicker">At a glance</div>
+          <h2>Practical boundaries.</h2>
+          <ul>
+            <li>Babblebox is a Discord bot, not a managed enterprise platform.</li>
+            <li>Users and admins must use it lawfully and within Discord's rules.</li>
+            <li>Admins are responsible for permissions, channels, logs, and custom configuration.</li>
+            <li>Availability depends on Discord, hosting, storage, and other third-party services.</li>
+            <li>No warranty, uptime guarantee, or paid SLA is provided.</li>
+          </ul>
+        </aside>
+      </section>
+
+      <section class="mini-grid" aria-label="Core principles">
+        <article class="mini-card">
+          <h2>Discord-native service</h2>
+          <p>Babblebox operates inside Discord and depends on Discord permissions, message visibility, channels, DMs, and API behavior.</p>
+        </article>
+        <article class="mini-card">
+          <h2>Admin-controlled deployment</h2>
+          <p>Server owners and administrators decide whether to install Babblebox, what it can access, and how moderation or log features are configured.</p>
+        </article>
+        <article class="mini-card">
+          <h2>Compact operating model</h2>
+          <p>Babblebox is designed to stay lightweight, bounded, and useful, not to act as a surveillance archive, enterprise workflow suite, or guaranteed always-on system.</p>
+        </article>
+      </section>
+
+      <section class="layout">
+        <aside class="side-stack">
+          <div class="policy-card">
+            <h2>Sections</h2>
+            <div class="anchor-list">
+              <a href="#acceptance">1. Acceptance and Scope</a>
+              <a href="#service">2. Service Description</a>
+              <a href="#eligibility">3. Eligibility and Lawful Use</a>
+              <a href="#responsibilities">4. User Responsibilities</a>
+              <a href="#admins">5. Server Admin Responsibilities</a>
+              <a href="#acceptable-use">6. Acceptable Use</a>
+              <a href="#content">7. Media and Custom Content</a>
+              <a href="#availability">8. Availability and Dependencies</a>
+              <a href="#privacy">9. Privacy</a>
+              <a href="#ip">10. Intellectual Property</a>
+              <a href="#warranties">11. Disclaimer of Warranties</a>
+              <a href="#liability">12. Limitation of Liability</a>
+              <a href="#termination">13. Suspension and Termination</a>
+              <a href="#changes">14. Changes to These Terms</a>
+              <a href="#contact">15. Contact</a>
+            </div>
+          </div>
+          <div class="policy-card">
+            <h2>Scope</h2>
+            <p>
+              These Terms apply to the Babblebox website, the Babblebox Discord bot, and official Babblebox support surfaces.
+              Privacy practices are described separately in the <a href="privacy.html">Privacy Policy</a>.
+            </p>
+          </div>
+          <div class="policy-card">
+            <h2>Related Pages</h2>
+            <div class="anchor-list">
+              <a href="privacy.html">Privacy Policy</a>
+              <a href="index.html">Main Website</a>
+              <a href="https://github.com/arno-create/babblebox-bot" target="_blank" rel="noopener noreferrer">GitHub Repository</a>
+            </div>
+          </div>
+        </aside>
+
+        <div class="content-stack">
+          <article id="acceptance" class="policy-card">
+            <h2>1. Acceptance and Scope</h2>
+            <p>
+              By inviting Babblebox to a Discord server, using its commands or interfaces, or browsing the Babblebox website,
+              you agree to these Terms. If you do not agree, do not use the website or the bot.
+            </p>
+            <p>
+              If you use Babblebox on behalf of a server, community, organization, or moderation team, you are responsible for
+              ensuring that you are authorized to install and configure the bot in that context.
+            </p>
+          </article>
+
+          <article id="service" class="policy-card">
+            <h2>2. Service Description</h2>
+            <p>
+              Babblebox is an open-source Discord bot designed around a small set of product lanes rather than an all-purpose
+              platform. Depending on feature availability, permissions, and server configuration, Babblebox may provide party
+              games, Daily Arcade challenges, Buddy and profile surfaces, private-first utilities, and optional admin-facing
+              Shield or lifecycle helpers.
+            </p>
+            <div class="info-grid">
+              <div class="info-tile">
+                <strong>Games and Daily</strong>
+                <span>Party games and Daily Arcade are designed for lightweight, shareable Discord play rather than tournament, gambling, or prize-backed use.</span>
+              </div>
+              <div class="info-tile">
+                <strong>Identity surfaces</strong>
+                <span>Buddy, profile, and vault features provide cosmetic and progress-related views, not a financial or account-value system.</span>
+              </div>
+              <div class="info-tile">
+                <strong>Utilities</strong>
+                <span>Watch, Later, Capture, reminders, AFK, and similar tools are convenience features and may depend on DMs, message access, and current Discord state.</span>
+              </div>
+              <div class="info-tile">
+                <strong>Optional admin tools</strong>
+                <span>Shield and admin helpers are compact server tools, not a complete moderation case-management platform or legal-compliance service.</span>
+              </div>
+            </div>
+            <p>
+              Babblebox may add, remove, limit, or adjust features at any time, especially where changes are needed for
+              reliability, safety, abuse prevention, infrastructure constraints, or Discord platform changes.
+            </p>
+          </article>
+
+          <article id="eligibility" class="policy-card">
+            <h2>3. Eligibility and Lawful Use</h2>
+            <p>
+              You may use Babblebox only in compliance with applicable law, Discord's terms and policies, and these Terms.
+              You may not use Babblebox where doing so would be unlawful or where you lack authority to use the relevant
+              Discord account, guild, role, or channel.
+            </p>
+            <p>
+              Babblebox is not intended for emergency services, life-safety use, or any environment where interruption,
+              delay, false positives, missed detections, or message-delivery failure could create high-risk consequences.
+            </p>
+          </article>
+
+          <article id="responsibilities" class="policy-card">
+            <h2>4. User Responsibilities</h2>
+            <p>When using Babblebox, you are responsible for your own conduct, commands, submissions, and the Discord context in which you use the bot.</p>
+            <ul>
+              <li>Use Babblebox only for legitimate server participation, moderation, entertainment, or personal utility use.</li>
+              <li>Do not rely on Babblebox as your only copy of important information, media, reminders, moderation evidence, or server records.</li>
+              <li>Do not attempt to break rate limits, flood features, bypass safety checks, exploit bugs, or interfere with other users' access.</li>
+              <li>Do not use Babblebox to collect, expose, or redistribute personal information or message content in ways that violate law, server rules, or Discord rules.</li>
+              <li>You remain responsible for any text, links, attachments, or custom inputs you submit through the bot.</li>
+            </ul>
+          </article>
+
+          <article id="admins" class="policy-card">
+            <h2>5. Server Admin Responsibilities</h2>
+            <p>
+              If you install or administer Babblebox in a server, you are responsible for how it is configured and where it
+              is allowed to operate.
+            </p>
+            <ul>
+              <li>Install Babblebox only if you have authority to manage that server or feature area.</li>
+              <li>Review and set Discord permissions, channel access, command visibility, log destinations, trusted roles, and exclusions responsibly.</li>
+              <li>Use moderation, logging, review, or follow-up features only in ways consistent with your server's rules and any legal obligations you may have.</li>
+              <li>Review custom templates, allowlists, phrases, role targets, and other admin-configured content before enabling them.</li>
+              <li>Keep in mind that some bot output is intentionally public-friendly while some flows are private-first; your own server configuration can still affect visibility.</li>
+            </ul>
+          </article>
+
+          <article id="acceptable-use" class="policy-card">
+            <h2>6. Acceptable Use and Prohibited Conduct</h2>
+            <p>Babblebox may not be used for abusive, deceptive, or unlawful behavior. Prohibited misuse includes, without limitation:</p>
+            <ul>
+              <li>harassment, stalking, threats, hateful conduct, or attempts to target protected groups</li>
+              <li>doxxing, privacy invasion, or unauthorized monitoring of users or servers</li>
+              <li>spam, scams, phishing, malware distribution, malicious link campaigns, or deceptive invite promotion</li>
+              <li>using the bot to facilitate illegal content, illegal transactions, or unlawful coordination</li>
+              <li>attempting to reverse engineer, overload, disrupt, or degrade the service beyond normal open-source inspection or legitimate bug reporting</li>
+              <li>using Babblebox to evade moderation, bans, suspensions, or platform restrictions</li>
+            </ul>
+            <p>
+              Babblebox may limit, block, or terminate use connected to abusive or high-risk behavior, even if a specific
+              misuse pattern is not listed above.
+            </p>
+          </article>
+
+          <article id="content" class="policy-card">
+            <h2>7. Media, Message Templates, and Custom Content</h2>
+            <p>
+              Some Babblebox features work with message links, attachment references, reminder text, AFK text, Watch keywords,
+              Moment Card sources, or administrator-supplied templates and moderation settings. That does not make Babblebox a
+              general media host, backup service, or permanent record system.
+            </p>
+            <h3>Your content and configuration</h3>
+            <ul>
+              <li>You are responsible for the legality, accuracy, and appropriateness of the content or configuration you submit through Babblebox.</li>
+              <li>You must have the necessary rights or permission to use content, links, attachments, names, branding, or other materials you surface through the bot.</li>
+              <li>Server admins are responsible for custom moderation templates, allowlists, role actions, and channel routing they configure.</li>
+            </ul>
+            <h3>Feature limits</h3>
+            <ul>
+              <li>Babblebox may truncate, sanitize, reject, or stop processing content that is unsafe, abusive, oversized, unavailable, deleted, or incompatible with the feature.</li>
+              <li>Moment Cards, Capture, and similar features depend on real Discord messages, message links, and attachment availability at the time of use.</li>
+              <li>Babblebox does not guarantee that attachments, previews, templates, or custom content will remain available, render identically, or be preserved long term.</li>
+            </ul>
+          </article>
+
+          <article id="availability" class="policy-card">
+            <h2>8. Availability, Uptime, and Third-Party Dependencies</h2>
+            <p>
+              Babblebox is offered on a best-effort basis. Availability is not guaranteed, and features may be interrupted,
+              degraded, delayed, or unavailable because of platform limits, infrastructure issues, message deletion, restart
+              windows, permission changes, or third-party outages.
+            </p>
+            <div class="info-grid">
+              <div class="info-tile">
+                <strong>Discord dependency</strong>
+                <span>Babblebox depends on Discord APIs, gateways, permissions, channel access, and DM delivery. If Discord changes or blocks something, Babblebox behavior can change with it.</span>
+              </div>
+              <div class="info-tile">
+                <strong>Hosting and storage</strong>
+                <span>Website hosting, Supabase, Postgres, or other supporting infrastructure may affect latency, storage availability, and restart continuity.</span>
+              </div>
+              <div class="info-tile">
+                <strong>Optional external services</strong>
+                <span>Some optional flows may depend on configured third-party providers, such as AI review providers for already-flagged Shield events where such review is enabled.</span>
+              </div>
+              <div class="info-tile">
+                <strong>No SLA</strong>
+                <span>Babblebox does not provide a paid service-level agreement, guaranteed response time, guaranteed moderation coverage, or guaranteed delivery outcome.</span>
+              </div>
+            </div>
+          </article>
+
+          <article id="privacy" class="policy-card">
+            <h2>9. Privacy</h2>
+            <p>
+              Babblebox's data handling practices are described in the <a href="privacy.html">Privacy Policy</a>. That policy
+              explains what the bot may access, what compact feature state it may store, and the limits designed to avoid
+              turning Babblebox into a broad archive.
+            </p>
+            <p>
+              By using Babblebox, you acknowledge that the service necessarily interacts with Discord content, metadata, and
+              permissions within the scopes where the bot is invited and allowed to operate.
+            </p>
+          </article>
+
+          <article id="ip" class="policy-card">
+            <h2>10. Intellectual Property and Branding</h2>
+            <p>
+              The Babblebox codebase, website presentation, product name, logo, branding, and original bot materials remain
+              the property of their respective owner or licensor, except where open-source license terms explicitly provide
+              otherwise. These Terms do not transfer ownership of Babblebox or its branding to you.
+            </p>
+            <p>
+              Subject to these Terms, you may use Babblebox as intended inside Discord. You may not present yourself as the
+              owner of Babblebox, misrepresent an official relationship, or use Babblebox branding in a misleading way.
+            </p>
+          </article>
+
+          <article id="warranties" class="policy-card">
+            <h2>11. Disclaimer of Warranties</h2>
+            <p>
+              Babblebox is provided on an "as is" and "as available" basis to the fullest extent permitted by law. No
+              warranty is made that the service will be uninterrupted, error-free, secure, available at any particular time,
+              or fit for any specific business, moderation, archival, or compliance purpose.
+            </p>
+            <p>
+              Babblebox does not warrant that all content will be detected, all reminders will be delivered, all moderation
+              outcomes will be correct, or all outputs will remain available after deletions, platform changes, or outages.
+            </p>
+          </article>
+
+          <article id="liability" class="policy-card">
+            <h2>12. Limitation of Liability</h2>
+            <p>
+              To the fullest extent permitted by law, Babblebox and its operator will not be liable for indirect, incidental,
+              special, consequential, exemplary, or punitive damages, or for lost profits, lost data, lost goodwill, server
+              disruption, moderation disputes, or content loss arising out of or related to your use of the website or the bot.
+            </p>
+            <p>
+              To the fullest extent permitted by law, the total aggregate liability for claims arising out of Babblebox will
+              not exceed the amounts you paid, if any, for the service during the twelve months before the event giving rise
+              to the claim.
+            </p>
+          </article>
+
+          <article id="termination" class="policy-card">
+            <h2>13. Suspension, Removal, and Termination</h2>
+            <p>
+              Babblebox may suspend, restrict, or terminate access to the website, bot, or specific features if use appears
+              abusive, unlawful, high-risk, incompatible with Discord platform rules, or harmful to the service or other users.
+            </p>
+            <ul>
+              <li>Server owners and administrators may remove Babblebox from their server at any time.</li>
+              <li>Babblebox may disable features or stop responding in certain servers or contexts if misuse or safety concerns arise.</li>
+              <li>Some compact stored state may persist temporarily until ordinary cleanup, expiry, or deletion flows run.</li>
+            </ul>
+          </article>
+
+          <article id="changes" class="policy-card">
+            <h2>14. Changes to These Terms</h2>
+            <p>
+              These Terms may be updated when Babblebox changes materially, when legal or platform requirements shift, or
+              when the operating model needs to be clarified. When the Terms are updated, the date at the top of this page
+              will be revised.
+            </p>
+            <p>
+              Continued use of Babblebox after an updated version is posted means you accept the revised Terms.
+            </p>
+          </article>
+
+          <article id="contact" class="policy-card">
+            <h2>15. Contact</h2>
+            <p>
+              For questions about these Terms, support, or product behavior, use the official public contact routes below.
+            </p>
+            <div class="info-grid">
+              <div class="info-tile">
+                <strong>GitHub</strong>
+                <span><a href="https://github.com/arno-create/babblebox-bot" target="_blank" rel="noopener noreferrer">github.com/arno-create/babblebox-bot</a></span>
+              </div>
+              <div class="info-tile">
+                <strong>Support server</strong>
+                <span><a href="https://discord.com/servers/inevitable-friendship-1322933864360050688" target="_blank" rel="noopener noreferrer">discord.com/servers/inevitable-friendship-1322933864360050688</a></span>
+              </div>
+              <div class="info-tile">
+                <strong>Privacy Policy</strong>
+                <span><a href="privacy.html">Read the hosted Privacy Policy page</a></span>
+              </div>
+              <div class="info-tile">
+                <strong>Main website</strong>
+                <span><a href="index.html">Return to the Babblebox website</a></span>
+              </div>
+            </div>
+          </article>
+        </div>
+      </section>
+    </div>
+  </main>
+
+  <footer>
+    <div class="container">
+      <div class="footer-row">
+        <div>
+          <strong>Babblebox</strong>
+          <div>Open-source Discord bot by Arno.</div>
+        </div>
+        <div class="footer-meta">
+          <div class="footer-group">
+            <div class="footer-label">Links</div>
+            <div class="footer-links">
+              <a href="index.html">Main Website</a>
+              <a href="privacy.html">Privacy Policy</a>
+              <a href="terms.html">Terms of Service</a>
+              <a href="https://github.com/arno-create/babblebox-bot" target="_blank" rel="noopener noreferrer">GitHub</a>
+              <a href="https://arno-create.github.io/Bdayblaze/" target="_blank" rel="noopener noreferrer">Bdayzblaze</a>
+            </div>
+          </div>
+          <div class="footer-group">
+            <div class="footer-label">Social</div>
+            <div class="footer-links">
+              <a href="https://x.com/arno__if" target="_blank" rel="noopener noreferrer">X</a>
+              <a href="https://instagram.com/arno.if" target="_blank" rel="noopener noreferrer">Instagram</a>
+            </div>
+          </div>
+        </div>
+      </div>
+    </div>
+  </footer>
+</body>
+</html>
