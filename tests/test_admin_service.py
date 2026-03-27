@@ -9,7 +9,13 @@ from unittest.mock import patch
 
 from babblebox import game_engine as ge
 from babblebox.admin_service import AdminService
-from babblebox.admin_store import AdminStore, default_admin_config, normalize_admin_config, normalize_verification_state
+from babblebox.admin_store import (
+    AdminStore,
+    _PostgresAdminStore,
+    default_admin_config,
+    normalize_admin_config,
+    normalize_verification_state,
+)
 from babblebox.utility_helpers import deserialize_datetime, serialize_datetime
 
 
@@ -161,6 +167,64 @@ class AdminStoreNormalizationTests(unittest.TestCase):
         self.assertEqual(normalized["review_version"], 3)
         self.assertEqual(normalized["review_message_channel_id"], 50)
         self.assertEqual(normalized["review_message_id"], 75)
+
+
+class _FakeSchemaConnection:
+    def __init__(self):
+        self.executed: list[str] = []
+
+    async def execute(self, statement: str, *args):
+        self.executed.append(statement)
+
+
+class _FakeAcquireContext:
+    def __init__(self, connection: _FakeSchemaConnection):
+        self.connection = connection
+
+    async def __aenter__(self):
+        return self.connection
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class _FakeSchemaPool:
+    def __init__(self, connection: _FakeSchemaConnection):
+        self.connection = connection
+
+    def acquire(self):
+        return _FakeAcquireContext(self.connection)
+
+
+class PostgresAdminStoreSchemaTests(unittest.IsolatedAsyncioTestCase):
+    async def test_ensure_schema_adds_followup_and_verification_review_columns(self):
+        store = _PostgresAdminStore("postgresql://admin-user:secret@db.example.com:5432/app")
+        connection = _FakeSchemaConnection()
+        store._pool = _FakeSchemaPool(connection)
+
+        await store._ensure_schema()
+
+        executed = "\n".join(connection.executed)
+        self.assertIn(
+            "ALTER TABLE admin_followup_roles ADD COLUMN IF NOT EXISTS review_pending BOOLEAN NOT NULL DEFAULT FALSE",
+            executed,
+        )
+        self.assertIn(
+            "ALTER TABLE admin_followup_roles ADD COLUMN IF NOT EXISTS review_version INTEGER NOT NULL DEFAULT 0",
+            executed,
+        )
+        self.assertIn(
+            "ALTER TABLE admin_followup_roles ADD COLUMN IF NOT EXISTS review_message_channel_id BIGINT NULL",
+            executed,
+        )
+        self.assertIn(
+            "ALTER TABLE admin_followup_roles ADD COLUMN IF NOT EXISTS review_message_id BIGINT NULL",
+            executed,
+        )
+        self.assertIn(
+            "ALTER TABLE admin_verification_states ADD COLUMN IF NOT EXISTS review_pending BOOLEAN NOT NULL DEFAULT FALSE",
+            executed,
+        )
 
 
 class AdminServiceTests(unittest.IsolatedAsyncioTestCase):
