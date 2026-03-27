@@ -12,6 +12,7 @@ from babblebox.command_utils import defer_hybrid_response, send_hybrid_response
 from babblebox.shield_service import (
     ACTION_LABELS,
     CUSTOM_PATTERN_LIMIT,
+    MATCH_CLASS_LABELS,
     PACK_LABELS,
     SENSITIVITY_LABELS,
     ShieldService,
@@ -29,6 +30,15 @@ ACTION_CHOICES = [
     app_commands.Choice(name="Delete + log", value="delete_log"),
     app_commands.Choice(name="Delete + log + escalate", value="delete_escalate"),
     app_commands.Choice(name="Timeout + log", value="timeout_log"),
+]
+LOW_ACTION_CHOICES = [
+    app_commands.Choice(name="Detect only", value="detect"),
+    app_commands.Choice(name="Log only", value="log"),
+]
+MEDIUM_ACTION_CHOICES = [
+    app_commands.Choice(name="Detect only", value="detect"),
+    app_commands.Choice(name="Log only", value="log"),
+    app_commands.Choice(name="Delete + log", value="delete_log"),
 ]
 SENSITIVITY_CHOICES = [
     app_commands.Choice(name="Low", value="low"),
@@ -67,6 +77,7 @@ AI_CONFIDENCE_CHOICES = [
     app_commands.Choice(name="Medium", value="medium"),
     app_commands.Choice(name="High", value="high"),
 ]
+SHIELD_AI_OVERRIDE_OWNER_IDS = {1266444952779620413, 1345860619836063754}
 
 
 class ShieldPanelView(discord.ui.View):
@@ -256,6 +267,54 @@ class ShieldCog(commands.Cog):
             return "None selected"
         return ", ".join(PACK_LABELS.get(pack, pack.title()) for pack in enabled_packs)
 
+    def _pack_policy_actions(self, config: dict[str, object], pack: str) -> tuple[str, str, str]:
+        return (
+            str(config.get(f"{pack}_low_action", "log")),
+            str(config.get(f"{pack}_medium_action", "log")),
+            str(config.get(f"{pack}_high_action", "log")),
+        )
+
+    def _pack_policy_compact(self, config: dict[str, object], pack: str) -> str:
+        low_action, medium_action, high_action = self._pack_policy_actions(config, pack)
+        return f"Low / Medium / High: `{low_action}` / `{medium_action}` / `{high_action}`"
+
+    def _pack_policy_detail(self, config: dict[str, object], pack: str) -> str:
+        low_action, medium_action, high_action = self._pack_policy_actions(config, pack)
+        return (
+            f"Enabled: {'Yes' if config[f'{pack}_enabled'] else 'No'} | "
+            f"Sensitivity: {SENSITIVITY_LABELS[config[f'{pack}_sensitivity']]}\n"
+            f"Low action: `{low_action}`\n"
+            f"Medium action: `{medium_action}`\n"
+            f"High action: `{high_action}`"
+        )
+
+    def _is_override_owner(self, user_id: int) -> bool:
+        return user_id in SHIELD_AI_OVERRIDE_OWNER_IDS
+
+    def _build_ai_override_embed(self, *, title: str, note: str) -> discord.Embed:
+        meta = self.service.get_meta()
+        state_label = "On" if meta["global_ai_override_enabled"] else "Off"
+        updated_by = meta["global_ai_override_updated_by"]
+        updated_at = meta["global_ai_override_updated_at"] or "Never"
+        updated_by_label = f"`{updated_by}`" if updated_by is not None else "`None`"
+        embed = discord.Embed(
+            title=title,
+            description=note,
+            color=ge.EMBED_THEME["accent"] if meta["global_ai_override_enabled"] else ge.EMBED_THEME["info"],
+        )
+        embed.add_field(
+            name="Global Override",
+            value=(
+                f"State: **{state_label}**\n"
+                f"Support server baseline: Always available there\n"
+                f"Last updated by: {updated_by_label}\n"
+                f"Last updated at: `{updated_at}`"
+            ),
+            inline=False,
+        )
+        embed.set_footer(text="Babblebox Shield AI | DM-only maintainer control")
+        return embed
+
     def _guild_from_bot(self, guild_id: int) -> discord.Guild | None:
         get_guild = getattr(self.bot, "get_guild", None)
         if callable(get_guild):
@@ -303,11 +362,13 @@ class ShieldCog(commands.Cog):
                 lines.append(line)
 
         delete_actions_enabled = any(
-            config.get(f"{pack}_enabled") and config.get(f"{pack}_action") in {"delete_log", "delete_escalate"}
+            config.get(f"{pack}_enabled")
+            and bool(set(self._pack_policy_actions(config, pack)).intersection({"delete_log", "delete_escalate"}))
             for pack in ("privacy", "promo", "scam")
         )
         timeout_actions_enabled = any(
-            config.get(f"{pack}_enabled") and config.get(f"{pack}_action") in {"timeout_log", "delete_escalate"}
+            config.get(f"{pack}_enabled")
+            and bool(set(self._pack_policy_actions(config, pack)).intersection({"timeout_log", "delete_escalate"}))
             for pack in ("privacy", "promo", "scam")
         )
 
@@ -351,7 +412,7 @@ class ShieldCog(commands.Cog):
         ai_status = self.service.get_ai_status(guild_id)
         embed = discord.Embed(
             title="Shield Control Panel",
-            description="Layer 1 stays local. Layer 2 AI review is optional, second-pass only, and never decides punishment on its own.",
+            description="Local detection stays authoritative. Lower-confidence heuristics can stay log-first while stronger matches can delete or escalate.",
             color=ge.EMBED_THEME["warning"] if config["module_enabled"] else ge.EMBED_THEME["info"],
         )
         log_channel = f"<#{config['log_channel_id']}>" if config.get("log_channel_id") else "Not set"
@@ -370,9 +431,8 @@ class ShieldCog(commands.Cog):
         for pack in ("privacy", "promo", "scam"):
             pack_lines.append(
                 f"**{PACK_LABELS[pack]}**\n"
-                f"Enabled: {'Yes' if config[f'{pack}_enabled'] else 'No'} | "
-                f"Action: `{config[f'{pack}_action']}` | "
-                f"Sensitivity: {SENSITIVITY_LABELS[config[f'{pack}_sensitivity']]}"
+                f"Enabled: {'Yes' if config[f'{pack}_enabled'] else 'No'} | Sensitivity: {SENSITIVITY_LABELS[config[f'{pack}_sensitivity']]}\n"
+                f"{self._pack_policy_compact(config, pack)}"
             )
         embed.add_field(name="Protection Packs", value="\n\n".join(pack_lines), inline=False)
         embed.add_field(
@@ -399,18 +459,16 @@ class ShieldCog(commands.Cog):
         config = self.service.get_config(guild_id)
         embed = discord.Embed(
             title="Shield Rules",
-            description="Primary local detections, actions, and repeated-hit escalation.",
+            description="Confidence-tier local policy. Uncertain detections can stay quiet while clean matches can act harder.",
             color=ge.EMBED_THEME["info"],
         )
         pack_lines = []
         for pack in ("privacy", "promo", "scam"):
             pack_lines.append(
                 f"**{PACK_LABELS[pack]}**\n"
-                f"Enabled: {'Yes' if config[f'{pack}_enabled'] else 'No'} | "
-                f"Action: `{config[f'{pack}_action']}` | "
-                f"Sensitivity: {SENSITIVITY_LABELS[config[f'{pack}_sensitivity']]}"
+                f"{self._pack_policy_detail(config, pack)}"
             )
-        embed.add_field(name="Pack Rules", value="\n\n".join(pack_lines), inline=False)
+        embed.add_field(name="Low / Medium / High Action Policy", value="\n\n".join(pack_lines), inline=False)
         embed.add_field(
             name="Escalation",
             value=(
@@ -431,13 +489,13 @@ class ShieldCog(commands.Cog):
         embed.add_field(
             name="Quick Use",
             value=(
-                "`/shield rules pack:promo enabled:true action:log sensitivity:high`\n"
+                "`/shield rules pack:promo enabled:true low_action:log medium_action:delete_log high_action:delete_escalate sensitivity:high`\n"
                 "`/shield rules module:true escalation_threshold:3 timeout_minutes:10`\n"
                 "`bb!shield advanced list` for safe custom patterns"
             ),
             inline=False,
         )
-        return ge.style_embed(embed, footer="Babblebox Shield | Local rules stay authoritative")
+        return ge.style_embed(embed, footer="Babblebox Shield | Low / Medium / High policy stays local and explicit")
 
     def _scope_embed(self, guild_id: int) -> discord.Embed:
         config = self.service.get_config(guild_id)
@@ -497,6 +555,7 @@ class ShieldCog(commands.Cog):
         embed.add_field(
             name="Availability",
             value=(
+                "Default rollout: Support server\n"
                 f"Server access: {'Allowed' if ai_status['supported'] else 'Not available in this server yet'}\n"
                 f"Provider: {ai_status['provider'] or 'Not configured'}\n"
                 f"Provider ready: {'Yes' if ai_status['provider_available'] else 'No'}\n"
@@ -551,7 +610,7 @@ class ShieldCog(commands.Cog):
         embed.add_field(
             name="What Alerts Include",
             value=(
-                "Detection summary, action summary, compact preview, optional attachment summary, and optional AI second-pass note.\n"
+                "Detection class, confidence, resolved action, compact preview, optional attachment summary, and optional AI second-pass note.\n"
                 "Babblebox does not keep a heavy deleted-message archive in Shield storage."
             ),
             inline=False,
@@ -638,13 +697,23 @@ class ShieldCog(commands.Cog):
         module="Turn the Shield module on or off",
         pack="Which protection pack to adjust",
         enabled="Turn that pack on or off",
-        action="What Shield should do when the pack matches",
+        action="Shorthand to use one graduated policy derived from a single action",
+        low_action="Action for broad or uncertain low-confidence matches",
+        medium_action="Action for medium-confidence matches",
+        high_action="Action for high-confidence matches",
         sensitivity="How broad or cautious the pack should be",
         escalation_threshold="Repeated-hit threshold for delete_escalate",
         escalation_window_minutes="Strike window used for delete_escalate",
         timeout_minutes="Timeout length used when escalation or timeout actions fire",
     )
-    @app_commands.choices(pack=PACK_CHOICES, action=ACTION_CHOICES, sensitivity=SENSITIVITY_CHOICES)
+    @app_commands.choices(
+        pack=PACK_CHOICES,
+        action=ACTION_CHOICES,
+        low_action=LOW_ACTION_CHOICES,
+        medium_action=MEDIUM_ACTION_CHOICES,
+        high_action=ACTION_CHOICES,
+        sensitivity=SENSITIVITY_CHOICES,
+    )
     async def shield_rules_command(
         self,
         ctx: commands.Context,
@@ -652,6 +721,9 @@ class ShieldCog(commands.Cog):
         pack: Optional[str] = None,
         enabled: Optional[bool] = None,
         action: Optional[str] = None,
+        low_action: Optional[str] = None,
+        medium_action: Optional[str] = None,
+        high_action: Optional[str] = None,
         sensitivity: Optional[str] = None,
         escalation_threshold: Optional[int] = None,
         escalation_window_minutes: Optional[int] = None,
@@ -665,16 +737,19 @@ class ShieldCog(commands.Cog):
             module_ok, module_message = await self.service.set_module_enabled(ctx.guild.id, module)
             ok = ok and module_ok
             messages.append(module_message)
-        pack_fields_used = any(value is not None for value in (enabled, action, sensitivity))
+        pack_fields_used = any(value is not None for value in (enabled, action, low_action, medium_action, high_action, sensitivity))
         if pack_fields_used and pack is None:
             ok = False
-            messages.append("Choose a pack when changing pack enabled/action/sensitivity.")
+            messages.append("Choose a pack when changing pack enabled, action policy, or sensitivity.")
         elif pack is not None:
             pack_ok, pack_message = await self.service.set_pack_config(
                 ctx.guild.id,
                 pack,
                 enabled=enabled,
                 action=action,
+                low_action=low_action,
+                medium_action=medium_action,
+                high_action=high_action,
                 sensitivity=sensitivity,
             )
             ok = ok and pack_ok
@@ -850,6 +925,35 @@ class ShieldCog(commands.Cog):
         )
         await self._send_result(ctx, "Shield AI", message, ok=ok)
 
+    @commands.command(name="shieldaiglobal", hidden=True)
+    async def shield_ai_global_override_command(self, ctx: commands.Context, mode: str = "status"):
+        if ctx.guild is not None:
+            return
+        author_id = getattr(ctx.author, "id", 0)
+        if not self._is_override_owner(author_id):
+            print(f"Shield AI override denied: unauthorized_dm_user_id={author_id}")
+            await ctx.send(content="That command is unavailable.")
+            return
+        normalized_mode = str(mode or "status").strip().lower()
+        if normalized_mode not in {"status", "on", "off"}:
+            await ctx.send(embed=self._build_ai_override_embed(title="Shield AI Override", note="Use `status`, `on`, or `off`."))
+            return
+        if normalized_mode == "status":
+            await ctx.send(
+                embed=self._build_ai_override_embed(
+                    title="Shield AI Override",
+                    note="Private maintainer status for the global Shield AI rollout override.",
+                )
+            )
+            return
+        ok, message = await self.service.set_global_ai_override(normalized_mode == "on", actor_id=author_id)
+        await ctx.send(
+            embed=self._build_ai_override_embed(
+                title="Shield AI Override",
+                note=message if ok else f"Override update failed: {message}",
+            )
+        )
+
     @shield_group.command(name="test", with_app_command=True, description="Dry-run a message through the current Shield rules")
     async def shield_test_command(self, ctx: commands.Context, text: str):
         if not await self._guard(ctx):
@@ -862,7 +966,9 @@ class ShieldCog(commands.Cog):
             embed.add_field(
                 name="Matches",
                 value="\n".join(
-                    f"**{PACK_LABELS.get(item.pack, item.pack.title())}** | {item.label} | `{item.action}` | {item.confidence}"
+                    f"**{PACK_LABELS.get(item.pack, item.pack.title())}** | {item.label} | "
+                    f"{MATCH_CLASS_LABELS.get(item.match_class, item.match_class.replace('_', ' ').title() if item.match_class else 'Match')} | "
+                    f"`{item.action}` | {item.confidence}"
                     for item in matches[:5]
                 ),
                 inline=False,

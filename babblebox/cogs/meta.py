@@ -25,11 +25,11 @@ HELP_PAGES: list[dict[str, str]] = [
     {
         "title": "Babblebox Guide",
         "emoji": "\U0001f3e0",
-        "description": "Five cozy lanes: Party Games, Utilities, Daily Arcade, Buddy/Profile, and Shield.",
+        "description": "Five clear lanes: Party Games, Utilities, Daily Arcade, Buddy/Profile, and Shield.",
         "body": (
-            "Use the arrows to browse by category.\n"
-            "Showable cards lean public by default.\n"
-            "Personal utilities and setup flows stay private."
+            "Use the arrows to browse the product by lane.\n"
+            "Showable cards lean public by default so they feel native in chat.\n"
+            "Personal utilities, setup, and sensitive admin work stay private."
         ),
         "try": "`/play`, `/daily`, `/profile`, `/watch`, `/remind`",
     },
@@ -83,12 +83,13 @@ HELP_PAGES: list[dict[str, str]] = [
         "emoji": "\U0001f6e1\ufe0f",
         "description": "Optional server-side protection and compact admin automations with conservative defaults.",
         "body": (
-            "Shield can watch for privacy leaks, invite/promo spam, and experimental scam heuristics.\n"
+            "Shield can watch for privacy leaks, invite or promo abuse, and experimental scam heuristics.\n"
             "`/shield panel`, `/shield rules`, `/shield ai`, and `/shield test` cover the core admin flow.\n"
             "`/admin panel`, `/admin followup`, `/admin verification`, and `/admin sync` cover returned-after-ban follow-up roles and unverified cleanup.\n"
             "Everything stays off until an admin configures it.\n"
-            "Defaults are log-first, with allowlists, trusted-role bypasses, private mod-log alerts, and safe advanced wildcard patterns instead of raw regex.\n"
-            "AI assist is optional, admin-only, support-server limited, and only reviews messages that local Shield already flagged. It never punishes on its own.\n"
+            "Defaults are log-first, with low/medium/high action policy, allowlists, trusted-role bypasses, private mod-log alerts, and safe advanced wildcard patterns instead of raw regex.\n"
+            "Repeated noisy links can stay low-confidence and log-only instead of being misread as strong promo.\n"
+            "AI assist is optional, admin-only, support-server limited by default, and only reviews messages that local Shield already flagged. It never punishes on its own.\n"
             "Admin lifecycle helpers stay compact: no Babblebox ban/kick command suite, no giant case archive, and no per-member task explosion."
         ),
         "try": "`/shield panel`, `/admin panel`, `/admin verification`, `/admin sync`",
@@ -100,7 +101,7 @@ HELP_PAGES: list[dict[str, str]] = [
         "body": (
             "Keep DMs open for Watch, Later, Capture, reminders, and DM-based party games.\n"
             "Use public visibility for showable cards, and private visibility for sensitive utility flows.\n"
-            "If you run Shield, start with log-only and tune filters before enabling deletes."
+            "If you run Shield, start with log-only or low-confidence logging and tune filters before enabling deletes."
         ),
         "try": "Open DMs, start with `/help`, then pick one lane to try first.",
     },

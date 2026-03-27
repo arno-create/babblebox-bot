@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import hashlib
 import ipaddress
 import re
 import uuid
@@ -25,6 +26,8 @@ from babblebox.shield_ai import (
     summarize_attachment_extensions,
 )
 from babblebox.shield_store import (
+    LOW_CONFIDENCE_ACTIONS,
+    MEDIUM_CONFIDENCE_ACTIONS,
     ShieldStateStore,
     ShieldStorageUnavailable,
     default_guild_shield_config,
@@ -60,7 +63,9 @@ CUSTOM_PATTERN_WILDCARD_LIMIT = 4
 MAX_MESSAGE_PREVIEW = 220
 ALERT_DEDUP_SECONDS = 30.0
 REPETITION_WINDOW_SECONDS = 10 * 60.0
-REPETITION_THRESHOLD = 3
+DIRECT_PROMO_REPEAT_THRESHOLD = 3
+GENERIC_LINK_NOISE_THRESHOLD = 4
+MEDIA_LINK_NOISE_THRESHOLD = 5
 RUNTIME_PRUNE_INTERVAL_SECONDS = 60.0
 
 PACK_LABELS = {
@@ -69,6 +74,14 @@ PACK_LABELS = {
     "scam": "Scam Heuristic",
     "advanced": "Advanced Pattern",
 }
+MATCH_CLASS_LABELS = {
+    "discord_invite": "Discord invite",
+    "self_promo": "Self-promo link",
+    "monetized_promo": "Monetized promo",
+    "cta_promo": "Call-to-action promo",
+    "repetitive_link_noise": "Repetitive link noise",
+}
+ESCALATION_BLOCKED_MATCH_CLASSES = {"repetitive_link_noise"}
 ACTION_LABELS = {
     "disabled": "Disabled",
     "detect": "Detect only",
@@ -121,12 +134,29 @@ SOCIAL_PROMO_DOMAINS = {
     "twitch.tv",
     "twitter.com",
     "x.com",
+    "linktr.ee",
+    "beacons.ai",
+    "carrd.co",
+}
+STOREFRONT_DOMAINS = {
     "patreon.com",
     "ko-fi.com",
     "gumroad.com",
     "etsy.com",
-    "linktr.ee",
-    "beacons.ai",
+    "buymeacoffee.com",
+    "myshopify.com",
+    "shopify.com",
+    "sellfy.com",
+}
+MEDIA_EMBED_DOMAINS = {
+    "tenor.com",
+    "media.tenor.com",
+    "giphy.com",
+    "media.giphy.com",
+    "imgur.com",
+    "i.imgur.com",
+    "cdn.discordapp.com",
+    "media.discordapp.net",
 }
 SHORTENER_DOMAINS = {
     "bit.ly",
@@ -142,8 +172,17 @@ SHORTENER_DOMAINS = {
 @dataclass(frozen=True)
 class PackSettings:
     enabled: bool
-    action: str
+    low_action: str
+    medium_action: str
+    high_action: str
     sensitivity: str
+
+    def action_for_confidence(self, confidence: str) -> str:
+        if confidence == "high":
+            return self.high_action
+        if confidence == "medium":
+            return self.medium_action
+        return self.low_action
 
 
 @dataclass(frozen=True)
@@ -205,7 +244,16 @@ class CompiledShieldConfig:
             return self.promo
         if pack == "scam":
             return self.scam
-        return PackSettings(enabled=True, action="log", sensitivity="normal")
+        return PackSettings(enabled=True, low_action="log", medium_action="log", high_action="log", sensitivity="normal")
+
+
+@dataclass(frozen=True)
+class ShieldLink:
+    raw_url: str
+    canonical_url: str
+    domain: str
+    category: str
+    invite_code: str | None = None
 
 
 @dataclass(frozen=True)
@@ -213,7 +261,10 @@ class ShieldSnapshot:
     text: str
     squashed: str
     urls: tuple[str, ...]
+    links: tuple[ShieldLink, ...]
+    canonical_links: tuple[str, ...]
     domains: frozenset[str]
+    link_categories: frozenset[str]
     invite_codes: frozenset[str]
     attachment_names: tuple[str, ...]
     has_links: bool
@@ -228,6 +279,7 @@ class ShieldMatch:
     action: str
     confidence: str
     heuristic: bool
+    match_class: str = ""
 
 
 @dataclass
@@ -242,6 +294,14 @@ class ShieldDecision:
     escalated: bool = False
     action_note: str | None = None
     ai_review: ShieldAIReviewResult | None = None
+
+
+@dataclass(frozen=True)
+class RepetitionSignals:
+    fingerprint: str | None
+    hits: int
+    pure_media_links: bool
+    has_unallowlisted_links: bool
 
 
 def _ordered_token_match(text: str, tokens: Sequence[str]) -> bool:
@@ -263,6 +323,14 @@ def _sorted_unique_ints(values: Iterable[Any]) -> list[int]:
 def _sorted_unique_text(values: Iterable[Any]) -> list[str]:
     cleaned = {normalize_plain_text(str(value)).casefold() for value in values if isinstance(value, str) and normalize_plain_text(str(value))}
     return sorted(cleaned)
+
+
+def _domain_matches(domain: str, candidate: str) -> bool:
+    return domain == candidate or domain.endswith(f".{candidate}")
+
+
+def _domain_in_set(domain: str, candidates: set[str]) -> bool:
+    return any(_domain_matches(domain, candidate) for candidate in candidates)
 
 
 def _extract_domain(raw_url: str) -> str | None:
@@ -301,13 +369,95 @@ def _extract_invite_codes(urls: Sequence[str]) -> frozenset[str]:
     return frozenset(codes)
 
 
+def _classify_link(domain: str, *, invite_code: str | None) -> str:
+    if invite_code is not None or _domain_matches(domain, "discord.gg") or _domain_matches(domain, "discord.com"):
+        return "discord_invite"
+    if _domain_in_set(domain, MEDIA_EMBED_DOMAINS):
+        return "media_embed"
+    if _domain_in_set(domain, STOREFRONT_DOMAINS):
+        return "storefront"
+    if _domain_in_set(domain, SOCIAL_PROMO_DOMAINS):
+        return "creator_social"
+    if _domain_in_set(domain, SHORTENER_DOMAINS):
+        return "shortener"
+    return "generic_external"
+
+
+def _build_link(raw_url: str) -> ShieldLink | None:
+    domain = _extract_domain(raw_url)
+    if domain is None:
+        return None
+    candidate = raw_url.strip().strip("()[]{}<>,.!?\"'")
+    if "://" not in candidate:
+        candidate = f"https://{candidate}"
+    parsed = urlsplit(candidate)
+    invite_match = INVITE_RE.search(candidate.casefold())
+    invite_code = invite_match.group(1).casefold() if invite_match else None
+    path = re.sub(r"/{2,}", "/", (parsed.path or "/").casefold()).rstrip("/")
+    path = path or "/"
+    canonical_url = f"discord-invite:{invite_code}" if invite_code else f"{domain}{path}"
+    return ShieldLink(
+        raw_url=raw_url,
+        canonical_url=canonical_url,
+        domain=domain,
+        category=_classify_link(domain, invite_code=invite_code),
+        invite_code=invite_code,
+    )
+
+
+def _canonical_repetition_fingerprint(snapshot: ShieldSnapshot) -> str | None:
+    if not snapshot.text or len(snapshot.text) < 6:
+        return None
+    canonical_text = snapshot.text
+    for link in snapshot.links:
+        canonical_text = canonical_text.replace(link.raw_url, f"[{link.category}:{link.canonical_url}]")
+    canonical_text = re.sub(r"\s+", " ", canonical_text).strip()
+    if not canonical_text:
+        return None
+    return hashlib.sha1(canonical_text.encode("utf-8")).hexdigest()
+
+
+def _confidence_rank(confidence: str) -> int:
+    return CONFIDENCE_STRENGTH.get(confidence, 0)
+
+
+def _boost_confidence(confidence: str) -> str:
+    if confidence == "low":
+        return "medium"
+    if confidence == "medium":
+        return "high"
+    return confidence
+
+
+def _match_class_label(match_class: str) -> str:
+    if not match_class:
+        return "Not specified"
+    return MATCH_CLASS_LABELS.get(match_class, match_class.replace("_", " ").title())
+
+
+def _legacy_action_policy(action: str) -> tuple[str, str, str]:
+    cleaned = str(action).strip().lower()
+    if cleaned == "detect":
+        return ("detect", "detect", "detect")
+    if cleaned == "log":
+        return ("log", "log", "log")
+    if cleaned == "delete_log":
+        return ("log", "delete_log", "delete_log")
+    if cleaned == "timeout_log":
+        return ("log", "delete_log", "timeout_log")
+    if cleaned == "delete_escalate":
+        return ("log", "delete_log", "delete_escalate")
+    return ("log", "log", "log")
+
+
 def _build_snapshot(text: str | None, attachments: Sequence[Any] | None = None) -> ShieldSnapshot:
     normalized = normalize_plain_text(text)
     squashed = squash_for_evasion_checks(normalized.casefold())
     lowered = normalized.casefold()
     urls = _extract_urls(lowered)
-    domains = frozenset(domain for domain in (_extract_domain(url) for url in urls) if domain)
-    invite_codes = _extract_invite_codes(urls)
+    links = tuple(link for link in (_build_link(url) for url in urls) if link is not None)
+    domains = frozenset(link.domain for link in links)
+    invite_codes = frozenset(link.invite_code for link in links if link.invite_code)
     attachment_names = tuple(
         normalize_plain_text(getattr(attachment, "filename", "")).casefold()
         for attachment in (attachments or [])
@@ -317,7 +467,10 @@ def _build_snapshot(text: str | None, attachments: Sequence[Any] | None = None) 
         text=lowered,
         squashed=squashed,
         urls=urls,
+        links=links,
+        canonical_links=tuple(link.canonical_url for link in links),
         domains=domains,
+        link_categories=frozenset(link.category for link in links),
         invite_codes=invite_codes,
         attachment_names=attachment_names,
         has_links=bool(urls),
@@ -466,6 +619,20 @@ class ShieldService:
     def storage_message(self, feature_name: str = "Shield") -> str:
         return f"{feature_name} is temporarily unavailable because Babblebox could not reach its Shield database."
 
+    def get_meta(self) -> dict[str, Any]:
+        meta = self.store.state.get("meta")
+        if isinstance(meta, dict):
+            return {
+                "global_ai_override_enabled": bool(meta.get("global_ai_override_enabled")),
+                "global_ai_override_updated_by": meta.get("global_ai_override_updated_by"),
+                "global_ai_override_updated_at": meta.get("global_ai_override_updated_at"),
+            }
+        return {
+            "global_ai_override_enabled": False,
+            "global_ai_override_updated_by": None,
+            "global_ai_override_updated_at": None,
+        }
+
     def get_config(self, guild_id: int) -> dict[str, Any]:
         raw = self.store.state.get("guilds", {}).get(str(guild_id))
         if isinstance(raw, dict):
@@ -473,10 +640,11 @@ class ShieldService:
         return default_guild_shield_config(guild_id)
 
     def is_ai_supported_guild(self, guild_id: int | None) -> bool:
-        return shield_ai_available_in_guild(guild_id)
+        return shield_ai_available_in_guild(guild_id) or self.get_meta()["global_ai_override_enabled"]
 
     def get_ai_status(self, guild_id: int) -> dict[str, Any]:
         config = self.get_config(guild_id)
+        meta = self.get_meta()
         diagnostics = self.ai_provider.diagnostics()
         supported = self.is_ai_supported_guild(guild_id)
         enabled_packs = [pack for pack in config.get("ai_enabled_packs", []) if pack in AI_REVIEW_PACK_SET]
@@ -489,6 +657,8 @@ class ShieldService:
             status_message = "AI review is configured but currently disabled for this server."
         return {
             "supported": supported,
+            "support_server_default": shield_ai_available_in_guild(guild_id),
+            "global_override_enabled": meta["global_ai_override_enabled"],
             "enabled": bool(config.get("ai_enabled")),
             "enabled_packs": enabled_packs,
             "min_confidence": config.get("ai_min_confidence", "high"),
@@ -499,6 +669,26 @@ class ShieldService:
             "max_chars": diagnostics.get("max_chars"),
             "status": status_message,
         }
+
+    async def set_global_ai_override(self, enabled: bool, *, actor_id: int) -> tuple[bool, str]:
+        if not self.storage_ready:
+            return False, self.storage_message("Shield AI")
+        async with self._lock:
+            meta = self.get_meta()
+            meta["global_ai_override_enabled"] = bool(enabled)
+            meta["global_ai_override_updated_by"] = actor_id
+            meta["global_ai_override_updated_at"] = ge.now_utc().isoformat()
+            self.store.state["meta"] = meta
+            flushed = await self.store.flush()
+            if not flushed:
+                return False, "Shield AI override could not be saved."
+        print(
+            "Shield AI override changed: "
+            f"enabled={'yes' if enabled else 'no'}, "
+            f"actor_id={actor_id}, "
+            f"updated_at={self.get_meta()['global_ai_override_updated_at']}"
+        )
+        return True, f"Global Shield AI override is now {'on' if enabled else 'off'}."
 
     def test_message(self, guild_id: int, text: str, *, attachments: Sequence[str] | None = None) -> list[ShieldMatch]:
         compiled = self._compiled_configs.get(guild_id) or self._compile_config(guild_id, self.get_config(guild_id))
@@ -513,6 +703,9 @@ class ShieldService:
             success_message=f"Shield is now {'enabled' if enabled else 'disabled'} for this server.",
         )
 
+    def _policy_summary(self, *, low_action: str, medium_action: str, high_action: str) -> str:
+        return f"low `{low_action}` | medium `{medium_action}` | high `{high_action}`"
+
     async def set_pack_config(
         self,
         guild_id: int,
@@ -520,35 +713,70 @@ class ShieldService:
         *,
         enabled: bool | None = None,
         action: str | None = None,
+        low_action: str | None = None,
+        medium_action: str | None = None,
+        high_action: str | None = None,
         sensitivity: str | None = None,
     ) -> tuple[bool, str]:
         if pack not in RULE_PACKS:
             return False, "Unknown Shield pack."
         cleaned_action = action.strip().lower() if isinstance(action, str) else None
+        cleaned_low_action = low_action.strip().lower() if isinstance(low_action, str) else None
+        cleaned_medium_action = medium_action.strip().lower() if isinstance(medium_action, str) else None
+        cleaned_high_action = high_action.strip().lower() if isinstance(high_action, str) else None
         cleaned_sensitivity = sensitivity.strip().lower() if isinstance(sensitivity, str) else None
-        if cleaned_action is not None and cleaned_action not in SHIELD_ACTIONS:
+        if cleaned_action is not None and cleaned_action not in SHIELD_ACTIONS - {"disabled"}:
             return False, "That action is not supported."
+        if cleaned_action is not None and any(value is not None for value in (cleaned_low_action, cleaned_medium_action, cleaned_high_action)):
+            return False, "Use either the legacy `action` shorthand or explicit low/medium/high actions."
+        if cleaned_low_action is not None and cleaned_low_action not in LOW_CONFIDENCE_ACTIONS:
+            return False, "Low-confidence actions must be `detect` or `log`."
+        if cleaned_medium_action is not None and cleaned_medium_action not in MEDIUM_CONFIDENCE_ACTIONS:
+            return False, "Medium-confidence actions must be `detect`, `log`, or `delete_log`."
+        if cleaned_high_action is not None and cleaned_high_action not in SHIELD_ACTIONS - {"disabled"}:
+            return False, "High-confidence action is not supported."
         if cleaned_sensitivity is not None and cleaned_sensitivity not in SHIELD_SENSITIVITIES:
             return False, "Sensitivity must be low, normal, or high."
+
+        current = self.get_config(guild_id)
+        if cleaned_action is not None:
+            derived_low, derived_medium, derived_high = _legacy_action_policy(cleaned_action)
+        else:
+            derived_low = current[f"{pack}_low_action"]
+            derived_medium = current[f"{pack}_medium_action"]
+            derived_high = current[f"{pack}_high_action"]
+        final_low_action = derived_low if cleaned_low_action is None else cleaned_low_action
+        final_medium_action = derived_medium if cleaned_medium_action is None else cleaned_medium_action
+        final_high_action = derived_high if cleaned_high_action is None else cleaned_high_action
 
         def mutate(config: dict[str, Any]):
             if enabled is not None:
                 config[f"{pack}_enabled"] = bool(enabled)
             if cleaned_action is not None:
                 config[f"{pack}_action"] = cleaned_action
+                low_default, medium_default, high_default = _legacy_action_policy(cleaned_action)
+                config[f"{pack}_low_action"] = low_default
+                config[f"{pack}_medium_action"] = medium_default
+                config[f"{pack}_high_action"] = high_default
+            if cleaned_low_action is not None:
+                config[f"{pack}_low_action"] = cleaned_low_action
+            if cleaned_medium_action is not None:
+                config[f"{pack}_medium_action"] = cleaned_medium_action
+            if cleaned_high_action is not None:
+                config[f"{pack}_high_action"] = cleaned_high_action
+            config[f"{pack}_action"] = config.get(f"{pack}_high_action", config.get(f"{pack}_action", "log"))
             if cleaned_sensitivity is not None:
                 config[f"{pack}_sensitivity"] = cleaned_sensitivity
 
-        current = self.get_config(guild_id)
         new_enabled = current[f"{pack}_enabled"] if enabled is None else bool(enabled)
-        new_action = current[f"{pack}_action"] if cleaned_action is None else cleaned_action
         new_sensitivity = current[f"{pack}_sensitivity"] if cleaned_sensitivity is None else cleaned_sensitivity
         return await self._update_config(
             guild_id,
             mutate,
             success_message=(
                 f"{PACK_LABELS[pack]} is {'enabled' if new_enabled else 'disabled'} "
-                f"with `{new_action}` at {SENSITIVITY_LABELS[new_sensitivity].lower()} sensitivity."
+                f"with {self._policy_summary(low_action=final_low_action, medium_action=final_medium_action, high_action=final_high_action)} "
+                f"at {SENSITIVITY_LABELS[new_sensitivity].lower()} sensitivity."
             ),
         )
 
@@ -792,8 +1020,8 @@ class ShieldService:
         if self._allow_phrase_bypass(compiled, snapshot):
             return None
 
-        repetitive_promo = self._track_repetitive_promo(message, snapshot, now)
-        matches = self._collect_matches(compiled, snapshot, repetitive_promo=repetitive_promo)
+        repetition = self._track_repetitive_promo(message, compiled, snapshot, now)
+        matches = self._collect_matches(compiled, snapshot, repetitive_promo=repetition)
         if not matches:
             return None
 
@@ -817,7 +1045,7 @@ class ShieldService:
             if not decision.timed_out:
                 decision.action_note = "Timeout was configured, but Babblebox could not time out that member."
 
-        if best.action == "delete_escalate":
+        if self._is_escalation_eligible(best):
             strike_count = self._record_strike(message.guild.id, message.author.id, best.pack, compiled, now)
             if strike_count >= compiled.escalation_threshold:
                 decision.timed_out = await self._timeout_member(
@@ -832,9 +1060,16 @@ class ShieldService:
                     )
                 elif decision.action_note is None:
                     decision.action_note = "Repeated-hit escalation was configured, but Babblebox could not time out that member."
+        elif best.action == "delete_escalate":
+            decision.action_note = "Repeated-hit escalation is reserved for high-confidence, non-noise Shield matches."
 
         if self._should_request_ai_review(compiled, decision):
-            request = self._build_ai_review_request(message, snapshot, decision, repetitive_promo=repetitive_promo)
+            request = self._build_ai_review_request(
+                message,
+                snapshot,
+                decision,
+                repetitive_promo=repetition.hits >= DIRECT_PROMO_REPEAT_THRESHOLD,
+            )
             if request is not None:
                 decision.ai_review = await self.ai_provider.review(request)
 
@@ -855,7 +1090,7 @@ class ShieldService:
         if not self.ai_provider.diagnostics().get("available"):
             return False
         top_reason = decision.reasons[0] if decision.reasons else None
-        if top_reason is None:
+        if top_reason is None or top_reason.match_class == "repetitive_link_noise":
             return False
         return CONFIDENCE_STRENGTH.get(top_reason.confidence, 0) >= CONFIDENCE_STRENGTH.get(compiled.ai_min_confidence, 3)
 
@@ -912,16 +1147,59 @@ class ShieldService:
             or bool(compiled.included_role_ids.intersection(role_ids))
         )
 
+    def _domain_is_allowlisted(self, domain: str, allow_domains: frozenset[str]) -> bool:
+        return any(_domain_matches(domain, candidate) for candidate in allow_domains)
+
+    def _make_pack_match(
+        self,
+        *,
+        pack: str,
+        settings: PackSettings,
+        label: str,
+        reason: str,
+        confidence: str,
+        heuristic: bool,
+        match_class: str,
+    ) -> ShieldMatch:
+        return ShieldMatch(
+            pack=pack,
+            label=label,
+            reason=reason,
+            action=settings.action_for_confidence(confidence),
+            confidence=confidence,
+            heuristic=heuristic,
+            match_class=match_class,
+        )
+
+    def _boost_match_for_repetition(self, match: ShieldMatch, settings: PackSettings, *, hits: int) -> ShieldMatch:
+        boosted_confidence = _boost_confidence(match.confidence)
+        return ShieldMatch(
+            pack=match.pack,
+            label=match.label,
+            reason=f"{match.reason} It was repeated {hits} times in a short window.",
+            action=settings.action_for_confidence(boosted_confidence),
+            confidence=boosted_confidence,
+            heuristic=match.heuristic,
+            match_class=match.match_class,
+        )
+
+    def _is_escalation_eligible(self, match: ShieldMatch) -> bool:
+        return (
+            match.action == "delete_escalate"
+            and match.confidence == "high"
+            and match.match_class not in ESCALATION_BLOCKED_MATCH_CLASSES
+        )
+
     def _collect_matches(
         self,
         compiled: CompiledShieldConfig,
         snapshot: ShieldSnapshot,
         *,
-        repetitive_promo: bool = False,
+        repetitive_promo: RepetitionSignals | None = None,
     ) -> list[ShieldMatch]:
         matches: list[ShieldMatch] = []
         matches.extend(self._detect_privacy(compiled, snapshot))
-        matches.extend(self._detect_promo(compiled, snapshot, repetitive_promo=repetitive_promo))
+        matches.extend(self._detect_promo(compiled, snapshot, repetitive_promo=repetitive_promo or RepetitionSignals(None, 0, False, False)))
         matches.extend(self._detect_scam(compiled, snapshot))
         matches.extend(self._detect_custom_patterns(compiled, snapshot))
         matches.sort(
@@ -936,7 +1214,7 @@ class ShieldService:
 
     def _detect_privacy(self, compiled: CompiledShieldConfig, snapshot: ShieldSnapshot) -> list[ShieldMatch]:
         settings = compiled.privacy
-        if not settings.enabled or settings.action == "disabled":
+        if not settings.enabled:
             return []
         matches: list[ShieldMatch] = []
         email_match = self._detect_privacy_email(settings, snapshot)
@@ -974,9 +1252,10 @@ class ShieldService:
                 pack="privacy",
                 label="Possible email address",
                 reason="A structured email address was posted in chat.",
-                action=settings.action,
+                action=settings.action_for_confidence(_confidence_from_score(score)),
                 confidence=_confidence_from_score(score),
                 heuristic=False,
+                match_class="privacy_email",
             )
         return None
 
@@ -1012,9 +1291,10 @@ class ShieldService:
             pack="privacy",
             label="Possible phone number",
             reason="A phone-like number passed structure checks and looked like a contact detail.",
-            action=settings.action,
+            action=settings.action_for_confidence(_confidence_from_score(best_score)),
             confidence=_confidence_from_score(best_score),
             heuristic=False,
+            match_class="privacy_phone",
         )
 
     def _detect_privacy_ip(self, settings: PackSettings, snapshot: ShieldSnapshot) -> ShieldMatch | None:
@@ -1045,9 +1325,10 @@ class ShieldService:
             pack="privacy",
             label="Possible IP or host detail",
             reason="A validated network address appeared with signals that looked more private than harmless.",
-            action=settings.action,
+            action=settings.action_for_confidence(_confidence_from_score(best_score)),
             confidence=_confidence_from_score(best_score),
             heuristic=True,
+            match_class="privacy_ip",
         )
 
     def _detect_privacy_crypto(self, settings: PackSettings, snapshot: ShieldSnapshot) -> ShieldMatch | None:
@@ -1071,9 +1352,10 @@ class ShieldService:
             pack="privacy",
             label="Possible crypto wallet",
             reason="A wallet-style address was posted with enough structure and context to look intentional.",
-            action=settings.action,
+            action=settings.action_for_confidence(_confidence_from_score(best_score)),
             confidence=_confidence_from_score(best_score),
             heuristic=True,
+            match_class="privacy_wallet",
         )
 
     def _detect_privacy_payment(self, settings: PackSettings, snapshot: ShieldSnapshot) -> ShieldMatch | None:
@@ -1099,9 +1381,10 @@ class ShieldService:
             pack="privacy",
             label="Possible payment detail",
             reason="A card-like number passed checksum validation and matched payment-style context.",
-            action=settings.action,
+            action=settings.action_for_confidence(_confidence_from_score(best_score)),
             confidence=_confidence_from_score(best_score),
             heuristic=False,
+            match_class="privacy_payment",
         )
 
     def _detect_privacy_sensitive_ids(self, settings: PackSettings, snapshot: ShieldSnapshot) -> list[ShieldMatch]:
@@ -1113,9 +1396,10 @@ class ShieldService:
                         pack="privacy",
                         label="Possible sensitive ID number",
                         reason="A structured SSN-style number passed basic validity checks.",
-                        action=settings.action,
+                        action=settings.action_for_confidence("high"),
                         confidence="high",
                         heuristic=False,
+                        match_class="privacy_ssn",
                     )
                 )
                 break
@@ -1136,9 +1420,10 @@ class ShieldService:
                             pack="privacy",
                             label="Possible routing number",
                             reason="A 9-digit number matched routing context and a checksum-style validation.",
-                            action=settings.action,
+                            action=settings.action_for_confidence(_confidence_from_score(score)),
                             confidence=_confidence_from_score(score),
                             heuristic=False,
+                            match_class="privacy_routing",
                         )
                     )
                     break
@@ -1157,9 +1442,10 @@ class ShieldService:
                         pack="privacy",
                         label="Possible verification code",
                         reason="A short code appeared next to OTP or verification wording.",
-                        action=settings.action,
+                        action=settings.action_for_confidence(_confidence_from_score(score)),
                         confidence=_confidence_from_score(score),
                         heuristic=True,
+                        match_class="privacy_otp",
                     )
                 )
                 break
@@ -1180,93 +1466,152 @@ class ShieldService:
                         pack="privacy",
                         label="Possible sensitive ID number",
                         reason="A long ID-like number appeared with account, passport, or tax-ID context.",
-                        action=settings.action,
+                        action=settings.action_for_confidence(_confidence_from_score(score)),
                         confidence=_confidence_from_score(score),
                         heuristic=True,
+                        match_class="privacy_account_id",
                     )
                 )
                 break
         return matches
 
-    def _detect_promo(self, compiled: CompiledShieldConfig, snapshot: ShieldSnapshot, *, repetitive_promo: bool) -> list[ShieldMatch]:
+    def _detect_promo(self, compiled: CompiledShieldConfig, snapshot: ShieldSnapshot, *, repetitive_promo: RepetitionSignals) -> list[ShieldMatch]:
         settings = compiled.promo
-        if not settings.enabled or settings.action == "disabled":
+        if not settings.enabled:
             return []
         matches: list[ShieldMatch] = []
-        unallowlisted_invites = [code for code in snapshot.invite_codes if code not in compiled.allow_invite_codes]
-        unallowlisted_domains = [domain for domain in snapshot.domains if domain not in compiled.allow_domains]
+        unallowlisted_links = [
+            link
+            for link in snapshot.links
+            if (
+                (link.invite_code is not None and link.invite_code not in compiled.allow_invite_codes)
+                or (link.invite_code is None and not self._domain_is_allowlisted(link.domain, compiled.allow_domains))
+            )
+        ]
+        unallowlisted_invites = [link for link in unallowlisted_links if link.invite_code is not None]
+        creator_links = [link for link in unallowlisted_links if link.category == "creator_social"]
+        storefront_links = [link for link in unallowlisted_links if link.category == "storefront"]
+        shortener_links = [link for link in unallowlisted_links if link.category == "shortener"]
         cta = bool(PROMO_CTA_RE.search(snapshot.text) or PROMO_CTA_RE.search(snapshot.squashed))
         invite_cta = bool(INVITE_CTA_RE.search(snapshot.text))
         monetized = bool(MONETIZED_PROMO_RE.search(snapshot.text))
         promo_context = bool(PROMO_CONTEXT_RE.search(snapshot.text))
-        social_domains = [domain for domain in unallowlisted_domains if domain in SOCIAL_PROMO_DOMAINS]
 
         if unallowlisted_invites:
             matches.append(
-                ShieldMatch(
+                self._make_pack_match(
                     pack="promo",
+                    settings=settings,
                     label="Discord invite link",
-                    reason="A Discord invite was posted in a way that looks like server promotion.",
-                    action=settings.action,
-                    confidence="high" if invite_cta else "medium",
+                    reason="A Discord invite was posted with enough server-promo context to warrant review.",
+                    confidence="high" if invite_cta or len(unallowlisted_invites) > 1 else "medium",
                     heuristic=False,
+                    match_class="discord_invite",
                 )
             )
-        if social_domains and (cta or monetized):
+        if creator_links and (cta or monetized or promo_context):
             matches.append(
-                ShieldMatch(
+                self._make_pack_match(
                     pack="promo",
+                    settings=settings,
                     label="Self-promo link",
-                    reason="A social or storefront link was paired with promo wording.",
-                    action=settings.action,
-                    confidence="medium",
+                    reason="A creator or social link was paired with promo wording.",
+                    confidence="medium" if cta or monetized else "low",
                     heuristic=True,
+                    match_class="self_promo",
                 )
             )
-        if monetized and unallowlisted_domains:
+        if monetized and storefront_links:
             matches.append(
-                ShieldMatch(
+                self._make_pack_match(
                     pack="promo",
+                    settings=settings,
                     label="Monetized promo wording",
                     reason="Sales or commission language appeared next to an external link.",
-                    action=settings.action,
-                    confidence="medium",
+                    confidence="high" if cta else "medium",
                     heuristic=True,
+                    match_class="monetized_promo",
                 )
             )
-        if settings.sensitivity == "high" and cta and unallowlisted_domains and (social_domains or monetized or promo_context or len(unallowlisted_domains) > 1):
+        if settings.sensitivity == "high" and cta and (creator_links or storefront_links or shortener_links) and promo_context:
             matches.append(
-                ShieldMatch(
+                self._make_pack_match(
                     pack="promo",
+                    settings=settings,
                     label="Call-to-action promo link",
                     reason="A promo-style call to action was paired with external links and other promotion signals.",
-                    action=settings.action,
-                    confidence="medium",
+                    confidence="low",
                     heuristic=True,
+                    match_class="cta_promo",
                 )
             )
-        if repetitive_promo and (snapshot.has_links or cta or monetized):
-            matches.append(
-                ShieldMatch(
-                    pack="promo",
-                    label="Repeated promo message",
-                    reason="Very similar promotion-style content has been repeated several times in a short window.",
-                    action=settings.action,
-                    confidence="high",
-                    heuristic=True,
+        if repetitive_promo.hits >= DIRECT_PROMO_REPEAT_THRESHOLD and matches:
+            boosted_matches: list[ShieldMatch] = []
+            for item in matches:
+                if item.match_class in {"discord_invite", "self_promo", "monetized_promo", "cta_promo"}:
+                    boosted_matches.append(self._boost_match_for_repetition(item, settings, hits=repetitive_promo.hits))
+                else:
+                    boosted_matches.append(item)
+            matches = boosted_matches
+        elif repetitive_promo.has_unallowlisted_links:
+            noise_threshold = MEDIA_LINK_NOISE_THRESHOLD if repetitive_promo.pure_media_links else GENERIC_LINK_NOISE_THRESHOLD
+            if repetitive_promo.hits >= noise_threshold and (settings.sensitivity == "high" or not repetitive_promo.pure_media_links):
+                reason = (
+                    "The same media or GIF link was repeated several times. This looks noisy, not promotional."
+                    if repetitive_promo.pure_media_links
+                    else "The same external link message was repeated several times without enough promo evidence to treat it as self-promo."
                 )
-            )
+                matches.append(
+                    self._make_pack_match(
+                        pack="promo",
+                        settings=settings,
+                        label="Repetitive link noise",
+                        reason=reason,
+                        confidence="low",
+                        heuristic=True,
+                        match_class="repetitive_link_noise",
+                    )
+                )
         return self._dedupe_matches(matches)
+
+    def _track_repetitive_promo(
+        self,
+        message: discord.Message,
+        compiled: CompiledShieldConfig,
+        snapshot: ShieldSnapshot,
+        now: float,
+    ) -> RepetitionSignals:
+        fingerprint = _canonical_repetition_fingerprint(snapshot)
+        if fingerprint is None:
+            return RepetitionSignals(None, 0, False, False)
+        key = (message.guild.id, message.author.id, fingerprint)
+        hits = [value for value in self._recent_promos.get(key, []) if now - value <= REPETITION_WINDOW_SECONDS]
+        hits.append(now)
+        self._recent_promos[key] = hits
+        has_unallowlisted_links = any(
+            (
+                (link.invite_code is not None and link.invite_code not in compiled.allow_invite_codes)
+                or (link.invite_code is None and not self._domain_is_allowlisted(link.domain, compiled.allow_domains))
+            )
+            for link in snapshot.links
+        )
+        pure_media_links = bool(snapshot.links) and all(link.category == "media_embed" for link in snapshot.links)
+        return RepetitionSignals(
+            fingerprint=fingerprint,
+            hits=len(hits),
+            pure_media_links=pure_media_links,
+            has_unallowlisted_links=has_unallowlisted_links,
+        )
 
     def _detect_scam(self, compiled: CompiledShieldConfig, snapshot: ShieldSnapshot) -> list[ShieldMatch]:
         settings = compiled.scam
-        if not settings.enabled or settings.action == "disabled":
+        if not settings.enabled:
             return []
         if _looks_like_scam_warning(snapshot.text):
             return []
         matches: list[ShieldMatch] = []
-        unallowlisted_domains = [domain for domain in snapshot.domains if domain not in compiled.allow_domains]
-        shortener = any(domain in SHORTENER_DOMAINS or "xn--" in domain for domain in unallowlisted_domains)
+        unallowlisted_domains = [domain for domain in snapshot.domains if not self._domain_is_allowlisted(domain, compiled.allow_domains)]
+        shortener = any(_domain_in_set(domain, SHORTENER_DOMAINS) or "xn--" in domain for domain in unallowlisted_domains)
         bait = bool(SCAM_BAIT_RE.search(snapshot.text) or SCAM_BAIT_RE.search(snapshot.squashed))
         social_engineering = bool(SOCIAL_ENGINEERING_RE.search(snapshot.text))
         brand_bait = bool(BRAND_BAIT_RE.search(snapshot.text))
@@ -1278,9 +1623,10 @@ class ShieldService:
                     pack="scam",
                     label="Scam bait + link",
                     reason="Gift, claim, or verification bait appeared next to a link or suspicious file.",
-                    action=settings.action,
+                    action=settings.action_for_confidence("high"),
                     confidence="high",
                     heuristic=True,
+                    match_class="scam_bait_link",
                 )
             )
         if shortener and social_engineering:
@@ -1289,9 +1635,10 @@ class ShieldService:
                     pack="scam",
                     label="Shortened or punycode lure",
                     reason="A shortened or punycode-style link appeared with instructions to open, claim, or verify something.",
-                    action=settings.action,
+                    action=settings.action_for_confidence("high"),
                     confidence="high",
                     heuristic=True,
+                    match_class="scam_shortener",
                 )
             )
         if snapshot.has_suspicious_attachment and social_engineering:
@@ -1300,9 +1647,10 @@ class ShieldService:
                     pack="scam",
                     label="Executable or archive lure",
                     reason="Suspicious file types were paired with social-engineering wording.",
-                    action=settings.action,
+                    action=settings.action_for_confidence("high"),
                     confidence="high",
                     heuristic=True,
+                    match_class="scam_attachment",
                 )
             )
         if dangerous_link and social_engineering:
@@ -1311,9 +1659,10 @@ class ShieldService:
                     pack="scam",
                     label="Executable download link",
                     reason="A download-style instruction pointed to an executable or archive-style URL.",
-                    action=settings.action,
+                    action=settings.action_for_confidence("high"),
                     confidence="high",
                     heuristic=True,
+                    match_class="scam_download",
                 )
             )
         if brand_bait and social_engineering and unallowlisted_domains:
@@ -1322,9 +1671,10 @@ class ShieldService:
                     pack="scam",
                     label="Brand-linked lure",
                     reason="Brand bait appeared with a link and coercive wording.",
-                    action=settings.action,
+                    action=settings.action_for_confidence("medium"),
                     confidence="medium",
                     heuristic=True,
+                    match_class="scam_brand_lure",
                 )
             )
         if settings.sensitivity == "high" and bait and (social_engineering or brand_bait):
@@ -1333,9 +1683,10 @@ class ShieldService:
                     pack="scam",
                     label="Scam bait wording",
                     reason="The message contains known claim or gift-bait wording reinforced by scam-style instructions or branding.",
-                    action=settings.action,
+                    action=settings.action_for_confidence("low"),
                     confidence="low",
                     heuristic=True,
+                    match_class="scam_bait_wording",
                 )
             )
         return self._dedupe_matches(matches)
@@ -1352,34 +1703,21 @@ class ShieldService:
                         action=pattern.action,
                         confidence="custom",
                         heuristic=False,
+                        match_class="advanced_pattern",
                     )
                 )
         return self._dedupe_matches(matches)
 
     def _dedupe_matches(self, matches: list[ShieldMatch]) -> list[ShieldMatch]:
-        seen: set[tuple[str, str]] = set()
+        seen: set[tuple[str, str, str]] = set()
         output: list[ShieldMatch] = []
         for item in matches:
-            key = (item.pack, item.label)
+            key = (item.pack, item.label, item.match_class)
             if key in seen:
                 continue
             seen.add(key)
             output.append(item)
         return output
-
-    def _track_repetitive_promo(self, message: discord.Message, snapshot: ShieldSnapshot, now: float) -> bool:
-        if not snapshot.text or len(snapshot.text) < 18:
-            return False
-        if not snapshot.has_links and not PROMO_CTA_RE.search(snapshot.text):
-            return False
-        fingerprint = snapshot.squashed[:100]
-        if not fingerprint:
-            return False
-        key = (message.guild.id, message.author.id, fingerprint)
-        hits = [value for value in self._recent_promos.get(key, []) if now - value <= REPETITION_WINDOW_SECONDS]
-        hits.append(now)
-        self._recent_promos[key] = hits
-        return len(hits) >= REPETITION_THRESHOLD
 
     def _record_strike(self, guild_id: int, user_id: int, pack: str, compiled: CompiledShieldConfig, now: float) -> int:
         key = (guild_id, user_id, pack)
@@ -1463,14 +1801,14 @@ class ShieldService:
             color=ge.EMBED_THEME["danger"] if decision.deleted or decision.timed_out else ge.EMBED_THEME["warning"],
         )
         if top_reason is not None:
-            severity = "High" if top_reason.confidence == "high" or decision.deleted or decision.timed_out else "Medium"
             embed.add_field(
                 name="Detection",
                 value=(
                     f"**{top_reason.label}**\n"
                     f"Pack: {PACK_LABELS.get(top_reason.pack, top_reason.pack.title())}\n"
+                    f"Class: {_match_class_label(top_reason.match_class)}\n"
                     f"Confidence: {top_reason.confidence.title()}\n"
-                    f"Severity: {severity}"
+                    f"Resolved action: {ACTION_LABELS.get(decision.action, decision.action)}"
                 ),
                 inline=False,
             )
@@ -1573,17 +1911,23 @@ class ShieldService:
             allow_phrases=tuple(_sorted_unique_text(raw.get("allow_phrases", []))),
             privacy=PackSettings(
                 enabled=bool(raw.get("privacy_enabled")),
-                action=str(raw.get("privacy_action", "log")).strip().lower(),
+                low_action=str(raw.get("privacy_low_action", "log")).strip().lower(),
+                medium_action=str(raw.get("privacy_medium_action", "log")).strip().lower(),
+                high_action=str(raw.get("privacy_high_action", "log")).strip().lower(),
                 sensitivity=str(raw.get("privacy_sensitivity", "normal")).strip().lower(),
             ),
             promo=PackSettings(
                 enabled=bool(raw.get("promo_enabled")),
-                action=str(raw.get("promo_action", "log")).strip().lower(),
+                low_action=str(raw.get("promo_low_action", "log")).strip().lower(),
+                medium_action=str(raw.get("promo_medium_action", "log")).strip().lower(),
+                high_action=str(raw.get("promo_high_action", "log")).strip().lower(),
                 sensitivity=str(raw.get("promo_sensitivity", "normal")).strip().lower(),
             ),
             scam=PackSettings(
                 enabled=bool(raw.get("scam_enabled")),
-                action=str(raw.get("scam_action", "log")).strip().lower(),
+                low_action=str(raw.get("scam_low_action", "log")).strip().lower(),
+                medium_action=str(raw.get("scam_medium_action", "log")).strip().lower(),
+                high_action=str(raw.get("scam_high_action", "log")).strip().lower(),
                 sensitivity=str(raw.get("scam_sensitivity", "normal")).strip().lower(),
             ),
             ai_enabled=bool(raw.get("ai_enabled")),

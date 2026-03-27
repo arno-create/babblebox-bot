@@ -1,0 +1,239 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Babblebox Help | Commands and FAQ</title>
+  <meta name="description" content="Babblebox help page for setup, public and private behavior, Daily Arcade, Buddy, Profile, Vault, utilities, Shield, and FAQ." />
+  <meta name="robots" content="index,follow,max-image-preview:large" />
+  <link rel="canonical" href="https://arno-create.github.io/babblebox-bot/help.html" />
+  <meta property="og:title" content="Babblebox Help | Commands and FAQ" />
+  <meta property="og:description" content="Learn how Babblebox works in Discord, what stays public or private, how the main commands fit together, and how Shield behaves." />
+  <meta property="og:url" content="https://arno-create.github.io/babblebox-bot/help.html" />
+  <meta property="og:type" content="website" />
+  <meta property="og:image" content="https://arno-create.github.io/babblebox-bot/banner.png" />
+  <meta name="twitter:card" content="summary_large_image" />
+  <meta name="twitter:title" content="Babblebox Help | Commands and FAQ" />
+  <meta name="twitter:description" content="Babblebox help for party games, Daily Arcade, Buddy, Profile, Vault, utilities, and compact Shield moderation." />
+  <meta name="twitter:image" content="https://arno-create.github.io/babblebox-bot/banner.png" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Sora:wght@500;600;700&display=swap" rel="stylesheet" />
+  <style>
+    :root { --bg:#060a14; --bg2:#0b1220; --panel:rgba(13,21,36,.78); --line:rgba(169,190,255,.15); --text:#f5f7ff; --soft:#dfe7ff; --muted:#a4aec3; --cyan:#7ddcff; --amber:#ffbb70; --rose:#ff839b; --radius:24px; --shadow:0 34px 90px rgba(1,4,10,.45); }
+    * { box-sizing:border-box; } html { scroll-behavior:smooth; } body { margin:0; color:var(--text); font-family:"Manrope",sans-serif; line-height:1.62; background:radial-gradient(circle at 12% 10%, rgba(125,220,255,.14), transparent 32%), radial-gradient(circle at 88% 8%, rgba(255,131,155,.12), transparent 26%), linear-gradient(180deg,#060a14 0%,#08101b 32%,#050913 100%); }
+    a { color:inherit; text-decoration:none; } code { font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; font-size:.95em; } img { display:block; max-width:100%; }
+    .container { width:min(1180px, calc(100% - 40px)); margin:0 auto; position:relative; z-index:1; }
+    .nav-shell { position:sticky; top:0; z-index:20; backdrop-filter:blur(18px); background:rgba(6,10,19,.76); border-bottom:1px solid rgba(169,190,255,.1); }
+    nav { display:grid; grid-template-columns:auto 1fr auto; gap:24px; align-items:center; padding:16px 0; }
+    .brand { display:inline-flex; align-items:center; gap:14px; } .brand img { width:48px; height:48px; border-radius:16px; border:1px solid rgba(255,255,255,.08); } .brand-title { display:block; font-family:"Sora",sans-serif; font-weight:700; letter-spacing:-.04em; } .brand-subtitle { display:block; margin-top:2px; color:var(--muted); font-size:.72rem; font-weight:700; letter-spacing:.14em; text-transform:uppercase; }
+    .nav-links, .footer-links { display:flex; gap:18px; flex-wrap:wrap; } .nav-links { justify-content:center; } .nav-links a, .nav-quiet, .footer-links a { color:var(--muted); } .nav-links a:hover, .nav-quiet:hover, .footer-links a:hover { color:var(--text); }
+    .nav-actions { display:flex; align-items:center; gap:14px; }
+    .btn { display:inline-flex; align-items:center; justify-content:center; min-height:46px; padding:0 18px; border-radius:999px; font-weight:800; transition:transform .18s ease; } .btn:hover { transform:translateY(-1px); }
+    .btn-primary { color:#081018; background:linear-gradient(135deg,var(--amber) 0%, #ff8f83 46%, var(--cyan) 100%); box-shadow:0 18px 40px rgba(255,143,131,.22); } .btn-secondary { color:var(--text); border:1px solid var(--line); background:rgba(16,26,43,.72); }
+    .hero { display:grid; grid-template-columns:minmax(0,1.08fr) minmax(290px,.92fr); gap:32px; padding:56px 0 34px; align-items:start; }
+    .eyebrow { display:inline-flex; align-items:center; padding:10px 14px; border-radius:999px; border:1px solid var(--line); background:rgba(13,21,36,.68); color:var(--soft); font-size:.76rem; font-weight:800; letter-spacing:.12em; text-transform:uppercase; }
+    h1, h2, h3 { margin:0; font-family:"Sora",sans-serif; line-height:1.08; letter-spacing:-.04em; } h1 { margin-top:22px; font-size:clamp(2.7rem, 7vw, 5.2rem); max-width:10ch; } h2 { font-size:clamp(1.5rem, 3vw, 2.1rem); } h3 { font-size:1rem; }
+    .hero-copy p, .section p, .info p, .faq p { color:var(--soft); } .hero-copy p { max-width:62ch; margin:18px 0 0; } .hero-actions { display:flex; flex-wrap:wrap; gap:14px; margin-top:28px; }
+    .hero-panel, .section, .jump-nav { border:1px solid var(--line); background:linear-gradient(180deg, rgba(11,18,31,.9), rgba(11,18,31,.72)); box-shadow:var(--shadow); }
+    .hero-panel { padding:26px; border-radius:28px; } .hero-panel ol { margin:16px 0 0; padding-left:20px; color:var(--soft); } .hero-panel li + li { margin-top:10px; }
+    .ribbon { display:grid; grid-template-columns:repeat(3, minmax(0,1fr)); gap:14px; margin-top:26px; } .info { padding:16px 18px; border-radius:18px; border:1px solid rgba(169,190,255,.12); background:rgba(13,21,36,.64); } .info strong { display:block; color:var(--soft); margin-bottom:8px; font-size:.94rem; text-transform:uppercase; letter-spacing:.05em; } .info p { margin:0; color:var(--muted); font-size:.94rem; }
+    .layout { display:grid; grid-template-columns:250px minmax(0,1fr); gap:30px; padding:8px 0 84px; } .jump-nav { position:sticky; top:100px; padding:18px; border-radius:22px; } .jump-nav .label { color:rgba(226,233,255,.7); font-size:.76rem; font-weight:800; letter-spacing:.14em; text-transform:uppercase; } .jump-nav a { display:block; margin-top:12px; color:var(--soft); font-weight:700; } .jump-nav a:hover { color:var(--cyan); }
+    .jump-chips { display:none; gap:10px; flex-wrap:wrap; margin:26px 0 4px; } .jump-chips a { padding:10px 14px; border-radius:999px; border:1px solid var(--line); background:rgba(13,21,36,.74); color:var(--soft); font-size:.86rem; font-weight:700; }
+    .content { display:grid; gap:18px; } .section { padding:26px 28px 28px; border-radius:28px; } .kicker { color:var(--cyan); font-size:.8rem; font-weight:800; letter-spacing:.14em; text-transform:uppercase; } .section h2 { margin-top:14px; } .section p { margin:16px 0 0; }
+    .grid2 { display:grid; grid-template-columns:repeat(2, minmax(0,1fr)); gap:14px; margin-top:20px; }
+    .command-list { display:grid; gap:12px; margin-top:20px; } .command-row { display:grid; grid-template-columns:minmax(170px,.7fr) minmax(0,1fr); gap:18px; padding:14px 0; border-top:1px solid rgba(169,190,255,.1); } .command-row:first-child { border-top:0; padding-top:0; } .command-row code { color:var(--cyan); font-weight:700; } .command-row p { margin:0; } .command-row span { display:block; margin-top:6px; color:var(--muted); font-size:.92rem; }
+    .faq-list { display:grid; gap:12px; margin-top:20px; } .faq { padding:16px 18px; border-radius:18px; border:1px solid rgba(169,190,255,.12); background:rgba(13,21,36,.64); } .faq p { margin:10px 0 0; color:var(--muted); }
+    footer { padding:26px 0 46px; } .footer-row { display:flex; justify-content:space-between; gap:18px; align-items:flex-start; padding-top:24px; border-top:1px solid rgba(169,190,255,.1); } .footer-meta { display:grid; gap:16px; justify-items:end; } .footer-label { color:rgba(226,233,255,.7); font-size:.72rem; font-weight:800; letter-spacing:.14em; text-transform:uppercase; }
+    @media (max-width:1080px) { nav { grid-template-columns:auto 1fr; } .nav-actions { grid-column:1 / -1; justify-content:space-between; } .hero, .ribbon, .layout { grid-template-columns:1fr; } .jump-nav { display:none; } .jump-chips { display:flex; } }
+    @media (max-width:760px) { nav { grid-template-columns:1fr; } .nav-links { justify-content:flex-start; flex-wrap:nowrap; overflow-x:auto; padding-bottom:4px; } .nav-actions { width:100%; flex-wrap:wrap; } h1 { max-width:100%; } .grid2, .command-row { grid-template-columns:1fr; } .footer-row { flex-direction:column; } .footer-meta { justify-items:start; } }
+  </style>
+</head>
+<body>
+  <div class="nav-shell">
+    <div class="container">
+      <nav aria-label="Primary">
+        <a class="brand" href="index.html" aria-label="Babblebox home">
+          <img src="logo.jpg" alt="Babblebox logo" />
+          <span><span class="brand-title">Babblebox</span><span class="brand-subtitle">Help and setup</span></span>
+        </a>
+        <div class="nav-links">
+          <a href="index.html">Home</a>
+          <a href="#getting-started">Getting Started</a>
+          <a href="#daily-arcade">Daily Arcade</a>
+          <a href="#utilities">Utilities</a>
+          <a href="#shield-admin">Shield</a>
+          <a href="#faq">FAQ</a>
+        </div>
+        <div class="nav-actions">
+          <a class="nav-quiet" href="privacy.html">Privacy</a>
+          <a class="nav-quiet" href="terms.html">Terms</a>
+          <a class="btn btn-primary" href="https://discord.com/oauth2/authorize?client_id=1480903089518022739" target="_blank" rel="noopener noreferrer">Invite Babblebox</a>
+        </div>
+      </nav>
+    </div>
+  </div>
+
+  <header class="container">
+    <div class="hero">
+      <div class="hero-copy">
+        <div class="eyebrow">Hosted help page</div>
+        <h1>Babblebox, explained clearly.</h1>
+        <p>Babblebox is built around a few clean lanes instead of a giant command maze: party games when the room is active, Daily Arcade for lighter rituals, identity surfaces worth showing, utilities that stay quiet, and compact admin safety when a server needs it.</p>
+        <p>This page covers setup, what stays public or private, the commands people actually use, and how Shield behaves without pretending every heuristic is certain.</p>
+        <div class="hero-actions">
+          <a class="btn btn-primary" href="https://discord.com/oauth2/authorize?client_id=1480903089518022739" target="_blank" rel="noopener noreferrer">Invite Babblebox</a>
+          <a class="btn btn-secondary" href="https://discord.com/servers/inevitable-friendship-1322933864360050688" target="_blank" rel="noopener noreferrer">Join Support Server</a>
+          <a class="btn btn-secondary" href="https://github.com/arno-create/babblebox-bot" target="_blank" rel="noopener noreferrer">View GitHub</a>
+        </div>
+        <div class="ribbon">
+          <article class="info"><strong>Public-friendly</strong><p>Showable cards usually lean public. Sensitive setup, reminders, and DM alert tools lean private.</p></article>
+          <article class="info"><strong>Start fast</strong><p>Invite the bot, use <code>/help</code>, then try <code>/play</code>, <code>/daily</code>, or <code>/watch</code>.</p></article>
+          <article class="info"><strong>Shield stays bounded</strong><p>Shield is optional, log-first by default, and built around compact moderator alerts instead of a huge archive.</p></article>
+        </div>
+      </div>
+      <aside class="hero-panel" aria-label="Quick start">
+        <h2>Quick start</h2>
+        <ol>
+          <li>Invite Babblebox and make sure it can send embeds where you want people to use it.</li>
+          <li>Use <code>/help</code> in Discord, or jump through the sections below.</li>
+          <li>Adopt one lane first: <code>/play</code>, <code>/daily</code>, <code>/buddy</code>, or <code>/watch</code>.</li>
+          <li>Turn on Shield only if your server actually needs moderation automation.</li>
+        </ol>
+      </aside>
+      <div class="jump-chips" aria-label="Section jumps">
+        <a href="#getting-started">Getting Started</a><a href="#visibility">Public vs Private</a><a href="#party-games">Party Games</a><a href="#daily-arcade">Daily Arcade</a><a href="#buddy-profile-vault">Buddy / Profile / Vault</a><a href="#utilities">Utilities</a><a href="#shield-admin">Shield / Admin</a><a href="#faq">FAQ</a>
+      </div>
+    </div>
+  </header>
+
+  <main class="container">
+    <div class="layout">
+      <aside class="jump-nav" aria-label="Section navigation">
+        <div class="label">Jump to</div>
+        <a href="#getting-started">Getting Started</a>
+        <a href="#visibility">Public vs Private</a>
+        <a href="#party-games">Party Games</a>
+        <a href="#daily-arcade">Daily Arcade</a>
+        <a href="#buddy-profile-vault">Buddy / Profile / Vault</a>
+        <a href="#utilities">Utilities</a>
+        <a href="#shield-admin">Shield / Admin</a>
+        <a href="#faq">FAQ</a>
+      </aside>
+
+      <div class="content">
+        <section class="section" id="getting-started">
+          <div class="kicker">Getting Started</div>
+          <h2>Start with one lane, not every command.</h2>
+          <p>Party servers usually start with <code>/play</code> and <code>/daily</code>. Smaller communities often start with <code>/watch</code>, <code>/later</code>, or <code>/remind</code>. Identity-heavy servers tend to start with <code>/buddy</code> and <code>/profile</code>.</p>
+          <div class="grid2">
+            <article class="info"><strong>Best first public command</strong><p><code>/play</code> opens the multiplayer lobby for Broken Telephone, Exquisite Corpse, Spyfall, and Word Bomb.</p></article>
+            <article class="info"><strong>Best first solo command</strong><p><code>/daily</code> opens Daily Arcade without needing a full room.</p></article>
+            <article class="info"><strong>Best first private utility</strong><p><code>/watch settings</code> is a good first setup if you want quiet DM alerts instead of noisy public posts.</p></article>
+            <article class="info"><strong>Best first admin command</strong><p><code>/shield panel</code> or <code>/admin panel</code> gives moderators the compact control surfaces first.</p></article>
+          </div>
+        </section>
+
+        <section class="section" id="visibility">
+          <div class="kicker">Public vs Private</div>
+          <h2>Showable where it should be. Quiet where it should stay personal.</h2>
+          <p>Babblebox separates surfaces people want to share from surfaces that work better as personal tools. That keeps the bot feeling native in Discord instead of turning every interaction into a private panel or every reminder into channel clutter.</p>
+          <div class="grid2">
+            <article class="info"><strong>Usually public</strong><p><code>/play</code>, most Daily Arcade outputs, <code>/buddy</code>, and <code>/profile</code> are designed to sit comfortably in chat.</p></article>
+            <article class="info"><strong>Usually private</strong><p><code>/watch</code>, <code>/later</code>, <code>/capture</code>, <code>/remind</code>, <code>/afk</code>, and most setup or failure states stay private or DM-oriented.</p></article>
+            <article class="info"><strong>Moderator-private</strong><p>Shield configuration, admin cleanup tooling, and mod alerts are meant for admins and moderator channels, not public callouts.</p></article>
+            <article class="info"><strong>Mobile-friendly intent</strong><p>Cards aim for short titles, compact lists, and spacing that still scans cleanly on Discord mobile.</p></article>
+          </div>
+        </section>
+
+        <section class="section" id="party-games">
+          <div class="kicker">Party Games</div>
+          <h2>Short multiplayer energy, built around live rooms.</h2>
+          <p><code>/play</code> acts as the shared lobby for the live-party lane instead of forcing people to remember several different entry points.</p>
+          <div class="command-list">
+            <div class="command-row"><div><code>/play</code></div><div><p>Open the multiplayer lobby.</p><span>Start Broken Telephone, Exquisite Corpse, Spyfall, or Word Bomb from one place.</span></div></div>
+            <div class="command-row"><div><code>/stats</code> and <code>/leaderboard</code></div><div><p>Check light session stats.</p><span>These stay compact and playful instead of turning into a giant progression system.</span></div></div>
+          </div>
+        </section>
+
+        <section class="section" id="daily-arcade">
+          <div class="kicker">Daily Arcade</div>
+          <h2>Three quick daily booths for lighter rituals.</h2>
+          <p>Daily Arcade gives people something to do even when there is no full group ready for a live room. It is public-friendly and spoiler-aware, so it works well as a recurring server habit.</p>
+          <div class="command-list">
+            <div class="command-row"><div><code>/daily</code></div><div><p>Open the current daily booth selection.</p><span>Babblebox currently centers Daily Arcade around Shuffle, Emoji, and Signal.</span></div></div>
+            <div class="command-row"><div><code>/daily play</code></div><div><p>Submit a daily answer or guess.</p><span>The shorthand path still defaults cleanly instead of forcing command complexity.</span></div></div>
+            <div class="command-row"><div><code>/daily stats</code>, <code>/daily share</code>, <code>/daily leaderboard</code></div><div><p>Share progress without turning the booth into a spoiler mess.</p><span>Warnings and storage issues stay private even when the main cards are public.</span></div></div>
+          </div>
+        </section>
+
+        <section class="section" id="buddy-profile-vault">
+          <div class="kicker">Buddy / Profile / Vault</div>
+          <h2>One identity layer, not a bloated economy.</h2>
+          <p>Babblebox's identity surfaces are meant to feel worth showing. They collect your ongoing flavor, streaks, achievements, and activity into a few readable surfaces rather than exploding into a giant inventory game.</p>
+          <div class="command-list">
+            <div class="command-row"><div><code>/buddy</code></div><div><p>Your public-friendly mascot or companion surface.</p><span>Good for quick status, style, and personality without a wall of admin text.</span></div></div>
+            <div class="command-row"><div><code>/profile</code></div><div><p>Your broader public identity card.</p><span>Useful when you want a showable summary that still feels readable in a real Discord channel.</span></div></div>
+            <div class="command-row"><div><code>/vault</code></div><div><p>Your more personal storage or progression surface.</p><span>Vault is the less public lane when you want to manage your own state quietly.</span></div></div>
+          </div>
+        </section>
+
+        <section class="section" id="utilities">
+          <div class="kicker">Utilities</div>
+          <h2>Quiet tools for real server life.</h2>
+          <p>Utilities are where Babblebox earns its keep on ordinary days. They reduce missed context and small task friction without filling channels with bot chatter.</p>
+          <div class="command-list">
+            <div class="command-row"><div><code>/watch mentions</code>, <code>/watch replies</code>, <code>/watch keyword</code></div><div><p>Get private DM alerts for the things you care about.</p><span>Watch is built for low-noise monitoring, not public surveillance theater.</span></div></div>
+            <div class="command-row"><div><code>/later mark</code></div><div><p>Save a place in a server so you can come back later.</p><span>Useful when you want to keep momentum without opening tabs or pinning messages everywhere.</span></div></div>
+            <div class="command-row"><div><code>/capture</code> and <code>/moment</code></div><div><p>Turn a message or exchange into something you can revisit or share.</p><span>Moment is the more showable lane; Capture is the more personal lane.</span></div></div>
+            <div class="command-row"><div><code>/remind</code></div><div><p>Set reminders without needing a separate productivity bot.</p><span>Reminder setup and failure states stay private so channels do not fill with housekeeping.</span></div></div>
+            <div class="command-row"><div><code>/afk</code>, <code>/afktimezone</code>, <code>/afkschedule</code></div><div><p>Set temporary AFK state, timezone hints, and repeating schedules.</p><span>This helps Babblebox explain absence cleanly without forcing manual status updates every time.</span></div></div>
+          </div>
+        </section>
+
+        <section class="section" id="shield-admin">
+          <div class="kicker">Shield / Admin</div>
+          <h2>Compact safety for moderators, with honest confidence.</h2>
+          <p>Shield is optional and starts from local rules. It can look for likely privacy leaks, invite or promo abuse, and scam-style bait, but it is designed to stay conservative when the signal is weak. Repeated harmless media links and noisy reposts are not supposed to masquerade as confident self-promo.</p>
+          <div class="grid2">
+            <article class="info"><strong>Main admin commands</strong><p><code>/shield panel</code>, <code>/shield rules</code>, <code>/shield allowlist</code>, <code>/shield ai</code>, and <code>/shield test</code>.</p></article>
+            <article class="info"><strong>Graduated local policy</strong><p>Shield uses low, medium, and high confidence actions so broad heuristics can log while stronger matches can delete or escalate.</p></article>
+            <article class="info"><strong>Allowlist and scope controls</strong><p>Admins can carve out trusted roles, included or excluded scope, allowlisted domains, invite codes, and phrases.</p></article>
+            <article class="info"><strong>AI stays second-pass only</strong><p>AI review is optional, support-server limited by default, only sees already-flagged messages, and never decides punishment on its own.</p></article>
+          </div>
+          <div class="command-list">
+            <div class="command-row"><div><code>/shield panel</code></div><div><p>Open the compact Shield admin surface.</p><span>Use this first if you want the current state without memorizing command flags.</span></div></div>
+            <div class="command-row"><div><code>/shield rules</code></div><div><p>Set pack sensitivity, low/medium/high action policy, and escalation thresholds.</p><span>A safe starting point is log-first policy with deletes reserved for cleaner high-confidence matches.</span></div></div>
+            <div class="command-row"><div><code>/shield allowlist</code> and <code>/shield filters</code></div><div><p>Teach Shield where it should back off.</p><span>This is especially important before moving beyond logging in busy community servers.</span></div></div>
+            <div class="command-row"><div><code>/shield ai</code></div><div><p>Turn on optional second-pass AI review.</p><span>AI enriches moderator alerts only. It does not auto-delete, auto-timeout, or see broad server history.</span></div></div>
+          </div>
+        </section>
+
+        <section class="section" id="faq">
+          <div class="kicker">FAQ</div>
+          <h2>Common questions</h2>
+          <div class="faq-list">
+            <article class="faq"><h3>Does Babblebox default to public or private replies?</h3><p>It depends on the surface. Showable things like party lobbies, Daily cards, Buddy, and Profile usually lean public. Personal tools and setup flows usually stay private.</p></article>
+            <article class="faq"><h3>Do I need every feature turned on?</h3><p>No. Babblebox is meant to work well when a server adopts only one lane first. You can use it just for games, just for utilities, just for identity surfaces, or add Shield only if you need it.</p></article>
+            <article class="faq"><h3>Does Shield automatically punish every match?</h3><p>No. Shield can log, delete, timeout, or escalate depending on the pack and the configured confidence tier. Uncertain detections can stay log-only.</p></article>
+            <article class="faq"><h3>Does Shield AI read my whole server?</h3><p>No. Shield AI only reviews already-flagged messages, uses a sanitized excerpt with compact metadata, and does not decide punishment on its own.</p></article>
+            <article class="faq"><h3>Will Babblebox work well on Discord mobile?</h3><p>That is the intent. Public cards are written to scan quickly, and the product tries to avoid oversized admin slabs or dense utility dumps.</p></article>
+            <article class="faq"><h3>Where should I ask for support or report an issue?</h3><p>Use the support server for live help, or open an issue on GitHub if you want to report a bug or inspect the open-source code directly.</p></article>
+          </div>
+        </section>
+      </div>
+    </div>
+  </main>
+
+  <footer>
+    <div class="container">
+      <div class="footer-row">
+        <div><strong>Babblebox</strong><div>Open-source Discord bot by Arno.</div></div>
+        <div class="footer-meta">
+          <div><div class="footer-label">Links</div><div class="footer-links"><a href="index.html">Main Website</a><a href="help.html">Help</a><a href="privacy.html">Privacy Policy</a><a href="terms.html">Terms of Service</a><a href="https://github.com/arno-create/babblebox-bot" target="_blank" rel="noopener noreferrer">GitHub</a><a href="https://discord.com/servers/inevitable-friendship-1322933864360050688" target="_blank" rel="noopener noreferrer">Support Server</a></div></div>
+        </div>
+      </div>
+    </div>
+  </footer>
+</body>
+</html>
