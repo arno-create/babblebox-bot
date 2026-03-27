@@ -570,7 +570,7 @@ class _PostgresAdminStore(_BaseAdminStore):
         raise AdminStorageUnavailable(f"Could not connect to Babblebox admin storage: {last_error}") from last_error
 
     async def _ensure_schema(self):
-        statements = [
+        table_statements = [
             (
                 "CREATE TABLE IF NOT EXISTS admin_guild_configs ("
                 "guild_id BIGINT PRIMARY KEY, "
@@ -611,7 +611,6 @@ class _PostgresAdminStore(_BaseAdminStore):
                 "PRIMARY KEY (guild_id, user_id)"
                 ")"
             ),
-            "CREATE INDEX IF NOT EXISTS ix_admin_ban_return_expires ON admin_ban_return_candidates (expires_at)",
             (
                 "CREATE TABLE IF NOT EXISTS admin_followup_roles ("
                 "guild_id BIGINT NOT NULL, "
@@ -627,8 +626,6 @@ class _PostgresAdminStore(_BaseAdminStore):
                 "PRIMARY KEY (guild_id, user_id)"
                 ")"
             ),
-            "CREATE INDEX IF NOT EXISTS ix_admin_followup_due ON admin_followup_roles (due_at)",
-            "CREATE INDEX IF NOT EXISTS ix_admin_followup_review_pending ON admin_followup_roles (review_pending, review_message_id)",
             (
                 "CREATE TABLE IF NOT EXISTS admin_verification_states ("
                 "guild_id BIGINT NOT NULL, "
@@ -645,23 +642,34 @@ class _PostgresAdminStore(_BaseAdminStore):
                 "PRIMARY KEY (guild_id, user_id)"
                 ")"
             ),
+        ]
+        alter_statements = [
+            "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS verification_deadline_action TEXT NOT NULL DEFAULT 'auto_kick'",
+            "ALTER TABLE admin_followup_roles ADD COLUMN IF NOT EXISTS review_pending BOOLEAN NOT NULL DEFAULT FALSE",
+            "ALTER TABLE admin_followup_roles ADD COLUMN IF NOT EXISTS review_version INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE admin_followup_roles ADD COLUMN IF NOT EXISTS review_message_channel_id BIGINT NULL",
+            "ALTER TABLE admin_followup_roles ADD COLUMN IF NOT EXISTS review_message_id BIGINT NULL",
+            "ALTER TABLE admin_verification_states ADD COLUMN IF NOT EXISTS review_pending BOOLEAN NOT NULL DEFAULT FALSE",
+            "ALTER TABLE admin_verification_states ADD COLUMN IF NOT EXISTS review_version INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE admin_verification_states ADD COLUMN IF NOT EXISTS review_message_channel_id BIGINT NULL",
+            "ALTER TABLE admin_verification_states ADD COLUMN IF NOT EXISTS review_message_id BIGINT NULL",
+        ]
+        index_statements = [
+            "CREATE INDEX IF NOT EXISTS ix_admin_ban_return_expires ON admin_ban_return_candidates (expires_at)",
+            "CREATE INDEX IF NOT EXISTS ix_admin_followup_due ON admin_followup_roles (due_at)",
+            "CREATE INDEX IF NOT EXISTS ix_admin_followup_review_pending ON admin_followup_roles (review_pending, review_message_id)",
             "CREATE INDEX IF NOT EXISTS ix_admin_verification_warning_due ON admin_verification_states (warning_at)",
             "CREATE INDEX IF NOT EXISTS ix_admin_verification_kick_due ON admin_verification_states (kick_at)",
             "CREATE INDEX IF NOT EXISTS ix_admin_verification_guild ON admin_verification_states (guild_id)",
             "CREATE INDEX IF NOT EXISTS ix_admin_verification_review_pending ON admin_verification_states (review_pending, review_message_id)",
         ]
         async with self._pool.acquire() as conn:
-            for statement in statements:
+            for statement in table_statements:
                 await conn.execute(statement)
-            await conn.execute("ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS verification_deadline_action TEXT NOT NULL DEFAULT 'auto_kick'")
-            await conn.execute("ALTER TABLE admin_followup_roles ADD COLUMN IF NOT EXISTS review_pending BOOLEAN NOT NULL DEFAULT FALSE")
-            await conn.execute("ALTER TABLE admin_followup_roles ADD COLUMN IF NOT EXISTS review_version INTEGER NOT NULL DEFAULT 0")
-            await conn.execute("ALTER TABLE admin_followup_roles ADD COLUMN IF NOT EXISTS review_message_channel_id BIGINT NULL")
-            await conn.execute("ALTER TABLE admin_followup_roles ADD COLUMN IF NOT EXISTS review_message_id BIGINT NULL")
-            await conn.execute("ALTER TABLE admin_verification_states ADD COLUMN IF NOT EXISTS review_pending BOOLEAN NOT NULL DEFAULT FALSE")
-            await conn.execute("ALTER TABLE admin_verification_states ADD COLUMN IF NOT EXISTS review_version INTEGER NOT NULL DEFAULT 0")
-            await conn.execute("ALTER TABLE admin_verification_states ADD COLUMN IF NOT EXISTS review_message_channel_id BIGINT NULL")
-            await conn.execute("ALTER TABLE admin_verification_states ADD COLUMN IF NOT EXISTS review_message_id BIGINT NULL")
+            for statement in alter_statements:
+                await conn.execute(statement)
+            for statement in index_statements:
+                await conn.execute(statement)
 
     async def fetch_all_configs(self) -> dict[int, dict[str, Any]]:
         async with self._pool.acquire() as conn:

@@ -172,9 +172,44 @@ class AdminStoreNormalizationTests(unittest.TestCase):
 class _FakeSchemaConnection:
     def __init__(self):
         self.executed: list[str] = []
+        self._legacy_columns = {
+            "admin_followup_roles": {
+                "guild_id",
+                "user_id",
+                "role_id",
+                "assigned_at",
+                "due_at",
+                "mode",
+            },
+            "admin_verification_states": {
+                "guild_id",
+                "user_id",
+                "joined_at",
+                "warning_at",
+                "kick_at",
+                "warning_sent_at",
+                "extension_count",
+            },
+        }
 
     async def execute(self, statement: str, *args):
         self.executed.append(statement)
+        if statement == "ALTER TABLE admin_followup_roles ADD COLUMN IF NOT EXISTS review_pending BOOLEAN NOT NULL DEFAULT FALSE":
+            self._legacy_columns["admin_followup_roles"].add("review_pending")
+        elif statement == "ALTER TABLE admin_followup_roles ADD COLUMN IF NOT EXISTS review_message_id BIGINT NULL":
+            self._legacy_columns["admin_followup_roles"].add("review_message_id")
+        elif statement == "ALTER TABLE admin_verification_states ADD COLUMN IF NOT EXISTS review_pending BOOLEAN NOT NULL DEFAULT FALSE":
+            self._legacy_columns["admin_verification_states"].add("review_pending")
+        elif statement == "ALTER TABLE admin_verification_states ADD COLUMN IF NOT EXISTS review_message_id BIGINT NULL":
+            self._legacy_columns["admin_verification_states"].add("review_message_id")
+        elif statement == "CREATE INDEX IF NOT EXISTS ix_admin_followup_review_pending ON admin_followup_roles (review_pending, review_message_id)":
+            missing = {"review_pending", "review_message_id"} - self._legacy_columns["admin_followup_roles"]
+            if missing:
+                raise AssertionError(f"follow-up review index created before legacy columns were backfilled: {sorted(missing)}")
+        elif statement == "CREATE INDEX IF NOT EXISTS ix_admin_verification_review_pending ON admin_verification_states (review_pending, review_message_id)":
+            missing = {"review_pending", "review_message_id"} - self._legacy_columns["admin_verification_states"]
+            if missing:
+                raise AssertionError(f"verification review index created before legacy columns were backfilled: {sorted(missing)}")
 
 
 class _FakeAcquireContext:
@@ -197,34 +232,40 @@ class _FakeSchemaPool:
 
 
 class PostgresAdminStoreSchemaTests(unittest.IsolatedAsyncioTestCase):
-    async def test_ensure_schema_adds_followup_and_verification_review_columns(self):
+    async def test_ensure_schema_backfills_columns_before_creating_indexes(self):
         store = _PostgresAdminStore("postgresql://admin-user:secret@db.example.com:5432/app")
         connection = _FakeSchemaConnection()
         store._pool = _FakeSchemaPool(connection)
 
         await store._ensure_schema()
 
-        executed = "\n".join(connection.executed)
-        self.assertIn(
-            "ALTER TABLE admin_followup_roles ADD COLUMN IF NOT EXISTS review_pending BOOLEAN NOT NULL DEFAULT FALSE",
-            executed,
+        executed = connection.executed
+        followup_review_pending_alter = executed.index(
+            "ALTER TABLE admin_followup_roles ADD COLUMN IF NOT EXISTS review_pending BOOLEAN NOT NULL DEFAULT FALSE"
         )
-        self.assertIn(
-            "ALTER TABLE admin_followup_roles ADD COLUMN IF NOT EXISTS review_version INTEGER NOT NULL DEFAULT 0",
-            executed,
+        followup_review_message_id_alter = executed.index(
+            "ALTER TABLE admin_followup_roles ADD COLUMN IF NOT EXISTS review_message_id BIGINT NULL"
         )
-        self.assertIn(
-            "ALTER TABLE admin_followup_roles ADD COLUMN IF NOT EXISTS review_message_channel_id BIGINT NULL",
-            executed,
+        followup_review_index = executed.index(
+            "CREATE INDEX IF NOT EXISTS ix_admin_followup_review_pending ON admin_followup_roles (review_pending, review_message_id)"
         )
-        self.assertIn(
-            "ALTER TABLE admin_followup_roles ADD COLUMN IF NOT EXISTS review_message_id BIGINT NULL",
-            executed,
+        verification_review_pending_alter = executed.index(
+            "ALTER TABLE admin_verification_states ADD COLUMN IF NOT EXISTS review_pending BOOLEAN NOT NULL DEFAULT FALSE"
         )
-        self.assertIn(
-            "ALTER TABLE admin_verification_states ADD COLUMN IF NOT EXISTS review_pending BOOLEAN NOT NULL DEFAULT FALSE",
-            executed,
+        verification_review_message_id_alter = executed.index(
+            "ALTER TABLE admin_verification_states ADD COLUMN IF NOT EXISTS review_message_id BIGINT NULL"
         )
+        verification_review_index = executed.index(
+            "CREATE INDEX IF NOT EXISTS ix_admin_verification_review_pending ON admin_verification_states (review_pending, review_message_id)"
+        )
+        first_index = next(index for index, statement in enumerate(executed) if statement.startswith("CREATE INDEX"))
+        last_alter = max(index for index, statement in enumerate(executed) if statement.startswith("ALTER TABLE"))
+
+        self.assertLess(followup_review_pending_alter, followup_review_index)
+        self.assertLess(followup_review_message_id_alter, followup_review_index)
+        self.assertLess(verification_review_pending_alter, verification_review_index)
+        self.assertLess(verification_review_message_id_alter, verification_review_index)
+        self.assertGreater(first_index, last_alter)
 
 
 class AdminServiceTests(unittest.IsolatedAsyncioTestCase):
