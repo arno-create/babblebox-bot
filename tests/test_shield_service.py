@@ -1,5 +1,6 @@
 import types
 import unittest
+from copy import deepcopy
 from typing import Optional
 from unittest.mock import AsyncMock, patch
 
@@ -209,13 +210,18 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(config["promo_enabled"])
         self.assertEqual(config["privacy_sensitivity"], "high")
         self.assertEqual(config["promo_action"], "delete_log")
+        self.assertEqual(config["promo_low_action"], "log")
+        self.assertEqual(config["promo_medium_action"], "delete_log")
+        self.assertEqual(config["promo_high_action"], "delete_log")
 
         self.service._rebuild_config_cache()
         compiled = self.service._compiled_configs[10]
         self.assertTrue(compiled.privacy.enabled)
         self.assertTrue(compiled.promo.enabled)
         self.assertEqual(compiled.privacy.sensitivity, "high")
-        self.assertEqual(compiled.promo.action, "delete_log")
+        self.assertEqual(compiled.promo.low_action, "log")
+        self.assertEqual(compiled.promo.medium_action, "delete_log")
+        self.assertEqual(compiled.promo.high_action, "delete_log")
 
     async def test_allowlisted_invite_suppresses_promo_match(self):
         ok, _ = await self.service.set_pack_config(10, "promo", enabled=True, action="log", sensitivity="normal")
@@ -242,6 +248,168 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         matches = self.service.test_message(10, "Join us here https://discord.gg/notallowed")
 
         self.assertTrue([match for match in matches if match.pack == "promo"])
+
+    async def test_pack_policy_validation_rejects_unsafe_low_confidence_action(self):
+        ok, message = await self.service.set_pack_config(10, "promo", enabled=True, low_action="delete_log")
+
+        self.assertFalse(ok)
+        self.assertIn("low-confidence", message.lower())
+
+    async def test_pack_policy_explicit_actions_are_persisted(self):
+        ok, _ = await self.service.set_pack_config(
+            10,
+            "promo",
+            enabled=True,
+            low_action="log",
+            medium_action="delete_log",
+            high_action="delete_escalate",
+            sensitivity="high",
+        )
+        self.assertTrue(ok)
+
+        config = self.service.get_config(10)
+        compiled = self.service._compiled_configs[10]
+
+        self.assertEqual((config["promo_low_action"], config["promo_medium_action"], config["promo_high_action"]), ("log", "delete_log", "delete_escalate"))
+        self.assertEqual((compiled.promo.low_action, compiled.promo.medium_action, compiled.promo.high_action), ("log", "delete_log", "delete_escalate"))
+
+    async def test_repeated_tenor_link_stays_low_confidence_noise(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        author = FakeAuthor(42, roles=[FakeRole(11, position=1)])
+
+        ok, _ = await self.service.set_module_enabled(guild.id, True)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_pack_config(
+            guild.id,
+            "promo",
+            enabled=True,
+            low_action="log",
+            medium_action="delete_log",
+            high_action="delete_escalate",
+            sensitivity="high",
+        )
+        self.assertTrue(ok)
+
+        decisions = []
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            for _ in range(5):
+                decisions.append(
+                    await self.service.handle_message(
+                        FakeMessage(
+                            guild=guild,
+                            channel=channel,
+                            author=author,
+                            content="https://tenor.com/view/cat-dance-gif-12345",
+                        )
+                    )
+                )
+
+        self.assertEqual(decisions[:-1], [None, None, None, None])
+        final = decisions[-1]
+        self.assertIsNotNone(final)
+        self.assertEqual(final.action, "log")
+        self.assertFalse(final.deleted)
+        self.assertEqual(final.reasons[0].match_class, "repetitive_link_noise")
+        self.assertEqual(final.reasons[0].confidence, "low")
+
+    async def test_repeated_generic_link_stays_log_only_noise(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        author = FakeAuthor(42, roles=[FakeRole(11, position=1)])
+
+        ok, _ = await self.service.set_module_enabled(guild.id, True)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_pack_config(
+            guild.id,
+            "promo",
+            enabled=True,
+            low_action="log",
+            medium_action="delete_log",
+            high_action="delete_escalate",
+            sensitivity="normal",
+        )
+        self.assertTrue(ok)
+
+        decisions = []
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            for _ in range(4):
+                decisions.append(
+                    await self.service.handle_message(
+                        FakeMessage(
+                            guild=guild,
+                            channel=channel,
+                            author=author,
+                            content="https://example.com/docs/guide",
+                        )
+                    )
+                )
+
+        self.assertEqual(decisions[:-1], [None, None, None])
+        final = decisions[-1]
+        self.assertIsNotNone(final)
+        self.assertEqual(final.action, "log")
+        self.assertFalse(final.deleted)
+        self.assertEqual(final.reasons[0].match_class, "repetitive_link_noise")
+
+    async def test_allowlisted_invite_repetition_stays_suppressed(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        author = FakeAuthor(42, roles=[FakeRole(11, position=1)])
+
+        ok, _ = await self.service.set_module_enabled(guild.id, True)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_pack_config(guild.id, "promo", enabled=True, action="log", sensitivity="high")
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_allow_entry(guild.id, "allow_invite_codes", "abc123", True)
+        self.assertTrue(ok)
+
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            decisions = [
+                await self.service.handle_message(
+                    FakeMessage(guild=guild, channel=channel, author=author, content="https://discord.gg/abc123")
+                )
+                for _ in range(5)
+            ]
+
+        self.assertEqual(decisions, [None, None, None, None, None])
+
+    async def test_repeated_invite_spam_can_reach_high_confidence_policy(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        author = FakeAuthor(42, roles=[FakeRole(11, position=1)])
+
+        ok, _ = await self.service.set_module_enabled(guild.id, True)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_pack_config(
+            guild.id,
+            "promo",
+            enabled=True,
+            low_action="log",
+            medium_action="delete_log",
+            high_action="delete_escalate",
+            sensitivity="normal",
+        )
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_escalation(guild.id, threshold=3, window_minutes=10, timeout_minutes=5)
+        self.assertTrue(ok)
+
+        with patch.object(self.service, "_timeout_member", new=AsyncMock(return_value=True)) as timeout_mock, patch.object(
+            self.service,
+            "_send_alert",
+            new=AsyncMock(),
+        ):
+            first = await self.service.handle_message(FakeMessage(guild=guild, channel=channel, author=author, content="https://discord.gg/notallowed"))
+            second = await self.service.handle_message(FakeMessage(guild=guild, channel=channel, author=author, content="https://discord.gg/notallowed"))
+            third = await self.service.handle_message(FakeMessage(guild=guild, channel=channel, author=author, content="https://discord.gg/notallowed"))
+
+        self.assertEqual(first.action, "delete_log")
+        self.assertEqual(second.action, "delete_log")
+        self.assertEqual(third.action, "delete_escalate")
+        self.assertEqual(third.reasons[0].match_class, "discord_invite")
+        self.assertTrue(third.deleted)
+        self.assertFalse(third.timed_out)
+        timeout_mock.assert_not_awaited()
 
     async def test_custom_wildcard_pattern_matches_safely(self):
         ok, _ = await self.service.add_custom_pattern(
@@ -338,6 +506,7 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
                     action="log",
                     confidence="high",
                     heuristic=False,
+                    match_class="privacy_email",
                 ),
             ),
         )
@@ -349,6 +518,8 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         embed = log_channel.sent[0]["embed"]
         self.assertEqual(embed.title, "Shield Alert | Privacy Leak")
         self.assertIn("Possible email address", embed.fields[0].value)
+        self.assertIn("Class:", embed.fields[0].value)
+        self.assertIn("Resolved action:", embed.fields[0].value)
 
     async def test_ai_config_is_restricted_to_allowed_guild(self):
         ok, message = await self.service.set_ai_config(10, enabled=True)
@@ -435,6 +606,62 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(decision.ai_review)
         self.service.ai_provider.review.assert_not_awaited()
 
+    async def test_noise_match_never_requests_ai_review(self):
+        guild = FakeGuild(SHIELD_AI_ALLOWED_GUILD_ID)
+        channel = FakeChannel(20)
+        log_channel = FakeChannel(99, name="shield-log")
+        self.bot.register_channel(log_channel)
+        author = FakeAuthor(42, roles=[FakeRole(11, position=1)])
+        self.service.ai_provider = FakeAIProvider(
+            result=ShieldAIReviewResult(
+                classification="false_positive",
+                confidence="medium",
+                priority="low",
+                false_positive=True,
+                explanation="Looks repetitive, but not like actual promotion.",
+                model="gpt-4.1-mini",
+            )
+        )
+
+        ok, _ = await self.service.set_module_enabled(guild.id, True)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_pack_config(guild.id, "promo", enabled=True, action="log", sensitivity="normal")
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_log_channel(guild.id, log_channel.id)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_ai_config(guild.id, enabled=True, enabled_packs=["promo"], min_confidence="low")
+        self.assertTrue(ok)
+
+        decisions = []
+        for _ in range(4):
+            decisions.append(
+                await self.service.handle_message(
+                    FakeMessage(guild=guild, channel=channel, author=author, content="https://example.com/docs/guide")
+                )
+            )
+
+        final = decisions[-1]
+        self.assertIsNotNone(final)
+        self.assertEqual(final.reasons[0].match_class, "repetitive_link_noise")
+        self.assertIsNone(final.ai_review)
+        self.service.ai_provider.review.assert_not_awaited()
+
+    async def test_global_ai_override_allows_non_support_guild(self):
+        self.service.ai_provider = FakeAIProvider(available=True)
+
+        ok, message = await self.service.set_ai_config(10, enabled=True)
+        self.assertFalse(ok)
+        self.assertIn("not available", message.lower())
+
+        ok, message = await self.service.set_global_ai_override(True, actor_id=1266444952779620413)
+        self.assertTrue(ok)
+        self.assertIn("now on", message.lower())
+        self.assertTrue(self.service.is_ai_supported_guild(10))
+
+        ok, message = await self.service.set_ai_config(10, enabled=True, enabled_packs=["privacy"], min_confidence="high")
+        self.assertTrue(ok)
+        self.assertIn("enabled", message.lower())
+
     async def test_ai_review_failure_does_not_block_local_alert(self):
         guild = FakeGuild(SHIELD_AI_ALLOWED_GUILD_ID)
         public_channel = FakeChannel(20)
@@ -484,3 +711,24 @@ class ShieldStoreNormalizationTests(unittest.TestCase):
         self.assertTrue(config["promo_enabled"])
         self.assertEqual(config["privacy_sensitivity"], "high")
         self.assertEqual(config["promo_action"], "delete_log")
+        self.assertEqual(config["promo_low_action"], "log")
+        self.assertEqual(config["promo_medium_action"], "delete_log")
+        self.assertEqual(config["promo_high_action"], "delete_log")
+
+    def test_normalize_state_preserves_global_ai_override_meta(self):
+        store = _MemoryShieldStore()
+        snapshot = {
+            "version": 2,
+            "meta": {
+                "global_ai_override_enabled": True,
+                "global_ai_override_updated_by": 1266444952779620413,
+                "global_ai_override_updated_at": "2026-03-27T10:00:00+00:00",
+            },
+            "guilds": {},
+        }
+
+        normalized = store.normalize_state(deepcopy(snapshot))
+
+        self.assertTrue(normalized["meta"]["global_ai_override_enabled"])
+        self.assertEqual(normalized["meta"]["global_ai_override_updated_by"], 1266444952779620413)
+        self.assertEqual(normalized["meta"]["global_ai_override_updated_at"], "2026-03-27T10:00:00+00:00")

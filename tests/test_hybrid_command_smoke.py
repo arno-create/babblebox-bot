@@ -10,7 +10,7 @@ import discord
 from babblebox import game_engine as ge
 from babblebox.cogs.gameplay import GameplayCog
 from babblebox.cogs.identity import IdentityCog
-from babblebox.cogs.meta import MetaCog
+from babblebox.cogs.meta import HELP_PAGES, MetaCog
 from babblebox.cogs.shield import ShieldCog
 from babblebox.cogs.utilities import AfkReturnWatchDurationSelect, UtilityCog
 from babblebox.profile_service import ProfileService
@@ -709,9 +709,11 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             protection_field = next(field for field in embed.fields if field.name == "Protection Packs")
 
             self.assertIn("**Privacy Leak**", protection_field.value)
-            self.assertIn("Enabled: Yes | Action: `delete_log` | Sensitivity: High", protection_field.value)
+            self.assertIn("Enabled: Yes | Sensitivity: High", protection_field.value)
+            self.assertIn("Low / Medium / High: `log` / `delete_log` / `delete_log`", protection_field.value)
             self.assertIn("**Promo / Invite**", protection_field.value)
-            self.assertIn("Enabled: Yes | Action: `log` | Sensitivity: Normal", protection_field.value)
+            self.assertIn("Enabled: Yes | Sensitivity: Normal", protection_field.value)
+            self.assertIn("Low / Medium / High: `log` / `log` / `log`", protection_field.value)
             self.assertIn("**Scam Heuristic**", protection_field.value)
         finally:
             await cog.service.close()
@@ -801,3 +803,66 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             self.assertNotIn("Operability", field_names)
         finally:
             await cog.service.close()
+
+    async def test_hidden_shield_ai_override_ignores_guild_invocation(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
+        cog = ShieldCog(bot)
+        try:
+            cog.service.storage_ready = True
+            ctx = FakeContext(
+                interaction=None,
+                guild=FakeGuild(10),
+                channel=FakeChannel(),
+                author=FakeAuthor(user_id=1266444952779620413, manage_guild=True),
+            )
+
+            await ShieldCog.shield_ai_global_override_command.callback(cog, ctx, "status")
+
+            self.assertEqual(ctx.send_calls, [])
+        finally:
+            await cog.service.close()
+
+    async def test_hidden_shield_ai_override_rejects_unauthorized_dm(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
+        cog = ShieldCog(bot)
+        try:
+            cog.service.storage_ready = True
+            ctx = FakeContext(
+                interaction=None,
+                guild=None,
+                channel=FakeChannel(),
+                author=FakeAuthor(user_id=777),
+            )
+
+            await ShieldCog.shield_ai_global_override_command.callback(cog, ctx, "status")
+
+            self.assertEqual(len(ctx.send_calls), 1)
+            self.assertEqual(ctx.send_calls[0]["content"], "That command is unavailable.")
+        finally:
+            await cog.service.close()
+
+    async def test_hidden_shield_ai_override_status_and_toggle_work_in_dm_for_owner(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
+        cog = ShieldCog(bot)
+        try:
+            cog.service.storage_ready = True
+            owner = FakeAuthor(user_id=1266444952779620413)
+            ctx = FakeContext(interaction=None, guild=None, channel=FakeChannel(), author=owner)
+
+            await ShieldCog.shield_ai_global_override_command.callback(cog, ctx, "status")
+            await ShieldCog.shield_ai_global_override_command.callback(cog, ctx, "on")
+            await ShieldCog.shield_ai_global_override_command.callback(cog, ctx, "off")
+
+            self.assertEqual(len(ctx.send_calls), 3)
+            self.assertEqual(ctx.send_calls[0]["embed"].title, "Shield AI Override")
+            self.assertIn("Private maintainer status", ctx.send_calls[0]["embed"].description)
+            self.assertIn("now on", ctx.send_calls[1]["embed"].description.lower())
+            self.assertIn("now off", ctx.send_calls[2]["embed"].description.lower())
+            self.assertFalse(cog.service.get_meta()["global_ai_override_enabled"])
+        finally:
+            await cog.service.close()
+
+    def test_hidden_override_command_is_not_in_public_help_pages(self):
+        serialized_help = " ".join(page["body"] + " " + page.get("try", "") for page in HELP_PAGES).casefold()
+
+        self.assertNotIn("shieldaiglobal", serialized_help)

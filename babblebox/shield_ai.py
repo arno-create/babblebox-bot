@@ -255,8 +255,6 @@ class OpenAIShieldAIProvider(ShieldAIProvider):
     async def review(self, request: ShieldAIReviewRequest) -> ShieldAIReviewResult | None:
         if not self.api_key:
             return None
-        if not shield_ai_available_in_guild(request.guild_id):
-            return None
         if not request.sanitized_content and not request.domains and not request.attachment_extensions:
             return None
 
