@@ -217,11 +217,13 @@ Admin lifecycle commands are private/admin-facing by default. The streamlined su
 | `/admin panel` | `bb!admin panel` | Open the admin lifecycle control panel |
 | `/admin status` | `bb!admin status` | View overview counts or inspect one member |
 | `/admin followup` | `bb!admin followup enabled true @Probation review 30d` | Configure returned-after-ban follow-up roles |
-| `/admin verification` | `bb!admin verification enabled true @Verified must_have_role 7d 2d` | Configure warning-before-kick verification cleanup |
+| `/admin verification` | `bb!admin verification enabled true @Verified must_have_role 7d 2d` | Configure warning-before-kick verification cleanup and the shared review queue |
 | `/admin logs` | `bb!admin logs #admin-log @Mods` | Set the shared admin log channel and alert role |
 | `/admin exclusions` | `bb!admin exclusions trusted_role_ids on @Mods` | Configure shared exclusions and trusted roles |
 | `/admin templates` | `bb!admin templates invite_link https://discord.gg/example` | Configure warning/kick DMs and optional rejoin link |
 | `/admin sync` | `bb!admin sync` | One-time catch-up scan for current unverified members |
+
+Verification cleanup is batch-first: routine sweeps emit grouped summaries, review mode uses one persistent queue message, and startup reconciliation resumes quietly without paging staff about unchanged backlog.
 
 ### Daily Arcade
 
@@ -390,6 +392,8 @@ Admin lifecycle storage stays row-based and compact:
 - `admin_ban_return_candidates`
 - `admin_followup_roles`
 - `admin_verification_states`
+- `admin_verification_review_queues`
+- `admin_verification_notification_snapshots`
 
 Stored data is intentionally small:
 
@@ -397,7 +401,8 @@ Stored data is intentionally small:
 - short-lived ban-return candidates with a 30-day purge window
 - active follow-up role rows only while Babblebox still manages that follow-up
 - pending verification rows only while someone is still unverified
-- review message IDs only while a moderator review is currently pending
+- one shared verification review queue row only while overdue review backlog exists
+- short-lived grouped verification notification snapshots only while restart-safe suppression state matters
 
 Not stored:
 
