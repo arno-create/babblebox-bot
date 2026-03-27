@@ -14,6 +14,7 @@ DEFAULT_BACKEND = "postgres"
 VALID_FOLLOWUP_MODES = {"auto_remove", "review"}
 VALID_FOLLOWUP_DURATION_UNITS = {"days", "weeks", "months"}
 VALID_VERIFICATION_LOGIC = {"must_have_role", "must_not_have_role"}
+VALID_VERIFICATION_DEADLINE_ACTIONS = {"auto_kick", "review"}
 
 
 class AdminStorageUnavailable(RuntimeError):
@@ -31,6 +32,7 @@ def default_admin_config(guild_id: int | None = None) -> dict[str, Any]:
         "verification_enabled": False,
         "verification_role_id": None,
         "verification_logic": "must_have_role",
+        "verification_deadline_action": "auto_kick",
         "verification_kick_after_seconds": 7 * 24 * 3600,
         "verification_warning_lead_seconds": 24 * 3600,
         "verification_help_channel_id": None,
@@ -129,6 +131,12 @@ def normalize_admin_config(guild_id: int, payload: Any) -> dict[str, Any]:
     cleaned["verification_role_id"] = payload.get("verification_role_id") if isinstance(payload.get("verification_role_id"), int) else None
     verification_logic = str(payload.get("verification_logic", "must_have_role")).strip().lower()
     cleaned["verification_logic"] = verification_logic if verification_logic in VALID_VERIFICATION_LOGIC else "must_have_role"
+    verification_deadline_action = str(payload.get("verification_deadline_action", "auto_kick")).strip().lower()
+    cleaned["verification_deadline_action"] = (
+        verification_deadline_action
+        if verification_deadline_action in VALID_VERIFICATION_DEADLINE_ACTIONS
+        else "auto_kick"
+    )
     for field, default_value, minimum, maximum in (
         ("verification_kick_after_seconds", 7 * 24 * 3600, 3600, 365 * 24 * 3600),
         ("verification_warning_lead_seconds", 24 * 3600, 60, 90 * 24 * 3600),
@@ -211,6 +219,9 @@ def normalize_verification_state(payload: Any) -> dict[str, Any] | None:
     kick_at = _serialize_datetime(_parse_datetime(payload.get("kick_at")))
     warning_sent_at = _serialize_datetime(_parse_datetime(payload.get("warning_sent_at")))
     extension_count = payload.get("extension_count")
+    review_version = payload.get("review_version")
+    review_message_channel_id = payload.get("review_message_channel_id")
+    review_message_id = payload.get("review_message_id")
     if not all(isinstance(value, int) and value > 0 for value in (guild_id, user_id)):
         return None
     if joined_at is None or warning_at is None or kick_at is None:
@@ -223,6 +234,10 @@ def normalize_verification_state(payload: Any) -> dict[str, Any] | None:
         "kick_at": kick_at,
         "warning_sent_at": warning_sent_at,
         "extension_count": extension_count if isinstance(extension_count, int) and extension_count >= 0 else 0,
+        "review_pending": bool(payload.get("review_pending")),
+        "review_version": review_version if isinstance(review_version, int) and review_version >= 0 else 0,
+        "review_message_channel_id": review_message_channel_id if isinstance(review_message_channel_id, int) and review_message_channel_id > 0 else None,
+        "review_message_id": review_message_id if isinstance(review_message_id, int) and review_message_id > 0 else None,
     }
 
 
@@ -269,6 +284,9 @@ class _BaseAdminStore:
         raise NotImplementedError
 
     async def list_review_views(self) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    async def list_verification_review_views(self) -> list[dict[str, Any]]:
         raise NotImplementedError
 
     async def list_followups_for_guild(self, guild_id: int) -> list[dict[str, Any]]:
@@ -376,6 +394,14 @@ class _MemoryAdminStore(_BaseAdminStore):
         rows.sort(key=lambda item: (item.get("guild_id", 0), item.get("user_id", 0)))
         return rows
 
+    async def list_verification_review_views(self) -> list[dict[str, Any]]:
+        rows = []
+        for record in self.verification_states.values():
+            if record.get("review_pending") and record.get("review_message_id"):
+                rows.append(deepcopy(record))
+        rows.sort(key=lambda item: (item.get("guild_id", 0), item.get("user_id", 0)))
+        return rows
+
     async def list_followups_for_guild(self, guild_id: int) -> list[dict[str, Any]]:
         rows = [deepcopy(record) for record in self.followups.values() if record.get("guild_id") == guild_id]
         rows.sort(key=lambda item: item.get("assigned_at") or "")
@@ -407,7 +433,7 @@ class _MemoryAdminStore(_BaseAdminStore):
         rows = []
         for record in self.verification_states.values():
             kick_at = _parse_datetime(record.get("kick_at"))
-            if kick_at is None or kick_at > now:
+            if kick_at is None or kick_at > now or record.get("review_pending"):
                 continue
             rows.append(deepcopy(record))
         rows.sort(key=lambda item: item.get("kick_at") or "")
@@ -444,6 +470,7 @@ def _config_from_row(row) -> dict[str, Any]:
             "verification_enabled": row["verification_enabled"],
             "verification_role_id": row["verification_role_id"],
             "verification_logic": row["verification_logic"],
+            "verification_deadline_action": row["verification_deadline_action"],
             "verification_kick_after_seconds": int(row["verification_kick_after_seconds"]),
             "verification_warning_lead_seconds": int(row["verification_warning_lead_seconds"]),
             "verification_help_channel_id": row["verification_help_channel_id"],
@@ -491,6 +518,10 @@ def _verification_from_row(row) -> dict[str, Any] | None:
             "kick_at": _serialize_datetime(row["kick_at"]),
             "warning_sent_at": _serialize_datetime(row["warning_sent_at"]),
             "extension_count": int(row["extension_count"]),
+            "review_pending": row["review_pending"],
+            "review_version": int(row["review_version"]),
+            "review_message_channel_id": row["review_message_channel_id"],
+            "review_message_id": row["review_message_id"],
         }
     )
 
@@ -551,6 +582,7 @@ class _PostgresAdminStore(_BaseAdminStore):
                 "verification_enabled BOOLEAN NOT NULL DEFAULT FALSE, "
                 "verification_role_id BIGINT NULL, "
                 "verification_logic TEXT NOT NULL DEFAULT 'must_have_role', "
+                "verification_deadline_action TEXT NOT NULL DEFAULT 'auto_kick', "
                 "verification_kick_after_seconds INTEGER NOT NULL DEFAULT 604800, "
                 "verification_warning_lead_seconds INTEGER NOT NULL DEFAULT 86400, "
                 "verification_help_channel_id BIGINT NULL, "
@@ -606,16 +638,26 @@ class _PostgresAdminStore(_BaseAdminStore):
                 "kick_at TIMESTAMPTZ NOT NULL, "
                 "warning_sent_at TIMESTAMPTZ NULL, "
                 "extension_count SMALLINT NOT NULL DEFAULT 0, "
+                "review_pending BOOLEAN NOT NULL DEFAULT FALSE, "
+                "review_version INTEGER NOT NULL DEFAULT 0, "
+                "review_message_channel_id BIGINT NULL, "
+                "review_message_id BIGINT NULL, "
                 "PRIMARY KEY (guild_id, user_id)"
                 ")"
             ),
             "CREATE INDEX IF NOT EXISTS ix_admin_verification_warning_due ON admin_verification_states (warning_at)",
             "CREATE INDEX IF NOT EXISTS ix_admin_verification_kick_due ON admin_verification_states (kick_at)",
             "CREATE INDEX IF NOT EXISTS ix_admin_verification_guild ON admin_verification_states (guild_id)",
+            "CREATE INDEX IF NOT EXISTS ix_admin_verification_review_pending ON admin_verification_states (review_pending, review_message_id)",
         ]
         async with self._pool.acquire() as conn:
             for statement in statements:
                 await conn.execute(statement)
+            await conn.execute("ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS verification_deadline_action TEXT NOT NULL DEFAULT 'auto_kick'")
+            await conn.execute("ALTER TABLE admin_verification_states ADD COLUMN IF NOT EXISTS review_pending BOOLEAN NOT NULL DEFAULT FALSE")
+            await conn.execute("ALTER TABLE admin_verification_states ADD COLUMN IF NOT EXISTS review_version INTEGER NOT NULL DEFAULT 0")
+            await conn.execute("ALTER TABLE admin_verification_states ADD COLUMN IF NOT EXISTS review_message_channel_id BIGINT NULL")
+            await conn.execute("ALTER TABLE admin_verification_states ADD COLUMN IF NOT EXISTS review_message_id BIGINT NULL")
 
     async def fetch_all_configs(self) -> dict[int, dict[str, Any]]:
         async with self._pool.acquire() as conn:
@@ -635,18 +677,18 @@ class _PostgresAdminStore(_BaseAdminStore):
                     (
                         "INSERT INTO admin_guild_configs ("
                         "guild_id, followup_enabled, followup_role_id, followup_mode, followup_duration_value, followup_duration_unit, "
-                        "verification_enabled, verification_role_id, verification_logic, verification_kick_after_seconds, "
+                        "verification_enabled, verification_role_id, verification_logic, verification_deadline_action, verification_kick_after_seconds, "
                         "verification_warning_lead_seconds, verification_help_channel_id, verification_help_extension_seconds, verification_max_extensions, "
                         "admin_log_channel_id, admin_alert_role_id, warning_template, kick_template, invite_link, "
                         "excluded_user_ids, excluded_role_ids, trusted_role_ids, "
                         "followup_exempt_staff, verification_exempt_staff, verification_exempt_bots, updated_at"
                         ") VALUES ("
                         "$1, $2, $3, $4, $5, $6, "
-                        "$7, $8, $9, $10, "
-                        "$11, $12, $13, $14, "
-                        "$15, $16, $17, $18, $19, "
-                        "$20::jsonb, $21::jsonb, $22::jsonb, "
-                        "$23, $24, $25, timezone('utc', now())"
+                        "$7, $8, $9, $10, $11, "
+                        "$12, $13, $14, $15, "
+                        "$16, $17, $18, $19, $20, "
+                        "$21::jsonb, $22::jsonb, $23::jsonb, "
+                        "$24, $25, $26, timezone('utc', now())"
                         ") "
                         "ON CONFLICT (guild_id) DO UPDATE SET "
                         "followup_enabled = EXCLUDED.followup_enabled, "
@@ -657,6 +699,7 @@ class _PostgresAdminStore(_BaseAdminStore):
                         "verification_enabled = EXCLUDED.verification_enabled, "
                         "verification_role_id = EXCLUDED.verification_role_id, "
                         "verification_logic = EXCLUDED.verification_logic, "
+                        "verification_deadline_action = EXCLUDED.verification_deadline_action, "
                         "verification_kick_after_seconds = EXCLUDED.verification_kick_after_seconds, "
                         "verification_warning_lead_seconds = EXCLUDED.verification_warning_lead_seconds, "
                         "verification_help_channel_id = EXCLUDED.verification_help_channel_id, "
@@ -684,6 +727,7 @@ class _PostgresAdminStore(_BaseAdminStore):
                     normalized["verification_enabled"],
                     normalized["verification_role_id"],
                     normalized["verification_logic"],
+                    normalized["verification_deadline_action"],
                     normalized["verification_kick_after_seconds"],
                     normalized["verification_warning_lead_seconds"],
                     normalized["verification_help_channel_id"],
@@ -841,6 +885,19 @@ class _PostgresAdminStore(_BaseAdminStore):
             )
         return [record for row in rows if (record := _followup_from_row(row)) is not None]
 
+    async def list_verification_review_views(self) -> list[dict[str, Any]]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                (
+                    "SELECT guild_id, user_id, joined_at, warning_at, kick_at, warning_sent_at, extension_count, "
+                    "review_pending, review_version, review_message_channel_id, review_message_id "
+                    "FROM admin_verification_states "
+                    "WHERE review_pending = TRUE AND review_message_id IS NOT NULL "
+                    "ORDER BY guild_id ASC, user_id ASC"
+                )
+            )
+        return [record for row in rows if (record := _verification_from_row(row)) is not None]
+
     async def list_followups_for_guild(self, guild_id: int) -> list[dict[str, Any]]:
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
@@ -862,15 +919,20 @@ class _PostgresAdminStore(_BaseAdminStore):
                 await conn.execute(
                     (
                         "INSERT INTO admin_verification_states ("
-                        "guild_id, user_id, joined_at, warning_at, kick_at, warning_sent_at, extension_count"
+                        "guild_id, user_id, joined_at, warning_at, kick_at, warning_sent_at, extension_count, "
+                        "review_pending, review_version, review_message_channel_id, review_message_id"
                         ") VALUES ("
-                        "$1, $2, $3, $4, $5, $6, $7"
+                        "$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11"
                         ") ON CONFLICT (guild_id, user_id) DO UPDATE SET "
                         "joined_at = EXCLUDED.joined_at, "
                         "warning_at = EXCLUDED.warning_at, "
                         "kick_at = EXCLUDED.kick_at, "
                         "warning_sent_at = EXCLUDED.warning_sent_at, "
-                        "extension_count = EXCLUDED.extension_count"
+                        "extension_count = EXCLUDED.extension_count, "
+                        "review_pending = EXCLUDED.review_pending, "
+                        "review_version = EXCLUDED.review_version, "
+                        "review_message_channel_id = EXCLUDED.review_message_channel_id, "
+                        "review_message_id = EXCLUDED.review_message_id"
                     ),
                     normalized["guild_id"],
                     normalized["user_id"],
@@ -879,13 +941,18 @@ class _PostgresAdminStore(_BaseAdminStore):
                     _parse_datetime(normalized["kick_at"]),
                     _parse_datetime(normalized["warning_sent_at"]),
                     normalized["extension_count"],
+                    normalized["review_pending"],
+                    normalized["review_version"],
+                    normalized["review_message_channel_id"],
+                    normalized["review_message_id"],
                 )
 
     async def fetch_verification_state(self, guild_id: int, user_id: int) -> dict[str, Any] | None:
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 (
-                    "SELECT guild_id, user_id, joined_at, warning_at, kick_at, warning_sent_at, extension_count "
+                    "SELECT guild_id, user_id, joined_at, warning_at, kick_at, warning_sent_at, extension_count, "
+                    "review_pending, review_version, review_message_channel_id, review_message_id "
                     "FROM admin_verification_states WHERE guild_id = $1 AND user_id = $2"
                 ),
                 guild_id,
@@ -902,7 +969,8 @@ class _PostgresAdminStore(_BaseAdminStore):
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 (
-                    "SELECT guild_id, user_id, joined_at, warning_at, kick_at, warning_sent_at, extension_count "
+                    "SELECT guild_id, user_id, joined_at, warning_at, kick_at, warning_sent_at, extension_count, "
+                    "review_pending, review_version, review_message_channel_id, review_message_id "
                     "FROM admin_verification_states "
                     "WHERE warning_sent_at IS NULL AND warning_at <= $1 "
                     "ORDER BY warning_at ASC LIMIT $2"
@@ -916,9 +984,10 @@ class _PostgresAdminStore(_BaseAdminStore):
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 (
-                    "SELECT guild_id, user_id, joined_at, warning_at, kick_at, warning_sent_at, extension_count "
+                    "SELECT guild_id, user_id, joined_at, warning_at, kick_at, warning_sent_at, extension_count, "
+                    "review_pending, review_version, review_message_channel_id, review_message_id "
                     "FROM admin_verification_states "
-                    "WHERE kick_at <= $1 "
+                    "WHERE kick_at <= $1 AND review_pending = FALSE "
                     "ORDER BY kick_at ASC LIMIT $2"
                 ),
                 now,
@@ -930,7 +999,8 @@ class _PostgresAdminStore(_BaseAdminStore):
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 (
-                    "SELECT guild_id, user_id, joined_at, warning_at, kick_at, warning_sent_at, extension_count "
+                    "SELECT guild_id, user_id, joined_at, warning_at, kick_at, warning_sent_at, extension_count, "
+                    "review_pending, review_version, review_message_channel_id, review_message_id "
                     "FROM admin_verification_states WHERE guild_id = $1 ORDER BY joined_at ASC"
                 ),
                 guild_id,
@@ -1036,6 +1106,9 @@ class AdminStore:
 
     async def list_review_views(self) -> list[dict[str, Any]]:
         return await self._store.list_review_views()
+
+    async def list_verification_review_views(self) -> list[dict[str, Any]]:
+        return await self._store.list_verification_review_views()
 
     async def list_followups_for_guild(self, guild_id: int) -> list[dict[str, Any]]:
         return await self._store.list_followups_for_guild(guild_id)

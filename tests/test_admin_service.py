@@ -9,7 +9,7 @@ from unittest.mock import patch
 
 from babblebox import game_engine as ge
 from babblebox.admin_service import AdminService
-from babblebox.admin_store import AdminStore
+from babblebox.admin_store import AdminStore, default_admin_config, normalize_admin_config, normalize_verification_state
 from babblebox.utility_helpers import deserialize_datetime, serialize_datetime
 
 
@@ -134,6 +134,35 @@ class FakeBot:
         return self._guild.get_channel(channel_id)
 
 
+class AdminStoreNormalizationTests(unittest.TestCase):
+    def test_admin_config_defaults_verification_deadline_action_to_auto_kick(self):
+        config = normalize_admin_config(10, {})
+        self.assertEqual(config["verification_deadline_action"], "auto_kick")
+        self.assertEqual(default_admin_config(10)["verification_deadline_action"], "auto_kick")
+
+    def test_verification_state_normalization_keeps_review_metadata(self):
+        normalized = normalize_verification_state(
+            {
+                "guild_id": 10,
+                "user_id": 20,
+                "joined_at": serialize_datetime(ge.now_utc() - timedelta(days=7)),
+                "warning_at": serialize_datetime(ge.now_utc() - timedelta(days=2)),
+                "kick_at": serialize_datetime(ge.now_utc() - timedelta(minutes=1)),
+                "warning_sent_at": serialize_datetime(ge.now_utc() - timedelta(days=1)),
+                "extension_count": 1,
+                "review_pending": True,
+                "review_version": 3,
+                "review_message_channel_id": 50,
+                "review_message_id": 75,
+            }
+        )
+        self.assertIsNotNone(normalized)
+        self.assertTrue(normalized["review_pending"])
+        self.assertEqual(normalized["review_version"], 3)
+        self.assertEqual(normalized["review_message_channel_id"], 50)
+        self.assertEqual(normalized["review_message_id"], 75)
+
+
 class AdminServiceTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.guild = FakeGuild(10)
@@ -151,7 +180,7 @@ class AdminServiceTests(unittest.IsolatedAsyncioTestCase):
         self.service = AdminService(self.bot, store=self.store)
         self.service.storage_ready = True
 
-    async def _configure_verification(self, *, with_logs: bool = False):
+    async def _configure_verification(self, *, with_logs: bool = False, deadline_action: str = "auto_kick"):
         if with_logs:
             ok, _ = await self.service.set_logs_config(self.guild.id, channel_id=self.log_channel.id, alert_role_id=None)
             self.assertTrue(ok)
@@ -160,6 +189,7 @@ class AdminServiceTests(unittest.IsolatedAsyncioTestCase):
             enabled=True,
             role_id=self.verified_role.id,
             logic="must_have_role",
+            deadline_action=deadline_action,
             kick_after_text="7d",
             warning_lead_text="2d",
             help_channel_id=self.help_channel.id,
@@ -215,6 +245,17 @@ class AdminServiceTests(unittest.IsolatedAsyncioTestCase):
                 "extension_count": 0,
             }
         )
+
+    async def _create_verification_review(self, member: FakeMember) -> dict[str, object]:
+        await self._configure_verification(with_logs=True, deadline_action="review")
+        self.guild.members[member.id] = member
+        await self._store_kick_due_state(member)
+        processed = await self.service._process_due_verification_kicks(ge.now_utc())
+        self.assertTrue(processed)
+        record = await self.store.fetch_verification_state(self.guild.id, member.id)
+        self.assertIsNotNone(record)
+        self.assertTrue(record["review_pending"])
+        return record
 
     async def test_ban_candidate_and_return_assign_followup_role(self):
         ok, _ = await self.service.set_logs_config(self.guild.id, channel_id=self.log_channel.id, alert_role_id=None)
@@ -451,6 +492,187 @@ class AdminServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(updated["warning_sent_at"])
         self.assertGreater(deserialize_datetime(updated["kick_at"]), ge.now_utc())
         self.assertEqual(len(member.sent), 1)
+
+    async def test_store_lists_verification_review_views(self):
+        await self.store.upsert_verification_state(
+            {
+                "guild_id": self.guild.id,
+                "user_id": 48,
+                "joined_at": serialize_datetime(ge.now_utc() - timedelta(days=8)),
+                "warning_at": serialize_datetime(ge.now_utc() - timedelta(days=1)),
+                "kick_at": serialize_datetime(ge.now_utc() - timedelta(minutes=1)),
+                "warning_sent_at": serialize_datetime(ge.now_utc() - timedelta(days=2)),
+                "extension_count": 0,
+                "review_pending": True,
+                "review_version": 2,
+                "review_message_channel_id": self.log_channel.id,
+                "review_message_id": 1234,
+            }
+        )
+
+        rows = await self.store.list_verification_review_views()
+
+        self.assertEqual(len(rows), 1)
+        self.assertEqual(rows[0]["review_version"], 2)
+        self.assertEqual(rows[0]["review_message_id"], 1234)
+
+    async def test_verification_review_mode_sends_review_message_instead_of_kicking(self):
+        member = FakeMember(481, self.guild, roles=[], top_role=FakeRole(5, position=5))
+        record = await self._create_verification_review(member)
+
+        self.assertFalse(member.kicked)
+        self.assertEqual(len(self.log_channel.sent), 1)
+        self.assertEqual(self.log_channel.sent[0]["embed"].title, "Verification Deadline Review")
+        self.assertIsNotNone(self.log_channel.sent[0]["view"])
+        self.assertIsNotNone(record["review_message_id"])
+
+    async def test_verification_review_due_state_is_not_resent_while_pending(self):
+        member = FakeMember(482, self.guild, roles=[], top_role=FakeRole(5, position=5))
+        await self._create_verification_review(member)
+
+        processed = await self.service._process_due_verification_kicks(ge.now_utc() + timedelta(minutes=5))
+
+        self.assertFalse(processed)
+        self.assertEqual(len(self.log_channel.sent), 1)
+        self.assertFalse(member.kicked)
+
+    async def test_verification_review_without_log_channel_backs_off(self):
+        await self._configure_verification(deadline_action="review")
+        member = FakeMember(483, self.guild, roles=[], top_role=FakeRole(5, position=5))
+        self.guild.members[member.id] = member
+        await self._store_kick_due_state(member)
+        before = ge.now_utc()
+
+        processed = await self.service._process_due_verification_kicks(before)
+        updated = await self.store.fetch_verification_state(self.guild.id, member.id)
+
+        self.assertTrue(processed)
+        self.assertFalse(member.kicked)
+        self.assertFalse(updated["review_pending"])
+        self.assertGreater(deserialize_datetime(updated["kick_at"]), before)
+
+    async def test_verification_review_kick_action_clears_state_and_logs(self):
+        member = FakeMember(484, self.guild, roles=[], top_role=FakeRole(5, position=5))
+        record = await self._create_verification_review(member)
+        actor = FakeMember(2, self.guild, roles=[], top_role=FakeRole(10, position=10), guild_permissions=FakePermissions(manage_guild=True))
+
+        ok, message, _ = await self.service.handle_verification_review_action(
+            guild_id=self.guild.id,
+            user_id=member.id,
+            version=record["review_version"],
+            action="kick",
+            actor=actor,
+        )
+
+        self.assertTrue(ok)
+        self.assertIn("kicked", message.lower())
+        self.assertTrue(member.kicked)
+        self.assertIsNone(await self.store.fetch_verification_state(self.guild.id, member.id))
+        self.assertEqual(self.log_channel.sent[-1]["embed"].title, "Verification Review Kick")
+
+    async def test_verification_review_kick_action_permission_failure_keeps_review_open(self):
+        member = FakeMember(485, self.guild, roles=[], top_role=FakeRole(5, position=5))
+        record = await self._create_verification_review(member)
+        self.guild.me.guild_permissions = FakePermissions(
+            manage_roles=True,
+            kick_members=False,
+            view_channel=True,
+            send_messages=True,
+            embed_links=True,
+            mention_everyone=True,
+        )
+        actor = FakeMember(2, self.guild, roles=[], top_role=FakeRole(10, position=10), guild_permissions=FakePermissions(manage_guild=True))
+
+        ok, message, _ = await self.service.handle_verification_review_action(
+            guild_id=self.guild.id,
+            user_id=member.id,
+            version=record["review_version"],
+            action="kick",
+            actor=actor,
+        )
+
+        self.assertFalse(ok)
+        self.assertIn("Kick Members", message)
+        updated = await self.store.fetch_verification_state(self.guild.id, member.id)
+        self.assertTrue(updated["review_pending"])
+        self.assertFalse(member.kicked)
+
+    async def test_verification_review_delay_action_moves_deadline_by_24_hours(self):
+        member = FakeMember(486, self.guild, roles=[], top_role=FakeRole(5, position=5))
+        record = await self._create_verification_review(member)
+        actor = FakeMember(2, self.guild, roles=[], top_role=FakeRole(10, position=10), guild_permissions=FakePermissions(manage_guild=True))
+        before = ge.now_utc()
+
+        ok, message, _ = await self.service.handle_verification_review_action(
+            guild_id=self.guild.id,
+            user_id=member.id,
+            version=record["review_version"],
+            action="delay",
+            actor=actor,
+        )
+        updated = await self.store.fetch_verification_state(self.guild.id, member.id)
+
+        self.assertTrue(ok)
+        self.assertIn("24 hours", message)
+        self.assertFalse(updated["review_pending"])
+        self.assertIsNone(updated["review_message_id"])
+        self.assertGreaterEqual(deserialize_datetime(updated["kick_at"]), before + timedelta(hours=23, minutes=59))
+        self.assertEqual(self.log_channel.sent[-1]["embed"].title, "Verification Review Delayed")
+
+    async def test_verification_review_ignore_action_clears_state(self):
+        member = FakeMember(487, self.guild, roles=[], top_role=FakeRole(5, position=5))
+        record = await self._create_verification_review(member)
+        actor = FakeMember(2, self.guild, roles=[], top_role=FakeRole(10, position=10), guild_permissions=FakePermissions(manage_guild=True))
+
+        ok, message, _ = await self.service.handle_verification_review_action(
+            guild_id=self.guild.id,
+            user_id=member.id,
+            version=record["review_version"],
+            action="ignore",
+            actor=actor,
+        )
+
+        self.assertTrue(ok)
+        self.assertIn("ignored", message.lower())
+        self.assertIsNone(await self.store.fetch_verification_state(self.guild.id, member.id))
+        self.assertEqual(self.log_channel.sent[-1]["embed"].title, "Verification Review Ignored")
+
+    async def test_verification_review_stale_action_fails_safely(self):
+        member = FakeMember(488, self.guild, roles=[], top_role=FakeRole(5, position=5))
+        record = await self._create_verification_review(member)
+        actor = FakeMember(2, self.guild, roles=[], top_role=FakeRole(10, position=10), guild_permissions=FakePermissions(manage_guild=True))
+
+        ok, message, current = await self.service.handle_verification_review_action(
+            guild_id=self.guild.id,
+            user_id=member.id,
+            version=record["review_version"] + 1,
+            action="delay",
+            actor=actor,
+        )
+
+        self.assertFalse(ok)
+        self.assertIn("stale", message.lower())
+        self.assertTrue(current["review_pending"])
+
+    async def test_verification_help_extension_closes_pending_review_and_reschedules(self):
+        member = FakeMember(489, self.guild, roles=[], top_role=FakeRole(5, position=5))
+        record = await self._create_verification_review(member)
+        old_kick_at = deserialize_datetime(record["kick_at"])
+
+        message = types.SimpleNamespace(
+            guild=self.guild,
+            author=member,
+            content="I still need help with verification",
+            webhook_id=None,
+            channel=self.help_channel,
+        )
+        await self.service.handle_message(message)
+        updated = await self.store.fetch_verification_state(self.guild.id, member.id)
+
+        self.assertFalse(updated["review_pending"])
+        self.assertGreater(updated["review_version"], record["review_version"])
+        self.assertIsNone(updated["review_message_id"])
+        self.assertGreater(deserialize_datetime(updated["kick_at"]), old_kick_at)
 
     async def test_verification_must_not_have_role_marks_role_holder_unverified(self):
         ok, _ = await self.service.set_verification_config(

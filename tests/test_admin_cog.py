@@ -3,9 +3,10 @@ from __future__ import annotations
 import asyncio
 import types
 import unittest
+from unittest.mock import AsyncMock
 
 from babblebox import game_engine as ge
-from babblebox.cogs.admin import AdminCog
+from babblebox.cogs.admin import AdminCog, FollowupReviewView, VerificationDeadlineReviewView
 from babblebox.admin_service import AdminService
 from babblebox.admin_store import AdminStore
 
@@ -287,6 +288,7 @@ class AdminCogSmokeTests(unittest.IsolatedAsyncioTestCase):
             enabled=True,
             role_id=self.verified_role.id,
             logic="must_have_role",
+            deadline_action="auto_kick",
             kick_after_text="7d",
             warning_lead_text="2d",
             help_channel_id=None,
@@ -297,10 +299,11 @@ class AdminCogSmokeTests(unittest.IsolatedAsyncioTestCase):
 
         embed = await self.cog.build_panel_embed(self.guild.id, "verification")
         current_rule = next(field for field in embed.fields if field.name == "Current Rule")
-        target = next(field for field in embed.fields if field.name == "Warn / Kick Target")
+        target = next(field for field in embed.fields if field.name == "Deadline Path")
 
         self.assertIn("Members are considered verified only if they HAVE <@&80>.", current_rule.value)
         self.assertIn("Users WITHOUT <@&80> are treated as unverified.", current_rule.value)
+        self.assertIn("Deadline action: **Kick automatically**", current_rule.value)
         self.assertIn("users who do NOT have <@&80> will be warned after 5 days and kicked after 1 week.", target.value)
         self.assertIn("Exempt from warning/kick", target.value)
 
@@ -312,6 +315,7 @@ class AdminCogSmokeTests(unittest.IsolatedAsyncioTestCase):
             enabled=True,
             role_id=not_verified_role.id,
             logic="must_not_have_role",
+            deadline_action="auto_kick",
             kick_after_text="7d",
             warning_lead_text="2d",
             help_channel_id=None,
@@ -322,11 +326,104 @@ class AdminCogSmokeTests(unittest.IsolatedAsyncioTestCase):
 
         embed = await self.cog.build_panel_embed(self.guild.id, "verification")
         review = next(field for field in embed.fields if field.name == "Please Review Carefully")
-        target = next(field for field in embed.fields if field.name == "Warn / Kick Target")
+        target = next(field for field in embed.fields if field.name == "Deadline Path")
 
         self.assertIn("sounds like an unverified-state role", review.value)
         self.assertIn("users WITH <@&81> should be warned and kicked", review.value)
         self.assertIn("users who still have <@&81> will be warned after 5 days and kicked after 1 week.", target.value)
+
+    async def test_verification_panel_review_mode_spells_out_moderator_review(self):
+        ok, _ = await self.cog.service.set_verification_config(
+            self.guild.id,
+            enabled=True,
+            role_id=self.verified_role.id,
+            logic="must_have_role",
+            deadline_action="review",
+            kick_after_text="7d",
+            warning_lead_text="2d",
+            help_channel_id=None,
+            help_extension_text="1d",
+            max_extensions=1,
+        )
+        self.assertTrue(ok)
+
+        embed = await self.cog.build_panel_embed(self.guild.id, "verification")
+        current_rule = next(field for field in embed.fields if field.name == "Current Rule")
+        target = next(field for field in embed.fields if field.name == "Deadline Path")
+
+        self.assertIn("Deadline action: **Moderator review**", current_rule.value)
+        self.assertIn("sent for moderator review after 1 week", target.value)
+
+    async def test_admin_verification_command_updates_deadline_action(self):
+        ctx = FakeContext(
+            interaction=FakeInteraction(),
+            guild=self.guild,
+            channel=FakeChannel(20),
+            author=FakeAuthor(manage_guild=True),
+        )
+
+        await AdminCog.admin_verification_command.callback(
+            self.cog,
+            ctx,
+            enabled=True,
+            role=self.verified_role,
+            logic="must_have_role",
+            deadline_action="review",
+            kick_after="7d",
+            warning_lead="2d",
+            help_channel=None,
+            help_extension="1d",
+            max_extensions=1,
+            clear_role=False,
+            clear_help_channel=False,
+        )
+
+        config = self.cog.service.get_config(self.guild.id)
+        self.assertEqual(config["verification_deadline_action"], "review")
+        self.assertEqual(len(ctx.send_calls), 1)
+        self.assertTrue(ctx.send_calls[0]["ephemeral"])
+
+    async def test_verification_review_view_denies_non_admins_privately(self):
+        view = VerificationDeadlineReviewView(guild_id=self.guild.id, user_id=123, version=1)
+        message = FakeMessage(embed=None, view=view)
+        interaction = FakeInteraction(
+            user=FakeAuthor(manage_guild=False),
+            guild=self.guild,
+            message=message,
+        )
+        interaction.client = types.SimpleNamespace(admin_service=self.cog.service)
+        kick_button = next(child for child in view.children if child.label == "Kick")
+
+        await kick_button.callback(interaction)
+
+        self.assertEqual(len(interaction.response.sent_messages), 1)
+        self.assertTrue(interaction.response.sent_messages[0]["kwargs"]["ephemeral"])
+        self.assertIn("Manage Server", interaction.response.sent_messages[0]["kwargs"]["embed"].description)
+
+    async def test_cog_load_registers_followup_and_verification_review_views(self):
+        record_followup = {
+            "guild_id": self.guild.id,
+            "user_id": 501,
+            "review_version": 2,
+            "review_message_id": 1501,
+        }
+        record_verification = {
+            "guild_id": self.guild.id,
+            "user_id": 502,
+            "review_version": 3,
+            "review_message_id": 1502,
+        }
+        self.cog.service.start = AsyncMock(return_value=True)
+        self.cog.service.list_review_views = AsyncMock(return_value=[record_followup])
+        self.cog.service.list_verification_review_views = AsyncMock(return_value=[record_verification])
+
+        await self.cog.cog_load()
+
+        self.assertEqual(len(self.bot.views), 2)
+        self.assertIsInstance(self.bot.views[0][0], FollowupReviewView)
+        self.assertEqual(self.bot.views[0][1], 1501)
+        self.assertIsInstance(self.bot.views[1][0], VerificationDeadlineReviewView)
+        self.assertEqual(self.bot.views[1][1], 1502)
 
     async def test_admin_panel_warns_when_operability_is_missing(self):
         blocked_log_channel = FakeChannel(
