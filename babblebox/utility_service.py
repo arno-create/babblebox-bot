@@ -800,6 +800,52 @@ class UtilityService:
         perms = message.channel.permissions_for(member)
         return perms.view_channel and perms.read_message_history
 
+    def _watch_mentioned_members(self, message: discord.Message) -> dict[int, discord.Member]:
+        mentioned_members: dict[int, discord.Member] = {}
+        for member in getattr(message, "mentions", []) or []:
+            member_id = getattr(member, "id", None)
+            if member_id is None or member_id == message.author.id or getattr(member, "bot", False):
+                continue
+            mentioned_members[int(member_id)] = member
+        return mentioned_members
+
+    def _watch_explicit_mention_user_ids(self, message: discord.Message) -> set[int]:
+        raw_mentions = getattr(message, "raw_mentions", ...)
+        if isinstance(raw_mentions, (list, tuple, set)):
+            return {
+                int(user_id)
+                for user_id in raw_mentions
+                if isinstance(user_id, int) and user_id != message.author.id
+            }
+        # Synthetic test messages may not expose raw_mentions. In that case,
+        # fall back to the provided mention objects rather than guessing from content.
+        return {
+            int(member.id)
+            for member in getattr(message, "mentions", []) or []
+            if getattr(member, "id", None) is not None
+            and member.id != message.author.id
+            and not getattr(member, "bot", False)
+        }
+
+    def _watch_reply_target(self, message: discord.Message) -> tuple[int | None, discord.Member | None]:
+        if getattr(message, "type", discord.MessageType.default) != discord.MessageType.reply:
+            return None, None
+        reference = getattr(message, "reference", None)
+        if reference is None:
+            return None, None
+        resolved = getattr(reference, "resolved", None)
+        cached_message = getattr(reference, "cached_message", None)
+        reply_message = resolved if isinstance(resolved, discord.Message) else cached_message
+        reply_author = getattr(reply_message, "author", None)
+        reply_author_id = getattr(reply_author, "id", None)
+        if (
+            reply_author_id is None
+            or reply_author_id == message.author.id
+            or getattr(reply_author, "bot", False)
+        ):
+            return None, None
+        return int(reply_author_id), reply_author
+
     def _member_can_access_channel(self, member: discord.Member, channel) -> bool:
         perms = channel.permissions_for(member)
         return perms.view_channel and perms.read_message_history
@@ -903,26 +949,21 @@ class UtilityService:
         alerts: dict[int, dict[str, set[str]]] = {}
         guild_id = message.guild.id
         channel_id = message.channel.id
-        mentioned_members = {member.id: member for member in message.mentions if member.id != message.author.id and not member.bot}
+        mentioned_members = self._watch_mentioned_members(message)
+        explicit_mention_user_ids = self._watch_explicit_mention_user_ids(message)
         watched_mentions = self._mention_by_guild.get(guild_id, set())
         watched_mention_channels = self._mention_by_channel.get(channel_id, set())
-        for user_id, member in mentioned_members.items():
+        for user_id in explicit_mention_user_ids:
             if user_id in self._mention_global or user_id in watched_mentions or user_id in watched_mention_channels:
                 if self._watch_filters_block(user_id, author_id=message.author.id, channel_id=channel_id):
                     continue
-                if self._member_can_access_message(member, message):
+                member = mentioned_members.get(user_id) or message.guild.get_member(user_id)
+                if member is not None and self._member_can_access_message(member, message):
                     alerts.setdefault(user_id, {"triggers": set(), "keywords": set()})["triggers"].add("Mention")
 
-        reference = message.reference
-        resolved = getattr(reference, "resolved", None)
-        cached_message = getattr(reference, "cached_message", None)
-        reply_message = resolved if isinstance(resolved, discord.Message) else cached_message
-        reply_author = getattr(reply_message, "author", None)
-        reply_author_id = getattr(reply_author, "id", None)
+        reply_author_id, reply_author = self._watch_reply_target(message)
         if (
             reply_author_id is not None
-            and reply_author_id != message.author.id
-            and not getattr(reply_author, "bot", False)
             and (
                 reply_author_id in self._reply_global
                 or reply_author_id in self._reply_by_guild.get(guild_id, set())

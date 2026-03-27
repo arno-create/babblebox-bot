@@ -63,7 +63,18 @@ class DummyGuild:
 
 
 class DummyMessage:
-    def __init__(self, *, message_id: int, author, guild, channel, content: str, created_at):
+    def __init__(
+        self,
+        *,
+        message_id: int,
+        author,
+        guild,
+        channel,
+        content: str,
+        created_at,
+        message_type=discord.MessageType.default,
+        raw_mentions: Optional[list[int]] = None,
+    ):
         self.id = message_id
         self.author = author
         self.guild = guild
@@ -74,6 +85,8 @@ class DummyMessage:
         self.jump_url = f"https://discord.com/channels/{guild.id}/{channel.id}/{message_id}"
         self.mentions = []
         self.reference = None
+        self.type = message_type
+        self.raw_mentions = list(raw_mentions or [])
 
 
 class DummyBot:
@@ -272,6 +285,323 @@ class UtilityStoreAndServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(summary["mention_channel_enabled"])
         self.assertTrue(summary["reply_server_enabled"])
         self.assertEqual(len(summary["channel_keywords"]), 1)
+
+    def _watch_embed_field(self, member: DummyMember, name: str) -> str:
+        embed = member.send.await_args.kwargs["embed"]
+        return next(field.value for field in embed.fields if field.name == name)
+
+    async def test_watch_explicit_mention_alert_stays_distinct_from_replies(self):
+        watcher = DummyMember(200, display_name="Mira")
+        author = DummyMember(201, display_name="Nina")
+        guild = DummyGuild(20, members=[watcher, author])
+        channel = DummyChannel(21, guild=guild, visible_user_ids={watcher.id, author.id})
+        self.bot.add_user(watcher)
+        ok, _ = await self.service.set_watch_mentions(watcher.id, guild_id=guild.id, channel_id=channel.id, scope="server", enabled=True)
+        self.assertTrue(ok)
+        message = DummyMessage(
+            message_id=40,
+            author=author,
+            guild=guild,
+            channel=channel,
+            content="hey <@200>",
+            created_at=ge.now_utc(),
+            raw_mentions=[watcher.id],
+        )
+        message.mentions = [watcher]
+
+        await self.service.handle_watch_message(message)
+
+        watcher.send.assert_awaited_once()
+        self.assertEqual(self._watch_embed_field(watcher, "Why"), "Mention")
+
+    async def test_watch_reply_alert_ignores_reply_generated_mention_metadata(self):
+        watcher = DummyMember(210, display_name="Mira")
+        author = DummyMember(211, display_name="Nina")
+        guild = DummyGuild(22, members=[watcher, author])
+        channel = DummyChannel(23, guild=guild, visible_user_ids={watcher.id, author.id})
+        self.bot.add_user(watcher)
+        ok, _ = await self.service.set_watch_mentions(watcher.id, guild_id=guild.id, channel_id=channel.id, scope="server", enabled=True)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_watch_replies(watcher.id, guild_id=guild.id, channel_id=channel.id, scope="server", enabled=True)
+        self.assertTrue(ok)
+        source = DummyMessage(
+            message_id=41,
+            author=watcher,
+            guild=guild,
+            channel=channel,
+            content="original",
+            created_at=ge.now_utc() - timedelta(minutes=1),
+        )
+        message = DummyMessage(
+            message_id=42,
+            author=author,
+            guild=guild,
+            channel=channel,
+            content="reply without explicit ping",
+            created_at=ge.now_utc(),
+            message_type=discord.MessageType.reply,
+            raw_mentions=[],
+        )
+        message.mentions = [watcher]
+        message.reference = types.SimpleNamespace(resolved=None, cached_message=source)
+
+        await self.service.handle_watch_message(message)
+
+        watcher.send.assert_awaited_once()
+        self.assertEqual(self._watch_embed_field(watcher, "Why"), "Reply")
+
+    async def test_watch_combines_reply_and_explicit_mention_for_same_user_once(self):
+        watcher = DummyMember(220, display_name="Mira")
+        author = DummyMember(221, display_name="Nina")
+        guild = DummyGuild(24, members=[watcher, author])
+        channel = DummyChannel(25, guild=guild, visible_user_ids={watcher.id, author.id})
+        self.bot.add_user(watcher)
+        ok, _ = await self.service.set_watch_mentions(watcher.id, guild_id=guild.id, channel_id=channel.id, scope="server", enabled=True)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_watch_replies(watcher.id, guild_id=guild.id, channel_id=channel.id, scope="server", enabled=True)
+        self.assertTrue(ok)
+        source = DummyMessage(
+            message_id=43,
+            author=watcher,
+            guild=guild,
+            channel=channel,
+            content="original",
+            created_at=ge.now_utc() - timedelta(minutes=1),
+        )
+        message = DummyMessage(
+            message_id=44,
+            author=author,
+            guild=guild,
+            channel=channel,
+            content="reply and ping <@220>",
+            created_at=ge.now_utc(),
+            message_type=discord.MessageType.reply,
+            raw_mentions=[watcher.id],
+        )
+        message.mentions = [watcher]
+        message.reference = types.SimpleNamespace(resolved=None, cached_message=source)
+
+        await self.service.handle_watch_message(message)
+
+        watcher.send.assert_awaited_once()
+        self.assertEqual(self._watch_embed_field(watcher, "Why"), "Mention, Reply")
+
+    async def test_watch_keeps_reply_and_explicit_mention_targets_separate(self):
+        reply_watcher = DummyMember(230, display_name="ReplyWatcher")
+        mention_watcher = DummyMember(231, display_name="MentionWatcher")
+        author = DummyMember(232, display_name="Nina")
+        guild = DummyGuild(26, members=[reply_watcher, mention_watcher, author])
+        channel = DummyChannel(27, guild=guild, visible_user_ids={reply_watcher.id, mention_watcher.id, author.id})
+        self.bot.add_user(reply_watcher)
+        self.bot.add_user(mention_watcher)
+        ok, _ = await self.service.set_watch_replies(reply_watcher.id, guild_id=guild.id, channel_id=channel.id, scope="server", enabled=True)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_watch_mentions(mention_watcher.id, guild_id=guild.id, channel_id=channel.id, scope="server", enabled=True)
+        self.assertTrue(ok)
+        source = DummyMessage(
+            message_id=45,
+            author=reply_watcher,
+            guild=guild,
+            channel=channel,
+            content="original",
+            created_at=ge.now_utc() - timedelta(minutes=1),
+        )
+        message = DummyMessage(
+            message_id=46,
+            author=author,
+            guild=guild,
+            channel=channel,
+            content="reply to one person and tag another <@231>",
+            created_at=ge.now_utc(),
+            message_type=discord.MessageType.reply,
+            raw_mentions=[mention_watcher.id],
+        )
+        message.mentions = [reply_watcher, mention_watcher]
+        message.reference = types.SimpleNamespace(resolved=None, cached_message=source)
+
+        await self.service.handle_watch_message(message)
+
+        reply_watcher.send.assert_awaited_once()
+        mention_watcher.send.assert_awaited_once()
+        self.assertEqual(self._watch_embed_field(reply_watcher, "Why"), "Reply")
+        self.assertEqual(self._watch_embed_field(mention_watcher, "Why"), "Mention")
+
+    async def test_watch_reply_metadata_noise_does_not_trigger_false_mention_alert(self):
+        watcher = DummyMember(240, display_name="Mira")
+        author = DummyMember(241, display_name="Nina")
+        guild = DummyGuild(28, members=[watcher, author])
+        channel = DummyChannel(29, guild=guild, visible_user_ids={watcher.id, author.id})
+        self.bot.add_user(watcher)
+        ok, _ = await self.service.set_watch_mentions(watcher.id, guild_id=guild.id, channel_id=channel.id, scope="server", enabled=True)
+        self.assertTrue(ok)
+        source = DummyMessage(
+            message_id=47,
+            author=watcher,
+            guild=guild,
+            channel=channel,
+            content="original",
+            created_at=ge.now_utc() - timedelta(minutes=1),
+        )
+        message = DummyMessage(
+            message_id=48,
+            author=author,
+            guild=guild,
+            channel=channel,
+            content="reply without explicit ping",
+            created_at=ge.now_utc(),
+            message_type=discord.MessageType.reply,
+            raw_mentions=[],
+        )
+        message.mentions = [watcher]
+        message.reference = types.SimpleNamespace(resolved=None, cached_message=source)
+
+        await self.service.handle_watch_message(message)
+
+        watcher.send.assert_not_awaited()
+
+    async def test_watch_keyword_alerts_can_stack_with_reply_alerts(self):
+        watcher = DummyMember(250, display_name="Mira")
+        author = DummyMember(251, display_name="Nina")
+        guild = DummyGuild(30, members=[watcher, author])
+        channel = DummyChannel(31, guild=guild, visible_user_ids={watcher.id, author.id})
+        self.bot.add_user(watcher)
+        ok, _ = await self.service.set_watch_replies(watcher.id, guild_id=guild.id, channel_id=channel.id, scope="server", enabled=True)
+        self.assertTrue(ok)
+        ok, _ = await self.service.add_watch_keyword(
+            watcher.id,
+            guild_id=guild.id,
+            channel_id=channel.id,
+            phrase="camera",
+            scope="server",
+            mode="contains",
+        )
+        self.assertTrue(ok)
+        source = DummyMessage(
+            message_id=49,
+            author=watcher,
+            guild=guild,
+            channel=channel,
+            content="original",
+            created_at=ge.now_utc() - timedelta(minutes=1),
+        )
+        message = DummyMessage(
+            message_id=50,
+            author=author,
+            guild=guild,
+            channel=channel,
+            content="replying about the camera",
+            created_at=ge.now_utc(),
+            message_type=discord.MessageType.reply,
+            raw_mentions=[],
+        )
+        message.reference = types.SimpleNamespace(resolved=None, cached_message=source)
+
+        await self.service.handle_watch_message(message)
+
+        watcher.send.assert_awaited_once()
+        self.assertEqual(self._watch_embed_field(watcher, "Why"), "Keyword, Reply")
+        self.assertEqual(self._watch_embed_field(watcher, "Matched Keywords"), "`camera`")
+
+    async def test_watch_dedupes_same_message_for_same_user(self):
+        watcher = DummyMember(260, display_name="Mira")
+        author = DummyMember(261, display_name="Nina")
+        guild = DummyGuild(32, members=[watcher, author])
+        channel = DummyChannel(33, guild=guild, visible_user_ids={watcher.id, author.id})
+        self.bot.add_user(watcher)
+        ok, _ = await self.service.set_watch_mentions(watcher.id, guild_id=guild.id, channel_id=channel.id, scope="server", enabled=True)
+        self.assertTrue(ok)
+        message = DummyMessage(
+            message_id=51,
+            author=author,
+            guild=guild,
+            channel=channel,
+            content="hey <@260>",
+            created_at=ge.now_utc(),
+            raw_mentions=[watcher.id],
+        )
+        message.mentions = [watcher]
+
+        await self.service.handle_watch_message(message)
+        await self.service.handle_watch_message(message)
+
+        watcher.send.assert_awaited_once()
+
+    async def test_watch_dm_cooldown_suppresses_second_message_briefly(self):
+        watcher = DummyMember(270, display_name="Mira")
+        author = DummyMember(271, display_name="Nina")
+        guild = DummyGuild(34, members=[watcher, author])
+        channel = DummyChannel(35, guild=guild, visible_user_ids={watcher.id, author.id})
+        self.bot.add_user(watcher)
+        ok, _ = await self.service.set_watch_mentions(watcher.id, guild_id=guild.id, channel_id=channel.id, scope="server", enabled=True)
+        self.assertTrue(ok)
+        first = DummyMessage(
+            message_id=52,
+            author=author,
+            guild=guild,
+            channel=channel,
+            content="hey <@270>",
+            created_at=ge.now_utc(),
+            raw_mentions=[watcher.id],
+        )
+        second = DummyMessage(
+            message_id=53,
+            author=author,
+            guild=guild,
+            channel=channel,
+            content="again <@270>",
+            created_at=ge.now_utc() + timedelta(seconds=1),
+            raw_mentions=[watcher.id],
+        )
+        first.mentions = [watcher]
+        second.mentions = [watcher]
+
+        await self.service.handle_watch_message(first)
+        await self.service.handle_watch_message(second)
+
+        watcher.send.assert_awaited_once()
+
+    async def test_watch_filters_and_channel_access_still_block_alerts(self):
+        watched_user = DummyMember(280, display_name="Mira")
+        blocked_user = DummyMember(281, display_name="Blocked")
+        author = DummyMember(282, display_name="Nina")
+        guild = DummyGuild(36, members=[watched_user, blocked_user, author])
+        visible_channel = DummyChannel(37, guild=guild, visible_user_ids={watched_user.id, blocked_user.id, author.id})
+        hidden_channel = DummyChannel(38, guild=guild, visible_user_ids={author.id})
+        self.bot.add_user(watched_user)
+        self.bot.add_user(blocked_user)
+        ok, _ = await self.service.set_watch_mentions(watched_user.id, guild_id=guild.id, channel_id=visible_channel.id, scope="server", enabled=True)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_watch_mentions(blocked_user.id, guild_id=guild.id, channel_id=visible_channel.id, scope="server", enabled=True)
+        self.assertTrue(ok)
+        ok, _ = await self.service.add_watch_ignored_user(watched_user.id, ignored_user_id=author.id)
+        self.assertTrue(ok)
+
+        visible_message = DummyMessage(
+            message_id=54,
+            author=author,
+            guild=guild,
+            channel=visible_channel,
+            content="hey <@280>",
+            created_at=ge.now_utc(),
+            raw_mentions=[watched_user.id],
+        )
+        visible_message.mentions = [watched_user]
+        hidden_message = DummyMessage(
+            message_id=55,
+            author=author,
+            guild=guild,
+            channel=hidden_channel,
+            content="hey <@281>",
+            created_at=ge.now_utc() + timedelta(seconds=1),
+            raw_mentions=[blocked_user.id],
+        )
+        hidden_message.mentions = [blocked_user]
+
+        await self.service.handle_watch_message(visible_message)
+        await self.service.handle_watch_message(hidden_message)
+
+        watched_user.send.assert_not_awaited()
+        blocked_user.send.assert_not_awaited()
 
     async def test_channel_reminders_are_strictly_limited(self):
         user = DummyUser(55)

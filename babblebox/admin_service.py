@@ -17,6 +17,7 @@ from babblebox.admin_store import (
     AdminStorageUnavailable,
     AdminStore,
     VALID_FOLLOWUP_MODES,
+    VALID_VERIFICATION_DEADLINE_ACTIONS,
     VALID_VERIFICATION_LOGIC,
     default_admin_config,
     normalize_admin_config,
@@ -45,13 +46,23 @@ VERIFICATION_LOGIC_LABELS = {
     "must_have_role": "Unverified if member DOES NOT have this role",
     "must_not_have_role": "Unverified if member DOES have this role",
 }
+VERIFICATION_DEADLINE_ACTION_LABELS = {
+    "auto_kick": "Kick automatically",
+    "review": "Moderator review",
+}
 REVIEW_ACTION_LABELS = {
     "remove": "Remove role now",
     "delay_week": "Delay 1 week",
     "delay_month": "Delay 1 month",
     "keep": "Keep role for now",
 }
+VERIFICATION_REVIEW_ACTION_LABELS = {
+    "kick": "Kick",
+    "delay": "Delay",
+    "ignore": "Ignore",
+}
 FOLLOWUP_DURATION_RE = re.compile(r"(?ix)^\s*(\d+)\s*(d|day|days|w|week|weeks|mo|mon|month|months|y|yr|year|years)\s*$")
+VERIFICATION_REVIEW_DELAY_SECONDS = 24 * 3600
 
 
 @dataclass(frozen=True)
@@ -65,6 +76,7 @@ class CompiledAdminConfig:
     verification_enabled: bool
     verification_role_id: int | None
     verification_logic: str
+    verification_deadline_action: str
     verification_kick_after_seconds: int
     verification_warning_lead_seconds: int
     verification_help_channel_id: int | None
@@ -173,6 +185,7 @@ def _compile_config(raw: dict[str, Any]) -> CompiledAdminConfig:
         verification_enabled=bool(raw["verification_enabled"]),
         verification_role_id=raw["verification_role_id"],
         verification_logic=raw["verification_logic"],
+        verification_deadline_action=raw["verification_deadline_action"],
         verification_kick_after_seconds=int(raw["verification_kick_after_seconds"]),
         verification_warning_lead_seconds=int(raw["verification_warning_lead_seconds"]),
         verification_help_channel_id=raw["verification_help_channel_id"],
@@ -373,6 +386,8 @@ class AdminService:
                 "(unverified if the member is missing the role) or `must_not_have_role` "
                 "(unverified if the member has the role)."
             )
+        if config["verification_deadline_action"] not in VALID_VERIFICATION_DEADLINE_ACTIONS:
+            return "Verification deadline action must be `auto_kick` or `review`."
         if config["followup_duration_unit"] == "months" and config["followup_duration_value"] > 12:
             return "Follow-up month durations can be at most 12 months."
         if config["verification_warning_lead_seconds"] >= config["verification_kick_after_seconds"]:
@@ -437,6 +452,7 @@ class AdminService:
         enabled: bool | None = None,
         role_id: int | None = None,
         logic: str | None = None,
+        deadline_action: str | None = None,
         kick_after_text: str | None = None,
         warning_lead_text: str | None = None,
         help_channel_id: int | None = None,
@@ -451,6 +467,9 @@ class AdminService:
                 "(unverified if the member is missing the role) or `must_not_have_role` "
                 "(unverified if the member has the role).",
             )
+        cleaned_deadline_action = deadline_action.strip().lower() if isinstance(deadline_action, str) else None
+        if cleaned_deadline_action is not None and cleaned_deadline_action not in VALID_VERIFICATION_DEADLINE_ACTIONS:
+            return False, "Verification deadline action must be `auto_kick` or `review`."
         parsed_kick_after = parse_duration_string(kick_after_text) if kick_after_text is not None else None
         if kick_after_text is not None and parsed_kick_after is None:
             return False, "Kick timer must use a duration like `7d` or `24h`."
@@ -470,6 +489,8 @@ class AdminService:
                 config["verification_role_id"] = role_id
             if cleaned_logic is not None:
                 config["verification_logic"] = cleaned_logic
+            if cleaned_deadline_action is not None:
+                config["verification_deadline_action"] = cleaned_deadline_action
             if parsed_kick_after is not None:
                 config["verification_kick_after_seconds"] = parsed_kick_after
             if parsed_warning_lead is not None:
@@ -485,6 +506,7 @@ class AdminService:
         final_enabled = preview["verification_enabled"] if enabled is None else bool(enabled)
         final_role = preview["verification_role_id"] if role_id is None else role_id
         final_logic = preview["verification_logic"] if cleaned_logic is None else cleaned_logic
+        final_deadline_action = preview["verification_deadline_action"] if cleaned_deadline_action is None else cleaned_deadline_action
         final_kick_after = preview["verification_kick_after_seconds"] if parsed_kick_after is None else parsed_kick_after
         final_warning_lead = preview["verification_warning_lead_seconds"] if parsed_warning_lead is None else parsed_warning_lead
         return await self._update_config(
@@ -493,7 +515,7 @@ class AdminService:
             success_message=(
                 f"Verification cleanup is {'enabled' if final_enabled else 'disabled'} "
                 f"for role <@&{final_role}> using `{final_logic}` with warning {format_duration_brief(final_warning_lead)} "
-                f"before a {format_duration_brief(final_kick_after)} kick timer."
+                f"before a {format_duration_brief(final_kick_after)} deadline and `{final_deadline_action}` action."
                 if final_role
                 else f"Verification cleanup is {'enabled' if final_enabled else 'disabled'}."
             ),
@@ -595,6 +617,11 @@ class AdminService:
         if not self.storage_ready:
             return []
         return await self.store.list_review_views()
+
+    async def list_verification_review_views(self) -> list[dict[str, Any]]:
+        if not self.storage_ready:
+            return []
+        return await self.store.list_verification_review_views()
 
     async def get_member_status(self, member: discord.Member) -> dict[str, Any]:
         compiled = self.get_compiled_config(member.guild.id)
@@ -841,7 +868,11 @@ class AdminService:
             checks.append(
                 VerificationPrecheck(
                     "warning",
-                    "No admin log channel is configured, so sync and test summaries will only be shown privately to the admin who runs them.",
+                    (
+                        "No admin log channel is configured, so sync and test summaries will only be shown privately to the admin who runs them, and moderator-review deadline mode cannot send Kick, Delay, and Ignore buttons."
+                        if compiled.verification_deadline_action == "review"
+                        else "No admin log channel is configured, so sync and test summaries will only be shown privately to the admin who runs them."
+                    ),
                 )
             )
         else:
@@ -850,7 +881,11 @@ class AdminService:
                 checks.append(
                     VerificationPrecheck(
                         "warning",
-                        f"I cannot access the configured admin log channel <#{compiled.admin_log_channel_id}>.",
+                        (
+                            f"I cannot access the configured admin log channel <#{compiled.admin_log_channel_id}>, so moderator-review deadline mode cannot send review buttons there."
+                            if compiled.verification_deadline_action == "review"
+                            else f"I cannot access the configured admin log channel <#{compiled.admin_log_channel_id}>."
+                        ),
                     )
                 )
             else:
@@ -867,7 +902,12 @@ class AdminService:
             checks.append(
                 VerificationPrecheck(
                     "warning",
-                    "Kick enforcement is enabled, but Babblebox is missing Kick Members. Sync can still track and warn members, but later kicks will fail.",
+                    (
+                        "Kick enforcement is enabled, but Babblebox is missing Kick Members. "
+                        "Sync can still track and warn members, but manual Kick actions from review mode will fail."
+                        if compiled.verification_deadline_action == "review"
+                        else "Kick enforcement is enabled, but Babblebox is missing Kick Members. Sync can still track and warn members, but later kicks will fail."
+                    ),
                 )
             )
         elif blocked_kick_matches > 0:
@@ -875,7 +915,11 @@ class AdminService:
             checks.append(
                 VerificationPrecheck(
                     "warning",
-                    f"{blocked_kick_matches} currently matched {noun} above Babblebox's role or protected by administrator or owner rules, so later kicks will be blocked for them.",
+                    (
+                        f"{blocked_kick_matches} currently matched {noun} above Babblebox's role or protected by administrator or owner rules, so manual kick actions will still be blocked for them."
+                        if compiled.verification_deadline_action == "review"
+                        else f"{blocked_kick_matches} currently matched {noun} above Babblebox's role or protected by administrator or owner rules, so later kicks will be blocked for them."
+                    ),
                 )
             )
 
@@ -1161,6 +1205,50 @@ class AdminService:
         )
         return embed
 
+    def build_verification_review_embed(
+        self,
+        guild: discord.Guild,
+        member: discord.Member,
+        record: dict[str, Any],
+        *,
+        compiled: CompiledAdminConfig,
+    ) -> discord.Embed:
+        kick_at = deserialize_datetime(record.get("kick_at"))
+        embed = discord.Embed(
+            title="Verification Deadline Review",
+            description=(
+                f"{member.mention} reached the verification deadline and still matches the configured unverified rule.\n"
+                "Kick now, delay the deadline by 24 hours, or ignore this deadline for now."
+            ),
+            color=ge.EMBED_THEME["warning"],
+        )
+        embed.add_field(name="Member", value=f"{ge.display_name_of(member)} (`{member.id}`)", inline=True)
+        embed.add_field(name="Rule", value=VERIFICATION_LOGIC_LABELS.get(compiled.verification_logic, "Verification rule"), inline=False)
+        if kick_at is not None:
+            embed.add_field(name="Deadline Reached", value=f"{ge.format_timestamp(kick_at, 'R')} ({ge.format_timestamp(kick_at, 'f')})", inline=False)
+        issue = self._kick_issue(guild, member)
+        kick_status = issue.detail if issue is not None else "Kick is currently available if permissions and hierarchy stay the same."
+        embed.add_field(name="Kick Check", value=kick_status, inline=False)
+        return ge.style_embed(embed, footer="Babblebox Admin | Verification cleanup")
+
+    def build_verification_review_resolution_embed(self, record: dict[str, Any], *, message: str, success: bool) -> discord.Embed:
+        embed = ge.make_status_embed(
+            "Verification Review Updated" if success else "Verification Review Failed",
+            message,
+            tone="success" if success else "warning",
+            footer="Babblebox Admin | Verification cleanup",
+        )
+        embed.add_field(name="Member", value=f"<@{record['user_id']}>", inline=True)
+        return embed
+
+    def _close_verification_review_record(self, record: dict[str, Any]) -> dict[str, Any]:
+        updated = dict(record)
+        updated["review_pending"] = False
+        updated["review_version"] = int(updated.get("review_version", 0) or 0) + 1
+        updated["review_message_channel_id"] = None
+        updated["review_message_id"] = None
+        return updated
+
     def build_followup_review_embed(self, guild: discord.Guild, member: discord.Member, record: dict[str, Any]) -> discord.Embed:
         due_at = deserialize_datetime(record.get("due_at"))
         assigned_at = deserialize_datetime(record.get("assigned_at"))
@@ -1381,6 +1469,10 @@ class AdminService:
             "kick_at": serialize_datetime(kick_at),
             "warning_sent_at": None,
             "extension_count": 0,
+            "review_pending": False,
+            "review_version": 0,
+            "review_message_channel_id": None,
+            "review_message_id": None,
         }
 
     async def handle_member_ban(self, guild: discord.Guild, user: discord.abc.User):
@@ -1456,6 +1548,8 @@ class AdminService:
         if kick_at is not None:
             verification_state["kick_at"] = serialize_datetime(kick_at + extension)
         verification_state["extension_count"] = int(verification_state.get("extension_count", 0) or 0) + 1
+        if verification_state.get("review_pending"):
+            verification_state = self._close_verification_review_record(verification_state)
         await self.store.upsert_verification_state(verification_state)
         self._wake_event.set()
         help_embed = ge.make_status_embed(
@@ -1909,6 +2003,105 @@ class AdminService:
         )
         return True, "The follow-up role was kept without another automatic review.", updated
 
+    async def handle_verification_review_action(
+        self,
+        *,
+        guild_id: int,
+        user_id: int,
+        version: int,
+        action: str,
+        actor: discord.Member,
+    ) -> tuple[bool, str, dict[str, Any] | None]:
+        if action not in VERIFICATION_REVIEW_ACTION_LABELS:
+            return False, "That verification review action is no longer supported.", None
+        record = await self.store.fetch_verification_state(guild_id, user_id)
+        if record is None:
+            return False, "That verification review is already closed.", None
+        if not record.get("review_pending") or int(record.get("review_version", 0) or 0) != version:
+            return False, "That verification review view is stale. Open the latest review message instead.", record
+        guild = getattr(actor, "guild", None)
+        if guild is None or guild.id != guild_id:
+            return False, "This verification review action must be used inside the correct server.", record
+        compiled = self.get_compiled_config(guild_id)
+        member = guild.get_member(user_id)
+        if member is None:
+            await self.store.delete_verification_state(guild_id, user_id)
+            return True, "That member already left the server, so Babblebox cleared the pending review.", record
+        status, status_reason = self._verification_status(member, compiled)
+        if status in {"verified", "exempt"}:
+            await self.store.delete_verification_state(guild_id, user_id)
+            return True, "That member no longer needs verification cleanup, so Babblebox cleared the pending review.", record
+        if action == "kick":
+            if status != "unverified":
+                return False, status_reason, record
+            issue = self._kick_issue(guild, member)
+            if issue is not None:
+                return False, issue.detail, record
+            dm_sent = False
+            with contextlib.suppress(discord.Forbidden, discord.HTTPException):
+                await member.send(
+                    embed=self.build_kick_embed(
+                        member,
+                        guild=guild,
+                        deadline=deserialize_datetime(record.get("kick_at")) or ge.now_utc(),
+                        compiled=compiled,
+                    )
+                )
+                dm_sent = True
+            try:
+                await member.kick(reason=f"Babblebox verification cleanup review action by {ge.display_name_of(actor)}.")
+            except (discord.Forbidden, discord.HTTPException):
+                return False, "Babblebox could not kick that member right now.", record
+            await self.store.delete_verification_state(guild_id, user_id)
+            await self.send_log(
+                guild,
+                compiled,
+                embed=ge.make_status_embed(
+                    "Verification Review Kick",
+                    (
+                        f"{actor.mention} kicked <@{user_id}> from verification cleanup review."
+                        if dm_sent
+                        else f"{actor.mention} kicked <@{user_id}> from verification cleanup review after the final DM could not be delivered."
+                    ),
+                    tone="success",
+                    footer="Babblebox Admin | Verification cleanup",
+                ),
+                alert=False,
+            )
+            return True, "The member was kicked.", record
+
+        updated = self._close_verification_review_record(record)
+        now = ge.now_utc()
+        if action == "delay":
+            updated["kick_at"] = serialize_datetime(now + timedelta(seconds=VERIFICATION_REVIEW_DELAY_SECONDS))
+            await self.store.upsert_verification_state(updated)
+            await self.send_log(
+                guild,
+                compiled,
+                embed=ge.make_status_embed(
+                    "Verification Review Delayed",
+                    f"{actor.mention} delayed verification cleanup review for <@{user_id}> by 24 hours.",
+                    tone="info",
+                    footer="Babblebox Admin | Verification cleanup",
+                ),
+                alert=False,
+            )
+            return True, "The verification review was delayed by 24 hours.", updated
+
+        await self.store.delete_verification_state(guild_id, user_id)
+        await self.send_log(
+            guild,
+            compiled,
+            embed=ge.make_status_embed(
+                "Verification Review Ignored",
+                f"{actor.mention} dismissed verification deadline enforcement for <@{user_id}>.",
+                tone="info",
+                footer="Babblebox Admin | Verification cleanup",
+            ),
+            alert=False,
+        )
+        return True, "The verification deadline was ignored for now.", record
+
     async def _wait_for_ready_state(self) -> bool:
         while True:
             try:
@@ -2083,6 +2276,65 @@ class AdminService:
         with contextlib.suppress(Exception):
             self.bot.add_view(view, message_id=message.id)
 
+    async def _send_verification_review_alert(
+        self,
+        guild: discord.Guild,
+        compiled: CompiledAdminConfig,
+        member: discord.Member,
+        record: dict[str, Any],
+        *,
+        now: datetime,
+    ):
+        from babblebox.cogs.admin import VerificationDeadlineReviewView
+
+        if compiled.admin_log_channel_id is None:
+            record["kick_at"] = serialize_datetime(now + timedelta(seconds=OPERATION_BACKOFF_SECONDS))
+            await self.store.upsert_verification_state(record)
+            await self.log_operability_warning_once(
+                guild,
+                compiled,
+                key="verification-review-no-log-channel",
+                message="Babblebox reached a verification deadline in moderator-review mode but no admin log channel is configured.",
+            )
+            return
+        channel = self._guild_channel(guild, compiled.admin_log_channel_id)
+        if channel is None:
+            record["kick_at"] = serialize_datetime(now + timedelta(seconds=OPERATION_BACKOFF_SECONDS))
+            await self.store.upsert_verification_state(record)
+            await self.log_operability_warning_once(
+                guild,
+                compiled,
+                key="verification-review-missing-log-channel",
+                message="Babblebox reached a verification deadline in moderator-review mode but could not access the configured admin log channel.",
+            )
+            return
+        next_version = int(record.get("review_version", 0) or 0) + 1
+        view = VerificationDeadlineReviewView(guild_id=guild.id, user_id=member.id, version=next_version)
+        try:
+            message = await channel.send(
+                content=f"<@&{compiled.admin_alert_role_id}>" if compiled.admin_alert_role_id and self.can_ping_alert_role(guild, compiled) else None,
+                embed=self.build_verification_review_embed(guild, member, record, compiled=compiled),
+                view=view,
+                allowed_mentions=discord.AllowedMentions(users=False, roles=True, everyone=False),
+            )
+        except (discord.Forbidden, discord.HTTPException):
+            record["kick_at"] = serialize_datetime(now + timedelta(seconds=OPERATION_BACKOFF_SECONDS))
+            await self.store.upsert_verification_state(record)
+            await self.log_operability_warning_once(
+                guild,
+                compiled,
+                key="verification-review-send-failed",
+                message="Babblebox reached a verification deadline in moderator-review mode but could not send the review alert to the admin log channel.",
+            )
+            return
+        record["review_pending"] = True
+        record["review_version"] = next_version
+        record["review_message_channel_id"] = channel.id
+        record["review_message_id"] = message.id
+        await self.store.upsert_verification_state(record)
+        with contextlib.suppress(Exception):
+            self.bot.add_view(view, message_id=message.id)
+
     async def _process_due_verification_warnings(self, now: datetime) -> bool:
         processed = False
         grouped_by_guild: dict[int, dict[GroupedAdminLogKey, list[str]]] = {}
@@ -2214,6 +2466,10 @@ class AdminService:
                     ),
                     member,
                 )
+                processed = True
+                continue
+            if compiled.verification_deadline_action == "review":
+                await self._send_verification_review_alert(guild, compiled, member, record, now=now)
                 processed = True
                 continue
             issue = self._kick_issue(guild, member)

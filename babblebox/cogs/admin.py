@@ -13,6 +13,8 @@ from babblebox import game_engine as ge
 from babblebox.admin_service import (
     FOLLOWUP_MODE_LABELS,
     REVIEW_ACTION_LABELS,
+    VERIFICATION_DEADLINE_ACTION_LABELS,
+    VERIFICATION_REVIEW_ACTION_LABELS,
     VERIFICATION_LOGIC_LABELS,
     AdminService,
     VerificationPrecheck,
@@ -32,6 +34,10 @@ FOLLOWUP_MODE_CHOICES = [
 VERIFICATION_LOGIC_CHOICES = [
     app_commands.Choice(name="Unverified if member DOES NOT have this role", value="must_have_role"),
     app_commands.Choice(name="Unverified if member DOES have this role", value="must_not_have_role"),
+]
+VERIFICATION_DEADLINE_ACTION_CHOICES = [
+    app_commands.Choice(name="Kick automatically", value="auto_kick"),
+    app_commands.Choice(name="Moderator review", value="review"),
 ]
 STATE_CHOICES = [
     app_commands.Choice(name="On", value="on"),
@@ -115,6 +121,79 @@ class FollowupReviewView(discord.ui.View):
         for child in self.children:
             child.disabled = True
         embed = service.build_followup_resolution_embed(record or {"user_id": self.user_id, "role_id": 0}, message=message, success=True)
+        await interaction.response.edit_message(embed=embed, view=self)
+
+
+class VerificationDeadlineReviewView(discord.ui.View):
+    def __init__(self, *, guild_id: int, user_id: int, version: int):
+        super().__init__(timeout=None)
+        self.guild_id = guild_id
+        self.user_id = user_id
+        self.version = version
+        self.add_item(self._make_button("kick", discord.ButtonStyle.danger))
+        self.add_item(self._make_button("delay", discord.ButtonStyle.secondary))
+        self.add_item(self._make_button("ignore", discord.ButtonStyle.success))
+
+    def _make_button(self, action: str, style: discord.ButtonStyle) -> discord.ui.Button:
+        button = discord.ui.Button(
+            label=VERIFICATION_REVIEW_ACTION_LABELS[action],
+            style=style,
+            custom_id=f"bb-admin-verification-review:{action}:{self.guild_id}:{self.user_id}:{self.version}",
+        )
+
+        async def _callback(interaction: discord.Interaction):
+            await self._handle_action(interaction, action)
+
+        button.callback = _callback
+        return button
+
+    async def _handle_action(self, interaction: discord.Interaction, action: str):
+        if interaction.guild is None or interaction.user is None:
+            await interaction.response.send_message("This verification review action only works inside a server.", ephemeral=True)
+            return
+        perms = getattr(interaction.user, "guild_permissions", None)
+        if not (getattr(perms, "administrator", False) or getattr(perms, "manage_guild", False)):
+            await interaction.response.send_message(
+                embed=ge.make_status_embed(
+                    "Admin Only",
+                    "You need **Manage Server** or administrator access to use verification review actions.",
+                    tone="warning",
+                    footer="Babblebox Admin",
+                ),
+                ephemeral=True,
+            )
+            return
+        service = getattr(interaction.client, "admin_service", None)
+        if service is None:
+            await interaction.response.send_message("Babblebox admin systems are unavailable right now.", ephemeral=True)
+            return
+        ok, message, record = await service.handle_verification_review_action(
+            guild_id=self.guild_id,
+            user_id=self.user_id,
+            version=self.version,
+            action=action,
+            actor=interaction.user,
+        )
+        if not ok:
+            if "stale" in message.lower() or "closed" in message.lower():
+                for child in self.children:
+                    child.disabled = True
+                embed = service.build_verification_review_resolution_embed(
+                    record or {"user_id": self.user_id},
+                    message=message,
+                    success=False,
+                )
+                await interaction.response.edit_message(embed=embed, view=self)
+                return
+            await interaction.response.send_message(message, ephemeral=True)
+            return
+        for child in self.children:
+            child.disabled = True
+        embed = service.build_verification_review_resolution_embed(
+            record or {"user_id": self.user_id},
+            message=message,
+            success=True,
+        )
         await interaction.response.edit_message(embed=embed, view=self)
 
 
@@ -375,6 +454,19 @@ class AdminCog(commands.Cog):
                     ),
                     message_id=message_id,
                 )
+        for record in await self.service.list_verification_review_views():
+            message_id = record.get("review_message_id")
+            if not isinstance(message_id, int):
+                continue
+            with contextlib.suppress(Exception):
+                self.bot.add_view(
+                    VerificationDeadlineReviewView(
+                        guild_id=int(record["guild_id"]),
+                        user_id=int(record["user_id"]),
+                        version=int(record.get("review_version", 0) or 0),
+                    ),
+                    message_id=message_id,
+                )
 
     def cog_unload(self):
         if getattr(self.bot, "admin_service", None) is self.service:
@@ -442,18 +534,24 @@ class AdminCog(commands.Cog):
         role_name = str(getattr(role, "name", "") or "").strip()
         warning_after = format_duration_brief(config["verification_kick_after_seconds"] - config["verification_warning_lead_seconds"])
         kick_after = format_duration_brief(config["verification_kick_after_seconds"])
+        deadline_action_label = VERIFICATION_DEADLINE_ACTION_LABELS[config["verification_deadline_action"]]
+        deadline_after = (
+            f"sent for moderator review after {kick_after}"
+            if config["verification_deadline_action"] == "review"
+            else f"kicked after {kick_after}"
+        )
         if config["verification_role_id"] is None:
             verified_sentence = "Members cannot be evaluated until a verification role is configured."
-            unverified_sentence = "Babblebox will not warn or kick anyone until the verification role is configured."
+            unverified_sentence = "Babblebox will not enforce verification deadlines until the verification role is configured."
             preview_sentence = "Current rule: incomplete, because no verification role is configured yet."
         elif config["verification_logic"] == "must_have_role":
             verified_sentence = f"Members are considered verified only if they HAVE {role_text}."
             unverified_sentence = f"Users WITHOUT {role_text} are treated as unverified."
-            preview_sentence = f"Current rule: users who do NOT have {role_text} will be warned after {warning_after} and kicked after {kick_after}."
+            preview_sentence = f"Current rule: users who do NOT have {role_text} will be warned after {warning_after} and {deadline_after}."
         else:
             verified_sentence = f"Members are considered verified only if they DO NOT HAVE {role_text}."
             unverified_sentence = f"Users WITH {role_text} are treated as unverified."
-            preview_sentence = f"Current rule: users who still have {role_text} will be warned after {warning_after} and kicked after {kick_after}."
+            preview_sentence = f"Current rule: users who still have {role_text} will be warned after {warning_after} and {deadline_after}."
 
         exempt_parts: list[str] = []
         if config["excluded_user_ids"] or config["excluded_role_ids"]:
@@ -492,6 +590,7 @@ class AdminCog(commands.Cog):
             "verified_sentence": verified_sentence,
             "unverified_sentence": unverified_sentence,
             "preview_sentence": preview_sentence,
+            "deadline_action_label": deadline_action_label,
             "exempt_sentence": exempt_sentence,
             "review_lines": review_lines,
         }
@@ -535,7 +634,12 @@ class AdminCog(commands.Cog):
                 add("Warning: The configured verification role no longer exists.")
             perms = getattr(me, "guild_permissions", None)
             if perms is None or not getattr(perms, "kick_members", False):
-                add("Warning: Verification cleanup cannot kick members because Babblebox is missing Kick Members.")
+                if compiled.verification_deadline_action == "review":
+                    add("Warning: Verification review mode can still warn members, but Kick Members is required for the Kick button.")
+                else:
+                    add("Warning: Verification cleanup cannot kick members because Babblebox is missing Kick Members.")
+            if compiled.verification_deadline_action == "review" and compiled.admin_log_channel_id is None:
+                add("Warning: Review-mode verification cleanup needs an admin log channel so Babblebox can send Kick, Delay, and Ignore buttons.")
             add("Note: Verification cleanup still cannot kick administrators or members whose top role is at or above Babblebox.")
 
         if compiled.admin_log_channel_id is not None:
@@ -684,8 +788,9 @@ class AdminCog(commands.Cog):
             value=(
                 f"Enabled: **{'Yes' if config['verification_enabled'] else 'No'}**\n"
                 f"Rule: {VERIFICATION_LOGIC_LABELS[config['verification_logic']]}\n"
+                f"Deadline action: **{verification_rule['deadline_action_label']}**\n"
                 f"{verification_rule['unverified_sentence']}\n"
-                f"Kick timer: {format_duration_brief(config['verification_kick_after_seconds'])}\n"
+                f"Deadline timer: {format_duration_brief(config['verification_kick_after_seconds'])}\n"
                 f"Warn lead: {format_duration_brief(config['verification_warning_lead_seconds'])}"
             ),
             inline=False,
@@ -751,7 +856,7 @@ class AdminCog(commands.Cog):
         rule = self._verification_rule_details(guild_id)
         embed = discord.Embed(
             title="Verification Cleanup",
-            description="Warn and then kick members who stay unverified too long, with a verification-help extension path.",
+            description="Warn members who stay unverified too long, then either kick automatically or send a moderator review with a verification-help extension path.",
             color=ge.EMBED_THEME["danger"],
         )
         embed.add_field(
@@ -760,13 +865,14 @@ class AdminCog(commands.Cog):
                 f"Enabled: **{'Yes' if config['verification_enabled'] else 'No'}**\n"
                 f"Role: {self._role_mention(config['verification_role_id'])}\n"
                 f"Logic label: {VERIFICATION_LOGIC_LABELS[config['verification_logic']]}\n"
+                f"Deadline action: **{rule['deadline_action_label']}**\n"
                 f"{rule['verified_sentence']}\n"
                 f"{rule['unverified_sentence']}"
             ),
             inline=False,
         )
         embed.add_field(
-            name="Warn / Kick Target",
+            name="Deadline Path",
             value=(
                 f"{rule['preview_sentence']}\n"
                 f"{rule['exempt_sentence']}"
@@ -787,7 +893,8 @@ class AdminCog(commands.Cog):
             value=(
                 "Babblebox tracks compact pending member state only.\n"
                 "Any non-trivial message in the verification-help channel can extend the deadline.\n"
-                "If someone is already deep into the timer when tracking starts, Babblebox gives them a fresh warning window instead of kicking instantly."
+                "If someone is already deep into the timer when tracking starts, Babblebox gives them a fresh warning window instead of enforcing the deadline instantly.\n"
+                "Review mode sends one mod-facing message with Kick, Delay, and Ignore buttons."
             ),
             inline=False,
         )
@@ -796,8 +903,8 @@ class AdminCog(commands.Cog):
         embed.add_field(
             name="Examples",
             value=(
-                "`@Verified + must_have_role` -> users WITHOUT `@Verified` are warned/kicked.\n"
-                "`@Not Verified + must_not_have_role` -> users WITH `@Not Verified` are warned/kicked."
+                "`@Verified + must_have_role` -> users WITHOUT `@Verified` follow the configured deadline action.\n"
+                "`@Not Verified + must_not_have_role` -> users WITH `@Not Verified` follow the configured deadline action."
             ),
             inline=False,
         )
@@ -1049,6 +1156,7 @@ class AdminCog(commands.Cog):
         enabled="Turn verification cleanup on or off",
         role="Verification role to evaluate",
         logic="Choose whether users missing this role or users still holding this role are treated as unverified",
+        deadline_action="Kick automatically at the deadline or send a moderator review message instead",
         kick_after="Full time before kick, like 7d",
         warning_lead="How long before the kick Babblebox should warn, like 2d",
         help_channel="Verification-help channel where messages can extend the deadline",
@@ -1057,13 +1165,14 @@ class AdminCog(commands.Cog):
         clear_role="Clear the configured verification role",
         clear_help_channel="Clear the verification-help channel",
     )
-    @app_commands.choices(logic=VERIFICATION_LOGIC_CHOICES)
+    @app_commands.choices(logic=VERIFICATION_LOGIC_CHOICES, deadline_action=VERIFICATION_DEADLINE_ACTION_CHOICES)
     async def admin_verification_command(
         self,
         ctx: commands.Context,
         enabled: Optional[bool] = None,
         role: Optional[discord.Role] = None,
         logic: Optional[str] = None,
+        deadline_action: Optional[str] = None,
         kick_after: Optional[str] = None,
         warning_lead: Optional[str] = None,
         help_channel: Optional[discord.TextChannel] = None,
@@ -1074,7 +1183,7 @@ class AdminCog(commands.Cog):
     ):
         if not await self._guard(ctx):
             return
-        if all(value is None for value in (enabled, role, logic, kick_after, warning_lead, help_channel, help_extension, max_extensions)) and not clear_role and not clear_help_channel:
+        if all(value is None for value in (enabled, role, logic, deadline_action, kick_after, warning_lead, help_channel, help_extension, max_extensions)) and not clear_role and not clear_help_channel:
             await send_hybrid_response(ctx, embed=await self.build_panel_embed(ctx.guild.id, "verification"), ephemeral=True)
             return
         current = self.service.get_config(ctx.guild.id)
@@ -1085,6 +1194,7 @@ class AdminCog(commands.Cog):
             enabled=enabled,
             role_id=resolved_role_id,
             logic=logic,
+            deadline_action=deadline_action,
             kick_after_text=kick_after,
             warning_lead_text=warning_lead,
             help_channel_id=resolved_help_channel_id,

@@ -395,7 +395,10 @@ class UtilityCog(commands.Cog):
         )
         embed = discord.Embed(
             title="Watch Settings",
-            description=f"Quiet DM alerts for **{ge.display_name_of(user)}**. Mentions, replies, and keywords stay split and compact.",
+            description=(
+                f"Quiet DM alerts for **{ge.display_name_of(user)}**. "
+                "Mentions mean explicit `@user` tags, replies mean replies to your message, and keywords stay split and compact."
+            ),
             color=ge.EMBED_THEME["accent"],
         )
         alert_lines = [
@@ -449,7 +452,8 @@ class UtilityCog(commands.Cog):
             value=(
                 "`/watch mentions on server`\n"
                 "`/watch replies on channel`\n"
-                "`/watch keyword add channel contains camera`"
+                "`/watch keyword add channel contains camera`\n"
+                "Mentions = explicit `@user` tags | replies = Discord replies to your message"
             ),
             inline=False,
         )
@@ -841,7 +845,7 @@ class UtilityCog(commands.Cog):
         tone = "success" if ok else "warning"
         await self._send_private_embed(
             ctx,
-            embed=ge.make_status_embed("Watch Mentions", message, tone=tone, footer="Babblebox Watch"),
+            embed=ge.make_status_embed("Watch Replies", message, tone=tone, footer="Babblebox Watch"),
         )
 
     @watch_group.command(name="user", with_app_command=True, description="Ping me when someone's next message comes through")
