@@ -38,6 +38,7 @@ VERIFICATION_SYNC_DM_PACE_SECONDS = 1.0
 VERIFICATION_SYNC_PROGRESS_INTERVAL = 10
 VERIFICATION_SYNC_YIELD_INTERVAL = 25
 VERIFICATION_SYNC_RUNTIME_ISSUE_LIMIT = 5
+GROUPED_MEMBER_PREVIEW_LIMIT = 3
 
 FOLLOWUP_MODE_LABELS = {"auto_remove": "Auto-remove", "review": "Moderator review"}
 VERIFICATION_LOGIC_LABELS = {
@@ -142,6 +143,23 @@ class VerificationSyncSession:
     runtime_issues: list[str] = field(default_factory=list)
     partial_failure: str | None = None
     summary: VerificationSyncSummary | None = None
+
+
+@dataclass(frozen=True)
+class AdminActionIssue:
+    code: str
+    detail: str
+    because_text: str
+
+
+@dataclass(frozen=True)
+class GroupedAdminLogKey:
+    kind: str
+    reason_code: str = ""
+    reason_text: str | None = None
+    role_mention: str | None = None
+    duration_label: str | None = None
+    dm_status: str | None = None
 
 
 def _compile_config(raw: dict[str, Any]) -> CompiledAdminConfig:
@@ -633,6 +651,147 @@ class AdminService:
                 continue
             yield member
 
+    def _collect_grouped_member_log(
+        self,
+        grouped: dict[GroupedAdminLogKey, list[str]],
+        key: GroupedAdminLogKey,
+        member: discord.Member | discord.abc.User | str,
+    ):
+        mention = member if isinstance(member, str) else getattr(member, "mention", f"<@{getattr(member, 'id', 0)}>")
+        bucket = grouped.setdefault(key, [])
+        if mention not in bucket:
+            bucket.append(mention)
+
+    def _format_grouped_member_mentions(self, mentions: list[str]) -> str:
+        count = len(mentions)
+        if count == 0:
+            return "Nobody"
+        if count == 1:
+            return mentions[0]
+        if count == 2:
+            return f"{mentions[0]} and {mentions[1]}"
+        if count <= GROUPED_MEMBER_PREVIEW_LIMIT:
+            return f"{', '.join(mentions[:-1])}, and {mentions[-1]}"
+        preview = ", ".join(mentions[:GROUPED_MEMBER_PREVIEW_LIMIT])
+        remaining = count - GROUPED_MEMBER_PREVIEW_LIMIT
+        return f"{preview}, and {remaining} more"
+
+    def _reason_fragment(self, reason_text: str | None, *, fallback: str) -> str:
+        cleaned = (reason_text or "").strip().rstrip(".!?")
+        return cleaned or fallback
+
+    def _grouped_log_text(self, key: GroupedAdminLogKey, mentions: list[str]) -> str:
+        member_text = self._format_grouped_member_mentions(mentions)
+        count = len(mentions)
+        was_were = "was" if count == 1 else "were"
+        reason = self._reason_fragment(key.reason_text, fallback="an unexpected issue occurred")
+        dm_status = key.dm_status or "unknown"
+        role_mention = key.role_mention or "the configured follow-up role"
+        duration_label = key.duration_label or "the configured follow-up window"
+
+        if key.kind == "verification-sync-skip":
+            return f"{member_text} {was_were} skipped during verification sync because {reason}."
+        if key.kind == "verification-sync-warning-dm-failed":
+            return f"Warning DMs failed for {member_text} during verification sync."
+        if key.kind == "verification-warning":
+            if dm_status == "failed":
+                return f"Verification warning DMs failed for {member_text}."
+            return f"Babblebox warned {member_text} about pending verification cleanup."
+        if key.kind == "verification-warning-skipped":
+            return f"{member_text} {was_were} not warned because {reason}."
+        if key.kind == "verification-kick-deferred":
+            return (
+                f"Babblebox warned {member_text} instead of kicking immediately because no prior warning had been recorded. "
+                f"DM status: {dm_status}."
+            )
+        if key.kind == "verification-kick-skipped":
+            return f"{member_text} {was_were} not kicked for verification cleanup because {reason}."
+        if key.kind == "verification-kick-success":
+            return f"Babblebox kicked {member_text} after the verification deadline expired. Final DM status: {dm_status}."
+        if key.kind == "followup-auto-remove-skipped":
+            return f"Babblebox could not auto-remove {role_mention} from {member_text} because {reason}."
+        if key.kind == "followup-auto-remove-success":
+            return f"Babblebox auto-removed {role_mention} from {member_text} after {duration_label}."
+        return f"{member_text} {was_were} affected by an admin automation outcome."
+
+    def _grouped_admin_log_payload(
+        self,
+        key: GroupedAdminLogKey,
+        mentions: list[str],
+    ) -> tuple[str, str, str, str, bool]:
+        count = len(mentions)
+        description = self._grouped_log_text(key, mentions)
+        verification_footer = "Babblebox Admin | Verification cleanup"
+        followup_footer = "Babblebox Admin | Returned-after-ban follow-up"
+
+        if key.kind == "verification-warning":
+            if key.dm_status == "failed":
+                return "Verification Warning Delivery Failed", description, "warning", verification_footer, False
+            title = "Verification Warning Sent" if count == 1 else "Verification Warnings Sent"
+            return title, description, "warning", verification_footer, False
+        if key.kind == "verification-warning-skipped":
+            return "Verification Warning Skipped", description, "warning", verification_footer, True
+        if key.kind == "verification-kick-deferred":
+            return "Verification Kick Deferred", description, "warning", verification_footer, False
+        if key.kind == "verification-kick-skipped":
+            return "Verification Kick Skipped", description, "warning", verification_footer, True
+        if key.kind == "verification-kick-success":
+            title = "Member Removed For Verification Cleanup" if count == 1 else "Members Removed For Verification Cleanup"
+            return title, description, "danger", verification_footer, True
+        if key.kind == "followup-auto-remove-skipped":
+            return "Follow-up Role Removal Skipped", description, "warning", followup_footer, True
+        if key.kind == "followup-auto-remove-success":
+            title = "Follow-up Role Removed" if count == 1 else "Follow-up Roles Removed"
+            return title, description, "success", followup_footer, False
+        return "Admin Automation Update", description, "info", "Babblebox Admin", False
+
+    def _grouped_admin_log_dedup_key(self, key: GroupedAdminLogKey) -> str | None:
+        if key.kind == "verification-warning-skipped":
+            return f"{key.kind}:{key.reason_code}"
+        if key.kind == "verification-kick-skipped" and key.reason_code.startswith("ambiguous:"):
+            return f"{key.kind}:{key.reason_code}"
+        return None
+
+    def _render_grouped_issue_lines(
+        self,
+        grouped: dict[GroupedAdminLogKey, list[str]],
+        *,
+        limit: int,
+    ) -> list[str]:
+        lines = [self._grouped_log_text(key, mentions) for key, mentions in grouped.items()]
+        if len(lines) <= limit:
+            return lines
+        remaining = len(lines) - limit
+        suffix = "" if remaining == 1 else "s"
+        return [*lines[:limit], f"... and {remaining} more grouped issue{suffix}."]
+
+    async def _flush_grouped_admin_logs(
+        self,
+        guild: discord.Guild,
+        compiled: CompiledAdminConfig,
+        grouped: dict[GroupedAdminLogKey, list[str]],
+    ):
+        for key, mentions in grouped.items():
+            title, description, tone, footer, alert = self._grouped_admin_log_payload(key, mentions)
+            dedup_key = self._grouped_admin_log_dedup_key(key)
+            if dedup_key is not None:
+                await self.log_operability_warning_once(
+                    guild,
+                    compiled,
+                    key=dedup_key,
+                    message=description,
+                    title=title,
+                    footer=footer,
+                    alert=alert,
+                )
+                continue
+            await self.send_log(
+                guild,
+                compiled,
+                embed=ge.make_status_embed(title, description, tone=tone, footer=footer),
+                alert=alert,
+            )
+
     def _warning_template_summary(self, compiled: CompiledAdminConfig) -> tuple[str, str]:
         default_text = (
             "You are still waiting on server verification in {guild}. Please finish verification before {deadline_relative}. "
@@ -857,13 +1016,6 @@ class AdminService:
             if self._verification_sync_sessions.get(guild_id) is session:
                 self._verification_sync_sessions.pop(guild_id, None)
 
-    def _record_verification_sync_issue(self, session: VerificationSyncSession, message: str):
-        if message in session.runtime_issues:
-            return
-        if len(session.runtime_issues) >= VERIFICATION_SYNC_RUNTIME_ISSUE_LIMIT:
-            return
-        session.runtime_issues.append(message)
-
     def _role_ids_for(self, member: discord.Member | discord.abc.User) -> set[int]:
         return {
             int(role.id)
@@ -1045,38 +1197,78 @@ class AdminService:
         embed.add_field(name="Role", value=f"<@&{record['role_id']}>", inline=True)
         return embed
 
-    def _followup_role_issue(self, guild: discord.Guild, member: discord.Member, role: discord.Role) -> str | None:
+    def _followup_role_issue(self, guild: discord.Guild, member: discord.Member, role: discord.Role) -> AdminActionIssue | None:
         me = self._bot_member(guild)
         if me is None:
-            return "Babblebox could not resolve its server member for role management."
+            return AdminActionIssue(
+                code="followup-bot-member-missing",
+                detail="Babblebox could not resolve its server member for role management.",
+                because_text="Babblebox could not resolve its server member for role management",
+            )
         perms = getattr(me, "guild_permissions", None)
         if perms is None or not getattr(perms, "manage_roles", False):
-            return "Babblebox is missing Manage Roles."
+            return AdminActionIssue(
+                code="followup-missing-manage-roles",
+                detail="Babblebox is missing Manage Roles.",
+                because_text="Babblebox is missing Manage Roles",
+            )
         if getattr(role, "position", 0) >= getattr(getattr(me, "top_role", None), "position", 0):
-            return f"{role.mention} is at or above Babblebox's top role."
+            return AdminActionIssue(
+                code="followup-role-above-bot",
+                detail=f"{role.mention} is at or above Babblebox's top role.",
+                because_text="the role is at or above Babblebox's top role",
+            )
         if getattr(getattr(member, "top_role", None), "position", 0) >= getattr(getattr(me, "top_role", None), "position", 0):
-            return f"{member.mention} is at or above Babblebox's top role."
+            return AdminActionIssue(
+                code="followup-member-above-bot",
+                detail="They are at or above Babblebox's top role.",
+                because_text="they are at or above Babblebox's top role",
+            )
         return None
 
-    def _kick_hierarchy_issue(self, guild: discord.Guild, member: discord.Member) -> str | None:
+    def _kick_hierarchy_issue(self, guild: discord.Guild, member: discord.Member) -> AdminActionIssue | None:
         me = self._bot_member(guild)
         if me is None:
-            return "Babblebox could not resolve its server member for kicks."
+            return AdminActionIssue(
+                code="kick-bot-member-missing",
+                detail="Babblebox could not resolve its server member for kicks.",
+                because_text="Babblebox could not resolve its server member for kicks",
+            )
         if getattr(member.guild_permissions, "administrator", False):
-            return "Babblebox cannot kick administrators."
+            return AdminActionIssue(
+                code="kick-administrator-protected",
+                detail="They are administrators.",
+                because_text="they are administrators",
+            )
         if getattr(guild, "owner_id", None) == member.id:
-            return "Babblebox cannot kick the server owner."
+            return AdminActionIssue(
+                code="kick-owner-protected",
+                detail="They are the server owner.",
+                because_text="they are the server owner",
+            )
         if getattr(getattr(member, "top_role", None), "position", 0) >= getattr(getattr(me, "top_role", None), "position", 0):
-            return f"{member.mention} is at or above Babblebox's top role."
+            return AdminActionIssue(
+                code="kick-member-above-bot",
+                detail="They are at or above Babblebox's top role.",
+                because_text="they are at or above Babblebox's top role",
+            )
         return None
 
-    def _kick_issue(self, guild: discord.Guild, member: discord.Member) -> str | None:
+    def _kick_issue(self, guild: discord.Guild, member: discord.Member) -> AdminActionIssue | None:
         me = self._bot_member(guild)
         if me is None:
-            return "Babblebox could not resolve its server member for kicks."
+            return AdminActionIssue(
+                code="kick-bot-member-missing",
+                detail="Babblebox could not resolve its server member for kicks.",
+                because_text="Babblebox could not resolve its server member for kicks",
+            )
         perms = getattr(me, "guild_permissions", None)
         if perms is None or not getattr(perms, "kick_members", False):
-            return "Babblebox is missing Kick Members."
+            return AdminActionIssue(
+                code="kick-missing-permission",
+                detail="Babblebox is missing Kick Members.",
+                because_text="Babblebox is missing Kick Members",
+            )
         return self._kick_hierarchy_issue(guild, member)
 
     async def _deliver_verification_warning(
@@ -1098,21 +1290,14 @@ class AdminService:
         updated_record["warning_sent_at"] = serialize_datetime(now)
         await self.store.upsert_verification_state(updated_record)
         if log_result:
-            await self.send_log(
-                guild,
-                compiled,
-                embed=ge.make_status_embed(
-                    "Verification Warning Sent",
-                    (
-                        f"Babblebox warned {member.mention} about pending verification cleanup.\n"
-                        f"Kick deadline: {ge.format_timestamp(warning_deadline, 'R')}.\n"
-                        f"DM status: {'sent' if dm_sent else 'failed'}."
-                    ),
-                    tone="warning",
-                    footer="Babblebox Admin | Verification cleanup",
-                ),
-                alert=False,
-            )
+            grouped = {
+                GroupedAdminLogKey(
+                    kind="verification-warning",
+                    reason_code=f"dm-{'sent' if dm_sent else 'failed'}",
+                    dm_status="sent" if dm_sent else "failed",
+                ): [member.mention]
+            }
+            await self._flush_grouped_admin_logs(guild, compiled, grouped)
         return updated_record, dm_sent
 
     def can_ping_alert_role(self, guild: discord.Guild, compiled: CompiledAdminConfig) -> bool:
@@ -1158,14 +1343,24 @@ class AdminService:
             return True
         return False
 
-    async def log_operability_warning_once(self, guild: discord.Guild, compiled: CompiledAdminConfig, *, key: str, message: str):
+    async def log_operability_warning_once(
+        self,
+        guild: discord.Guild,
+        compiled: CompiledAdminConfig,
+        *,
+        key: str,
+        message: str,
+        title: str = "Admin Automation Warning",
+        footer: str = "Babblebox Admin",
+        alert: bool = True,
+    ):
         now = asyncio.get_running_loop().time()
         dedup_key = (guild.id, key)
         if now - self._log_dedup.get(dedup_key, 0.0) < LOG_DEDUP_SECONDS:
             return
         self._log_dedup[dedup_key] = now
-        embed = ge.make_status_embed("Admin Automation Warning", message, tone="warning", footer="Babblebox Admin")
-        sent = await self.send_log(guild, compiled, embed=embed, alert=True)
+        embed = ge.make_status_embed(title, message, tone="warning", footer=footer)
+        sent = await self.send_log(guild, compiled, embed=embed, alert=alert)
         if not sent:
             print(f"Admin automation warning for guild {guild.id}: {message}")
 
@@ -1327,7 +1522,7 @@ class AdminService:
                 member.guild,
                 compiled,
                 key=f"followup-assign-{member.id}",
-                message=f"Babblebox could not assign {role.mention} to {member.mention}. {issue}",
+                message=f"Babblebox could not assign {role.mention} to {member.mention}. {issue.detail}",
             )
             return
         assigned = False
@@ -1467,6 +1662,7 @@ class AdminService:
             for row in await self.store.list_verification_states_for_guild(guild.id)
         }
         seen_member_ids: set[int] = set()
+        grouped_runtime_issues: dict[GroupedAdminLogKey, list[str]] = {}
         now = ge.now_utc()
         try:
             for member in self._iter_guild_members(guild):
@@ -1503,6 +1699,14 @@ class AdminService:
                             session.warned_count += 1
                             if not dm_sent:
                                 session.failed_dm_count += 1
+                                self._collect_grouped_member_log(
+                                    grouped_runtime_issues,
+                                    GroupedAdminLogKey(
+                                        kind="verification-sync-warning-dm-failed",
+                                        reason_code="warning-dm-failed",
+                                    ),
+                                    member,
+                                )
                             changed = True
                             await asyncio.sleep(VERIFICATION_SYNC_DM_PACE_SECONDS)
                         if not changed:
@@ -1515,11 +1719,27 @@ class AdminService:
                             changed = True
                         elif status == "ambiguous":
                             session.skipped_count += 1
-                            self._record_verification_sync_issue(session, f"Skipped {member.mention} because {status_reason}")
+                            self._collect_grouped_member_log(
+                                grouped_runtime_issues,
+                                GroupedAdminLogKey(
+                                    kind="verification-sync-skip",
+                                    reason_code=f"ambiguous:{status_reason}",
+                                    reason_text=status_reason,
+                                ),
+                                member,
+                            )
                 except Exception as exc:
                     session.skipped_count += 1
-                    mention = getattr(member, "mention", f"<@{member_id}>")
-                    self._record_verification_sync_issue(session, f"Skipped {mention} because {exc}")
+                    reason_text = f"unexpected {type(exc).__name__}: {exc}" if str(exc).strip() else f"unexpected {type(exc).__name__}"
+                    self._collect_grouped_member_log(
+                        grouped_runtime_issues,
+                        GroupedAdminLogKey(
+                            kind="verification-sync-skip",
+                            reason_code=f"exception:{type(exc).__name__}:{reason_text}",
+                            reason_text=reason_text,
+                        ),
+                        member,
+                    )
                 if progress_callback is not None and (changed or session.scanned_members % VERIFICATION_SYNC_PROGRESS_INTERVAL == 0 or session.stop_requested):
                     with contextlib.suppress(Exception):
                         await progress_callback(session, False)
@@ -1538,12 +1758,15 @@ class AdminService:
                         await asyncio.sleep(0)
         except Exception as exc:
             session.partial_failure = f"Unexpected sync error: {exc}"
-            self._record_verification_sync_issue(session, session.partial_failure)
         finally:
             session.running = False
             session.finished_at = ge.now_utc()
             session.current_member_id = None
             precheck_issues = [check.message for check in session.preview.prechecks if check.severity in {"blocked", "warning"}]
+            session.runtime_issues = self._render_grouped_issue_lines(
+                grouped_runtime_issues,
+                limit=VERIFICATION_SYNC_RUNTIME_ISSUE_LIMIT,
+            )
             issues = tuple(dict.fromkeys([*precheck_issues, *session.runtime_issues]))
             session.summary = VerificationSyncSummary(
                 scanned_members=session.scanned_members,
@@ -1616,7 +1839,7 @@ class AdminService:
                 return True, "The follow-up role was already gone, so Babblebox cleared the pending record.", record
             issue = self._followup_role_issue(guild, member, role)
             if issue is not None:
-                return False, issue, record
+                return False, issue.detail, record
             try:
                 await member.remove_roles(role, reason=f"Babblebox follow-up review action by {ge.display_name_of(actor)}.")
             except (discord.Forbidden, discord.HTTPException):
@@ -1726,6 +1949,8 @@ class AdminService:
 
     async def _process_due_followups(self, now: datetime) -> bool:
         processed = False
+        grouped_by_guild: dict[int, dict[GroupedAdminLogKey, list[str]]] = {}
+        compiled_by_guild: dict[int, CompiledAdminConfig] = {}
         for record in await self.store.list_due_followups(now, limit=FOLLOWUP_REVIEW_LIMIT):
             guild = self.bot.get_guild(int(record["guild_id"]))
             if guild is None:
@@ -1733,6 +1958,8 @@ class AdminService:
                 processed = True
                 continue
             compiled = self.get_compiled_config(guild.id)
+            compiled_by_guild[guild.id] = compiled
+            grouped_logs = grouped_by_guild.setdefault(guild.id, {})
             member = guild.get_member(int(record["user_id"]))
             role = self._guild_role(guild, int(record["role_id"]))
             if member is None or role is None or role not in getattr(member, "roles", []):
@@ -1744,11 +1971,15 @@ class AdminService:
                 if issue is not None:
                     record["due_at"] = serialize_datetime(now + timedelta(seconds=OPERATION_BACKOFF_SECONDS))
                     await self.store.upsert_followup(record)
-                    await self.log_operability_warning_once(
-                        guild,
-                        compiled,
-                        key=f"followup-remove-{member.id}",
-                        message=f"Babblebox could not auto-remove {role.mention} from {member.mention}. {issue}",
+                    self._collect_grouped_member_log(
+                        grouped_logs,
+                        GroupedAdminLogKey(
+                            kind="followup-auto-remove-skipped",
+                            reason_code=issue.code,
+                            reason_text=issue.because_text,
+                            role_mention=role.mention,
+                        ),
+                        member,
                     )
                     processed = True
                     continue
@@ -1757,30 +1988,39 @@ class AdminService:
                 except (discord.Forbidden, discord.HTTPException):
                     record["due_at"] = serialize_datetime(now + timedelta(seconds=OPERATION_BACKOFF_SECONDS))
                     await self.store.upsert_followup(record)
-                    await self.log_operability_warning_once(
-                        guild,
-                        compiled,
-                        key=f"followup-remove-http-{member.id}",
-                        message=f"Babblebox could not auto-remove {role.mention} from {member.mention}. Discord rejected the change.",
+                    self._collect_grouped_member_log(
+                        grouped_logs,
+                        GroupedAdminLogKey(
+                            kind="followup-auto-remove-skipped",
+                            reason_code="discord-rejected",
+                            reason_text="Discord rejected the change",
+                            role_mention=role.mention,
+                        ),
+                        member,
                     )
                     processed = True
                     continue
                 await self.store.delete_followup(guild.id, member.id)
-                await self.send_log(
-                    guild,
-                    compiled,
-                    embed=ge.make_status_embed(
-                        "Follow-up Role Removed",
-                        f"Babblebox auto-removed {role.mention} from {member.mention} after {_followup_duration_label(compiled.followup_duration_value, compiled.followup_duration_unit)}.",
-                        tone="success",
-                        footer="Babblebox Admin | Returned-after-ban follow-up",
+                self._collect_grouped_member_log(
+                    grouped_logs,
+                    GroupedAdminLogKey(
+                        kind="followup-auto-remove-success",
+                        reason_code=f"removed:{role.id}",
+                        role_mention=role.mention,
+                        duration_label=_followup_duration_label(compiled.followup_duration_value, compiled.followup_duration_unit),
                     ),
-                    alert=False,
+                    member,
                 )
                 processed = True
                 continue
             await self._send_followup_review_alert(guild, compiled, member, role, record, now=now)
             processed = True
+        for guild_id, grouped_logs in grouped_by_guild.items():
+            guild = self.bot.get_guild(guild_id)
+            compiled = compiled_by_guild.get(guild_id)
+            if guild is None or compiled is None:
+                continue
+            await self._flush_grouped_admin_logs(guild, compiled, grouped_logs)
         return processed
 
     async def _send_followup_review_alert(
@@ -1845,6 +2085,8 @@ class AdminService:
 
     async def _process_due_verification_warnings(self, now: datetime) -> bool:
         processed = False
+        grouped_by_guild: dict[int, dict[GroupedAdminLogKey, list[str]]] = {}
+        compiled_by_guild: dict[int, CompiledAdminConfig] = {}
         for record in await self.store.list_due_verification_warnings(now, limit=VERIFICATION_BATCH_LIMIT):
             guild = self.bot.get_guild(int(record["guild_id"]))
             if guild is None:
@@ -1859,6 +2101,8 @@ class AdminService:
                 processed = True
                 continue
             compiled = self.get_compiled_config(guild.id)
+            compiled_by_guild[guild.id] = compiled
+            grouped_logs = grouped_by_guild.setdefault(guild.id, {})
             if not compiled.verification_enabled:
                 await self.store.delete_verification_state(guild.id, member.id)
                 processed = True
@@ -1869,26 +2113,46 @@ class AdminService:
                 processed = True
                 continue
             if status != "unverified":
-                await self.log_operability_warning_once(
-                    guild,
-                    compiled,
-                    key="verification-warning-ambiguous",
-                    message=f"Babblebox skipped a verification warning for {member.mention}. {status_reason}",
+                self._collect_grouped_member_log(
+                    grouped_logs,
+                    GroupedAdminLogKey(
+                        kind="verification-warning-skipped",
+                        reason_code=f"ambiguous:{status_reason}",
+                        reason_text=status_reason,
+                    ),
+                    member,
                 )
                 continue
-            await self._deliver_verification_warning(
+            _, dm_sent = await self._deliver_verification_warning(
                 guild,
                 member,
                 compiled,
                 record,
                 now=now,
-                log_result=True,
+                log_result=False,
+            )
+            self._collect_grouped_member_log(
+                grouped_logs,
+                GroupedAdminLogKey(
+                    kind="verification-warning",
+                    reason_code=f"dm-{'sent' if dm_sent else 'failed'}",
+                    dm_status="sent" if dm_sent else "failed",
+                ),
+                member,
             )
             processed = True
+        for guild_id, grouped_logs in grouped_by_guild.items():
+            guild = self.bot.get_guild(guild_id)
+            compiled = compiled_by_guild.get(guild_id)
+            if guild is None or compiled is None:
+                continue
+            await self._flush_grouped_admin_logs(guild, compiled, grouped_logs)
         return processed
 
     async def _process_due_verification_kicks(self, now: datetime) -> bool:
         processed = False
+        grouped_by_guild: dict[int, dict[GroupedAdminLogKey, list[str]]] = {}
+        compiled_by_guild: dict[int, CompiledAdminConfig] = {}
         for record in await self.store.list_due_verification_kicks(now, limit=VERIFICATION_BATCH_LIMIT):
             guild = self.bot.get_guild(int(record["guild_id"]))
             if guild is None:
@@ -1903,6 +2167,8 @@ class AdminService:
                 processed = True
                 continue
             compiled = self.get_compiled_config(guild.id)
+            compiled_by_guild[guild.id] = compiled
+            grouped_logs = grouped_by_guild.setdefault(guild.id, {})
             if not compiled.verification_enabled:
                 await self.store.delete_verification_state(guild.id, member.id)
                 processed = True
@@ -1913,11 +2179,14 @@ class AdminService:
                 processed = True
                 continue
             if status != "unverified":
-                await self.log_operability_warning_once(
-                    guild,
-                    compiled,
-                    key="verification-kick-ambiguous",
-                    message=f"Babblebox skipped a verification kick for {member.mention}. {status_reason}",
+                self._collect_grouped_member_log(
+                    grouped_logs,
+                    GroupedAdminLogKey(
+                        kind="verification-kick-skipped",
+                        reason_code=f"ambiguous:{status_reason}",
+                        reason_text=status_reason,
+                    ),
+                    member,
                 )
                 continue
             if record.get("warning_sent_at") is None and compiled.verification_warning_lead_seconds > 0:
@@ -1936,16 +2205,14 @@ class AdminService:
                     )
                     dm_sent = True
                 await self.store.upsert_verification_state(record)
-                await self.send_log(
-                    guild,
-                    compiled,
-                    embed=ge.make_status_embed(
-                        "Verification Warning Deferred A Kick",
-                        f"Babblebox warned {member.mention} instead of kicking immediately because no prior warning had been recorded. DM status: {'sent' if dm_sent else 'failed'}.",
-                        tone="warning",
-                        footer="Babblebox Admin | Verification cleanup",
+                self._collect_grouped_member_log(
+                    grouped_logs,
+                    GroupedAdminLogKey(
+                        kind="verification-kick-deferred",
+                        reason_code=f"dm-{'sent' if dm_sent else 'failed'}",
+                        dm_status="sent" if dm_sent else "failed",
                     ),
-                    alert=False,
+                    member,
                 )
                 processed = True
                 continue
@@ -1953,11 +2220,14 @@ class AdminService:
             if issue is not None:
                 record["kick_at"] = serialize_datetime(now + timedelta(seconds=OPERATION_BACKOFF_SECONDS))
                 await self.store.upsert_verification_state(record)
-                await self.log_operability_warning_once(
-                    guild,
-                    compiled,
-                    key=f"verification-kick-{member.id}",
-                    message=f"Babblebox could not kick {member.mention} for verification cleanup. {issue}",
+                self._collect_grouped_member_log(
+                    grouped_logs,
+                    GroupedAdminLogKey(
+                        kind="verification-kick-skipped",
+                        reason_code=issue.code,
+                        reason_text=issue.because_text,
+                    ),
+                    member,
                 )
                 processed = True
                 continue
@@ -1977,25 +2247,32 @@ class AdminService:
             except (discord.Forbidden, discord.HTTPException):
                 record["kick_at"] = serialize_datetime(now + timedelta(seconds=OPERATION_BACKOFF_SECONDS))
                 await self.store.upsert_verification_state(record)
-                await self.log_operability_warning_once(
-                    guild,
-                    compiled,
-                    key=f"verification-kick-http-{member.id}",
-                    message=f"Babblebox tried to kick {member.mention} for verification cleanup, but Discord rejected the action.",
+                self._collect_grouped_member_log(
+                    grouped_logs,
+                    GroupedAdminLogKey(
+                        kind="verification-kick-skipped",
+                        reason_code="discord-rejected",
+                        reason_text="Discord rejected the action",
+                    ),
+                    member,
                 )
                 processed = True
                 continue
             await self.store.delete_verification_state(guild.id, member.id)
-            await self.send_log(
-                guild,
-                compiled,
-                embed=ge.make_status_embed(
-                    "Member Removed For Verification Cleanup",
-                    f"Babblebox kicked {member.mention} after the verification deadline expired. Final DM status: {'sent' if dm_sent else 'failed'}.",
-                    tone="danger",
-                    footer="Babblebox Admin | Verification cleanup",
+            self._collect_grouped_member_log(
+                grouped_logs,
+                GroupedAdminLogKey(
+                    kind="verification-kick-success",
+                    reason_code=f"dm-{'sent' if dm_sent else 'failed'}",
+                    dm_status="sent" if dm_sent else "failed",
                 ),
-                alert=True,
+                member,
             )
             processed = True
+        for guild_id, grouped_logs in grouped_by_guild.items():
+            guild = self.bot.get_guild(guild_id)
+            compiled = compiled_by_guild.get(guild_id)
+            if guild is None or compiled is None:
+                continue
+            await self._flush_grouped_admin_logs(guild, compiled, grouped_logs)
         return processed
