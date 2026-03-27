@@ -134,9 +134,24 @@ class FakeChannel:
         self.name = name
         self.mention = f"<#{channel_id}>"
         self._permissions = permissions or FakePermissionSnapshot()
+        self.sent = []
+        self._messages: dict[int, FakeMessage] = {}
 
     def permissions_for(self, member):
         return self._permissions
+
+    async def send(self, **kwargs):
+        message = FakeMessage(**kwargs)
+        message.id = 1000 + len(self.sent)
+        self.sent.append({"message": message, **kwargs})
+        self._messages[message.id] = message
+        return message
+
+    async def fetch_message(self, message_id: int):
+        message = self._messages.get(message_id)
+        if message is None:
+            raise Exception("missing")
+        return message
 
 
 class FakeGuild:
@@ -407,15 +422,21 @@ class AdminCogSmokeTests(unittest.IsolatedAsyncioTestCase):
             "review_version": 2,
             "review_message_id": 1501,
         }
+        record_queue = {
+            "guild_id": self.guild.id,
+            "channel_id": 31,
+            "message_id": 1502,
+            "updated_at": ge.now_utc().isoformat(),
+        }
         record_verification = {
             "guild_id": self.guild.id,
             "user_id": 502,
             "review_version": 3,
-            "review_message_id": 1502,
         }
         self.cog.service.start = AsyncMock(return_value=True)
         self.cog.service.list_review_views = AsyncMock(return_value=[record_followup])
-        self.cog.service.list_verification_review_views = AsyncMock(return_value=[record_verification])
+        self.cog.service.list_verification_review_queues = AsyncMock(return_value=[record_queue])
+        self.cog.service.current_verification_review_target = AsyncMock(return_value=record_verification)
 
         await self.cog.cog_load()
 

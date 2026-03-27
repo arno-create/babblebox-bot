@@ -222,6 +222,10 @@ def normalize_verification_state(payload: Any) -> dict[str, Any] | None:
     review_version = payload.get("review_version")
     review_message_channel_id = payload.get("review_message_channel_id")
     review_message_id = payload.get("review_message_id")
+    last_result_code = _clean_optional_text(payload.get("last_result_code"))
+    last_result_at = _serialize_datetime(_parse_datetime(payload.get("last_result_at")))
+    last_notified_code = _clean_optional_text(payload.get("last_notified_code"))
+    last_notified_at = _serialize_datetime(_parse_datetime(payload.get("last_notified_at")))
     if not all(isinstance(value, int) and value > 0 for value in (guild_id, user_id)):
         return None
     if joined_at is None or warning_at is None or kick_at is None:
@@ -238,6 +242,52 @@ def normalize_verification_state(payload: Any) -> dict[str, Any] | None:
         "review_version": review_version if isinstance(review_version, int) and review_version >= 0 else 0,
         "review_message_channel_id": review_message_channel_id if isinstance(review_message_channel_id, int) and review_message_channel_id > 0 else None,
         "review_message_id": review_message_id if isinstance(review_message_id, int) and review_message_id > 0 else None,
+        "last_result_code": last_result_code,
+        "last_result_at": last_result_at,
+        "last_notified_code": last_notified_code,
+        "last_notified_at": last_notified_at,
+    }
+
+
+def normalize_verification_review_queue(payload: Any) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    guild_id = payload.get("guild_id")
+    channel_id = payload.get("channel_id")
+    message_id = payload.get("message_id")
+    updated_at = _serialize_datetime(_parse_datetime(payload.get("updated_at")))
+    if not isinstance(guild_id, int) or guild_id <= 0:
+        return None
+    return {
+        "guild_id": guild_id,
+        "channel_id": channel_id if isinstance(channel_id, int) and channel_id > 0 else None,
+        "message_id": message_id if isinstance(message_id, int) and message_id > 0 else None,
+        "updated_at": updated_at,
+    }
+
+
+def normalize_verification_notification_snapshot(payload: Any) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    guild_id = payload.get("guild_id")
+    run_context = _clean_optional_text(payload.get("run_context"))
+    operation = _clean_optional_text(payload.get("operation"))
+    outcome = _clean_optional_text(payload.get("outcome"))
+    reason_code = _clean_optional_text(payload.get("reason_code"))
+    signature = _clean_optional_text(payload.get("signature"))
+    notified_at = _serialize_datetime(_parse_datetime(payload.get("notified_at")))
+    if not isinstance(guild_id, int) or guild_id <= 0:
+        return None
+    if not all((run_context, operation, outcome, reason_code)):
+        return None
+    return {
+        "guild_id": guild_id,
+        "run_context": run_context,
+        "operation": operation,
+        "outcome": outcome,
+        "reason_code": reason_code,
+        "signature": signature,
+        "notified_at": notified_at,
     }
 
 
@@ -289,6 +339,32 @@ class _BaseAdminStore:
     async def list_verification_review_views(self) -> list[dict[str, Any]]:
         raise NotImplementedError
 
+    async def list_verification_review_queues(self) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    async def fetch_verification_review_queue(self, guild_id: int) -> dict[str, Any] | None:
+        raise NotImplementedError
+
+    async def upsert_verification_review_queue(self, record: dict[str, Any]):
+        raise NotImplementedError
+
+    async def delete_verification_review_queue(self, guild_id: int):
+        raise NotImplementedError
+
+    async def fetch_verification_notification_snapshot(
+        self,
+        guild_id: int,
+        *,
+        run_context: str,
+        operation: str,
+        outcome: str,
+        reason_code: str,
+    ) -> dict[str, Any] | None:
+        raise NotImplementedError
+
+    async def upsert_verification_notification_snapshot(self, record: dict[str, Any]):
+        raise NotImplementedError
+
     async def list_followups_for_guild(self, guild_id: int) -> list[dict[str, Any]]:
         raise NotImplementedError
 
@@ -322,12 +398,16 @@ class _MemoryAdminStore(_BaseAdminStore):
         self.ban_candidates: dict[tuple[int, int], dict[str, Any]] = {}
         self.followups: dict[tuple[int, int], dict[str, Any]] = {}
         self.verification_states: dict[tuple[int, int], dict[str, Any]] = {}
+        self.verification_review_queues: dict[int, dict[str, Any]] = {}
+        self.verification_notification_snapshots: dict[tuple[int, str, str, str, str], dict[str, Any]] = {}
 
     async def load(self):
         self.configs = {}
         self.ban_candidates = {}
         self.followups = {}
         self.verification_states = {}
+        self.verification_review_queues = {}
+        self.verification_notification_snapshots = {}
 
     async def fetch_all_configs(self) -> dict[int, dict[str, Any]]:
         return {guild_id: deepcopy(config) for guild_id, config in self.configs.items()}
@@ -401,6 +481,47 @@ class _MemoryAdminStore(_BaseAdminStore):
                 rows.append(deepcopy(record))
         rows.sort(key=lambda item: (item.get("guild_id", 0), item.get("user_id", 0)))
         return rows
+
+    async def list_verification_review_queues(self) -> list[dict[str, Any]]:
+        rows = [deepcopy(record) for record in self.verification_review_queues.values()]
+        rows.sort(key=lambda item: item.get("guild_id", 0))
+        return rows
+
+    async def fetch_verification_review_queue(self, guild_id: int) -> dict[str, Any] | None:
+        record = self.verification_review_queues.get(guild_id)
+        return deepcopy(record) if record is not None else None
+
+    async def upsert_verification_review_queue(self, record: dict[str, Any]):
+        normalized = normalize_verification_review_queue(record)
+        if normalized is not None:
+            self.verification_review_queues[int(normalized["guild_id"])] = normalized
+
+    async def delete_verification_review_queue(self, guild_id: int):
+        self.verification_review_queues.pop(guild_id, None)
+
+    async def fetch_verification_notification_snapshot(
+        self,
+        guild_id: int,
+        *,
+        run_context: str,
+        operation: str,
+        outcome: str,
+        reason_code: str,
+    ) -> dict[str, Any] | None:
+        record = self.verification_notification_snapshots.get((guild_id, run_context, operation, outcome, reason_code))
+        return deepcopy(record) if record is not None else None
+
+    async def upsert_verification_notification_snapshot(self, record: dict[str, Any]):
+        normalized = normalize_verification_notification_snapshot(record)
+        if normalized is not None:
+            key = (
+                normalized["guild_id"],
+                normalized["run_context"],
+                normalized["operation"],
+                normalized["outcome"],
+                normalized["reason_code"],
+            )
+            self.verification_notification_snapshots[key] = normalized
 
     async def list_followups_for_guild(self, guild_id: int) -> list[dict[str, Any]]:
         rows = [deepcopy(record) for record in self.followups.values() if record.get("guild_id") == guild_id]
@@ -522,6 +643,35 @@ def _verification_from_row(row) -> dict[str, Any] | None:
             "review_version": int(row["review_version"]),
             "review_message_channel_id": row["review_message_channel_id"],
             "review_message_id": row["review_message_id"],
+            "last_result_code": row.get("last_result_code"),
+            "last_result_at": _serialize_datetime(row.get("last_result_at")),
+            "last_notified_code": row.get("last_notified_code"),
+            "last_notified_at": _serialize_datetime(row.get("last_notified_at")),
+        }
+    )
+
+
+def _verification_review_queue_from_row(row) -> dict[str, Any] | None:
+    return normalize_verification_review_queue(
+        {
+            "guild_id": row["guild_id"],
+            "channel_id": row["channel_id"],
+            "message_id": row["message_id"],
+            "updated_at": _serialize_datetime(row["updated_at"]),
+        }
+    )
+
+
+def _verification_notification_snapshot_from_row(row) -> dict[str, Any] | None:
+    return normalize_verification_notification_snapshot(
+        {
+            "guild_id": row["guild_id"],
+            "run_context": row["run_context"],
+            "operation": row["operation"],
+            "outcome": row["outcome"],
+            "reason_code": row["reason_code"],
+            "signature": row["signature"],
+            "notified_at": _serialize_datetime(row["notified_at"]),
         }
     )
 
@@ -639,7 +789,31 @@ class _PostgresAdminStore(_BaseAdminStore):
                 "review_version INTEGER NOT NULL DEFAULT 0, "
                 "review_message_channel_id BIGINT NULL, "
                 "review_message_id BIGINT NULL, "
+                "last_result_code TEXT NULL, "
+                "last_result_at TIMESTAMPTZ NULL, "
+                "last_notified_code TEXT NULL, "
+                "last_notified_at TIMESTAMPTZ NULL, "
                 "PRIMARY KEY (guild_id, user_id)"
+                ")"
+            ),
+            (
+                "CREATE TABLE IF NOT EXISTS admin_verification_review_queues ("
+                "guild_id BIGINT PRIMARY KEY, "
+                "channel_id BIGINT NULL, "
+                "message_id BIGINT NULL, "
+                "updated_at TIMESTAMPTZ NULL"
+                ")"
+            ),
+            (
+                "CREATE TABLE IF NOT EXISTS admin_verification_notification_snapshots ("
+                "guild_id BIGINT NOT NULL, "
+                "run_context TEXT NOT NULL, "
+                "operation TEXT NOT NULL, "
+                "outcome TEXT NOT NULL, "
+                "reason_code TEXT NOT NULL, "
+                "signature TEXT NULL, "
+                "notified_at TIMESTAMPTZ NULL, "
+                "PRIMARY KEY (guild_id, run_context, operation, outcome, reason_code)"
                 ")"
             ),
         ]
@@ -653,6 +827,10 @@ class _PostgresAdminStore(_BaseAdminStore):
             "ALTER TABLE admin_verification_states ADD COLUMN IF NOT EXISTS review_version INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE admin_verification_states ADD COLUMN IF NOT EXISTS review_message_channel_id BIGINT NULL",
             "ALTER TABLE admin_verification_states ADD COLUMN IF NOT EXISTS review_message_id BIGINT NULL",
+            "ALTER TABLE admin_verification_states ADD COLUMN IF NOT EXISTS last_result_code TEXT NULL",
+            "ALTER TABLE admin_verification_states ADD COLUMN IF NOT EXISTS last_result_at TIMESTAMPTZ NULL",
+            "ALTER TABLE admin_verification_states ADD COLUMN IF NOT EXISTS last_notified_code TEXT NULL",
+            "ALTER TABLE admin_verification_states ADD COLUMN IF NOT EXISTS last_notified_at TIMESTAMPTZ NULL",
         ]
         index_statements = [
             "CREATE INDEX IF NOT EXISTS ix_admin_ban_return_expires ON admin_ban_return_candidates (expires_at)",
@@ -662,6 +840,8 @@ class _PostgresAdminStore(_BaseAdminStore):
             "CREATE INDEX IF NOT EXISTS ix_admin_verification_kick_due ON admin_verification_states (kick_at)",
             "CREATE INDEX IF NOT EXISTS ix_admin_verification_guild ON admin_verification_states (guild_id)",
             "CREATE INDEX IF NOT EXISTS ix_admin_verification_review_pending ON admin_verification_states (review_pending, review_message_id)",
+            "CREATE INDEX IF NOT EXISTS ix_admin_verification_last_notified ON admin_verification_states (guild_id, last_notified_at)",
+            "CREATE INDEX IF NOT EXISTS ix_admin_verification_snapshot_notified ON admin_verification_notification_snapshots (guild_id, notified_at)",
         ]
         async with self._pool.acquire() as conn:
             for statement in table_statements:
@@ -902,13 +1082,104 @@ class _PostgresAdminStore(_BaseAdminStore):
             rows = await conn.fetch(
                 (
                     "SELECT guild_id, user_id, joined_at, warning_at, kick_at, warning_sent_at, extension_count, "
-                    "review_pending, review_version, review_message_channel_id, review_message_id "
+                    "review_pending, review_version, review_message_channel_id, review_message_id, "
+                    "last_result_code, last_result_at, last_notified_code, last_notified_at "
                     "FROM admin_verification_states "
                     "WHERE review_pending = TRUE AND review_message_id IS NOT NULL "
                     "ORDER BY guild_id ASC, user_id ASC"
                 )
             )
         return [record for row in rows if (record := _verification_from_row(row)) is not None]
+
+    async def list_verification_review_queues(self) -> list[dict[str, Any]]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT guild_id, channel_id, message_id, updated_at FROM admin_verification_review_queues ORDER BY guild_id ASC"
+            )
+        return [record for row in rows if (record := _verification_review_queue_from_row(row)) is not None]
+
+    async def fetch_verification_review_queue(self, guild_id: int) -> dict[str, Any] | None:
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT guild_id, channel_id, message_id, updated_at FROM admin_verification_review_queues WHERE guild_id = $1",
+                guild_id,
+            )
+        return _verification_review_queue_from_row(row) if row is not None else None
+
+    async def upsert_verification_review_queue(self, record: dict[str, Any]):
+        normalized = normalize_verification_review_queue(record)
+        if normalized is None:
+            return
+        async with self._io_lock:
+            async with self._pool.acquire() as conn:
+                await conn.execute(
+                    (
+                        "INSERT INTO admin_verification_review_queues (guild_id, channel_id, message_id, updated_at) "
+                        "VALUES ($1, $2, $3, $4) "
+                        "ON CONFLICT (guild_id) DO UPDATE SET "
+                        "channel_id = EXCLUDED.channel_id, "
+                        "message_id = EXCLUDED.message_id, "
+                        "updated_at = EXCLUDED.updated_at"
+                    ),
+                    normalized["guild_id"],
+                    normalized["channel_id"],
+                    normalized["message_id"],
+                    _parse_datetime(normalized["updated_at"]),
+                )
+
+    async def delete_verification_review_queue(self, guild_id: int):
+        async with self._io_lock:
+            async with self._pool.acquire() as conn:
+                await conn.execute("DELETE FROM admin_verification_review_queues WHERE guild_id = $1", guild_id)
+
+    async def fetch_verification_notification_snapshot(
+        self,
+        guild_id: int,
+        *,
+        run_context: str,
+        operation: str,
+        outcome: str,
+        reason_code: str,
+    ) -> dict[str, Any] | None:
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                (
+                    "SELECT guild_id, run_context, operation, outcome, reason_code, signature, notified_at "
+                    "FROM admin_verification_notification_snapshots "
+                    "WHERE guild_id = $1 AND run_context = $2 AND operation = $3 AND outcome = $4 AND reason_code = $5"
+                ),
+                guild_id,
+                run_context,
+                operation,
+                outcome,
+                reason_code,
+            )
+        return _verification_notification_snapshot_from_row(row) if row is not None else None
+
+    async def upsert_verification_notification_snapshot(self, record: dict[str, Any]):
+        normalized = normalize_verification_notification_snapshot(record)
+        if normalized is None:
+            return
+        async with self._io_lock:
+            async with self._pool.acquire() as conn:
+                await conn.execute(
+                    (
+                        "INSERT INTO admin_verification_notification_snapshots ("
+                        "guild_id, run_context, operation, outcome, reason_code, signature, notified_at"
+                        ") VALUES ("
+                        "$1, $2, $3, $4, $5, $6, $7"
+                        ") ON CONFLICT (guild_id, run_context, operation, outcome, reason_code) DO UPDATE SET "
+                        "signature = EXCLUDED.signature, "
+                        "notified_at = EXCLUDED.notified_at"
+                    ),
+                    normalized["guild_id"],
+                    normalized["run_context"],
+                    normalized["operation"],
+                    normalized["outcome"],
+                    normalized["reason_code"],
+                    normalized["signature"],
+                    _parse_datetime(normalized["notified_at"]),
+                )
 
     async def list_followups_for_guild(self, guild_id: int) -> list[dict[str, Any]]:
         async with self._pool.acquire() as conn:
@@ -932,9 +1203,10 @@ class _PostgresAdminStore(_BaseAdminStore):
                     (
                         "INSERT INTO admin_verification_states ("
                         "guild_id, user_id, joined_at, warning_at, kick_at, warning_sent_at, extension_count, "
-                        "review_pending, review_version, review_message_channel_id, review_message_id"
+                        "review_pending, review_version, review_message_channel_id, review_message_id, "
+                        "last_result_code, last_result_at, last_notified_code, last_notified_at"
                         ") VALUES ("
-                        "$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11"
+                        "$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15"
                         ") ON CONFLICT (guild_id, user_id) DO UPDATE SET "
                         "joined_at = EXCLUDED.joined_at, "
                         "warning_at = EXCLUDED.warning_at, "
@@ -944,7 +1216,11 @@ class _PostgresAdminStore(_BaseAdminStore):
                         "review_pending = EXCLUDED.review_pending, "
                         "review_version = EXCLUDED.review_version, "
                         "review_message_channel_id = EXCLUDED.review_message_channel_id, "
-                        "review_message_id = EXCLUDED.review_message_id"
+                        "review_message_id = EXCLUDED.review_message_id, "
+                        "last_result_code = EXCLUDED.last_result_code, "
+                        "last_result_at = EXCLUDED.last_result_at, "
+                        "last_notified_code = EXCLUDED.last_notified_code, "
+                        "last_notified_at = EXCLUDED.last_notified_at"
                     ),
                     normalized["guild_id"],
                     normalized["user_id"],
@@ -957,6 +1233,10 @@ class _PostgresAdminStore(_BaseAdminStore):
                     normalized["review_version"],
                     normalized["review_message_channel_id"],
                     normalized["review_message_id"],
+                    normalized["last_result_code"],
+                    _parse_datetime(normalized["last_result_at"]),
+                    normalized["last_notified_code"],
+                    _parse_datetime(normalized["last_notified_at"]),
                 )
 
     async def fetch_verification_state(self, guild_id: int, user_id: int) -> dict[str, Any] | None:
@@ -964,7 +1244,8 @@ class _PostgresAdminStore(_BaseAdminStore):
             row = await conn.fetchrow(
                 (
                     "SELECT guild_id, user_id, joined_at, warning_at, kick_at, warning_sent_at, extension_count, "
-                    "review_pending, review_version, review_message_channel_id, review_message_id "
+                    "review_pending, review_version, review_message_channel_id, review_message_id, "
+                    "last_result_code, last_result_at, last_notified_code, last_notified_at "
                     "FROM admin_verification_states WHERE guild_id = $1 AND user_id = $2"
                 ),
                 guild_id,
@@ -982,7 +1263,8 @@ class _PostgresAdminStore(_BaseAdminStore):
             rows = await conn.fetch(
                 (
                     "SELECT guild_id, user_id, joined_at, warning_at, kick_at, warning_sent_at, extension_count, "
-                    "review_pending, review_version, review_message_channel_id, review_message_id "
+                    "review_pending, review_version, review_message_channel_id, review_message_id, "
+                    "last_result_code, last_result_at, last_notified_code, last_notified_at "
                     "FROM admin_verification_states "
                     "WHERE warning_sent_at IS NULL AND warning_at <= $1 "
                     "ORDER BY warning_at ASC LIMIT $2"
@@ -997,7 +1279,8 @@ class _PostgresAdminStore(_BaseAdminStore):
             rows = await conn.fetch(
                 (
                     "SELECT guild_id, user_id, joined_at, warning_at, kick_at, warning_sent_at, extension_count, "
-                    "review_pending, review_version, review_message_channel_id, review_message_id "
+                    "review_pending, review_version, review_message_channel_id, review_message_id, "
+                    "last_result_code, last_result_at, last_notified_code, last_notified_at "
                     "FROM admin_verification_states "
                     "WHERE kick_at <= $1 AND review_pending = FALSE "
                     "ORDER BY kick_at ASC LIMIT $2"
@@ -1012,7 +1295,8 @@ class _PostgresAdminStore(_BaseAdminStore):
             rows = await conn.fetch(
                 (
                     "SELECT guild_id, user_id, joined_at, warning_at, kick_at, warning_sent_at, extension_count, "
-                    "review_pending, review_version, review_message_channel_id, review_message_id "
+                    "review_pending, review_version, review_message_channel_id, review_message_id, "
+                    "last_result_code, last_result_at, last_notified_code, last_notified_at "
                     "FROM admin_verification_states WHERE guild_id = $1 ORDER BY joined_at ASC"
                 ),
                 guild_id,
@@ -1121,6 +1405,38 @@ class AdminStore:
 
     async def list_verification_review_views(self) -> list[dict[str, Any]]:
         return await self._store.list_verification_review_views()
+
+    async def list_verification_review_queues(self) -> list[dict[str, Any]]:
+        return await self._store.list_verification_review_queues()
+
+    async def fetch_verification_review_queue(self, guild_id: int) -> dict[str, Any] | None:
+        return await self._store.fetch_verification_review_queue(guild_id)
+
+    async def upsert_verification_review_queue(self, record: dict[str, Any]):
+        await self._store.upsert_verification_review_queue(record)
+
+    async def delete_verification_review_queue(self, guild_id: int):
+        await self._store.delete_verification_review_queue(guild_id)
+
+    async def fetch_verification_notification_snapshot(
+        self,
+        guild_id: int,
+        *,
+        run_context: str,
+        operation: str,
+        outcome: str,
+        reason_code: str,
+    ) -> dict[str, Any] | None:
+        return await self._store.fetch_verification_notification_snapshot(
+            guild_id,
+            run_context=run_context,
+            operation=operation,
+            outcome=outcome,
+            reason_code=reason_code,
+        )
+
+    async def upsert_verification_notification_snapshot(self, record: dict[str, Any]):
+        await self._store.upsert_verification_notification_snapshot(record)
 
     async def list_followups_for_guild(self, guild_id: int) -> list[dict[str, Any]]:
         return await self._store.list_followups_for_guild(guild_id)

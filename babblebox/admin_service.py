@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import calendar
 import contextlib
+import hashlib
 import re
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
@@ -40,6 +41,9 @@ VERIFICATION_SYNC_PROGRESS_INTERVAL = 10
 VERIFICATION_SYNC_YIELD_INTERVAL = 25
 VERIFICATION_SYNC_RUNTIME_ISSUE_LIMIT = 5
 GROUPED_MEMBER_PREVIEW_LIMIT = 3
+VERIFICATION_NOTIFICATION_SUPPRESSION_SECONDS = 24 * 3600
+VERIFICATION_QUEUE_PREVIEW_LIMIT = 5
+VERIFICATION_SUMMARY_LINE_LIMIT = 8
 
 FOLLOWUP_MODE_LABELS = {"auto_remove": "Auto-remove", "review": "Moderator review"}
 VERIFICATION_LOGIC_LABELS = {
@@ -174,6 +178,31 @@ class GroupedAdminLogKey:
     dm_status: str | None = None
 
 
+@dataclass(frozen=True)
+class VerificationBatchKey:
+    run_context: str
+    operation: str
+    outcome: str
+    reason_code: str
+    reason_text: str | None = None
+    dm_status: str | None = None
+
+
+@dataclass
+class VerificationBatchGroup:
+    mentions: list[str] = field(default_factory=list)
+    member_ids: list[int] = field(default_factory=list)
+    records: list[dict[str, Any]] = field(default_factory=list)
+
+
+@dataclass
+class VerificationSweepBatch:
+    run_context: str
+    grouped_by_guild: dict[int, dict[VerificationBatchKey, VerificationBatchGroup]] = field(default_factory=dict)
+    counts_by_guild: dict[int, dict[str, int]] = field(default_factory=dict)
+    queue_refresh_guild_ids: set[int] = field(default_factory=set)
+
+
 def _compile_config(raw: dict[str, Any]) -> CompiledAdminConfig:
     return CompiledAdminConfig(
         guild_id=int(raw["guild_id"]),
@@ -303,6 +332,7 @@ class AdminService:
         self._log_dedup: dict[tuple[int, str], float] = {}
         self._verification_sync_sessions: dict[int, VerificationSyncSession] = {}
         self._verification_sync_lock = asyncio.Lock()
+        self._startup_resume_pending = True
 
     async def start(self) -> bool:
         if self._startup_storage_error is not None:
@@ -320,6 +350,7 @@ class AdminService:
         self.storage_ready = True
         self.storage_error = None
         await self._rebuild_config_cache()
+        self._startup_resume_pending = True
         self._scheduler_task = asyncio.create_task(self._scheduler_loop(), name="babblebox-admin-scheduler")
         self._wake_event.set()
         return True
@@ -623,6 +654,21 @@ class AdminService:
             return []
         return await self.store.list_verification_review_views()
 
+    async def list_verification_review_queues(self) -> list[dict[str, Any]]:
+        if not self.storage_ready:
+            return []
+        return await self.store.list_verification_review_queues()
+
+    async def current_verification_review_target(self, guild_id: int) -> dict[str, Any] | None:
+        if not self.storage_ready:
+            return None
+        guild = self.bot.get_guild(guild_id)
+        if guild is None:
+            return None
+        compiled = self.get_compiled_config(guild_id)
+        pending = await self._active_verification_review_rows(guild, compiled)
+        return pending[0] if pending else None
+
     async def get_member_status(self, member: discord.Member) -> dict[str, Any]:
         compiled = self.get_compiled_config(member.guild.id)
         followup = await self.store.fetch_followup(member.guild.id, member.id) if self.storage_ready else None
@@ -757,16 +803,16 @@ class AdminService:
             title = "Verification Warning Sent" if count == 1 else "Verification Warnings Sent"
             return title, description, "warning", verification_footer, False
         if key.kind == "verification-warning-skipped":
-            return "Verification Warning Skipped", description, "warning", verification_footer, True
+            return "Verification Warning Skipped", description, "warning", verification_footer, False
         if key.kind == "verification-kick-deferred":
             return "Verification Kick Deferred", description, "warning", verification_footer, False
         if key.kind == "verification-kick-skipped":
-            return "Verification Kick Skipped", description, "warning", verification_footer, True
+            return "Verification Kick Skipped", description, "warning", verification_footer, False
         if key.kind == "verification-kick-success":
             title = "Member Removed For Verification Cleanup" if count == 1 else "Members Removed For Verification Cleanup"
-            return title, description, "danger", verification_footer, True
+            return title, description, "danger", verification_footer, False
         if key.kind == "followup-auto-remove-skipped":
-            return "Follow-up Role Removal Skipped", description, "warning", followup_footer, True
+            return "Follow-up Role Removal Skipped", description, "warning", followup_footer, False
         if key.kind == "followup-auto-remove-success":
             title = "Follow-up Role Removed" if count == 1 else "Follow-up Roles Removed"
             return title, description, "success", followup_footer, False
@@ -818,6 +864,229 @@ class AdminService:
                 embed=ge.make_status_embed(title, description, tone=tone, footer=footer),
                 alert=alert,
             )
+
+    def _verification_result_code(self, key: VerificationBatchKey) -> str:
+        return f"{key.operation}:{key.outcome}:{key.reason_code}"
+
+    def _set_verification_result(self, record: dict[str, Any], key: VerificationBatchKey, *, now: datetime) -> dict[str, Any]:
+        updated = dict(record)
+        updated["last_result_code"] = self._verification_result_code(key)
+        updated["last_result_at"] = serialize_datetime(now)
+        return updated
+
+    def _set_verification_notified(self, record: dict[str, Any], key: VerificationBatchKey, *, now: datetime) -> dict[str, Any]:
+        updated = dict(record)
+        updated["last_notified_code"] = self._verification_result_code(key)
+        updated["last_notified_at"] = serialize_datetime(now)
+        return updated
+
+    def _verification_notification_signature(self, member_ids: list[int]) -> str:
+        joined = ",".join(str(member_id) for member_id in sorted(set(member_ids)))
+        return hashlib.sha1(joined.encode("ascii"), usedforsecurity=False).hexdigest()
+
+    def _count_verification_batch_outcome(self, batch: VerificationSweepBatch, guild_id: int, key: VerificationBatchKey):
+        counts = batch.counts_by_guild.setdefault(guild_id, {})
+        count_key = f"{key.operation}:{key.outcome}"
+        counts[count_key] = counts.get(count_key, 0) + 1
+
+    def _collect_verification_batch_outcome(
+        self,
+        batch: VerificationSweepBatch,
+        guild_id: int,
+        key: VerificationBatchKey,
+        member: discord.Member | discord.abc.User | str,
+        *,
+        record: dict[str, Any] | None = None,
+    ):
+        grouped = batch.grouped_by_guild.setdefault(guild_id, {})
+        bucket = grouped.setdefault(key, VerificationBatchGroup())
+        mention = member if isinstance(member, str) else getattr(member, "mention", f"<@{getattr(member, 'id', 0)}>")
+        if mention not in bucket.mentions:
+            bucket.mentions.append(mention)
+        member_id = getattr(member, "id", None)
+        if isinstance(member_id, int) and member_id not in bucket.member_ids:
+            bucket.member_ids.append(member_id)
+        if record is not None:
+            bucket.records.append(dict(record))
+        self._count_verification_batch_outcome(batch, guild_id, key)
+
+    def _verification_reason_text(self, reason_code: str, *, detail: str | None = None) -> str:
+        mapping = {
+            "missing_kick_members": "Babblebox is missing Kick Members",
+            "target_above_bot_role": "their top role is at or above Babblebox's",
+            "target_is_administrator": "they are administrators",
+            "target_is_owner": "they are the server owner",
+            "discord_rejected_kick": "Discord rejected the kick",
+            "bot_member_unavailable": "Babblebox could not resolve its own server member for kicks",
+            "verification_rule_ambiguous": detail or "the verification rule could not be evaluated",
+            "review_queued": "they were added to the verification review queue",
+            "missing_prior_warning": "no prior warning had been recorded",
+            "dm_failed": "DM delivery failed",
+            "dm_sent": "DM delivery succeeded",
+        }
+        return mapping.get(reason_code, detail or reason_code.replace("_", " "))
+
+    def _verification_group_text(self, key: VerificationBatchKey, mentions: list[str]) -> str:
+        member_text = self._format_grouped_member_mentions(mentions)
+        count = len(mentions)
+        was_were = "was" if count == 1 else "were"
+        noun = "member" if count == 1 else "members"
+        reason = self._reason_fragment(
+            key.reason_text or self._verification_reason_text(key.reason_code),
+            fallback="an unexpected issue occurred",
+        )
+        if key.operation == "warning" and key.outcome == "sent":
+            if key.reason_code == "dm_failed":
+                return f"Warning DMs failed for {member_text}."
+            return f"Babblebox warned {member_text} about pending verification cleanup."
+        if key.operation == "warning" and key.outcome == "skipped":
+            return f"{member_text} {was_were} not warned because {reason}."
+        if key.operation == "kick" and key.outcome == "deferred":
+            return (
+                f"Babblebox warned {member_text} instead of kicking immediately because no prior warning had been recorded. "
+                f"DM status: {key.dm_status or 'unknown'}."
+            )
+        if key.operation == "kick" and key.outcome == "blocked":
+            return f"{member_text} {was_were} not kicked because {reason}."
+        if key.operation == "kick" and key.outcome == "success":
+            return f"Babblebox kicked {member_text} after the verification deadline expired. Final DM status: {key.dm_status or 'unknown'}."
+        if key.operation == "review" and key.outcome == "queued":
+            if count == 1:
+                return f"{member_text} was added to the verification review queue."
+            return f"{count} {noun} were added to the verification review queue."
+        return f"{member_text} {was_were} affected by verification automation."
+
+    def _verification_summary_lines(self, counts: dict[str, int]) -> list[str]:
+        labels = (
+            ("warning:sent", "Warnings sent"),
+            ("warning:skipped", "Warnings skipped"),
+            ("kick:deferred", "Kick deadlines deferred"),
+            ("kick:blocked", "Kicks blocked"),
+            ("kick:success", "Members kicked"),
+            ("review:queued", "Queued for review"),
+        )
+        lines = []
+        for key, label in labels:
+            value = counts.get(key, 0)
+            if value:
+                lines.append(f"{label}: **{value}**")
+        return lines or ["No operator-facing verification changes were emitted."]
+
+    def _verification_summary_title(self, run_context: str) -> str:
+        if run_context == "startup_resume":
+            return "Verification Reconciliation Resumed"
+        return "Verification Automation Summary"
+
+    def _verification_summary_description(self, run_context: str) -> str:
+        if run_context == "startup_resume":
+            return "Babblebox resumed overdue verification reconciliation after startup and only surfaced changes that still matter."
+        return "Babblebox processed the current overdue verification sweep and grouped identical outcomes into one calm summary."
+
+    async def _should_notify_verification_group(
+        self,
+        guild_id: int,
+        key: VerificationBatchKey,
+        group: VerificationBatchGroup,
+        *,
+        now: datetime,
+    ) -> bool:
+        cutoff = now - timedelta(seconds=VERIFICATION_NOTIFICATION_SUPPRESSION_SECONDS)
+        result_code = self._verification_result_code(key)
+        row_requires_notification = False
+        for record in group.records:
+            last_code = str(record.get("last_notified_code") or "").strip()
+            last_at = deserialize_datetime(record.get("last_notified_at"))
+            if last_code != result_code or last_at is None or last_at <= cutoff:
+                row_requires_notification = True
+                break
+        snapshot = await self.store.fetch_verification_notification_snapshot(
+            guild_id,
+            run_context=key.run_context,
+            operation=key.operation,
+            outcome=key.outcome,
+            reason_code=key.reason_code,
+        )
+        if snapshot is None:
+            return True
+        snapshot_time = deserialize_datetime(snapshot.get("notified_at"))
+        if snapshot_time is None or snapshot_time <= cutoff:
+            return True
+        return snapshot.get("signature") != self._verification_notification_signature(group.member_ids) or row_requires_notification
+
+    async def _mark_verification_group_notified(
+        self,
+        guild_id: int,
+        key: VerificationBatchKey,
+        group: VerificationBatchGroup,
+        *,
+        now: datetime,
+    ):
+        for record in group.records:
+            updated = self._set_verification_notified(record, key, now=now)
+            await self.store.upsert_verification_state(updated)
+        await self.store.upsert_verification_notification_snapshot(
+            {
+                "guild_id": guild_id,
+                "run_context": key.run_context,
+                "operation": key.operation,
+                "outcome": key.outcome,
+                "reason_code": key.reason_code,
+                "signature": self._verification_notification_signature(group.member_ids),
+                "notified_at": serialize_datetime(now),
+            }
+        )
+
+    async def _flush_verification_sweep_batch(
+        self,
+        batch: VerificationSweepBatch,
+        *,
+        now: datetime,
+    ):
+        severity_order = {
+            ("kick", "blocked"): 0,
+            ("warning", "skipped"): 1,
+            ("kick", "deferred"): 2,
+            ("review", "queued"): 3,
+            ("warning", "sent"): 4,
+            ("kick", "success"): 5,
+        }
+        for guild_id, grouped in batch.grouped_by_guild.items():
+            guild = self.bot.get_guild(guild_id)
+            compiled = self.get_compiled_config(guild_id)
+            if guild is None:
+                continue
+            visible_groups: list[tuple[VerificationBatchKey, VerificationBatchGroup]] = []
+            for key, group in grouped.items():
+                if await self._should_notify_verification_group(guild_id, key, group, now=now):
+                    visible_groups.append((key, group))
+            if not visible_groups:
+                continue
+            visible_groups.sort(key=lambda item: (severity_order.get((item[0].operation, item[0].outcome), 99), item[0].reason_code))
+            queue_only = all(key.operation == "review" and key.outcome == "queued" for key, _ in visible_groups)
+            if queue_only:
+                for key, group in visible_groups:
+                    await self._mark_verification_group_notified(guild_id, key, group, now=now)
+                continue
+            embed = ge.make_status_embed(
+                self._verification_summary_title(batch.run_context),
+                self._verification_summary_description(batch.run_context),
+                tone="warning" if any(key.outcome in {"blocked", "skipped"} for key, _ in visible_groups) else "info",
+                footer="Babblebox Admin | Verification cleanup",
+            )
+            embed.add_field(
+                name="Run Summary",
+                value="\n".join(self._verification_summary_lines(batch.counts_by_guild.get(guild_id, {}))),
+                inline=False,
+            )
+            lines = [self._verification_group_text(key, group.mentions) for key, group in visible_groups]
+            if len(lines) > VERIFICATION_SUMMARY_LINE_LIMIT:
+                remaining = len(lines) - VERIFICATION_SUMMARY_LINE_LIMIT
+                suffix = "" if remaining == 1 else "s"
+                lines = [*lines[:VERIFICATION_SUMMARY_LINE_LIMIT], f"... and {remaining} more grouped outcome{suffix}."]
+            embed.add_field(name="Grouped Outcomes", value=ge.join_limited_lines(lines, limit=1024), inline=False)
+            await self.send_log(guild, compiled, embed=embed, alert=False)
+            for key, group in visible_groups:
+                await self._mark_verification_group_notified(guild_id, key, group, now=now)
 
     def _warning_template_summary(self, compiled: CompiledAdminConfig) -> tuple[str, str]:
         default_text = (
@@ -1241,6 +1510,215 @@ class AdminService:
         embed.add_field(name="Member", value=f"<@{record['user_id']}>", inline=True)
         return embed
 
+    def _verification_review_sort_key(self, record: dict[str, Any]) -> tuple[datetime, datetime, int]:
+        fallback = ge.now_utc()
+        return (
+            deserialize_datetime(record.get("kick_at")) or fallback,
+            deserialize_datetime(record.get("joined_at")) or fallback,
+            int(record.get("user_id") or 0),
+        )
+
+    async def _active_verification_review_rows(
+        self,
+        guild: discord.Guild,
+        compiled: CompiledAdminConfig,
+    ) -> list[dict[str, Any]]:
+        pending: list[dict[str, Any]] = []
+        for record in await self.store.list_verification_states_for_guild(guild.id):
+            if not record.get("review_pending"):
+                continue
+            member = guild.get_member(int(record["user_id"]))
+            if member is None or not compiled.verification_enabled:
+                await self.store.delete_verification_state(guild.id, int(record["user_id"]))
+                continue
+            if compiled.verification_deadline_action != "review":
+                await self.store.upsert_verification_state(self._close_verification_review_record(record))
+                continue
+            status, _ = self._verification_status(member, compiled)
+            if status in {"verified", "exempt"}:
+                await self.store.delete_verification_state(guild.id, int(record["user_id"]))
+                continue
+            if status != "unverified":
+                await self.store.upsert_verification_state(self._close_verification_review_record(record))
+                continue
+            if record.get("review_message_channel_id") is not None or record.get("review_message_id") is not None:
+                cleaned = dict(record)
+                cleaned["review_message_channel_id"] = None
+                cleaned["review_message_id"] = None
+                await self.store.upsert_verification_state(cleaned)
+                record = cleaned
+            pending.append(record)
+        pending.sort(key=self._verification_review_sort_key)
+        return pending
+
+    def build_verification_review_queue_embed(
+        self,
+        guild: discord.Guild,
+        pending_rows: list[dict[str, Any]],
+        *,
+        compiled: CompiledAdminConfig,
+        note: str | None = None,
+    ) -> discord.Embed:
+        embed = discord.Embed(
+            title="Verification Review Queue",
+            description=(
+                "Overdue verification cases are queued here. The oldest actionable case is shown first."
+                if pending_rows
+                else "No pending verification reviews remain."
+            ),
+            color=ge.EMBED_THEME["warning"],
+        )
+        embed.add_field(
+            name="Queue",
+            value=f"Pending reviews: **{len(pending_rows)}**",
+            inline=False,
+        )
+        if not pending_rows:
+            if note:
+                embed.add_field(name="Last Update", value=note, inline=False)
+            return ge.style_embed(embed, footer="Babblebox Admin | Verification cleanup")
+        current = pending_rows[0]
+        member = guild.get_member(int(current["user_id"]))
+        kick_at = deserialize_datetime(current.get("kick_at"))
+        member_label = (
+            f"{ge.display_name_of(member)} (`{member.id}`)"
+            if member is not None
+            else f"<@{current['user_id']}> (`{current['user_id']}`)"
+        )
+        embed.add_field(name="Current Case", value=member_label, inline=False)
+        embed.add_field(
+            name="Rule",
+            value=VERIFICATION_LOGIC_LABELS.get(compiled.verification_logic, "Verification rule"),
+            inline=False,
+        )
+        if kick_at is not None:
+            embed.add_field(
+                name="Deadline Reached",
+                value=f"{ge.format_timestamp(kick_at, 'R')} ({ge.format_timestamp(kick_at, 'f')})",
+                inline=False,
+            )
+        if member is not None:
+            issue = self._kick_issue(guild, member)
+            kick_status = issue.detail if issue is not None else "Kick is currently available if permissions and hierarchy stay the same."
+        else:
+            kick_status = "Kick cannot be checked because the member is no longer cached."
+        embed.add_field(name="Kick Check", value=kick_status, inline=False)
+        preview_lines: list[str] = []
+        for row in pending_rows[:VERIFICATION_QUEUE_PREVIEW_LIMIT]:
+            user_id = int(row["user_id"])
+            queued_member = guild.get_member(user_id)
+            mention = queued_member.mention if queued_member is not None else f"<@{user_id}>"
+            deadline = deserialize_datetime(row.get("kick_at"))
+            if deadline is not None:
+                preview_lines.append(f"{mention} • due {ge.format_timestamp(deadline, 'R')}")
+            else:
+                preview_lines.append(mention)
+        preview_lines = [line.replace("\a due", "- due").replace(" • due", " - due") for line in preview_lines]
+        if len(pending_rows) > VERIFICATION_QUEUE_PREVIEW_LIMIT:
+            remaining = len(pending_rows) - VERIFICATION_QUEUE_PREVIEW_LIMIT
+            suffix = "" if remaining == 1 else "s"
+            preview_lines.append(f"... and {remaining} more queued case{suffix}.")
+        embed.add_field(name="Backlog Preview", value="\n".join(preview_lines), inline=False)
+        if note:
+            embed.add_field(name="Last Update", value=note, inline=False)
+        return ge.style_embed(embed, footer="Babblebox Admin | Verification cleanup")
+
+    async def _verification_queue_message(
+        self,
+        channel,
+        *,
+        message_id: int | None,
+    ):
+        if not isinstance(message_id, int):
+            return None
+        fetch_message = getattr(channel, "fetch_message", None)
+        if not callable(fetch_message):
+            return None
+        with contextlib.suppress(discord.NotFound, discord.Forbidden, discord.HTTPException):
+            return await fetch_message(message_id)
+        return None
+
+    async def _sync_verification_review_queue(
+        self,
+        guild: discord.Guild,
+        compiled: CompiledAdminConfig,
+        *,
+        now: datetime,
+        note: str | None = None,
+    ):
+        from babblebox.cogs.admin import VerificationDeadlineReviewView
+
+        pending_rows = await self._active_verification_review_rows(guild, compiled)
+        queue_record = await self.store.fetch_verification_review_queue(guild.id)
+        if not pending_rows:
+            if queue_record is not None:
+                channel = self._guild_channel(guild, queue_record.get("channel_id"))
+                message = await self._verification_queue_message(channel, message_id=queue_record.get("message_id")) if channel is not None else None
+                if message is not None:
+                    with contextlib.suppress(discord.Forbidden, discord.HTTPException):
+                        await message.edit(
+                            embed=self.build_verification_review_queue_embed(guild, [], compiled=compiled, note=note),
+                            view=None,
+                        )
+                await self.store.delete_verification_review_queue(guild.id)
+            return
+        if compiled.admin_log_channel_id is None:
+            await self.log_operability_warning_once(
+                guild,
+                compiled,
+                key="verification-review-queue-no-log-channel",
+                message="Babblebox has verification review backlog but no admin log channel is configured for the shared review queue.",
+                alert=False,
+            )
+            return
+        channel = self._guild_channel(guild, compiled.admin_log_channel_id)
+        if channel is None:
+            await self.log_operability_warning_once(
+                guild,
+                compiled,
+                key="verification-review-queue-missing-log-channel",
+                message="Babblebox has verification review backlog but could not access the configured admin log channel for the shared review queue.",
+                alert=False,
+            )
+            return
+        current = pending_rows[0]
+        view = VerificationDeadlineReviewView(
+            guild_id=guild.id,
+            user_id=int(current["user_id"]),
+            version=int(current.get("review_version", 0) or 0),
+        )
+        embed = self.build_verification_review_queue_embed(guild, pending_rows, compiled=compiled, note=note)
+        message = await self._verification_queue_message(channel, message_id=queue_record.get("message_id") if queue_record else None)
+        if message is None:
+            with contextlib.suppress(discord.Forbidden, discord.HTTPException):
+                message = await channel.send(
+                    embed=embed,
+                    view=view,
+                    allowed_mentions=discord.AllowedMentions(users=False, roles=False, everyone=False),
+                )
+        else:
+            with contextlib.suppress(discord.Forbidden, discord.HTTPException):
+                await message.edit(embed=embed, view=view)
+        if message is None:
+            await self.log_operability_warning_once(
+                guild,
+                compiled,
+                key="verification-review-queue-send-failed",
+                message="Babblebox has verification review backlog but could not create or update the shared review queue message.",
+                alert=False,
+            )
+            return
+        await self.store.upsert_verification_review_queue(
+            {
+                "guild_id": guild.id,
+                "channel_id": channel.id,
+                "message_id": message.id,
+                "updated_at": serialize_datetime(now),
+            }
+        )
+        with contextlib.suppress(Exception):
+            self.bot.add_view(view, message_id=message.id)
+
     def _close_verification_review_record(self, record: dict[str, Any]) -> dict[str, Any]:
         updated = dict(record)
         updated["review_pending"] = False
@@ -1318,27 +1796,27 @@ class AdminService:
         me = self._bot_member(guild)
         if me is None:
             return AdminActionIssue(
-                code="kick-bot-member-missing",
+                code="bot_member_unavailable",
                 detail="Babblebox could not resolve its server member for kicks.",
                 because_text="Babblebox could not resolve its server member for kicks",
             )
         if getattr(member.guild_permissions, "administrator", False):
             return AdminActionIssue(
-                code="kick-administrator-protected",
+                code="target_is_administrator",
                 detail="They are administrators.",
                 because_text="they are administrators",
             )
         if getattr(guild, "owner_id", None) == member.id:
             return AdminActionIssue(
-                code="kick-owner-protected",
+                code="target_is_owner",
                 detail="They are the server owner.",
                 because_text="they are the server owner",
             )
         if getattr(getattr(member, "top_role", None), "position", 0) >= getattr(getattr(me, "top_role", None), "position", 0):
             return AdminActionIssue(
-                code="kick-member-above-bot",
+                code="target_above_bot_role",
                 detail="They are at or above Babblebox's top role.",
-                because_text="they are at or above Babblebox's top role",
+                because_text="their top role is at or above Babblebox's",
             )
         return None
 
@@ -1346,14 +1824,14 @@ class AdminService:
         me = self._bot_member(guild)
         if me is None:
             return AdminActionIssue(
-                code="kick-bot-member-missing",
+                code="bot_member_unavailable",
                 detail="Babblebox could not resolve its server member for kicks.",
                 because_text="Babblebox could not resolve its server member for kicks",
             )
         perms = getattr(me, "guild_permissions", None)
         if perms is None or not getattr(perms, "kick_members", False):
             return AdminActionIssue(
-                code="kick-missing-permission",
+                code="missing_kick_members",
                 detail="Babblebox is missing Kick Members.",
                 because_text="Babblebox is missing Kick Members",
             )
@@ -1440,7 +1918,7 @@ class AdminService:
         message: str,
         title: str = "Admin Automation Warning",
         footer: str = "Babblebox Admin",
-        alert: bool = True,
+        alert: bool = False,
     ):
         now = asyncio.get_running_loop().time()
         dedup_key = (guild.id, key)
@@ -1473,6 +1951,10 @@ class AdminService:
             "review_version": 0,
             "review_message_channel_id": None,
             "review_message_id": None,
+            "last_result_code": None,
+            "last_result_at": None,
+            "last_notified_code": None,
+            "last_notified_at": None,
         }
 
     async def handle_member_ban(self, guild: discord.Guild, user: discord.abc.User):
@@ -1502,8 +1984,16 @@ class AdminService:
     async def handle_member_remove(self, member: discord.Member):
         if not self.storage_ready:
             return
+        existing = await self.store.fetch_verification_state(member.guild.id, member.id)
         await self.store.delete_verification_state(member.guild.id, member.id)
         await self.store.delete_followup(member.guild.id, member.id)
+        if existing and existing.get("review_pending"):
+            await self._sync_verification_review_queue(
+                member.guild,
+                self.get_compiled_config(member.guild.id),
+                now=ge.now_utc(),
+                note=f"<@{member.id}> left the server, so the review queue was refreshed.",
+            )
 
     async def handle_member_update(self, before: discord.Member, after: discord.Member):
         if not self.storage_ready:
@@ -1514,7 +2004,15 @@ class AdminService:
         if before_status == after_status and self._role_ids_for(before) == self._role_ids_for(after):
             return
         if after_status in {"verified", "exempt"}:
+            existing = await self.store.fetch_verification_state(after.guild.id, after.id)
             await self.store.delete_verification_state(after.guild.id, after.id)
+            if existing and existing.get("review_pending"):
+                await self._sync_verification_review_queue(
+                    after.guild,
+                    before_compiled,
+                    now=ge.now_utc(),
+                    note=f"{after.mention} no longer needs verification cleanup, so the review queue was refreshed.",
+                )
             return
         if after_status == "unverified":
             await self._ensure_verification_state(after, reason="role update")
@@ -1536,7 +2034,15 @@ class AdminService:
             return
         status, _ = self._verification_status(message.author, compiled)
         if status != "unverified":
+            review_pending = bool(verification_state.get("review_pending"))
             await self.store.delete_verification_state(message.guild.id, message.author.id)
+            if review_pending:
+                await self._sync_verification_review_queue(
+                    message.guild,
+                    compiled,
+                    now=ge.now_utc(),
+                    note=f"{message.author.mention} no longer needs review, so the queue was refreshed.",
+                )
             return
         if int(verification_state.get("extension_count", 0) or 0) >= compiled.verification_max_extensions:
             return
@@ -1548,10 +2054,16 @@ class AdminService:
         if kick_at is not None:
             verification_state["kick_at"] = serialize_datetime(kick_at + extension)
         verification_state["extension_count"] = int(verification_state.get("extension_count", 0) or 0) + 1
+        queue_note = None
         if verification_state.get("review_pending"):
             verification_state = self._close_verification_review_record(verification_state)
+            queue_note = (
+                f"{message.author.mention} asked for help in {message.channel.mention}, so their pending review was converted back into a delayed deadline."
+            )
         await self.store.upsert_verification_state(verification_state)
         self._wake_event.set()
+        if queue_note is not None:
+            await self._sync_verification_review_queue(message.guild, compiled, now=ge.now_utc(), note=queue_note)
         help_embed = ge.make_status_embed(
             "Verification Deadline Extended",
             (
@@ -1666,7 +2178,7 @@ class AdminService:
                 tone="warning",
                 footer="Babblebox Admin | Returned-after-ban follow-up",
             ),
-            alert=compiled.followup_mode == "review",
+            alert=False,
         )
 
     async def _ensure_verification_state(self, member: discord.Member, *, reason: str):
@@ -2018,7 +2530,7 @@ class AdminService:
         if record is None:
             return False, "That verification review is already closed.", None
         if not record.get("review_pending") or int(record.get("review_version", 0) or 0) != version:
-            return False, "That verification review view is stale. Open the latest review message instead.", record
+            return False, "That verification review queue view is stale. Refresh the shared queue message instead.", record
         guild = getattr(actor, "guild", None)
         if guild is None or guild.id != guild_id:
             return False, "This verification review action must be used inside the correct server.", record
@@ -2026,10 +2538,22 @@ class AdminService:
         member = guild.get_member(user_id)
         if member is None:
             await self.store.delete_verification_state(guild_id, user_id)
+            await self._sync_verification_review_queue(
+                guild,
+                compiled,
+                now=ge.now_utc(),
+                note=f"<@{user_id}> already left the server, so the queue was refreshed.",
+            )
             return True, "That member already left the server, so Babblebox cleared the pending review.", record
         status, status_reason = self._verification_status(member, compiled)
         if status in {"verified", "exempt"}:
             await self.store.delete_verification_state(guild_id, user_id)
+            await self._sync_verification_review_queue(
+                guild,
+                compiled,
+                now=ge.now_utc(),
+                note=f"{member.mention} no longer needs verification cleanup, so the queue was refreshed.",
+            )
             return True, "That member no longer needs verification cleanup, so Babblebox cleared the pending review.", record
         if action == "kick":
             if status != "unverified":
@@ -2068,6 +2592,12 @@ class AdminService:
                 ),
                 alert=False,
             )
+            await self._sync_verification_review_queue(
+                guild,
+                compiled,
+                now=ge.now_utc(),
+                note=f"{actor.mention} kicked <@{user_id}> from the verification review queue.",
+            )
             return True, "The member was kicked.", record
 
         updated = self._close_verification_review_record(record)
@@ -2086,6 +2616,12 @@ class AdminService:
                 ),
                 alert=False,
             )
+            await self._sync_verification_review_queue(
+                guild,
+                compiled,
+                now=now,
+                note=f"{actor.mention} delayed verification cleanup for <@{user_id}> by 24 hours.",
+            )
             return True, "The verification review was delayed by 24 hours.", updated
 
         await self.store.delete_verification_state(guild_id, user_id)
@@ -2099,6 +2635,12 @@ class AdminService:
                 footer="Babblebox Admin | Verification cleanup",
             ),
             alert=False,
+        )
+        await self._sync_verification_review_queue(
+            guild,
+            compiled,
+            now=now,
+            note=f"{actor.mention} ignored verification deadline enforcement for <@{user_id}>.",
         )
         return True, "The verification deadline was ignored for now.", record
 
@@ -2125,19 +2667,44 @@ class AdminService:
             except asyncio.TimeoutError:
                 continue
 
+    async def _refresh_startup_verification_review_queues(self, *, now: datetime):
+        guild_ids = {int(guild_id) for guild_id in self._compiled_configs}
+        for record in await self.store.list_verification_review_queues():
+            guild_ids.add(int(record["guild_id"]))
+        for guild_id in guild_ids:
+            guild = self.bot.get_guild(guild_id)
+            if guild is None:
+                continue
+            compiled = self.get_compiled_config(guild_id)
+            if compiled.verification_deadline_action != "review" and not await self.store.fetch_verification_review_queue(guild_id):
+                continue
+            await self._sync_verification_review_queue(guild, compiled, now=now)
+
     async def _run_sweep(self) -> bool:
         if not self.storage_ready:
             return False
         now = ge.now_utc()
+        run_context = "startup_resume" if self._startup_resume_pending else "scheduled"
         processed = False
         if await self.store.prune_expired_ban_candidates(now, limit=200):
             processed = True
         if await self._process_due_followups(now):
             processed = True
-        if await self._process_due_verification_warnings(now):
+        verification_batch = VerificationSweepBatch(run_context=run_context)
+        if await self._process_due_verification_warnings(now, batch=verification_batch):
             processed = True
-        if await self._process_due_verification_kicks(now):
+        if await self._process_due_verification_kicks(now, batch=verification_batch):
             processed = True
+        if verification_batch.grouped_by_guild:
+            await self._flush_verification_sweep_batch(verification_batch, now=now)
+        for guild_id in sorted(verification_batch.queue_refresh_guild_ids):
+            guild = self.bot.get_guild(guild_id)
+            if guild is None:
+                continue
+            await self._sync_verification_review_queue(guild, self.get_compiled_config(guild_id), now=now)
+        if self._startup_resume_pending:
+            await self._refresh_startup_verification_review_queues(now=now)
+            self._startup_resume_pending = False
         return processed
 
     async def _process_due_followups(self, now: datetime) -> bool:
@@ -2253,7 +2820,6 @@ class AdminService:
         view = FollowupReviewView(guild_id=guild.id, user_id=member.id, version=next_version)
         try:
             message = await channel.send(
-                content=f"<@&{compiled.admin_alert_role_id}>" if compiled.admin_alert_role_id and self.can_ping_alert_role(guild, compiled) else None,
                 embed=self.build_followup_review_embed(guild, member, record),
                 view=view,
                 allowed_mentions=discord.AllowedMentions(users=False, roles=True, everyone=False),
@@ -2276,69 +2842,42 @@ class AdminService:
         with contextlib.suppress(Exception):
             self.bot.add_view(view, message_id=message.id)
 
-    async def _send_verification_review_alert(
+    async def _queue_verification_review(
         self,
         guild: discord.Guild,
         compiled: CompiledAdminConfig,
-        member: discord.Member,
         record: dict[str, Any],
         *,
         now: datetime,
+        batch: VerificationSweepBatch,
     ):
-        from babblebox.cogs.admin import VerificationDeadlineReviewView
+        updated = dict(record)
+        updated["review_pending"] = True
+        updated["review_version"] = int(updated.get("review_version", 0) or 0) + 1
+        updated["review_message_channel_id"] = None
+        updated["review_message_id"] = None
+        key = VerificationBatchKey(
+            run_context=batch.run_context,
+            operation="review",
+            outcome="queued",
+            reason_code="review_queued",
+            reason_text="they were added to the verification review queue",
+        )
+        updated = self._set_verification_result(updated, key, now=now)
+        await self.store.upsert_verification_state(updated)
+        member = guild.get_member(int(updated["user_id"])) or f"<@{updated['user_id']}>"
+        self._collect_verification_batch_outcome(batch, guild.id, key, member, record=updated)
+        batch.queue_refresh_guild_ids.add(guild.id)
 
-        if compiled.admin_log_channel_id is None:
-            record["kick_at"] = serialize_datetime(now + timedelta(seconds=OPERATION_BACKOFF_SECONDS))
-            await self.store.upsert_verification_state(record)
-            await self.log_operability_warning_once(
-                guild,
-                compiled,
-                key="verification-review-no-log-channel",
-                message="Babblebox reached a verification deadline in moderator-review mode but no admin log channel is configured.",
-            )
-            return
-        channel = self._guild_channel(guild, compiled.admin_log_channel_id)
-        if channel is None:
-            record["kick_at"] = serialize_datetime(now + timedelta(seconds=OPERATION_BACKOFF_SECONDS))
-            await self.store.upsert_verification_state(record)
-            await self.log_operability_warning_once(
-                guild,
-                compiled,
-                key="verification-review-missing-log-channel",
-                message="Babblebox reached a verification deadline in moderator-review mode but could not access the configured admin log channel.",
-            )
-            return
-        next_version = int(record.get("review_version", 0) or 0) + 1
-        view = VerificationDeadlineReviewView(guild_id=guild.id, user_id=member.id, version=next_version)
-        try:
-            message = await channel.send(
-                content=f"<@&{compiled.admin_alert_role_id}>" if compiled.admin_alert_role_id and self.can_ping_alert_role(guild, compiled) else None,
-                embed=self.build_verification_review_embed(guild, member, record, compiled=compiled),
-                view=view,
-                allowed_mentions=discord.AllowedMentions(users=False, roles=True, everyone=False),
-            )
-        except (discord.Forbidden, discord.HTTPException):
-            record["kick_at"] = serialize_datetime(now + timedelta(seconds=OPERATION_BACKOFF_SECONDS))
-            await self.store.upsert_verification_state(record)
-            await self.log_operability_warning_once(
-                guild,
-                compiled,
-                key="verification-review-send-failed",
-                message="Babblebox reached a verification deadline in moderator-review mode but could not send the review alert to the admin log channel.",
-            )
-            return
-        record["review_pending"] = True
-        record["review_version"] = next_version
-        record["review_message_channel_id"] = channel.id
-        record["review_message_id"] = message.id
-        await self.store.upsert_verification_state(record)
-        with contextlib.suppress(Exception):
-            self.bot.add_view(view, message_id=message.id)
-
-    async def _process_due_verification_warnings(self, now: datetime) -> bool:
+    async def _process_due_verification_warnings(
+        self,
+        now: datetime,
+        *,
+        batch: VerificationSweepBatch | None = None,
+    ) -> bool:
+        owned_batch = batch is None
+        batch = batch or VerificationSweepBatch(run_context="scheduled")
         processed = False
-        grouped_by_guild: dict[int, dict[GroupedAdminLogKey, list[str]]] = {}
-        compiled_by_guild: dict[int, CompiledAdminConfig] = {}
         for record in await self.store.list_due_verification_warnings(now, limit=VERIFICATION_BATCH_LIMIT):
             guild = self.bot.get_guild(int(record["guild_id"]))
             if guild is None:
@@ -2353,8 +2892,6 @@ class AdminService:
                 processed = True
                 continue
             compiled = self.get_compiled_config(guild.id)
-            compiled_by_guild[guild.id] = compiled
-            grouped_logs = grouped_by_guild.setdefault(guild.id, {})
             if not compiled.verification_enabled:
                 await self.store.delete_verification_state(guild.id, member.id)
                 processed = True
@@ -2365,16 +2902,21 @@ class AdminService:
                 processed = True
                 continue
             if status != "unverified":
-                self._collect_grouped_member_log(
-                    grouped_logs,
-                    GroupedAdminLogKey(
-                        kind="verification-warning-skipped",
-                        reason_code=f"ambiguous:{status_reason}",
-                        reason_text=status_reason,
-                    ),
-                    member,
+                key = VerificationBatchKey(
+                    run_context=batch.run_context,
+                    operation="warning",
+                    outcome="skipped",
+                    reason_code="verification_rule_ambiguous",
+                    reason_text=status_reason,
                 )
+                updated = self._set_verification_result(record, key, now=now)
+                await self.store.upsert_verification_state(updated)
+                self._collect_verification_batch_outcome(batch, guild.id, key, member, record=updated)
+                processed = True
                 continue
+            reason_code = "dm_sent"
+            reason_text = None
+            outcome = "sent"
             _, dm_sent = await self._deliver_verification_warning(
                 guild,
                 member,
@@ -2383,28 +2925,35 @@ class AdminService:
                 now=now,
                 log_result=False,
             )
-            self._collect_grouped_member_log(
-                grouped_logs,
-                GroupedAdminLogKey(
-                    kind="verification-warning",
-                    reason_code=f"dm-{'sent' if dm_sent else 'failed'}",
-                    dm_status="sent" if dm_sent else "failed",
-                ),
-                member,
+            if not dm_sent:
+                reason_code = "dm_failed"
+            key = VerificationBatchKey(
+                run_context=batch.run_context,
+                operation="warning",
+                outcome=outcome,
+                reason_code=reason_code,
+                reason_text=reason_text,
+                dm_status="sent" if dm_sent else "failed",
             )
+            updated = await self.store.fetch_verification_state(guild.id, member.id)
+            if updated is not None:
+                updated = self._set_verification_result(updated, key, now=now)
+                await self.store.upsert_verification_state(updated)
+            self._collect_verification_batch_outcome(batch, guild.id, key, member, record=updated)
             processed = True
-        for guild_id, grouped_logs in grouped_by_guild.items():
-            guild = self.bot.get_guild(guild_id)
-            compiled = compiled_by_guild.get(guild_id)
-            if guild is None or compiled is None:
-                continue
-            await self._flush_grouped_admin_logs(guild, compiled, grouped_logs)
+        if owned_batch and batch.grouped_by_guild:
+            await self._flush_verification_sweep_batch(batch, now=now)
         return processed
 
-    async def _process_due_verification_kicks(self, now: datetime) -> bool:
+    async def _process_due_verification_kicks(
+        self,
+        now: datetime,
+        *,
+        batch: VerificationSweepBatch | None = None,
+    ) -> bool:
+        owned_batch = batch is None
+        batch = batch or VerificationSweepBatch(run_context="scheduled")
         processed = False
-        grouped_by_guild: dict[int, dict[GroupedAdminLogKey, list[str]]] = {}
-        compiled_by_guild: dict[int, CompiledAdminConfig] = {}
         for record in await self.store.list_due_verification_kicks(now, limit=VERIFICATION_BATCH_LIMIT):
             guild = self.bot.get_guild(int(record["guild_id"]))
             if guild is None:
@@ -2419,8 +2968,6 @@ class AdminService:
                 processed = True
                 continue
             compiled = self.get_compiled_config(guild.id)
-            compiled_by_guild[guild.id] = compiled
-            grouped_logs = grouped_by_guild.setdefault(guild.id, {})
             if not compiled.verification_enabled:
                 await self.store.delete_verification_state(guild.id, member.id)
                 processed = True
@@ -2431,60 +2978,64 @@ class AdminService:
                 processed = True
                 continue
             if status != "unverified":
-                self._collect_grouped_member_log(
-                    grouped_logs,
-                    GroupedAdminLogKey(
-                        kind="verification-kick-skipped",
-                        reason_code=f"ambiguous:{status_reason}",
-                        reason_text=status_reason,
-                    ),
-                    member,
+                key = VerificationBatchKey(
+                    run_context=batch.run_context,
+                    operation="kick",
+                    outcome="blocked",
+                    reason_code="verification_rule_ambiguous",
+                    reason_text=status_reason,
                 )
+                updated = self._set_verification_result(record, key, now=now)
+                await self.store.upsert_verification_state(updated)
+                self._collect_verification_batch_outcome(batch, guild.id, key, member, record=updated)
+                processed = True
                 continue
             if record.get("warning_sent_at") is None and compiled.verification_warning_lead_seconds > 0:
-                record["warning_at"] = serialize_datetime(now)
-                record["warning_sent_at"] = serialize_datetime(now)
-                record["kick_at"] = serialize_datetime(now + timedelta(seconds=compiled.verification_warning_lead_seconds))
+                updated = dict(record)
+                updated["warning_at"] = serialize_datetime(now)
+                updated["warning_sent_at"] = serialize_datetime(now)
+                updated["kick_at"] = serialize_datetime(now + timedelta(seconds=compiled.verification_warning_lead_seconds))
                 dm_sent = False
                 with contextlib.suppress(discord.Forbidden, discord.HTTPException):
                     await member.send(
                         embed=self.build_warning_embed(
                             member,
                             guild=guild,
-                            deadline=deserialize_datetime(record["kick_at"]) or (now + timedelta(seconds=compiled.verification_warning_lead_seconds)),
+                            deadline=deserialize_datetime(updated["kick_at"]) or (now + timedelta(seconds=compiled.verification_warning_lead_seconds)),
                             compiled=compiled,
                         )
                     )
                     dm_sent = True
-                await self.store.upsert_verification_state(record)
-                self._collect_grouped_member_log(
-                    grouped_logs,
-                    GroupedAdminLogKey(
-                        kind="verification-kick-deferred",
-                        reason_code=f"dm-{'sent' if dm_sent else 'failed'}",
-                        dm_status="sent" if dm_sent else "failed",
-                    ),
-                    member,
+                key = VerificationBatchKey(
+                    run_context=batch.run_context,
+                    operation="kick",
+                    outcome="deferred",
+                    reason_code="missing_prior_warning",
+                    dm_status="sent" if dm_sent else "failed",
                 )
+                updated = self._set_verification_result(updated, key, now=now)
+                await self.store.upsert_verification_state(updated)
+                self._collect_verification_batch_outcome(batch, guild.id, key, member, record=updated)
                 processed = True
                 continue
             if compiled.verification_deadline_action == "review":
-                await self._send_verification_review_alert(guild, compiled, member, record, now=now)
+                await self._queue_verification_review(guild, compiled, record, now=now, batch=batch)
                 processed = True
                 continue
             issue = self._kick_issue(guild, member)
             if issue is not None:
-                record["kick_at"] = serialize_datetime(now + timedelta(seconds=OPERATION_BACKOFF_SECONDS))
-                await self.store.upsert_verification_state(record)
-                self._collect_grouped_member_log(
-                    grouped_logs,
-                    GroupedAdminLogKey(
-                        kind="verification-kick-skipped",
-                        reason_code=issue.code,
-                        reason_text=issue.because_text,
-                    ),
-                    member,
+                updated = dict(record)
+                updated["kick_at"] = serialize_datetime(now + timedelta(seconds=OPERATION_BACKOFF_SECONDS))
+                key = VerificationBatchKey(
+                    run_context=batch.run_context,
+                    operation="kick",
+                    outcome="blocked",
+                    reason_code=issue.code,
+                    reason_text=issue.because_text,
                 )
+                updated = self._set_verification_result(updated, key, now=now)
+                await self.store.upsert_verification_state(updated)
+                self._collect_verification_batch_outcome(batch, guild.id, key, member, record=updated)
                 processed = True
                 continue
             dm_sent = False
@@ -2501,34 +3052,40 @@ class AdminService:
             try:
                 await member.kick(reason="Babblebox verification cleanup timer expired.")
             except (discord.Forbidden, discord.HTTPException):
-                record["kick_at"] = serialize_datetime(now + timedelta(seconds=OPERATION_BACKOFF_SECONDS))
-                await self.store.upsert_verification_state(record)
-                self._collect_grouped_member_log(
-                    grouped_logs,
-                    GroupedAdminLogKey(
-                        kind="verification-kick-skipped",
-                        reason_code="discord-rejected",
-                        reason_text="Discord rejected the action",
-                    ),
-                    member,
+                updated = dict(record)
+                updated["kick_at"] = serialize_datetime(now + timedelta(seconds=OPERATION_BACKOFF_SECONDS))
+                key = VerificationBatchKey(
+                    run_context=batch.run_context,
+                    operation="kick",
+                    outcome="blocked",
+                    reason_code="discord_rejected_kick",
+                    reason_text="Discord rejected the kick",
                 )
+                updated = self._set_verification_result(updated, key, now=now)
+                await self.store.upsert_verification_state(updated)
+                self._collect_verification_batch_outcome(batch, guild.id, key, member, record=updated)
                 processed = True
                 continue
             await self.store.delete_verification_state(guild.id, member.id)
-            self._collect_grouped_member_log(
-                grouped_logs,
-                GroupedAdminLogKey(
-                    kind="verification-kick-success",
-                    reason_code=f"dm-{'sent' if dm_sent else 'failed'}",
+            self._collect_verification_batch_outcome(
+                batch,
+                guild.id,
+                VerificationBatchKey(
+                    run_context=batch.run_context,
+                    operation="kick",
+                    outcome="success",
+                    reason_code="dm_sent" if dm_sent else "dm_failed",
                     dm_status="sent" if dm_sent else "failed",
                 ),
                 member,
             )
             processed = True
-        for guild_id, grouped_logs in grouped_by_guild.items():
-            guild = self.bot.get_guild(guild_id)
-            compiled = compiled_by_guild.get(guild_id)
-            if guild is None or compiled is None:
-                continue
-            await self._flush_grouped_admin_logs(guild, compiled, grouped_logs)
+        if owned_batch:
+            if batch.grouped_by_guild:
+                await self._flush_verification_sweep_batch(batch, now=now)
+            for guild_id in sorted(batch.queue_refresh_guild_ids):
+                guild = self.bot.get_guild(guild_id)
+                if guild is None:
+                    continue
+                await self._sync_verification_review_queue(guild, self.get_compiled_config(guild_id), now=now)
         return processed

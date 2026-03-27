@@ -133,6 +133,21 @@ class VerificationDeadlineReviewView(discord.ui.View):
         self.add_item(self._make_button("kick", discord.ButtonStyle.danger))
         self.add_item(self._make_button("delay", discord.ButtonStyle.secondary))
         self.add_item(self._make_button("ignore", discord.ButtonStyle.success))
+        refresh = discord.ui.Button(
+            label="Refresh",
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"bb-admin-verification-review:refresh:{self.guild_id}:{self.user_id}:{self.version}",
+        )
+
+        async def _refresh_callback(interaction: discord.Interaction):
+            service = getattr(interaction.client, "admin_service", None)
+            if service is None:
+                await interaction.response.send_message("Babblebox admin systems are unavailable right now.", ephemeral=True)
+                return
+            await self._refresh_queue_message(interaction, service, note="Verification review queue refreshed.")
+
+        refresh.callback = _refresh_callback
+        self.add_item(refresh)
 
     def _make_button(self, action: str, style: discord.ButtonStyle) -> discord.ui.Button:
         button = discord.ui.Button(
@@ -146,6 +161,26 @@ class VerificationDeadlineReviewView(discord.ui.View):
 
         button.callback = _callback
         return button
+
+    async def _refresh_queue_message(self, interaction: discord.Interaction, service: AdminService, *, note: str | None = None):
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message("This verification review action only works inside a server.", ephemeral=True)
+            return
+        current = await service.current_verification_review_target(self.guild_id)
+        compiled = service.get_compiled_config(self.guild_id)
+        if current is None:
+            embed = service.build_verification_review_queue_embed(guild, [], compiled=compiled, note=note)
+            await interaction.response.edit_message(embed=embed, view=None)
+            return
+        pending_rows = await service._active_verification_review_rows(guild, compiled)
+        embed = service.build_verification_review_queue_embed(guild, pending_rows, compiled=compiled, note=note)
+        next_view = VerificationDeadlineReviewView(
+            guild_id=self.guild_id,
+            user_id=int(current["user_id"]),
+            version=int(current.get("review_version", 0) or 0),
+        )
+        await interaction.response.edit_message(embed=embed, view=next_view)
 
     async def _handle_action(self, interaction: discord.Interaction, action: str):
         if interaction.guild is None or interaction.user is None:
@@ -176,25 +211,11 @@ class VerificationDeadlineReviewView(discord.ui.View):
         )
         if not ok:
             if "stale" in message.lower() or "closed" in message.lower():
-                for child in self.children:
-                    child.disabled = True
-                embed = service.build_verification_review_resolution_embed(
-                    record or {"user_id": self.user_id},
-                    message=message,
-                    success=False,
-                )
-                await interaction.response.edit_message(embed=embed, view=self)
+                await self._refresh_queue_message(interaction, service, note=message)
                 return
             await interaction.response.send_message(message, ephemeral=True)
             return
-        for child in self.children:
-            child.disabled = True
-        embed = service.build_verification_review_resolution_embed(
-            record or {"user_id": self.user_id},
-            message=message,
-            success=True,
-        )
-        await interaction.response.edit_message(embed=embed, view=self)
+        await self._refresh_queue_message(interaction, service, note=message)
 
 
 class AdminPanelView(discord.ui.View):
@@ -454,16 +475,19 @@ class AdminCog(commands.Cog):
                     ),
                     message_id=message_id,
                 )
-        for record in await self.service.list_verification_review_views():
-            message_id = record.get("review_message_id")
+        for record in await self.service.list_verification_review_queues():
+            message_id = record.get("message_id")
             if not isinstance(message_id, int):
+                continue
+            target = await self.service.current_verification_review_target(int(record["guild_id"]))
+            if target is None:
                 continue
             with contextlib.suppress(Exception):
                 self.bot.add_view(
                     VerificationDeadlineReviewView(
                         guild_id=int(record["guild_id"]),
-                        user_id=int(record["user_id"]),
-                        version=int(record.get("review_version", 0) or 0),
+                        user_id=int(target["user_id"]),
+                        version=int(target.get("review_version", 0) or 0),
                     ),
                     message_id=message_id,
                 )
@@ -840,7 +864,7 @@ class AdminCog(commands.Cog):
                 "Babblebox does not know the original ban length.\n"
                 "It only reacts when a member returns within 30 days of a ban event.\n"
                 "Auto-remove removes the role on expiry.\n"
-                "Review mode sends moderator buttons to the admin log channel."
+                "Review mode posts one moderator review item to the admin log channel."
             ),
             inline=False,
         )
@@ -856,7 +880,7 @@ class AdminCog(commands.Cog):
         rule = self._verification_rule_details(guild_id)
         embed = discord.Embed(
             title="Verification Cleanup",
-            description="Warn members who stay unverified too long, then either kick automatically or send a moderator review with a verification-help extension path.",
+            description="Warn members who stay unverified too long, then either kick automatically or place them into one persistent moderator review queue with a verification-help extension path.",
             color=ge.EMBED_THEME["danger"],
         )
         embed.add_field(
@@ -894,7 +918,8 @@ class AdminCog(commands.Cog):
                 "Babblebox tracks compact pending member state only.\n"
                 "Any non-trivial message in the verification-help channel can extend the deadline.\n"
                 "If someone is already deep into the timer when tracking starts, Babblebox gives them a fresh warning window instead of enforcing the deadline instantly.\n"
-                "Review mode sends one mod-facing message with Kick, Delay, and Ignore buttons."
+                "Review mode maintains one persistent verification review queue with Kick, Delay, Ignore, and Refresh actions.\n"
+                "Restart reconciliation stays grouped and quiet instead of replaying one message per overdue member."
             ),
             inline=False,
         )
@@ -1120,7 +1145,7 @@ class AdminCog(commands.Cog):
     @app_commands.describe(
         enabled="Turn punishment follow-up on or off",
         role="Role to assign when someone returns within 30 days of a ban event",
-        mode="Remove automatically later or send a moderator review alert",
+        mode="Remove automatically later or open a moderator review item",
         duration="How long the follow-up role should stay, like 30d, 6w, or 3mo",
         clear_role="Clear the configured follow-up role",
     )
@@ -1156,7 +1181,7 @@ class AdminCog(commands.Cog):
         enabled="Turn verification cleanup on or off",
         role="Verification role to evaluate",
         logic="Choose whether users missing this role or users still holding this role are treated as unverified",
-        deadline_action="Kick automatically at the deadline or send a moderator review message instead",
+        deadline_action="Kick automatically at the deadline or add the member to the shared verification review queue instead",
         kick_after="Full time before kick, like 7d",
         warning_lead="How long before the kick Babblebox should warn, like 2d",
         help_channel="Verification-help channel where messages can extend the deadline",
