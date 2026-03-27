@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import discord
 import types
 import unittest
 from datetime import timedelta
@@ -149,6 +150,71 @@ class AdminServiceTests(unittest.IsolatedAsyncioTestCase):
         await self.store.load()
         self.service = AdminService(self.bot, store=self.store)
         self.service.storage_ready = True
+
+    async def _configure_verification(self, *, with_logs: bool = False):
+        if with_logs:
+            ok, _ = await self.service.set_logs_config(self.guild.id, channel_id=self.log_channel.id, alert_role_id=None)
+            self.assertTrue(ok)
+        ok, _ = await self.service.set_verification_config(
+            self.guild.id,
+            enabled=True,
+            role_id=self.verified_role.id,
+            logic="must_have_role",
+            kick_after_text="7d",
+            warning_lead_text="2d",
+            help_channel_id=self.help_channel.id,
+            help_extension_text="1d",
+            max_extensions=1,
+        )
+        self.assertTrue(ok)
+
+    async def _configure_followup(self, *, with_logs: bool = False):
+        if with_logs:
+            ok, _ = await self.service.set_logs_config(self.guild.id, channel_id=self.log_channel.id, alert_role_id=None)
+            self.assertTrue(ok)
+        ok, _ = await self.service.set_followup_config(
+            self.guild.id,
+            enabled=True,
+            role_id=self.followup_role.id,
+            mode="auto_remove",
+            duration_text="30d",
+        )
+        self.assertTrue(ok)
+
+    def _dm_forbidden(self):
+        return discord.Forbidden(types.SimpleNamespace(status=403, reason="Forbidden", headers={}), "DMs are closed")
+
+    def _make_dm_fail(self, member: FakeMember):
+        async def _send(*, embed=None):
+            raise self._dm_forbidden()
+
+        member.send = _send
+
+    async def _store_warning_due_state(self, member: FakeMember):
+        await self.store.upsert_verification_state(
+            {
+                "guild_id": self.guild.id,
+                "user_id": member.id,
+                "joined_at": serialize_datetime(ge.now_utc() - timedelta(days=8)),
+                "warning_at": serialize_datetime(ge.now_utc() - timedelta(minutes=1)),
+                "kick_at": serialize_datetime(ge.now_utc() + timedelta(days=1)),
+                "warning_sent_at": None,
+                "extension_count": 0,
+            }
+        )
+
+    async def _store_kick_due_state(self, member: FakeMember):
+        await self.store.upsert_verification_state(
+            {
+                "guild_id": self.guild.id,
+                "user_id": member.id,
+                "joined_at": serialize_datetime(ge.now_utc() - timedelta(days=10)),
+                "warning_at": serialize_datetime(ge.now_utc() - timedelta(days=3)),
+                "kick_at": serialize_datetime(ge.now_utc() - timedelta(minutes=1)),
+                "warning_sent_at": serialize_datetime(ge.now_utc() - timedelta(days=2)),
+                "extension_count": 0,
+            }
+        )
 
     async def test_ban_candidate_and_return_assign_followup_role(self):
         ok, _ = await self.service.set_logs_config(self.guild.id, channel_id=self.log_channel.id, alert_role_id=None)
@@ -528,18 +594,7 @@ class AdminServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertLess(summary.warned_count, 3)
 
     async def test_due_warning_sweep_skips_guild_with_active_sync_session(self):
-        ok, _ = await self.service.set_verification_config(
-            self.guild.id,
-            enabled=True,
-            role_id=self.verified_role.id,
-            logic="must_have_role",
-            kick_after_text="7d",
-            warning_lead_text="2d",
-            help_channel_id=self.help_channel.id,
-            help_extension_text="1d",
-            max_extensions=1,
-        )
-        self.assertTrue(ok)
+        await self._configure_verification()
         member = FakeMember(80, self.guild, roles=[], top_role=FakeRole(5, position=5))
         self.guild.members[member.id] = member
         await self.store.upsert_verification_state(
@@ -562,3 +617,196 @@ class AdminServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(processed)
         self.assertEqual(len(member.sent), 0)
         await self.service.clear_verification_sync_session(self.guild.id, session)
+
+    async def test_due_verification_warnings_group_failed_dms_into_one_log(self):
+        await self._configure_verification(with_logs=True)
+        first = FakeMember(81, self.guild, roles=[], top_role=FakeRole(5, position=5))
+        second = FakeMember(82, self.guild, roles=[], top_role=FakeRole(5, position=5))
+        for member in (first, second):
+            self._make_dm_fail(member)
+            self.guild.members[member.id] = member
+            await self._store_warning_due_state(member)
+
+        processed = await self.service._process_due_verification_warnings(ge.now_utc())
+
+        self.assertTrue(processed)
+        self.assertEqual(len(self.log_channel.sent), 1)
+        embed = self.log_channel.sent[0]["embed"]
+        self.assertEqual(embed.title, "Verification Warning Delivery Failed")
+        self.assertEqual(
+            embed.description,
+            "Verification warning DMs failed for <@81> and <@82>.",
+        )
+
+    async def test_due_verification_kicks_group_same_failure_reason_into_one_log(self):
+        await self._configure_verification(with_logs=True)
+        self.guild.me.guild_permissions = FakePermissions(
+            manage_roles=True,
+            kick_members=False,
+            view_channel=True,
+            send_messages=True,
+            embed_links=True,
+            mention_everyone=True,
+        )
+        members = [
+            FakeMember(90, self.guild, roles=[], top_role=FakeRole(5, position=5)),
+            FakeMember(91, self.guild, roles=[], top_role=FakeRole(5, position=5)),
+            FakeMember(92, self.guild, roles=[], top_role=FakeRole(5, position=5)),
+        ]
+        for member in members:
+            self.guild.members[member.id] = member
+            await self._store_kick_due_state(member)
+
+        processed = await self.service._process_due_verification_kicks(ge.now_utc())
+
+        self.assertTrue(processed)
+        self.assertEqual(len(self.log_channel.sent), 1)
+        embed = self.log_channel.sent[0]["embed"]
+        self.assertEqual(embed.title, "Verification Kick Skipped")
+        self.assertEqual(
+            embed.description,
+            "<@90>, <@91>, and <@92> were not kicked for verification cleanup because Babblebox is missing Kick Members.",
+        )
+
+    async def test_due_verification_kicks_keep_distinct_reasons_separate(self):
+        await self._configure_verification(with_logs=True)
+        ok, _ = await self.service.set_exemption_toggle(self.guild.id, "verification_exempt_staff", False)
+        self.assertTrue(ok)
+        admin_member = FakeMember(
+            93,
+            self.guild,
+            roles=[],
+            top_role=FakeRole(5, position=5),
+            guild_permissions=FakePermissions(administrator=True),
+        )
+        high_member = FakeMember(94, self.guild, roles=[], top_role=FakeRole(901, position=150))
+        for member in (admin_member, high_member):
+            self.guild.members[member.id] = member
+            await self._store_kick_due_state(member)
+
+        processed = await self.service._process_due_verification_kicks(ge.now_utc())
+
+        self.assertTrue(processed)
+        self.assertEqual(len(self.log_channel.sent), 2)
+        descriptions = {item["embed"].description for item in self.log_channel.sent}
+        self.assertIn(
+            "<@93> was not kicked for verification cleanup because they are administrators.",
+            descriptions,
+        )
+        self.assertIn(
+            "<@94> was not kicked for verification cleanup because they are at or above Babblebox's top role.",
+            descriptions,
+        )
+
+    async def test_due_verification_kicks_truncate_large_group_member_list(self):
+        await self._configure_verification(with_logs=True)
+        self.guild.me.guild_permissions = FakePermissions(
+            manage_roles=True,
+            kick_members=False,
+            view_channel=True,
+            send_messages=True,
+            embed_links=True,
+            mention_everyone=True,
+        )
+        for user_id in (95, 96, 97, 98, 99):
+            member = FakeMember(user_id, self.guild, roles=[], top_role=FakeRole(5, position=5))
+            self.guild.members[member.id] = member
+            await self._store_kick_due_state(member)
+
+        processed = await self.service._process_due_verification_kicks(ge.now_utc())
+
+        self.assertTrue(processed)
+        embed = self.log_channel.sent[0]["embed"]
+        self.assertIn("<@95>, <@96>, <@97>, and 2 more", embed.description)
+        self.assertNotIn("<@98>", embed.description)
+        self.assertNotIn("<@99>", embed.description)
+
+    async def test_verification_sync_summary_groups_dm_failures_and_skip_reasons(self):
+        await self._configure_verification(with_logs=True)
+        first = FakeMember(100, self.guild, roles=[], top_role=FakeRole(5, position=5), joined_at=ge.now_utc() - timedelta(days=9))
+        second = FakeMember(101, self.guild, roles=[], top_role=FakeRole(5, position=5), joined_at=ge.now_utc() - timedelta(days=9))
+        skipped = FakeMember(102, self.guild, roles=[], top_role=FakeRole(5, position=5), joined_at=ge.now_utc() - timedelta(days=9))
+        for member in (first, second):
+            self._make_dm_fail(member)
+        for member in (first, second, skipped):
+            self.guild.members[member.id] = member
+
+        original_status = self.service._verification_status
+
+        def fake_status(member, compiled):
+            if member.id == skipped.id:
+                return "ambiguous", "the configured verification role could not be resolved for this member"
+            return original_status(member, compiled)
+
+        with patch.object(self.service, "_verification_status", side_effect=fake_status):
+            preview = await self.service.build_verification_sync_preview(self.guild)
+            created, session = await self.service.create_verification_sync_session(self.guild, actor_id=2, preview=preview)
+            self.assertTrue(created)
+            with patch("babblebox.admin_service.VERIFICATION_SYNC_DM_PACE_SECONDS", new=0):
+                summary = await self.service.run_verification_sync_session(self.guild, session)
+
+        self.assertEqual(summary.failed_dm_count, 2)
+        self.assertIn("Warning DMs failed for <@100> and <@101> during verification sync.", summary.issues)
+        self.assertIn(
+            "<@102> was skipped during verification sync because the configured verification role could not be resolved for this member.",
+            summary.issues,
+        )
+        self.assertEqual(self.log_channel.sent[-1]["embed"].title, "Verification Sync Complete")
+        issues_field = next(field for field in self.log_channel.sent[-1]["embed"].fields if field.name == "Issues")
+        self.assertIn("Warning DMs failed for <@100> and <@101> during verification sync.", issues_field.value)
+
+    async def test_verification_sync_issue_groups_do_not_cross_merge_between_runs(self):
+        await self._configure_verification(with_logs=True)
+        first = FakeMember(103, self.guild, roles=[], top_role=FakeRole(5, position=5), joined_at=ge.now_utc() - timedelta(days=9))
+        second = FakeMember(104, self.guild, roles=[], top_role=FakeRole(5, position=5), joined_at=ge.now_utc() - timedelta(days=9))
+        self._make_dm_fail(first)
+        self._make_dm_fail(second)
+        self.guild.members[first.id] = first
+
+        preview = await self.service.build_verification_sync_preview(self.guild)
+        created, session = await self.service.create_verification_sync_session(self.guild, actor_id=2, preview=preview)
+        self.assertTrue(created)
+        with patch("babblebox.admin_service.VERIFICATION_SYNC_DM_PACE_SECONDS", new=0):
+            first_summary = await self.service.run_verification_sync_session(self.guild, session)
+
+        self.guild.members[second.id] = second
+        preview = await self.service.build_verification_sync_preview(self.guild)
+        created, session = await self.service.create_verification_sync_session(self.guild, actor_id=2, preview=preview)
+        self.assertTrue(created)
+        with patch("babblebox.admin_service.VERIFICATION_SYNC_DM_PACE_SECONDS", new=0):
+            second_summary = await self.service.run_verification_sync_session(self.guild, session)
+
+        self.assertEqual(first_summary.issues, ("Warning DMs failed for <@103> during verification sync.",))
+        self.assertEqual(second_summary.issues, ("Warning DMs failed for <@104> during verification sync.",))
+
+    async def test_due_followup_auto_remove_groups_same_outcome_into_one_log(self):
+        await self._configure_followup(with_logs=True)
+        first = FakeMember(110, self.guild, roles=[self.followup_role], top_role=FakeRole(5, position=5))
+        second = FakeMember(111, self.guild, roles=[self.followup_role], top_role=FakeRole(5, position=5))
+        for member in (first, second):
+            self.guild.members[member.id] = member
+            await self.store.upsert_followup(
+                {
+                    "guild_id": self.guild.id,
+                    "user_id": member.id,
+                    "role_id": self.followup_role.id,
+                    "assigned_at": serialize_datetime(ge.now_utc() - timedelta(days=31)),
+                    "due_at": serialize_datetime(ge.now_utc() - timedelta(minutes=1)),
+                    "mode": "auto_remove",
+                    "review_pending": False,
+                    "review_version": 0,
+                    "review_message_channel_id": None,
+                    "review_message_id": None,
+                }
+            )
+
+        processed = await self.service._process_due_followups(ge.now_utc())
+
+        self.assertTrue(processed)
+        self.assertEqual(len(self.log_channel.sent), 1)
+        embed = self.log_channel.sent[0]["embed"]
+        self.assertEqual(embed.title, "Follow-up Roles Removed")
+        self.assertEqual(
+            embed.description,
+            "Babblebox auto-removed <@&70> from <@110> and <@111> after 30 days.",
+        )
