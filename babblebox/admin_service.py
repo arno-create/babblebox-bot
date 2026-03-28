@@ -44,6 +44,20 @@ GROUPED_MEMBER_PREVIEW_LIMIT = 3
 VERIFICATION_NOTIFICATION_SUPPRESSION_SECONDS = 24 * 3600
 VERIFICATION_QUEUE_PREVIEW_LIMIT = 5
 VERIFICATION_SUMMARY_LINE_LIMIT = 8
+VERIFICATION_QUEUE_RELEVANT_CONFIG_FIELDS = frozenset(
+    {
+        "admin_log_channel_id",
+        "verification_enabled",
+        "verification_role_id",
+        "verification_logic",
+        "verification_deadline_action",
+        "excluded_user_ids",
+        "excluded_role_ids",
+        "trusted_role_ids",
+        "verification_exempt_staff",
+        "verification_exempt_bots",
+    }
+)
 
 FOLLOWUP_MODE_LABELS = {"auto_remove": "Auto-remove", "review": "Moderator review"}
 VERIFICATION_LOGIC_LABELS = {
@@ -389,12 +403,23 @@ class AdminService:
     def get_compiled_config(self, guild_id: int) -> CompiledAdminConfig:
         return self._compiled_configs.get(guild_id) or _compile_config(default_admin_config(guild_id))
 
-    async def _update_config(self, guild_id: int, mutator, *, success_message: str) -> tuple[bool, str]:
+    async def _update_config(
+        self,
+        guild_id: int,
+        mutator,
+        *,
+        success_message: str,
+        post_update_hook=None,
+        requested_fields: set[str] | None = None,
+        force_post_update: bool = False,
+    ) -> tuple[bool, str]:
         if not self.storage_ready:
             return False, self.storage_message("Admin systems")
+        before: dict[str, Any] | None = None
         async with self._lock:
-            current = self.get_config(guild_id)
-            current["guild_id"] = guild_id
+            before = self.get_config(guild_id)
+            before["guild_id"] = guild_id
+            current = dict(before)
             try:
                 mutator(current)
             except ValueError as exc:
@@ -405,7 +430,22 @@ class AdminService:
                 return False, validation_error
             await self.store.upsert_config(normalized)
             self._compiled_configs[guild_id] = _compile_config(normalized)
-            self._wake_event.set()
+        before = before or default_admin_config(guild_id)
+        changed_fields = {
+            field
+            for field in set(before) | set(normalized)
+            if before.get(field) != normalized.get(field)
+        }
+        if post_update_hook is not None:
+            await post_update_hook(
+                guild_id,
+                before=before,
+                after=normalized,
+                changed_fields=changed_fields,
+                requested_fields=set(requested_fields or ()),
+                force=force_post_update,
+            )
+        self._wake_event.set()
         return True, success_message
 
     def _validate_config(self, config: dict[str, Any]) -> str | None:
@@ -540,6 +580,16 @@ class AdminService:
         final_deadline_action = preview["verification_deadline_action"] if cleaned_deadline_action is None else cleaned_deadline_action
         final_kick_after = preview["verification_kick_after_seconds"] if parsed_kick_after is None else parsed_kick_after
         final_warning_lead = preview["verification_warning_lead_seconds"] if parsed_warning_lead is None else parsed_warning_lead
+        requested_fields = {
+            field
+            for field, supplied in (
+                ("verification_enabled", enabled is not None),
+                ("verification_role_id", role_id is not None),
+                ("verification_logic", cleaned_logic is not None),
+                ("verification_deadline_action", cleaned_deadline_action is not None),
+            )
+            if supplied
+        }
         return await self._update_config(
             guild_id,
             mutate,
@@ -550,6 +600,9 @@ class AdminService:
                 if final_role
                 else f"Verification cleanup is {'enabled' if final_enabled else 'disabled'}."
             ),
+            post_update_hook=self._reconcile_verification_review_backlog_after_config_change,
+            requested_fields=requested_fields,
+            force_post_update=bool(requested_fields),
         )
 
     async def set_logs_config(
@@ -567,6 +620,9 @@ class AdminService:
             guild_id,
             mutate,
             success_message="Admin log channel and alert role updated.",
+            post_update_hook=self._reconcile_verification_review_backlog_after_config_change,
+            requested_fields={"admin_log_channel_id"},
+            force_post_update=True,
         )
 
     async def set_exclusion_target(self, guild_id: int, field: str, target_id: int, enabled: bool) -> tuple[bool, str]:
@@ -588,6 +644,9 @@ class AdminService:
             guild_id,
             mutate,
             success_message=f"Admin {label} was {'updated' if enabled else 'trimmed'}.",
+            post_update_hook=self._reconcile_verification_review_backlog_after_config_change,
+            requested_fields={field},
+            force_post_update=field in VERIFICATION_QUEUE_RELEVANT_CONFIG_FIELDS,
         )
 
     async def set_exemption_toggle(self, guild_id: int, field: str, enabled: bool) -> tuple[bool, str]:
@@ -598,6 +657,9 @@ class AdminService:
             guild_id,
             lambda config: config.__setitem__(field, bool(enabled)),
             success_message=f"{label.title()} is now {'enabled' if enabled else 'disabled'}.",
+            post_update_hook=self._reconcile_verification_review_backlog_after_config_change,
+            requested_fields={field},
+            force_post_update=field in VERIFICATION_QUEUE_RELEVANT_CONFIG_FIELDS,
         )
 
     async def set_templates(
@@ -1528,8 +1590,10 @@ class AdminService:
             if not record.get("review_pending"):
                 continue
             member = guild.get_member(int(record["user_id"]))
-            if member is None or not compiled.verification_enabled:
+            if member is None:
                 await self.store.delete_verification_state(guild.id, int(record["user_id"]))
+                continue
+            if not compiled.verification_enabled:
                 continue
             if compiled.verification_deadline_action != "review":
                 await self.store.upsert_verification_state(self._close_verification_review_record(record))
@@ -1638,6 +1702,37 @@ class AdminService:
             return await fetch_message(message_id)
         return None
 
+    def build_verification_review_queue_notice_embed(
+        self,
+        *,
+        title: str,
+        message: str,
+        tone: str = "info",
+    ) -> discord.Embed:
+        return ge.make_status_embed(title, message, tone=tone, footer="Babblebox Admin | Verification cleanup")
+
+    async def _retire_verification_review_queue(
+        self,
+        guild: discord.Guild,
+        compiled: CompiledAdminConfig,
+        *,
+        queue_record: dict[str, Any] | None,
+        title: str,
+        message: str,
+        tone: str = "info",
+    ):
+        if queue_record is None:
+            return
+        channel = self._guild_channel(guild, queue_record.get("channel_id"))
+        message_obj = await self._verification_queue_message(channel, message_id=queue_record.get("message_id")) if channel is not None else None
+        if message_obj is not None:
+            with contextlib.suppress(discord.Forbidden, discord.HTTPException):
+                await message_obj.edit(
+                    embed=self.build_verification_review_queue_notice_embed(title=title, message=message, tone=tone),
+                    view=None,
+                )
+        await self.store.delete_verification_review_queue(guild.id)
+
     async def _sync_verification_review_queue(
         self,
         guild: discord.Guild,
@@ -1645,6 +1740,7 @@ class AdminService:
         *,
         now: datetime,
         note: str | None = None,
+        inactive_reason: str | None = None,
     ):
         from babblebox.cogs.admin import VerificationDeadlineReviewView
 
@@ -1652,17 +1748,34 @@ class AdminService:
         queue_record = await self.store.fetch_verification_review_queue(guild.id)
         if not pending_rows:
             if queue_record is not None:
-                channel = self._guild_channel(guild, queue_record.get("channel_id"))
-                message = await self._verification_queue_message(channel, message_id=queue_record.get("message_id")) if channel is not None else None
-                if message is not None:
-                    with contextlib.suppress(discord.Forbidden, discord.HTTPException):
-                        await message.edit(
-                            embed=self.build_verification_review_queue_embed(guild, [], compiled=compiled, note=note),
-                            view=None,
-                        )
-                await self.store.delete_verification_review_queue(guild.id)
+                if inactive_reason is not None:
+                    await self._retire_verification_review_queue(
+                        guild,
+                        compiled,
+                        queue_record=queue_record,
+                        title="Verification Review Queue Updated",
+                        message=inactive_reason,
+                    )
+                else:
+                    channel = self._guild_channel(guild, queue_record.get("channel_id"))
+                    message = await self._verification_queue_message(channel, message_id=queue_record.get("message_id")) if channel is not None else None
+                    if message is not None:
+                        with contextlib.suppress(discord.Forbidden, discord.HTTPException):
+                            await message.edit(
+                                embed=self.build_verification_review_queue_embed(guild, [], compiled=compiled, note=note),
+                                view=None,
+                            )
+                    await self.store.delete_verification_review_queue(guild.id)
             return
         if compiled.admin_log_channel_id is None:
+            await self._retire_verification_review_queue(
+                guild,
+                compiled,
+                queue_record=queue_record,
+                title="Verification Review Queue Unavailable",
+                message="The shared verification review queue is unavailable until an admin log channel is configured.",
+                tone="warning",
+            )
             await self.log_operability_warning_once(
                 guild,
                 compiled,
@@ -1673,6 +1786,14 @@ class AdminService:
             return
         channel = self._guild_channel(guild, compiled.admin_log_channel_id)
         if channel is None:
+            await self._retire_verification_review_queue(
+                guild,
+                compiled,
+                queue_record=queue_record,
+                title="Verification Review Queue Unavailable",
+                message="The shared verification review queue is unavailable until the configured admin log channel is accessible again.",
+                tone="warning",
+            )
             await self.log_operability_warning_once(
                 guild,
                 compiled,
@@ -1681,6 +1802,15 @@ class AdminService:
                 alert=False,
             )
             return
+        if queue_record is not None and queue_record.get("channel_id") != channel.id:
+            await self._retire_verification_review_queue(
+                guild,
+                compiled,
+                queue_record=queue_record,
+                title="Verification Review Queue Moved",
+                message=f"The shared verification review queue moved to {channel.mention}.",
+            )
+            queue_record = None
         current = pending_rows[0]
         view = VerificationDeadlineReviewView(
             guild_id=guild.id,
@@ -1718,6 +1848,67 @@ class AdminService:
         )
         with contextlib.suppress(Exception):
             self.bot.add_view(view, message_id=message.id)
+
+    async def _reconcile_verification_review_backlog_after_config_change(
+        self,
+        guild_id: int,
+        *,
+        before: dict[str, Any],
+        after: dict[str, Any],
+        changed_fields: set[str],
+        requested_fields: set[str],
+        force: bool = False,
+    ):
+        relevant_fields = (changed_fields | requested_fields) & VERIFICATION_QUEUE_RELEVANT_CONFIG_FIELDS
+        if not relevant_fields and not force:
+            return
+        guild = self.bot.get_guild(guild_id)
+        if guild is None:
+            return
+        compiled_before = _compile_config(before)
+        compiled_after = _compile_config(after)
+        now = ge.now_utc()
+        active_note = None
+        if compiled_after.verification_enabled and compiled_after.verification_deadline_action == "review":
+            batch = VerificationSweepBatch(run_context="config_change")
+            for record in await self.store.list_verification_states_for_guild(guild_id):
+                if record.get("review_pending"):
+                    continue
+                kick_at = deserialize_datetime(record.get("kick_at"))
+                if kick_at is None or kick_at > now:
+                    continue
+                member = guild.get_member(int(record["user_id"]))
+                if member is None:
+                    continue
+                status, _ = self._verification_status(member, compiled_after)
+                if status in {"verified", "exempt"}:
+                    await self.store.delete_verification_state(guild_id, member.id)
+                    continue
+                if status != "unverified":
+                    continue
+                await self._queue_verification_review(guild, compiled_after, record, now=now, batch=batch)
+            if batch.grouped_by_guild:
+                await self._flush_verification_sweep_batch(batch, now=now)
+            if (
+                "admin_log_channel_id" in relevant_fields
+                or "verification_deadline_action" in relevant_fields
+                or "verification_enabled" in relevant_fields
+            ):
+                active_note = "Verification review backlog was reconciled after the latest config change."
+        inactive_reason = None
+        if compiled_before.admin_log_channel_id != compiled_after.admin_log_channel_id and compiled_before.admin_log_channel_id is not None:
+            active_note = f"Verification review backlog moved to <#{compiled_after.admin_log_channel_id}>." if compiled_after.admin_log_channel_id is not None else active_note
+        if not compiled_after.verification_enabled:
+            inactive_reason = "Verification cleanup is disabled, so this review queue is inactive."
+        elif compiled_after.verification_deadline_action != "review":
+            inactive_reason = "Verification cleanup is no longer using moderator review."
+        await self._sync_verification_review_queue(
+            guild,
+            compiled_after,
+            now=now,
+            note=active_note,
+            inactive_reason=inactive_reason,
+        )
 
     def _close_verification_review_record(self, record: dict[str, Any]) -> dict[str, Any]:
         updated = dict(record)
