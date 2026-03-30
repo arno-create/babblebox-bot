@@ -25,13 +25,13 @@ HELP_PAGES: list[dict[str, str]] = [
     {
         "title": "Babblebox Guide",
         "emoji": "\U0001f3e0",
-        "description": "Five clear lanes: Party Games, Utilities, Daily Arcade, Buddy/Profile, and Shield.",
+        "description": "Five clear lanes: Party Games, Question Drops / Daily Arcade, Utilities, Buddy/Profile, and Shield.",
         "body": (
             "Use the arrows to browse the product by lane.\n"
             "Showable cards lean public by default so they feel native in chat.\n"
             "Personal utilities, setup, and sensitive admin work stay private."
         ),
-        "try": "`/play`, `/daily`, `/profile`, `/watch`, `/remind`",
+        "try": "`/play`, `/drops status`, `/daily`, `/profile`, `/watch`",
     },
     {
         "title": "Party Games",
@@ -39,10 +39,11 @@ HELP_PAGES: list[dict[str, str]] = [
         "description": "Short multiplayer rooms for live server energy.",
         "body": (
             "`/play` opens the lobby.\n"
-            "Broken Telephone, Exquisite Corpse, Spyfall, and Word Bomb all start there.\n"
+            "Broken Telephone, Exquisite Corpse, Spyfall, Word Bomb, Only 16, and Pattern Hunt all start there.\n"
+            "`/hunt status` and `/hunt guess` stay quiet until a Pattern Hunt room is live.\n"
             "If the room is quiet, Babblebox points people toward Daily, Profile, and utilities instead of dead-ending."
         ),
-        "try": "`/play`",
+        "try": "`/play`, `/hunt status`",
     },
     {
         "title": "Everyday Utilities",
@@ -58,14 +59,15 @@ HELP_PAGES: list[dict[str, str]] = [
     {
         "title": "Daily Arcade",
         "emoji": "\U0001f579\ufe0f",
-        "description": "Three fast daily booths with compact storage.",
+        "description": "Three fast daily booths plus compact scheduled Question Drops.",
         "body": (
             "`/daily` opens Shuffle, Emoji, and Signal.\n"
             "`/daily play <guess>` still defaults to Shuffle Booth.\n"
+            "`/drops panel`, `/drops config`, `/drops channels`, `/drops categories`, and `/drops stats` cover the scheduled trivia lane.\n"
             "`/daily`, `/daily play`, `/daily stats`, `/daily share`, and `/daily leaderboard` all lean public by default.\n"
             "Public Daily cards stay spoiler-safe, while warnings and storage issues stay private."
         ),
-        "try": "`/daily`, `/daily stats`, `/daily share`",
+        "try": "`/daily`, `/drops status`, `/drops stats`",
     },
     {
         "title": "Buddy / Profile / Vault",
@@ -74,7 +76,7 @@ HELP_PAGES: list[dict[str, str]] = [
         "body": (
             "`/buddy` and `/profile` are public-friendly by default.\n"
             "`/vault` stays more personal.\n"
-            "Buddy style, streaks, titles, badges, utilities, and multiplayer highlights all meet here."
+            "Buddy style, streaks, titles, badges, utilities, multiplayer highlights, and Question Drops points all meet here."
         ),
         "try": "`/buddy`, `/profile`, `/vault`",
     },
@@ -99,7 +101,7 @@ HELP_PAGES: list[dict[str, str]] = [
         "emoji": "\u2728",
         "description": "A few quick habits make Babblebox feel much better.",
         "body": (
-            "Keep DMs open for Watch, Later, Capture, reminders, and DM-based party games.\n"
+            "Keep DMs open for Watch, Later, Capture, reminders, Pattern Hunt, and other DM-based party moments.\n"
             "Use public visibility for showable cards, and private visibility for sensitive utility flows.\n"
             "If you run Shield, start with log-only or low-confidence logging and tune filters before enabling deletes."
         ),

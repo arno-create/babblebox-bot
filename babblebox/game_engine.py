@@ -394,6 +394,11 @@ def build_chaos_headline(game):
         survivors = len(game.get("starting_players", []))
         winner = game.get("winner_name", "The winner")
         return f"Encore headline: {winner} outlasted a {survivors}-player blast wave."
+    if game_type == "only16":
+        winner = game.get("winner_name", "The winner")
+        return f"Encore headline: {winner} survived the number trap and kept it locked to 16."
+    if game_type == "pattern_hunt":
+        return "Encore headline: the hidden pattern stayed private until the final reveal."
     return "Encore headline: the lobby somehow got even louder."
 
 
@@ -450,6 +455,7 @@ def create_game_state(host, channel):
         "dm_turn_timeout": TURN_TIMEOUT_SECONDS,
         "spyfall_vote_timeout": SPYFALL_VOTE_TIMEOUT_SECONDS,
         "bomb_time_modifier": 0.0,
+        "only16_mode": "strict",
     }
 
 
@@ -524,6 +530,10 @@ def get_player_stats(user):
             "bomb_words": 0,
             "bomb_fastest_word_time": None,
             "bomb_fastest_word": "",
+            "only16_games": 0,
+            "only16_wins": 0,
+            "pattern_hunt_games": 0,
+            "pattern_hunt_wins": 0,
         },
     )
     stats["display_name"] = display_name_of(user)
@@ -550,6 +560,10 @@ def mark_game_started(game):
             stats["spyfall_games"] += 1
         elif game_type == "bomb":
             stats["bomb_games"] += 1
+        elif game_type == "only16":
+            stats["only16_games"] += 1
+        elif game_type == "pattern_hunt":
+            stats["pattern_hunt_games"] += 1
 
     game["stats_recorded"] = True
     schedule_profile_update(
@@ -887,6 +901,12 @@ def build_stats_embed(target, stats):
         f"Fastest Word: {fastest_text}"
     )
     embed.add_field(name="Word Bomb", value=bomb, inline=False)
+
+    social = (
+        f"Only 16: **{stats.get('only16_games', 0)}** played / **{stats.get('only16_wins', 0)}** wins\n"
+        f"Pattern Hunt: **{stats.get('pattern_hunt_games', 0)}** played / **{stats.get('pattern_hunt_wins', 0)}** wins"
+    )
+    embed.add_field(name="New Rooms", value=social, inline=False)
     return style_embed(embed, footer=f"Babblebox Session Stats | {SESSION_NOTE}")
 
 
@@ -1160,6 +1180,8 @@ def get_lobby_embed(guild_id):
         "corpse": ("📝 Exquisite Corpse", "Blind collaborative nonsense for 3+ players.", discord.Color.purple()),
         "spyfall": ("🕵️ Spyfall", "Find the spy before the room turns on itself. 3+ players.", discord.Color.dark_gray()),
         "bomb": ("💣 Word Bomb", "Fast typing survival for 2+ players.", discord.Color.red()),
+        "only16": ("Only 16", "Social elimination built around explicit quantity traps. 2+ players.", discord.Color.orange()),
+        "pattern_hunt": ("Pattern Hunt", "One guesser, secret machine-checkable rule, public clues. 3+ players.", discord.Color.dark_teal()),
     }
 
     title, desc, color = titles.get(gt, titles["none"])
@@ -1173,9 +1195,18 @@ def get_lobby_embed(guild_id):
             value=f"**{config['label']}** | {config['description']}",
             inline=False,
         )
+    if gt == "only16":
+        embed.add_field(
+            name="Only 16 Mode",
+            value=(
+                f"**{str(game.get('only16_mode', 'strict')).title()}**\n"
+                "Strict counts only direct replies. Smart allows one tight follow-up window."
+            ),
+            inline=False,
+        )
 
     if gt != "none":
-        min_players = 2 if gt == "bomb" else 3
+        min_players = 2 if gt in {"bomb", "only16"} else 3
         if not players:
             lobby_value = (
                 "No players yet. Tap **Join** to open the room.\n"
@@ -1241,6 +1272,8 @@ class GameSelect(discord.ui.Select):
             discord.SelectOption(label="Exquisite Corpse", description="Absurd collaborative story", emoji="📝", value="corpse"),
             discord.SelectOption(label="Spyfall", description="Find the spy among you", emoji="🕵️", value="spyfall"),
             discord.SelectOption(label="Word Bomb", description="Battle Royale typing game", emoji="💣", value="bomb"),
+            discord.SelectOption(label="Only 16", description="Quantity trap elimination", emoji="🔢", value="only16"),
+            discord.SelectOption(label="Pattern Hunt", description="Guess the hidden rule", emoji="🧩", value="pattern_hunt"),
         ]
         super().__init__(placeholder="Host, choose a game...", min_values=1, max_values=1, options=options)
         self.guild_id = guild_id
@@ -1316,6 +1349,40 @@ class BombModeButton(discord.ui.Button):
             )
 
 
+class Only16ModeButton(discord.ui.Button):
+    def __init__(self, guild_id):
+        super().__init__(label="Only 16: Strict", style=discord.ButtonStyle.secondary, row=2)
+        self.guild_id = guild_id
+        self.refresh()
+
+    def refresh(self):
+        game = games.get(self.guild_id)
+        mode = str(game.get("only16_mode", "strict")).title() if game else "Strict"
+        self.label = f"Only 16: {mode}"
+        self.disabled = not game or game.get("game_type") != "only16" or game.get("active") or game.get("closing")
+
+    async def callback(self, interaction):
+        game = games.get(self.guild_id)
+        if not game or game.get("closing") or game.get("active"):
+            return await safe_send_interaction(interaction, "This lobby is closed.", ephemeral=True)
+
+        async with game["lock"]:
+            game = games.get(self.guild_id)
+            if not game or game.get("closing") or game.get("active"):
+                return await safe_send_interaction(interaction, "This lobby is closed.", ephemeral=True)
+            if interaction.user.id != game["host"].id:
+                return await safe_send_interaction(interaction, "Only the host can change the Only 16 mode.", ephemeral=True)
+            if game.get("game_type") != "only16":
+                return await safe_send_interaction(interaction, "Select Only 16 first, then choose a mode.", ephemeral=True)
+            game["only16_mode"] = "smart" if str(game.get("only16_mode", "strict")).casefold() == "strict" else "strict"
+            if isinstance(self.view, LobbyView):
+                self.view.refresh_components()
+            ok = await safe_edit_interaction_message(interaction, embed=get_lobby_embed(self.guild_id), view=self.view)
+            if not ok:
+                await cleanup_game(self.guild_id)
+                return
+
+
 class ChaosCardButton(discord.ui.Button):
     def __init__(self, guild_id):
         super().__init__(label="Chaos Card: Off", style=discord.ButtonStyle.secondary, row=2)
@@ -1361,14 +1428,17 @@ class LobbyView(TrackedView):
         super().__init__(guild_id, timeout=900)
         self.game_select = GameSelect(guild_id)
         self.bomb_mode_button = BombModeButton(guild_id)
+        self.only16_mode_button = Only16ModeButton(guild_id)
         self.chaos_card_button = ChaosCardButton(guild_id)
         self.add_item(self.game_select)
         self.add_item(self.bomb_mode_button)
+        self.add_item(self.only16_mode_button)
         self.add_item(self.chaos_card_button)
         self.refresh_components()
 
     def refresh_components(self):
         self.bomb_mode_button.refresh()
+        self.only16_mode_button.refresh()
         self.chaos_card_button.refresh()
 
     async def on_timeout(self):
@@ -1436,7 +1506,7 @@ class LobbyView(TrackedView):
             if game["game_type"] == "bomb" and (runtime_bot is None or not getattr(runtime_bot, "dictionary_ready", False)):
                 return await safe_send_interaction(interaction, "Word Bomb is unavailable right now because the dictionary did not finish loading.", ephemeral=True)
 
-            min_players = 2 if game["game_type"] == "bomb" else 3
+            min_players = 2 if game["game_type"] in {"bomb", "only16"} else 3
             if len(game["players"]) < min_players:
                 return await safe_send_interaction(
                     interaction,
@@ -1542,6 +1612,18 @@ class LobbyView(TrackedView):
                 await game["channel"].send(embed=start_embed)
                 mark_game_started(game)
                 await _start_bomb_turn_locked(self.guild_id, game)
+                return
+
+            if gt == "only16":
+                from babblebox.only16_game import start_only16_game_locked
+
+                await start_only16_game_locked(self.guild_id, game)
+                return
+
+            if gt == "pattern_hunt":
+                from babblebox.pattern_hunt_game import start_pattern_hunt_game_locked
+
+                await start_pattern_hunt_game_locked(self.guild_id, game)
                 return
 
             shuffled_list = "\n".join(f"**{i + 1}.** {player.display_name}" for i, player in enumerate(game["players"]))

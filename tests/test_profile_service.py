@@ -156,3 +156,43 @@ class ProfileServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(
             await self.service.store.fetch_daily_result(challenge_id=challenge_id, puzzle_date=recent_date, user_id=99)
         )
+
+    async def test_question_drop_results_update_profile_and_category_summary(self):
+        await self.service.record_question_drop_result(55, category="logic", correct=True, points=12)
+        await self.service.record_question_drop_result(55, category="logic", correct=True, points=8)
+        await self.service.record_question_drop_result(55, category="science", correct=False, points=10)
+
+        profile = await self.service.get_profile(55)
+        self.assertEqual(profile["question_drop_attempts"], 3)
+        self.assertEqual(profile["question_drop_correct"], 2)
+        self.assertEqual(profile["question_drop_points"], 20)
+        self.assertEqual(profile["question_drop_current_streak"], 0)
+        self.assertEqual(profile["question_drop_best_streak"], 2)
+
+        summary = await self.service.get_question_drop_summary(55)
+        self.assertIsNotNone(summary)
+        self.assertEqual(len(summary["categories"]), 2)
+        self.assertEqual(summary["categories"][0]["category"], "logic")
+        self.assertEqual(summary["categories"][0]["points"], 20)
+        self.assertEqual(summary["categories"][0]["best_streak"], 2)
+        self.assertEqual(summary["categories"][1]["category"], "science")
+        self.assertEqual(summary["categories"][1]["attempts"], 1)
+        self.assertEqual(summary["categories"][1]["correct_count"], 0)
+
+    async def test_new_party_game_round_and_win_fields_are_recorded(self):
+        await self.service.record_game_started(game_type="only16", host_id=70, player_ids=[70, 71])
+        await self.service.record_game_started(game_type="pattern_hunt", host_id=70, player_ids=[70, 71, 72])
+        await self.service.record_only16_win(71)
+        await self.service.record_pattern_hunt_win(72)
+
+        host = await self.service.get_profile(70)
+        only16_winner = await self.service.get_profile(71)
+        hunt_winner = await self.service.get_profile(72)
+
+        self.assertEqual(host["only16_rounds"], 1)
+        self.assertEqual(host["pattern_hunt_rounds"], 1)
+        self.assertEqual(host["games_hosted"], 2)
+        self.assertEqual(only16_winner["only16_wins"], 1)
+        self.assertEqual(only16_winner["games_won"], 1)
+        self.assertEqual(hunt_winner["pattern_hunt_wins"], 1)
+        self.assertEqual(hunt_winner["games_won"], 1)

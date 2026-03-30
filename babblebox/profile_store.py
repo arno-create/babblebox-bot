@@ -41,6 +41,15 @@ PROFILE_COLUMNS = (
     "spyfall_wins",
     "bomb_rounds",
     "bomb_wins",
+    "only16_rounds",
+    "only16_wins",
+    "pattern_hunt_rounds",
+    "pattern_hunt_wins",
+    "question_drop_attempts",
+    "question_drop_correct",
+    "question_drop_points",
+    "question_drop_current_streak",
+    "question_drop_best_streak",
     "xp_window_date",
     "daily_xp_actions",
     "utility_xp_actions",
@@ -56,6 +65,16 @@ DAILY_RESULT_COLUMNS = (
     "first_attempt_at",
     "completed_at",
     "solve_seconds",
+)
+
+QUESTION_DROP_CATEGORY_COLUMNS = (
+    "user_id",
+    "category",
+    "attempts",
+    "correct_count",
+    "points",
+    "current_streak",
+    "best_streak",
 )
 
 
@@ -96,6 +115,7 @@ def default_profile_store_state() -> dict[str, Any]:
     return {
         "profiles": {},
         "daily_results": {},
+        "question_drop_categories": {},
         "meta": {},
     }
 
@@ -131,6 +151,15 @@ class _BaseProfileStore:
         raise NotImplementedError
 
     async def fetch_daily_leaderboard(self, *, metric: str, today: date, limit: int) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    async def fetch_question_drop_category(self, *, user_id: int, category: str) -> dict[str, Any] | None:
+        raise NotImplementedError
+
+    async def save_question_drop_category(self, row: dict[str, Any]):
+        raise NotImplementedError
+
+    async def fetch_question_drop_categories(self, *, user_id: int) -> list[dict[str, Any]]:
         raise NotImplementedError
 
     async def get_meta(self, key: str) -> dict[str, Any] | None:
@@ -197,6 +226,30 @@ class _MemoryProfileStore(_BaseProfileStore):
             rows = [row for row in rows if row["total_daily_clears"] > 0]
             rows.sort(key=lambda item: (item["total_daily_clears"], item["best_daily_streak"], item["active_streak"], item["xp_total"]), reverse=True)
         return rows[:limit]
+
+    async def fetch_question_drop_category(self, *, user_id: int, category: str) -> dict[str, Any] | None:
+        return _copy_payload(self.state["question_drop_categories"].get((user_id, category)))
+
+    async def save_question_drop_category(self, row: dict[str, Any]):
+        key = (row["user_id"], row["category"])
+        self.state["question_drop_categories"][key] = _copy_payload(row)
+
+    async def fetch_question_drop_categories(self, *, user_id: int) -> list[dict[str, Any]]:
+        rows = [
+            _copy_payload(row)
+            for (row_user_id, _), row in self.state["question_drop_categories"].items()
+            if row_user_id == user_id
+        ]
+        rows.sort(
+            key=lambda item: (
+                int(item.get("points", 0) or 0),
+                int(item.get("correct_count", 0) or 0),
+                int(item.get("attempts", 0) or 0),
+                str(item.get("category", "")),
+            ),
+            reverse=True,
+        )
+        return rows
 
     async def get_meta(self, key: str) -> dict[str, Any] | None:
         return _copy_payload(self.state["meta"].get(key))
@@ -294,6 +347,15 @@ class _PostgresProfileStore(_BaseProfileStore):
                 "spyfall_wins INTEGER NOT NULL DEFAULT 0, "
                 "bomb_rounds INTEGER NOT NULL DEFAULT 0, "
                 "bomb_wins INTEGER NOT NULL DEFAULT 0, "
+                "only16_rounds INTEGER NOT NULL DEFAULT 0, "
+                "only16_wins INTEGER NOT NULL DEFAULT 0, "
+                "pattern_hunt_rounds INTEGER NOT NULL DEFAULT 0, "
+                "pattern_hunt_wins INTEGER NOT NULL DEFAULT 0, "
+                "question_drop_attempts INTEGER NOT NULL DEFAULT 0, "
+                "question_drop_correct INTEGER NOT NULL DEFAULT 0, "
+                "question_drop_points INTEGER NOT NULL DEFAULT 0, "
+                "question_drop_current_streak INTEGER NOT NULL DEFAULT 0, "
+                "question_drop_best_streak INTEGER NOT NULL DEFAULT 0, "
                 "xp_window_date DATE NULL, "
                 "daily_xp_actions SMALLINT NOT NULL DEFAULT 0, "
                 "utility_xp_actions SMALLINT NOT NULL DEFAULT 0, "
@@ -305,6 +367,7 @@ class _PostgresProfileStore(_BaseProfileStore):
             "CREATE INDEX IF NOT EXISTS ix_bb_profiles_total_daily_clears ON bb_user_profiles (total_daily_clears DESC)",
             "CREATE INDEX IF NOT EXISTS ix_bb_profiles_best_daily_streak ON bb_user_profiles (best_daily_streak DESC)",
             "CREATE INDEX IF NOT EXISTS ix_bb_profiles_xp_total ON bb_user_profiles (xp_total DESC)",
+            "CREATE INDEX IF NOT EXISTS ix_bb_profiles_question_drop_points ON bb_user_profiles (question_drop_points DESC)",
             (
                 "CREATE TABLE IF NOT EXISTS bb_daily_results ("
                 "challenge_id TEXT NOT NULL, "
@@ -320,10 +383,36 @@ class _PostgresProfileStore(_BaseProfileStore):
             ),
             "CREATE INDEX IF NOT EXISTS ix_bb_daily_results_user_date ON bb_daily_results (user_id, puzzle_date DESC)",
             "CREATE INDEX IF NOT EXISTS ix_bb_daily_results_date ON bb_daily_results (puzzle_date DESC)",
+            (
+                "CREATE TABLE IF NOT EXISTS bb_question_drop_categories ("
+                "user_id BIGINT NOT NULL, "
+                "category TEXT NOT NULL, "
+                "attempts INTEGER NOT NULL DEFAULT 0, "
+                "correct_count INTEGER NOT NULL DEFAULT 0, "
+                "points INTEGER NOT NULL DEFAULT 0, "
+                "current_streak INTEGER NOT NULL DEFAULT 0, "
+                "best_streak INTEGER NOT NULL DEFAULT 0, "
+                "updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc', now()), "
+                "PRIMARY KEY (user_id, category)"
+                ")"
+            ),
+            "CREATE INDEX IF NOT EXISTS ix_bb_question_drop_categories_user_points ON bb_question_drop_categories (user_id, points DESC, correct_count DESC)",
         ]
         async with self._pool.acquire() as conn:
             for statement in statements:
                 await conn.execute(statement)
+            for column_sql in (
+                "ADD COLUMN IF NOT EXISTS only16_rounds INTEGER NOT NULL DEFAULT 0",
+                "ADD COLUMN IF NOT EXISTS only16_wins INTEGER NOT NULL DEFAULT 0",
+                "ADD COLUMN IF NOT EXISTS pattern_hunt_rounds INTEGER NOT NULL DEFAULT 0",
+                "ADD COLUMN IF NOT EXISTS pattern_hunt_wins INTEGER NOT NULL DEFAULT 0",
+                "ADD COLUMN IF NOT EXISTS question_drop_attempts INTEGER NOT NULL DEFAULT 0",
+                "ADD COLUMN IF NOT EXISTS question_drop_correct INTEGER NOT NULL DEFAULT 0",
+                "ADD COLUMN IF NOT EXISTS question_drop_points INTEGER NOT NULL DEFAULT 0",
+                "ADD COLUMN IF NOT EXISTS question_drop_current_streak INTEGER NOT NULL DEFAULT 0",
+                "ADD COLUMN IF NOT EXISTS question_drop_best_streak INTEGER NOT NULL DEFAULT 0",
+            ):
+                await conn.execute(f"ALTER TABLE bb_user_profiles {column_sql}")
 
     def _row_to_dict(self, row) -> dict[str, Any] | None:
         if row is None:
@@ -402,6 +491,41 @@ class _PostgresProfileStore(_BaseProfileStore):
             )
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(query, today, limit)
+        return [dict(row) for row in rows]
+
+    async def fetch_question_drop_category(self, *, user_id: int, category: str) -> dict[str, Any] | None:
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT user_id, category, attempts, correct_count, points, current_streak, best_streak "
+                "FROM bb_question_drop_categories WHERE user_id = $1 AND category = $2",
+                user_id,
+                category,
+            )
+        return self._row_to_dict(row)
+
+    async def save_question_drop_category(self, row: dict[str, Any]):
+        columns_sql = ", ".join(QUESTION_DROP_CATEGORY_COLUMNS)
+        placeholders_sql = ", ".join(f"${index}" for index in range(1, len(QUESTION_DROP_CATEGORY_COLUMNS) + 1))
+        updates_sql = ", ".join(
+            f"{column} = EXCLUDED.{column}" for column in QUESTION_DROP_CATEGORY_COLUMNS if column not in {"user_id", "category"}
+        )
+        values = [row.get(column) for column in QUESTION_DROP_CATEGORY_COLUMNS]
+        async with self._io_lock:
+            async with self._pool.acquire() as conn:
+                await conn.execute(
+                    f"INSERT INTO bb_question_drop_categories ({columns_sql}) VALUES ({placeholders_sql}) "
+                    f"ON CONFLICT (user_id, category) DO UPDATE SET {updates_sql}, updated_at = timezone('utc', now())",
+                    *values,
+                )
+
+    async def fetch_question_drop_categories(self, *, user_id: int) -> list[dict[str, Any]]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT user_id, category, attempts, correct_count, points, current_streak, best_streak "
+                "FROM bb_question_drop_categories WHERE user_id = $1 "
+                "ORDER BY points DESC, correct_count DESC, attempts DESC, category ASC",
+                user_id,
+            )
         return [dict(row) for row in rows]
 
     async def get_meta(self, key: str) -> dict[str, Any] | None:
@@ -503,6 +627,15 @@ class ProfileStore:
 
     async def fetch_daily_leaderboard(self, *, metric: str, today: date, limit: int) -> list[dict[str, Any]]:
         return await self._store.fetch_daily_leaderboard(metric=metric, today=today, limit=limit)
+
+    async def fetch_question_drop_category(self, *, user_id: int, category: str) -> dict[str, Any] | None:
+        return await self._store.fetch_question_drop_category(user_id=user_id, category=category)
+
+    async def save_question_drop_category(self, row: dict[str, Any]):
+        await self._store.save_question_drop_category(row)
+
+    async def fetch_question_drop_categories(self, *, user_id: int) -> list[dict[str, Any]]:
+        return await self._store.fetch_question_drop_categories(user_id=user_id)
 
     async def get_meta(self, key: str) -> dict[str, Any] | None:
         return await self._store.get_meta(key)
