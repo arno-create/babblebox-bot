@@ -9,10 +9,15 @@ from discord.ext import commands
 from babblebox import game_engine as ge
 from babblebox.command_utils import send_hybrid_response
 from babblebox.only16_game import manually_arm_only16_message
-from babblebox.pattern_hunt_game import PATTERN_HUNT_RULE_FAMILIES, build_pattern_hunt_status_embed, parse_guess_atom, submit_pattern_guess_locked
+from babblebox.pattern_hunt_game import (
+    PATTERN_HUNT_RULE_FAMILIES,
+    build_pattern_hunt_status_embed,
+    parse_guess_atom,
+    rule_family_label,
+    submit_pattern_guess_locked,
+)
 
-
-ATOM_FAMILY_CHOICES = [app_commands.Choice(name=family.replace("_", " ").title(), value=family) for family in PATTERN_HUNT_RULE_FAMILIES]
+ATOM_FAMILY_CHOICES = [app_commands.Choice(name=rule_family_label(family), value=family) for family in PATTERN_HUNT_RULE_FAMILIES]
 
 
 class PartyGamesCog(commands.Cog):
@@ -57,7 +62,6 @@ class PartyGamesCog(commands.Cog):
         value_two="Value for the second family, if needed",
         atom_three="Third rule family",
         value_three="Value for the third family, if needed",
-        note="Optional free-text note; this does not affect correctness",
     )
     @app_commands.choices(atom_one=ATOM_FAMILY_CHOICES, atom_two=ATOM_FAMILY_CHOICES, atom_three=ATOM_FAMILY_CHOICES)
     async def hunt_guess_command(
@@ -69,9 +73,7 @@ class PartyGamesCog(commands.Cog):
         value_two: Optional[str] = None,
         atom_three: Optional[str] = None,
         value_three: Optional[str] = None,
-        note: Optional[str] = None,
     ):
-        del note
         if ctx.guild is None:
             await send_hybrid_response(ctx, embed=ge.make_status_embed("Server Only", "Pattern Hunt only works inside a server.", tone="warning", footer="Babblebox Pattern Hunt"), ephemeral=True)
             return

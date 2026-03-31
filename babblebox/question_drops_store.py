@@ -11,6 +11,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 
 DEFAULT_BACKEND = "postgres"
+QUESTION_DROP_MAX_DROPS_PER_DAY = 4
 
 
 class QuestionDropsStorageUnavailable(RuntimeError):
@@ -39,7 +40,9 @@ def normalize_question_drops_config(guild_id: int, payload: Any) -> dict[str, An
         return cleaned
     cleaned["enabled"] = bool(payload.get("enabled"))
     drops_per_day = payload.get("drops_per_day")
-    cleaned["drops_per_day"] = drops_per_day if isinstance(drops_per_day, int) and 1 <= drops_per_day <= 10 else 2
+    cleaned["drops_per_day"] = (
+        drops_per_day if isinstance(drops_per_day, int) and 1 <= drops_per_day <= QUESTION_DROP_MAX_DROPS_PER_DAY else 2
+    )
     timezone_name = payload.get("timezone")
     cleaned["timezone"] = timezone_name.strip() if isinstance(timezone_name, str) and timezone_name.strip() else "UTC"
     answer_window = payload.get("answer_window_seconds")
@@ -83,13 +86,25 @@ def _serialize_datetime(value: Any) -> str | None:
     return parsed.isoformat() if parsed is not None else None
 
 
-def normalize_active_drop(payload: Any) -> dict[str, Any] | None:
+def _normalize_participant_ids(values: Any) -> list[int]:
+    if not isinstance(values, (list, tuple, set)):
+        return []
+    return sorted({int(value) for value in values if isinstance(value, int) and value > 0})
+
+
+def normalize_active_drop(payload: Any, *, allow_missing_exposure_id: bool = False) -> dict[str, Any] | None:
     if not isinstance(payload, dict):
         return None
-    required_ints = ("guild_id", "channel_id", "message_id", "author_user_id", "difficulty", "exposure_id")
+    required_ints = ("guild_id", "channel_id", "message_id", "author_user_id", "difficulty")
     for field in required_ints:
         if not isinstance(payload.get(field), int) or int(payload[field]) <= 0:
             return None
+    exposure_id = payload.get("exposure_id")
+    if allow_missing_exposure_id:
+        if exposure_id is not None and (not isinstance(exposure_id, int) or exposure_id <= 0):
+            return None
+    elif not isinstance(exposure_id, int) or exposure_id <= 0:
+        return None
     asked_at = _serialize_datetime(_parse_datetime(payload.get("asked_at")))
     expires_at = _serialize_datetime(_parse_datetime(payload.get("expires_at")))
     if asked_at is None or expires_at is None:
@@ -101,12 +116,12 @@ def normalize_active_drop(payload: Any) -> dict[str, Any] | None:
     if not all(isinstance(payload.get(field), str) and payload[field].strip() for field in string_fields):
         return None
     tone_mode = str(payload.get("tone_mode", "clean")).strip().casefold()
-    return {
+    normalized = {
         "guild_id": int(payload["guild_id"]),
         "channel_id": int(payload["channel_id"]),
         "message_id": int(payload["message_id"]),
         "author_user_id": int(payload["author_user_id"]),
-        "exposure_id": int(payload["exposure_id"]),
+        "exposure_id": int(exposure_id) if isinstance(exposure_id, int) and exposure_id > 0 else None,
         "concept_id": payload["concept_id"].strip(),
         "variant_hash": payload["variant_hash"].strip(),
         "category": payload["category"].strip().casefold(),
@@ -117,7 +132,11 @@ def normalize_active_drop(payload: Any) -> dict[str, Any] | None:
         "expires_at": expires_at,
         "slot_key": payload["slot_key"].strip(),
         "tone_mode": tone_mode if tone_mode in {"clean", "playful", "roast-light"} else "clean",
+        "participant_user_ids": _normalize_participant_ids(payload.get("participant_user_ids", [])),
     }
+    if not allow_missing_exposure_id and normalized["exposure_id"] is None:
+        return None
+    return normalized
 
 
 def normalize_exposure(payload: Any) -> dict[str, Any] | None:
@@ -207,10 +226,19 @@ class _BaseQuestionDropsStore:
     async def upsert_active_drop(self, record: dict[str, Any]):
         raise NotImplementedError
 
+    async def register_posted_drop(self, exposure_record: dict[str, Any], active_record: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+        raise NotImplementedError
+
+    async def update_active_drop_participants(self, guild_id: int, channel_id: int, participant_user_ids: list[int]):
+        raise NotImplementedError
+
     async def delete_active_drop(self, guild_id: int, channel_id: int):
         raise NotImplementedError
 
     async def insert_exposure(self, record: dict[str, Any]) -> dict[str, Any]:
+        raise NotImplementedError
+
+    async def delete_exposure(self, exposure_id: int):
         raise NotImplementedError
 
     async def resolve_exposure(self, exposure_id: int, *, resolved_at: datetime, winner_user_id: int | None):
@@ -261,6 +289,32 @@ class _MemoryQuestionDropsStore(_BaseQuestionDropsStore):
         if normalized is not None:
             self.active_drops[(normalized["guild_id"], normalized["channel_id"])] = normalized
 
+    async def register_posted_drop(self, exposure_record: dict[str, Any], active_record: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+        normalized_exposure = normalize_exposure(exposure_record)
+        normalized_active = normalize_active_drop(active_record, allow_missing_exposure_id=True)
+        if normalized_exposure is None or normalized_active is None:
+            raise ValueError("Invalid Question Drops record.")
+        if any(
+            record["guild_id"] == normalized_exposure["guild_id"] and record["slot_key"] == normalized_exposure["slot_key"]
+            for record in self.exposures.values()
+        ):
+            raise ValueError("Question Drops slot already registered.")
+        active_key = (normalized_active["guild_id"], normalized_active["channel_id"])
+        if active_key in self.active_drops:
+            raise ValueError("Question Drops channel already has an active drop.")
+        normalized_exposure["id"] = self._next_exposure_id
+        self._next_exposure_id += 1
+        self.exposures[int(normalized_exposure["id"])] = deepcopy(normalized_exposure)
+        normalized_active["exposure_id"] = int(normalized_exposure["id"])
+        self.active_drops[active_key] = deepcopy(normalized_active)
+        return deepcopy(normalized_exposure), deepcopy(normalized_active)
+
+    async def update_active_drop_participants(self, guild_id: int, channel_id: int, participant_user_ids: list[int]):
+        record = self.active_drops.get((guild_id, channel_id))
+        if record is None:
+            return
+        record["participant_user_ids"] = _normalize_participant_ids(participant_user_ids)
+
     async def delete_active_drop(self, guild_id: int, channel_id: int):
         self.active_drops.pop((guild_id, channel_id), None)
 
@@ -272,6 +326,9 @@ class _MemoryQuestionDropsStore(_BaseQuestionDropsStore):
         self._next_exposure_id += 1
         self.exposures[int(normalized["id"])] = normalized
         return deepcopy(normalized)
+
+    async def delete_exposure(self, exposure_id: int):
+        self.exposures.pop(exposure_id, None)
 
     async def resolve_exposure(self, exposure_id: int, *, resolved_at: datetime, winner_user_id: int | None):
         record = self.exposures.get(exposure_id)
@@ -336,6 +393,7 @@ def _active_drop_from_row(row) -> dict[str, Any] | None:
             "expires_at": _serialize_datetime(row["expires_at"]),
             "slot_key": row["slot_key"],
             "tone_mode": row["tone_mode"],
+            "participant_user_ids": row["participant_user_ids"] or [],
         }
     )
 
@@ -437,7 +495,14 @@ class _PostgresQuestionDropsStore(_BaseQuestionDropsStore):
             "CREATE INDEX IF NOT EXISTS ix_question_drop_exposures_guild_asked ON question_drop_exposures (guild_id, asked_at DESC)",
             "CREATE INDEX IF NOT EXISTS ix_question_drop_exposures_guild_concept ON question_drop_exposures (guild_id, concept_id, asked_at DESC)",
             "CREATE INDEX IF NOT EXISTS ix_question_drop_exposures_guild_variant ON question_drop_exposures (guild_id, variant_hash, asked_at DESC)",
-            "CREATE INDEX IF NOT EXISTS ix_question_drop_exposures_slot_key ON question_drop_exposures (guild_id, slot_key)",
+            (
+                "DELETE FROM question_drop_exposures WHERE id IN ("
+                "SELECT id FROM ("
+                "SELECT id, ROW_NUMBER() OVER (PARTITION BY guild_id, slot_key ORDER BY asked_at DESC, id DESC) AS rn "
+                "FROM question_drop_exposures"
+                ") dedupe WHERE rn > 1)"
+            ),
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_question_drop_exposures_guild_slot ON question_drop_exposures (guild_id, slot_key)",
             (
                 "CREATE TABLE IF NOT EXISTS question_drop_active ("
                 "guild_id BIGINT NOT NULL, "
@@ -455,9 +520,11 @@ class _PostgresQuestionDropsStore(_BaseQuestionDropsStore):
                 "expires_at TIMESTAMPTZ NOT NULL, "
                 "slot_key TEXT NOT NULL, "
                 "tone_mode TEXT NOT NULL DEFAULT 'clean', "
+                "participant_user_ids JSONB NOT NULL DEFAULT '[]'::jsonb, "
                 "PRIMARY KEY (guild_id, channel_id)"
                 ")"
             ),
+            "ALTER TABLE question_drop_active ADD COLUMN IF NOT EXISTS participant_user_ids JSONB NOT NULL DEFAULT '[]'::jsonb",
             "CREATE INDEX IF NOT EXISTS ix_question_drop_active_expires ON question_drop_active (expires_at)",
         ]
         async with self._pool.acquire() as conn:
@@ -529,7 +596,7 @@ class _PostgresQuestionDropsStore(_BaseQuestionDropsStore):
             rows = await conn.fetch(
                 (
                     "SELECT guild_id, channel_id, message_id, author_user_id, exposure_id, concept_id, variant_hash, category, "
-                    "difficulty, prompt, answer_spec, asked_at, expires_at, slot_key, tone_mode "
+                    "difficulty, prompt, answer_spec, asked_at, expires_at, slot_key, tone_mode, participant_user_ids "
                     "FROM question_drop_active ORDER BY expires_at ASC"
                 )
             )
@@ -540,7 +607,7 @@ class _PostgresQuestionDropsStore(_BaseQuestionDropsStore):
             row = await conn.fetchrow(
                 (
                     "SELECT guild_id, channel_id, message_id, author_user_id, exposure_id, concept_id, variant_hash, category, "
-                    "difficulty, prompt, answer_spec, asked_at, expires_at, slot_key, tone_mode "
+                    "difficulty, prompt, answer_spec, asked_at, expires_at, slot_key, tone_mode, participant_user_ids "
                     "FROM question_drop_active WHERE guild_id = $1 AND channel_id = $2"
                 ),
                 guild_id,
@@ -554,43 +621,99 @@ class _PostgresQuestionDropsStore(_BaseQuestionDropsStore):
             return
         async with self._io_lock:
             async with self._pool.acquire() as conn:
+                await self._upsert_active_drop_with_conn(conn, normalized)
+
+    async def _upsert_active_drop_with_conn(self, conn, normalized: dict[str, Any]):
+        await conn.execute(
+            (
+                "INSERT INTO question_drop_active ("
+                "guild_id, channel_id, message_id, author_user_id, exposure_id, concept_id, variant_hash, category, difficulty, "
+                "prompt, answer_spec, asked_at, expires_at, slot_key, tone_mode, participant_user_ids"
+                ") VALUES ("
+                "$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12, $13, $14, $15, $16::jsonb"
+                ") ON CONFLICT (guild_id, channel_id) DO UPDATE SET "
+                "message_id = EXCLUDED.message_id, "
+                "author_user_id = EXCLUDED.author_user_id, "
+                "exposure_id = EXCLUDED.exposure_id, "
+                "concept_id = EXCLUDED.concept_id, "
+                "variant_hash = EXCLUDED.variant_hash, "
+                "category = EXCLUDED.category, "
+                "difficulty = EXCLUDED.difficulty, "
+                "prompt = EXCLUDED.prompt, "
+                "answer_spec = EXCLUDED.answer_spec, "
+                "asked_at = EXCLUDED.asked_at, "
+                "expires_at = EXCLUDED.expires_at, "
+                "slot_key = EXCLUDED.slot_key, "
+                "tone_mode = EXCLUDED.tone_mode, "
+                "participant_user_ids = EXCLUDED.participant_user_ids"
+            ),
+            normalized["guild_id"],
+            normalized["channel_id"],
+            normalized["message_id"],
+            normalized["author_user_id"],
+            normalized["exposure_id"],
+            normalized["concept_id"],
+            normalized["variant_hash"],
+            normalized["category"],
+            normalized["difficulty"],
+            normalized["prompt"],
+            json.dumps(normalized["answer_spec"]),
+            _parse_datetime(normalized["asked_at"]),
+            _parse_datetime(normalized["expires_at"]),
+            normalized["slot_key"],
+            normalized["tone_mode"],
+            json.dumps(normalized["participant_user_ids"]),
+        )
+
+    async def register_posted_drop(self, exposure_record: dict[str, Any], active_record: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+        normalized_exposure = normalize_exposure(exposure_record)
+        normalized_active = normalize_active_drop(active_record, allow_missing_exposure_id=True)
+        if normalized_exposure is None or normalized_active is None:
+            raise ValueError("Invalid Question Drops record.")
+        async with self._io_lock:
+            async with self._pool.acquire() as conn:
+                async with conn.transaction():
+                    row = await conn.fetchrow(
+                        (
+                            "INSERT INTO question_drop_exposures ("
+                            "guild_id, channel_id, concept_id, variant_hash, category, difficulty, asked_at, resolved_at, winner_user_id, slot_key"
+                            ") VALUES ("
+                            "$1, $2, $3, $4, $5, $6, $7, $8, $9, $10"
+                            ") ON CONFLICT (guild_id, slot_key) DO NOTHING RETURNING id"
+                        ),
+                        normalized_exposure["guild_id"],
+                        normalized_exposure["channel_id"],
+                        normalized_exposure["concept_id"],
+                        normalized_exposure["variant_hash"],
+                        normalized_exposure["category"],
+                        normalized_exposure["difficulty"],
+                        _parse_datetime(normalized_exposure["asked_at"]),
+                        _parse_datetime(normalized_exposure["resolved_at"]),
+                        normalized_exposure["winner_user_id"],
+                        normalized_exposure["slot_key"],
+                    )
+                    if row is None:
+                        raise ValueError("Question Drops slot already registered.")
+                    normalized_exposure["id"] = int(row["id"])
+                    normalized_active["exposure_id"] = int(row["id"])
+                    if await conn.fetchval(
+                        "SELECT 1 FROM question_drop_active WHERE guild_id = $1 AND channel_id = $2",
+                        normalized_active["guild_id"],
+                        normalized_active["channel_id"],
+                    ):
+                        raise ValueError("Question Drops channel already has an active drop.")
+                    await self._upsert_active_drop_with_conn(conn, normalize_active_drop(normalized_active))
+        return normalized_exposure, normalize_active_drop(normalized_active)
+
+    async def update_active_drop_participants(self, guild_id: int, channel_id: int, participant_user_ids: list[int]):
+        normalized_ids = _normalize_participant_ids(participant_user_ids)
+        async with self._io_lock:
+            async with self._pool.acquire() as conn:
                 await conn.execute(
-                    (
-                        "INSERT INTO question_drop_active ("
-                        "guild_id, channel_id, message_id, author_user_id, exposure_id, concept_id, variant_hash, category, difficulty, "
-                        "prompt, answer_spec, asked_at, expires_at, slot_key, tone_mode"
-                        ") VALUES ("
-                        "$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12, $13, $14, $15"
-                        ") ON CONFLICT (guild_id, channel_id) DO UPDATE SET "
-                        "message_id = EXCLUDED.message_id, "
-                        "author_user_id = EXCLUDED.author_user_id, "
-                        "exposure_id = EXCLUDED.exposure_id, "
-                        "concept_id = EXCLUDED.concept_id, "
-                        "variant_hash = EXCLUDED.variant_hash, "
-                        "category = EXCLUDED.category, "
-                        "difficulty = EXCLUDED.difficulty, "
-                        "prompt = EXCLUDED.prompt, "
-                        "answer_spec = EXCLUDED.answer_spec, "
-                        "asked_at = EXCLUDED.asked_at, "
-                        "expires_at = EXCLUDED.expires_at, "
-                        "slot_key = EXCLUDED.slot_key, "
-                        "tone_mode = EXCLUDED.tone_mode"
-                    ),
-                    normalized["guild_id"],
-                    normalized["channel_id"],
-                    normalized["message_id"],
-                    normalized["author_user_id"],
-                    normalized["exposure_id"],
-                    normalized["concept_id"],
-                    normalized["variant_hash"],
-                    normalized["category"],
-                    normalized["difficulty"],
-                    normalized["prompt"],
-                    json.dumps(normalized["answer_spec"]),
-                    _parse_datetime(normalized["asked_at"]),
-                    _parse_datetime(normalized["expires_at"]),
-                    normalized["slot_key"],
-                    normalized["tone_mode"],
+                    "UPDATE question_drop_active SET participant_user_ids = $3::jsonb WHERE guild_id = $1 AND channel_id = $2",
+                    guild_id,
+                    channel_id,
+                    json.dumps(normalized_ids),
                 )
 
     async def delete_active_drop(self, guild_id: int, channel_id: int):
@@ -625,6 +748,11 @@ class _PostgresQuestionDropsStore(_BaseQuestionDropsStore):
                 )
         normalized["id"] = int(row["id"])
         return normalized
+
+    async def delete_exposure(self, exposure_id: int):
+        async with self._io_lock:
+            async with self._pool.acquire() as conn:
+                await conn.execute("DELETE FROM question_drop_exposures WHERE id = $1", exposure_id)
 
     async def resolve_exposure(self, exposure_id: int, *, resolved_at: datetime, winner_user_id: int | None):
         async with self._io_lock:
@@ -721,11 +849,20 @@ class QuestionDropsStore:
     async def upsert_active_drop(self, record: dict[str, Any]):
         await self._store.upsert_active_drop(record)
 
+    async def register_posted_drop(self, exposure_record: dict[str, Any], active_record: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
+        return await self._store.register_posted_drop(exposure_record, active_record)
+
+    async def update_active_drop_participants(self, guild_id: int, channel_id: int, participant_user_ids: list[int]):
+        await self._store.update_active_drop_participants(guild_id, channel_id, participant_user_ids)
+
     async def delete_active_drop(self, guild_id: int, channel_id: int):
         await self._store.delete_active_drop(guild_id, channel_id)
 
     async def insert_exposure(self, record: dict[str, Any]) -> dict[str, Any]:
         return await self._store.insert_exposure(record)
+
+    async def delete_exposure(self, exposure_id: int):
+        await self._store.delete_exposure(exposure_id)
 
     async def resolve_exposure(self, exposure_id: int, *, resolved_at: datetime, winner_user_id: int | None):
         await self._store.resolve_exposure(exposure_id, resolved_at=resolved_at, winner_user_id=winner_user_id)

@@ -1200,7 +1200,7 @@ def get_lobby_embed(guild_id):
             name="Only 16 Mode",
             value=(
                 f"**{str(game.get('only16_mode', 'strict')).title()}**\n"
-                "Strict counts only direct replies. Smart allows one tight follow-up window."
+                "Strict only judges direct replies. Smart can catch one clean first follow-up before chatter voids the trap."
             ),
             inline=False,
         )
@@ -2444,73 +2444,3 @@ async def handle_telephone_turn_locked(message, guild_id, game):
         )
 
 
-# ==========================================
-# ==========================================
-# HELP
-# ==========================================
-def build_help_embed() -> discord.Embed:
-    embed = discord.Embed(
-        title="Babblebox Manual",
-        description=(
-            "Babblebox has four clear pillars: Party Games, Everyday Utilities, Daily Arcade, and Buddy/Profile."
-        ),
-        color=discord.Color.gold(),
-    )
-    embed.add_field(
-        name="Party Games",
-        value=(
-            "`/play` or `bb!play` opens the lobby.\n"
-            "Broken Telephone and Exquisite Corpse need 3+ players.\n"
-            "Spyfall needs 3+ players and supports `/vote`.\n"
-            "Word Bomb needs 2+ players and supports bomb modes plus Chaos Cards."
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="Everyday Utilities",
-        value=(
-            "`/watch mentions`, `/watch replies`, and `/watch keyword ...` split your alerts cleanly.\n"
-            "`/later mark` to save your reading spot.\n"
-            "`/capture` for a private channel snapshot.\n"
-            "`/moment create`, `/moment from-reply`, or `/moment recent` make shareable cards.\n"
-            "`/remind set` for one-time reminders.\n"
-            "`/afk`, `/afkstatus`, `/afktimezone`, and `/afkschedule` cover away status, local clock scheduling, and recurring routines."
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="Daily Arcade",
-        value=(
-            "`/daily` opens today's three booths.\n"
-            "`/daily play <guess>` still defaults to Shuffle Booth.\n"
-            "`/daily play emoji <guess>` and `/daily play signal <guess>` open the other booths.\n"
-            "`/daily share` and `/daily leaderboard` are public-friendly by default."
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="Buddy And Profile",
-        value=(
-            "`/buddy` opens your companion card.\n"
-            "`/buddy rename`, `/buddy style`, and `/buddy stats` manage identity and progression.\n"
-            "`/profile` is showable by default, while `/vault` stays more personal.\n"
-            "Buddy, Daily Arcade, utilities, and multiplayer highlights all live in one compact product layer."
-        ),
-        inline=False,
-    )
-    embed.add_field(
-        name="If You Are Solo",
-        value="Babblebox is still useful when a lobby is not available. Try `/daily`, `/buddy`, `/profile`, `/moment recent`, `/remind`, or `/later`.",
-        inline=False,
-    )
-    embed.add_field(
-        name="Required Channel Permissions",
-        value=format_permission_list(PLAY_REQUIRED_PERMS),
-        inline=False,
-    )
-    embed.add_field(
-        name="DM Requirement",
-        value="Broken Telephone, Exquisite Corpse, Spyfall role messages, Watch alerts, Later markers, Capture, and DM reminders rely on open DMs.",
-        inline=False,
-    )
-    return style_embed(embed, footer="Babblebox Manual | Party Games + Utilities + Daily Arcade + Buddy/Profile")

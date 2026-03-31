@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import random
 import re
+from collections import defaultdict, deque
 from dataclasses import dataclass
 from typing import Any
 
@@ -16,10 +17,11 @@ PATTERN_HUNT_GUESS_LIMIT = 3
 PATTERN_HUNT_STRIKE_LIMIT = 3
 PATTERN_HUNT_PROMPT_TIMEOUT_SECONDS = 35
 PATTERN_HUNT_ANSWER_TIMEOUT_SECONDS = 30
+PATTERN_HUNT_RECENT_SIGNATURES = 6
 PATTERN_HUNT_RULE_FAMILIES = (
     "starts_with_letter",
     "ends_with_punctuation",
-    "contains_number",
+    "contains_digits",
     "contains_emoji",
     "contains_category_word",
     "forbid_letter",
@@ -27,14 +29,11 @@ PATTERN_HUNT_RULE_FAMILIES = (
     "word_count_range",
     "question_form",
     "same_initial_letter",
-    "exact_punctuation_count",
-    "char_length_range",
 )
 
 _WORD_RE = re.compile(r"[a-zA-Z']+")
-_PUNCT_RE = re.compile(r"[.!?,;:]")
 _EMOJI_RE = re.compile(r"[\U0001F300-\U0001FAFF\u2600-\u27BF]")
-_NUMBER_RE = re.compile(r"\d")
+_DIGIT_RE = re.compile(r"\d")
 _COLOR_WORDS = {"red", "blue", "green", "yellow", "orange", "purple", "black", "white"}
 _ANIMAL_WORDS = {"cat", "dog", "fox", "owl", "bear", "whale", "shark", "lion", "tiger", "rabbit"}
 _FOOD_WORDS = {"pizza", "taco", "apple", "bread", "soup", "burger", "noodle", "grape", "tea", "cookie"}
@@ -42,6 +41,18 @@ _CATEGORY_WORDS = {
     "color": _COLOR_WORDS,
     "animal": _ANIMAL_WORDS,
     "food": _FOOD_WORDS,
+}
+_FAMILY_LABELS = {
+    "starts_with_letter": "Starts With Letter",
+    "ends_with_punctuation": "Ends With Punctuation",
+    "contains_digits": "Contains Digits",
+    "contains_emoji": "Contains Emoji",
+    "contains_category_word": "Contains Category Word",
+    "forbid_letter": "Forbid Letter",
+    "exact_word_count": "Exact Word Count",
+    "word_count_range": "Word Count Range",
+    "question_form": "Question Form",
+    "same_initial_letter": "Same Initial Letter",
 }
 _SAMPLE_MESSAGES = (
     "Blue bears bake bread!",
@@ -51,7 +62,7 @@ _SAMPLE_MESSAGES = (
     "Taco time tonight!",
     "Can black cats cook?",
     "12 bold owls watch.",
-    "Sunny soup sings 🙂",
+    "Sunny soup sings!",
     "Purple pizza party!",
     "Do orange foxes yodel?",
     "Three tiny tigers?",
@@ -68,7 +79,7 @@ _SAMPLE_MESSAGES = (
     "Orange owls orbit.",
     "Do tacos taste terrific?",
     "Red roses rest.",
-    "Pizza pirates parade 🙂",
+    "Pizza pirates parade!",
     "Do foxes bring bread?",
     "Whispering wolves wait.",
     "8 green goblets gleam.",
@@ -77,13 +88,16 @@ _SAMPLE_MESSAGES = (
     "Bold blue balloons burst!",
     "Sharks share soup.",
     "Do purple bears bake?",
-    "Happy noodles hum 🙂",
+    "Happy noodles hum!",
     "10 tiny tacos tumble.",
     "Can red rabbits read?",
     "Bright birds bloom.",
     "Do cats carry cookies?",
     "Golden grapes grow.",
     "7 sleepy sharks smile.",
+)
+_RECENT_RULE_SIGNATURES: dict[int, deque[tuple[tuple[str, str], ...]]] = defaultdict(
+    lambda: deque(maxlen=PATTERN_HUNT_RECENT_SIGNATURES)
 )
 
 
@@ -101,14 +115,7 @@ def _words(text: str | None) -> list[str]:
     return [token.casefold() for token in _WORD_RE.findall(str(text or ""))]
 
 
-def _punctuation_count(text: str | None) -> int:
-    return len(_PUNCT_RE.findall(str(text or "")))
-
-
-def _matches_atom(atom: RuleAtom, text: str | None) -> bool:
-    raw = str(text or "")
-    lowered = _normalize_text(raw)
-    words = _words(raw)
+def _singularish_words(words: list[str]) -> list[str]:
     singularish = []
     for word in words:
         singularish.append(word)
@@ -116,13 +123,21 @@ def _matches_atom(atom: RuleAtom, text: str | None) -> bool:
             singularish.append(word[:-2])
         if word.endswith("s") and len(word) > 1:
             singularish.append(word[:-1])
+    return singularish
+
+
+def _matches_atom(atom: RuleAtom, text: str | None) -> bool:
+    raw = str(text or "")
+    lowered = _normalize_text(raw)
+    words = _words(raw)
+    singularish = _singularish_words(words)
     if atom.family == "starts_with_letter":
         first_letter = next((char.casefold() for char in raw if char.isalpha()), "")
         return first_letter == str(atom.value).casefold()
     if atom.family == "ends_with_punctuation":
         return raw.rstrip().endswith(str(atom.value))
-    if atom.family == "contains_number":
-        return _NUMBER_RE.search(raw) is not None
+    if atom.family == "contains_digits":
+        return _DIGIT_RE.search(raw) is not None
     if atom.family == "contains_emoji":
         return _EMOJI_RE.search(raw) is not None
     if atom.family == "contains_category_word":
@@ -139,11 +154,6 @@ def _matches_atom(atom: RuleAtom, text: str | None) -> bool:
     if atom.family == "same_initial_letter":
         initials = [word[0] for word in words if word]
         return len(initials) >= 2 and len(set(initials)) == 1
-    if atom.family == "exact_punctuation_count":
-        return _punctuation_count(raw) == int(atom.value)
-    if atom.family == "char_length_range":
-        minimum, maximum = atom.value
-        return minimum <= len(raw.strip()) <= maximum
     return False
 
 
@@ -153,13 +163,17 @@ def message_matches_rule(rule_atoms: list[RuleAtom], text: str | None) -> bool:
     return all(_matches_atom(atom, text) for atom in rule_atoms)
 
 
+def rule_family_label(family: str) -> str:
+    return _FAMILY_LABELS.get(family, family.replace("_", " ").title())
+
+
 def render_rule_atom(atom: RuleAtom) -> str:
     if atom.family == "starts_with_letter":
         return f"starts with `{atom.value}`"
     if atom.family == "ends_with_punctuation":
         return f"ends with `{atom.value}`"
-    if atom.family == "contains_number":
-        return "contains a number"
+    if atom.family == "contains_digits":
+        return "contains a digit (`0-9`)"
     if atom.family == "contains_emoji":
         return "contains an emoji"
     if atom.family == "contains_category_word":
@@ -174,10 +188,6 @@ def render_rule_atom(atom: RuleAtom) -> str:
         return "is phrased as a question"
     if atom.family == "same_initial_letter":
         return "uses words that all start with the same letter"
-    if atom.family == "exact_punctuation_count":
-        return f"contains exactly {atom.value} punctuation mark(s)"
-    if atom.family == "char_length_range":
-        return f"is {atom.value[0]}-{atom.value[1]} characters long"
     return atom.family
 
 
@@ -192,7 +202,7 @@ def parse_guess_atom(family: str | None, value: str | None) -> tuple[bool, RuleA
     if normalized_family not in PATTERN_HUNT_RULE_FAMILIES:
         return False, "Unknown rule family."
     raw_value = str(value or "").strip()
-    if normalized_family in {"contains_number", "contains_emoji", "question_form", "same_initial_letter"}:
+    if normalized_family in {"contains_digits", "contains_emoji", "question_form", "same_initial_letter"}:
         return True, RuleAtom(normalized_family)
     if normalized_family in {"starts_with_letter", "forbid_letter"}:
         if len(raw_value) != 1 or not raw_value.isalpha():
@@ -207,11 +217,11 @@ def parse_guess_atom(family: str | None, value: str | None) -> tuple[bool, RuleA
         if category not in _CATEGORY_WORDS:
             return False, "That rule needs `color`, `animal`, or `food`."
         return True, RuleAtom(normalized_family, category)
-    if normalized_family in {"exact_word_count", "exact_punctuation_count"}:
+    if normalized_family == "exact_word_count":
         if not raw_value.isdigit():
             return False, "That rule needs a whole number."
         return True, RuleAtom(normalized_family, int(raw_value))
-    if normalized_family in {"word_count_range", "char_length_range"}:
+    if normalized_family == "word_count_range":
         if "-" not in raw_value:
             return False, "That rule needs a range like `3-5`."
         left_text, right_text = [part.strip() for part in raw_value.split("-", 1)]
@@ -226,10 +236,7 @@ def parse_guess_atom(family: str | None, value: str | None) -> tuple[bool, RuleA
 
 
 def _rule_signature(rule_atoms: list[RuleAtom]) -> tuple[tuple[str, str], ...]:
-    parts = []
-    for atom in rule_atoms:
-        parts.append((atom.family, str(atom.value)))
-    return tuple(sorted(parts))
+    return tuple(sorted((atom.family, str(atom.value)) for atom in rule_atoms))
 
 
 def _compatible(existing: list[RuleAtom], candidate: RuleAtom) -> bool:
@@ -244,10 +251,6 @@ def _compatible(existing: list[RuleAtom], candidate: RuleAtom) -> bool:
             return False
         if candidate.family == "question_form" and atom.family == "ends_with_punctuation" and atom.value != "?":
             return False
-        if atom.family == "exact_punctuation_count" and candidate.family == "question_form" and atom.value == 0:
-            return False
-        if candidate.family == "exact_punctuation_count" and atom.family == "question_form" and candidate.value == 0:
-            return False
         if atom.family == "forbid_letter" and candidate.family == "starts_with_letter" and atom.value == candidate.value:
             return False
         if atom.family == "starts_with_letter" and candidate.family == "forbid_letter" and atom.value == candidate.value:
@@ -256,43 +259,59 @@ def _compatible(existing: list[RuleAtom], candidate: RuleAtom) -> bool:
 
 
 def _atom_candidates(rng: random.Random) -> list[RuleAtom]:
-    return [
-        RuleAtom("starts_with_letter", rng.choice(("b", "c", "g", "p", "t"))),
-        RuleAtom("ends_with_punctuation", rng.choice(("?", "!", "."))),
-        RuleAtom("contains_number"),
-        RuleAtom("contains_emoji"),
-        RuleAtom("contains_category_word", rng.choice(("color", "animal", "food"))),
-        RuleAtom("forbid_letter", rng.choice(("a", "e", "i", "o", "u"))),
-        RuleAtom("exact_word_count", rng.choice((2, 3, 4, 5))),
-        RuleAtom("word_count_range", rng.choice(((2, 3), (3, 4), (3, 5)))),
-        RuleAtom("question_form"),
-        RuleAtom("same_initial_letter"),
-        RuleAtom("exact_punctuation_count", rng.choice((0, 1, 2))),
-        RuleAtom("char_length_range", rng.choice(((10, 18), (12, 22), (14, 26)))),
+    weighted_candidates: list[tuple[int, RuleAtom]] = [
+        (3, RuleAtom("contains_category_word", rng.choice(("color", "animal", "food")))),
+        (3, RuleAtom("question_form")),
+        (3, RuleAtom("contains_digits")),
+        (3, RuleAtom("same_initial_letter")),
+        (2, RuleAtom("exact_word_count", rng.choice((2, 3, 4, 5)))),
+        (2, RuleAtom("word_count_range", rng.choice(((2, 3), (3, 4), (3, 5))))),
+        (2, RuleAtom("starts_with_letter", rng.choice(("b", "c", "g", "p", "t")))),
+        (2, RuleAtom("forbid_letter", rng.choice(("a", "e", "i", "o", "u")))),
+        (2, RuleAtom("ends_with_punctuation", rng.choice(("?", "!", ".")))),
+        (1, RuleAtom("contains_emoji")),
     ]
+    expanded = [atom for weight, atom in weighted_candidates for _ in range(weight)]
+    rng.shuffle(expanded)
+    return expanded
 
 
-def select_rule_bundle(seed_value: int) -> tuple[list[RuleAtom], list[str], str]:
+def select_rule_bundle(
+    seed_value: int,
+    *,
+    recent_signatures: set[tuple[tuple[str, str], ...]] | None = None,
+) -> tuple[list[RuleAtom], list[str], str]:
+    recent_signatures = recent_signatures or set()
     rng = random.Random(seed_value)
-    for _ in range(200):
-        atom_count = rng.choices((1, 2, 3), weights=(2, 5, 3))[0]
+    fallback: tuple[list[RuleAtom], list[str], str] | None = None
+    for _ in range(300):
+        atom_count = rng.choices((1, 2, 3), weights=(3, 5, 2))[0]
         atoms: list[RuleAtom] = []
-        candidates = _atom_candidates(rng)
-        rng.shuffle(candidates)
-        for candidate in candidates:
+        for candidate in _atom_candidates(rng):
             if _compatible(atoms, candidate):
                 atoms.append(candidate)
             if len(atoms) >= atom_count:
                 break
         if len(atoms) != atom_count:
             continue
+        signature = _rule_signature(atoms)
         valid_examples = [sample for sample in _SAMPLE_MESSAGES if message_matches_rule(atoms, sample)]
         invalid_examples = [sample for sample in _SAMPLE_MESSAGES if not message_matches_rule(atoms, sample)]
-        if len(valid_examples) >= 2 and invalid_examples:
-            rng.shuffle(valid_examples)
-            return atoms, valid_examples[:2], invalid_examples[0]
-    fallback = [RuleAtom("contains_number")]
-    return fallback, [sample for sample in _SAMPLE_MESSAGES if _NUMBER_RE.search(sample)][:2], "Blue bears bake bread!"
+        if len(valid_examples) < 2 or not invalid_examples:
+            continue
+        rng.shuffle(valid_examples)
+        rng.shuffle(invalid_examples)
+        candidate_bundle = (atoms, valid_examples[:2], invalid_examples[0])
+        if fallback is None:
+            fallback = candidate_bundle
+        if signature in recent_signatures:
+            continue
+        return candidate_bundle
+    if fallback is not None:
+        return fallback
+    fallback_atoms = [RuleAtom("contains_digits")]
+    fallback_valid = [sample for sample in _SAMPLE_MESSAGES if _DIGIT_RE.search(sample)][:2]
+    return fallback_atoms, fallback_valid, "Blue bears bake bread!"
 
 
 def ensure_pattern_hunt_state(game: dict[str, Any]) -> dict[str, Any]:
@@ -316,29 +335,33 @@ async def start_pattern_hunt_game_locked(guild_id: int, game: dict[str, Any]):
         )
         await ge.cleanup_game(guild_id)
         return
-    seed_value = sum(player.id for player in players) + len(players) * 31
-    guesser = random.choice(players)
+    secure_rng = random.SystemRandom()
+    guesser = secure_rng.choice(players)
     coders = [player for player in players if player.id != guesser.id]
-    rule_atoms, valid_examples, invalid_example = select_rule_bundle(seed_value)
+    recent_signatures = set(_RECENT_RULE_SIGNATURES[guild_id])
+    seed_value = secure_rng.randrange(1, 1_000_000_000)
+    rule_atoms, valid_examples, invalid_example = select_rule_bundle(seed_value, recent_signatures=recent_signatures)
+    _RECENT_RULE_SIGNATURES[guild_id].append(_rule_signature(rule_atoms))
     for coder in coders:
         try:
             await coder.send(
                 embed=ge.make_status_embed(
                     "Pattern Hunt Rule",
                     (
-                        f"Secret rule: **{render_rule(rule_atoms)}**\n"
-                        f"Valid examples:\n- {valid_examples[0]}\n- {valid_examples[1]}\n"
-                        f"Invalid example:\n- {invalid_example}"
+                        f"Keep this hidden: **{render_rule(rule_atoms)}**\n"
+                        f"Fits:\n- {valid_examples[0]}\n- {valid_examples[1]}\n"
+                        f"Does not fit:\n- {invalid_example}\n"
+                        "Answer the guesser cleanly. If Babblebox rejects a clue, retry without explaining why."
                     ),
                     tone="accent",
-                    footer="Babblebox Pattern Hunt | Keep it hidden from the guesser",
+                    footer="Babblebox Pattern Hunt | The guesser never sees this DM",
                 )
             )
         except Exception:
             await game["channel"].send(
                 embed=ge.make_status_embed(
                     "DM Failure",
-                    f"I couldn't DM {coder.mention}, so Pattern Hunt was cancelled before the secret rule leaked unevenly.",
+                    f"I could not DM {coder.mention}, so Pattern Hunt was cancelled before the hidden rule got lopsided.",
                     tone="danger",
                     footer="Babblebox Pattern Hunt",
                 ),
@@ -378,7 +401,7 @@ def build_pattern_hunt_status_embed(game: dict[str, Any], *, public: bool, title
     state = ensure_pattern_hunt_state(game)
     guesser = ge.get_snapshot_player(game, state.get("guesser_id"))
     coder = ge.get_snapshot_player(game, current_pattern_hunt_coder_id(game))
-    description = "The guesser asks a prompt, the current coder answers, and the hidden rule stays private."
+    description = "The guesser asks for clues, coders answer in public, and the hidden rule stays private."
     if public and state.get("hint_text"):
         description += f"\nHint: {state['hint_text']}"
     embed = discord.Embed(title=title, description=description, color=discord.Color.dark_teal())
@@ -427,7 +450,7 @@ async def handle_pattern_hunt_message_locked(message: discord.Message, guild_id:
         await game["channel"].send(
             embed=ge.make_status_embed(
                 "Coder Turn",
-                f"{coder.mention if coder is not None else 'Coder'}, answer once without exposing the rule.",
+                f"{coder.mention if coder is not None else 'Coder'}, answer once without explaining the rule.",
                 tone="accent",
                 footer="Babblebox Pattern Hunt",
             ),
@@ -448,7 +471,7 @@ async def handle_pattern_hunt_message_locked(message: discord.Message, guild_id:
         await game["channel"].send(
             embed=ge.make_status_embed(
                 "Accepted",
-                f"{message.author.mention}'s answer is locked in.",
+                f"{message.author.mention}'s clue is locked in.",
                 tone="success",
                 footer="Babblebox Pattern Hunt",
             ),
@@ -461,14 +484,14 @@ async def handle_pattern_hunt_message_locked(message: discord.Message, guild_id:
         await game["channel"].send(
             embed=ge.make_status_embed(
                 "Try Again",
-                f"{message.author.mention}, that answer doesn't fit. Retry once without explaining the rule.",
+                f"{message.author.mention}, that clue does not fit. Retry once without explaining why.",
                 tone="warning",
                 footer="Babblebox Pattern Hunt",
             ),
             allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
         )
         return True
-    await _apply_pattern_strike_locked(guild_id, game, reason=f"{message.author.mention} broke the hidden rule twice in the same turn.")
+    await _apply_pattern_strike_locked(guild_id, game, reason=f"{message.author.mention} missed the rule twice in the same turn.")
     return True
 
 
@@ -509,7 +532,7 @@ async def _begin_pattern_turn_locked(guild_id: int, game: dict[str, Any]):
     await game["channel"].send(
         embed=ge.make_status_embed(
             "Prompt Phase",
-            f"{guesser.mention if guesser else 'Guesser'}, ask a prompt. {coder.mention if coder else 'Coder'} will answer next.",
+            f"{guesser.mention if guesser else 'Guesser'}, ask for a clue. {coder.mention if coder else 'Coder'} answers next.",
             tone="accent",
             footer="Babblebox Pattern Hunt",
         ),
@@ -523,7 +546,7 @@ async def _advance_pattern_turn_locked(guild_id: int, game: dict[str, Any]):
     state = ensure_pattern_hunt_state(game)
     state["turns_used"] = int(state.get("turns_used", 0) or 0) + 1
     if int(state.get("turns_used", 0)) >= int(state.get("turn_limit", 0)):
-        await _finish_pattern_hunt_locked(guild_id, game, guesser_won=False, reason="The coders survived the full turn budget.")
+        await _finish_pattern_hunt_locked(guild_id, game, guesser_won=False, reason="The coders survived the full clue budget.")
         return
     coder_order = state.get("coder_order", [])
     if coder_order:
@@ -537,7 +560,9 @@ async def _apply_pattern_strike_locked(guild_id: int, game: dict[str, Any], *, r
     if not state.get("hint_revealed") and int(state.get("strikes", 0)) >= 1:
         first_family = state["rule_atoms"][0].family if state.get("rule_atoms") else "unknown"
         state["hint_revealed"] = True
-        state["hint_text"] = f"The rule uses **{len(state.get('rule_atoms', []))}** atom(s), and one family is **{first_family.replace('_', ' ')}**."
+        state["hint_text"] = (
+            f"The rule uses **{len(state.get('rule_atoms', []))}** part(s), and one family is **{rule_family_label(first_family)}**."
+        )
     await game["channel"].send(
         embed=ge.make_status_embed(
             "Team Strike",
@@ -548,7 +573,7 @@ async def _apply_pattern_strike_locked(guild_id: int, game: dict[str, Any], *, r
         allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
     )
     if int(state.get("strikes", 0)) >= int(state.get("strike_limit", 3)):
-        await _finish_pattern_hunt_locked(guild_id, game, guesser_won=True, reason="The coders cracked under the rule pressure and hit the strike limit.")
+        await _finish_pattern_hunt_locked(guild_id, game, guesser_won=True, reason="The coders hit the strike limit and the guesser takes it.")
         return
     await _advance_pattern_turn_locked(guild_id, game)
 
@@ -588,7 +613,7 @@ async def _pattern_hunt_prompt_timeout(guild_id: int, token: int):
             return
         if game.get("turn_token") != token:
             return
-        await _apply_pattern_strike_locked(guild_id, game, reason="The guesser ran out of time to ask a prompt.")
+        await _apply_pattern_strike_locked(guild_id, game, reason="The guesser ran out of time to ask for a clue.")
 
 
 async def _pattern_hunt_answer_timeout(guild_id: int, token: int):

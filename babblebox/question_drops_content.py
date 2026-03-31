@@ -35,7 +35,8 @@ FALSE_ALIASES = {"false", "f", "no", "n", "incorrect"}
 
 _PUNCT_RE = re.compile(r"[^\w\s#&+\-]")
 _SPACE_RE = re.compile(r"\s+")
-_NUMBER_RE = re.compile(r"[-+]?\d+(?:\.\d+)?")
+_NUMERIC_TOKEN_RE = re.compile(r"(?<![\w/])[-+]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?![\w/])")
+_CHOICE_LETTER_RE = re.compile(r"^\s*(?:option|answer)?\s*\(?([a-z])\)?(?:[\)\].:\-])?(?:\s+(.*))?\s*$", re.IGNORECASE)
 
 
 @dataclass(frozen=True)
@@ -55,6 +56,7 @@ class QuestionDropVariant:
 def normalize_answer_text(raw: str | None) -> str:
     text = str(raw or "").casefold().strip()
     text = text.replace("’", "'")
+    text = text.replace("“", '"').replace("”", '"')
     text = _PUNCT_RE.sub(" ", text)
     text = _SPACE_RE.sub(" ", text)
     return text.strip()
@@ -67,17 +69,43 @@ def _normalize_token_sequence(raw: str | None) -> tuple[str, ...]:
     return tuple(token for token in cleaned.split(" ") if token)
 
 
-def extract_first_number(raw: str | None) -> float | None:
+def extract_single_number(raw: str | None) -> float | None:
     cleaned = str(raw or "").strip()
     if not cleaned:
         return None
-    match = _NUMBER_RE.search(cleaned.replace(",", ""))
-    if match is None:
+    matches = list(_NUMERIC_TOKEN_RE.finditer(cleaned))
+    if len(matches) != 1:
         return None
     try:
-        return float(match.group(0))
+        return float(matches[0].group(0).replace(",", ""))
     except ValueError:
         return None
+
+
+def _correct_choice_letter(answer_spec: dict[str, Any]) -> str | None:
+    choices = [normalize_answer_text(choice) for choice in answer_spec.get("choices", []) if isinstance(choice, str)]
+    answer = normalize_answer_text(answer_spec.get("answer"))
+    if not choices or not answer:
+        return None
+    try:
+        index = choices.index(answer)
+    except ValueError:
+        return None
+    if index >= 26:
+        return None
+    return chr(ord("a") + index)
+
+
+def _parse_choice_letter(raw_answer: str | None, answer_spec: dict[str, Any]) -> str | None:
+    match = _CHOICE_LETTER_RE.match(str(raw_answer or ""))
+    if match is None:
+        return None
+    letter = str(match.group(1) or "").casefold()
+    trailing = normalize_answer_text(match.group(2) or "")
+    choices = [normalize_answer_text(choice) for choice in answer_spec.get("choices", []) if isinstance(choice, str)]
+    if trailing and trailing not in choices:
+        return None
+    return letter or None
 
 
 def validate_answer_spec(spec: dict[str, Any]) -> tuple[bool, str | None]:
@@ -100,10 +128,14 @@ def validate_answer_spec(spec: dict[str, Any]) -> tuple[bool, str | None]:
     if answer_type == "multiple_choice":
         choices = spec.get("choices")
         answer = spec.get("answer")
-        if not isinstance(choices, list) or len(choices) < 2:
-            return False, "Multiple-choice answers need at least two options."
-        if not isinstance(answer, str) or normalize_answer_text(answer) == "":
+        normalized_choices = [normalize_answer_text(choice) for choice in choices] if isinstance(choices, list) else []
+        normalized_answer = normalize_answer_text(answer) if isinstance(answer, str) else ""
+        if len(normalized_choices) < 2 or not all(normalized_choices):
+            return False, "Multiple-choice answers need at least two non-empty options."
+        if not normalized_answer:
             return False, "Multiple-choice answers need a correct option."
+        if normalized_answer not in normalized_choices:
+            return False, "Multiple-choice answers need the correct option to match one of the choices."
         return True, None
     if answer_type == "ordered_tokens":
         tokens = spec.get("tokens")
@@ -122,7 +154,7 @@ def judge_answer(answer_spec: dict[str, Any], raw_answer: str | None) -> bool:
         accepted = {normalize_answer_text(item) for item in answer_spec.get("accepted", []) if isinstance(item, str)}
         return bool(candidate) and candidate in accepted
     if answer_type == "numeric":
-        candidate = extract_first_number(raw_answer)
+        candidate = extract_single_number(raw_answer)
         if candidate is None:
             return False
         expected = float(answer_spec["value"])
@@ -137,7 +169,12 @@ def judge_answer(answer_spec: dict[str, Any], raw_answer: str | None) -> bool:
     if answer_type == "multiple_choice":
         candidate = normalize_answer_text(raw_answer)
         answer = normalize_answer_text(answer_spec.get("answer"))
-        return bool(candidate) and candidate == answer
+        if candidate and candidate == answer:
+            return True
+        correct_letter = _correct_choice_letter(answer_spec)
+        if correct_letter is None:
+            return False
+        return _parse_choice_letter(raw_answer, answer_spec) == correct_letter
     if answer_type == "ordered_tokens":
         candidate_tokens = _normalize_token_sequence(raw_answer)
         expected_tokens = tuple(normalize_answer_text(token) for token in answer_spec.get("tokens", []))
@@ -158,7 +195,9 @@ def render_answer_summary(answer_spec: dict[str, Any]) -> str:
     if answer_type == "boolean":
         return "true" if answer_spec.get("value") else "false"
     if answer_type == "multiple_choice":
-        return str(answer_spec.get("answer") or "unknown")
+        letter = _correct_choice_letter(answer_spec)
+        answer = str(answer_spec.get("answer") or "unknown")
+        return f"{letter.upper()}) {answer}" if letter is not None else answer
     if answer_type == "ordered_tokens":
         return " ".join(str(token) for token in answer_spec.get("tokens", [])) or "unknown"
     return "unknown"
@@ -190,10 +229,12 @@ def _make_rng(seed_material: str) -> random.Random:
 
 
 def _static_variant(seed: dict[str, Any], *, seed_material: str, variant_index: int) -> QuestionDropVariant:
-    variants = seed["variants"]
-    rng = _make_rng(f"{seed_material}:{seed['concept_id']}:{variant_index}")
-    payload = variants[rng.randrange(len(variants))]
-    variant_hash = build_variant_hash(seed["concept_id"], payload["prompt"], str(variant_index))
+    variants = list(seed["variants"])
+    rotation_rng = _make_rng(f"{seed_material}:{seed['concept_id']}:rotation")
+    rotation = rotation_rng.randrange(len(variants)) if variants else 0
+    payload_index = (rotation + variant_index) % len(variants)
+    payload = variants[payload_index]
+    variant_hash = build_variant_hash(seed["concept_id"], payload["prompt"], str(payload_index))
     return QuestionDropVariant(
         concept_id=seed["concept_id"],
         category=seed["category"],
@@ -231,7 +272,7 @@ def _math_multiplication(seed: dict[str, Any], *, seed_material: str, variant_in
     rng = _make_rng(f"{seed_material}:{seed['concept_id']}:{variant_index}")
     left = rng.randint(6, 12)
     right = rng.randint(4, 9)
-    prompt = f"What is {left} × {right}?"
+    prompt = f"What is {left} * {right}?"
     answer = left * right
     return QuestionDropVariant(
         concept_id=seed["concept_id"],
@@ -281,6 +322,8 @@ def _language_anagram(seed: dict[str, Any], *, seed_material: str, variant_index
             ("alter", "later"),
             ("earth", "heart"),
             ("stare", "tears"),
+            ("thing", "night"),
+            ("save", "vase"),
         )
     )
     prompt = f"Unscramble this word: **{payload[0]}**"
@@ -330,6 +373,17 @@ QUESTION_DROP_SEEDS: tuple[dict[str, Any], ...] = (
         ),
     },
     {
+        "concept_id": "science:plants-gas",
+        "category": "science",
+        "difficulty": 2,
+        "source_type": "curated",
+        "generator_type": "static_pack",
+        "variants": (
+            {"prompt": "Which gas do plants absorb during photosynthesis?", "answer_spec": {"type": "text", "accepted": ["carbon dioxide", "co2"]}},
+            {"prompt": "Plants pull in which gas during photosynthesis?", "answer_spec": {"type": "text", "accepted": ["carbon dioxide", "co2"]}},
+        ),
+    },
+    {
         "concept_id": "history:moon-landing-year",
         "category": "history",
         "difficulty": 2,
@@ -349,6 +403,17 @@ QUESTION_DROP_SEEDS: tuple[dict[str, Any], ...] = (
         "variants": (
             {"prompt": "What year did the Berlin Wall fall?", "answer_spec": {"type": "numeric", "value": 1989}},
             {"prompt": "In which year was the Berlin Wall opened and effectively brought down?", "answer_spec": {"type": "numeric", "value": 1989}},
+        ),
+    },
+    {
+        "concept_id": "history:first-us-president",
+        "category": "history",
+        "difficulty": 1,
+        "source_type": "curated",
+        "generator_type": "static_pack",
+        "variants": (
+            {"prompt": "Who was the first president of the United States?", "answer_spec": {"type": "text", "accepted": ["george washington", "washington"]}},
+            {"prompt": "Name the first U.S. president.", "answer_spec": {"type": "text", "accepted": ["george washington", "washington"]}},
         ),
     },
     {
@@ -374,6 +439,17 @@ QUESTION_DROP_SEEDS: tuple[dict[str, Any], ...] = (
         ),
     },
     {
+        "concept_id": "geography:largest-ocean",
+        "category": "geography",
+        "difficulty": 2,
+        "source_type": "curated",
+        "generator_type": "static_pack",
+        "variants": (
+            {"prompt": "What is the largest ocean on Earth?", "answer_spec": {"type": "text", "accepted": ["pacific", "pacific ocean"]}},
+            {"prompt": "Name Earth's largest ocean.", "answer_spec": {"type": "text", "accepted": ["pacific", "pacific ocean"]}},
+        ),
+    },
+    {
         "concept_id": "language:oxford-comma-boolean",
         "category": "language",
         "difficulty": 2,
@@ -381,6 +457,7 @@ QUESTION_DROP_SEEDS: tuple[dict[str, Any], ...] = (
         "generator_type": "static_pack",
         "variants": (
             {"prompt": "True or false: an Oxford comma appears before the final item in a list.", "answer_spec": {"type": "boolean", "value": True}},
+            {"prompt": "True or false: the Oxford comma is the comma placed before the last item in a list of three or more.", "answer_spec": {"type": "boolean", "value": True}},
         ),
     },
     {
@@ -391,6 +468,7 @@ QUESTION_DROP_SEEDS: tuple[dict[str, Any], ...] = (
         "generator_type": "static_pack",
         "variants": (
             {"prompt": "What is the plural of 'cactus' in common English usage?", "answer_spec": {"type": "text", "accepted": ["cacti", "cactuses"]}},
+            {"prompt": "Give a common English plural for 'cactus'.", "answer_spec": {"type": "text", "accepted": ["cacti", "cactuses"]}},
         ),
     },
     {
@@ -410,6 +488,10 @@ QUESTION_DROP_SEEDS: tuple[dict[str, Any], ...] = (
         "variants": (
             {
                 "prompt": "Multiple choice: which color usually means 'go' on a traffic light? A) red B) yellow C) green",
+                "answer_spec": {"type": "multiple_choice", "choices": ["red", "yellow", "green"], "answer": "green"},
+            },
+            {
+                "prompt": "Which traffic-light option usually means 'go'? A) red B) yellow C) green",
                 "answer_spec": {"type": "multiple_choice", "choices": ["red", "yellow", "green"], "answer": "green"},
             },
         ),
@@ -438,6 +520,7 @@ QUESTION_DROP_SEEDS: tuple[dict[str, Any], ...] = (
         "generator_type": "static_pack",
         "variants": (
             {"prompt": "Which chess piece can move in an L shape?", "answer_spec": {"type": "text", "accepted": ["knight", "the knight"]}},
+            {"prompt": "Name the chess piece that moves in an L shape.", "answer_spec": {"type": "text", "accepted": ["knight", "the knight"]}},
         ),
     },
     {
@@ -451,6 +534,21 @@ QUESTION_DROP_SEEDS: tuple[dict[str, Any], ...] = (
                 "prompt": "Put these additive primary colors in order from shortest answer length to longest: blue, red, green",
                 "answer_spec": {"type": "ordered_tokens", "tokens": ["red", "blue", "green"]},
             },
+            {
+                "prompt": "Order these additive primary colors from the shortest word to the longest: blue, red, green",
+                "answer_spec": {"type": "ordered_tokens", "tokens": ["red", "blue", "green"]},
+            },
+        ),
+    },
+    {
+        "concept_id": "culture:piano-keys",
+        "category": "culture",
+        "difficulty": 1,
+        "source_type": "curated",
+        "generator_type": "static_pack",
+        "variants": (
+            {"prompt": "How many keys does a standard piano have?", "answer_spec": {"type": "numeric", "value": 88}},
+            {"prompt": "A standard piano has how many keys?", "answer_spec": {"type": "numeric", "value": 88}},
         ),
     },
     {
@@ -462,6 +560,12 @@ QUESTION_DROP_SEEDS: tuple[dict[str, Any], ...] = (
         "variants": (),
     },
 )
+
+QUESTION_DROP_SEED_BY_CONCEPT_ID = {seed["concept_id"]: seed for seed in QUESTION_DROP_SEEDS}
+
+
+def question_drop_seed_for_concept(concept_id: str | None) -> dict[str, Any] | None:
+    return QUESTION_DROP_SEED_BY_CONCEPT_ID.get(str(concept_id or ""))
 
 
 def validate_content_pack(seeds: tuple[dict[str, Any], ...] | None = None) -> tuple[bool, str | None]:
@@ -509,13 +613,17 @@ def iter_candidate_variants(
     *,
     categories: set[str] | None = None,
     seed_material: str,
-    variants_per_seed: int = 2,
+    variants_per_seed: int = 6,
 ) -> list[QuestionDropVariant]:
     allowed_categories = categories or set(QUESTION_DROP_CATEGORIES)
     variants: list[QuestionDropVariant] = []
     for seed in QUESTION_DROP_SEEDS:
         if seed["category"] not in allowed_categories:
             continue
-        for variant_index in range(max(1, int(variants_per_seed))):
+        if seed["generator_type"] == "static_pack":
+            count = len(seed["variants"])
+        else:
+            count = max(1, int(variants_per_seed))
+        for variant_index in range(count):
             variants.append(build_variant(seed, seed_material=seed_material, variant_index=variant_index))
     return variants

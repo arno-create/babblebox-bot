@@ -24,6 +24,7 @@ from babblebox.question_drops_content import (
     iter_candidate_variants,
     judge_answer,
     normalize_answer_text,
+    question_drop_seed_for_concept,
     render_answer_summary,
     validate_content_pack,
 )
@@ -37,13 +38,17 @@ from babblebox.question_drops_store import (
 from babblebox.utility_helpers import canonicalize_afk_timezone, load_afk_timezone
 
 
-QUESTION_DROP_CONCEPT_COOLDOWN_DAYS = 5
-QUESTION_DROP_VARIANT_COOLDOWN_DAYS = 14
+QUESTION_DROP_CONCEPT_COOLDOWN_DAYS = 4
+QUESTION_DROP_STATIC_VARIANT_COOLDOWN_DAYS = 10
+QUESTION_DROP_GENERATED_CONCEPT_COOLDOWN_DAYS = 1
+QUESTION_DROP_GENERATED_VARIANT_COOLDOWN_DAYS = 2
 QUESTION_DROP_EXPOSURE_RETENTION_DAYS = 90
 QUESTION_DROP_ACTIVITY_WINDOW_SECONDS = 90 * 60
 QUESTION_DROP_SLOT_GRACE_SECONDS = 45 * 60
 QUESTION_DROP_SCHEDULER_INTERVAL_SECONDS = 45.0
 QUESTION_DROP_WRONG_FEEDBACK_GLOBAL_LIMIT = 2
+QUESTION_DROP_PRUNE_INTERVAL_SECONDS = 6 * 60 * 60
+QUESTION_DROP_EXPOSURE_FETCH_LIMIT = 220
 
 
 def _config_signature(config: dict[str, Any]) -> str:
@@ -143,6 +148,7 @@ class QuestionDropsService:
         self._wrong_feedback_users: dict[int, set[int]] = defaultdict(set)
         self._wrong_feedback_count: dict[int, int] = defaultdict(int)
         self._attempted_users: dict[int, set[int]] = defaultdict(set)
+        self._next_prune_at: datetime | None = None
 
     async def start(self) -> bool:
         valid, message = validate_content_pack()
@@ -166,17 +172,8 @@ class QuestionDropsService:
         self.storage_ready = True
         self.storage_error = None
         self._configs = await self.store.fetch_all_configs()
-        active_rows = await self.store.list_active_drops()
-        self._active_drops = {
-            (record["guild_id"], record["channel_id"]): record
-            for record in active_rows
-            if self._active_drop_is_live(record, now=ge.now_utc())
-        }
-        for record in self._active_drops.values():
-            exposure_id = int(record["exposure_id"])
-            self._wrong_feedback_users.setdefault(exposure_id, set())
-            self._wrong_feedback_count.setdefault(exposure_id, 0)
-            self._attempted_users.setdefault(exposure_id, set())
+        self._next_prune_at = ge.now_utc()
+        await self._restore_active_rows(await self.store.list_active_drops())
         self._scheduler_task = asyncio.create_task(self._scheduler_loop(), name="babblebox-question-drops-scheduler")
         self._wake_event.set()
         return True
@@ -187,6 +184,41 @@ class QuestionDropsService:
             with contextlib.suppress(asyncio.CancelledError):
                 await self._scheduler_task
         await self.store.close()
+
+    async def _restore_active_rows(self, active_rows: list[dict[str, Any]]):
+        now = ge.now_utc()
+        self._active_drops = {}
+        for record in active_rows:
+            if not self._active_drop_is_live(record, now=now):
+                await self._expire_drop(record, timed_out=True, announce=False)
+                continue
+            if not await self._message_still_exists(record):
+                await self._expire_drop(record, timed_out=False, announce=False)
+                continue
+            self._active_drops[(record["guild_id"], record["channel_id"])] = record
+            exposure_id = int(record["exposure_id"])
+            self._wrong_feedback_users.setdefault(exposure_id, set())
+            self._wrong_feedback_count.setdefault(exposure_id, 0)
+            self._attempted_users[exposure_id] = set(record.get("participant_user_ids", []) or [])
+
+    async def _message_still_exists(self, record: dict[str, Any]) -> bool:
+        channel = self.bot.get_channel(record["channel_id"]) if hasattr(self.bot, "get_channel") else None
+        if channel is None:
+            return True
+        fetch_message = getattr(channel, "fetch_message", None)
+        if fetch_message is None or not callable(fetch_message):
+            return True
+        try:
+            await fetch_message(int(record["message_id"]))
+        except discord.NotFound:
+            return False
+        except discord.HTTPException:
+            return True
+        return True
+
+    def has_live_drop(self, guild_id: int, channel_id: int) -> bool:
+        record = self._active_drops.get((guild_id, channel_id))
+        return record is not None and self._active_drop_is_live(record, now=ge.now_utc())
 
     def storage_message(self, feature_name: str = "Question Drops") -> str:
         return f"{feature_name} are temporarily unavailable because Babblebox could not reach the Question Drops database."
@@ -331,7 +363,7 @@ class QuestionDropsService:
         config = snapshot.config
         enabled_categories = config.get("enabled_categories") or list(QUESTION_DROP_CATEGORIES)
         enabled_category_labels = [QUESTION_DROP_CATEGORY_LABELS.get(category, category.title()) for category in enabled_categories]
-        description = "Compact scheduled prompts with offline content and a strict anti-repeat selector."
+        description = "Compact scheduled prompts with offline content, cautious repeat control, and same-channel conflict blocking."
         if not config.get("enabled"):
             description = "Question Drops are currently disabled for this server."
         embed = discord.Embed(
@@ -379,7 +411,7 @@ class QuestionDropsService:
                 value=f"{ge.format_timestamp(snapshot.next_slot_at, 'R')} ({ge.format_timestamp(snapshot.next_slot_at, 'f')})",
                 inline=False,
             )
-        return ge.style_embed(embed, footer="Babblebox Question Drops | Compact, offline, anti-repeat")
+        return ge.style_embed(embed, footer="Babblebox Question Drops | Compact, offline, channel-safe")
 
     def build_stats_embed(self, user: discord.abc.User, summary: dict[str, Any]) -> discord.Embed:
         profile = summary["profile"]
@@ -396,7 +428,7 @@ class QuestionDropsService:
             name="Overall",
             value=(
                 f"Points: **{int(profile.get('question_drop_points', 0) or 0)}**\n"
-                f"Correct: **{correct} / {attempts}**\n"
+                f"Solves: **{correct} / {attempts} participations**\n"
                 f"Accuracy: **{accuracy:.0f}%**"
             ),
             inline=True,
@@ -437,67 +469,95 @@ class QuestionDropsService:
         answer_text = normalize_answer_text(message.content)
         if not answer_text:
             return False
-        exposure_id = int(active["exposure_id"])
-        profile_service = getattr(self.bot, "profile_service", None)
+        result_payload: dict[str, Any] | None = None
+        feedback_line: str | None = None
         async with self._lock:
             current = self._active_drops.get((message.guild.id, message.channel.id))
             if current is None or int(current["message_id"]) != int(active["message_id"]):
                 return False
+            exposure_id = int(current["exposure_id"])
+            participants = self._attempted_users.setdefault(exposure_id, set(current.get("participant_user_ids", []) or []))
+            first_attempt = message.author.id not in participants
+            if first_attempt:
+                participants.add(message.author.id)
+                await self.store.update_active_drop_participants(current["guild_id"], current["channel_id"], sorted(participants))
+                current["participant_user_ids"] = sorted(participants)
             if judge_answer(current["answer_spec"], message.content):
+                participant_ids = sorted(participants | {message.author.id})
                 await self.store.resolve_exposure(exposure_id, resolved_at=now, winner_user_id=message.author.id)
                 await self.store.delete_active_drop(current["guild_id"], current["channel_id"])
                 self._active_drops.pop((current["guild_id"], current["channel_id"]), None)
                 self._wrong_feedback_users.pop(exposure_id, None)
                 self._wrong_feedback_count.pop(exposure_id, None)
                 self._attempted_users.pop(exposure_id, None)
-                if profile_service is not None and getattr(profile_service, "storage_ready", False):
-                    await profile_service.record_question_drop_result(
-                        message.author.id,
-                        category=current["category"],
-                        correct=True,
-                        points=answer_points_for_difficulty(int(current["difficulty"])),
-                    )
-                with contextlib.suppress(discord.HTTPException):
-                    await message.channel.send(
-                        embed=ge.make_status_embed(
-                            "Correct",
-                            f"{message.author.mention} solved the drop and earned **{answer_points_for_difficulty(int(current['difficulty']))}** points.",
-                            tone="success",
-                            footer=f"Babblebox Question Drops | {QUESTION_DROP_CATEGORY_LABELS.get(current['category'], current['category'].title())}",
-                        ),
-                        allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
-                    )
-                return True
-            first_attempt = message.author.id not in self._attempted_users[exposure_id]
-            if first_attempt:
-                self._attempted_users[exposure_id].add(message.author.id)
-                if profile_service is not None and getattr(profile_service, "storage_ready", False):
-                    await profile_service.record_question_drop_result(
-                        message.author.id,
-                        category=current["category"],
-                        correct=False,
-                        points=0,
-                    )
-            if (
+                result_payload = {
+                    "category": current["category"],
+                    "difficulty": int(current["difficulty"]),
+                    "participant_ids": participant_ids,
+                    "winner_user_id": message.author.id,
+                }
+            elif (
                 message.author.id not in self._wrong_feedback_users[exposure_id]
                 and self._wrong_feedback_count[exposure_id] < QUESTION_DROP_WRONG_FEEDBACK_GLOBAL_LIMIT
             ):
-                line = _tone_failure_line(current.get("tone_mode", "clean"))
-                if line:
+                feedback_line = _tone_failure_line(current.get("tone_mode", "clean"))
+                if feedback_line:
                     self._wrong_feedback_users[exposure_id].add(message.author.id)
                     self._wrong_feedback_count[exposure_id] += 1
-                    with contextlib.suppress(discord.HTTPException):
-                        await message.channel.send(
-                            embed=ge.make_status_embed(
-                                "Nope",
-                                line,
-                                tone="warning",
-                                footer="Babblebox Question Drops",
-                            ),
-                            delete_after=6.0,
-                            allowed_mentions=discord.AllowedMentions.none(),
-                        )
+        if result_payload is not None:
+            await self._record_participation_batch(
+                category=result_payload["category"],
+                difficulty=result_payload["difficulty"],
+                participant_ids=result_payload["participant_ids"],
+                winner_user_id=result_payload["winner_user_id"],
+            )
+            with contextlib.suppress(discord.HTTPException):
+                await message.channel.send(
+                    embed=ge.make_status_embed(
+                        "Correct",
+                        f"{message.author.mention} solved the drop and earned **{answer_points_for_difficulty(result_payload['difficulty'])}** points.",
+                        tone="success",
+                        footer=f"Babblebox Question Drops | {QUESTION_DROP_CATEGORY_LABELS.get(result_payload['category'], result_payload['category'].title())}",
+                    ),
+                    allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
+                )
+            return True
+        if feedback_line:
+            with contextlib.suppress(discord.HTTPException):
+                await message.channel.send(
+                    embed=ge.make_status_embed(
+                        "Nope",
+                        feedback_line,
+                        tone="warning",
+                        footer="Babblebox Question Drops",
+                    ),
+                    delete_after=6.0,
+                    allowed_mentions=discord.AllowedMentions.none(),
+                )
         return False
+
+    async def _record_participation_batch(
+        self,
+        *,
+        category: str,
+        difficulty: int,
+        participant_ids: list[int],
+        winner_user_id: int | None,
+    ):
+        profile_service = getattr(self.bot, "profile_service", None)
+        if profile_service is None or not getattr(profile_service, "storage_ready", False):
+            return
+        participant_set = {user_id for user_id in participant_ids if isinstance(user_id, int) and user_id > 0}
+        if winner_user_id is not None and winner_user_id > 0:
+            participant_set.add(winner_user_id)
+        points = answer_points_for_difficulty(int(difficulty))
+        for user_id in sorted(participant_set):
+            await profile_service.record_question_drop_result(
+                user_id,
+                category=category,
+                correct=user_id == winner_user_id,
+                points=points if user_id == winner_user_id else 0,
+            )
 
     async def handle_raw_message_delete(self, payload: discord.RawMessageDeleteEvent):
         if payload.guild_id is None:
@@ -528,8 +588,12 @@ class QuestionDropsService:
     async def _prune_old_exposures(self):
         if not self.storage_ready:
             return
+        now = ge.now_utc()
+        if self._next_prune_at is not None and now < self._next_prune_at:
+            return
         cutoff = ge.now_utc() - timedelta(days=QUESTION_DROP_EXPOSURE_RETENTION_DAYS)
         await self.store.prune_exposures(before=cutoff, limit=500)
+        self._next_prune_at = now + timedelta(seconds=QUESTION_DROP_PRUNE_INTERVAL_SECONDS)
 
     def _active_drop_is_live(self, record: dict[str, Any], *, now: datetime) -> bool:
         expires_raw = record.get("expires_at")
@@ -548,14 +612,24 @@ class QuestionDropsService:
                 continue
             await self._expire_drop(record, timed_out=True)
 
-    async def _expire_drop(self, record: dict[str, Any], *, timed_out: bool):
+    async def _expire_drop(self, record: dict[str, Any], *, timed_out: bool, announce: bool = True):
         exposure_id = int(record["exposure_id"])
         await self.store.resolve_exposure(exposure_id, resolved_at=ge.now_utc(), winner_user_id=None)
         await self.store.delete_active_drop(record["guild_id"], record["channel_id"])
         self._active_drops.pop((record["guild_id"], record["channel_id"]), None)
+        participant_ids = sorted(self._attempted_users.get(exposure_id, set(record.get("participant_user_ids", []) or [])))
         self._wrong_feedback_users.pop(exposure_id, None)
         self._wrong_feedback_count.pop(exposure_id, None)
         self._attempted_users.pop(exposure_id, None)
+        if participant_ids:
+            await self._record_participation_batch(
+                category=record["category"],
+                difficulty=int(record["difficulty"]),
+                participant_ids=participant_ids,
+                winner_user_id=None,
+            )
+        if not announce:
+            return
         channel = self.bot.get_channel(record["channel_id"]) if hasattr(self.bot, "get_channel") else None
         if channel is None:
             return
@@ -585,19 +659,26 @@ class QuestionDropsService:
             slots = _daily_slot_datetimes(guild_id, now_local.date(), config)
             if not slots:
                 continue
-            exposures = await self.store.list_exposures_for_guild(guild_id, limit=300)
-            used_slot_keys = {record["slot_key"] for record in exposures if isinstance(record.get("slot_key"), str)}
             active_slot_keys = {
                 record["slot_key"]
                 for (active_guild_id, _), record in self._active_drops.items()
                 if active_guild_id == guild_id
             }
+            due_slots: list[str] = []
             for index, local_slot in enumerate(slots):
                 slot_key = _slot_key(now_local.date(), index)
-                if slot_key in used_slot_keys or slot_key in active_slot_keys:
+                if slot_key in active_slot_keys:
                     continue
                 slot_utc = local_slot.astimezone(timezone.utc)
                 if slot_utc > now or (now - slot_utc).total_seconds() > QUESTION_DROP_SLOT_GRACE_SECONDS:
+                    continue
+                due_slots.append(slot_key)
+            if not due_slots:
+                continue
+            exposures = await self.store.list_exposures_for_guild(guild_id, limit=QUESTION_DROP_EXPOSURE_FETCH_LIMIT)
+            used_slot_keys = {record["slot_key"] for record in exposures if isinstance(record.get("slot_key"), str)}
+            for slot_key in due_slots:
+                if slot_key in used_slot_keys:
                     continue
                 channel = self._select_channel_for_slot(guild_id, config, exposures, slot_key=slot_key, now=now)
                 if channel is None:
@@ -655,20 +736,6 @@ class QuestionDropsService:
         variant = self._select_variant(guild_id, getattr(channel, "id", 0), exposures=exposures, slot_key=slot_key, config=config)
         if variant is None:
             return
-        exposure = await self.store.insert_exposure(
-            {
-                "guild_id": guild_id,
-                "channel_id": getattr(channel, "id", 0),
-                "concept_id": variant.concept_id,
-                "variant_hash": variant.variant_hash,
-                "category": variant.category,
-                "difficulty": variant.difficulty,
-                "asked_at": asked_at,
-                "resolved_at": None,
-                "winner_user_id": None,
-                "slot_key": slot_key,
-            }
-        )
         prompt = variant.prompt
         embed = discord.Embed(
             title="Question Drop",
@@ -685,17 +752,30 @@ class QuestionDropsService:
             ),
             inline=False,
         )
+        if variant.answer_spec.get("type") == "multiple_choice":
+            embed.add_field(name="Answering", value="Reply with the option text or the matching letter.", inline=False)
         embed = ge.style_embed(embed, footer="Babblebox Question Drops | First correct answer scores")
-        with contextlib.suppress(discord.HTTPException):
+        try:
             message = await channel.send(embed=embed)
-        if "message" not in locals():
+        except discord.HTTPException:
             return
-        record = {
+        exposure_record = {
+            "guild_id": guild_id,
+            "channel_id": getattr(channel, "id", 0),
+            "concept_id": variant.concept_id,
+            "variant_hash": variant.variant_hash,
+            "category": variant.category,
+            "difficulty": variant.difficulty,
+            "asked_at": asked_at,
+            "resolved_at": None,
+            "winner_user_id": None,
+            "slot_key": slot_key,
+        }
+        active_record = {
             "guild_id": guild_id,
             "channel_id": getattr(channel, "id", 0),
             "message_id": message.id,
             "author_user_id": int(getattr(getattr(self.bot, "user", None), "id", 1) or 1),
-            "exposure_id": int(exposure["id"]),
             "concept_id": variant.concept_id,
             "variant_hash": variant.variant_hash,
             "category": variant.category,
@@ -706,16 +786,33 @@ class QuestionDropsService:
             "expires_at": asked_at + timedelta(seconds=int(config.get("answer_window_seconds", 60))),
             "slot_key": slot_key,
             "tone_mode": config.get("tone_mode", "clean"),
+            "participant_user_ids": [],
         }
-        await self.store.upsert_active_drop(record)
-        normalized_record = normalize_active_drop(record)
+        try:
+            stored_exposure, stored_active = await self.store.register_posted_drop(exposure_record, active_record)
+        except Exception:
+            with contextlib.suppress(discord.HTTPException):
+                await message.delete()
+            return
+        normalized_record = normalize_active_drop(stored_active)
         if normalized_record is None:
+            with contextlib.suppress(Exception):
+                await self.store.delete_active_drop(guild_id, getattr(channel, "id", 0))
+                await self.store.delete_exposure(int(stored_exposure["id"]))
+            with contextlib.suppress(discord.HTTPException):
+                await message.delete()
             return
         self._active_drops[(guild_id, getattr(channel, "id", 0))] = normalized_record
-        exposure_id = int(exposure["id"])
+        exposure_id = int(normalized_record["exposure_id"])
         self._wrong_feedback_users[exposure_id] = set()
         self._wrong_feedback_count[exposure_id] = 0
         self._attempted_users[exposure_id] = set()
+
+    def _repeat_windows_for_variant(self, variant: QuestionDropVariant) -> tuple[int, int]:
+        seed = question_drop_seed_for_concept(variant.concept_id) or {}
+        if seed.get("source_type") == "generated":
+            return QUESTION_DROP_GENERATED_CONCEPT_COOLDOWN_DAYS, QUESTION_DROP_GENERATED_VARIANT_COOLDOWN_DAYS
+        return QUESTION_DROP_CONCEPT_COOLDOWN_DAYS, QUESTION_DROP_STATIC_VARIANT_COOLDOWN_DAYS
 
     def _select_variant(
         self,
@@ -727,13 +824,14 @@ class QuestionDropsService:
         config: dict[str, Any],
     ) -> QuestionDropVariant | None:
         allowed_categories = set(config.get("enabled_categories") or QUESTION_DROP_CATEGORIES)
-        candidates = iter_candidate_variants(categories=allowed_categories, seed_material=_slot_seed_material(guild_id, channel_id, slot_key), variants_per_seed=2)
+        candidates = iter_candidate_variants(categories=allowed_categories, seed_material=_slot_seed_material(guild_id, channel_id, slot_key), variants_per_seed=6)
         if not candidates:
             return None
         recent_by_concept: dict[str, datetime] = {}
         recent_by_variant: dict[str, datetime] = {}
         category_counts = Counter()
         difficulty_counts = Counter()
+        source_counts = Counter()
         now = ge.now_utc()
         for record in exposures:
             asked_at = datetime.fromisoformat(record["asked_at"])
@@ -744,20 +842,24 @@ class QuestionDropsService:
             if (now - asked_at).days <= 14:
                 category_counts[record["category"]] += 1
                 difficulty_counts[int(record["difficulty"])] += 1
+                seed = question_drop_seed_for_concept(record["concept_id"]) or {}
+                source_counts[str(seed.get("source_type", "curated"))] += 1
         scored: list[tuple[float, QuestionDropVariant]] = []
         for variant in candidates:
+            concept_cooldown_days, variant_cooldown_days = self._repeat_windows_for_variant(variant)
             concept_seen_at = recent_by_concept.get(variant.concept_id)
-            if concept_seen_at is not None and (now - concept_seen_at).days < QUESTION_DROP_CONCEPT_COOLDOWN_DAYS:
+            if concept_seen_at is not None and (now - concept_seen_at).days < concept_cooldown_days:
                 continue
             variant_seen_at = recent_by_variant.get(variant.variant_hash)
-            if variant_seen_at is not None and (now - variant_seen_at).days < QUESTION_DROP_VARIANT_COOLDOWN_DAYS:
+            if variant_seen_at is not None and (now - variant_seen_at).days < variant_cooldown_days:
                 continue
-            freshness = 30.0 if concept_seen_at is None else min((now - concept_seen_at).days * 2.0, 20.0)
-            variant_freshness = 10.0 if variant_seen_at is None else min((now - variant_seen_at).days * 0.5, 6.0)
+            freshness = 26.0 if concept_seen_at is None else min((now - concept_seen_at).days * 2.0, 18.0)
+            variant_freshness = 10.0 if variant_seen_at is None else min((now - variant_seen_at).days * 0.75, 8.0)
             category_balance = 8.0 - category_counts[variant.category]
-            difficulty_balance = 6.0 - difficulty_counts[int(variant.difficulty)]
+            difficulty_balance = 5.0 - difficulty_counts[int(variant.difficulty)]
+            source_balance = 3.0 - source_counts[variant.source_type]
             jitter = (int(build_variant_hash(slot_key, variant.variant_hash), 16) % 1000) / 1000.0
-            score = freshness + variant_freshness + category_balance + difficulty_balance + jitter
+            score = freshness + variant_freshness + category_balance + difficulty_balance + source_balance + jitter
             scored.append((score, variant))
         if not scored:
             return None
@@ -770,7 +872,7 @@ class QuestionDropsService:
             return None
         tzinfo = load_afk_timezone(config.get("timezone")) or timezone.utc
         now = ge.now_utc()
-        exposures = await self.store.list_exposures_for_guild(guild_id, limit=300)
+        exposures = await self.store.list_exposures_for_guild(guild_id, limit=QUESTION_DROP_EXPOSURE_FETCH_LIMIT)
         used_slot_keys = {record["slot_key"] for record in exposures if isinstance(record.get("slot_key"), str)}
         active_slot_keys = {
             record["slot_key"]

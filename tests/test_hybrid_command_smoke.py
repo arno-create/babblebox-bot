@@ -215,6 +215,30 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         finally:
             ge.games = saved_games
 
+    async def test_play_command_blocks_same_channel_when_question_drop_is_live(self):
+        saved_games = ge.games
+        ge.games = {}
+        try:
+            bot = types.SimpleNamespace(
+                question_drops_service=types.SimpleNamespace(storage_ready=True, has_live_drop=lambda guild_id, channel_id: True)
+            )
+            cog = GameplayCog(bot)
+            ctx = FakeContext(
+                interaction=FakeInteraction(),
+                author=FakeAuthor(),
+                guild=FakeGuild(),
+                channel=FakeChannel(),
+            )
+
+            with patch("babblebox.cogs.gameplay.require_channel_permissions", new=AsyncMock(return_value=True)):
+                await GameplayCog.play_command.callback(cog, ctx)
+
+            self.assertEqual(len(ctx.send_calls), 1)
+            self.assertTrue(ctx.send_calls[0]["ephemeral"])
+            self.assertIn("Question Drop", ctx.send_calls[0]["embed"].description)
+        finally:
+            ge.games = saved_games
+
     async def test_watch_mentions_storage_unavailable_still_responds(self):
         bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
         cog = UtilityCog(bot)
