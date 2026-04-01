@@ -13,6 +13,17 @@ from urllib.parse import urlsplit, urlunsplit
 DEFAULT_BACKEND = "postgres"
 QUESTION_DROP_MIN_DROPS_PER_DAY = 1
 QUESTION_DROP_MAX_DROPS_PER_DAY = 10
+QUESTION_DROP_KNOWLEDGE_CATEGORIES = (
+    "science",
+    "history",
+    "geography",
+    "language",
+    "logic",
+    "math",
+    "culture",
+)
+QUESTION_DROP_MASTERY_TIERS = (1, 2, 3)
+QUESTION_DROP_AI_CELEBRATION_MODES = ("off", "rare", "event_only")
 
 
 class QuestionDropsStorageUnavailable(RuntimeError):
@@ -31,8 +42,115 @@ def default_question_drops_config(guild_id: int | None = None) -> dict[str, Any]
         "active_start_hour": 10,
         "active_end_hour": 22,
         "enabled_channel_ids": [],
-        "enabled_categories": [],
+        "enabled_categories": list(QUESTION_DROP_KNOWLEDGE_CATEGORIES),
+        "category_mastery": default_question_drop_category_mastery(),
+        "scholar_ladder": default_question_drop_scholar_ladder(),
+        "ai_celebrations_enabled": False,
     }
+
+
+def default_question_drop_tier(tier: int) -> dict[str, Any]:
+    return {"tier": int(tier), "role_id": None, "threshold": 0}
+
+
+def default_question_drop_tiers() -> list[dict[str, Any]]:
+    return [default_question_drop_tier(tier) for tier in QUESTION_DROP_MASTERY_TIERS]
+
+
+def default_question_drop_category_mastery() -> dict[str, Any]:
+    return {
+        category: {
+            "enabled": False,
+            "announcement_channel_id": None,
+            "silent_grant": False,
+            "tiers": default_question_drop_tiers(),
+        }
+        for category in QUESTION_DROP_KNOWLEDGE_CATEGORIES
+    }
+
+
+def default_question_drop_scholar_ladder() -> dict[str, Any]:
+    return {
+        "enabled": False,
+        "announcement_channel_id": None,
+        "silent_grant": False,
+        "tiers": default_question_drop_tiers(),
+    }
+
+
+def default_question_drops_meta() -> dict[str, Any]:
+    return {
+        "ai_celebration_mode": "off",
+        "updated_by": None,
+        "updated_at": None,
+    }
+
+
+def _normalize_positive_int(value: Any) -> int | None:
+    return int(value) if isinstance(value, int) and value > 0 else None
+
+
+def _normalize_nonnegative_int(value: Any, *, default: int = 0) -> int:
+    return int(value) if isinstance(value, int) and value >= 0 else default
+
+
+def _normalize_question_drop_tiers(payload: Any) -> list[dict[str, Any]]:
+    normalized_by_tier = {tier: default_question_drop_tier(tier) for tier in QUESTION_DROP_MASTERY_TIERS}
+    raw_items = payload if isinstance(payload, list) else []
+    for item in raw_items:
+        if not isinstance(item, dict):
+            continue
+        tier = item.get("tier")
+        if not isinstance(tier, int) or tier not in QUESTION_DROP_MASTERY_TIERS:
+            continue
+        normalized_by_tier[tier] = {
+            "tier": tier,
+            "role_id": _normalize_positive_int(item.get("role_id")),
+            "threshold": _normalize_nonnegative_int(item.get("threshold"), default=0),
+        }
+    return [normalized_by_tier[tier] for tier in QUESTION_DROP_MASTERY_TIERS]
+
+
+def _normalize_category_mastery(payload: Any) -> dict[str, Any]:
+    default_value = default_question_drop_category_mastery()
+    if not isinstance(payload, dict):
+        return default_value
+    cleaned: dict[str, Any] = {}
+    for category in QUESTION_DROP_KNOWLEDGE_CATEGORIES:
+        raw_category = payload.get(category)
+        if not isinstance(raw_category, dict):
+            cleaned[category] = deepcopy(default_value[category])
+            continue
+        cleaned[category] = {
+            "enabled": bool(raw_category.get("enabled")),
+            "announcement_channel_id": _normalize_positive_int(raw_category.get("announcement_channel_id")),
+            "silent_grant": bool(raw_category.get("silent_grant")),
+            "tiers": _normalize_question_drop_tiers(raw_category.get("tiers")),
+        }
+    return cleaned
+
+
+def _normalize_scholar_ladder(payload: Any) -> dict[str, Any]:
+    default_value = default_question_drop_scholar_ladder()
+    if not isinstance(payload, dict):
+        return default_value
+    return {
+        "enabled": bool(payload.get("enabled")),
+        "announcement_channel_id": _normalize_positive_int(payload.get("announcement_channel_id")),
+        "silent_grant": bool(payload.get("silent_grant")),
+        "tiers": _normalize_question_drop_tiers(payload.get("tiers")),
+    }
+
+
+def normalize_question_drops_meta(payload: Any) -> dict[str, Any]:
+    cleaned = default_question_drops_meta()
+    if not isinstance(payload, dict):
+        return cleaned
+    mode = str(payload.get("ai_celebration_mode", "off")).strip().casefold()
+    cleaned["ai_celebration_mode"] = mode if mode in QUESTION_DROP_AI_CELEBRATION_MODES else "off"
+    cleaned["updated_by"] = _normalize_positive_int(payload.get("updated_by"))
+    cleaned["updated_at"] = _serialize_datetime(_parse_datetime(payload.get("updated_at")))
+    return cleaned
 
 
 def normalize_question_drops_config(guild_id: int, payload: Any) -> dict[str, Any]:
@@ -62,9 +180,12 @@ def normalize_question_drops_config(guild_id: int, payload: Any) -> dict[str, An
         {
             str(value).strip().casefold()
             for value in payload.get("enabled_categories", [])
-            if str(value).strip().casefold() in {"science", "history", "geography", "language", "logic", "math", "culture"}
+            if str(value).strip().casefold() in QUESTION_DROP_KNOWLEDGE_CATEGORIES
         }
     )
+    cleaned["category_mastery"] = _normalize_category_mastery(payload.get("category_mastery"))
+    cleaned["scholar_ladder"] = _normalize_scholar_ladder(payload.get("scholar_ladder"))
+    cleaned["ai_celebrations_enabled"] = bool(payload.get("ai_celebrations_enabled"))
     return cleaned
 
 
@@ -246,7 +367,13 @@ class _BaseQuestionDropsStore:
     async def fetch_config(self, guild_id: int) -> dict[str, Any] | None:
         raise NotImplementedError
 
+    async def fetch_meta(self) -> dict[str, Any] | None:
+        raise NotImplementedError
+
     async def upsert_config(self, config: dict[str, Any]):
+        raise NotImplementedError
+
+    async def upsert_meta(self, meta: dict[str, Any]):
         raise NotImplementedError
 
     async def list_active_drops(self) -> list[dict[str, Any]]:
@@ -310,6 +437,7 @@ class _MemoryQuestionDropsStore(_BaseQuestionDropsStore):
 
     def __init__(self):
         self.configs: dict[int, dict[str, Any]] = {}
+        self.meta: dict[str, Any] = default_question_drops_meta()
         self.active_drops: dict[tuple[int, int], dict[str, Any]] = {}
         self.pending_posts: dict[tuple[int, str], dict[str, Any]] = {}
         self.exposures: dict[int, dict[str, Any]] = {}
@@ -317,6 +445,7 @@ class _MemoryQuestionDropsStore(_BaseQuestionDropsStore):
 
     async def load(self):
         self.configs = {}
+        self.meta = default_question_drops_meta()
         self.active_drops = {}
         self.pending_posts = {}
         self.exposures = {}
@@ -329,9 +458,15 @@ class _MemoryQuestionDropsStore(_BaseQuestionDropsStore):
         config = self.configs.get(guild_id)
         return deepcopy(config) if config is not None else None
 
+    async def fetch_meta(self) -> dict[str, Any] | None:
+        return deepcopy(self.meta)
+
     async def upsert_config(self, config: dict[str, Any]):
         normalized = normalize_question_drops_config(int(config["guild_id"]), config)
         self.configs[int(config["guild_id"])] = normalized
+
+    async def upsert_meta(self, meta: dict[str, Any]):
+        self.meta = normalize_question_drops_meta(meta)
 
     async def list_active_drops(self) -> list[dict[str, Any]]:
         return [deepcopy(record) for record in self.active_drops.values()]
@@ -494,8 +629,25 @@ def _config_from_row(row) -> dict[str, Any]:
             "active_end_hour": row["active_end_hour"],
             "enabled_channel_ids": row["enabled_channel_ids"] or [],
             "enabled_categories": row["enabled_categories"] or [],
+            "category_mastery": dict(row["category_mastery"] or {}),
+            "scholar_ladder": dict(row["scholar_ladder"] or {}),
+            "ai_celebrations_enabled": row["ai_celebrations_enabled"],
         },
     )
+
+
+def _meta_from_row(row) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    value = row["value"]
+    if isinstance(value, str):
+        try:
+            value = json.loads(value)
+        except json.JSONDecodeError:
+            value = {}
+    payload = value if isinstance(value, dict) else {}
+    payload["updated_at"] = _serialize_datetime(row.get("updated_at"))
+    return normalize_question_drops_meta(payload)
 
 
 def _active_drop_from_row(row) -> dict[str, Any] | None:
@@ -612,6 +764,16 @@ class _PostgresQuestionDropsStore(_BaseQuestionDropsStore):
                 "active_end_hour INTEGER NOT NULL DEFAULT 22, "
                 "enabled_channel_ids JSONB NOT NULL DEFAULT '[]'::jsonb, "
                 "enabled_categories JSONB NOT NULL DEFAULT '[]'::jsonb, "
+                "category_mastery JSONB NOT NULL DEFAULT '{}'::jsonb, "
+                "scholar_ladder JSONB NOT NULL DEFAULT '{}'::jsonb, "
+                "ai_celebrations_enabled BOOLEAN NOT NULL DEFAULT FALSE, "
+                "updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc', now())"
+                ")"
+            ),
+            (
+                "CREATE TABLE IF NOT EXISTS question_drop_meta ("
+                "key TEXT PRIMARY KEY, "
+                "value JSONB NOT NULL DEFAULT '{}'::jsonb, "
                 "updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc', now())"
                 ")"
             ),
@@ -630,6 +792,9 @@ class _PostgresQuestionDropsStore(_BaseQuestionDropsStore):
                 "slot_key TEXT NOT NULL"
                 ")"
             ),
+            "ALTER TABLE question_drop_configs ADD COLUMN IF NOT EXISTS category_mastery JSONB NOT NULL DEFAULT '{}'::jsonb",
+            "ALTER TABLE question_drop_configs ADD COLUMN IF NOT EXISTS scholar_ladder JSONB NOT NULL DEFAULT '{}'::jsonb",
+            "ALTER TABLE question_drop_configs ADD COLUMN IF NOT EXISTS ai_celebrations_enabled BOOLEAN NOT NULL DEFAULT FALSE",
             "CREATE INDEX IF NOT EXISTS ix_question_drop_exposures_guild_asked ON question_drop_exposures (guild_id, asked_at DESC)",
             "CREATE INDEX IF NOT EXISTS ix_question_drop_exposures_guild_concept ON question_drop_exposures (guild_id, concept_id, asked_at DESC)",
             "CREATE INDEX IF NOT EXISTS ix_question_drop_exposures_guild_variant ON question_drop_exposures (guild_id, variant_hash, asked_at DESC)",
@@ -689,7 +854,8 @@ class _PostgresQuestionDropsStore(_BaseQuestionDropsStore):
             rows = await conn.fetch(
                 (
                     "SELECT guild_id, enabled, drops_per_day, timezone, answer_window_seconds, tone_mode, activity_gate, "
-                    "active_start_hour, active_end_hour, enabled_channel_ids, enabled_categories "
+                    "active_start_hour, active_end_hour, enabled_channel_ids, enabled_categories, "
+                    "category_mastery, scholar_ladder, ai_celebrations_enabled "
                     "FROM question_drop_configs"
                 )
             )
@@ -700,12 +866,20 @@ class _PostgresQuestionDropsStore(_BaseQuestionDropsStore):
             row = await conn.fetchrow(
                 (
                     "SELECT guild_id, enabled, drops_per_day, timezone, answer_window_seconds, tone_mode, activity_gate, "
-                    "active_start_hour, active_end_hour, enabled_channel_ids, enabled_categories "
+                    "active_start_hour, active_end_hour, enabled_channel_ids, enabled_categories, "
+                    "category_mastery, scholar_ladder, ai_celebrations_enabled "
                     "FROM question_drop_configs WHERE guild_id = $1"
                 ),
                 guild_id,
             )
         return _config_from_row(row) if row is not None else None
+
+    async def fetch_meta(self) -> dict[str, Any] | None:
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT value, updated_at FROM question_drop_meta WHERE key = 'global'"
+            )
+        return _meta_from_row(row) if row is not None else None
 
     async def upsert_config(self, config: dict[str, Any]):
         normalized = normalize_question_drops_config(int(config["guild_id"]), config)
@@ -715,9 +889,10 @@ class _PostgresQuestionDropsStore(_BaseQuestionDropsStore):
                     (
                         "INSERT INTO question_drop_configs ("
                         "guild_id, enabled, drops_per_day, timezone, answer_window_seconds, tone_mode, activity_gate, "
-                        "active_start_hour, active_end_hour, enabled_channel_ids, enabled_categories, updated_at"
+                        "active_start_hour, active_end_hour, enabled_channel_ids, enabled_categories, "
+                        "category_mastery, scholar_ladder, ai_celebrations_enabled, updated_at"
                         ") VALUES ("
-                        "$1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb, timezone('utc', now())"
+                        "$1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb, $12::jsonb, $13::jsonb, $14, timezone('utc', now())"
                         ") ON CONFLICT (guild_id) DO UPDATE SET "
                         "enabled = EXCLUDED.enabled, "
                         "drops_per_day = EXCLUDED.drops_per_day, "
@@ -729,6 +904,9 @@ class _PostgresQuestionDropsStore(_BaseQuestionDropsStore):
                         "active_end_hour = EXCLUDED.active_end_hour, "
                         "enabled_channel_ids = EXCLUDED.enabled_channel_ids, "
                         "enabled_categories = EXCLUDED.enabled_categories, "
+                        "category_mastery = EXCLUDED.category_mastery, "
+                        "scholar_ladder = EXCLUDED.scholar_ladder, "
+                        "ai_celebrations_enabled = EXCLUDED.ai_celebrations_enabled, "
                         "updated_at = timezone('utc', now())"
                     ),
                     normalized["guild_id"],
@@ -742,6 +920,28 @@ class _PostgresQuestionDropsStore(_BaseQuestionDropsStore):
                     normalized["active_end_hour"],
                     json.dumps(normalized["enabled_channel_ids"]),
                     json.dumps(normalized["enabled_categories"]),
+                    json.dumps(normalized["category_mastery"]),
+                    json.dumps(normalized["scholar_ladder"]),
+                    normalized["ai_celebrations_enabled"],
+                )
+
+    async def upsert_meta(self, meta: dict[str, Any]):
+        normalized = normalize_question_drops_meta(meta)
+        async with self._io_lock:
+            async with self._pool.acquire() as conn:
+                await conn.execute(
+                    (
+                        "INSERT INTO question_drop_meta (key, value, updated_at) "
+                        "VALUES ('global', $1::jsonb, timezone('utc', now())) "
+                        "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at"
+                    ),
+                    json.dumps(
+                        {
+                            "ai_celebration_mode": normalized["ai_celebration_mode"],
+                            "updated_by": normalized["updated_by"],
+                            "updated_at": normalized["updated_at"],
+                        }
+                    ),
                 )
 
     async def list_active_drops(self) -> list[dict[str, Any]]:
@@ -1120,8 +1320,14 @@ class QuestionDropsStore:
     async def fetch_config(self, guild_id: int) -> dict[str, Any] | None:
         return await self._store.fetch_config(guild_id)
 
+    async def fetch_meta(self) -> dict[str, Any] | None:
+        return await self._store.fetch_meta()
+
     async def upsert_config(self, config: dict[str, Any]):
         await self._store.upsert_config(config)
+
+    async def upsert_meta(self, meta: dict[str, Any]):
+        await self._store.upsert_meta(meta)
 
     async def list_active_drops(self) -> list[dict[str, Any]]:
         return await self._store.list_active_drops()

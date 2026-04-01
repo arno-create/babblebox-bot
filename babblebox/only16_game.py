@@ -17,10 +17,10 @@ ONLY16_MODE_LABELS = {
     "strict": "Strict (Recommended)",
     "smart": "Smart (Advanced)",
 }
-ONLY16_TUTORIAL_ASK_WINDOW_SECONDS = 50
-ONLY16_ASK_WINDOW_SECONDS = 35
-ONLY16_TUTORIAL_TRAP_WINDOW_SECONDS = 24
-ONLY16_TRAP_WINDOW_SECONDS = 18
+ONLY16_TUTORIAL_ASK_WINDOW_SECONDS = 75
+ONLY16_ASK_WINDOW_SECONDS = 60
+ONLY16_TUTORIAL_TRAP_WINDOW_SECONDS = 45
+ONLY16_TRAP_WINDOW_SECONDS = 30
 ONLY16_MAX_EXPRESSION_LENGTH = 48
 ONLY16_MAX_EXPRESSION_TOKENS = 24
 ONLY16_MAX_EXPRESSION_DEPTH = 6
@@ -476,16 +476,33 @@ def _only16_player_names(game: dict[str, Any]) -> str:
     return ge.join_limited_lines([f"**{index + 1}.** {player.display_name}" for index, player in enumerate(game.get("players", []))])
 
 
-def _only16_mode_guide() -> str:
-    return (
-        "Strict (Recommended): reply directly to the armed question with one clear number.\n"
-        "Smart (Advanced): replies still count, plus one clean standalone answer like `16!`.\n"
-        "Chatter stays out, and ambiguity never eliminates."
-    )
+def _only16_anchor_mode_label(mode: str | None) -> str:
+    return "Smart" if str(mode or "").casefold() == "smart" else "Strict (Recommended)"
 
 
 def _only16_supported_math_copy() -> str:
     return "Safe math: integers with `+ - * / ^`, unary `+/-`, and parentheses."
+
+
+def _only16_anchor_counts_copy(mode: str | None) -> str:
+    lines = [
+        "Reply with one clear number only.",
+        "Digits, simple number words, and safe math like `8+8` all count.",
+        "Fuzzy replies, multiple clear numbers, or unsupported math void the trap instead of knocking anyone out.",
+    ]
+    if str(mode or "").casefold() == "smart":
+        lines.append("Smart also accepts one clean standalone answer like `16!`.")
+    else:
+        lines.insert(0, "Strict keeps it simple: reply to the armed question only.")
+    return "\n".join(lines)
+
+
+def _only16_first_round_copy() -> str:
+    return (
+        "1. The current asker posts one clean number question.\n"
+        "2. Everyone else replies with one clear number.\n"
+        "3. The first miss is safe so the room can learn the rhythm."
+    )
 
 
 def _smart_exact_payload(text: str | None) -> Only16ParseResult:
@@ -542,13 +559,6 @@ def _classify_smart_follow_up(text: str | None, parsed: Only16ParseResult) -> tu
     return "ignore", parsed
 
 
-def _trap_live_copy(mode: str | None) -> str:
-    normalized = str(mode or "strict").casefold()
-    if normalized == "smart":
-        return "Trap live. Smart mode counts direct replies plus one clean standalone answer. Chatter stays out."
-    return "Trap live. Strict mode counts direct replies to the armed question only. Chatter stays out."
-
-
 def _only16_is_tutorial_round(state: dict[str, Any]) -> bool:
     return not bool(state.get("tutorial_complete"))
 
@@ -581,7 +591,7 @@ def _only16_next_step_copy(game: dict[str, Any], asker_id: int | None) -> str:
     next_asker = _only16_next_asker(game, asker_id)
     if next_asker is None:
         return "No next turn: the game is down to one player."
-    return f"Next up: {next_asker.mention} asks the next trap."
+    return f"Next up: {next_asker.mention} asks the next number question."
 
 
 def build_only16_anchor_embed(game: dict[str, Any]) -> discord.Embed:
@@ -590,40 +600,51 @@ def build_only16_anchor_embed(game: dict[str, Any]) -> discord.Embed:
     trap_live = _trap_is_live(trap)
     current_asker = ge.get_current_player(game)
     question_text = ge.safe_field_text((trap or {}).get("question_text") or "", limit=240)
+    mode = state.get("mode", "strict")
+    turn_name = ge.display_name_of(current_asker) if current_asker is not None else "Unknown"
+    next_copy = _only16_next_step_copy(game, (trap or {}).get("asker_id") if trap_live else getattr(current_asker, "id", None))
     if trap_live:
-        state_label = "Trap is live"
         deadline = trap.get("expires_at")
-        now_copy = "The room gets one clear answer before the window closes."
-        question_copy = question_text or "The armed question is missing."
-        next_copy = "Babblebox judges the first clear answer, then the next asker takes over."
+        trap_asker = ge.get_snapshot_player(game, trap.get("asker_id"))
+        asker_name = ge.display_name_of(trap_asker) if trap_asker is not None else turn_name
+        who_is_up = f"{asker_name} armed the live trap."
+        do_now = (
+            f"Anyone except {asker_name} can reply to the live question below.\n"
+            "Keep the answer short so Babblebox can judge it cleanly."
+        )
+        next_field = "Babblebox judges the first clear answer, then passes the ask to the next player."
+        if _only16_is_tutorial_round(state):
+            next_field += "\nOpening round safety is still on, so the first miss stays harmless."
     else:
-        state_label = "Ask a trap question"
         deadline = state.get("ask_expires_at")
-        asker_name = ge.display_name_of(current_asker) if current_asker is not None else "The next asker"
-        now_copy = f"{asker_name} should ask one clean number question to arm the trap."
-        question_copy = "Waiting for one clean number question."
-        next_copy = "Once a clean question lands, the trap goes live and the first clear answer gets judged."
+        who_is_up = f"{turn_name} is asking now."
+        do_now = f"{turn_name}, ask one clean number question in chat to arm the trap."
+        next_field = "Once the trap is armed, everyone else can answer. If time runs out, the turn moves on."
 
     embed = discord.Embed(
-        title="Only 16",
-        description="Ask a number question, wait for one clear answer, and hope nobody lands anywhere but 16.",
+        title="🎯 Only 16",
+        description="A social number trap: ask one clean number question, wait for one clear answer, and hope it lands on 16.",
         color=discord.Color.orange(),
     )
     if _only16_is_tutorial_round(state):
-        embed.description += "\nOpening round is protected so everyone can learn the rhythm before the real eliminations begin."
-    embed.add_field(name="Current Asker", value=ge.display_name_of(current_asker) if current_asker is not None else "Unknown", inline=True)
-    embed.add_field(name="State", value=state_label, inline=True)
+        embed.description += "\nOpening round is slower and forgiving so the room can learn the rhythm first."
+    embed.add_field(name="Who's Up", value=who_is_up, inline=True)
+    embed.add_field(name="Mode", value=_only16_anchor_mode_label(mode), inline=True)
     embed.add_field(name="Time Left", value=_only16_deadline_copy(deadline), inline=True)
-    embed.add_field(name="What Matters Now", value=now_copy, inline=False)
-    embed.add_field(name="Live Question", value=question_copy, inline=False)
-    embed.add_field(
-        name="What Counts",
-        value=f"Mode: **{only16_mode_label(state.get('mode'))}**\n{_only16_mode_guide()}\n{_only16_supported_math_copy()}",
-        inline=False,
-    )
-    embed.add_field(name="Live Players", value=_only16_player_names(game), inline=False)
-    embed.add_field(name="What Happens Next", value=next_copy, inline=False)
-    return ge.style_embed(embed, footer="Babblebox Only 16 | One clear answer decides the trap")
+    if trap_live:
+        embed.add_field(name="Live Trap", value=question_text or "The armed question is missing.", inline=False)
+        embed.add_field(name="Do This Now", value=do_now, inline=False)
+        embed.add_field(name="What Counts", value=_only16_anchor_counts_copy(mode), inline=False)
+        embed.add_field(name="What Happens Next", value=f"{next_field}\n{next_copy}", inline=False)
+        embed.add_field(name="Players Left", value=_only16_player_names(game), inline=False)
+    else:
+        embed.add_field(name="Do This Now", value=do_now, inline=False)
+        embed.add_field(name="What Counts", value=_only16_anchor_counts_copy(mode), inline=False)
+        embed.add_field(name="What Happens Next", value=f"{next_field}\n{next_copy}", inline=False)
+        embed.add_field(name="Players Left", value=_only16_player_names(game), inline=False)
+        if _only16_is_tutorial_round(state):
+            embed.add_field(name="First Round", value=_only16_first_round_copy(), inline=False)
+    return ge.style_embed(embed, footer="Babblebox Only 16 | One clear answer decides the turn")
 
 
 async def _refresh_only16_anchor(game: dict[str, Any]):
@@ -750,8 +771,8 @@ async def _handle_only16_answer_locked(message: discord.Message, guild_id: int, 
         await _consume_only16_trap_locked(
             guild_id,
             game,
-            title="Trap Voided",
-            reason="Smart mode only judges one clean standalone answer, so Babblebox skipped that fuzzy non-reply.",
+            title="⚖️ Trap Voided",
+            reason="Smart mode only counts one clean standalone answer, so that fuzzy drive-by does not spring the trap.",
         )
         return True
     return await _resolve_only16_answer_locked(message, guild_id, game, trap, parsed)
@@ -774,11 +795,11 @@ async def _resolve_only16_answer_locked(
     if parsed.kind == "none":
         _close_only16_tutorial(state)
         body = (
-            f"{message.author.mention} never gave one clear explicit number, so the trap passes harmlessly.\n"
+            f"{message.author.mention} never landed on one clear number, so the trap slips by harmlessly.\n"
             f"{_only16_next_step_copy(game, asker_id)}"
         )
         await game["channel"].send(
-            embed=ge.make_status_embed("Safe Pass", body, tone="info", footer="Babblebox Only 16"),
+            embed=ge.make_status_embed("✅ Safe", body, tone="info", footer="Babblebox Only 16"),
             allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
         )
         await _advance_to_next_asker_locked(guild_id, game, asker_id=asker_id)
@@ -787,9 +808,9 @@ async def _resolve_only16_answer_locked(
         _close_only16_tutorial(state)
         await game["channel"].send(
             embed=ge.make_status_embed(
-                "Trap Voided",
+                "⚖️ Trap Voided",
                 (
-                    f"{message.author.mention} gave more than one explicit number, so Babblebox voided the trap on fairness.\n"
+                    f"{message.author.mention} dropped more than one clear number, so the trap stays fair and nobody goes out.\n"
                     f"{_only16_next_step_copy(game, asker_id)}"
                 ),
                 tone="info",
@@ -803,9 +824,9 @@ async def _resolve_only16_answer_locked(
         _close_only16_tutorial(state)
         await game["channel"].send(
             embed=ge.make_status_embed(
-                "Trap Voided",
+                "⚖️ Trap Voided",
                 (
-                    f"{message.author.mention} used math outside the safe judge grammar, so Babblebox would not auto-eliminate on it.\n"
+                    f"{message.author.mention} used math outside the safe judge grammar, so the trap is waved off instead.\n"
                     f"{_only16_supported_math_copy()}\n"
                     f"{_only16_next_step_copy(game, asker_id)}"
                 ),
@@ -823,13 +844,13 @@ async def _resolve_only16_answer_locked(
     if numeric_value == 16:
         _close_only16_tutorial(state)
         body = (
-            f"{message.author.mention}'s math lands on **16**, so they slip through."
+            f"{message.author.mention}'s math lands on **16**, so they stay in."
             if parsed.source == "expression"
-            else f"{message.author.mention} lands on **16** and slips through."
+            else f"{message.author.mention} lands on **16** and stays in."
         )
         body += f"\n{_only16_next_step_copy(game, asker_id)}"
         await game["channel"].send(
-            embed=ge.make_status_embed("Still Alive", body, tone="success", footer="Babblebox Only 16"),
+            embed=ge.make_status_embed("✅ Safe", body, tone="success", footer="Babblebox Only 16"),
             allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
         )
         await _advance_to_next_asker_locked(guild_id, game, asker_id=asker_id)
@@ -838,11 +859,11 @@ async def _resolve_only16_answer_locked(
     if tutorial_round:
         _close_only16_tutorial(state)
         body = (
-            f"{message.author.mention} landed on **{rendered_value}**, not **16**, but the opening round is protected so nobody is out yet.\n"
+            f"{message.author.mention} landed on **{rendered_value}**, not **16**, but this warm-up round is protected so nobody is out yet.\n"
             f"{_only16_next_step_copy(game, asker_id)}"
         )
         await game["channel"].send(
-            embed=ge.make_status_embed("Practice Save", body, tone="warning", footer="Babblebox Only 16"),
+            embed=ge.make_status_embed("🛟 Warm-Up Save", body, tone="warning", footer="Babblebox Only 16"),
             allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
         )
         await _advance_to_next_asker_locked(guild_id, game, asker_id=asker_id)
@@ -859,7 +880,7 @@ async def _resolve_only16_answer_locked(
     )
     body += f"\n{_only16_next_step_copy(game, asker_id)}"
     await game["channel"].send(
-        embed=ge.make_status_embed("Eliminated", body, tone="danger", footer="Babblebox Only 16"),
+        embed=ge.make_status_embed("💥 Out", body, tone="danger", footer="Babblebox Only 16"),
         allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
     )
     if len(game["players"]) <= 1:
@@ -871,7 +892,7 @@ async def _resolve_only16_answer_locked(
     return True
 
 
-async def _consume_only16_trap_locked(guild_id: int, game: dict[str, Any], *, reason: str, title: str = "Trap Voided"):
+async def _consume_only16_trap_locked(guild_id: int, game: dict[str, Any], *, reason: str, title: str = "⚖️ Trap Voided"):
     await ge.cancel_task(game.get("turn_task"))
     state = ensure_only16_state(game)
     trap = state.get("trap")
@@ -937,7 +958,7 @@ async def _finish_only16_locked(guild_id: int, game: dict[str, Any]):
     ge.schedule_profile_update("record_only16_win", winner.id)
     await game["channel"].send(
         embed=ge.make_status_embed(
-            "Winner",
+            "🏆 Only 16 Winner",
             f"{winner.mention} is the last player standing and takes **Only 16**.",
             tone="success",
             footer="Babblebox Only 16",
@@ -963,9 +984,9 @@ async def _only16_ask_timeout(guild_id: int, token: int, timeout_seconds: int):
             return
         await game["channel"].send(
             embed=ge.make_status_embed(
-                "Turn Skipped",
+                "⏭️ Turn Moved On",
                 (
-                    f"{current_asker.mention} did not arm a clean number question in time, so the turn moves on.\n"
+                    f"{current_asker.mention} did not arm a clean number question in time.\n"
                     f"{_only16_next_step_copy(game, current_asker.id)}"
                 ),
                 tone="info",
@@ -994,6 +1015,6 @@ async def _only16_trap_timeout(guild_id: int, token: int, timeout_seconds: int):
         await _consume_only16_trap_locked(
             guild_id,
             game,
-            title="Trap Window Closed",
-            reason="Nobody bit before the trap window closed.",
+            title="⏳ Window Closed",
+            reason="No one answered before the trap window closed.",
         )

@@ -2,9 +2,10 @@
 
 Babblebox is a modular Discord bot built with Python and `discord.py`.
 
-It is designed around five clear product lanes:
+It is designed around six clear product lanes:
 
 - Party Games for active voice/text hangouts
+- Question Drops for scheduled guild knowledge play and mastery progression
 - Everyday Utilities for quiet server life
 - Daily Arcade for low-player-count return visits
 - Buddy / Profile / Vault for identity, streaks, and showable progress
@@ -35,9 +36,28 @@ Babblebox is intentionally compact:
 - Exquisite Corpse
 - Spyfall
 - Word Bomb
+- Only 16
+  - social number trap with Strict and Smart modes
+  - safe arithmetic, number words, and ambiguity protection
+  - slower warm-up round and anchor-first live state
+- Pattern Hunt
+  - one public clue loop with private rule guesses
+  - hidden-rule coder DMs and machine-checkable rule families
+  - first-round grace, clue budget, and cleaner reveal flow
 - Chaos Cards and bomb mode variants
 - hybrid slash + `bb!` prefix support
 - session stats and session leaderboard commands
+
+### Question Drops
+
+- scheduled in-channel knowledge prompts
+- guild-first knowledge lane with `/drops panel`, `/drops status`, `/drops stats`, and `/drops leaderboard`
+- configurable channels, categories, timing, activity gating, and tone
+- category mastery roles
+- guild scholar ladder
+- profile / buddy / vault knowledge tie-ins
+- rare AI celebration copy as a public-facing optional layer
+- numeric, number-word, safe multiple-choice, and spoiler-aware answer judging
 
 ### Everyday Utilities
 
@@ -123,6 +143,7 @@ Daily Arcade design rules:
 - anti-farm per-day XP caps by category
 - `/profile` is public-friendly by default
 - `/vault` stays the more personal snapshot
+- Question Drops totals, mastery flavor, and scholar ranks fold in without replacing Daily or party-game identity
 
 ## Commands
 
@@ -149,8 +170,45 @@ Party game flow still starts from `/play`.
 - Exquisite Corpse: 3+ players
 - Spyfall: 3+ players
 - Word Bomb: 2+ players
+- Only 16: 2+ players, anchor-first number trap, Strict recommended, Smart visible for extra chaos
+- Pattern Hunt: 3+ players, public clue loop, private rule guesses, and coder role DMs that stay hidden from the room
 
 Babblebox now nudges solo users toward Daily Arcade, Buddy, Profile, and utilities instead of leaving them at dead ends.
+
+Related party-game commands:
+
+Use slash for multi-family Pattern Hunt guesses. Prefix stays positional, so the example below keeps it to one clean family.
+
+| Slash | Prefix | Purpose |
+| --- | --- | --- |
+| `/hunt` | `bb!hunt` | Open the private Pattern Hunt card |
+| `/hunt status` | `bb!hunt status` | Mirror the live Pattern Hunt state card privately |
+| `/hunt guess` | `bb!hunt guess contains_digits` | Submit a private 1-3 family rule theory |
+
+### Question Drops
+
+Slash is recommended for multi-option setup here. Prefix stays positional, so the examples below keep to the shortest truthful forms.
+
+| Slash | Prefix | Purpose |
+| --- | --- | --- |
+| `/drops panel` | `bb!drops panel` | Open the Question Drops knowledge panel |
+| `/drops status` | `bb!drops status` | View schedule, channels, categories, and operability |
+| `/drops config` | `bb!drops config true 4` | Configure cadence, timing, tone, and AI opt-in |
+| `/drops channels` | `bb!drops channels add #trivia` | Add or remove Question Drops channels |
+| `/drops categories` | `bb!drops categories disable math` | Enable, disable, or reset knowledge categories |
+| `/drops stats` | `bb!drops stats @name` | View guild-first Question Drops progress |
+| `/drops leaderboard` | `bb!drops leaderboard science` | View the guild knowledge board |
+| `/drops mastery category` | `bb!drops mastery category science true 1 @Role 25` | Configure category mastery roles |
+| `/drops mastery scholar` | `bb!drops mastery scholar true 1 @Role 100` | Configure the guild scholar ladder |
+| `/drops mastery recalc` | `bb!drops mastery recalc` | Preview or execute a grant-only role recalculation |
+
+Question Drops notes:
+
+- 1-10 drops per day
+- live drops stay compact and block `/play` only in the same channel while unresolved
+- numeric answers accept clean digits, simple number words, and safe judged formats
+- category mastery and scholar ladder stay guild-first
+- profile, buddy, and vault surfaces fold the knowledge lane in without confusing it with Daily Arcade
 
 ### Everyday Utilities
 
@@ -195,14 +253,15 @@ AFK examples:
 ### Shield / Safety
 
 Shield commands are private/admin-facing by default. The streamlined slash surface is centered on `/shield panel`.
+Slash is the best fit for multi-option admin setup here. Prefix stays positional, so the examples below stay intentionally short.
 
 | Slash | Prefix | Purpose |
 | --- | --- | --- |
 | `/shield panel` | `bb!shield panel` | Open the Shield admin panel |
-| `/shield rules` | `bb!shield rules pack promo enabled true action log sensitivity normal` | Configure module, packs, and escalation |
+| `/shield rules` | `bb!shield rules true promo true log` | Configure module, packs, and escalation |
 | `/shield logs` | `bb!shield logs #shield-log @Mods` | Set the mod-log channel and optional alert role |
-| `/shield filters` | `bb!shield filters only_included trusted_role_ids on @Mods` | Tune scope, includes, excludes, and trusted roles |
-| `/shield allowlist` | `bb!shield allowlist allow_domains on example.com` | Manage domain, invite, and phrase allowlists |
+| `/shield filters` | `bb!shield filters` | Tune scope, includes, excludes, and trusted roles |
+| `/shield allowlist` | `bb!shield allowlist` | Manage domain, invite, and phrase allowlists |
 | `/shield ai` | `bb!shield ai true high true false true` | Configure optional AI second-pass review |
 | `/shield advanced add` | `bb!shield advanced add Gift claim*gift wildcard log` | Add a safe advanced pattern |
 | `/shield advanced list` | `bb!shield advanced list` | Review advanced patterns |
@@ -211,16 +270,17 @@ Shield commands are private/admin-facing by default. The streamlined slash surfa
 ### Admin Lifecycle
 
 Admin lifecycle commands are private/admin-facing by default. The streamlined surface is centered on `/admin panel`.
+Slash is recommended for the heavier config flows here. Prefix stays positional, so the examples below show the safest compact forms.
 
 | Slash | Prefix | Purpose |
 | --- | --- | --- |
 | `/admin panel` | `bb!admin panel` | Open the admin lifecycle control panel |
 | `/admin status` | `bb!admin status` | View overview counts or inspect one member |
-| `/admin followup` | `bb!admin followup enabled true @Probation review 30d` | Configure returned-after-ban follow-up roles |
-| `/admin verification` | `bb!admin verification enabled true @Verified must_have_role 7d 2d` | Configure warning-before-kick verification cleanup and the shared review queue |
+| `/admin followup` | `bb!admin followup true @Probation review 30d` | Configure returned-after-ban follow-up roles |
+| `/admin verification` | `bb!admin verification true @Verified must_have_role review 7d 2d` | Configure warning-before-kick verification cleanup and the shared review queue |
 | `/admin logs` | `bb!admin logs #admin-log @Mods` | Set the shared admin log channel and alert role |
-| `/admin exclusions` | `bb!admin exclusions trusted_role_ids on @Mods` | Configure shared exclusions and trusted roles |
-| `/admin templates` | `bb!admin templates invite_link https://discord.gg/example` | Configure warning/kick DMs and optional rejoin link |
+| `/admin exclusions` | `bb!admin exclusions` | Configure shared exclusions and trusted roles |
+| `/admin templates` | `bb!admin templates` | Configure warning/kick DMs and optional rejoin link |
 | `/admin sync` | `bb!admin sync` | One-time catch-up scan for current unverified members |
 
 Verification cleanup is batch-first: routine sweeps emit grouped summaries, review mode uses one persistent queue message, and startup reconciliation resumes quietly without paging staff about unchanged backlog.
@@ -433,8 +493,15 @@ Moment Cards do not introduce a durable archive table.
 |   |-- command_utils.py
 |   |-- daily_challenges.py
 |   |-- game_engine.py
+|   |-- only16_game.py
+|   |-- pattern_hunt_game.py
 |   |-- profile_service.py
 |   |-- profile_store.py
+|   |-- question_drops_ai.py
+|   |-- question_drops_content.py
+|   |-- question_drops_service.py
+|   |-- question_drops_store.py
+|   |-- question_drops_style.py
 |   |-- shield_ai.py
 |   |-- shield_service.py
 |   |-- shield_store.py
@@ -451,6 +518,8 @@ Moment Cards do not introduce a durable archive table.
 |       |-- gameplay.py
 |       |-- identity.py
 |       |-- meta.py
+|       |-- party_games.py
+|       |-- question_drops.py
 |       |-- shield.py
 |       `-- utilities.py
 |-- assets/
@@ -464,12 +533,18 @@ Moment Cards do not introduce a durable archive table.
 
 - `babblebox/bot.py`: bot bootstrap, extension loading, dictionary setup, sync
 - `babblebox/game_engine.py`: lobby state, gameplay flow, recaps, help/manual, session stats
+- `babblebox/only16_game.py`: Only 16 number-trap parsing, anchor flow, and fairness rules
+- `babblebox/pattern_hunt_game.py`: Pattern Hunt hidden-rule engine, DM onboarding, and anchor flow
 - `babblebox/utility_store.py`: Postgres-first utility persistence, including Watch V2 schema
 - `babblebox/utility_service.py`: Watch, Later, Capture, Moment, Remind, AFK orchestration
 - `babblebox/utility_helpers.py`: utility preview rendering, transcript formatting, and Moment Card embeds
 - `babblebox/daily_challenges.py`: deterministic Daily Arcade booth generation
 - `babblebox/profile_store.py`: compact profile and daily persistence
-- `babblebox/profile_service.py`: Daily Arcade, Buddy, Profile, Vault, and anti-farm progression
+- `babblebox/profile_service.py`: Daily Arcade, Question Drops identity tie-ins, Buddy, Profile, Vault, and anti-farm progression
+- `babblebox/question_drops_content.py`: Question Drops seed content and generated variants
+- `babblebox/question_drops_service.py`: Question Drops scheduling, judging, mastery, and guild-first panels
+- `babblebox/question_drops_store.py`: Question Drops persistence and config normalization
+- `babblebox/question_drops_style.py`: Question Drops emoji and presentation helpers
 - `babblebox/admin_store.py`: compact admin lifecycle config and pending-state persistence
 - `babblebox/admin_service.py`: returned-after-ban follow-up logic, verification cleanup, and bounded sweeping
 - `babblebox/shield_ai.py`: optional AI provider integration, redaction, truncation, and safe parsing
@@ -477,6 +552,9 @@ Moment Cards do not introduce a durable archive table.
 - `babblebox/shield_service.py`: Shield matching, cache rebuilds, actions, and mod-log delivery
 - `babblebox/cogs/admin.py`: admin-facing lifecycle panel, grouped commands, and review buttons
 - `babblebox/cogs/identity.py`: Daily Arcade, Buddy, Profile, and Vault commands
+- `babblebox/cogs/meta.py`: in-bot manual and compact help surfaces
+- `babblebox/cogs/party_games.py`: Pattern Hunt private command surface
+- `babblebox/cogs/question_drops.py`: Question Drops grouped command surface and mastery admin flows
 - `babblebox/cogs/shield.py`: admin-facing Shield command surface
 - `babblebox/cogs/utilities.py`: Watch V2, Later, Capture, Moment, and Remind commands
 
@@ -571,6 +649,7 @@ These features rely on DMs being open:
 
 - Broken Telephone
 - Exquisite Corpse
+- Pattern Hunt coder role DMs
 - Spyfall role messages
 - Watch alerts
 - Later markers

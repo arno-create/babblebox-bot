@@ -4,7 +4,7 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Babblebox Help | Commands and FAQ</title>
-  <meta name="description" content="Babblebox help page for setup, public and private behavior, Daily Arcade, Buddy, Profile, Vault, utilities, Shield, and FAQ." />
+  <meta name="description" content="Babblebox help page for party games, Question Drops, Daily Arcade, Buddy, Profile, Vault, utilities, Shield, and FAQ." />
   <meta name="robots" content="index,follow,max-image-preview:large" />
   <link rel="canonical" href="https://arno-create.github.io/babblebox-bot/help.html" />
   <meta property="og:title" content="Babblebox Help | Commands and FAQ" />
@@ -14,7 +14,7 @@
   <meta property="og:image" content="https://arno-create.github.io/babblebox-bot/banner.png" />
   <meta name="twitter:card" content="summary_large_image" />
   <meta name="twitter:title" content="Babblebox Help | Commands and FAQ" />
-  <meta name="twitter:description" content="Babblebox help for party games, Daily Arcade, Buddy, Profile, Vault, utilities, and compact Shield moderation." />
+  <meta name="twitter:description" content="Babblebox help for party games, Question Drops, Daily Arcade, Buddy, Profile, Vault, utilities, and compact Shield moderation." />
   <meta name="twitter:image" content="https://arno-create.github.io/babblebox-bot/banner.png" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -151,31 +151,32 @@
           <h2>Short multiplayer energy, built around live rooms.</h2>
           <p><code>/play</code> acts as the shared lobby for the live-party lane instead of forcing people to remember several different entry points.</p>
           <div class="command-list">
-      <div class="command-row"><div><code>/play</code></div><div><p>Open the multiplayer lobby.</p><span>Start Broken Telephone, Exquisite Corpse, Spyfall, Word Bomb, Only 16, or Pattern Hunt from one place. Only 16 is easiest in <strong>Strict (recommended)</strong>: ask a number question, wait for one clear answer, and 16 survives. Pattern Hunt is the social deduction room: one player reads the clues while the coders protect a hidden rule.</span></div></div>
-      <div class="command-row"><div><code>/hunt status</code> and <code>/hunt guess</code></div><div><p>Operate the active Pattern Hunt round.</p><span>These stay dormant unless a Pattern Hunt lobby is already live in the server. <code>/hunt status</code> mirrors the live state card privately, and <code>/hunt guess</code> is built for 1-3 clean rule families. The <strong>Contains Digits</strong> guess family means digits <code>0-9</code> only.</span></div></div>
+      <div class="command-row"><div><code>/play</code></div><div><p>Open the multiplayer lobby.</p><span>Start Broken Telephone, Exquisite Corpse, Spyfall, Word Bomb, Only 16, or Pattern Hunt from one place. Only 16 is easiest in <strong>Strict (recommended)</strong>: ask one clean number question, then wait for the first clear answer. <strong>Strict = reply to the armed question only.</strong> Smart is still visible if the room wants looser chaos and also counts one clean standalone answer like <code>16!</code>. Pattern Hunt keeps the loop social: one public clue loop, one hidden rule, and private guesses. Coders need server DMs open before the room starts.</span></div></div>
+      <div class="command-row"><div><code>/hunt status</code> and <code>/hunt guess</code></div><div><p>Operate the active Pattern Hunt round.</p><span>These stay dormant unless a Pattern Hunt lobby is already live in the server. <code>/hunt status</code> mirrors the live state card privately, and <code>/hunt guess</code> is built for 1-3 clean rule families that stay private while the public chat keeps reading the clues. The <strong>Contains Digits</strong> guess family means digits <code>0-9</code> only, and slash is the cleanest way to submit multi-family theories.</span></div></div>
             <div class="command-row"><div><code>/stats</code> and <code>/leaderboard</code></div><div><p>Check light session stats.</p><span>These stay compact and playful instead of turning into a giant progression system.</span></div></div>
           </div>
         </section>
 
         <section class="section" id="daily-arcade">
           <div class="kicker">Daily Arcade</div>
-          <h2>Three quick daily booths plus compact scheduled Question Drops.</h2>
-          <p>Daily Arcade gives people something to do even when there is no full group ready for a live room. Question Drops add lightweight scheduled prompts without turning the server into a spammy trivia cannon. Both lanes stay compact, public-friendly, and spoiler-aware.</p>
+          <h2>Three quick daily booths plus a guild-first Question Drops lane.</h2>
+          <p>Daily Arcade gives people something to do even when there is no full group ready for a live room. Question Drops add lightweight scheduled prompts, mastery roles, scholar ranks, and guild knowledge boards without turning the server into a spammy trivia cannon. Both lanes stay compact, public-friendly, and spoiler-aware.</p>
           <div class="command-list">
             <div class="command-row"><div><code>/daily</code></div><div><p>Open the current daily booth selection.</p><span>Babblebox currently centers Daily Arcade around Shuffle, Emoji, and Signal.</span></div></div>
             <div class="command-row"><div><code>/daily play</code></div><div><p>Submit a daily answer or guess.</p><span>The shorthand path still defaults cleanly instead of forcing command complexity.</span></div></div>
             <div class="command-row"><div><code>/daily stats</code>, <code>/daily share</code>, <code>/daily leaderboard</code></div><div><p>Share progress without turning the booth into a spoiler mess.</p><span>Warnings and storage issues stay private even when the main cards are public.</span></div></div>
-            <div class="command-row"><div><code>/drops panel</code>, <code>/drops status</code>, <code>/drops config</code>, <code>/drops channels</code>, <code>/drops categories</code>, <code>/drops stats</code></div><div><p>Run the scheduled Question Drops lane.</p><span>Admins can run 1-10 drops per day, tune activity gating, and choose channels, categories, and tone. Players answer live in-channel, numeric drops accept clean digits or simple number words, multiple-choice prompts accept the correct option letter or option text, idle channels can skip a slot, higher daily counts reuse concepts sooner, and a live drop blocks new party rooms in that same channel until it resolves.</span></div></div>
+            <div class="command-row"><div><code>/drops panel</code>, <code>/drops status</code>, <code>/drops config</code>, <code>/drops channels</code>, <code>/drops categories</code>, <code>/drops stats</code>, <code>/drops leaderboard</code></div><div><p>Run the scheduled Question Drops lane.</p><span>Admins can run 1-10 drops per day, tune activity gating, and choose channels, categories, and tone. Players answer live in-channel, numeric drops accept clean digits or simple number words, multiple-choice prompts accept the correct option letter or option text, idle channels can skip a slot, higher daily counts reuse concepts sooner, and a live drop blocks new party rooms in that same channel until it resolves.</span></div></div>
+            <div class="command-row"><div><code>/drops mastery category</code>, <code>/drops mastery scholar</code>, <code>/drops mastery recalc</code></div><div><p>Configure mastery roles and the scholar ladder.</p><span>Category mastery roles stay per-category, the scholar ladder stays guild-first, and recalculation is grant-only so admins can safely catch up existing members without role flap.</span></div></div>
           </div>
         </section>
 
         <section class="section" id="buddy-profile-vault">
           <div class="kicker">Buddy / Profile / Vault</div>
           <h2>One identity layer, not a bloated economy.</h2>
-          <p>Babblebox's identity surfaces are meant to feel worth showing. They collect your ongoing flavor, streaks, achievements, party-game wins, and Question Drops progress into a few readable surfaces rather than exploding into a giant inventory game.</p>
+          <p>Babblebox's identity surfaces are meant to feel worth showing. They collect your ongoing flavor, streaks, achievements, party-game wins, Question Drops progress, mastery flavor, and scholar rank into a few readable surfaces rather than exploding into a giant inventory game.</p>
           <div class="command-list">
             <div class="command-row"><div><code>/buddy</code></div><div><p>Your public-friendly mascot or companion surface.</p><span>Good for quick status, style, and personality without a wall of admin text.</span></div></div>
-            <div class="command-row"><div><code>/profile</code></div><div><p>Your broader public identity card.</p><span>Useful when you want a showable summary that still feels readable in a real Discord channel.</span></div></div>
+            <div class="command-row"><div><code>/profile</code></div><div><p>Your broader public identity card.</p><span>Useful when you want a showable summary that still feels readable in a real Discord channel, including guild-first knowledge lane progress without confusing it with Daily Arcade.</span></div></div>
             <div class="command-row"><div><code>/vault</code></div><div><p>Your more personal storage or progression surface.</p><span>Vault is the less public lane when you want to manage your own state quietly.</span></div></div>
           </div>
         </section>

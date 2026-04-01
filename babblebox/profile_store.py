@@ -77,6 +77,37 @@ QUESTION_DROP_CATEGORY_COLUMNS = (
     "best_streak",
 )
 
+QUESTION_DROP_GUILD_PROFILE_COLUMNS = (
+    "guild_id",
+    "user_id",
+    "attempts",
+    "correct_count",
+    "points",
+    "current_streak",
+    "best_streak",
+)
+
+QUESTION_DROP_GUILD_CATEGORY_COLUMNS = (
+    "guild_id",
+    "user_id",
+    "category",
+    "attempts",
+    "correct_count",
+    "points",
+    "current_streak",
+    "best_streak",
+)
+
+QUESTION_DROP_UNLOCK_COLUMNS = (
+    "guild_id",
+    "user_id",
+    "scope_type",
+    "scope_key",
+    "tier",
+    "role_id",
+    "granted_at",
+)
+
 
 class ProfileStorageUnavailable(RuntimeError):
     pass
@@ -116,6 +147,9 @@ def default_profile_store_state() -> dict[str, Any]:
         "profiles": {},
         "daily_results": {},
         "question_drop_categories": {},
+        "question_drop_guild_profiles": {},
+        "question_drop_guild_categories": {},
+        "question_drop_unlocks": {},
         "meta": {},
     }
 
@@ -160,6 +194,42 @@ class _BaseProfileStore:
         raise NotImplementedError
 
     async def fetch_question_drop_categories(self, *, user_id: int) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    async def fetch_question_drop_guild_profile(self, *, guild_id: int, user_id: int) -> dict[str, Any] | None:
+        raise NotImplementedError
+
+    async def save_question_drop_guild_profile(self, row: dict[str, Any]):
+        raise NotImplementedError
+
+    async def fetch_question_drop_guild_profiles(self, *, guild_id: int) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    async def fetch_question_drop_guild_rank(self, *, guild_id: int, user_id: int) -> int | None:
+        raise NotImplementedError
+
+    async def fetch_question_drop_guild_category(self, *, guild_id: int, user_id: int, category: str) -> dict[str, Any] | None:
+        raise NotImplementedError
+
+    async def save_question_drop_guild_category(self, row: dict[str, Any]):
+        raise NotImplementedError
+
+    async def fetch_question_drop_guild_categories(self, *, guild_id: int, user_id: int) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    async def fetch_question_drop_guild_leaderboard(self, *, guild_id: int, limit: int) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    async def fetch_question_drop_guild_category_leaderboard(self, *, guild_id: int, category: str, limit: int) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    async def fetch_question_drop_guild_category_rank(self, *, guild_id: int, user_id: int, category: str) -> int | None:
+        raise NotImplementedError
+
+    async def fetch_question_drop_unlocks(self, *, guild_id: int, user_id: int) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    async def save_question_drop_unlock(self, row: dict[str, Any]):
         raise NotImplementedError
 
     async def get_meta(self, key: str) -> dict[str, Any] | None:
@@ -250,6 +320,108 @@ class _MemoryProfileStore(_BaseProfileStore):
             reverse=True,
         )
         return rows
+
+    async def fetch_question_drop_guild_profile(self, *, guild_id: int, user_id: int) -> dict[str, Any] | None:
+        return _copy_payload(self.state["question_drop_guild_profiles"].get((guild_id, user_id)))
+
+    async def save_question_drop_guild_profile(self, row: dict[str, Any]):
+        key = (row["guild_id"], row["user_id"])
+        self.state["question_drop_guild_profiles"][key] = _copy_payload(row)
+
+    async def fetch_question_drop_guild_profiles(self, *, guild_id: int) -> list[dict[str, Any]]:
+        rows = [
+            _copy_payload(row)
+            for (row_guild_id, _), row in self.state["question_drop_guild_profiles"].items()
+            if row_guild_id == guild_id
+        ]
+        rows.sort(
+            key=lambda item: (
+                int(item.get("points", 0) or 0),
+                int(item.get("correct_count", 0) or 0),
+                int(item.get("attempts", 0) or 0),
+                -int(item.get("user_id", 0) or 0),
+            ),
+            reverse=True,
+        )
+        return rows
+
+    async def fetch_question_drop_guild_rank(self, *, guild_id: int, user_id: int) -> int | None:
+        rows = await self.fetch_question_drop_guild_profiles(guild_id=guild_id)
+        for index, row in enumerate(rows, start=1):
+            if int(row.get("user_id", 0) or 0) == user_id:
+                return index
+        return None
+
+    async def fetch_question_drop_guild_category(self, *, guild_id: int, user_id: int, category: str) -> dict[str, Any] | None:
+        return _copy_payload(self.state["question_drop_guild_categories"].get((guild_id, user_id, category)))
+
+    async def save_question_drop_guild_category(self, row: dict[str, Any]):
+        key = (row["guild_id"], row["user_id"], row["category"])
+        self.state["question_drop_guild_categories"][key] = _copy_payload(row)
+
+    async def fetch_question_drop_guild_categories(self, *, guild_id: int, user_id: int) -> list[dict[str, Any]]:
+        rows = [
+            _copy_payload(row)
+            for (row_guild_id, row_user_id, _), row in self.state["question_drop_guild_categories"].items()
+            if row_guild_id == guild_id and row_user_id == user_id
+        ]
+        rows.sort(
+            key=lambda item: (
+                int(item.get("points", 0) or 0),
+                int(item.get("correct_count", 0) or 0),
+                int(item.get("attempts", 0) or 0),
+                str(item.get("category", "")),
+            ),
+            reverse=True,
+        )
+        return rows
+
+    async def fetch_question_drop_guild_leaderboard(self, *, guild_id: int, limit: int) -> list[dict[str, Any]]:
+        return (await self.fetch_question_drop_guild_profiles(guild_id=guild_id))[:limit]
+
+    async def fetch_question_drop_guild_category_leaderboard(self, *, guild_id: int, category: str, limit: int) -> list[dict[str, Any]]:
+        rows = [
+            _copy_payload(row)
+            for (row_guild_id, _, row_category), row in self.state["question_drop_guild_categories"].items()
+            if row_guild_id == guild_id and row_category == category
+        ]
+        rows.sort(
+            key=lambda item: (
+                int(item.get("points", 0) or 0),
+                int(item.get("correct_count", 0) or 0),
+                int(item.get("attempts", 0) or 0),
+                -int(item.get("user_id", 0) or 0),
+            ),
+            reverse=True,
+        )
+        return rows[:limit]
+
+    async def fetch_question_drop_guild_category_rank(self, *, guild_id: int, user_id: int, category: str) -> int | None:
+        rows = await self.fetch_question_drop_guild_category_leaderboard(guild_id=guild_id, category=category, limit=1000000)
+        for index, row in enumerate(rows, start=1):
+            if int(row.get("user_id", 0) or 0) == user_id:
+                return index
+        return None
+
+    async def fetch_question_drop_unlocks(self, *, guild_id: int, user_id: int) -> list[dict[str, Any]]:
+        rows = [
+            _copy_payload(row)
+            for (row_guild_id, row_user_id, _, _, _, _), row in self.state["question_drop_unlocks"].items()
+            if row_guild_id == guild_id and row_user_id == user_id
+        ]
+        rows.sort(
+            key=lambda item: (
+                str(item.get("scope_type", "")),
+                str(item.get("scope_key", "")),
+                int(item.get("tier", 0) or 0),
+                int(item.get("role_id", 0) or 0),
+            )
+        )
+        return rows
+
+    async def save_question_drop_unlock(self, row: dict[str, Any]):
+        key = (row["guild_id"], row["user_id"], row["scope_type"], row["scope_key"], row["tier"], row["role_id"])
+        self.state["question_drop_unlocks"][key] = _copy_payload(row)
 
     async def get_meta(self, key: str) -> dict[str, Any] | None:
         return _copy_payload(self.state["meta"].get(key))
@@ -390,6 +562,45 @@ class _PostgresProfileStore(_BaseProfileStore):
                 "PRIMARY KEY (user_id, category)"
                 ")"
             ),
+            (
+                "CREATE TABLE IF NOT EXISTS bb_question_drop_guild_profiles ("
+                "guild_id BIGINT NOT NULL, "
+                "user_id BIGINT NOT NULL, "
+                "attempts INTEGER NOT NULL DEFAULT 0, "
+                "correct_count INTEGER NOT NULL DEFAULT 0, "
+                "points INTEGER NOT NULL DEFAULT 0, "
+                "current_streak INTEGER NOT NULL DEFAULT 0, "
+                "best_streak INTEGER NOT NULL DEFAULT 0, "
+                "updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc', now()), "
+                "PRIMARY KEY (guild_id, user_id)"
+                ")"
+            ),
+            (
+                "CREATE TABLE IF NOT EXISTS bb_question_drop_guild_categories ("
+                "guild_id BIGINT NOT NULL, "
+                "user_id BIGINT NOT NULL, "
+                "category TEXT NOT NULL, "
+                "attempts INTEGER NOT NULL DEFAULT 0, "
+                "correct_count INTEGER NOT NULL DEFAULT 0, "
+                "points INTEGER NOT NULL DEFAULT 0, "
+                "current_streak INTEGER NOT NULL DEFAULT 0, "
+                "best_streak INTEGER NOT NULL DEFAULT 0, "
+                "updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc', now()), "
+                "PRIMARY KEY (guild_id, user_id, category)"
+                ")"
+            ),
+            (
+                "CREATE TABLE IF NOT EXISTS bb_question_drop_unlocks ("
+                "guild_id BIGINT NOT NULL, "
+                "user_id BIGINT NOT NULL, "
+                "scope_type TEXT NOT NULL, "
+                "scope_key TEXT NOT NULL, "
+                "tier SMALLINT NOT NULL, "
+                "role_id BIGINT NOT NULL, "
+                "granted_at TIMESTAMPTZ NOT NULL, "
+                "PRIMARY KEY (guild_id, user_id, scope_type, scope_key, tier, role_id)"
+                ")"
+            ),
         ]
         profile_column_migrations = (
             "ADD COLUMN IF NOT EXISTS only16_rounds INTEGER NOT NULL DEFAULT 0",
@@ -412,6 +623,10 @@ class _PostgresProfileStore(_BaseProfileStore):
             "CREATE INDEX IF NOT EXISTS ix_bb_daily_results_user_date ON bb_daily_results (user_id, puzzle_date DESC)",
             "CREATE INDEX IF NOT EXISTS ix_bb_daily_results_date ON bb_daily_results (puzzle_date DESC)",
             "CREATE INDEX IF NOT EXISTS ix_bb_question_drop_categories_user_points ON bb_question_drop_categories (user_id, points DESC, correct_count DESC)",
+            "CREATE INDEX IF NOT EXISTS ix_bb_question_drop_guild_profiles_leaderboard ON bb_question_drop_guild_profiles (guild_id, points DESC, correct_count DESC, attempts DESC, user_id ASC)",
+            "CREATE INDEX IF NOT EXISTS ix_bb_question_drop_guild_categories_lookup ON bb_question_drop_guild_categories (guild_id, user_id, points DESC, correct_count DESC)",
+            "CREATE INDEX IF NOT EXISTS ix_bb_question_drop_guild_categories_leaderboard ON bb_question_drop_guild_categories (guild_id, category, points DESC, correct_count DESC, attempts DESC, user_id ASC)",
+            "CREATE INDEX IF NOT EXISTS ix_bb_question_drop_unlocks_lookup ON bb_question_drop_unlocks (guild_id, user_id, scope_type, scope_key, tier)",
         ]
         async with self._pool.acquire() as conn:
             transaction = getattr(conn, "transaction", None)
@@ -560,6 +775,153 @@ class _PostgresProfileStore(_BaseProfileStore):
             )
         return [dict(row) for row in rows]
 
+    async def fetch_question_drop_guild_profile(self, *, guild_id: int, user_id: int) -> dict[str, Any] | None:
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT guild_id, user_id, attempts, correct_count, points, current_streak, best_streak "
+                "FROM bb_question_drop_guild_profiles WHERE guild_id = $1 AND user_id = $2",
+                guild_id,
+                user_id,
+            )
+        return self._row_to_dict(row)
+
+    async def save_question_drop_guild_profile(self, row: dict[str, Any]):
+        columns_sql = ", ".join(QUESTION_DROP_GUILD_PROFILE_COLUMNS)
+        placeholders_sql = ", ".join(f"${index}" for index in range(1, len(QUESTION_DROP_GUILD_PROFILE_COLUMNS) + 1))
+        updates_sql = ", ".join(
+            f"{column} = EXCLUDED.{column}" for column in QUESTION_DROP_GUILD_PROFILE_COLUMNS if column not in {"guild_id", "user_id"}
+        )
+        values = [row.get(column) for column in QUESTION_DROP_GUILD_PROFILE_COLUMNS]
+        async with self._io_lock:
+            async with self._pool.acquire() as conn:
+                await conn.execute(
+                    f"INSERT INTO bb_question_drop_guild_profiles ({columns_sql}) VALUES ({placeholders_sql}) "
+                    f"ON CONFLICT (guild_id, user_id) DO UPDATE SET {updates_sql}, updated_at = timezone('utc', now())",
+                    *values,
+                )
+
+    async def fetch_question_drop_guild_profiles(self, *, guild_id: int) -> list[dict[str, Any]]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT guild_id, user_id, attempts, correct_count, points, current_streak, best_streak "
+                "FROM bb_question_drop_guild_profiles WHERE guild_id = $1 "
+                "ORDER BY points DESC, correct_count DESC, attempts DESC, user_id ASC",
+                guild_id,
+            )
+        return [dict(row) for row in rows]
+
+    async def fetch_question_drop_guild_rank(self, *, guild_id: int, user_id: int) -> int | None:
+        async with self._pool.acquire() as conn:
+            rank = await conn.fetchval(
+                (
+                    "SELECT rank_position FROM ("
+                    "SELECT user_id, RANK() OVER (ORDER BY points DESC, correct_count DESC, attempts DESC, user_id ASC) AS rank_position "
+                    "FROM bb_question_drop_guild_profiles WHERE guild_id = $1"
+                    ") ranked WHERE user_id = $2"
+                ),
+                guild_id,
+                user_id,
+            )
+        return int(rank) if isinstance(rank, int) else None
+
+    async def fetch_question_drop_guild_category(self, *, guild_id: int, user_id: int, category: str) -> dict[str, Any] | None:
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT guild_id, user_id, category, attempts, correct_count, points, current_streak, best_streak "
+                "FROM bb_question_drop_guild_categories WHERE guild_id = $1 AND user_id = $2 AND category = $3",
+                guild_id,
+                user_id,
+                category,
+            )
+        return self._row_to_dict(row)
+
+    async def save_question_drop_guild_category(self, row: dict[str, Any]):
+        columns_sql = ", ".join(QUESTION_DROP_GUILD_CATEGORY_COLUMNS)
+        placeholders_sql = ", ".join(f"${index}" for index in range(1, len(QUESTION_DROP_GUILD_CATEGORY_COLUMNS) + 1))
+        updates_sql = ", ".join(
+            f"{column} = EXCLUDED.{column}" for column in QUESTION_DROP_GUILD_CATEGORY_COLUMNS if column not in {"guild_id", "user_id", "category"}
+        )
+        values = [row.get(column) for column in QUESTION_DROP_GUILD_CATEGORY_COLUMNS]
+        async with self._io_lock:
+            async with self._pool.acquire() as conn:
+                await conn.execute(
+                    f"INSERT INTO bb_question_drop_guild_categories ({columns_sql}) VALUES ({placeholders_sql}) "
+                    f"ON CONFLICT (guild_id, user_id, category) DO UPDATE SET {updates_sql}, updated_at = timezone('utc', now())",
+                    *values,
+                )
+
+    async def fetch_question_drop_guild_categories(self, *, guild_id: int, user_id: int) -> list[dict[str, Any]]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT guild_id, user_id, category, attempts, correct_count, points, current_streak, best_streak "
+                "FROM bb_question_drop_guild_categories WHERE guild_id = $1 AND user_id = $2 "
+                "ORDER BY points DESC, correct_count DESC, attempts DESC, category ASC",
+                guild_id,
+                user_id,
+            )
+        return [dict(row) for row in rows]
+
+    async def fetch_question_drop_guild_leaderboard(self, *, guild_id: int, limit: int) -> list[dict[str, Any]]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT guild_id, user_id, attempts, correct_count, points, current_streak, best_streak "
+                "FROM bb_question_drop_guild_profiles WHERE guild_id = $1 "
+                "ORDER BY points DESC, correct_count DESC, attempts DESC, user_id ASC LIMIT $2",
+                guild_id,
+                limit,
+            )
+        return [dict(row) for row in rows]
+
+    async def fetch_question_drop_guild_category_leaderboard(self, *, guild_id: int, category: str, limit: int) -> list[dict[str, Any]]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT guild_id, user_id, category, attempts, correct_count, points, current_streak, best_streak "
+                "FROM bb_question_drop_guild_categories WHERE guild_id = $1 AND category = $2 "
+                "ORDER BY points DESC, correct_count DESC, attempts DESC, user_id ASC LIMIT $3",
+                guild_id,
+                category,
+                limit,
+            )
+        return [dict(row) for row in rows]
+
+    async def fetch_question_drop_guild_category_rank(self, *, guild_id: int, user_id: int, category: str) -> int | None:
+        async with self._pool.acquire() as conn:
+            rank = await conn.fetchval(
+                (
+                    "SELECT rank_position FROM ("
+                    "SELECT user_id, RANK() OVER (ORDER BY points DESC, correct_count DESC, attempts DESC, user_id ASC) AS rank_position "
+                    "FROM bb_question_drop_guild_categories WHERE guild_id = $1 AND category = $2"
+                    ") ranked WHERE user_id = $3"
+                ),
+                guild_id,
+                category,
+                user_id,
+            )
+        return int(rank) if isinstance(rank, int) else None
+
+    async def fetch_question_drop_unlocks(self, *, guild_id: int, user_id: int) -> list[dict[str, Any]]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT guild_id, user_id, scope_type, scope_key, tier, role_id, granted_at "
+                "FROM bb_question_drop_unlocks WHERE guild_id = $1 AND user_id = $2 "
+                "ORDER BY scope_type ASC, scope_key ASC, tier ASC, role_id ASC",
+                guild_id,
+                user_id,
+            )
+        return [dict(row) for row in rows]
+
+    async def save_question_drop_unlock(self, row: dict[str, Any]):
+        columns_sql = ", ".join(QUESTION_DROP_UNLOCK_COLUMNS)
+        placeholders_sql = ", ".join(f"${index}" for index in range(1, len(QUESTION_DROP_UNLOCK_COLUMNS) + 1))
+        values = [row.get(column) for column in QUESTION_DROP_UNLOCK_COLUMNS]
+        async with self._io_lock:
+            async with self._pool.acquire() as conn:
+                await conn.execute(
+                    f"INSERT INTO bb_question_drop_unlocks ({columns_sql}) VALUES ({placeholders_sql}) "
+                    "ON CONFLICT (guild_id, user_id, scope_type, scope_key, tier, role_id) DO NOTHING",
+                    *values,
+                )
+
     async def get_meta(self, key: str) -> dict[str, Any] | None:
         async with self._pool.acquire() as conn:
             value = await conn.fetchval("SELECT value FROM bb_identity_meta WHERE key = $1", key)
@@ -668,6 +1030,42 @@ class ProfileStore:
 
     async def fetch_question_drop_categories(self, *, user_id: int) -> list[dict[str, Any]]:
         return await self._store.fetch_question_drop_categories(user_id=user_id)
+
+    async def fetch_question_drop_guild_profile(self, *, guild_id: int, user_id: int) -> dict[str, Any] | None:
+        return await self._store.fetch_question_drop_guild_profile(guild_id=guild_id, user_id=user_id)
+
+    async def save_question_drop_guild_profile(self, row: dict[str, Any]):
+        await self._store.save_question_drop_guild_profile(row)
+
+    async def fetch_question_drop_guild_profiles(self, *, guild_id: int) -> list[dict[str, Any]]:
+        return await self._store.fetch_question_drop_guild_profiles(guild_id=guild_id)
+
+    async def fetch_question_drop_guild_rank(self, *, guild_id: int, user_id: int) -> int | None:
+        return await self._store.fetch_question_drop_guild_rank(guild_id=guild_id, user_id=user_id)
+
+    async def fetch_question_drop_guild_category(self, *, guild_id: int, user_id: int, category: str) -> dict[str, Any] | None:
+        return await self._store.fetch_question_drop_guild_category(guild_id=guild_id, user_id=user_id, category=category)
+
+    async def save_question_drop_guild_category(self, row: dict[str, Any]):
+        await self._store.save_question_drop_guild_category(row)
+
+    async def fetch_question_drop_guild_categories(self, *, guild_id: int, user_id: int) -> list[dict[str, Any]]:
+        return await self._store.fetch_question_drop_guild_categories(guild_id=guild_id, user_id=user_id)
+
+    async def fetch_question_drop_guild_leaderboard(self, *, guild_id: int, limit: int) -> list[dict[str, Any]]:
+        return await self._store.fetch_question_drop_guild_leaderboard(guild_id=guild_id, limit=limit)
+
+    async def fetch_question_drop_guild_category_leaderboard(self, *, guild_id: int, category: str, limit: int) -> list[dict[str, Any]]:
+        return await self._store.fetch_question_drop_guild_category_leaderboard(guild_id=guild_id, category=category, limit=limit)
+
+    async def fetch_question_drop_guild_category_rank(self, *, guild_id: int, user_id: int, category: str) -> int | None:
+        return await self._store.fetch_question_drop_guild_category_rank(guild_id=guild_id, user_id=user_id, category=category)
+
+    async def fetch_question_drop_unlocks(self, *, guild_id: int, user_id: int) -> list[dict[str, Any]]:
+        return await self._store.fetch_question_drop_unlocks(guild_id=guild_id, user_id=user_id)
+
+    async def save_question_drop_unlock(self, row: dict[str, Any]):
+        await self._store.save_question_drop_unlock(row)
 
     async def get_meta(self, key: str) -> dict[str, Any] | None:
         return await self._store.get_meta(key)

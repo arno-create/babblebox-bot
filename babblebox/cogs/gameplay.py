@@ -14,7 +14,7 @@ class GameplayCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
-    @commands.hybrid_command(name="play", with_app_command=True, description="Open the Babblebox menu and host a game")
+    @commands.hybrid_command(name="play", with_app_command=True, description="Open the Babblebox party-game lobby")
     async def play_command(self, ctx: commands.Context):
         if ctx.guild is None or ctx.channel is None:
             await send_hybrid_response(

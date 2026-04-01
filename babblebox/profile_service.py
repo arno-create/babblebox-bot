@@ -18,6 +18,8 @@ from babblebox.daily_challenges import (
     normalize_daily_guess,
     resolve_daily_mode,
 )
+from babblebox.question_drops_content import answer_points_for_difficulty
+from babblebox.question_drops_style import category_label_with_emoji, progression_emoji, scholar_label
 from babblebox.profile_store import ProfileStorageUnavailable, ProfileStore
 from babblebox.text_safety import sanitize_short_plain_text
 
@@ -328,6 +330,72 @@ def _blank_question_drop_category(user_id: int, category: str) -> dict[str, Any]
     }
 
 
+def _blank_question_drop_guild_profile(guild_id: int, user_id: int) -> dict[str, Any]:
+    return {
+        "guild_id": guild_id,
+        "user_id": user_id,
+        "attempts": 0,
+        "correct_count": 0,
+        "points": 0,
+        "current_streak": 0,
+        "best_streak": 0,
+    }
+
+
+def _blank_question_drop_guild_category(guild_id: int, user_id: int, category: str) -> dict[str, Any]:
+    return {
+        "guild_id": guild_id,
+        "user_id": user_id,
+        "category": category,
+        "attempts": 0,
+        "correct_count": 0,
+        "points": 0,
+        "current_streak": 0,
+        "best_streak": 0,
+    }
+
+
+def _global_question_drop_snapshot(profile: dict[str, Any]) -> dict[str, int]:
+    return {
+        "attempts": int(profile.get("question_drop_attempts", 0) or 0),
+        "correct_count": int(profile.get("question_drop_correct", 0) or 0),
+        "points": int(profile.get("question_drop_points", 0) or 0),
+        "current_streak": int(profile.get("question_drop_current_streak", 0) or 0),
+        "best_streak": int(profile.get("question_drop_best_streak", 0) or 0),
+    }
+
+
+def _scholar_tier_from_unlocks(unlocks: list[dict[str, Any]]) -> int:
+    scholar_tiers = {
+        int(item.get("tier", 0) or 0)
+        for item in unlocks
+        if str(item.get("scope_type", "")).casefold() == "scholar"
+    }
+    return max(scholar_tiers, default=0)
+
+
+def _top_mastery_from_unlocks(unlocks: list[dict[str, Any]]) -> tuple[str | None, int]:
+    top_category = None
+    top_tier = 0
+    for item in unlocks:
+        if str(item.get("scope_type", "")).casefold() != "category":
+            continue
+        tier = int(item.get("tier", 0) or 0)
+        category = str(item.get("scope_key", "")).strip().casefold()
+        if tier > top_tier:
+            top_category = category
+            top_tier = tier
+    return top_category, top_tier
+
+
+def _knowledge_accuracy(row: dict[str, Any]) -> int:
+    attempts = int(row.get("attempts", 0) or 0)
+    correct = int(row.get("correct_count", 0) or 0)
+    if attempts <= 0:
+        return 0
+    return int(round((correct / attempts) * 100.0))
+
+
 def _daily_booth_line(mode: str, puzzle, result: dict[str, Any] | None, *, active_mode: str) -> str:
     prefix = "\u25b6" if mode == active_mode else "\u2022"
     return f"{prefix} {_daily_mode_icon(mode)} **{puzzle.label}** | {_daily_progress_line(result)}"
@@ -515,19 +583,107 @@ class ProfileService:
             self._sync_identity_fields(profile, today)
             return self._enrich_profile(profile)
 
-    async def get_question_drop_summary(self, user_id: int) -> dict[str, Any] | None:
+    async def get_question_drop_summary(self, user_id: int, *, guild_id: int | None = None) -> dict[str, Any] | None:
         if not self.storage_ready:
             return None
         async with self._lock:
             profile = await self._ensure_profile(user_id)
             today = ge.now_utc().date()
             self._sync_identity_fields(profile, today)
-            categories = await self.store.fetch_question_drop_categories(user_id=user_id)
+            global_categories = await self.store.fetch_question_drop_categories(user_id=user_id)
+            guild_profile = None
+            guild_categories: list[dict[str, Any]] = []
+            guild_rank = None
+            guild_unlocks: list[dict[str, Any]] = []
+            if isinstance(guild_id, int) and guild_id > 0:
+                guild_profile = await self.store.fetch_question_drop_guild_profile(guild_id=guild_id, user_id=user_id)
+                if guild_profile is None:
+                    guild_profile = _blank_question_drop_guild_profile(guild_id, user_id)
+                guild_categories = await self.store.fetch_question_drop_guild_categories(guild_id=guild_id, user_id=user_id)
+                guild_rank = await self.store.fetch_question_drop_guild_rank(guild_id=guild_id, user_id=user_id)
+                guild_unlocks = await self.store.fetch_question_drop_unlocks(guild_id=guild_id, user_id=user_id)
+            top_categories = guild_categories[:3] if guild_categories else global_categories[:3]
             return {
                 "profile": self._enrich_profile(profile),
-                "categories": categories,
-                "top_categories": categories[:3],
+                "global_profile": _global_question_drop_snapshot(profile),
+                "global_categories": global_categories,
+                "categories": guild_categories if guild_categories else global_categories,
+                "top_categories": top_categories,
+                "guild_id": guild_id,
+                "guild_profile": guild_profile,
+                "guild_categories": guild_categories,
+                "guild_rank": guild_rank,
+                "guild_unlocks": guild_unlocks,
             }
+
+    async def get_question_drop_leaderboard(self, *, guild_id: int, category: str | None = None, limit: int = 10) -> list[dict[str, Any]]:
+        if not self.storage_ready:
+            return []
+        if not isinstance(guild_id, int) or guild_id <= 0:
+            return []
+        normalized_category = str(category or "").strip().lower()
+        if normalized_category:
+            return await self.store.fetch_question_drop_guild_category_leaderboard(guild_id=guild_id, category=normalized_category, limit=limit)
+        return await self.store.fetch_question_drop_guild_leaderboard(guild_id=guild_id, limit=limit)
+
+    async def backfill_question_drop_guild_points_from_exposures(self, *, guild_id: int, exposures: list[dict[str, Any]]) -> dict[str, int]:
+        if not self.storage_ready or not isinstance(guild_id, int) or guild_id <= 0:
+            return {"updated_profiles": 0, "updated_categories": 0}
+        meta_key = f"question_drop_guild_backfill:{guild_id}"
+        async with self._lock:
+            existing_meta = await self.store.get_meta(meta_key)
+            if isinstance(existing_meta, dict) and existing_meta.get("completed_at"):
+                return {
+                    "updated_profiles": int(existing_meta.get("updated_profiles", 0) or 0),
+                    "updated_categories": int(existing_meta.get("updated_categories", 0) or 0),
+                }
+            points_by_user: dict[int, int] = {}
+            correct_by_user: dict[int, int] = {}
+            points_by_category: dict[tuple[int, str], int] = {}
+            correct_by_category: dict[tuple[int, str], int] = {}
+            for exposure in exposures:
+                if not isinstance(exposure, dict):
+                    continue
+                winner_user_id = exposure.get("winner_user_id")
+                if not isinstance(winner_user_id, int) or winner_user_id <= 0:
+                    continue
+                category_id = str(exposure.get("category") or "").strip().lower()
+                if not category_id:
+                    continue
+                points = answer_points_for_difficulty(int(exposure.get("difficulty", 1) or 1))
+                points_by_user[winner_user_id] = points_by_user.get(winner_user_id, 0) + points
+                correct_by_user[winner_user_id] = correct_by_user.get(winner_user_id, 0) + 1
+                category_key = (winner_user_id, category_id)
+                points_by_category[category_key] = points_by_category.get(category_key, 0) + points
+                correct_by_category[category_key] = correct_by_category.get(category_key, 0) + 1
+            updated_profiles = 0
+            updated_categories = 0
+            for user_id, points in points_by_user.items():
+                guild_profile = await self.store.fetch_question_drop_guild_profile(guild_id=guild_id, user_id=user_id)
+                if guild_profile is None:
+                    guild_profile = _blank_question_drop_guild_profile(guild_id, user_id)
+                guild_profile["points"] = max(int(guild_profile.get("points", 0) or 0), points)
+                guild_profile["correct_count"] = max(int(guild_profile.get("correct_count", 0) or 0), correct_by_user.get(user_id, 0))
+                await self.store.save_question_drop_guild_profile(guild_profile)
+                updated_profiles += 1
+            for (user_id, category_id), points in points_by_category.items():
+                guild_category = await self.store.fetch_question_drop_guild_category(guild_id=guild_id, user_id=user_id, category=category_id)
+                if guild_category is None:
+                    guild_category = _blank_question_drop_guild_category(guild_id, user_id, category_id)
+                guild_category["points"] = max(int(guild_category.get("points", 0) or 0), points)
+                guild_category["correct_count"] = max(int(guild_category.get("correct_count", 0) or 0), correct_by_category.get((user_id, category_id), 0))
+                await self.store.save_question_drop_guild_category(guild_category)
+                updated_categories += 1
+            await self.store.set_meta(
+                meta_key,
+                {
+                    "completed_at": ge.now_utc().isoformat(),
+                    "updated_profiles": updated_profiles,
+                    "updated_categories": updated_categories,
+                    "winner_rows": len(points_by_category),
+                },
+            )
+        return {"updated_profiles": updated_profiles, "updated_categories": updated_categories}
 
     async def rename_buddy(self, user_id: int, nickname: str) -> tuple[bool, str]:
         if not self.storage_ready:
@@ -853,26 +1009,28 @@ class ProfileService:
             self._sync_identity_fields(profile, today)
             await self.store.save_profile(profile)
 
-    async def record_question_drop_result(self, user_id: int, *, category: str, correct: bool, points: int):
+    async def record_question_drop_result(self, user_id: int, *, guild_id: int, category: str, correct: bool, points: int):
         if not self.storage_ready:
-            return
+            return {}
         category_id = str(category or "").strip().lower()
         if not category_id:
-            return
+            return {}
         granted_points = max(0, int(points))
         async with self._lock:
             today = ge.now_utc().date()
-            await self._apply_question_drop_result_locked(
+            update = await self._apply_question_drop_result_locked(
                 today=today,
+                guild_id=guild_id,
                 user_id=user_id,
                 category_id=category_id,
                 correct=bool(correct),
                 granted_points=granted_points,
             )
+        return update
 
-    async def record_question_drop_results_batch(self, results: list[dict[str, Any]]):
+    async def record_question_drop_results_batch(self, results: list[dict[str, Any]], *, guild_id: int):
         if not self.storage_ready:
-            return
+            return {}
         normalized: dict[tuple[int, str], dict[str, Any]] = {}
         for raw in results:
             if not isinstance(raw, dict):
@@ -897,28 +1055,38 @@ class ProfileService:
             if raw.get("correct"):
                 candidate["points"] = max(int(candidate["points"]), max(0, int(raw.get("points", 0) or 0)))
         if not normalized:
-            return
+            return {}
+        updates: dict[int, dict[str, Any]] = {}
         async with self._lock:
             today = ge.now_utc().date()
             for result in normalized.values():
-                await self._apply_question_drop_result_locked(
+                update = await self._apply_question_drop_result_locked(
                     today=today,
+                    guild_id=guild_id,
                     user_id=int(result["user_id"]),
                     category_id=str(result["category_id"]),
                     correct=bool(result["correct"]),
                     granted_points=max(0, int(result["points"])),
                 )
+                updates[int(result["user_id"])] = update
+        return updates
 
     async def _apply_question_drop_result_locked(
         self,
         *,
         today,
+        guild_id: int,
         user_id: int,
         category_id: str,
         correct: bool,
         granted_points: int,
-    ):
+    ) -> dict[str, Any]:
         profile = await self._ensure_profile(user_id)
+        before_global = _global_question_drop_snapshot(profile)
+        before_guild = await self.store.fetch_question_drop_guild_profile(guild_id=guild_id, user_id=user_id)
+        if before_guild is None:
+            before_guild = _blank_question_drop_guild_profile(guild_id, user_id)
+        guild_profile = dict(before_guild)
         profile["question_drop_attempts"] = int(profile.get("question_drop_attempts", 0) or 0) + 1
         if correct:
             profile["question_drop_correct"] = int(profile.get("question_drop_correct", 0) or 0) + 1
@@ -926,7 +1094,6 @@ class ProfileService:
             next_streak = int(profile.get("question_drop_current_streak", 0) or 0) + 1
             profile["question_drop_current_streak"] = next_streak
             profile["question_drop_best_streak"] = max(int(profile.get("question_drop_best_streak", 0) or 0), next_streak)
-            self._grant_xp(profile, bucket="daily", amount=min(DAILY_CLEAR_XP, max(1, granted_points)), today=today)
             mood = "proud"
         else:
             profile["question_drop_current_streak"] = 0
@@ -934,6 +1101,7 @@ class ProfileService:
         category_row = await self.store.fetch_question_drop_category(user_id=user_id, category=category_id)
         if category_row is None:
             category_row = _blank_question_drop_category(user_id, category_id)
+        before_global_category = dict(category_row)
         category_row["attempts"] = int(category_row.get("attempts", 0) or 0) + 1
         if correct:
             category_row["correct_count"] = int(category_row.get("correct_count", 0) or 0) + 1
@@ -943,16 +1111,95 @@ class ProfileService:
             category_row["best_streak"] = max(int(category_row.get("best_streak", 0) or 0), next_category_streak)
         else:
             category_row["current_streak"] = 0
+        before_guild_category = await self.store.fetch_question_drop_guild_category(guild_id=guild_id, user_id=user_id, category=category_id)
+        if before_guild_category is None:
+            before_guild_category = _blank_question_drop_guild_category(guild_id, user_id, category_id)
+        guild_category_row = dict(before_guild_category)
+        before_rank = await self.store.fetch_question_drop_guild_rank(guild_id=guild_id, user_id=user_id)
+        before_category_rank = await self.store.fetch_question_drop_guild_category_rank(guild_id=guild_id, user_id=user_id, category=category_id)
+        guild_profile["attempts"] = int(guild_profile.get("attempts", 0) or 0) + 1
+        if correct:
+            guild_profile["correct_count"] = int(guild_profile.get("correct_count", 0) or 0) + 1
+            guild_profile["points"] = int(guild_profile.get("points", 0) or 0) + granted_points
+            next_guild_streak = int(guild_profile.get("current_streak", 0) or 0) + 1
+            guild_profile["current_streak"] = next_guild_streak
+            guild_profile["best_streak"] = max(int(guild_profile.get("best_streak", 0) or 0), next_guild_streak)
+        else:
+            guild_profile["current_streak"] = 0
+        guild_category_row["attempts"] = int(guild_category_row.get("attempts", 0) or 0) + 1
+        if correct:
+            guild_category_row["correct_count"] = int(guild_category_row.get("correct_count", 0) or 0) + 1
+            guild_category_row["points"] = int(guild_category_row.get("points", 0) or 0) + granted_points
+            next_guild_category_streak = int(guild_category_row.get("current_streak", 0) or 0) + 1
+            guild_category_row["current_streak"] = next_guild_category_streak
+            guild_category_row["best_streak"] = max(int(guild_category_row.get("best_streak", 0) or 0), next_guild_category_streak)
+        else:
+            guild_category_row["current_streak"] = 0
         self._touch_profile(profile, mood=mood)
         self._sync_identity_fields(profile, today)
         await self.store.save_question_drop_category(category_row)
+        await self.store.save_question_drop_guild_category(guild_category_row)
+        await self.store.save_question_drop_guild_profile(guild_profile)
         await self.store.save_profile(profile)
+        after_rank = await self.store.fetch_question_drop_guild_rank(guild_id=guild_id, user_id=user_id)
+        after_category_rank = await self.store.fetch_question_drop_guild_category_rank(guild_id=guild_id, user_id=user_id, category=category_id)
+        return {
+            "user_id": user_id,
+            "guild_id": guild_id,
+            "category": category_id,
+            "correct": bool(correct),
+            "points_awarded": granted_points if correct else 0,
+            "global_before": before_global,
+            "global_after": _global_question_drop_snapshot(profile),
+            "global_category_before": before_global_category,
+            "global_category_after": dict(category_row),
+            "guild_before": before_guild,
+            "guild_after": dict(guild_profile),
+            "guild_category_before": before_guild_category,
+            "guild_category_after": dict(guild_category_row),
+            "guild_rank_before": before_rank,
+            "guild_rank_after": after_rank,
+            "category_rank_before": before_category_rank,
+            "category_rank_after": after_category_rank,
+        }
 
     def _resolve_user_label(self, user_id: int) -> str:
-        cached = self.bot.get_user(user_id)
+        get_user = getattr(self.bot, "get_user", None)
+        cached = get_user(user_id) if callable(get_user) else None
         if cached is not None:
             return ge.display_name_of(cached)
         return f"User {user_id}"
+
+    def _knowledge_context(self, profile: dict[str, Any], knowledge_summary: dict[str, Any] | None) -> dict[str, Any]:
+        summary = knowledge_summary if isinstance(knowledge_summary, dict) else {}
+        global_profile = summary.get("global_profile") or _global_question_drop_snapshot(profile)
+        global_categories = summary.get("global_categories") or []
+        guild_profile = summary.get("guild_profile")
+        guild_categories = summary.get("guild_categories") or []
+        unlocks = summary.get("guild_unlocks") or []
+        has_guild_scope = isinstance(guild_profile, dict)
+        primary_profile = guild_profile if has_guild_scope else global_profile
+        primary_categories = guild_categories if has_guild_scope else global_categories
+        scope_label = "This server" if has_guild_scope else "Lifetime"
+        scholar_tier = _scholar_tier_from_unlocks(unlocks)
+        mastery_category, mastery_tier = _top_mastery_from_unlocks(unlocks)
+        top_category = primary_categories[0] if primary_categories else None
+        lifetime_top_category = global_categories[0] if has_guild_scope and not primary_categories and global_categories else None
+        return {
+            "scope_label": scope_label,
+            "primary_profile": primary_profile,
+            "primary_categories": primary_categories,
+            "global_profile": global_profile,
+            "global_categories": global_categories,
+            "guild_rank": summary.get("guild_rank"),
+            "scholar_tier": scholar_tier,
+            "scholar_label": scholar_label(scholar_tier) if scholar_tier > 0 else "No scholar rank yet",
+            "mastery_category": mastery_category,
+            "mastery_tier": mastery_tier,
+            "top_category": top_category,
+            "top_category_scope_label": scope_label if top_category is not None else None,
+            "lifetime_top_category": lifetime_top_category,
+        }
 
     def build_daily_embed(self, user: discord.abc.User, daily_status: dict[str, Any], *, public: bool = False) -> discord.Embed:
         profile = daily_status["profile"]
@@ -1088,8 +1335,29 @@ class ProfileService:
         )
         return ge.style_embed(embed, footer="Babblebox Daily Arcade | Shared UTC booths, compact lifetime stats")
 
-    def build_buddy_embed(self, user: discord.abc.User, profile: dict[str, Any]) -> discord.Embed:
+    def build_buddy_embed(self, user: discord.abc.User, profile: dict[str, Any], *, knowledge_summary: dict[str, Any] | None = None) -> discord.Embed:
         species = profile["species_meta"]
+        knowledge = self._knowledge_context(profile, knowledge_summary)
+        primary = knowledge["primary_profile"]
+        top_category = knowledge["top_category"]
+        lifetime_top_category = knowledge.get("lifetime_top_category")
+        if isinstance(top_category, dict):
+            lead_prefix = "Lifetime lead" if knowledge.get("top_category_scope_label") == "Lifetime" else "Server lead"
+            top_category_text = (
+                f"{lead_prefix}: {category_label_with_emoji(top_category['category'])} | **{int(top_category.get('points', 0) or 0)}** pts"
+            )
+        elif isinstance(lifetime_top_category, dict):
+            top_category_text = (
+                f"Lifetime lead: {category_label_with_emoji(lifetime_top_category['category'])} | "
+                f"**{int(lifetime_top_category.get('points', 0) or 0)}** pts"
+            )
+        else:
+            top_category_text = "No category lead yet"
+        mastery_text = (
+            f"{progression_emoji('mastery')} {category_label_with_emoji(knowledge['mastery_category'])} | Tier **{knowledge['mastery_tier']}**"
+            if knowledge["mastery_category"] and int(knowledge["mastery_tier"] or 0) > 0
+            else f"{progression_emoji('mastery')} No mastery badge yet"
+        )
         embed = discord.Embed(
             title=f"Buddy | {profile['buddy_name']}",
             description=(
@@ -1118,11 +1386,11 @@ class ProfileService:
             inline=True,
         )
         embed.add_field(
-            name="Question Drops",
+            name="🎓 Knowledge Lane",
             value=(
-                f"Points: **{profile['question_drop_points']}**\n"
-                f"Solved: **{profile['question_drop_correct']} / {profile['question_drop_attempts']} drops**\n"
-                f"Streak: **{profile['question_drop_current_streak']}**"
+                f"{knowledge['scope_label']}: **{int(primary.get('points', 0) or 0)}** pts\n"
+                f"{progression_emoji('streak')} Streak: **{int(primary.get('current_streak', 0) or 0)}**\n"
+                f"{progression_emoji('scholar')} {knowledge['scholar_label']}"
             ),
             inline=True,
         )
@@ -1132,13 +1400,27 @@ class ProfileService:
             value=(
                 f"Utilities used: **{_utility_score(profile)}**\n"
                 f"Games played: **{profile['games_played']}**\n"
-                f"Daily booths played: **{profile['total_daily_participations']}**"
+                f"{top_category_text}\n"
+                f"{mastery_text}"
             ),
             inline=False,
         )
         return ge.style_embed(embed, footer="Babblebox Buddy | Cosmetic-first progression with daily caps")
 
-    def build_buddy_stats_embed(self, user: discord.abc.User, profile: dict[str, Any]) -> discord.Embed:
+    def build_buddy_stats_embed(self, user: discord.abc.User, profile: dict[str, Any], *, knowledge_summary: dict[str, Any] | None = None) -> discord.Embed:
+        knowledge = self._knowledge_context(profile, knowledge_summary)
+        primary = knowledge["primary_profile"]
+        lifetime_top_category = knowledge.get("lifetime_top_category") or knowledge.get("top_category")
+        flavor_lines = [
+            f"{progression_emoji('scholar')} {knowledge['scholar_label']}",
+            f"{progression_emoji('streak')} Best streak: **{int(primary.get('best_streak', 0) or 0)}**",
+            f"{progression_emoji('next')} Lifetime total: **{int(knowledge['global_profile'].get('points', 0) or 0)}** pts",
+        ]
+        if isinstance(lifetime_top_category, dict):
+            flavor_lines.append(
+                f"Lifetime lead: {category_label_with_emoji(lifetime_top_category['category'])} | "
+                f"**{int(lifetime_top_category.get('points', 0) or 0)}** pts"
+            )
         embed = discord.Embed(
             title=f"Buddy Stats | {profile['buddy_name']}",
             description="Progress, titles, badges, and the activity mix shaping your companion.",
@@ -1152,13 +1434,18 @@ class ProfileService:
                 f"Arcade clears: **{profile['total_daily_clears']}**\n"
                 f"Utilities used: **{_utility_score(profile)}**\n"
                 f"Games won: **{profile['games_won']}**\n"
-                f"Question Drop points: **{profile['question_drop_points']}**"
+                f"{knowledge['scope_label']} knowledge: **{int(primary.get('points', 0) or 0)}** pts"
             ),
             inline=True,
         )
         unlocked_titles = [TITLE_DEFINITIONS[title]["label"] for title in profile["titles_unlocked"]]
         embed.add_field(name="Unlocked Titles", value=", ".join(unlocked_titles) if unlocked_titles else "None yet", inline=True)
         embed.add_field(name="Badges", value=_format_badges(profile["badges_unlocked"]), inline=False)
+        embed.add_field(
+            name="Knowledge Flavor",
+            value="\n".join(flavor_lines),
+            inline=False,
+        )
         embed.add_field(
             name="XP Rules",
             value="Daily, utility, and game XP are capped per UTC day so progress stays cozy instead of grindy.",
@@ -1171,17 +1458,36 @@ class ProfileService:
         target: discord.abc.User,
         profile: dict[str, Any],
         *,
+        knowledge_summary: dict[str, Any] | None = None,
         utility_summary: dict[str, Any] | None,
         session_stats: dict[str, Any] | None,
         title: str = "Babblebox Profile",
     ) -> discord.Embed:
         species = profile["species_meta"]
         is_vault = title.lower().endswith("vault")
+        knowledge = self._knowledge_context(profile, knowledge_summary)
+        primary = knowledge["primary_profile"]
+        guild_rank_text = f"#{knowledge['guild_rank']}" if isinstance(knowledge.get("guild_rank"), int) else "Unranked"
+        top_category = knowledge["top_category"]
+        lifetime_top_category = knowledge.get("lifetime_top_category")
+        if isinstance(top_category, dict):
+            lead_prefix = "Lifetime lead" if knowledge.get("top_category_scope_label") == "Lifetime" else "Server lead"
+            top_category_text = (
+                f"{lead_prefix}: {category_label_with_emoji(top_category['category'])} | "
+                f"**{int(top_category.get('points', 0) or 0)}** pts"
+            )
+        elif isinstance(lifetime_top_category, dict):
+            top_category_text = (
+                f"Lifetime lead: {category_label_with_emoji(lifetime_top_category['category'])} | "
+                f"**{int(lifetime_top_category.get('points', 0) or 0)}** pts"
+            )
+        else:
+            top_category_text = "No top category yet"
         embed = discord.Embed(
             title=title,
             description=(
                 f"**{ge.display_name_of(target)}** with buddy **{profile['buddy_name']}** in the Babblebox lounge.\n"
-                f"{'Private snapshot with live utility context.' if is_vault else 'Showable snapshot of arcade, buddy, and party highlights.'}"
+                f"{'Private snapshot with live utility context.' if is_vault else 'Showable snapshot of knowledge, arcade, buddy, and party highlights.'}"
             ),
             color=profile["style_meta"]["color"],
         )
@@ -1205,13 +1511,30 @@ class ProfileService:
         )
         embed.add_field(name="Level Track", value=_level_track(profile), inline=True)
         embed.add_field(
-            name="Question Drops",
+            name="🎓 Knowledge Lane",
             value=(
-                f"Points: **{profile['question_drop_points']}**\n"
-                f"Solved: **{profile['question_drop_correct']} / {profile['question_drop_attempts']} drops**\n"
-                f"Best streak: **{profile['question_drop_best_streak']}**"
+                f"{knowledge['scope_label']}: **{int(primary.get('points', 0) or 0)}** pts\n"
+                f"Solved: **{int(primary.get('correct_count', 0) or 0)} / {int(primary.get('attempts', 0) or 0)}**\n"
+                f"{progression_emoji('streak')} Best streak: **{int(primary.get('best_streak', 0) or 0)}**"
             ),
             inline=True,
+        )
+        embed.add_field(
+            name="Knowledge Highlights",
+            value=(
+                f"{progression_emoji('scholar')} {knowledge['scholar_label']}\n"
+                f"{progression_emoji('move')} Rank: **{guild_rank_text}**\n"
+                f"{top_category_text}"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Lifetime Flavor",
+            value=(
+                f"Question Drop points: **{int(knowledge['global_profile'].get('points', 0) or 0)}**\n"
+                f"Solved: **{int(knowledge['global_profile'].get('correct_count', 0) or 0)} / {int(knowledge['global_profile'].get('attempts', 0) or 0)}**"
+            ),
+            inline=False,
         )
         if utility_summary is not None:
             embed.add_field(

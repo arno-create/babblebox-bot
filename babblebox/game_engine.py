@@ -1207,8 +1207,8 @@ def get_lobby_embed(guild_id):
         "corpse": ("📝 Exquisite Corpse", "Blind collaborative nonsense for 3+ players.", discord.Color.purple()),
         "spyfall": ("🕵️ Spyfall", "Find the spy before the room turns on itself. 3+ players.", discord.Color.dark_gray()),
         "bomb": ("💣 Word Bomb", "Fast typing survival for 2+ players.", discord.Color.red()),
-        "only16": ("Only 16", "Ask a number question, wait for one clear answer, and hope nobody lands anywhere but 16. 2+ players.", discord.Color.orange()),
-        "pattern_hunt": ("Pattern Hunt", "One player reads the room while the coders protect a hidden rule with public clues. 3+ players.", discord.Color.dark_teal()),
+        "only16": ("Only 16", "Funny number trap. Ask one clean number question; the first clear answer decides it. 2+ players.", discord.Color.orange()),
+        "pattern_hunt": ("Pattern Hunt", "One public clue loop, private rule guesses. 3+ players.", discord.Color.dark_teal()),
     }
 
     title, desc, color = titles.get(gt, titles["none"])
@@ -1226,10 +1226,19 @@ def get_lobby_embed(guild_id):
         embed.add_field(
             name="Only 16 Mode",
             value=(
-                f"**{'Strict (Recommended)' if str(game.get('only16_mode', 'strict')).casefold() == 'strict' else 'Smart (Advanced)'}**\n"
-                "Strict: reply to the armed question with one clear number.\n"
-                "Smart: replies still count, plus one clean standalone answer like `16!`.\n"
-                "Chatter stays out, and ambiguity never knocks anyone out."
+                f"**{'Strict (Recommended)' if str(game.get('only16_mode', 'strict')).casefold() == 'strict' else 'Smart (Visible chaos mode)'}**\n"
+                "Strict = reply to the armed question only. Best for first-time rooms.\n"
+                "Smart = also counts one clean standalone answer like `16!`.\n"
+                "Start with Strict, then switch to Smart if the room wants extra chaos."
+            ),
+            inline=False,
+        )
+    if gt == "pattern_hunt":
+        embed.add_field(
+            name="Pattern Hunt Setup",
+            value=(
+                "Coders need server DMs open before the room starts.\n"
+                "The guesser asks for one real clue or theme in chat, and private rule theories stay in `/hunt guess`."
             ),
             inline=False,
         )
@@ -1386,7 +1395,7 @@ class Only16ModeButton(discord.ui.Button):
 
     def refresh(self):
         game = games.get(self.guild_id)
-        mode = "Strict (Recommended)" if not game or str(game.get("only16_mode", "strict")).casefold() == "strict" else "Smart (Advanced)"
+        mode = "Strict (Recommended)" if not game or str(game.get("only16_mode", "strict")).casefold() == "strict" else "Smart (Visible)"
         self.label = f"Only 16: {mode}"
         self.disabled = not game or game.get("game_type") != "only16" or game.get("active") or game.get("closing")
 

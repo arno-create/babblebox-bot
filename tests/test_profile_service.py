@@ -19,6 +19,7 @@ class ProfileServiceTests(unittest.IsolatedAsyncioTestCase):
         bot = types.SimpleNamespace(get_user=lambda user_id: None)
         store = ProfileStore(backend="memory")
         self.service = ProfileService(bot, store=store)
+        self.guild_id = 10
         started = await self.service.start()
         self.assertTrue(started)
 
@@ -158,9 +159,9 @@ class ProfileServiceTests(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_question_drop_results_update_profile_and_category_summary(self):
-        await self.service.record_question_drop_result(55, category="logic", correct=True, points=12)
-        await self.service.record_question_drop_result(55, category="logic", correct=True, points=8)
-        await self.service.record_question_drop_result(55, category="science", correct=False, points=10)
+        await self.service.record_question_drop_result(55, guild_id=self.guild_id, category="logic", correct=True, points=12)
+        await self.service.record_question_drop_result(55, guild_id=self.guild_id, category="logic", correct=True, points=8)
+        await self.service.record_question_drop_result(55, guild_id=self.guild_id, category="science", correct=False, points=10)
 
         profile = await self.service.get_profile(55)
         self.assertEqual(profile["question_drop_attempts"], 3)
@@ -169,8 +170,11 @@ class ProfileServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(profile["question_drop_current_streak"], 0)
         self.assertEqual(profile["question_drop_best_streak"], 2)
 
-        summary = await self.service.get_question_drop_summary(55)
+        summary = await self.service.get_question_drop_summary(55, guild_id=self.guild_id)
         self.assertIsNotNone(summary)
+        self.assertEqual(summary["guild_profile"]["points"], 20)
+        self.assertEqual(summary["guild_profile"]["best_streak"], 2)
+        self.assertEqual(summary["global_profile"]["points"], 20)
         self.assertEqual(len(summary["categories"]), 2)
         self.assertEqual(summary["categories"][0]["category"], "logic")
         self.assertEqual(summary["categories"][0]["points"], 20)
@@ -186,7 +190,8 @@ class ProfileServiceTests(unittest.IsolatedAsyncioTestCase):
                 {"user_id": 55, "category": "logic", "correct": True, "points": 12},
                 {"user_id": 55, "category": "logic", "correct": True, "points": 8},
                 {"user_id": 55, "category": "science", "correct": False, "points": 10},
-            ]
+            ],
+            guild_id=self.guild_id,
         )
 
         profile = await self.service.get_profile(55)
@@ -196,7 +201,7 @@ class ProfileServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(profile["question_drop_current_streak"], 0)
         self.assertEqual(profile["question_drop_best_streak"], 1)
 
-        summary = await self.service.get_question_drop_summary(55)
+        summary = await self.service.get_question_drop_summary(55, guild_id=self.guild_id)
         self.assertEqual(summary["categories"][0]["category"], "logic")
         self.assertEqual(summary["categories"][0]["attempts"], 1)
         self.assertEqual(summary["categories"][0]["correct_count"], 1)
@@ -204,18 +209,80 @@ class ProfileServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(summary["categories"][1]["category"], "science")
         self.assertEqual(summary["categories"][1]["attempts"], 1)
         self.assertEqual(summary["categories"][1]["correct_count"], 0)
+        self.assertEqual(summary["guild_profile"]["points"], 12)
 
-    async def test_profile_embed_uses_clean_question_drop_copy(self):
-        await self.service.record_question_drop_result(88, category="logic", correct=True, points=12)
+    async def test_profile_embed_separates_knowledge_from_arcade(self):
+        await self.service.record_question_drop_result(88, guild_id=self.guild_id, category="logic", correct=True, points=12)
         profile = await self.service.get_profile(88)
+        knowledge_summary = await self.service.get_question_drop_summary(88, guild_id=self.guild_id)
         user = types.SimpleNamespace(display_name="User 88")
 
-        embed = self.service.build_profile_embed(user, profile, utility_summary=None, session_stats=None)
-        question_drops = next(field.value for field in embed.fields if field.name == "Question Drops")
+        embed = self.service.build_profile_embed(
+            user,
+            profile,
+            knowledge_summary=knowledge_summary,
+            utility_summary=None,
+            session_stats=None,
+        )
+        serialized_fields = "\n".join(f"{field.name}: {field.value}" for field in embed.fields)
 
-        self.assertIn("Solved: **1 / 1 drops**", question_drops)
-        self.assertNotIn("participated drops", question_drops)
+        self.assertIn("Daily Arcade", serialized_fields)
+        self.assertIn("Knowledge", serialized_fields)
+        self.assertIn("Lifetime Flavor", serialized_fields)
+        self.assertIn("12", serialized_fields)
         self.assertIn("party highlights", embed.description)
+
+    async def test_question_drop_summary_stays_guild_first_and_daily_arcade_is_separate(self):
+        await self.service.record_question_drop_result(101, guild_id=self.guild_id, category="science", correct=True, points=10)
+        await self.service.submit_daily_guess(101, (await self.service.get_daily_status(101))["puzzle"].answer)
+
+        summary = await self.service.get_question_drop_summary(101, guild_id=self.guild_id)
+        profile = await self.service.get_profile(101)
+
+        self.assertEqual(summary["guild_profile"]["points"], 10)
+        self.assertEqual(summary["global_profile"]["points"], 10)
+        self.assertEqual(profile["total_daily_clears"], 1)
+        self.assertEqual(profile["question_drop_points"], 10)
+
+    async def test_profile_and_buddy_surfaces_label_lifetime_flavor_when_local_knowledge_is_empty(self):
+        await self.service.record_question_drop_result(202, guild_id=self.guild_id, category="science", correct=True, points=12)
+        profile = await self.service.get_profile(202)
+        summary = await self.service.get_question_drop_summary(202, guild_id=999)
+        user = types.SimpleNamespace(display_name="User 202")
+
+        profile_embed = self.service.build_profile_embed(
+            user,
+            profile,
+            knowledge_summary=summary,
+            utility_summary=None,
+            session_stats=None,
+        )
+        buddy_embed = self.service.build_buddy_embed(user, profile, knowledge_summary=summary)
+        buddy_stats_embed = self.service.build_buddy_stats_embed(user, profile, knowledge_summary=summary)
+
+        profile_fields = "\n".join(f"{field.name}: {field.value}" for field in profile_embed.fields)
+        buddy_fields = "\n".join(f"{field.name}: {field.value}" for field in buddy_embed.fields)
+        buddy_stats_fields = "\n".join(f"{field.name}: {field.value}" for field in buddy_stats_embed.fields)
+
+        self.assertIn("This server: **0** pts", profile_fields)
+        self.assertIn("Lifetime lead:", profile_fields)
+        self.assertNotIn("Server lead: 🔬 Science", profile_fields)
+
+        self.assertIn("This server: **0** pts", buddy_fields)
+        self.assertIn("Lifetime lead:", buddy_fields)
+
+        self.assertIn("This server knowledge: **0** pts", buddy_stats_fields)
+        self.assertIn("Lifetime total: **12** pts", buddy_stats_fields)
+        self.assertIn("Lifetime lead:", buddy_stats_fields)
+
+    async def test_question_drop_guild_leaderboard_orders_by_guild_points(self):
+        await self.service.record_question_drop_result(1, guild_id=self.guild_id, category="logic", correct=True, points=12)
+        await self.service.record_question_drop_result(2, guild_id=self.guild_id, category="science", correct=True, points=8)
+        await self.service.record_question_drop_result(2, guild_id=self.guild_id, category="science", correct=True, points=8)
+
+        leaderboard = await self.service.get_question_drop_leaderboard(guild_id=self.guild_id)
+
+        self.assertEqual([entry["user_id"] for entry in leaderboard[:2]], [2, 1])
 
     async def test_new_party_game_round_and_win_fields_are_recorded(self):
         await self.service.record_game_started(game_type="only16", host_id=70, player_ids=[70, 71])
