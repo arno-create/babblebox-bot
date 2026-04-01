@@ -41,7 +41,7 @@ _ANSWER_LEAD_RE = re.compile(
     re.IGNORECASE,
 )
 _SMART_STANDALONE_LEAD_RE = re.compile(
-    r"^\s*(?:it(?:'s| is)?|answer(?: is|'s)?|my guess is)\s+(?P<payload>.+?)\s*$",
+    r"^\s*(?:it(?:'s| is)|answer(?::|\s+is|'s)|my guess is)\s+(?P<payload>.+?)\s*$",
     re.IGNORECASE,
 )
 _DIGIT_RE = re.compile(r"(?<![\w/])([+-]?\d+)(?![\w/])")
@@ -198,6 +198,7 @@ def ensure_only16_state(game: dict[str, Any]) -> dict[str, Any]:
     state = game.setdefault("only16", {})
     state.setdefault("mode", game.get("only16_mode", "strict"))
     state.setdefault("trap", None)
+    state.setdefault("ask_started_at", None)
     return state
 
 
@@ -212,7 +213,7 @@ def has_quantity_intent(text: str | None) -> bool:
     return _QUANTITY_HINT_RE.search(str(text or "")) is not None
 
 
-def detect_count_question(text: str | None) -> bool:
+def detect_numeric_question(text: str | None) -> bool:
     content = str(text or "").strip()
     if not content or not has_question_intent(content):
         return False
@@ -223,6 +224,10 @@ def detect_count_question(text: str | None) -> bool:
         return False
     parsed = _parse_exact_numeric_payload(arithmetic_match.group("expr"))
     return parsed.kind == "single" and parsed.source == "expression"
+
+
+def detect_count_question(text: str | None) -> bool:
+    return detect_numeric_question(text)
 
 
 def extract_reply_target_id(message: discord.Message) -> int | None:
@@ -466,7 +471,11 @@ def _only16_player_names(game: dict[str, Any]) -> str:
 
 
 def _only16_mode_guide() -> str:
-    return "Strict: replies only.\nSmart: replies plus one clear standalone answer.\nUnrelated chatter is ignored."
+    return (
+        "Strict: reply to the armed question only.\n"
+        "Smart: reply to the armed question or give one clear standalone answer.\n"
+        "Unrelated chatter is ignored."
+    )
 
 
 def _only16_supported_math_copy() -> str:
@@ -513,8 +522,15 @@ def _classify_smart_follow_up(text: str | None, parsed: Only16ParseResult) -> st
 def _trap_live_copy(mode: str | None) -> str:
     normalized = str(mode or "strict").casefold()
     if normalized == "smart":
-        return "Trap live. Smart mode is on: replies plus one clear standalone answer can count. Unrelated chatter is ignored."
-    return "Trap live. Strict mode is on: replies only. Unrelated chatter is ignored."
+        return "Trap live. Smart mode is on: replies to the armed question or one clear standalone answer can count. Unrelated chatter is ignored."
+    return "Trap live. Strict mode is on: only replies to the armed question count. Unrelated chatter is ignored."
+
+
+def _message_created_at_utc(message: discord.Message) -> Any:
+    created_at = getattr(message, "created_at", None)
+    if created_at is None or not hasattr(created_at, "tzinfo"):
+        return None
+    return created_at.astimezone(ge.now_utc().tzinfo) if created_at.tzinfo else created_at.replace(tzinfo=ge.now_utc().tzinfo)
 
 
 async def start_only16_game_locked(guild_id: int, game: dict[str, Any]):
@@ -524,7 +540,7 @@ async def start_only16_game_locked(guild_id: int, game: dict[str, Any]):
         title="Only 16",
         description=(
             f"Mode: **{only16_mode_label(state.get('mode'))}**\n"
-            "Ask a clear count question. Explicit numbers include digits, safe number words, or bounded math like `8*2`, `17-1`, or `(10+6)`."
+            "Ask a clear number question. Explicit numbers include digits, safe number words, or bounded math like `8*2`, `17-1`, or `(10+6)`."
         ),
         color=discord.Color.orange(),
     )
@@ -547,7 +563,7 @@ async def handle_only16_message_locked(message: discord.Message, guild_id: int, 
     trap = state.get("trap")
     current_asker = ge.get_current_player(game)
     if current_asker is not None and current_asker.id == message.author.id and not _trap_is_live(trap):
-        if detect_count_question(message.content):
+        if detect_numeric_question(message.content):
             await _arm_only16_trap_locked(guild_id, game, message, manual=False)
             return True
         return False
@@ -579,8 +595,12 @@ async def manually_arm_only16_message(message: discord.Message, guild_id: int, g
         return False, "That message is not in the live Only 16 channel."
     if _trap_is_live(state.get("trap")):
         return False, "A trap is already armed."
-    if not has_question_intent(message.content):
-        return False, "Manual arming still needs a clear question."
+    if not detect_numeric_question(message.content):
+        return False, "Manual arming still needs a clear number question."
+    ask_started_at = state.get("ask_started_at")
+    created_at = _message_created_at_utc(message)
+    if ask_started_at is None or created_at is None or created_at < ask_started_at:
+        return False, "You can only arm a question from your current ask window."
     await _arm_only16_trap_locked(guild_id, game, message, manual=True)
     return True, "16 trap armed."
 
@@ -598,7 +618,7 @@ async def _arm_only16_trap_locked(guild_id: int, game: dict[str, Any], message: 
     }
     state["trap"] = trap
     with contextlib.suppress(discord.HTTPException):
-        await message.add_reaction("dYZ_")
+        await message.add_reaction("🎯")
     with contextlib.suppress(discord.HTTPException):
         await game["channel"].send(
             embed=ge.make_status_embed(
@@ -656,7 +676,7 @@ async def _resolve_only16_answer_locked(
     asker_id = trap["asker_id"]
 
     if parsed.kind == "none":
-        body = f"{message.author.mention} answered without a clear explicit number, so Babblebox let it pass."
+        body = f"{message.author.mention} did not give one clear explicit number, so Babblebox lets it pass."
         await game["channel"].send(
             embed=ge.make_status_embed("Safe Pass", body, tone="info", footer="Babblebox Only 16"),
             allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
@@ -767,13 +787,14 @@ async def _start_only16_turn_locked(guild_id: int, game: dict[str, Any]):
         game["current_player_index"] = 0
         current_asker = ge.get_current_player(game)
     state["trap"] = None
+    state["ask_started_at"] = ge.now_utc()
     token = ge.bump_token(game, "turn_token")
     await ge.cancel_task(game.get("turn_task"))
     await game["channel"].send(
         embed=ge.make_status_embed(
             "Your Trap Turn",
             (
-                f"{current_asker.mention}, ask a clear quantity question in the next **{ONLY16_ASK_WINDOW_SECONDS} seconds**.\n"
+                f"{current_asker.mention}, ask a clear number question in the next **{ONLY16_ASK_WINDOW_SECONDS} seconds**.\n"
                 f"Mode: **{only16_mode_label(state.get('mode'))}**\n"
                 f"{_only16_mode_guide()}"
             ),
@@ -824,7 +845,7 @@ async def _only16_ask_timeout(guild_id: int, token: int):
         await game["channel"].send(
             embed=ge.make_status_embed(
                 "Turn Skipped",
-                f"{current_asker.mention} did not arm a clean 16 trap in time, so the turn moves on.",
+                f"{current_asker.mention} did not arm a clear number question in time, so the turn moves on.",
                 tone="info",
                 footer="Babblebox Only 16",
             ),

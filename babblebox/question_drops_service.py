@@ -25,6 +25,7 @@ from babblebox.question_drops_content import (
     iter_candidate_variants,
     judge_answer,
     question_drop_seed_for_concept,
+    render_answer_instruction,
     render_answer_summary,
     validate_content_pack,
 )
@@ -432,9 +433,14 @@ class QuestionDropsService:
         config = snapshot.config
         enabled_categories = config.get("enabled_categories") or list(QUESTION_DROP_CATEGORIES)
         enabled_category_labels = [QUESTION_DROP_CATEGORY_LABELS.get(category, category.title()) for category in enabled_categories]
-        description = "Compact scheduled prompts with offline content, honest repeat control, optional activity gating, and same-channel /play blocking."
+        description = "Compact scheduled prompts with offline content, honest repeat control, and same-channel /play blocking."
         if not config.get("enabled"):
             description = "Question Drops are currently off for this server."
+        else:
+            if str(config.get("activity_gate", "light")).casefold() == "light":
+                description += " Idle channels can skip a slot."
+            if int(config.get("drops_per_day", 2) or 2) >= 6:
+                description += " Higher daily counts reuse concepts sooner."
         embed = discord.Embed(
             title="Question Drops",
             description=description,
@@ -876,9 +882,7 @@ class QuestionDropsService:
             ),
             inline=False,
         )
-        answer_lane = "Reply to this drop or send one clean standalone answer."
-        if variant.answer_spec.get("type") == "multiple_choice":
-            answer_lane = "Reply to this drop or send the option text. The right letter also works, like `C` or `option c`."
+        answer_lane = render_answer_instruction(variant.answer_spec)
         embed.add_field(name="Answering", value=answer_lane, inline=False)
         embed = ge.style_embed(embed, footer="Babblebox Question Drops | First correct answer scores")
         message = None
@@ -1018,12 +1022,20 @@ class QuestionDropsService:
         scored: list[tuple[float, QuestionDropVariant]] = []
         same_day_scored: list[tuple[float, QuestionDropVariant]] = []
         generated_gap = max(0, source_counts["curated"] - source_counts["generated"])
+        drop_pressure = max(0, int(config.get("drops_per_day", 2) or 2) - 2)
         for variant in candidates:
             concept_cooldown_days, variant_cooldown_days, preferred_concept_days, preferred_variant_days = self._repeat_windows_for_variant(
                 variant,
                 category_variant_capacity=category_variant_capacity,
                 category_concept_counts=category_concept_counts,
             )
+            if drop_pressure:
+                if variant.source_type == "generated":
+                    preferred_concept_days += min(drop_pressure * 0.25, 1.5)
+                    preferred_variant_days += min(drop_pressure * 0.35, 2.0)
+                else:
+                    preferred_concept_days += min(drop_pressure * 0.75, 3.0)
+                    preferred_variant_days += min(drop_pressure * 0.9, 4.0)
             concept_seen_at = recent_by_concept.get(variant.concept_id)
             days_since_concept = ((now - concept_seen_at).total_seconds() / 86400.0) if concept_seen_at is not None else None
             if days_since_concept is not None and days_since_concept < concept_cooldown_days:
@@ -1041,10 +1053,10 @@ class QuestionDropsService:
             category_balance = 8.0 - category_counts[variant.category]
             difficulty_balance = 5.0 - difficulty_counts[int(variant.difficulty)]
             if variant.source_type == "generated":
-                source_balance = 2.5 + min(generated_gap * 0.75, 4.0)
-                pool_depth_bonus = min(category_variant_capacity[variant.category], 12) * 0.22
+                source_balance = 2.5 + min(generated_gap * 0.75, 4.0) + min(drop_pressure * 0.7, 4.0)
+                pool_depth_bonus = (min(category_variant_capacity[variant.category], 12) * 0.22) + min(drop_pressure * 0.25, 1.5)
             else:
-                source_balance = 1.5 - min(generated_gap * 0.35, 3.0)
+                source_balance = 1.5 - min(generated_gap * 0.35, 3.0) - min(drop_pressure * 0.55, 3.0)
                 pool_depth_bonus = min(category_variant_capacity[variant.category], 12) * 0.06
             jitter = (int(build_variant_hash(slot_key, variant.variant_hash), 16) % 1000) / 1000.0
             score = freshness + variant_freshness + category_balance + difficulty_balance + source_balance + pool_depth_bonus + jitter

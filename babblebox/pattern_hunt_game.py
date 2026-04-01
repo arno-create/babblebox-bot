@@ -54,6 +54,9 @@ _FAMILY_LABELS = {
     "question_form": "Question Form",
     "same_initial_letter": "Same Initial Letter",
 }
+_PATTERN_HUNT_DRY_SOLO_FAMILIES = {"exact_word_count", "word_count_range", "ends_with_punctuation", "starts_with_letter", "forbid_letter"}
+_PATTERN_HUNT_FINE_GRAINED_FAMILIES = {"exact_word_count", "word_count_range", "ends_with_punctuation", "starts_with_letter", "forbid_letter"}
+_PATTERN_HUNT_SOCIAL_FAMILIES = {"contains_category_word", "question_form", "same_initial_letter", "contains_emoji", "contains_digits"}
 _SAMPLE_MESSAGES = (
     "Blue bears bake bread!",
     "Do green grapes glow?",
@@ -289,6 +292,12 @@ def _bundle_quality_ok(atoms: list[RuleAtom], valid_examples: list[str], invalid
     unique_valid = {sample.casefold() for sample in valid_examples}
     if len(unique_valid) < 3:
         return False
+    if len(atoms) == 1 and atoms[0].family in _PATTERN_HUNT_DRY_SOLO_FAMILIES:
+        return False
+    if len(atoms) >= 2 and not any(atom.family in _PATTERN_HUNT_SOCIAL_FAMILIES for atom in atoms):
+        return False
+    if len(atoms) >= 3 and sum(atom.family in _PATTERN_HUNT_FINE_GRAINED_FAMILIES for atom in atoms) >= 2:
+        return False
     return True
 
 
@@ -319,7 +328,7 @@ def select_rule_bundle(
     rng = random.Random(seed_value)
     fallback: tuple[list[RuleAtom], list[str], str] | None = None
     for _ in range(300):
-        atom_count = rng.choices((1, 2, 3), weights=(3, 5, 2))[0]
+        atom_count = rng.choices((1, 2, 3), weights=(4, 5, 1))[0]
         atoms: list[RuleAtom] = []
         for candidate in _atom_candidates(rng):
             if _compatible(atoms, candidate):
@@ -382,19 +391,19 @@ async def start_pattern_hunt_game_locked(guild_id: int, game: dict[str, Any]):
                 embed=ge.style_embed(
                     discord.Embed(
                         title="Pattern Hunt Rule",
-                        description="Keep this private from the guesser. Public clues should fit the rule without explaining it.",
+                        description="Keep this private. Public clues should fit the rule without naming or explaining it.",
                         color=ge.EMBED_THEME["accent"],
                     ).add_field(name="Secret Rule", value=render_rule(rule_atoms), inline=False).add_field(
-                        name="Fits",
+                        name="Fits the Rule",
                         value=f"- {valid_examples[0]}\n- {valid_examples[1]}",
                         inline=False,
                     ).add_field(
-                        name="Does Not Fit",
+                        name="Fails the Rule",
                         value=f"- {invalid_example}",
                         inline=False,
                     ).add_field(
                         name="Coder Note",
-                        value="Answer once in public. If Babblebox rejects a clue, retry without leaking why.",
+                        value="Give one public clue per turn. If Babblebox rejects it, retry once without explaining why.",
                         inline=False,
                     ),
                     footer="Babblebox Pattern Hunt | The guesser never sees this DM",
@@ -514,7 +523,7 @@ async def handle_pattern_hunt_message_locked(message: discord.Message, guild_id:
         await game["channel"].send(
             embed=ge.make_status_embed(
                 "Coder Turn",
-                f"{coder.mention if coder is not None else 'Coder'}, answer once with a clue that fits the rule. Do not explain the rule.",
+                f"{coder.mention if coder is not None else 'Coder'}, answer once with a clue that fits the rule. Keep the rule hidden.",
                 tone="accent",
                 footer="Babblebox Pattern Hunt",
             ),
@@ -532,15 +541,6 @@ async def handle_pattern_hunt_message_locked(message: discord.Message, guild_id:
                 "prompt": state.get("current_prompt") or "",
             }
         )
-        await game["channel"].send(
-            embed=ge.make_status_embed(
-                "Accepted",
-                f"{message.author.mention}'s clue is locked in for the guesser.",
-                tone="success",
-                footer="Babblebox Pattern Hunt",
-            ),
-            allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
-        )
         await _advance_pattern_turn_locked(guild_id, game)
         return True
     if not state.get("retry_used"):
@@ -548,7 +548,7 @@ async def handle_pattern_hunt_message_locked(message: discord.Message, guild_id:
         await game["channel"].send(
             embed=ge.make_status_embed(
                 "Try Again",
-                f"{message.author.mention}, that clue does not fit. Retry once with a clue only, no rule talk.",
+                f"{message.author.mention}, that clue does not fit. Retry once with a new clue only.",
                 tone="warning",
                 footer="Babblebox Pattern Hunt",
             ),
@@ -599,7 +599,7 @@ async def _begin_pattern_turn_locked(guild_id: int, game: dict[str, Any]):
     await game["channel"].send(
         embed=ge.make_status_embed(
             "Prompt Phase",
-            f"{guesser.mention if guesser else 'Guesser'}, ask for one clue. {coder.mention if coder else 'Coder'} answers once in public.",
+            f"{guesser.mention if guesser else 'Guesser'}, ask for one clue. {coder.mention if coder else 'Coder'} gives one public clue.",
             tone="accent",
             footer="Babblebox Pattern Hunt",
         ),

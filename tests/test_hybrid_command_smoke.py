@@ -179,7 +179,8 @@ class FakeLobbyView:
 class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
     def test_help_pages_reflect_hardened_only16_and_pattern_hunt_copy(self):
         party_page = next(page for page in HELP_PAGES if page["title"] == "Party Games")
-        self.assertIn("Smart: replies plus one clear standalone answer.", party_page["body"])
+        self.assertIn("Strict: reply to the armed question only.", party_page["body"])
+        self.assertIn("Smart: reply to the armed question or give one clear standalone answer.", party_page["body"])
         self.assertIn("digits `0-9` only", party_page["body"])
 
     def test_help_pages_reflect_question_drop_option_copy(self):

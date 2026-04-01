@@ -6,11 +6,19 @@ from datetime import timedelta
 from unittest.mock import AsyncMock, patch
 
 from babblebox import game_engine as ge
-from babblebox.only16_game import detect_count_question, ensure_only16_state, handle_only16_message_locked, parse_only16_numeric_answer
+from babblebox.only16_game import (
+    detect_count_question,
+    ensure_only16_state,
+    handle_only16_message_locked,
+    manually_arm_only16_message,
+    parse_only16_numeric_answer,
+)
 from babblebox.pattern_hunt_game import (
     RuleAtom,
     _SAMPLE_MESSAGES,
+    _bundle_quality_ok,
     build_pattern_hunt_status_embed,
+    handle_pattern_hunt_message_locked,
     message_matches_rule,
     parse_guess_atom,
     select_rule_bundle,
@@ -35,12 +43,23 @@ class DummyChannel:
 
 
 class DummyMessage:
-    def __init__(self, *, channel: DummyChannel, author: DummyUser, content: str, message_id: int = 999, reference=None):
+    def __init__(
+        self,
+        *,
+        channel: DummyChannel,
+        author: DummyUser,
+        content: str,
+        message_id: int = 999,
+        created_at=None,
+        reference=None,
+    ):
         self.channel = channel
         self.author = author
         self.content = content
         self.id = message_id
+        self.created_at = created_at or ge.now_utc()
         self.reference = reference
+        self.add_reaction = AsyncMock()
 
 
 class PartyGameLogicTests(unittest.IsolatedAsyncioTestCase):
@@ -60,6 +79,7 @@ class PartyGameLogicTests(unittest.IsolatedAsyncioTestCase):
         }
         state = ensure_only16_state(game)
         state["mode"] = mode
+        state["ask_started_at"] = ge.now_utc() - timedelta(seconds=1)
         state["trap"] = {
             "asker_id": asker.id,
             "question_message_id": 100,
@@ -129,9 +149,37 @@ class PartyGameLogicTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(channel.sent[-1][1]["embed"].title, "Still Alive")
                 advance.assert_awaited_once()
 
+    async def test_only16_smart_mode_accepts_compact_answer_wrapper(self):
+        game, _asker, responder, channel = self._make_only16_game(mode="smart")
+        message = DummyMessage(channel=channel, author=responder, content="answer: 16")
+
+        with patch("babblebox.only16_game._advance_to_next_asker_locked", new=AsyncMock()) as advance:
+            handled = await handle_only16_message_locked(message, 99, game)
+
+        self.assertTrue(handled)
+        self.assertIsNone(ensure_only16_state(game).get("trap"))
+        self.assertEqual(channel.sent[-1][1]["embed"].title, "Still Alive")
+        advance.assert_awaited_once()
+
     async def test_only16_strict_mode_ignores_non_reply_answers(self):
         game, _asker, responder, _channel = self._make_only16_game(mode="strict")
         message = DummyMessage(channel=game["channel"], author=responder, content="16")
+
+        with patch("babblebox.only16_game._advance_to_next_asker_locked", new=AsyncMock()) as advance:
+            handled = await handle_only16_message_locked(message, 99, game)
+
+        self.assertFalse(handled)
+        self.assertIsNotNone(ensure_only16_state(game).get("trap"))
+        advance.assert_not_awaited()
+
+    async def test_only16_strict_mode_ignores_replies_to_the_wrong_message(self):
+        game, _asker, responder, _channel = self._make_only16_game(mode="strict")
+        message = DummyMessage(
+            channel=game["channel"],
+            author=responder,
+            content="16",
+            reference=types.SimpleNamespace(message_id=9999),
+        )
 
         with patch("babblebox.only16_game._advance_to_next_asker_locked", new=AsyncMock()) as advance:
             handled = await handle_only16_message_locked(message, 99, game)
@@ -164,6 +212,34 @@ class PartyGameLogicTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(handled)
                 self.assertIsNotNone(ensure_only16_state(game).get("trap"))
                 advance.assert_not_awaited()
+
+    async def test_only16_manual_arm_rejects_stale_messages(self):
+        game, asker, _responder, _channel = self._make_only16_game(mode="smart")
+        state = ensure_only16_state(game)
+        state["trap"] = None
+        state["ask_started_at"] = ge.now_utc()
+        message = DummyMessage(
+            channel=game["channel"],
+            author=asker,
+            content="How many moons does Mars have?",
+            created_at=state["ask_started_at"] - timedelta(seconds=2),
+        )
+
+        ok, note = await manually_arm_only16_message(message, 99, game, asker)
+
+        self.assertFalse(ok)
+        self.assertIn("current ask window", note)
+
+    async def test_only16_manual_arm_rejects_non_numeric_questions(self):
+        game, asker, _responder, _channel = self._make_only16_game(mode="smart")
+        state = ensure_only16_state(game)
+        state["trap"] = None
+        message = DummyMessage(channel=game["channel"], author=asker, content="What's up?")
+
+        ok, note = await manually_arm_only16_message(message, 99, game, asker)
+
+        self.assertFalse(ok)
+        self.assertIn("clear number question", note)
 
     def test_pattern_rule_matchers_are_machine_checkable(self):
         rule = [
@@ -204,6 +280,13 @@ class PartyGameLogicTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any(message_matches_rule([RuleAtom("contains_digits")], sample) for sample in _SAMPLE_MESSAGES))
         self.assertTrue(any(message_matches_rule([RuleAtom("contains_emoji")], sample) for sample in _SAMPLE_MESSAGES))
 
+    def test_pattern_hunt_bundle_quality_rejects_dry_solo_rules(self):
+        atoms = [RuleAtom("exact_word_count", 3)]
+        valid_examples = [sample for sample in _SAMPLE_MESSAGES if message_matches_rule(atoms, sample)]
+        invalid_examples = [sample for sample in _SAMPLE_MESSAGES if not message_matches_rule(atoms, sample)]
+
+        self.assertFalse(_bundle_quality_ok(atoms, valid_examples, invalid_examples))
+
     def test_pattern_hunt_status_embed_clarifies_contains_digits_and_guess_flow(self):
         guesser = DummyUser(10)
         coder = DummyUser(11)
@@ -232,6 +315,70 @@ class PartyGameLogicTests(unittest.IsolatedAsyncioTestCase):
         values = "\n".join(field.value for field in embed.fields)
         self.assertIn("digits `0-9` only", values)
         self.assertIn("/hunt guess", values)
+
+    async def test_pattern_hunt_valid_clue_advances_without_extra_acceptance_chatter(self):
+        guesser = DummyUser(10)
+        coder = DummyUser(11)
+        channel = DummyChannel()
+        game = {
+            "players": [guesser, coder],
+            "starting_players": [guesser, coder],
+            "channel": channel,
+            "turn_task": None,
+            "pattern_hunt": {
+                "guesser_id": guesser.id,
+                "coder_order": [coder.id],
+                "current_coder_index": 0,
+                "phase": "answer",
+                "rule_atoms": [RuleAtom("contains_digits")],
+                "current_prompt": "digit clue",
+                "accepted_answers": [],
+            },
+        }
+
+        with patch("babblebox.pattern_hunt_game._advance_pattern_turn_locked", new=AsyncMock()) as advance:
+            handled = await handle_pattern_hunt_message_locked(
+                DummyMessage(channel=channel, author=coder, content="7 foxes sprint!"),
+                99,
+                game,
+            )
+
+        self.assertTrue(handled)
+        self.assertEqual(channel.sent, [])
+        self.assertEqual(game["pattern_hunt"]["accepted_answers"][0]["prompt"], "digit clue")
+        advance.assert_awaited_once()
+
+    async def test_pattern_hunt_retry_feedback_stays_non_leaky(self):
+        guesser = DummyUser(10)
+        coder = DummyUser(11)
+        channel = DummyChannel()
+        game = {
+            "players": [guesser, coder],
+            "starting_players": [guesser, coder],
+            "channel": channel,
+            "turn_task": None,
+            "pattern_hunt": {
+                "guesser_id": guesser.id,
+                "coder_order": [coder.id],
+                "current_coder_index": 0,
+                "phase": "answer",
+                "rule_atoms": [RuleAtom("contains_digits")],
+                "current_prompt": "digit clue",
+                "accepted_answers": [],
+                "retry_used": False,
+            },
+        }
+
+        handled = await handle_pattern_hunt_message_locked(
+            DummyMessage(channel=channel, author=coder, content="Blue foxes sprint!"),
+            99,
+            game,
+        )
+
+        self.assertTrue(handled)
+        retry_copy = channel.sent[-1][1]["embed"].description
+        self.assertIn("Retry once with a new clue only.", retry_copy)
+        self.assertNotIn("rule", retry_copy.casefold())
 
     async def test_pattern_hunt_reveal_recap_uses_prompt_to_answer_wording(self):
         guesser = DummyUser(10)

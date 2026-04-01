@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import random
 import re
+from collections import Counter
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -36,13 +37,15 @@ FALSE_ALIASES = {"false", "f", "no", "n", "incorrect"}
 _PUNCT_RE = re.compile(r"[^\w\s#&+\-]")
 _SPACE_RE = re.compile(r"\s+")
 _NUMERIC_TOKEN_RE = re.compile(r"(?<![\w/])[-+]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?![\w/])")
+_EXACT_NUMERIC_RE = re.compile(r"^[-+]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?$")
 _CHOICE_LETTER_RE = re.compile(r"^\s*(?:option|answer)?\s*\(?([a-z])\)?(?:[\)\].:\-])?(?:\s+(.*))?\s*$", re.IGNORECASE)
 _ANSWER_LEAD_RE = re.compile(
-    r"^\s*(?:answer|answer is|guess|guess is|my guess|my guess is|i pick|i choose|i(?:'ll| will) go with|it(?:'s| is))\s*:?\s+(?P<payload>.+?)\s*$",
+    r"^\s*(?:(?:the\s+)?answer(?:\s+is)?|guess(?:\s+is)?|my guess(?:\s+is)?|i pick|i choose|i(?:'ll| will) go with|it(?:'s| is))\s*:?\s+(?P<payload>.+?)\s*$",
     re.IGNORECASE,
 )
 _URL_RE = re.compile(r"https?://|\bdiscord\.gg/\S+", re.IGNORECASE)
 _MENTION_RE = re.compile(r"<[@#]&?\d+>")
+_NUMBER_WORD_RE = re.compile(r"[a-z]+", re.IGNORECASE)
 _CHATTER_LEAD_TOKENS = {
     "and",
     "because",
@@ -59,13 +62,17 @@ _CHATTER_LEAD_TOKENS = {
     "lol",
     "lmao",
     "nah",
+    "no",
     "nope",
     "ok",
     "okay",
+    "oh",
+    "omg",
     "same",
     "seriously",
     "that",
     "this",
+    "true",
     "wait",
     "what",
     "when",
@@ -74,6 +81,7 @@ _CHATTER_LEAD_TOKENS = {
     "wild",
     "wow",
     "yeah",
+    "yes",
     "yep",
     "you",
 }
@@ -81,17 +89,60 @@ _CHATTER_TOKENS = {
     "bro",
     "bruh",
     "crazy",
+    "fr",
     "huh",
     "lol",
     "lmao",
+    "no",
+    "oh",
+    "omg",
+    "real",
+    "really",
     "same",
     "seriously",
     "thanks",
     "thank",
+    "true",
     "wait",
+    "way",
     "wild",
     "wow",
+    "yes",
 }
+_NUMBER_WORDS = {
+    "zero": 0,
+    "one": 1,
+    "two": 2,
+    "three": 3,
+    "four": 4,
+    "five": 5,
+    "six": 6,
+    "seven": 7,
+    "eight": 8,
+    "nine": 9,
+    "ten": 10,
+    "eleven": 11,
+    "twelve": 12,
+    "thirteen": 13,
+    "fourteen": 14,
+    "fifteen": 15,
+    "sixteen": 16,
+    "seventeen": 17,
+    "eighteen": 18,
+    "nineteen": 19,
+}
+_TENS_WORDS = {
+    "twenty": 20,
+    "thirty": 30,
+    "forty": 40,
+    "fifty": 50,
+    "sixty": 60,
+    "seventy": 70,
+    "eighty": 80,
+    "ninety": 90,
+}
+_SIGN_WORDS = {"minus", "negative"}
+_NUMBER_WORD_VOCAB = set(_NUMBER_WORDS) | set(_TENS_WORDS) | {"hundred"} | _SIGN_WORDS
 
 
 @dataclass(frozen=True)
@@ -135,6 +186,89 @@ def extract_single_number(raw: str | None) -> float | None:
         return float(matches[0].group(0).replace(",", ""))
     except ValueError:
         return None
+
+
+def _strip_trailing_terminal_punctuation(raw: str | None) -> str:
+    return str(raw or "").strip().rstrip(".!?").strip()
+
+
+def _parse_number_words_exact(raw: str | None) -> int | None:
+    content = _strip_trailing_terminal_punctuation(raw)
+    matches = list(_NUMBER_WORD_RE.finditer(content))
+    if not matches:
+        return None
+    if content[: matches[0].start()].strip() or content[matches[-1].end() :].strip():
+        return None
+    previous_end = matches[0].start()
+    words: list[str] = []
+    for match in matches:
+        word = match.group(0).casefold()
+        if word not in _NUMBER_WORD_VOCAB:
+            return None
+        separator = content[previous_end : match.start()]
+        if separator and not re.fullmatch(r"[-\s]+", separator):
+            return None
+        words.append(word)
+        previous_end = match.end()
+    return _parse_number_word_tokens(words)
+
+
+def _parse_number_word_tokens(words: list[str]) -> int | None:
+    if not words:
+        return None
+    sign = 1
+    tokens = list(words)
+    if tokens[0] in _SIGN_WORDS:
+        sign = -1
+        tokens = tokens[1:]
+    if not tokens:
+        return None
+    if tokens == ["hundred"]:
+        return 100 * sign
+
+    def parse_sub_hundred(rest: list[str]) -> int | None:
+        if not rest:
+            return 0
+        if len(rest) == 1:
+            if rest[0] in _NUMBER_WORDS:
+                return _NUMBER_WORDS[rest[0]]
+            if rest[0] in _TENS_WORDS:
+                return _TENS_WORDS[rest[0]]
+            return None
+        if len(rest) == 2 and rest[0] in _TENS_WORDS and rest[1] in _NUMBER_WORDS and 1 <= _NUMBER_WORDS[rest[1]] <= 9:
+            return _TENS_WORDS[rest[0]] + _NUMBER_WORDS[rest[1]]
+        return None
+
+    if "hundred" not in tokens:
+        value = parse_sub_hundred(tokens)
+        return (sign * value) if value is not None else None
+    if tokens.count("hundred") != 1:
+        return None
+    hundred_index = tokens.index("hundred")
+    if hundred_index != 1:
+        return None
+    head = tokens[0]
+    if head not in _NUMBER_WORDS or not 1 <= _NUMBER_WORDS[head] <= 9:
+        return None
+    tail_value = parse_sub_hundred(tokens[2:])
+    if tail_value is None:
+        return None
+    return sign * ((_NUMBER_WORDS[head] * 100) + tail_value)
+
+
+def _parse_clean_numeric_payload(raw: str | None) -> float | None:
+    content = _strip_trailing_terminal_punctuation(raw)
+    if not content:
+        return None
+    if _EXACT_NUMERIC_RE.fullmatch(content):
+        try:
+            return float(content.replace(",", ""))
+        except ValueError:
+            return None
+    word_value = _parse_number_words_exact(content)
+    if word_value is not None:
+        return float(word_value)
+    return None
 
 
 def _correct_choice_letter(answer_spec: dict[str, Any]) -> str | None:
@@ -189,6 +323,8 @@ def _looks_like_free_text_guess(raw_answer: str | None, *, max_tokens: int) -> b
         return False
     if tokens[0] in _CHATTER_LEAD_TOKENS:
         return False
+    if all(token in (_CHATTER_TOKENS | _CHATTER_LEAD_TOKENS | TRUE_ALIASES | FALSE_ALIASES) for token in tokens):
+        return False
     if sum(1 for token in tokens if token in _CHATTER_TOKENS) >= 2:
         return False
     return True
@@ -234,37 +370,36 @@ def validate_answer_spec(spec: dict[str, Any]) -> tuple[bool, str | None]:
 
 
 def judge_answer(answer_spec: dict[str, Any], raw_answer: str | None) -> bool:
+    candidates = _answer_payload_candidates(raw_answer)
     answer_type = answer_spec.get("type")
     if answer_type == "text":
-        candidate = normalize_answer_text(raw_answer)
         accepted = {normalize_answer_text(item) for item in answer_spec.get("accepted", []) if isinstance(item, str)}
-        return bool(candidate) and candidate in accepted
+        return any(bool(normalize_answer_text(candidate)) and normalize_answer_text(candidate) in accepted for candidate in candidates)
     if answer_type == "numeric":
-        candidate = extract_single_number(raw_answer)
-        if candidate is None:
-            return False
         expected = float(answer_spec["value"])
-        return abs(candidate - expected) < 1e-9
+        return any(
+            candidate is not None and abs(candidate - expected) < 1e-9
+            for candidate in (_parse_clean_numeric_payload(item) for item in candidates)
+        )
     if answer_type == "boolean":
-        candidate = normalize_answer_text(raw_answer)
-        if not candidate:
-            return False
         if answer_spec.get("value") is True:
-            return candidate in TRUE_ALIASES
-        return candidate in FALSE_ALIASES
+            return any(normalize_answer_text(candidate) in TRUE_ALIASES for candidate in candidates if normalize_answer_text(candidate))
+        return any(normalize_answer_text(candidate) in FALSE_ALIASES for candidate in candidates if normalize_answer_text(candidate))
     if answer_type == "multiple_choice":
-        candidate = normalize_answer_text(raw_answer)
         answer = normalize_answer_text(answer_spec.get("answer"))
-        if candidate and candidate == answer:
-            return True
         correct_letter = _correct_choice_letter(answer_spec)
         if correct_letter is None:
             return False
-        return _parse_choice_letter(raw_answer, answer_spec) == correct_letter
+        for candidate in candidates:
+            normalized = normalize_answer_text(candidate)
+            if normalized and normalized == answer:
+                return True
+            if _parse_choice_letter(candidate, answer_spec) == correct_letter:
+                return True
+        return False
     if answer_type == "ordered_tokens":
-        candidate_tokens = _normalize_token_sequence(raw_answer)
         expected_tokens = tuple(normalize_answer_text(token) for token in answer_spec.get("tokens", []))
-        return bool(candidate_tokens) and candidate_tokens == expected_tokens
+        return any((candidate_tokens := _normalize_token_sequence(candidate)) and candidate_tokens == expected_tokens for candidate in candidates)
     return False
 
 
@@ -286,7 +421,7 @@ def is_answer_attempt(answer_spec: dict[str, Any], raw_answer: str | None, *, di
                 return True
         return False
     if answer_type == "numeric":
-        return any(extract_single_number(candidate) is not None for candidate in candidates)
+        return any(_parse_clean_numeric_payload(candidate) is not None for candidate in candidates)
     if answer_type == "boolean":
         normalized_values = {normalize_answer_text(candidate) for candidate in candidates if normalize_answer_text(candidate)}
         return bool(normalized_values.intersection(TRUE_ALIASES | FALSE_ALIASES))
@@ -294,9 +429,10 @@ def is_answer_attempt(answer_spec: dict[str, Any], raw_answer: str | None, *, di
         expected_tokens = tuple(normalize_answer_text(token) for token in answer_spec.get("tokens", []))
         if not expected_tokens:
             return False
+        expected_counter = Counter(expected_tokens)
         for candidate in candidates:
             candidate_tokens = _normalize_token_sequence(candidate)
-            if candidate_tokens and len(candidate_tokens) == len(expected_tokens):
+            if candidate_tokens and Counter(candidate_tokens) == expected_counter:
                 return True
         return False
     if answer_type == "text":
@@ -336,6 +472,19 @@ def render_answer_summary(answer_spec: dict[str, Any]) -> str:
     if answer_type == "ordered_tokens":
         return " ".join(str(token) for token in answer_spec.get("tokens", [])) or "unknown"
     return "unknown"
+
+
+def render_answer_instruction(answer_spec: dict[str, Any]) -> str:
+    answer_type = answer_spec.get("type")
+    if answer_type == "multiple_choice":
+        return "Reply to this drop or send the option text. The correct letter also works, like `C` or `option c`."
+    if answer_type == "numeric":
+        return "Reply to this drop or send the number itself. Clean digits or simple number words both work."
+    if answer_type == "boolean":
+        return "Reply to this drop or send `true` / `false` or `yes` / `no`."
+    if answer_type == "ordered_tokens":
+        return "Reply to this drop or send the full sequence in order, like `red, blue, green`."
+    return "Reply to this drop or send a short clean answer."
 
 
 def answer_points_for_difficulty(difficulty: int) -> int:

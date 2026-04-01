@@ -22,7 +22,7 @@ class WebsiteDocsTests(unittest.TestCase):
             self.assertIn(anchor, help_html)
         for command in ("/daily", "/buddy", "/profile", "/vault", "/watch", "/later", "/capture", "/remind", "/afk", "/shield panel"):
             self.assertIn(command, help_html)
-        self.assertIn("Strict = replies only", help_html)
+        self.assertIn("Strict = reply to the armed question only", help_html)
         self.assertIn("1-10 drops per day", help_html)
         self.assertNotIn("shieldaiglobal", help_html.casefold())
 

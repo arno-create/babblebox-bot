@@ -11,11 +11,13 @@ import discord
 
 from babblebox import game_engine as ge
 from babblebox.question_drops_content import (
+    QuestionDropVariant,
     answer_points_for_difficulty,
     build_variant,
     is_answer_attempt,
     judge_answer,
     normalize_answer_text,
+    render_answer_instruction,
     validate_content_pack,
 )
 from babblebox.question_drops_service import QuestionDropsService
@@ -118,13 +120,17 @@ class QuestionDropsContentTests(unittest.TestCase):
         self.assertTrue(judge_answer({"type": "numeric", "value": 42}, "The answer is 42."))
         self.assertFalse(judge_answer({"type": "numeric", "value": 42}, "42 or 43"))
         self.assertFalse(judge_answer({"type": "numeric", "value": 1989}, "19,89"))
-        self.assertFalse(judge_answer({"type": "numeric", "value": 42}, "forty two"))
+        self.assertTrue(judge_answer({"type": "numeric", "value": 42}, "forty two"))
+        self.assertTrue(judge_answer({"type": "numeric", "value": 42}, "answer: forty two"))
+        self.assertFalse(judge_answer({"type": "numeric", "value": 42}, "I have 42 cats"))
+        self.assertTrue(judge_answer({"type": "boolean", "value": True}, "it's true"))
         multiple_choice = {"type": "multiple_choice", "choices": ["red", "yellow", "green"], "answer": "green"}
         self.assertTrue(judge_answer(multiple_choice, "green"))
         self.assertTrue(judge_answer(multiple_choice, "C"))
         self.assertTrue(judge_answer(multiple_choice, "c) green"))
         self.assertFalse(judge_answer(multiple_choice, "c maybe"))
         self.assertTrue(judge_answer({"type": "ordered_tokens", "tokens": ["red", "blue", "green"]}, "red, blue, green"))
+        self.assertFalse(judge_answer({"type": "ordered_tokens", "tokens": ["red", "blue", "green"]}, "green, blue, red"))
         self.assertEqual(normalize_answer_text("  Hello,  World! "), "hello world")
 
     def test_answer_attempt_gate_accepts_clean_guesses_and_rejects_chatter(self):
@@ -134,16 +140,33 @@ class QuestionDropsContentTests(unittest.TestCase):
         self.assertTrue(is_answer_attempt(text_spec, "maybe venus", direct_reply=True))
         self.assertFalse(is_answer_attempt(text_spec, "wait that's wild"))
         self.assertFalse(is_answer_attempt(text_spec, "what do you mean"))
+        self.assertFalse(is_answer_attempt(text_spec, "no way"))
+        self.assertFalse(is_answer_attempt(text_spec, "true"))
 
         numeric_spec = {"type": "numeric", "value": 16}
         self.assertTrue(is_answer_attempt(numeric_spec, "16"))
         self.assertTrue(is_answer_attempt(numeric_spec, "answer 16"))
+        self.assertTrue(is_answer_attempt(numeric_spec, "sixteen"))
+        self.assertTrue(is_answer_attempt(numeric_spec, "the answer is sixteen"))
         self.assertFalse(is_answer_attempt(numeric_spec, "numbers are hard lol"))
+        self.assertFalse(is_answer_attempt(numeric_spec, "I have 16 cats"))
+        self.assertFalse(is_answer_attempt(numeric_spec, "1989 was wild"))
 
         multiple_choice = {"type": "multiple_choice", "choices": ["red", "yellow", "green"], "answer": "green"}
         self.assertTrue(is_answer_attempt(multiple_choice, "option c"))
         self.assertTrue(is_answer_attempt(multiple_choice, "green"))
         self.assertFalse(is_answer_attempt(multiple_choice, "which one was c again"))
+
+        ordered = {"type": "ordered_tokens", "tokens": ["red", "blue", "green"]}
+        self.assertTrue(is_answer_attempt(ordered, "green, blue, red"))
+        self.assertFalse(is_answer_attempt(ordered, "it is true"))
+
+    def test_render_answer_instruction_matches_answer_type(self):
+        self.assertIn("option text", render_answer_instruction({"type": "multiple_choice", "choices": ["a"], "answer": "a"}))
+        self.assertIn("number words", render_answer_instruction({"type": "numeric", "value": 12}))
+        self.assertIn("true", render_answer_instruction({"type": "boolean", "value": True}))
+        self.assertIn("full sequence", render_answer_instruction({"type": "ordered_tokens", "tokens": ["red", "blue"]}))
+        self.assertIn("short clean answer", render_answer_instruction({"type": "text", "accepted": ["mars"]}))
 
 
 class QuestionDropsServiceTests(unittest.IsolatedAsyncioTestCase):
@@ -279,6 +302,70 @@ class QuestionDropsServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNotNone(next_variant)
         self.assertNotEqual(next_variant.concept_id, first_variant.concept_id)
+
+    async def test_selector_high_drop_pressure_prefers_generated_depth_over_curated_reuse(self):
+        curated_variant = QuestionDropVariant(
+            concept_id="custom:science-curated",
+            category="science",
+            difficulty=1,
+            source_type="curated",
+            generator_type="static",
+            prompt="Curated science prompt",
+            answer_spec={"type": "text", "accepted": ["alpha"]},
+            variant_hash="curated-science",
+        )
+        generated_variant = QuestionDropVariant(
+            concept_id="custom:math-generated",
+            category="math",
+            difficulty=1,
+            source_type="generated",
+            generator_type="math_custom",
+            prompt="Generated math prompt",
+            answer_spec={"type": "numeric", "value": 7},
+            variant_hash="generated-math",
+        )
+        exposures = [
+            {
+                "guild_id": self.guild.id,
+                "channel_id": self.channel.id,
+                "concept_id": f"old-math-{index}",
+                "variant_hash": f"old-math-{index}",
+                "category": "math",
+                "difficulty": 1,
+                "asked_at": ge.now_utc().isoformat(),
+                "resolved_at": None,
+                "winner_user_id": None,
+                "slot_key": f"2026-03-2{index}:0",
+            }
+            for index in range(3)
+        ]
+
+        low_config = {**self.service.get_config(self.guild.id), "drops_per_day": 1}
+        high_config = {**self.service.get_config(self.guild.id), "drops_per_day": 10}
+        with patch(
+            "babblebox.question_drops_service.iter_candidate_variants",
+            return_value=[curated_variant, generated_variant],
+        ), patch(
+            "babblebox.question_drops_service.question_drop_seed_for_concept",
+            side_effect=lambda concept_id: {"source_type": "generated"} if str(concept_id).startswith("old-math-") else None,
+        ):
+            low_pick = self.service._select_variant(
+                self.guild.id,
+                self.channel.id,
+                exposures=exposures,
+                slot_key="2026-03-30:0",
+                config=low_config,
+            )
+            high_pick = self.service._select_variant(
+                self.guild.id,
+                self.channel.id,
+                exposures=exposures,
+                slot_key="2026-03-30:0",
+                config=high_config,
+            )
+
+        self.assertEqual(low_pick, curated_variant)
+        self.assertEqual(high_pick, generated_variant)
 
     async def test_update_config_accepts_maximum_drop_range(self):
         ok, message = await self.service.update_config(self.guild.id, drops_per_day=10)
@@ -458,6 +545,15 @@ class QuestionDropsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.service._wrong_feedback_count[exposure_id], 0)
         self.assertEqual(self.service._attempted_users[exposure_id], set())
         self.bot.profile_service.record_question_drop_results_batch.assert_not_awaited()
+
+    async def test_status_embed_honestly_notes_idle_skip_and_high_frequency_reuse(self):
+        await self.service.update_config(self.guild.id, drops_per_day=10, activity_gate="light")
+
+        snapshot = await self.service.get_status_snapshot(self.guild)
+        embed = self.service.build_status_embed(self.guild, snapshot)
+
+        self.assertIn("Idle channels can skip a slot.", embed.description)
+        self.assertIn("Higher daily counts reuse concepts sooner.", embed.description)
 
     async def test_party_game_overlap_retires_live_drop_before_judging(self):
         active = await self._post_one_drop()
