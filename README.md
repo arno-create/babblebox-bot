@@ -51,7 +51,7 @@ Babblebox is intentionally compact:
 ### Question Drops
 
 - scheduled in-channel knowledge prompts
-- guild-first knowledge lane with `/drops panel`, `/drops status`, `/drops stats`, and `/drops leaderboard`
+- guild-first knowledge lane with `/drops status`, `/drops stats`, and `/drops leaderboard`
 - configurable channels, categories, timing, activity gating, and tone
 - category mastery roles
 - guild scholar ladder
@@ -191,7 +191,6 @@ Slash is recommended for multi-option setup here. Prefix stays positional, so th
 
 | Slash | Prefix | Purpose |
 | --- | --- | --- |
-| `/drops panel` | `bb!drops panel` | Open the Question Drops knowledge panel |
 | `/drops status` | `bb!drops status` | View schedule, channels, categories, and operability |
 | `/drops config` | `bb!drops config true 4` | Configure cadence, timing, tone, and AI opt-in |
 | `/drops channels` | `bb!drops channels add #trivia` | Add or remove Question Drops channels |

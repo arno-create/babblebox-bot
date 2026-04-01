@@ -75,6 +75,16 @@ class WebsiteDocsTests(unittest.TestCase):
 
         self.assertNotIn("dropscelebaiglobal", readme.casefold())
         self.assertNotIn("dropscelebaiglobal", index_html.casefold())
+        self.assertNotIn("/drops panel", readme)
+
+    def test_help_and_readme_do_not_reintroduce_duplicate_drops_panel_copy(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        help_html = (ROOT / "help.html").read_text(encoding="utf-8")
+
+        self.assertIn("/drops status", readme)
+        self.assertIn("/drops status", help_html)
+        self.assertNotIn("/drops panel", readme)
+        self.assertNotIn("/drops panel", help_html)
 
     def test_readme_examples_drop_known_fake_prefix_shapes(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")

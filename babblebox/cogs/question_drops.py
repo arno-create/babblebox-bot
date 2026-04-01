@@ -129,23 +129,6 @@ class QuestionDropsCog(commands.Cog):
         snapshot = await self.service.get_status_snapshot(ctx.guild)
         await send_hybrid_response(ctx, embed=self.service.build_status_embed(ctx.guild, snapshot), ephemeral=True)
 
-    @drops_group.command(name="panel", with_app_command=True, description="Open the Question Drops knowledge panel")
-    @app_commands.default_permissions(manage_guild=True)
-    async def drops_panel_command(self, ctx: commands.Context):
-        if ctx.guild is None:
-            await send_hybrid_response(
-                ctx,
-                embed=ge.make_status_embed("Server Only", "This command only works inside a server.", tone="warning", footer="Babblebox Question Drops"),
-                ephemeral=True,
-            )
-            return
-        if not await self._require_storage(ctx, "Question Drops", defer_response=False):
-            return
-        if not await self._require_admin(ctx):
-            return
-        snapshot = await self.service.get_status_snapshot(ctx.guild)
-        await send_hybrid_response(ctx, embed=self.service.build_status_embed(ctx.guild, snapshot), ephemeral=True)
-
     @drops_group.command(name="status", with_app_command=True, description="Show Question Drops mastery status for this server")
     async def drops_status_command(self, ctx: commands.Context):
         if ctx.guild is None:
