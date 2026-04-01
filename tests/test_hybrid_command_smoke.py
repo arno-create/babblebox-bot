@@ -188,11 +188,19 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
 
     def test_help_pages_reflect_question_drop_option_copy(self):
         question_drops_page = next(page for page in HELP_PAGES if page["title"] == "Question Drops")
-        self.assertIn("/drops panel", question_drops_page["body"])
+        self.assertIn("/drops status", question_drops_page["body"])
+        self.assertNotIn("/drops panel", question_drops_page["body"])
         self.assertIn("/drops mastery category", question_drops_page["body"])
         self.assertIn("scholar ladder", question_drops_page["body"])
         daily_page = next(page for page in HELP_PAGES if page["title"] == "Daily Arcade")
         self.assertIn("Question Drops stay separate as the guild knowledge lane", daily_page["body"])
+
+    def test_question_drops_group_no_longer_registers_duplicate_panel_command(self):
+        cog = QuestionDropsCog(types.SimpleNamespace(loop=None))
+        command_names = {command.name for command in cog.drops_group.commands}
+
+        self.assertIn("status", command_names)
+        self.assertNotIn("panel", command_names)
 
     def test_only16_lobby_copy_stays_aligned_with_manual(self):
         saved_games = ge.games

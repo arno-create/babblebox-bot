@@ -50,12 +50,12 @@ HELP_PAGES: list[dict[str, str]] = [
         "emoji": "\U0001f4da",
         "description": "Guild knowledge drops with visible mastery, scholar ranks, and low-noise progression.",
         "body": (
-            "`/drops panel` and `/drops status` show the guild knowledge lane clearly.\n"
+            "`/drops status` shows the guild knowledge lane clearly.\n"
             "`/drops stats` and `/drops leaderboard` stay guild-first, while Buddy and Profile surfaces fold the knowledge lane into identity cleanly.\n"
             "`/drops mastery category ...` configures category mastery roles, and `/drops mastery scholar ...` configures the guild scholar ladder.\n"
             "Admins can run 1-10 drops a day, pick channels and categories, and opt into rare AI celebration copy without turning the lane into spam."
         ),
-        "try": "`/drops panel`, `/drops stats`, `/drops leaderboard`",
+        "try": "`/drops status`, `/drops stats`, `/drops leaderboard`",
     },
     {
         "title": "Everyday Utilities",
