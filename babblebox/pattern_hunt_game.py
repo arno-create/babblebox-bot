@@ -6,6 +6,7 @@ import random
 import re
 from collections import defaultdict, deque
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import Any
 
 import discord
@@ -15,9 +16,12 @@ from babblebox import game_engine as ge
 
 PATTERN_HUNT_GUESS_LIMIT = 3
 PATTERN_HUNT_STRIKE_LIMIT = 3
-PATTERN_HUNT_PROMPT_TIMEOUT_SECONDS = 35
-PATTERN_HUNT_ANSWER_TIMEOUT_SECONDS = 30
+PATTERN_HUNT_TUTORIAL_PROMPT_TIMEOUT_SECONDS = 60
+PATTERN_HUNT_PROMPT_TIMEOUT_SECONDS = 45
+PATTERN_HUNT_TUTORIAL_ANSWER_TIMEOUT_SECONDS = 50
+PATTERN_HUNT_ANSWER_TIMEOUT_SECONDS = 40
 PATTERN_HUNT_RECENT_SIGNATURES = 6
+_PATTERN_HUNT_ANCHOR_SLOT = "pattern_hunt"
 PATTERN_HUNT_RULE_FAMILIES = (
     "starts_with_letter",
     "ends_with_punctuation",
@@ -361,6 +365,15 @@ def ensure_pattern_hunt_state(game: dict[str, Any]) -> dict[str, Any]:
     state = game.setdefault("pattern_hunt", {})
     state.setdefault("phase", "setup")
     state.setdefault("accepted_answers", [])
+    if "clue_limit" not in state and "turn_limit" in state:
+        state["clue_limit"] = state.get("turn_limit", 0)
+    if "clues_used" not in state and "turns_used" in state:
+        state["clues_used"] = state.get("turns_used", 0)
+    state.setdefault("clue_limit", 0)
+    state.setdefault("clues_used", 0)
+    state.setdefault("deadline_at", None)
+    state.setdefault("tutorial_cycle_active", False)
+    state.setdefault("tutorial_grace_used", False)
     return state
 
 
@@ -380,6 +393,56 @@ def _pattern_hunt_clue_recap_lines(
         else:
             lines.append(f"**{item['coder']}**: {clue}")
     return lines
+
+
+def _pattern_hunt_prompt_timeout_seconds(state: dict[str, Any]) -> int:
+    return PATTERN_HUNT_TUTORIAL_PROMPT_TIMEOUT_SECONDS if state.get("tutorial_cycle_active") else PATTERN_HUNT_PROMPT_TIMEOUT_SECONDS
+
+
+def _pattern_hunt_answer_timeout_seconds(state: dict[str, Any]) -> int:
+    return PATTERN_HUNT_TUTORIAL_ANSWER_TIMEOUT_SECONDS if state.get("tutorial_cycle_active") else PATTERN_HUNT_ANSWER_TIMEOUT_SECONDS
+
+
+def _pattern_hunt_deadline_copy(deadline: Any) -> str:
+    if deadline is None or not hasattr(deadline, "tzinfo"):
+        return "No live timer."
+    return f"{ge.format_timestamp(deadline, 'R')} ({ge.format_timestamp(deadline, 't')})"
+
+
+def _pattern_hunt_budget_lines(state: dict[str, Any]) -> str:
+    clues_left = max(0, int(state.get("clue_limit", 0)) - int(state.get("clues_used", 0)))
+    guesses_left = max(0, int(state.get("guess_limit", 3)) - int(state.get("guesses_used", 0)))
+    misses_left = max(0, int(state.get("strike_limit", 3)) - int(state.get("strikes", 0)))
+    return (
+        f"Clues left: **{clues_left}**\n"
+        f"Guesses left: **{guesses_left}**\n"
+        f"Team misses left: **{misses_left}**"
+    )
+
+
+def _pattern_hunt_now_copy(game: dict[str, Any], *, public: bool) -> str:
+    state = ensure_pattern_hunt_state(game)
+    guesser = ge.get_snapshot_player(game, state.get("guesser_id"))
+    coder = ge.get_snapshot_player(game, current_pattern_hunt_coder_id(game))
+    guesser_name = ge.display_name_of(guesser) if guesser is not None else "The guesser"
+    coder_name = ge.display_name_of(coder) if coder is not None else "the coder"
+    if str(state.get("phase", "setup")).casefold() == "answer":
+        return (
+            f"{coder_name} owes one public clue that fits the hidden rule without explaining it. "
+            f"{guesser_name} can use `/hunt guess` whenever the room has enough to work with."
+        )
+    return (
+        f"{guesser_name} asks {coder_name} for one clue. "
+        "After the clue lands, the guesser can keep asking or use `/hunt guess`."
+    )
+
+
+async def _refresh_pattern_hunt_anchor(game: dict[str, Any]):
+    await ge.upsert_game_anchor(game, _PATTERN_HUNT_ANCHOR_SLOT, embed=build_pattern_hunt_status_embed(game, public=True))
+
+
+def _finish_pattern_hunt_tutorial_cycle(state: dict[str, Any]):
+    state["tutorial_cycle_active"] = False
 
 
 async def start_pattern_hunt_game_locked(guild_id: int, game: dict[str, Any]):
@@ -409,7 +472,7 @@ async def start_pattern_hunt_game_locked(guild_id: int, game: dict[str, Any]):
                 embed=ge.style_embed(
                     discord.Embed(
                         title="Pattern Hunt Rule",
-                        description="Keep this private. Public clues should fit the rule without naming it or explaining the logic.",
+                        description="Keep this private. Give one public clue that fits the rule, and never explain the logic out loud.",
                         color=ge.EMBED_THEME["accent"],
                     ).add_field(name="Secret Rule", value=render_rule(rule_atoms), inline=False).add_field(
                         name="Fits the Rule",
@@ -421,7 +484,7 @@ async def start_pattern_hunt_game_locked(guild_id: int, game: dict[str, Any]):
                         inline=False,
                     ).add_field(
                         name="Coder Note",
-                        value="Give one public clue per turn. If Babblebox rejects it, rewrite once without explaining the miss.",
+                        value="One clue per turn. If Babblebox rejects it, rewrite once with a fresh clue only.",
                         inline=False,
                     ),
                     footer="Babblebox Pattern Hunt | The guesser never sees this DM",
@@ -439,7 +502,7 @@ async def start_pattern_hunt_game_locked(guild_id: int, game: dict[str, Any]):
             )
             await ge.cleanup_game(guild_id)
             return
-    turn_limit = max(4, 2 * len(coders))
+    turn_limit = max(5, (2 * len(coders)) + 1)
     state.update(
         {
             "phase": "prompt",
@@ -453,6 +516,8 @@ async def start_pattern_hunt_game_locked(guild_id: int, game: dict[str, Any]):
             "guess_limit": PATTERN_HUNT_GUESS_LIMIT,
             "strikes": 0,
             "strike_limit": PATTERN_HUNT_STRIKE_LIMIT,
+            "clues_used": 0,
+            "clue_limit": turn_limit,
             "turns_used": 0,
             "turn_limit": turn_limit,
             "current_prompt": None,
@@ -460,42 +525,44 @@ async def start_pattern_hunt_game_locked(guild_id: int, game: dict[str, Any]):
             "hint_revealed": False,
             "hint_text": None,
             "accepted_answers": [],
+            "deadline_at": None,
+            "tutorial_cycle_active": True,
+            "tutorial_grace_used": False,
         }
     )
     ge.mark_game_started(game)
-    await game["channel"].send(embed=build_pattern_hunt_status_embed(game, public=True, title="Pattern Hunt Started"))
     await _begin_pattern_turn_locked(guild_id, game)
 
 
-def build_pattern_hunt_status_embed(game: dict[str, Any], *, public: bool, title: str = "Pattern Hunt Status") -> discord.Embed:
+def build_pattern_hunt_status_embed(game: dict[str, Any], *, public: bool, title: str = "Pattern Hunt") -> discord.Embed:
     state = ensure_pattern_hunt_state(game)
     guesser = ge.get_snapshot_player(game, state.get("guesser_id"))
     coder = ge.get_snapshot_player(game, current_pattern_hunt_coder_id(game))
-    description = "The guesser asks for one clue at a time, the current coder answers once in public, and Babblebox keeps the hidden rule machine-judged."
+    description = "One player reads the room. The coders protect a hidden rule with public clues."
+    if state.get("tutorial_cycle_active"):
+        description += "\nOpening cycle is slowed down on purpose so everyone can catch the rhythm first."
     if public and state.get("hint_text"):
         description += f"\nHint: {state['hint_text']}"
     if not public:
         description += "\nUse `/hunt guess` for a clean 1-3 family theory. `Contains Digits` means digits `0-9` only."
+
     embed = discord.Embed(title=title, description=description, color=discord.Color.dark_teal())
     embed.add_field(name="Guesser", value=ge.display_name_of(guesser) if guesser else "Unknown", inline=True)
     embed.add_field(name="Current Coder", value=ge.display_name_of(coder) if coder else "Unknown", inline=True)
-    phase_label = {
-        "prompt": "Guesser Asking",
-        "answer": "Coder Answering",
-    }.get(str(state.get("phase", "setup")).casefold(), str(state.get("phase", "setup")).title())
-    embed.add_field(name="Phase", value=phase_label, inline=True)
-    embed.add_field(
-        name="Budget",
-        value=(
-            f"Guesses left: **{int(state.get('guess_limit', 3)) - int(state.get('guesses_used', 0))}**\n"
-            f"Strikes: **{int(state.get('strikes', 0))}/{int(state.get('strike_limit', 3))}**\n"
-            f"Turns left: **{int(state.get('turn_limit', 0)) - int(state.get('turns_used', 0))}**"
-        ),
-        inline=True,
-    )
+    embed.add_field(name="Time Left", value=_pattern_hunt_deadline_copy(state.get("deadline_at")), inline=True)
+    embed.add_field(name="What Happens Now", value=_pattern_hunt_now_copy(game, public=public), inline=False)
+    if state.get("current_prompt"):
+        embed.add_field(name="Current Prompt", value=ge.safe_field_text(state.get("current_prompt"), limit=240), inline=False)
+    embed.add_field(name="Budget", value=_pattern_hunt_budget_lines(state), inline=False)
+    if state.get("tutorial_cycle_active"):
+        embed.add_field(
+            name="Opening Rhythm",
+            value="1. Guesser asks for one clue.\n2. Current coder gives one clue that fits.\n3. Guesser keeps asking or uses `/hunt guess`.",
+            inline=False,
+        )
     if not public:
         embed.add_field(
-            name="Guessing",
+            name="Private Guessing",
             value=(
                 "Use 1-3 rule families in `/hunt guess`.\n"
                 "Families that need a value take simple inputs like `a`, `?`, `food`, `3`, or `3-5`.\n"
@@ -506,11 +573,11 @@ def build_pattern_hunt_status_embed(game: dict[str, Any], *, public: bool, title
     if state.get("accepted_answers"):
         lines = _pattern_hunt_clue_recap_lines(
             state["accepted_answers"],
-            limit=4,
+            limit=5,
             prompt_limit=36,
             clue_limit=64,
         )
-        embed.add_field(name="Public Clues", value="\n".join(lines), inline=False)
+        embed.add_field(name="Recent Clues", value="\n".join(lines), inline=False)
     return ge.style_embed(embed, footer="Babblebox Pattern Hunt | Hidden rule stays private")
 
 
@@ -531,21 +598,7 @@ async def handle_pattern_hunt_message_locked(message: discord.Message, guild_id:
         return False
     if state.get("phase") == "prompt" and message.author.id == state.get("guesser_id"):
         state["current_prompt"] = message.content
-        state["phase"] = "answer"
-        state["retry_used"] = False
-        token = ge.bump_token(game, "turn_token")
-        await ge.cancel_task(game.get("turn_task"))
-        coder = ge.get_snapshot_player(game, current_pattern_hunt_coder_id(game))
-        await game["channel"].send(
-            embed=ge.make_status_embed(
-                "Coder Turn",
-                f"{coder.mention if coder is not None else 'Coder'}, give one public clue that fits the rule. Keep the rule hidden.",
-                tone="accent",
-                footer="Babblebox Pattern Hunt",
-            ),
-            allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
-        )
-        game["turn_task"] = asyncio.create_task(_pattern_hunt_answer_timeout(guild_id, token), name=f"babblebox-pattern-answer-{guild_id}")
+        await _start_pattern_answer_locked(guild_id, game)
         return True
     if state.get("phase") != "answer" or message.author.id != current_pattern_hunt_coder_id(game):
         return False
@@ -557,21 +610,26 @@ async def handle_pattern_hunt_message_locked(message: discord.Message, guild_id:
                 "prompt": state.get("current_prompt") or "",
             }
         )
-        await _advance_pattern_turn_locked(guild_id, game)
+        await _advance_pattern_turn_locked(guild_id, game, count_clue=True)
         return True
     if not state.get("retry_used"):
         state["retry_used"] = True
         await game["channel"].send(
             embed=ge.make_status_embed(
                 "Try Again",
-                f"{message.author.mention}, that clue missed. Rewrite it once with a fresh clue only.",
+                f"{message.author.mention}, that clue does not fit. Try one fresh clue without explaining the pattern.",
                 tone="warning",
                 footer="Babblebox Pattern Hunt",
             ),
             allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
         )
         return True
-    await _apply_pattern_strike_locked(guild_id, game, reason=f"{message.author.mention} missed the rule twice in the same turn.")
+    await _handle_pattern_penalty_locked(
+        guild_id,
+        game,
+        reason=f"{message.author.mention} missed the rule twice in the same turn.",
+        reset_phase="answer",
+    )
     return True
 
 
@@ -588,8 +646,8 @@ async def submit_pattern_guess_locked(
     if not valid_bundle:
         return False, validation_message or "That Pattern Hunt guess needs a cleaner rule bundle."
     if _rule_signature(guessed_atoms) == _rule_signature(state.get("rule_atoms", [])):
-        await _finish_pattern_hunt_locked(guild_id, game, guesser_won=True, reason=f"{actor.mention} cracked the rule: **{render_rule(state['rule_atoms'])}**.")
-        return True, "Correct"
+        await _finish_pattern_hunt_locked(guild_id, game, guesser_won=True, reason=f"{actor.mention} read the room and cracked the rule.")
+        return True, "You cracked it."
     state["guesses_used"] = int(state.get("guesses_used", 0) or 0) + 1
     remaining = int(state.get("guess_limit", 3)) - int(state.get("guesses_used", 0))
     if remaining <= 0:
@@ -599,8 +657,25 @@ async def submit_pattern_guess_locked(
             guesser_won=False,
             reason=f"{actor.mention} ran out of guesses. The coders held the pattern.",
         )
-        return True, "Wrong and out of guesses"
-    return False, f"Not it. You have **{remaining}** structured guess(es) left."
+        return True, "Out of guesses."
+    await _refresh_pattern_hunt_anchor(game)
+    return False, f"Not the rule yet. You have **{remaining}** guess(es) left."
+
+
+async def _start_pattern_answer_locked(guild_id: int, game: dict[str, Any]):
+    state = ensure_pattern_hunt_state(game)
+    state["phase"] = "answer"
+    state["retry_used"] = False
+    timeout_seconds = _pattern_hunt_answer_timeout_seconds(state)
+    state["deadline_at"] = ge.now_utc() + timedelta(seconds=timeout_seconds)
+    token = ge.bump_token(game, "turn_token")
+    await ge.cancel_task(game.get("turn_task"))
+    await _refresh_pattern_hunt_anchor(game)
+    game["turn_task"] = asyncio.create_task(
+        _pattern_hunt_answer_timeout(guild_id, token, timeout_seconds),
+        name=f"babblebox-pattern-answer-{guild_id}",
+    )
+    ge.reset_idle_timer(guild_id)
 
 
 async def _begin_pattern_turn_locked(guild_id: int, game: dict[str, Any]):
@@ -608,33 +683,54 @@ async def _begin_pattern_turn_locked(guild_id: int, game: dict[str, Any]):
     state["phase"] = "prompt"
     state["current_prompt"] = None
     state["retry_used"] = False
+    timeout_seconds = _pattern_hunt_prompt_timeout_seconds(state)
+    state["deadline_at"] = ge.now_utc() + timedelta(seconds=timeout_seconds)
     token = ge.bump_token(game, "turn_token")
     await ge.cancel_task(game.get("turn_task"))
-    guesser = ge.get_snapshot_player(game, state.get("guesser_id"))
-    coder = ge.get_snapshot_player(game, current_pattern_hunt_coder_id(game))
-    await game["channel"].send(
-        embed=ge.make_status_embed(
-            "Prompt Phase",
-            f"{guesser.mention if guesser else 'Guesser'}, ask for one clue. {coder.mention if coder else 'Coder'} answers once in public.",
-            tone="accent",
-            footer="Babblebox Pattern Hunt",
-        ),
-        allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
+    await _refresh_pattern_hunt_anchor(game)
+    game["turn_task"] = asyncio.create_task(
+        _pattern_hunt_prompt_timeout(guild_id, token, timeout_seconds),
+        name=f"babblebox-pattern-prompt-{guild_id}",
     )
-    game["turn_task"] = asyncio.create_task(_pattern_hunt_prompt_timeout(guild_id, token), name=f"babblebox-pattern-prompt-{guild_id}")
     ge.reset_idle_timer(guild_id)
 
 
-async def _advance_pattern_turn_locked(guild_id: int, game: dict[str, Any]):
+async def _advance_pattern_turn_locked(guild_id: int, game: dict[str, Any], *, count_clue: bool):
     state = ensure_pattern_hunt_state(game)
-    state["turns_used"] = int(state.get("turns_used", 0) or 0) + 1
-    if int(state.get("turns_used", 0)) >= int(state.get("turn_limit", 0)):
-        await _finish_pattern_hunt_locked(guild_id, game, guesser_won=False, reason="The coders survived the full clue budget.")
-        return
+    if count_clue:
+        state["clues_used"] = int(state.get("clues_used", 0) or 0) + 1
+        state["turns_used"] = state["clues_used"]
+        if int(state.get("clues_used", 0)) >= int(state.get("clue_limit", 0)):
+            _finish_pattern_hunt_tutorial_cycle(state)
+            await _finish_pattern_hunt_locked(guild_id, game, guesser_won=False, reason="The coders survived the full clue budget.")
+            return
+    else:
+        state["turns_used"] = int(state.get("clues_used", 0) or 0)
+    _finish_pattern_hunt_tutorial_cycle(state)
     coder_order = state.get("coder_order", [])
     if coder_order:
         state["current_coder_index"] = (int(state.get("current_coder_index", 0) or 0) + 1) % len(coder_order)
     await _begin_pattern_turn_locked(guild_id, game)
+
+
+async def _handle_pattern_penalty_locked(guild_id: int, game: dict[str, Any], *, reason: str, reset_phase: str):
+    state = ensure_pattern_hunt_state(game)
+    if not state.get("tutorial_grace_used"):
+        state["tutorial_grace_used"] = True
+        if reset_phase == "answer":
+            body = "Opening-cycle grace keeps this one clean. The same coder gets one fresh clue timer."
+        else:
+            body = "Opening-cycle grace keeps this one clean. The guesser gets one fresh prompt timer."
+        await game["channel"].send(
+            embed=ge.make_status_embed("Warm-Up Reset", body, tone="info", footer="Babblebox Pattern Hunt"),
+            allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
+        )
+        if reset_phase == "answer":
+            await _start_pattern_answer_locked(guild_id, game)
+        else:
+            await _begin_pattern_turn_locked(guild_id, game)
+        return
+    await _apply_pattern_strike_locked(guild_id, game, reason=reason)
 
 
 async def _apply_pattern_strike_locked(guild_id: int, game: dict[str, Any], *, reason: str):
@@ -646,19 +742,25 @@ async def _apply_pattern_strike_locked(guild_id: int, game: dict[str, Any], *, r
         state["hint_text"] = (
             f"Babblebox hint: the rule has **{len(state.get('rule_atoms', []))}** part(s), and one family is **{rule_family_label(first_family)}**."
         )
+    misses_left = max(0, int(state.get("strike_limit", 3)) - int(state.get("strikes", 0)))
+    body = f"{reason}\nTeam misses left: **{misses_left}**."
+    if int(state.get("strikes", 0)) == 1 and state.get("hint_text"):
+        body += f"\n{state['hint_text']}"
+    body += "\nBabblebox rotates to the next clue."
     await game["channel"].send(
         embed=ge.make_status_embed(
-            "Team Strike",
-            reason,
+            "Team Miss",
+            body,
             tone="warning",
             footer="Babblebox Pattern Hunt",
         ),
         allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
     )
     if int(state.get("strikes", 0)) >= int(state.get("strike_limit", 3)):
-        await _finish_pattern_hunt_locked(guild_id, game, guesser_won=True, reason="The coders hit the strike limit and the guesser takes it.")
+        _finish_pattern_hunt_tutorial_cycle(state)
+        await _finish_pattern_hunt_locked(guild_id, game, guesser_won=True, reason="The coders ran out of misses, so the guesser takes it.")
         return
-    await _advance_pattern_turn_locked(guild_id, game)
+    await _advance_pattern_turn_locked(guild_id, game, count_clue=False)
 
 
 async def _finish_pattern_hunt_locked(guild_id: int, game: dict[str, Any], *, guesser_won: bool, reason: str):
@@ -675,6 +777,15 @@ async def _finish_pattern_hunt_locked(guild_id: int, game: dict[str, Any], *, gu
         description=reason,
         color=discord.Color.gold() if guesser_won else discord.Color.green(),
     )
+    embed.add_field(
+        name="Outcome",
+        value=(
+            f"{ge.display_name_of(guesser)} cracked the pattern."
+            if guesser_won and guesser is not None
+            else "The coders protected the pattern."
+        ),
+        inline=False,
+    )
     embed.add_field(name="Secret Rule", value=render_rule(state.get("rule_atoms", [])), inline=False)
     if state.get("accepted_answers"):
         lines = _pattern_hunt_clue_recap_lines(
@@ -683,13 +794,13 @@ async def _finish_pattern_hunt_locked(guild_id: int, game: dict[str, Any], *, gu
             prompt_limit=30,
             clue_limit=54,
         )
-        embed.add_field(name="Clue Recap", value="\n".join(lines), inline=False)
+        embed.add_field(name="Recent Clues", value="\n".join(lines), inline=False)
     await game["channel"].send(embed=ge.style_embed(embed, footer="Babblebox Pattern Hunt | Hidden rule revealed"))
     await ge.cleanup_game(guild_id)
 
 
-async def _pattern_hunt_prompt_timeout(guild_id: int, token: int):
-    await asyncio.sleep(PATTERN_HUNT_PROMPT_TIMEOUT_SECONDS)
+async def _pattern_hunt_prompt_timeout(guild_id: int, token: int, timeout_seconds: int):
+    await asyncio.sleep(timeout_seconds)
     game = ge.games.get(guild_id)
     if not game or game.get("closing") or not game.get("active") or game.get("game_type") != "pattern_hunt":
         return
@@ -699,11 +810,16 @@ async def _pattern_hunt_prompt_timeout(guild_id: int, token: int):
             return
         if game.get("turn_token") != token:
             return
-        await _apply_pattern_strike_locked(guild_id, game, reason="The guesser ran out of time before asking for a clue.")
+        await _handle_pattern_penalty_locked(
+            guild_id,
+            game,
+            reason="The guesser ran out of time before asking for a clue.",
+            reset_phase="prompt",
+        )
 
 
-async def _pattern_hunt_answer_timeout(guild_id: int, token: int):
-    await asyncio.sleep(PATTERN_HUNT_ANSWER_TIMEOUT_SECONDS)
+async def _pattern_hunt_answer_timeout(guild_id: int, token: int, timeout_seconds: int):
+    await asyncio.sleep(timeout_seconds)
     game = ge.games.get(guild_id)
     if not game or game.get("closing") or not game.get("active") or game.get("game_type") != "pattern_hunt":
         return
@@ -714,8 +830,9 @@ async def _pattern_hunt_answer_timeout(guild_id: int, token: int):
         if game.get("turn_token") != token:
             return
         coder = ge.get_snapshot_player(game, current_pattern_hunt_coder_id(game))
-        await _apply_pattern_strike_locked(
+        await _handle_pattern_penalty_locked(
             guild_id,
             game,
-            reason=f"{coder.mention if coder else 'The coder'} ran out of time, so the coder team took a strike.",
+            reason=f"{coder.mention if coder else 'The current coder'} ran out of time before sending a clue.",
+            reset_phase="answer",
         )

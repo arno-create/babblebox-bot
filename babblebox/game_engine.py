@@ -452,6 +452,7 @@ def create_game_state(host, channel):
         "bomb_minimum_time": 3.0,
         "bomb_turn_started_at": None,
         "chaos_card": "none",
+        "state_anchors": {},
         "dm_turn_timeout": TURN_TIMEOUT_SECONDS,
         "spyfall_vote_timeout": SPYFALL_VOTE_TIMEOUT_SECONDS,
         "bomb_time_modifier": 0.0,
@@ -959,6 +960,31 @@ def make_status_embed(
     return style_embed(embed, footer=footer)
 
 
+async def upsert_game_anchor(
+    game,
+    slot: str,
+    *,
+    embed: discord.Embed,
+    allowed_mentions=None,
+):
+    anchors = game.setdefault("state_anchors", {})
+    anchor_message = anchors.get(slot)
+    if anchor_message is not None:
+        try:
+            await anchor_message.edit(embed=embed, allowed_mentions=allowed_mentions)
+            return anchor_message
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            anchors.pop(slot, None)
+
+    try:
+        anchor_message = await game["channel"].send(embed=embed, allowed_mentions=allowed_mentions)
+    except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+        return None
+
+    anchors[slot] = anchor_message
+    return anchor_message
+
+
 def format_timestamp(value, style="R"):
     if value is None:
         return "Unknown"
@@ -1103,6 +1129,7 @@ async def cleanup_game(guild_id):
 
     game["first_audio"] = None
     game["final_audio"] = None
+    game["state_anchors"] = {}
 
     async with games_guard:
         current = games.get(guild_id)
@@ -1180,8 +1207,8 @@ def get_lobby_embed(guild_id):
         "corpse": ("📝 Exquisite Corpse", "Blind collaborative nonsense for 3+ players.", discord.Color.purple()),
         "spyfall": ("🕵️ Spyfall", "Find the spy before the room turns on itself. 3+ players.", discord.Color.dark_gray()),
         "bomb": ("💣 Word Bomb", "Fast typing survival for 2+ players.", discord.Color.red()),
-        "only16": ("Only 16", "Fair quantity traps with explicit numeric judging and low-noise Smart mode. 2+ players.", discord.Color.orange()),
-        "pattern_hunt": ("Pattern Hunt", "One guesser, hidden machine-judged rule, public clues, structured guesses. 3+ players.", discord.Color.dark_teal()),
+        "only16": ("Only 16", "Ask a number question, wait for one clear answer, and hope nobody lands anywhere but 16. 2+ players.", discord.Color.orange()),
+        "pattern_hunt": ("Pattern Hunt", "One player reads the room while the coders protect a hidden rule with public clues. 3+ players.", discord.Color.dark_teal()),
     }
 
     title, desc, color = titles.get(gt, titles["none"])
@@ -1199,10 +1226,10 @@ def get_lobby_embed(guild_id):
         embed.add_field(
             name="Only 16 Mode",
             value=(
-                f"**{str(game.get('only16_mode', 'strict')).title()}**\n"
-                "Strict: direct replies to the armed question only.\n"
-                "Smart: direct replies plus one clean standalone answer like `16!` or `sixteen.`.\n"
-                "Chatter stays out, and ambiguity never eliminates."
+                f"**{'Strict (Recommended)' if str(game.get('only16_mode', 'strict')).casefold() == 'strict' else 'Smart (Advanced)'}**\n"
+                "Strict: reply to the armed question with one clear number.\n"
+                "Smart: replies still count, plus one clean standalone answer like `16!`.\n"
+                "Chatter stays out, and ambiguity never knocks anyone out."
             ),
             inline=False,
         )
@@ -1353,13 +1380,13 @@ class BombModeButton(discord.ui.Button):
 
 class Only16ModeButton(discord.ui.Button):
     def __init__(self, guild_id):
-        super().__init__(label="Only 16: Strict", style=discord.ButtonStyle.secondary, row=2)
+        super().__init__(label="Only 16: Strict (Recommended)", style=discord.ButtonStyle.secondary, row=2)
         self.guild_id = guild_id
         self.refresh()
 
     def refresh(self):
         game = games.get(self.guild_id)
-        mode = str(game.get("only16_mode", "strict")).title() if game else "Strict"
+        mode = "Strict (Recommended)" if not game or str(game.get("only16_mode", "strict")).casefold() == "strict" else "Smart (Advanced)"
         self.label = f"Only 16: {mode}"
         self.disabled = not game or game.get("game_type") != "only16" or game.get("active") or game.get("closing")
 
