@@ -1,6 +1,7 @@
 import types
 import unittest
-from unittest.mock import AsyncMock, patch
+import asyncio
+from unittest.mock import AsyncMock, Mock, patch
 
 from babblebox import game_engine as ge
 from babblebox.cogs.events import EventsCog
@@ -127,3 +128,47 @@ class EventsCogTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(message.channel.sent), 1)
         self.assertIsNone(message.channel.sent[0][1]["view"])
+
+    async def test_party_game_channel_routes_before_question_drops(self):
+        utility_service = types.SimpleNamespace(
+            clear_afk_on_activity=AsyncMock(return_value=None),
+            collect_afk_notice_targets=lambda **kwargs: [],
+            handle_watch_message=AsyncMock(),
+            handle_return_watch_message=AsyncMock(),
+        )
+        question_drops_service = types.SimpleNamespace(
+            observe_message_activity=Mock(),
+            retire_drop_for_party_game=AsyncMock(),
+            handle_message=AsyncMock(return_value=False),
+        )
+        bot = types.SimpleNamespace(
+            utility_service=utility_service,
+            shield_service=None,
+            question_drops_service=question_drops_service,
+            get_cog=lambda name: None,
+        )
+        cog = EventsCog(bot)
+        message = FakeMessage()
+        saved_games = ge.games
+        ge.games = {
+            message.guild.id: {
+                "closing": False,
+                "active": True,
+                "game_type": "pattern_hunt",
+                "channel": message.channel,
+                "lock": asyncio.Lock(),
+            }
+        }
+        try:
+            with (
+                patch("babblebox.cogs.events.is_command_message", new=AsyncMock(return_value=False)),
+                patch("babblebox.pattern_hunt_game.handle_pattern_hunt_message_locked", new=AsyncMock(return_value=True)) as handle_hunt,
+            ):
+                await cog.on_message(message)
+        finally:
+            ge.games = saved_games
+
+        question_drops_service.observe_message_activity.assert_called_once_with(message)
+        question_drops_service.retire_drop_for_party_game.assert_awaited_once_with(message.guild.id, message.channel.id)
+        handle_hunt.assert_awaited_once()
+        question_drops_service.handle_message.assert_not_awaited()

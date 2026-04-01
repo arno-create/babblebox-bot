@@ -34,6 +34,23 @@ class GameplayCog(commands.Cog):
             return
 
         guild_id = ctx.guild.id
+        question_drops_service = getattr(self.bot, "question_drops_service", None)
+        if (
+            question_drops_service is not None
+            and getattr(question_drops_service, "storage_ready", False)
+            and question_drops_service.has_live_drop(guild_id, ctx.channel.id)
+        ):
+            await send_hybrid_response(
+                ctx,
+                embed=ge.make_status_embed(
+                    "Channel Busy",
+                    "A Question Drop is live in this channel right now. Let it resolve or time out before opening a party room here.",
+                    tone="warning",
+                    footer="Babblebox Lobby",
+                ),
+                ephemeral=True,
+            )
+            return
         async with ge.games_guard:
             if guild_id in ge.games:
                 await send_hybrid_response(

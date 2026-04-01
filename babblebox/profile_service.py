@@ -134,6 +134,8 @@ GAME_TYPE_FIELDS = {
     "corpse": "corpse_rounds",
     "spyfall": "spyfall_rounds",
     "bomb": "bomb_rounds",
+    "only16": "only16_rounds",
+    "pattern_hunt": "pattern_hunt_rounds",
 }
 
 
@@ -173,6 +175,15 @@ def _profile_default(user_id: int) -> dict[str, Any]:
         "spyfall_wins": 0,
         "bomb_rounds": 0,
         "bomb_wins": 0,
+        "only16_rounds": 0,
+        "only16_wins": 0,
+        "pattern_hunt_rounds": 0,
+        "pattern_hunt_wins": 0,
+        "question_drop_attempts": 0,
+        "question_drop_correct": 0,
+        "question_drop_points": 0,
+        "question_drop_current_streak": 0,
+        "question_drop_best_streak": 0,
         "xp_window_date": None,
         "daily_xp_actions": 0,
         "utility_xp_actions": 0,
@@ -305,6 +316,18 @@ def _level_track(profile: dict[str, Any]) -> str:
     )
 
 
+def _blank_question_drop_category(user_id: int, category: str) -> dict[str, Any]:
+    return {
+        "user_id": user_id,
+        "category": category,
+        "attempts": 0,
+        "correct_count": 0,
+        "points": 0,
+        "current_streak": 0,
+        "best_streak": 0,
+    }
+
+
 def _daily_booth_line(mode: str, puzzle, result: dict[str, Any] | None, *, active_mode: str) -> str:
     prefix = "\u25b6" if mode == active_mode else "\u2022"
     return f"{prefix} {_daily_mode_icon(mode)} **{puzzle.label}** | {_daily_progress_line(result)}"
@@ -360,7 +383,7 @@ def _daily_active_progress_line(
         return f"Progress: Clear {attempts}/{DAILY_MAX_ATTEMPTS} | share ready"
     if result.get("completed_at") is not None:
         if public:
-            return f"Progress: Wrapped {attempts}/{DAILY_MAX_ATTEMPTS} | share-ready summary"
+            return f"Progress: Wrapped {attempts}/{DAILY_MAX_ATTEMPTS} | share ready summary"
         return f"Progress: Wrapped {attempts}/{DAILY_MAX_ATTEMPTS} | answer **{puzzle.answer.upper()}**"
     remaining = max(0, DAILY_MAX_ATTEMPTS - attempts)
     return f"Progress: {attempts}/{DAILY_MAX_ATTEMPTS} used | {remaining} left"
@@ -491,6 +514,20 @@ class ProfileService:
             today = ge.now_utc().date()
             self._sync_identity_fields(profile, today)
             return self._enrich_profile(profile)
+
+    async def get_question_drop_summary(self, user_id: int) -> dict[str, Any] | None:
+        if not self.storage_ready:
+            return None
+        async with self._lock:
+            profile = await self._ensure_profile(user_id)
+            today = ge.now_utc().date()
+            self._sync_identity_fields(profile, today)
+            categories = await self.store.fetch_question_drop_categories(user_id=user_id)
+            return {
+                "profile": self._enrich_profile(profile),
+                "categories": categories,
+                "top_categories": categories[:3],
+            }
 
     async def rename_buddy(self, user_id: int, nickname: str) -> tuple[bool, str]:
         if not self.storage_ready:
@@ -790,6 +827,127 @@ class ProfileService:
             self._sync_identity_fields(profile, today)
             await self.store.save_profile(profile)
 
+    async def record_only16_win(self, winner_id: int):
+        if not self.storage_ready:
+            return
+        async with self._lock:
+            today = ge.now_utc().date()
+            profile = await self._ensure_profile(winner_id)
+            profile["games_won"] = int(profile.get("games_won", 0) or 0) + 1
+            profile["only16_wins"] = int(profile.get("only16_wins", 0) or 0) + 1
+            self._grant_xp(profile, bucket="game", amount=GAME_WIN_XP, today=today)
+            self._touch_profile(profile, mood="celebrating")
+            self._sync_identity_fields(profile, today)
+            await self.store.save_profile(profile)
+
+    async def record_pattern_hunt_win(self, winner_id: int):
+        if not self.storage_ready:
+            return
+        async with self._lock:
+            today = ge.now_utc().date()
+            profile = await self._ensure_profile(winner_id)
+            profile["games_won"] = int(profile.get("games_won", 0) or 0) + 1
+            profile["pattern_hunt_wins"] = int(profile.get("pattern_hunt_wins", 0) or 0) + 1
+            self._grant_xp(profile, bucket="game", amount=GAME_WIN_XP, today=today)
+            self._touch_profile(profile, mood="celebrating")
+            self._sync_identity_fields(profile, today)
+            await self.store.save_profile(profile)
+
+    async def record_question_drop_result(self, user_id: int, *, category: str, correct: bool, points: int):
+        if not self.storage_ready:
+            return
+        category_id = str(category or "").strip().lower()
+        if not category_id:
+            return
+        granted_points = max(0, int(points))
+        async with self._lock:
+            today = ge.now_utc().date()
+            await self._apply_question_drop_result_locked(
+                today=today,
+                user_id=user_id,
+                category_id=category_id,
+                correct=bool(correct),
+                granted_points=granted_points,
+            )
+
+    async def record_question_drop_results_batch(self, results: list[dict[str, Any]]):
+        if not self.storage_ready:
+            return
+        normalized: dict[tuple[int, str], dict[str, Any]] = {}
+        for raw in results:
+            if not isinstance(raw, dict):
+                continue
+            user_id = raw.get("user_id")
+            if not isinstance(user_id, int) or user_id <= 0:
+                continue
+            category_id = str(raw.get("category") or "").strip().lower()
+            if not category_id:
+                continue
+            key = (user_id, category_id)
+            candidate = normalized.setdefault(
+                key,
+                {
+                    "user_id": user_id,
+                    "category_id": category_id,
+                    "correct": False,
+                    "points": 0,
+                },
+            )
+            candidate["correct"] = bool(candidate["correct"] or raw.get("correct"))
+            if raw.get("correct"):
+                candidate["points"] = max(int(candidate["points"]), max(0, int(raw.get("points", 0) or 0)))
+        if not normalized:
+            return
+        async with self._lock:
+            today = ge.now_utc().date()
+            for result in normalized.values():
+                await self._apply_question_drop_result_locked(
+                    today=today,
+                    user_id=int(result["user_id"]),
+                    category_id=str(result["category_id"]),
+                    correct=bool(result["correct"]),
+                    granted_points=max(0, int(result["points"])),
+                )
+
+    async def _apply_question_drop_result_locked(
+        self,
+        *,
+        today,
+        user_id: int,
+        category_id: str,
+        correct: bool,
+        granted_points: int,
+    ):
+        profile = await self._ensure_profile(user_id)
+        profile["question_drop_attempts"] = int(profile.get("question_drop_attempts", 0) or 0) + 1
+        if correct:
+            profile["question_drop_correct"] = int(profile.get("question_drop_correct", 0) or 0) + 1
+            profile["question_drop_points"] = int(profile.get("question_drop_points", 0) or 0) + granted_points
+            next_streak = int(profile.get("question_drop_current_streak", 0) or 0) + 1
+            profile["question_drop_current_streak"] = next_streak
+            profile["question_drop_best_streak"] = max(int(profile.get("question_drop_best_streak", 0) or 0), next_streak)
+            self._grant_xp(profile, bucket="daily", amount=min(DAILY_CLEAR_XP, max(1, granted_points)), today=today)
+            mood = "proud"
+        else:
+            profile["question_drop_current_streak"] = 0
+            mood = "focused"
+        category_row = await self.store.fetch_question_drop_category(user_id=user_id, category=category_id)
+        if category_row is None:
+            category_row = _blank_question_drop_category(user_id, category_id)
+        category_row["attempts"] = int(category_row.get("attempts", 0) or 0) + 1
+        if correct:
+            category_row["correct_count"] = int(category_row.get("correct_count", 0) or 0) + 1
+            category_row["points"] = int(category_row.get("points", 0) or 0) + granted_points
+            next_category_streak = int(category_row.get("current_streak", 0) or 0) + 1
+            category_row["current_streak"] = next_category_streak
+            category_row["best_streak"] = max(int(category_row.get("best_streak", 0) or 0), next_category_streak)
+        else:
+            category_row["current_streak"] = 0
+        self._touch_profile(profile, mood=mood)
+        self._sync_identity_fields(profile, today)
+        await self.store.save_question_drop_category(category_row)
+        await self.store.save_profile(profile)
+
     def _resolve_user_label(self, user_id: int) -> str:
         cached = self.bot.get_user(user_id)
         if cached is not None:
@@ -899,14 +1057,6 @@ class ProfileService:
         for row in recent[:6]:
             mode = challenge_modes.get(row["challenge_id"], "shuffle")
             label = _daily_mode_label(mode)
-            marker = "cleared" if row.get("solved") else "tried"
-            recent_lines.append(
-                f"**{row['puzzle_date'].isoformat()}** • {_daily_mode_icon(mode)} {label} • {marker} {int(row.get('attempt_count', 0) or 0)}/{DAILY_MAX_ATTEMPTS}"
-            )
-        recent_lines = []
-        for row in recent[:6]:
-            mode = challenge_modes.get(row["challenge_id"], "shuffle")
-            label = _daily_mode_label(mode)
             recent_lines.append(
                 f"{row['puzzle_date'].isoformat()} | {_daily_mode_icon(mode)} {label} | {_daily_progress_line(row)}"
             )
@@ -967,6 +1117,15 @@ class ProfileService:
             ),
             inline=True,
         )
+        embed.add_field(
+            name="Question Drops",
+            value=(
+                f"Points: **{profile['question_drop_points']}**\n"
+                f"Solved: **{profile['question_drop_correct']} / {profile['question_drop_attempts']} drops**\n"
+                f"Streak: **{profile['question_drop_current_streak']}**"
+            ),
+            inline=True,
+        )
         embed.add_field(name="Badges", value=_format_badges(profile["badges_unlocked"]), inline=False)
         embed.add_field(
             name="Little Snapshot",
@@ -992,7 +1151,8 @@ class ProfileService:
                 f"Mood: **{profile['resolved_mood']}**\n"
                 f"Arcade clears: **{profile['total_daily_clears']}**\n"
                 f"Utilities used: **{_utility_score(profile)}**\n"
-                f"Games won: **{profile['games_won']}**"
+                f"Games won: **{profile['games_won']}**\n"
+                f"Question Drop points: **{profile['question_drop_points']}**"
             ),
             inline=True,
         )
@@ -1021,7 +1181,7 @@ class ProfileService:
             title=title,
             description=(
                 f"**{ge.display_name_of(target)}** with buddy **{profile['buddy_name']}** in the Babblebox lounge.\n"
-                f"{'Private snapshot with live utility context.' if is_vault else 'Showable snapshot of arcade, buddy, and party energy.'}"
+                f"{'Private snapshot with live utility context.' if is_vault else 'Showable snapshot of arcade, buddy, and party highlights.'}"
             ),
             color=profile["style_meta"]["color"],
         )
@@ -1044,6 +1204,15 @@ class ProfileService:
             inline=True,
         )
         embed.add_field(name="Level Track", value=_level_track(profile), inline=True)
+        embed.add_field(
+            name="Question Drops",
+            value=(
+                f"Points: **{profile['question_drop_points']}**\n"
+                f"Solved: **{profile['question_drop_correct']} / {profile['question_drop_attempts']} drops**\n"
+                f"Best streak: **{profile['question_drop_best_streak']}**"
+            ),
+            inline=True,
+        )
         if utility_summary is not None:
             embed.add_field(
                 name="Quiet Utility",
@@ -1067,8 +1236,16 @@ class ProfileService:
                 inline=False,
             )
         game_lines = [
-            f"Rounds: telephone **{profile['telephone_rounds']}**, corpse **{profile['corpse_rounds']}**, spyfall **{profile['spyfall_rounds']}**, bomb **{profile['bomb_rounds']}**",
-            f"Highlights: telephone clears **{profile['telephone_completions']}**, corpse masterpieces **{profile['corpse_masterpieces']}**, bomb wins **{profile['bomb_wins']}**",
+            (
+                f"Rounds: telephone **{profile['telephone_rounds']}**, corpse **{profile['corpse_rounds']}**, "
+                f"spyfall **{profile['spyfall_rounds']}**, bomb **{profile['bomb_rounds']}**, "
+                f"only 16 **{profile['only16_rounds']}**, pattern hunt **{profile['pattern_hunt_rounds']}**"
+            ),
+            (
+                f"Highlights: telephone clears **{profile['telephone_completions']}**, corpse masterpieces **{profile['corpse_masterpieces']}**, "
+                f"bomb wins **{profile['bomb_wins']}**, only 16 wins **{profile['only16_wins']}**, "
+                f"pattern hunt wins **{profile['pattern_hunt_wins']}**"
+            ),
         ]
         if session_stats is not None:
             game_lines.append(

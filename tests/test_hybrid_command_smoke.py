@@ -177,6 +177,39 @@ class FakeLobbyView:
 
 
 class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
+    def test_help_pages_reflect_hardened_only16_and_pattern_hunt_copy(self):
+        party_page = next(page for page in HELP_PAGES if page["title"] == "Party Games")
+        self.assertIn("Strict judges direct replies to the armed question only.", party_page["body"])
+        self.assertIn("`16!` or `sixteen.`", party_page["body"])
+        self.assertIn("digits `0-9` only", party_page["body"])
+
+    def test_help_pages_reflect_question_drop_option_copy(self):
+        daily_page = next(page for page in HELP_PAGES if page["title"] == "Daily Arcade")
+        self.assertIn("1-10 drops a day", daily_page["body"])
+        self.assertIn("option letter or option text", daily_page["body"])
+        self.assertIn("Quiet channels can skip a slot", daily_page["body"])
+
+    def test_only16_lobby_copy_stays_aligned_with_manual(self):
+        saved_games = ge.games
+        host = FakeAuthor(1)
+        ge.games = {
+            55: {
+                "host": host,
+                "players": [host, FakeAuthor(2)],
+                "game_type": "only16",
+                "only16_mode": "smart",
+            }
+        }
+        try:
+            embed = ge.get_lobby_embed(55)
+        finally:
+            ge.games = saved_games
+
+        mode_field = next(field.value for field in embed.fields if field.name == "Only 16 Mode")
+        self.assertIn("Strict: direct replies to the armed question only.", mode_field)
+        self.assertIn("`16!` or `sixteen.`", mode_field)
+        self.assertIn("ambiguity never eliminates", mode_field)
+
     async def test_ping_command_responds_through_context_send(self):
         cog = MetaCog(object())
         ctx = FakeContext(interaction=FakeInteraction())
@@ -212,6 +245,30 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(ctx.defer_calls), 1)
             self.assertEqual(len(ctx.send_calls), 1)
             register_view.assert_called_once()
+        finally:
+            ge.games = saved_games
+
+    async def test_play_command_blocks_same_channel_when_question_drop_is_live(self):
+        saved_games = ge.games
+        ge.games = {}
+        try:
+            bot = types.SimpleNamespace(
+                question_drops_service=types.SimpleNamespace(storage_ready=True, has_live_drop=lambda guild_id, channel_id: True)
+            )
+            cog = GameplayCog(bot)
+            ctx = FakeContext(
+                interaction=FakeInteraction(),
+                author=FakeAuthor(),
+                guild=FakeGuild(),
+                channel=FakeChannel(),
+            )
+
+            with patch("babblebox.cogs.gameplay.require_channel_permissions", new=AsyncMock(return_value=True)):
+                await GameplayCog.play_command.callback(cog, ctx)
+
+            self.assertEqual(len(ctx.send_calls), 1)
+            self.assertTrue(ctx.send_calls[0]["ephemeral"])
+            self.assertIn("Question Drop", ctx.send_calls[0]["embed"].description)
         finally:
             ge.games = saved_games
 

@@ -45,6 +45,7 @@ class EventsCog(commands.Cog):
 
         utility_service = getattr(self.bot, "utility_service", None)
         shield_service = getattr(self.bot, "shield_service", None)
+        question_drops_service = getattr(self.bot, "question_drops_service", None)
         author_afk = None
         if utility_service is not None:
             author_afk = await utility_service.clear_afk_on_activity(message.author.id)
@@ -100,6 +101,8 @@ class EventsCog(commands.Cog):
         if utility_service is not None:
             await utility_service.handle_watch_message(message)
             await utility_service.handle_return_watch_message(message)
+        if question_drops_service is not None:
+            question_drops_service.observe_message_activity(message)
 
         if isinstance(message.channel, discord.DMChannel):
             guild_id = ge.dm_routes.get(message.author.id)
@@ -126,6 +129,37 @@ class EventsCog(commands.Cog):
             guild_id = message.guild.id
             game = ge.games.get(guild_id)
             if (
+                question_drops_service is not None
+                and game
+                and not game.get("closing")
+                and game.get("active")
+                and message.channel.id == getattr(game.get("channel"), "id", None)
+            ):
+                await question_drops_service.retire_drop_for_party_game(guild_id, message.channel.id)
+            if (
+                game
+                and not game.get("closing")
+                and game.get("active")
+                and game.get("game_type") in {"only16", "pattern_hunt"}
+                and message.channel.id == game["channel"].id
+            ):
+                async with game["lock"]:
+                    game = ge.games.get(guild_id)
+                    if not game or game.get("closing") or not game.get("active") or message.channel.id != game["channel"].id:
+                        return
+                    if game.get("game_type") == "only16":
+                        from babblebox.only16_game import handle_only16_message_locked
+
+                        handled = await handle_only16_message_locked(message, guild_id, game)
+                        if handled:
+                            return
+                    if game.get("game_type") == "pattern_hunt":
+                        from babblebox.pattern_hunt_game import handle_pattern_hunt_message_locked
+
+                        handled = await handle_pattern_hunt_message_locked(message, guild_id, game)
+                        if handled:
+                            return
+            if (
                 game
                 and not game.get("closing")
                 and game.get("active")
@@ -144,6 +178,10 @@ class EventsCog(commands.Cog):
                         if current_player and current_player.id == message.author.id:
                             await ge.handle_bomb_turn_locked(message, guild_id, game)
                             return
+            if question_drops_service is not None:
+                handled_drop = await question_drops_service.handle_message(message)
+                if handled_drop:
+                    return
 
     @commands.Cog.listener()
     async def on_member_remove(self, member: discord.Member):
@@ -202,7 +240,20 @@ class EventsCog(commands.Cog):
         if payload.guild_id is None:
             return
 
+        question_drops_service = getattr(self.bot, "question_drops_service", None)
+        if question_drops_service is not None:
+            await question_drops_service.handle_raw_message_delete(payload)
+
         game = ge.games.get(payload.guild_id)
+        if game and not game.get("closing") and game.get("active") and game.get("game_type") == "only16":
+            async with game["lock"]:
+                game = ge.games.get(payload.guild_id)
+                if game and not game.get("closing") and game.get("active") and game.get("game_type") == "only16":
+                    from babblebox.only16_game import handle_only16_message_delete_locked
+
+                    handled = await handle_only16_message_delete_locked(payload.message_id, payload.guild_id, game)
+                    if handled:
+                        return
         if not game or game.get("closing"):
             return
 

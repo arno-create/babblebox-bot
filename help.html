@@ -88,7 +88,7 @@
         </div>
         <div class="ribbon">
           <article class="info"><strong>Public-friendly</strong><p>Showable cards usually lean public. Sensitive setup, reminders, and DM alert tools lean private.</p></article>
-          <article class="info"><strong>Start fast</strong><p>Invite the bot, use <code>/help</code>, then try <code>/play</code>, <code>/daily</code>, or <code>/watch</code>.</p></article>
+          <article class="info"><strong>Start fast</strong><p>Invite the bot, use <code>/help</code>, then try <code>/play</code>, <code>/drops status</code>, <code>/daily</code>, or <code>/watch</code>.</p></article>
           <article class="info"><strong>Shield stays bounded</strong><p>Shield is optional, log-first by default, and built around compact moderator alerts instead of a huge archive.</p></article>
         </div>
       </div>
@@ -97,7 +97,7 @@
         <ol>
           <li>Invite Babblebox and make sure it can send embeds where you want people to use it.</li>
           <li>Use <code>/help</code> in Discord, or jump through the sections below.</li>
-          <li>Adopt one lane first: <code>/play</code>, <code>/daily</code>, <code>/buddy</code>, or <code>/watch</code>.</li>
+          <li>Adopt one lane first: <code>/play</code>, <code>/drops status</code>, <code>/daily</code>, <code>/buddy</code>, or <code>/watch</code>.</li>
           <li>Turn on Shield only if your server actually needs moderation automation.</li>
         </ol>
       </aside>
@@ -125,12 +125,12 @@
         <section class="section" id="getting-started">
           <div class="kicker">Getting Started</div>
           <h2>Start with one lane, not every command.</h2>
-          <p>Party servers usually start with <code>/play</code> and <code>/daily</code>. Smaller communities often start with <code>/watch</code>, <code>/later</code>, or <code>/remind</code>. Identity-heavy servers tend to start with <code>/buddy</code> and <code>/profile</code>.</p>
+          <p>Party servers usually start with <code>/play</code> and <code>/daily</code>. Retention-focused communities often add <code>/drops status</code> and scheduled Question Drops next. Smaller communities often start with <code>/watch</code>, <code>/later</code>, or <code>/remind</code>. Identity-heavy servers tend to start with <code>/buddy</code> and <code>/profile</code>.</p>
           <div class="grid2">
-            <article class="info"><strong>Best first public command</strong><p><code>/play</code> opens the multiplayer lobby for Broken Telephone, Exquisite Corpse, Spyfall, and Word Bomb.</p></article>
+            <article class="info"><strong>Best first public command</strong><p><code>/play</code> opens the multiplayer lobby for Broken Telephone, Exquisite Corpse, Spyfall, Word Bomb, Only 16, and Pattern Hunt.</p></article>
             <article class="info"><strong>Best first solo command</strong><p><code>/daily</code> opens Daily Arcade without needing a full room.</p></article>
             <article class="info"><strong>Best first private utility</strong><p><code>/watch settings</code> is a good first setup if you want quiet DM alerts instead of noisy public posts.</p></article>
-            <article class="info"><strong>Best first admin command</strong><p><code>/shield panel</code> or <code>/admin panel</code> gives moderators the compact control surfaces first.</p></article>
+            <article class="info"><strong>Best first admin command</strong><p><code>/drops panel</code>, <code>/shield panel</code>, or <code>/admin panel</code> gives moderators compact control surfaces first.</p></article>
           </div>
         </section>
 
@@ -151,26 +151,28 @@
           <h2>Short multiplayer energy, built around live rooms.</h2>
           <p><code>/play</code> acts as the shared lobby for the live-party lane instead of forcing people to remember several different entry points.</p>
           <div class="command-list">
-            <div class="command-row"><div><code>/play</code></div><div><p>Open the multiplayer lobby.</p><span>Start Broken Telephone, Exquisite Corpse, Spyfall, or Word Bomb from one place.</span></div></div>
+            <div class="command-row"><div><code>/play</code></div><div><p>Open the multiplayer lobby.</p><span>Start Broken Telephone, Exquisite Corpse, Spyfall, Word Bomb, Only 16, or Pattern Hunt from one place. Only 16 uses one clean judge guide: Strict = reply to the armed question only, Smart = reply to the armed question or give one clear standalone answer, and unrelated chatter is ignored.</span></div></div>
+            <div class="command-row"><div><code>/hunt status</code> and <code>/hunt guess</code></div><div><p>Operate the active Pattern Hunt round.</p><span>These stay dormant unless a Pattern Hunt lobby is already live in the server. The <strong>Contains Digits</strong> guess family means digits <code>0-9</code> only, and <code>/hunt guess</code> is built for 1-3 clean rule families.</span></div></div>
             <div class="command-row"><div><code>/stats</code> and <code>/leaderboard</code></div><div><p>Check light session stats.</p><span>These stay compact and playful instead of turning into a giant progression system.</span></div></div>
           </div>
         </section>
 
         <section class="section" id="daily-arcade">
           <div class="kicker">Daily Arcade</div>
-          <h2>Three quick daily booths for lighter rituals.</h2>
-          <p>Daily Arcade gives people something to do even when there is no full group ready for a live room. It is public-friendly and spoiler-aware, so it works well as a recurring server habit.</p>
+          <h2>Three quick daily booths plus compact scheduled Question Drops.</h2>
+          <p>Daily Arcade gives people something to do even when there is no full group ready for a live room. Question Drops add lightweight scheduled prompts without turning the server into a spammy trivia cannon. Both lanes stay compact, public-friendly, and spoiler-aware.</p>
           <div class="command-list">
             <div class="command-row"><div><code>/daily</code></div><div><p>Open the current daily booth selection.</p><span>Babblebox currently centers Daily Arcade around Shuffle, Emoji, and Signal.</span></div></div>
             <div class="command-row"><div><code>/daily play</code></div><div><p>Submit a daily answer or guess.</p><span>The shorthand path still defaults cleanly instead of forcing command complexity.</span></div></div>
             <div class="command-row"><div><code>/daily stats</code>, <code>/daily share</code>, <code>/daily leaderboard</code></div><div><p>Share progress without turning the booth into a spoiler mess.</p><span>Warnings and storage issues stay private even when the main cards are public.</span></div></div>
+            <div class="command-row"><div><code>/drops panel</code>, <code>/drops status</code>, <code>/drops config</code>, <code>/drops channels</code>, <code>/drops categories</code>, <code>/drops stats</code></div><div><p>Run the scheduled Question Drops lane.</p><span>Admins can run 1-10 drops per day, tune activity gating, and choose channels, categories, and tone. Players answer live in-channel, numeric drops accept clean digits or simple number words, multiple-choice prompts accept the correct option letter or option text, idle channels can skip a slot, higher daily counts reuse concepts sooner, and a live drop blocks new party rooms in that same channel until it resolves.</span></div></div>
           </div>
         </section>
 
         <section class="section" id="buddy-profile-vault">
           <div class="kicker">Buddy / Profile / Vault</div>
           <h2>One identity layer, not a bloated economy.</h2>
-          <p>Babblebox's identity surfaces are meant to feel worth showing. They collect your ongoing flavor, streaks, achievements, and activity into a few readable surfaces rather than exploding into a giant inventory game.</p>
+          <p>Babblebox's identity surfaces are meant to feel worth showing. They collect your ongoing flavor, streaks, achievements, party-game wins, and Question Drops progress into a few readable surfaces rather than exploding into a giant inventory game.</p>
           <div class="command-list">
             <div class="command-row"><div><code>/buddy</code></div><div><p>Your public-friendly mascot or companion surface.</p><span>Good for quick status, style, and personality without a wall of admin text.</span></div></div>
             <div class="command-row"><div><code>/profile</code></div><div><p>Your broader public identity card.</p><span>Useful when you want a showable summary that still feels readable in a real Discord channel.</span></div></div>
