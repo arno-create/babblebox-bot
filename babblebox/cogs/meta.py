@@ -25,7 +25,7 @@ HELP_PAGES: list[dict[str, str]] = [
     {
         "title": "Babblebox Guide",
         "emoji": "\U0001f3e0",
-        "description": "Five clear lanes: Party Games, Question Drops / Daily Arcade, Utilities, Buddy/Profile, and Shield.",
+        "description": "Six clear lanes: Party Games, Question Drops, Daily Arcade, Utilities, Buddy/Profile, and Shield.",
         "body": (
             "Use the arrows to browse the product by lane.\n"
             "Showable cards lean public by default so they feel native in chat.\n"
@@ -59,17 +59,17 @@ HELP_PAGES: list[dict[str, str]] = [
     {
         "title": "Daily Arcade",
         "emoji": "\U0001f579\ufe0f",
-        "description": "Three fast daily booths plus compact scheduled Question Drops.",
+        "description": "Three fast arcade booths, kept separate from knowledge mastery.",
         "body": (
             "`/daily` opens Shuffle, Emoji, and Signal.\n"
             "`/daily play <guess>` still defaults to Shuffle Booth.\n"
-            "`/drops panel`, `/drops config`, `/drops channels`, `/drops categories`, and `/drops stats` run the scheduled trivia lane.\n"
-            "Admins can schedule **1-10 drops a day** in selected channels.\n"
-            "Numeric drops accept clean digits or simple number words. Multiple-choice prompts also accept the correct option letter or option text.\n"
-            "Quiet channels can skip a slot. Higher daily counts recycle sooner once the fresh pool thins. A live drop blocks `/play` in that same channel until it resolves.\n"
+            "Daily stays arcade-only, so clears and streaks here do not feed Question Drops mastery roles or scholar ranks.\n"
+            "Question Drops live under `/drops` as the guild knowledge lane with `/drops status`, `/drops stats`, `/drops leaderboard`, and `/drops mastery ...`.\n"
+            "Admins can still schedule **1-10 drops a day**, and numeric or multiple-choice drops still accept the correct option letter or option text.\n"
+            "Quiet channels can skip a slot, and a live drop still blocks `/play` in that same channel until it resolves.\n"
             "`/daily`, `/daily play`, `/daily stats`, `/daily share`, and `/daily leaderboard` lean public by default while warnings stay private."
         ),
-        "try": "`/daily`, `/drops status`, `/drops stats`",
+        "try": "`/daily`, `/daily stats`, `/drops status`",
     },
     {
         "title": "Buddy / Profile / Vault",
@@ -78,7 +78,8 @@ HELP_PAGES: list[dict[str, str]] = [
         "body": (
             "`/buddy` and `/profile` are public-friendly by default.\n"
             "`/vault` stays more personal.\n"
-            "Buddy style, streaks, titles, badges, utilities, multiplayer highlights, and Question Drops points all meet here."
+            "Buddy style, streaks, titles, badges, utilities, multiplayer highlights, and guild-first knowledge flavor all meet here.\n"
+            "Profiles keep Knowledge, Daily Arcade, and party-game highlights separate so the lanes stay easy to understand."
         ),
         "try": "`/buddy`, `/profile`, `/vault`",
     },

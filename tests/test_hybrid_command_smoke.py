@@ -11,6 +11,7 @@ from babblebox import game_engine as ge
 from babblebox.cogs.gameplay import GameplayCog
 from babblebox.cogs.identity import IdentityCog
 from babblebox.cogs.meta import HELP_PAGES, MetaCog
+from babblebox.cogs.question_drops import QuestionDropsCog
 from babblebox.cogs.shield import ShieldCog
 from babblebox.cogs.utilities import AfkReturnWatchDurationSelect, UtilityCog
 from babblebox.profile_service import ProfileService
@@ -920,7 +921,86 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await cog.service.close()
 
+    async def test_drops_mastery_group_denies_non_admins_privately(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
+        cog = QuestionDropsCog(bot)
+        try:
+            cog.service.storage_ready = True
+            ctx = FakeContext(
+                interaction=FakeInteraction(),
+                guild=FakeGuild(),
+                channel=FakeChannel(),
+                author=FakeAuthor(manage_guild=False),
+            )
+
+            await QuestionDropsCog.drops_mastery_group.callback(cog, ctx)
+
+            self.assertEqual(len(ctx.send_calls), 1)
+            self.assertTrue(ctx.send_calls[0]["ephemeral"])
+            self.assertIn("Manage Server", ctx.send_calls[0]["embed"].description)
+        finally:
+            await cog.service.close()
+
+    async def test_hidden_drops_ai_override_ignores_guild_invocation(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
+        cog = QuestionDropsCog(bot)
+        try:
+            cog.service.storage_ready = True
+            ctx = FakeContext(
+                interaction=None,
+                guild=FakeGuild(10),
+                channel=FakeChannel(),
+                author=FakeAuthor(user_id=1266444952779620413, manage_guild=True),
+            )
+
+            await QuestionDropsCog.drops_celebration_ai_global_override_command.callback(cog, ctx, "status")
+
+            self.assertEqual(ctx.send_calls, [])
+        finally:
+            await cog.service.close()
+
+    async def test_hidden_drops_ai_override_rejects_unauthorized_dm(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
+        cog = QuestionDropsCog(bot)
+        try:
+            cog.service.storage_ready = True
+            ctx = FakeContext(
+                interaction=None,
+                guild=None,
+                channel=FakeChannel(),
+                author=FakeAuthor(user_id=777),
+            )
+
+            await QuestionDropsCog.drops_celebration_ai_global_override_command.callback(cog, ctx, "status")
+
+            self.assertEqual(len(ctx.send_calls), 1)
+            self.assertEqual(ctx.send_calls[0]["content"], "That command is unavailable.")
+        finally:
+            await cog.service.close()
+
+    async def test_hidden_drops_ai_override_status_and_toggle_work_in_dm_for_owner(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
+        cog = QuestionDropsCog(bot)
+        try:
+            cog.service.storage_ready = True
+            owner = FakeAuthor(user_id=1266444952779620413)
+            ctx = FakeContext(interaction=None, guild=None, channel=FakeChannel(), author=owner)
+
+            await QuestionDropsCog.drops_celebration_ai_global_override_command.callback(cog, ctx, "status")
+            await QuestionDropsCog.drops_celebration_ai_global_override_command.callback(cog, ctx, "rare")
+            await QuestionDropsCog.drops_celebration_ai_global_override_command.callback(cog, ctx, "off")
+
+            self.assertEqual(len(ctx.send_calls), 3)
+            self.assertEqual(ctx.send_calls[0]["embed"].title, "Question Drops AI Override")
+            self.assertIn("Private maintainer status", ctx.send_calls[0]["embed"].description)
+            self.assertIn("now `rare`", ctx.send_calls[1]["embed"].description.lower())
+            self.assertIn("now `off`", ctx.send_calls[2]["embed"].description.lower())
+            self.assertEqual(cog.service.get_meta()["ai_celebration_mode"], "off")
+        finally:
+            await cog.service.close()
+
     def test_hidden_override_command_is_not_in_public_help_pages(self):
         serialized_help = " ".join(page["body"] + " " + page.get("try", "") for page in HELP_PAGES).casefold()
 
         self.assertNotIn("shieldaiglobal", serialized_help)
+        self.assertNotIn("dropscelebaiglobal", serialized_help)

@@ -358,8 +358,16 @@ class IdentityCog(commands.Cog):
             )
             return
         profile = await self.service.get_profile(ctx.author.id)
+        knowledge_summary = await self.service.get_question_drop_summary(
+            ctx.author.id,
+            guild_id=ctx.guild.id if ctx.guild is not None else None,
+        )
         self._mark_public_cooldown(ctx, bucket="buddy", visibility=visibility)
-        await send_hybrid_response(ctx, embed=self.service.build_buddy_embed(ctx.author, profile), ephemeral=self._is_private(visibility))
+        await send_hybrid_response(
+            ctx,
+            embed=self.service.build_buddy_embed(ctx.author, profile, knowledge_summary=knowledge_summary),
+            ephemeral=self._is_private(visibility),
+        )
 
     @buddy_group.command(name="profile", with_app_command=True, description="Open your Buddy card")
     @app_commands.describe(visibility="Show your Buddy publicly or only to you")
@@ -382,8 +390,16 @@ class IdentityCog(commands.Cog):
             )
             return
         profile = await self.service.get_profile(ctx.author.id)
+        knowledge_summary = await self.service.get_question_drop_summary(
+            ctx.author.id,
+            guild_id=ctx.guild.id if ctx.guild is not None else None,
+        )
         self._mark_public_cooldown(ctx, bucket="buddy_profile", visibility=visibility)
-        await send_hybrid_response(ctx, embed=self.service.build_buddy_embed(ctx.author, profile), ephemeral=self._is_private(visibility))
+        await send_hybrid_response(
+            ctx,
+            embed=self.service.build_buddy_embed(ctx.author, profile, knowledge_summary=knowledge_summary),
+            ephemeral=self._is_private(visibility),
+        )
 
     @buddy_group.command(name="rename", with_app_command=True, description="Rename your Babblebox Buddy")
     @app_commands.describe(nickname="A short safe name for your buddy")
@@ -431,8 +447,16 @@ class IdentityCog(commands.Cog):
             )
             return
         profile = await self.service.get_profile(ctx.author.id)
+        knowledge_summary = await self.service.get_question_drop_summary(
+            ctx.author.id,
+            guild_id=ctx.guild.id if ctx.guild is not None else None,
+        )
         self._mark_public_cooldown(ctx, bucket="buddy_stats", visibility=visibility)
-        await send_hybrid_response(ctx, embed=self.service.build_buddy_stats_embed(ctx.author, profile), ephemeral=self._is_private(visibility))
+        await send_hybrid_response(
+            ctx,
+            embed=self.service.build_buddy_stats_embed(ctx.author, profile, knowledge_summary=knowledge_summary),
+            ephemeral=self._is_private(visibility),
+        )
 
     @commands.hybrid_command(name="profile", with_app_command=True, description="View a Babblebox profile with Daily, Buddy, utilities, and game stats")
     @app_commands.describe(user="Whose profile to view", visibility="Show the profile publicly or only to you")
@@ -456,6 +480,10 @@ class IdentityCog(commands.Cog):
             return
         target = user or ctx.author
         profile = await self.service.get_profile(target.id)
+        knowledge_summary = await self.service.get_question_drop_summary(
+            target.id,
+            guild_id=ctx.guild.id if ctx.guild is not None else None,
+        )
         utility_summary = None
         if target.id == ctx.author.id and self._is_private(visibility):
             utility_summary = self._utility_summary_for(user_id=target.id, guild_id=ctx.guild.id if ctx.guild else None)
@@ -466,6 +494,7 @@ class IdentityCog(commands.Cog):
             embed=self.service.build_profile_embed(
                 target,
                 profile,
+                knowledge_summary=knowledge_summary,
                 utility_summary=utility_summary,
                 session_stats=session_stats,
                 title="Babblebox Profile",
@@ -478,6 +507,10 @@ class IdentityCog(commands.Cog):
         if not await self._require_storage(ctx, "Vault"):
             return
         profile = await self.service.get_profile(ctx.author.id)
+        knowledge_summary = await self.service.get_question_drop_summary(
+            ctx.author.id,
+            guild_id=ctx.guild.id if ctx.guild is not None else None,
+        )
         utility_summary = self._utility_summary_for(user_id=ctx.author.id, guild_id=ctx.guild.id if ctx.guild else None)
         session_stats = ge.session_stats.get(ctx.author.id)
         await send_hybrid_response(
@@ -485,6 +518,7 @@ class IdentityCog(commands.Cog):
             embed=self.service.build_profile_embed(
                 ctx.author,
                 profile,
+                knowledge_summary=knowledge_summary,
                 utility_summary=utility_summary,
                 session_stats=session_stats,
                 title="Babblebox Vault",

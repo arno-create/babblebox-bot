@@ -29,14 +29,27 @@ from babblebox.question_drops_content import (
     render_answer_summary,
     validate_content_pack,
 )
+from babblebox.question_drops_ai import build_question_drop_ai_provider
+from babblebox.question_drops_style import (
+    category_emoji,
+    category_label,
+    category_label_with_emoji,
+    leaderboard_marker,
+    progression_emoji,
+    scholar_label,
+    tier_label,
+)
 from babblebox.question_drops_store import (
     QUESTION_DROP_MAX_DROPS_PER_DAY,
     QUESTION_DROP_MIN_DROPS_PER_DAY,
+    QUESTION_DROP_MASTERY_TIERS,
     QuestionDropsStorageUnavailable,
     QuestionDropsStore,
     default_question_drops_config,
+    default_question_drops_meta,
     normalize_active_drop,
     normalize_question_drops_config,
+    normalize_question_drops_meta,
 )
 from babblebox.utility_helpers import canonicalize_afk_timezone, load_afk_timezone
 
@@ -155,6 +168,8 @@ class QuestionDropsService:
         self._wrong_feedback_count: dict[int, int] = defaultdict(int)
         self._attempted_users: dict[int, set[int]] = defaultdict(set)
         self._next_prune_at: datetime | None = None
+        self._meta = default_question_drops_meta()
+        self._ai_provider = build_question_drop_ai_provider()
 
     async def start(self) -> bool:
         valid, message = validate_content_pack()
@@ -178,6 +193,7 @@ class QuestionDropsService:
         self.storage_ready = True
         self.storage_error = None
         self._configs = await self.store.fetch_all_configs()
+        self._meta = normalize_question_drops_meta(await self.store.fetch_meta() or default_question_drops_meta())
         await self._sweep_pending_posts(await self.store.list_pending_posts(), force=True)
         self._next_prune_at = ge.now_utc()
         await self._restore_active_rows(await self.store.list_active_drops())
@@ -190,6 +206,7 @@ class QuestionDropsService:
             self._scheduler_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._scheduler_task
+        await self._ai_provider.close()
         await self.store.close()
 
     async def _restore_active_rows(self, active_rows: list[dict[str, Any]]):
@@ -292,6 +309,9 @@ class QuestionDropsService:
             return default_question_drops_config(guild_id)
         return normalize_question_drops_config(guild_id, config)
 
+    def get_meta(self) -> dict[str, Any]:
+        return normalize_question_drops_meta(self._meta)
+
     async def update_config(
         self,
         guild_id: int,
@@ -304,6 +324,7 @@ class QuestionDropsService:
         activity_gate: str | None = None,
         active_start_hour: int | None = None,
         active_end_hour: int | None = None,
+        ai_celebrations_enabled: bool | None = None,
     ) -> tuple[bool, str]:
         if not self.storage_ready:
             return False, self.storage_message()
@@ -339,6 +360,8 @@ class QuestionDropsService:
                 current["active_start_hour"] = active_start_hour
             if active_end_hour is not None:
                 current["active_end_hour"] = active_end_hour
+            if ai_celebrations_enabled is not None:
+                current["ai_celebrations_enabled"] = bool(ai_celebrations_enabled)
             normalized = normalize_question_drops_config(guild_id, current)
             if normalized["active_start_hour"] >= normalized["active_end_hour"]:
                 return False, "Active hours need a clear daytime window. Use a start hour earlier than the end hour."
@@ -409,7 +432,274 @@ class QuestionDropsService:
         self._wake_event.set()
         return True, "Question Drops categories updated."
 
+    async def set_global_ai_celebration_mode(self, mode: str, *, actor_id: int) -> tuple[bool, str]:
+        if not self.storage_ready:
+            return False, self.storage_message()
+        normalized_mode = str(mode or "").strip().casefold()
+        if normalized_mode not in {"off", "rare", "event_only"}:
+            return False, "Use `off`, `rare`, or `event_only`."
+        next_meta = {
+            "ai_celebration_mode": normalized_mode,
+            "updated_by": actor_id if isinstance(actor_id, int) and actor_id > 0 else None,
+            "updated_at": ge.now_utc(),
+        }
+        async with self._lock:
+            await self.store.upsert_meta(next_meta)
+            self._meta = normalize_question_drops_meta(next_meta)
+        return True, f"Question Drops AI celebrations are now `{normalized_mode}`."
+
+    async def update_category_mastery(
+        self,
+        guild_id: int,
+        *,
+        category: str,
+        enabled: bool | None = None,
+        tier: int | None = None,
+        role_id: int | None = None,
+        threshold: int | None = None,
+        announcement_channel_id: int | None = None,
+        clear_announcement_channel: bool = False,
+        silent_grant: bool | None = None,
+    ) -> tuple[bool, str]:
+        if not self.storage_ready:
+            return False, self.storage_message()
+        normalized_category = str(category or "").strip().casefold()
+        if normalized_category not in QUESTION_DROP_CATEGORIES:
+            return False, f"Unknown category. Choose from {', '.join(QUESTION_DROP_CATEGORIES)}."
+        if tier is not None and tier not in QUESTION_DROP_MASTERY_TIERS:
+            return False, "Tier must be 1, 2, or 3."
+        if threshold is not None and int(threshold) < 0:
+            return False, "Threshold must be 0 or higher."
+        async with self._lock:
+            config = dict(self.get_config(guild_id))
+            mastery = dict(config.get("category_mastery", {}))
+            category_config = dict(mastery.get(normalized_category, {}))
+            if enabled is not None:
+                category_config["enabled"] = bool(enabled)
+            if silent_grant is not None:
+                category_config["silent_grant"] = bool(silent_grant)
+            if clear_announcement_channel:
+                category_config["announcement_channel_id"] = None
+            elif announcement_channel_id is not None:
+                category_config["announcement_channel_id"] = int(announcement_channel_id) if announcement_channel_id > 0 else None
+            tiers = [dict(item) for item in category_config.get("tiers", [])]
+            if tier is not None:
+                for item in tiers:
+                    if int(item.get("tier", 0) or 0) != int(tier):
+                        continue
+                    if role_id is not None:
+                        item["role_id"] = int(role_id) if role_id > 0 else None
+                    if threshold is not None:
+                        item["threshold"] = max(0, int(threshold))
+                    break
+            category_config["tiers"] = tiers
+            mastery[normalized_category] = category_config
+            config["category_mastery"] = mastery
+            normalized = normalize_question_drops_config(guild_id, config)
+            await self.store.upsert_config(normalized)
+            self._configs[guild_id] = normalized
+        return True, f"{category_label(normalized_category)} mastery settings updated."
+
+    async def update_scholar_ladder(
+        self,
+        guild_id: int,
+        *,
+        enabled: bool | None = None,
+        tier: int | None = None,
+        role_id: int | None = None,
+        threshold: int | None = None,
+        announcement_channel_id: int | None = None,
+        clear_announcement_channel: bool = False,
+        silent_grant: bool | None = None,
+    ) -> tuple[bool, str]:
+        if not self.storage_ready:
+            return False, self.storage_message()
+        if tier is not None and tier not in QUESTION_DROP_MASTERY_TIERS:
+            return False, "Tier must be 1, 2, or 3."
+        if threshold is not None and int(threshold) < 0:
+            return False, "Threshold must be 0 or higher."
+        async with self._lock:
+            config = dict(self.get_config(guild_id))
+            scholar = dict(config.get("scholar_ladder", {}))
+            if enabled is not None:
+                scholar["enabled"] = bool(enabled)
+            if silent_grant is not None:
+                scholar["silent_grant"] = bool(silent_grant)
+            if clear_announcement_channel:
+                scholar["announcement_channel_id"] = None
+            elif announcement_channel_id is not None:
+                scholar["announcement_channel_id"] = int(announcement_channel_id) if announcement_channel_id > 0 else None
+            tiers = [dict(item) for item in scholar.get("tiers", [])]
+            if tier is not None:
+                for item in tiers:
+                    if int(item.get("tier", 0) or 0) != int(tier):
+                        continue
+                    if role_id is not None:
+                        item["role_id"] = int(role_id) if role_id > 0 else None
+                    if threshold is not None:
+                        item["threshold"] = max(0, int(threshold))
+                    break
+            scholar["tiers"] = tiers
+            config["scholar_ladder"] = scholar
+            normalized = normalize_question_drops_config(guild_id, config)
+            await self.store.upsert_config(normalized)
+            self._configs[guild_id] = normalized
+        return True, "Scholar ladder settings updated."
+
+    def _profile_service(self):
+        profile_service = getattr(self.bot, "profile_service", None)
+        if profile_service is None or not getattr(profile_service, "storage_ready", False):
+            return None
+        return profile_service
+
+    async def _ensure_guild_backfill(self, guild_id: int):
+        profile_service = self._profile_service()
+        if profile_service is None:
+            return
+        backfill = getattr(profile_service, "backfill_question_drop_guild_points_from_exposures", None)
+        if not callable(backfill):
+            return
+        exposures = await self.store.list_exposures_for_guild(guild_id, limit=QUESTION_DROP_EXPOSURE_FETCH_LIMIT)
+        await backfill(guild_id=guild_id, exposures=exposures)
+
+    def _bot_member_for_guild(self, guild: discord.Guild):
+        bot_user = getattr(self.bot, "user", None)
+        bot_user_id = getattr(bot_user, "id", 0)
+        guild_me = getattr(guild, "me", None)
+        if guild_me is not None:
+            return guild_me
+        get_member = getattr(guild, "get_member", None)
+        if callable(get_member) and isinstance(bot_user_id, int) and bot_user_id > 0:
+            return get_member(bot_user_id)
+        return None
+
+    def _configured_category_mastery(self, config: dict[str, Any], category: str) -> dict[str, Any]:
+        mastery = config.get("category_mastery", {})
+        if not isinstance(mastery, dict):
+            return {}
+        return dict(mastery.get(str(category or "").strip().casefold(), {}))
+
+    def _configured_tiers(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
+        tiers = payload.get("tiers", []) if isinstance(payload, dict) else []
+        return [dict(item) for item in tiers if isinstance(item, dict)]
+
+    def _configured_unlock_tiers(self, payload: dict[str, Any]) -> list[dict[str, Any]]:
+        return [
+            item
+            for item in self._configured_tiers(payload)
+            if isinstance(item.get("role_id"), int) and int(item["role_id"]) > 0 and int(item.get("threshold", 0) or 0) > 0
+        ]
+
+    def _unlocks_for_scope(self, unlocks: list[dict[str, Any]], *, scope_type: str, scope_key: str) -> list[dict[str, Any]]:
+        return [
+            item
+            for item in unlocks
+            if str(item.get("scope_type", "")).casefold() == scope_type
+            and str(item.get("scope_key", "")).casefold() == scope_key
+        ]
+
+    def _current_scope_tier(self, unlocks: list[dict[str, Any]], *, scope_type: str, scope_key: str) -> int:
+        scoped_unlocks = self._unlocks_for_scope(unlocks, scope_type=scope_type, scope_key=scope_key)
+        return max((int(item.get("tier", 0) or 0) for item in scoped_unlocks), default=0)
+
+    def _next_scope_tier(self, tiers: list[dict[str, Any]], *, points: int, current_tier: int) -> dict[str, Any] | None:
+        for tier in sorted(tiers, key=lambda item: int(item.get("tier", 0) or 0)):
+            if int(tier.get("tier", 0) or 0) <= current_tier:
+                continue
+            threshold = int(tier.get("threshold", 0) or 0)
+            if threshold <= 0:
+                continue
+            return {
+                "tier": int(tier["tier"]),
+                "threshold": threshold,
+                "remaining": max(0, threshold - max(0, int(points))),
+                "role_id": int(tier.get("role_id", 0) or 0) or None,
+            }
+        return None
+
+    def _rank_delta(self, before_rank: int | None, after_rank: int | None) -> int:
+        if not isinstance(before_rank, int) or before_rank <= 0:
+            return 0
+        if not isinstance(after_rank, int) or after_rank <= 0:
+            return 0
+        return max(0, before_rank - after_rank)
+
+    def _crossed_hundred_points(self, before_points: int, after_points: int) -> int | None:
+        before_bucket = max(0, int(before_points)) // 100
+        after_bucket = max(0, int(after_points)) // 100
+        if after_bucket > before_bucket and after_bucket > 0:
+            return after_bucket * 100
+        return None
+
+    def _milestone_flags(self, update: dict[str, Any], role_events: list[dict[str, Any]]) -> dict[str, Any]:
+        guild_before = update.get("guild_before", {}) if isinstance(update.get("guild_before"), dict) else {}
+        guild_after = update.get("guild_after", {}) if isinstance(update.get("guild_after"), dict) else {}
+        category_before = update.get("guild_category_before", {}) if isinstance(update.get("guild_category_before"), dict) else {}
+        category_after = update.get("guild_category_after", {}) if isinstance(update.get("guild_category_after"), dict) else {}
+        category_role_events = [event for event in role_events if event.get("scope_type") == "category"]
+        scholar_role_events = [event for event in role_events if event.get("scope_type") == "scholar"]
+        return {
+            "first_category_correct": int(category_before.get("correct_count", 0) or 0) == 0 and int(category_after.get("correct_count", 0) or 0) == 1,
+            "bounce_back": int(guild_before.get("current_streak", 0) or 0) == 0 and int(guild_before.get("attempts", 0) or 0) > 0,
+            "new_best_streak": int(guild_after.get("best_streak", 0) or 0) > int(guild_before.get("best_streak", 0) or 0),
+            "guild_rank_jump": self._rank_delta(update.get("guild_rank_before"), update.get("guild_rank_after")),
+            "category_rank_jump": self._rank_delta(update.get("category_rank_before"), update.get("category_rank_after")),
+            "guild_points_milestone": self._crossed_hundred_points(
+                int(guild_before.get("points", 0) or 0),
+                int(guild_after.get("points", 0) or 0),
+            ),
+            "category_role_events": category_role_events,
+            "scholar_role_events": scholar_role_events,
+            "took_guild_first": update.get("guild_rank_after") == 1 and update.get("guild_rank_before") not in {1, None},
+            "took_category_first": update.get("category_rank_after") == 1 and update.get("category_rank_before") not in {1, None},
+        }
+
+    async def _resolve_announcement_channel(self, guild: discord.Guild, channel_id: int | None):
+        if not isinstance(channel_id, int) or channel_id <= 0:
+            return None
+        channel = guild.get_channel(channel_id)
+        if channel is None:
+            return None
+        permissions_for = getattr(channel, "permissions_for", None)
+        bot_member = self._bot_member_for_guild(guild)
+        if callable(permissions_for) and bot_member is not None:
+            perms = permissions_for(bot_member)
+            if not bool(getattr(perms, "view_channel", False)):
+                return None
+        return channel
+
+    async def _announce_role_grant(self, guild: discord.Guild, fallback_channel, event: dict[str, Any]):
+        channel = await self._resolve_announcement_channel(guild, event.get("announcement_channel_id"))
+        if channel is None:
+            channel = fallback_channel
+        if channel is None:
+            return
+        description = (
+            f"{progression_emoji('role')} {event['member_mention']} earned <@&{event['role_id']}> "
+            f"for {event['scope_label']} at **{event['threshold']}** points."
+        )
+        if event.get("tier") == 3:
+            description += f" {progression_emoji('mastery')} Top tier secured."
+        with contextlib.suppress(discord.HTTPException):
+            await channel.send(
+                embed=ge.make_status_embed(
+                    f"{event['headline']} Unlocked",
+                    description,
+                    tone="success",
+                    footer="Babblebox Question Drops",
+                ),
+                allowed_mentions=discord.AllowedMentions(users=True, roles=True, everyone=False),
+            )
+
+    def _resolve_user_label(self, user_id: int) -> str:
+        get_user = getattr(self.bot, "get_user", None)
+        cached = get_user(user_id) if callable(get_user) else None
+        if cached is not None:
+            return ge.display_name_of(cached)
+        return f"User {user_id}"
+
     async def get_status_snapshot(self, guild: discord.Guild) -> QuestionDropStatusSnapshot:
+        await self._ensure_guild_backfill(guild.id)
         config = self.get_config(guild.id)
         active_channels = [
             record
@@ -432,8 +722,10 @@ class QuestionDropsService:
     def build_status_embed(self, guild: discord.Guild, snapshot: QuestionDropStatusSnapshot) -> discord.Embed:
         config = snapshot.config
         enabled_categories = config.get("enabled_categories") or list(QUESTION_DROP_CATEGORIES)
-        enabled_category_labels = [QUESTION_DROP_CATEGORY_LABELS.get(category, category.title()) for category in enabled_categories]
-        description = "Compact scheduled trivia with offline content, honest freshness rules, and same-channel `/play` protection."
+        enabled_category_labels = [category_label_with_emoji(category) for category in enabled_categories]
+        meta = self.get_meta()
+        scholar = dict(config.get("scholar_ladder", {}))
+        description = "Guild-first knowledge mastery with compact drops, visible thresholds, and low-noise role prestige."
         if not config.get("enabled"):
             description = "Question Drops are off for this server."
         else:
@@ -441,6 +733,49 @@ class QuestionDropsService:
                 description += " Quiet channels can skip a slot."
             if int(config.get("drops_per_day", 2) or 2) >= 6:
                 description += " Higher daily counts recycle sooner once the fresh pool thins."
+        bot_member = self._bot_member_for_guild(guild)
+        bot_perms = getattr(bot_member, "guild_permissions", None)
+        operability_lines = []
+        if bot_member is None:
+            operability_lines.append("Bot member could not be resolved for role checks.")
+        elif not bool(getattr(bot_perms, "manage_roles", False)):
+            operability_lines.append("Missing `Manage Roles`, so mastery and scholar roles cannot be granted.")
+        for category in enabled_categories:
+            category_mastery = self._configured_category_mastery(config, category)
+            if not category_mastery.get("enabled"):
+                continue
+            for tier in self._configured_unlock_tiers(category_mastery):
+                role = guild.get_role(int(tier["role_id"])) if hasattr(guild, "get_role") else None
+                if role is None:
+                    operability_lines.append(
+                        f"{category_label(category)} {tier_label(int(tier['tier']))}: configured role is missing."
+                    )
+        for tier in self._configured_unlock_tiers(scholar):
+            role = guild.get_role(int(tier["role_id"])) if hasattr(guild, "get_role") else None
+            if role is None:
+                operability_lines.append(f"{scholar_label(int(tier['tier']))}: configured role is missing.")
+        mastery_lines = []
+        for category in enabled_categories:
+            category_mastery = self._configured_category_mastery(config, category)
+            if not category_mastery.get("enabled"):
+                continue
+            tiers = self._configured_unlock_tiers(category_mastery)
+            if not tiers:
+                continue
+            tier_text = ", ".join(
+                f"{tier_label(int(item['tier']))} `{int(item['threshold'])}`"
+                for item in sorted(tiers, key=lambda item: int(item.get("tier", 0) or 0))
+            )
+            flags = []
+            if category_mastery.get("silent_grant"):
+                flags.append("silent")
+            if isinstance(category_mastery.get("announcement_channel_id"), int):
+                flags.append(f"announce <#{int(category_mastery['announcement_channel_id'])}>")
+            mastery_lines.append(f"{category_label_with_emoji(category)} {tier_text}" + (f" [{' | '.join(flags)}]" if flags else ""))
+        scholar_lines = [
+            f"{scholar_label(int(item['tier']))} `{int(item['threshold'])}`"
+            for item in sorted(self._configured_unlock_tiers(scholar), key=lambda item: int(item.get("tier", 0) or 0))
+        ]
         embed = discord.Embed(
             title="Question Drops",
             description=description,
@@ -474,10 +809,31 @@ class QuestionDropsService:
             inline=True,
         )
         embed.add_field(
+            name="Knowledge Lane",
+            value=(
+                f"Categories: **{len(enabled_categories)}**\n"
+                f"{progression_emoji('role')} Mastery: **{'On' if mastery_lines else 'Off'}**\n"
+                f"{progression_emoji('scholar')} Scholar ladder: **{'On' if scholar_lines else 'Off'}**"
+            ),
+            inline=True,
+        )
+        embed.add_field(
             name="Categories",
             value=", ".join(enabled_category_labels),
             inline=False,
         )
+        if mastery_lines:
+            embed.add_field(name="Mastery Roles", value="\n".join(mastery_lines[:6]), inline=False)
+        if scholar_lines:
+            scholar_flags = []
+            if scholar.get("silent_grant"):
+                scholar_flags.append("silent")
+            if isinstance(scholar.get("announcement_channel_id"), int):
+                scholar_flags.append(f"announce <#{int(scholar['announcement_channel_id'])}>")
+            scholar_value = "\n".join(scholar_lines)
+            if scholar_flags:
+                scholar_value += f"\nSettings: {' | '.join(scholar_flags)}"
+            embed.add_field(name="Scholar Ladder", value=scholar_value, inline=False)
         if snapshot.enabled_channel_mentions:
             embed.add_field(name="Channels", value="\n".join(snapshot.enabled_channel_mentions[:8]), inline=False)
         if snapshot.next_slot_at is not None:
@@ -486,45 +842,239 @@ class QuestionDropsService:
                 value=f"{ge.format_timestamp(snapshot.next_slot_at, 'R')} ({ge.format_timestamp(snapshot.next_slot_at, 'f')})",
                 inline=False,
             )
+        embed.add_field(
+            name="AI Celebrations",
+            value=(
+                f"Guild opt-in: **{'On' if config.get('ai_celebrations_enabled') else 'Off'}**\n"
+                f"Global override: **{meta.get('ai_celebration_mode', 'off')}**\n"
+                f"Provider: **{self._ai_provider.diagnostics().get('status', 'Unavailable')}**"
+            ),
+            inline=False,
+        )
+        if operability_lines:
+            embed.add_field(name="Operability", value="\n".join(operability_lines[:6]), inline=False)
         return ge.style_embed(embed, footer="Babblebox Question Drops | Compact, offline, channel-safe")
 
     def build_stats_embed(self, user: discord.abc.User, summary: dict[str, Any]) -> discord.Embed:
         profile = summary["profile"]
-        categories = summary["top_categories"]
+        guild_profile = summary.get("guild_profile")
+        primary = guild_profile if isinstance(guild_profile, dict) else summary.get("global_profile", {})
+        categories = summary.get("guild_categories") or summary.get("top_categories") or []
+        unlocks = summary.get("guild_unlocks") or []
+        guild_id = summary.get("guild_id")
+        config = self.get_config(guild_id) if isinstance(guild_id, int) and guild_id > 0 else None
         embed = discord.Embed(
             title="Question Drops Stats",
-            description=f"Quick read on **{ge.display_name_of(user)}**.",
+            description=f"Knowledge mastery snapshot for **{ge.display_name_of(user)}**.",
             color=ge.EMBED_THEME["info"],
         )
-        participations = int(profile.get("question_drop_attempts", 0) or 0)
-        correct = int(profile.get("question_drop_correct", 0) or 0)
+        participations = int(primary.get("attempts", 0) or 0)
+        correct = int(primary.get("correct_count", 0) or 0)
         accuracy = (correct / participations * 100.0) if participations else 0.0
         embed.add_field(
-            name="Overall",
+            name="Knowledge",
             value=(
-                f"Points: **{int(profile.get('question_drop_points', 0) or 0)}**\n"
+                f"Scope: **{'This server' if isinstance(guild_profile, dict) else 'Lifetime'}**\n"
+                f"Points: **{int(primary.get('points', 0) or 0)}**\n"
                 f"Solved: **{correct} / {participations} drops**\n"
                 f"Accuracy: **{accuracy:.0f}%**"
             ),
             inline=True,
         )
         embed.add_field(
-            name="Streak",
+            name=f"{progression_emoji('streak')} Streak",
             value=(
-                f"Current: **{int(profile.get('question_drop_current_streak', 0) or 0)}**\n"
-                f"Best: **{int(profile.get('question_drop_best_streak', 0) or 0)}**"
+                f"Current: **{int(primary.get('current_streak', 0) or 0)}**\n"
+                f"Best: **{int(primary.get('best_streak', 0) or 0)}**"
             ),
             inline=True,
         )
+        if isinstance(summary.get("guild_rank"), int):
+            embed.add_field(
+                name=f"{progression_emoji('move')} Rank",
+                value=f"Knowledge board: **#{int(summary['guild_rank'])}**",
+                inline=True,
+            )
+        scholar_tier = self._current_scope_tier(unlocks, scope_type="scholar", scope_key="global")
+        scholar_next = None
+        if config is not None:
+            scholar_next = self._next_scope_tier(
+                self._configured_unlock_tiers(dict(config.get("scholar_ladder", {}))),
+                points=int(primary.get("points", 0) or 0),
+                current_tier=scholar_tier,
+            )
+        scholar_lines = [f"{progression_emoji('scholar')} Current: **{scholar_label(scholar_tier)}**" if scholar_tier else f"{progression_emoji('scholar')} Current: **Unranked**"]
+        if scholar_next is not None:
+            scholar_lines.append(
+                f"{progression_emoji('next')} Next: **{scholar_label(int(scholar_next['tier']))}** in **{int(scholar_next['remaining'])}** pts"
+            )
+        embed.add_field(name="Scholar", value="\n".join(scholar_lines), inline=False)
         if categories:
             lines = []
             for entry in categories[:4]:
-                label = QUESTION_DROP_CATEGORY_LABELS.get(entry["category"], entry["category"].title())
-                lines.append(
-                    f"**{label}**: {int(entry.get('correct_count', 0) or 0)} solves, {int(entry.get('points', 0) or 0)} pts"
+                category_id = str(entry.get("category", "")).strip().casefold()
+                current_tier = self._current_scope_tier(unlocks, scope_type="category", scope_key=category_id)
+                next_tier = None
+                if config is not None:
+                    next_tier = self._next_scope_tier(
+                        self._configured_unlock_tiers(self._configured_category_mastery(config, category_id)),
+                        points=int(entry.get("points", 0) or 0),
+                        current_tier=current_tier,
+                    )
+                line = (
+                    f"{category_label_with_emoji(category_id)} **{int(entry.get('points', 0) or 0)}** pts | "
+                    f"{int(entry.get('correct_count', 0) or 0)} solves"
                 )
+                if current_tier > 0:
+                    line += f" | {progression_emoji('role')} {tier_label(current_tier)}"
+                if next_tier is not None:
+                    line += f" | {progression_emoji('next')} {int(next_tier['remaining'])} to {tier_label(int(next_tier['tier']))}"
+                lines.append(line)
             embed.add_field(name="Top Categories", value="\n".join(lines), inline=False)
+        if isinstance(guild_profile, dict):
+            global_profile = summary.get("global_profile", {})
+            embed.add_field(
+                name="Lifetime Flavor",
+                value=(
+                    f"Lifetime points: **{int(global_profile.get('points', 0) or 0)}**\n"
+                    f"Lifetime solves: **{int(global_profile.get('correct_count', 0) or 0)} / {int(global_profile.get('attempts', 0) or 0)}**"
+                ),
+                inline=False,
+            )
         return ge.style_embed(embed, footer="Babblebox Question Drops | Aggregates only, no answer archive")
+
+    def build_leaderboard_embed(self, guild: discord.Guild, entries: list[dict[str, Any]], *, category: str | None = None) -> discord.Embed:
+        normalized_category = str(category or "").strip().casefold()
+        if normalized_category:
+            title = f"{category_label_with_emoji(normalized_category)} Knowledge Leaders"
+            footer = "Babblebox Question Drops | Category mastery board"
+        else:
+            title = "Knowledge Leaderboard"
+            footer = "Babblebox Question Drops | Guild-first knowledge board"
+        if not entries:
+            return ge.make_status_embed(title, "No knowledge results are on the board yet.", tone="info", footer=footer)
+        lines = []
+        for index, entry in enumerate(entries[:10], start=1):
+            user_id = int(entry.get("user_id", 0) or 0)
+            label = self._resolve_user_label(user_id)
+            points = int(entry.get("points", 0) or 0)
+            correct = int(entry.get("correct_count", 0) or 0)
+            attempts = int(entry.get("attempts", 0) or 0)
+            streak = int(entry.get("current_streak", 0) or 0)
+            lines.append(
+                f"**{leaderboard_marker(index)}** {label} | **{points}** pts | {correct}/{attempts} solved | {progression_emoji('streak')} {streak}"
+            )
+        embed = discord.Embed(
+            title=title,
+            description="\n".join(lines),
+            color=ge.EMBED_THEME["accent"],
+        )
+        embed.add_field(name="Guild", value=guild.name, inline=True)
+        embed.add_field(name="Lane", value="Knowledge mastery only", inline=True)
+        if normalized_category:
+            embed.add_field(name="Category", value=category_label_with_emoji(normalized_category), inline=True)
+        return ge.style_embed(embed, footer=footer)
+
+    def _guild_members_for_recalc(self, guild: discord.Guild) -> list[Any]:
+        members = getattr(guild, "members", None)
+        if isinstance(members, list):
+            return [member for member in members if not bool(getattr(member, "bot", False))]
+        cached_members = getattr(guild, "_members", None)
+        if isinstance(cached_members, dict):
+            return [member for member in cached_members.values() if not bool(getattr(member, "bot", False))]
+        return []
+
+    def _pending_unlocks_for_summary(self, summary: dict[str, Any]) -> list[dict[str, Any]]:
+        guild_id = int(summary.get("guild_id", 0) or 0)
+        if guild_id <= 0:
+            return []
+        config = self.get_config(guild_id)
+        unlocks = summary.get("guild_unlocks") or []
+        pending: list[dict[str, Any]] = []
+        guild_profile = summary.get("guild_profile") or {}
+        scholar_config = dict(config.get("scholar_ladder", {}))
+        if scholar_config.get("enabled"):
+            scholar_points = int(guild_profile.get("points", 0) or 0)
+            for tier_config in self._configured_unlock_tiers(scholar_config):
+                tier = int(tier_config.get("tier", 0) or 0)
+                role_id = int(tier_config.get("role_id", 0) or 0)
+                threshold = int(tier_config.get("threshold", 0) or 0)
+                if scholar_points >= threshold and not self._unlock_exists(unlocks, scope_type="scholar", scope_key="global", tier=tier, role_id=role_id):
+                    pending.append(
+                        {
+                            "scope_type": "scholar",
+                            "scope_key": "global",
+                            "scope_label": "the scholar ladder",
+                            "tier": tier,
+                            "threshold": threshold,
+                            "role_id": role_id,
+                        }
+                    )
+        for row in summary.get("guild_categories") or []:
+            category_id = str(row.get("category", "")).strip().casefold()
+            category_config = self._configured_category_mastery(config, category_id)
+            if not category_config.get("enabled"):
+                continue
+            category_points = int(row.get("points", 0) or 0)
+            for tier_config in self._configured_unlock_tiers(category_config):
+                tier = int(tier_config.get("tier", 0) or 0)
+                role_id = int(tier_config.get("role_id", 0) or 0)
+                threshold = int(tier_config.get("threshold", 0) or 0)
+                if category_points >= threshold and not self._unlock_exists(unlocks, scope_type="category", scope_key=category_id, tier=tier, role_id=role_id):
+                    pending.append(
+                        {
+                            "scope_type": "category",
+                            "scope_key": category_id,
+                            "scope_label": category_label_with_emoji(category_id),
+                            "tier": tier,
+                            "threshold": threshold,
+                            "role_id": role_id,
+                        }
+                    )
+        return pending
+
+    async def recalculate_mastery_roles(
+        self,
+        guild: discord.Guild,
+        *,
+        member=None,
+        preview: bool = True,
+    ) -> dict[str, Any]:
+        profile_service = self._profile_service()
+        if profile_service is None:
+            return {"preview": preview, "scanned": 0, "pending": 0, "granted": 0}
+        await self._ensure_guild_backfill(guild.id)
+        targets = [member] if member is not None else self._guild_members_for_recalc(guild)
+        pending_total = 0
+        granted_total = 0
+        scanned = 0
+        for target in targets:
+            if target is None or bool(getattr(target, "bot", False)):
+                continue
+            scanned += 1
+            summary = await profile_service.get_question_drop_summary(int(target.id), guild_id=guild.id)
+            if not isinstance(summary, dict):
+                continue
+            pending_unlocks = self._pending_unlocks_for_summary(summary)
+            pending_total += len(pending_unlocks)
+            if preview:
+                continue
+            for candidate in pending_unlocks:
+                event = await self._grant_unlock_role(
+                    guild=guild,
+                    member=target,
+                    scope_type=str(candidate["scope_type"]),
+                    scope_key=str(candidate["scope_key"]),
+                    scope_label=str(candidate["scope_label"]),
+                    tier=int(candidate["tier"]),
+                    threshold=int(candidate["threshold"]),
+                    role_id=int(candidate["role_id"]),
+                    silent_grant=True,
+                    announcement_channel_id=None,
+                )
+                if event is not None:
+                    granted_total += 1
+        return {"preview": preview, "scanned": scanned, "pending": pending_total, "granted": granted_total}
 
     def observe_message_activity(self, message: discord.Message):
         if message.guild is None:
@@ -585,10 +1135,13 @@ class QuestionDropsService:
                 self._active_drops.pop((current["guild_id"], current["channel_id"]), None)
                 self._clear_active_drop_runtime_state(exposure_id)
                 result_payload = {
+                    "guild_id": current["guild_id"],
+                    "channel_id": current["channel_id"],
                     "category": current["category"],
                     "difficulty": int(current["difficulty"]),
                     "participant_ids": participant_ids,
                     "winner_user_id": message.author.id,
+                    "answer_spec": current["answer_spec"],
                 }
             elif (
                 message.author.id not in self._wrong_feedback_users[exposure_id]
@@ -599,20 +1152,34 @@ class QuestionDropsService:
                     self._wrong_feedback_users[exposure_id].add(message.author.id)
                     self._wrong_feedback_count[exposure_id] += 1
         if result_payload is not None:
-            await self._record_participation_batch(
+            updates = await self._record_participation_batch(
+                guild_id=result_payload["guild_id"],
                 category=result_payload["category"],
                 difficulty=result_payload["difficulty"],
                 participant_ids=result_payload["participant_ids"],
                 winner_user_id=result_payload["winner_user_id"],
             )
+            role_events = []
+            update = updates.get(int(message.author.id), {}) if isinstance(updates, dict) else {}
+            if isinstance(update, dict) and update:
+                role_events = await self._grant_progression_rewards(
+                    guild=message.guild,
+                    member=message.author,
+                    fallback_channel=message.channel,
+                    category=str(result_payload["category"]),
+                    update=update,
+                )
+            result_embed = await self._build_solve_embed(
+                winner=message.author,
+                category=str(result_payload["category"]),
+                answer_spec=result_payload["answer_spec"],
+                update=update,
+                role_events=role_events,
+                fallback_points=answer_points_for_difficulty(result_payload["difficulty"]),
+            )
             with contextlib.suppress(discord.HTTPException):
                 await message.channel.send(
-                    embed=ge.make_status_embed(
-                        "Solved",
-                        f"{message.author.mention} took the drop for **{answer_points_for_difficulty(result_payload['difficulty'])}** points.",
-                        tone="success",
-                        footer=f"Babblebox Question Drops | {QUESTION_DROP_CATEGORY_LABELS.get(result_payload['category'], result_payload['category'].title())}",
-                    ),
+                    embed=result_embed,
                     allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
                 )
             return True
@@ -638,14 +1205,15 @@ class QuestionDropsService:
     async def _record_participation_batch(
         self,
         *,
+        guild_id: int,
         category: str,
         difficulty: int,
         participant_ids: list[int],
         winner_user_id: int | None,
-    ):
+    ) -> dict[int, dict[str, Any]]:
         profile_service = getattr(self.bot, "profile_service", None)
         if profile_service is None or not getattr(profile_service, "storage_ready", False):
-            return
+            return {}
         participant_set = {user_id for user_id in participant_ids if isinstance(user_id, int) and user_id > 0}
         if winner_user_id is not None and winner_user_id > 0:
             participant_set.add(winner_user_id)
@@ -661,15 +1229,340 @@ class QuestionDropsService:
         ]
         batch_recorder = getattr(profile_service, "record_question_drop_results_batch", None)
         if callable(batch_recorder):
-            await batch_recorder(results)
-            return
+            updates = await batch_recorder(results, guild_id=guild_id)
+            return updates if isinstance(updates, dict) else {}
+        updates = {}
         for result in results:
-            await profile_service.record_question_drop_result(
+            updates[int(result["user_id"])] = await profile_service.record_question_drop_result(
                 int(result["user_id"]),
+                guild_id=guild_id,
                 category=str(result["category"]),
                 correct=bool(result["correct"]),
                 points=int(result["points"]),
             )
+        return updates
+
+    def _unlock_exists(
+        self,
+        unlocks: list[dict[str, Any]],
+        *,
+        scope_type: str,
+        scope_key: str,
+        tier: int,
+        role_id: int,
+    ) -> bool:
+        return any(
+            str(item.get("scope_type", "")).casefold() == scope_type
+            and str(item.get("scope_key", "")).casefold() == scope_key
+            and int(item.get("tier", 0) or 0) == int(tier)
+            and int(item.get("role_id", 0) or 0) == int(role_id)
+            for item in unlocks
+        )
+
+    def _member_has_role(self, member, role_id: int) -> bool:
+        roles = getattr(member, "roles", None)
+        if not isinstance(roles, list):
+            return False
+        return any(int(getattr(role, "id", 0) or 0) == int(role_id) for role in roles)
+
+    async def _grant_unlock_role(
+        self,
+        *,
+        guild: discord.Guild,
+        member,
+        scope_type: str,
+        scope_key: str,
+        scope_label: str,
+        tier: int,
+        threshold: int,
+        role_id: int,
+        silent_grant: bool,
+        announcement_channel_id: int | None,
+    ) -> dict[str, Any] | None:
+        if not hasattr(guild, "get_role"):
+            return None
+        role = guild.get_role(int(role_id))
+        if role is None:
+            return None
+        already_has_role = self._member_has_role(member, int(role_id))
+        if not already_has_role:
+            add_roles = getattr(member, "add_roles", None)
+            bot_member = self._bot_member_for_guild(guild)
+            if not callable(add_roles) or bot_member is None:
+                return None
+            bot_permissions = getattr(bot_member, "guild_permissions", None)
+            if not bool(getattr(bot_permissions, "manage_roles", False)):
+                return None
+            bot_top_role = getattr(bot_member, "top_role", None)
+            bot_top_position = int(getattr(bot_top_role, "position", 0) or 0)
+            role_position = int(getattr(role, "position", 0) or 0)
+            if bot_top_position and role_position >= bot_top_position:
+                return None
+            try:
+                await add_roles(role, reason=f"Babblebox Question Drops {scope_type} milestone reached")
+            except (discord.Forbidden, discord.HTTPException):
+                return None
+        profile_service = self._profile_service()
+        if profile_service is None:
+            return None
+        unlock_row = {
+            "guild_id": guild.id,
+            "user_id": int(getattr(member, "id", 0) or 0),
+            "scope_type": scope_type,
+            "scope_key": scope_key,
+            "tier": int(tier),
+            "role_id": int(role_id),
+            "granted_at": ge.now_utc(),
+        }
+        await profile_service.store.save_question_drop_unlock(unlock_row)
+        event = {
+            "scope_type": scope_type,
+            "scope_key": scope_key,
+            "scope_label": scope_label,
+            "tier": int(tier),
+            "threshold": int(threshold),
+            "role_id": int(role_id),
+            "member_mention": getattr(member, "mention", f"<@{getattr(member, 'id', 0)}>"),
+            "announcement_channel_id": announcement_channel_id,
+            "silent_grant": bool(silent_grant),
+            "headline": scholar_label(int(tier)) if scope_type == "scholar" else f"{category_label(scope_key)} {tier_label(int(tier))}",
+        }
+        return event
+
+    async def _grant_progression_rewards(
+        self,
+        *,
+        guild: discord.Guild,
+        member,
+        fallback_channel,
+        category: str,
+        update: dict[str, Any],
+    ) -> list[dict[str, Any]]:
+        profile_service = self._profile_service()
+        member_id = int(getattr(member, "id", 0) or 0)
+        if profile_service is None or member_id <= 0:
+            return []
+        config = self.get_config(guild.id)
+        unlocks = await profile_service.store.fetch_question_drop_unlocks(guild_id=guild.id, user_id=member_id)
+        events: list[dict[str, Any]] = []
+        category_id = str(category or "").strip().casefold()
+        category_points = int(update.get("guild_category_after", {}).get("points", 0) or 0)
+        guild_points = int(update.get("guild_after", {}).get("points", 0) or 0)
+        category_config = self._configured_category_mastery(config, category_id)
+        if category_config.get("enabled"):
+            for tier_config in self._configured_unlock_tiers(category_config):
+                tier = int(tier_config.get("tier", 0) or 0)
+                role_id = int(tier_config.get("role_id", 0) or 0)
+                threshold = int(tier_config.get("threshold", 0) or 0)
+                if category_points < threshold or self._unlock_exists(unlocks, scope_type="category", scope_key=category_id, tier=tier, role_id=role_id):
+                    continue
+                event = await self._grant_unlock_role(
+                    guild=guild,
+                    member=member,
+                    scope_type="category",
+                    scope_key=category_id,
+                    scope_label=category_label_with_emoji(category_id),
+                    tier=tier,
+                    threshold=threshold,
+                    role_id=role_id,
+                    silent_grant=bool(category_config.get("silent_grant")),
+                    announcement_channel_id=category_config.get("announcement_channel_id"),
+                )
+                if event is not None:
+                    events.append(event)
+                    unlocks.append(
+                        {
+                            "scope_type": "category",
+                            "scope_key": category_id,
+                            "tier": tier,
+                            "role_id": role_id,
+                        }
+                    )
+                    if not bool(category_config.get("silent_grant")):
+                        await self._announce_role_grant(guild, fallback_channel, event)
+        scholar_config = dict(config.get("scholar_ladder", {}))
+        if scholar_config.get("enabled"):
+            for tier_config in self._configured_unlock_tiers(scholar_config):
+                tier = int(tier_config.get("tier", 0) or 0)
+                role_id = int(tier_config.get("role_id", 0) or 0)
+                threshold = int(tier_config.get("threshold", 0) or 0)
+                if guild_points < threshold or self._unlock_exists(unlocks, scope_type="scholar", scope_key="global", tier=tier, role_id=role_id):
+                    continue
+                event = await self._grant_unlock_role(
+                    guild=guild,
+                    member=member,
+                    scope_type="scholar",
+                    scope_key="global",
+                    scope_label="the scholar ladder",
+                    tier=tier,
+                    threshold=threshold,
+                    role_id=role_id,
+                    silent_grant=bool(scholar_config.get("silent_grant")),
+                    announcement_channel_id=scholar_config.get("announcement_channel_id"),
+                )
+                if event is not None:
+                    events.append(event)
+                    unlocks.append(
+                        {
+                            "scope_type": "scholar",
+                            "scope_key": "global",
+                            "tier": tier,
+                            "role_id": role_id,
+                        }
+                    )
+                    if not bool(scholar_config.get("silent_grant")):
+                        await self._announce_role_grant(guild, fallback_channel, event)
+        return events
+
+    def _ai_event_allowed(self, *, mode: str, flags: dict[str, Any]) -> bool:
+        if mode == "off":
+            return False
+        event_only = bool(
+            any(int(event.get("tier", 0) or 0) >= 3 for event in flags.get("category_role_events", []))
+            or any(int(event.get("tier", 0) or 0) >= 1 for event in flags.get("scholar_role_events", []))
+            or flags.get("took_guild_first")
+            or flags.get("took_category_first")
+        )
+        if mode == "event_only":
+            return event_only
+        return bool(
+            event_only
+            or flags.get("guild_points_milestone")
+            or flags.get("new_best_streak")
+            or flags.get("guild_rank_jump")
+        )
+
+    async def _maybe_ai_highlight(
+        self,
+        *,
+        winner,
+        category: str,
+        answer: str,
+        update: dict[str, Any],
+        flags: dict[str, Any],
+    ) -> str | None:
+        config = self.get_config(int(update.get("guild_id", 0) or 0))
+        if not config.get("ai_celebrations_enabled"):
+            return None
+        mode = str(self.get_meta().get("ai_celebration_mode", "off")).casefold()
+        if not self._ai_event_allowed(mode=mode, flags=flags):
+            return None
+        return await self._ai_provider.highlight(
+            {
+                "mode": mode,
+                "winner": ge.display_name_of(winner),
+                "category": category_label(category),
+                "answer": answer,
+                "points_awarded": int(update.get("points_awarded", 0) or 0),
+                "current_streak": int(update.get("guild_after", {}).get("current_streak", 0) or 0),
+                "best_streak": int(update.get("guild_after", {}).get("best_streak", 0) or 0),
+                "guild_rank_before": update.get("guild_rank_before"),
+                "guild_rank_after": update.get("guild_rank_after"),
+                "category_rank_before": update.get("category_rank_before"),
+                "category_rank_after": update.get("category_rank_after"),
+                "role_events": [
+                    f"{event.get('headline')} at {event.get('threshold')} points"
+                    for event in (flags.get("category_role_events", []) + flags.get("scholar_role_events", []))
+                ],
+            }
+        )
+
+    async def _build_solve_embed(
+        self,
+        *,
+        winner,
+        category: str,
+        answer_spec: dict[str, Any],
+        update: dict[str, Any],
+        role_events: list[dict[str, Any]],
+        fallback_points: int,
+    ) -> discord.Embed:
+        category_id = str(category or "").strip().casefold()
+        answer = render_answer_summary(answer_spec)
+        flags = self._milestone_flags(update, role_events)
+        guild_after = update.get("guild_after", {}) if isinstance(update, dict) else {}
+        category_after = update.get("guild_category_after", {}) if isinstance(update, dict) else {}
+        title = f"{category_emoji(category_id)} Solved"
+        if any(int(event.get("tier", 0) or 0) >= 3 for event in flags["category_role_events"]):
+            title = f"{progression_emoji('mastery')} {category_label(category_id)} Mastery"
+        elif flags["scholar_role_events"]:
+            title = f"{progression_emoji('scholar')} Scholar Rank Up"
+        elif flags["took_guild_first"] or flags["took_category_first"]:
+            title = f"{progression_emoji('move')} New #1"
+        elif flags["guild_points_milestone"] is not None:
+            title = f"{progression_emoji('scholar')} {int(flags['guild_points_milestone'])} Knowledge Points"
+        elif flags["new_best_streak"]:
+            title = f"{progression_emoji('streak')} New Best Streak"
+        elif flags["first_category_correct"]:
+            title = f"{category_emoji(category_id)} First {category_label(category_id)} Solve"
+        ai_highlight = await self._maybe_ai_highlight(
+            winner=winner,
+            category=category_id,
+            answer=answer,
+            update=update,
+            flags=flags,
+        )
+        description_lines = []
+        if ai_highlight:
+            description_lines.append(ai_highlight)
+        else:
+            description_lines.append(
+                f"{getattr(winner, 'mention', ge.display_name_of(winner))} solved **{answer}** for **{int(update.get('points_awarded', 0) or fallback_points)}** points."
+            )
+        detail_bits = [category_label_with_emoji(category_id)]
+        current_streak = int(guild_after.get("current_streak", 0) or 0)
+        if current_streak > 1:
+            detail_bits.append(f"{progression_emoji('streak')} {current_streak} streak")
+        rank_jump = max(int(flags.get("guild_rank_jump", 0) or 0), int(flags.get("category_rank_jump", 0) or 0))
+        if rank_jump > 0:
+            detail_bits.append(f"{progression_emoji('move')} up {rank_jump}")
+        description_lines.append(" | ".join(detail_bits))
+        highlight_lines = []
+        for event in role_events[:2]:
+            highlight_lines.append(
+                f"{progression_emoji('role')} {event['headline']} unlocked at **{int(event['threshold'])}** pts"
+            )
+        if flags["guild_points_milestone"] is not None:
+            highlight_lines.append(
+                f"{progression_emoji('scholar')} Reached **{int(flags['guild_points_milestone'])}** guild knowledge points"
+            )
+        profile_service = self._profile_service()
+        unlocks = []
+        profile_store = getattr(profile_service, "store", None) if profile_service is not None else None
+        if profile_store is not None and hasattr(profile_store, "fetch_question_drop_unlocks"):
+            unlocks = await profile_store.fetch_question_drop_unlocks(
+                guild_id=int(update.get("guild_id", 0) or 0),
+                user_id=int(update.get("user_id", 0) or 0),
+            )
+        config = self.get_config(int(update.get("guild_id", 0) or 0))
+        current_category_tier = self._current_scope_tier(unlocks, scope_type="category", scope_key=category_id)
+        next_category_tier = self._next_scope_tier(
+            self._configured_unlock_tiers(self._configured_category_mastery(config, category_id)),
+            points=int(category_after.get("points", 0) or 0),
+            current_tier=current_category_tier,
+        )
+        current_scholar_tier = self._current_scope_tier(unlocks, scope_type="scholar", scope_key="global")
+        next_scholar_tier = self._next_scope_tier(
+            self._configured_unlock_tiers(dict(config.get("scholar_ladder", {}))),
+            points=int(guild_after.get("points", 0) or 0),
+            current_tier=current_scholar_tier,
+        )
+        if next_category_tier is not None:
+            highlight_lines.append(
+                f"{progression_emoji('next')} {int(next_category_tier['remaining'])} pts to {tier_label(int(next_category_tier['tier']))} in {category_label(category_id)}"
+            )
+        elif next_scholar_tier is not None:
+            highlight_lines.append(
+                f"{progression_emoji('next')} {int(next_scholar_tier['remaining'])} pts to {scholar_label(int(next_scholar_tier['tier']))}"
+            )
+        if highlight_lines:
+            description_lines.extend(highlight_lines[:2])
+        return ge.make_status_embed(
+            title,
+            "\n".join(description_lines),
+            tone="success",
+            footer=f"Babblebox Question Drops | {category_label(category_id)}",
+        )
 
     async def handle_raw_message_delete(self, payload: discord.RawMessageDeleteEvent):
         if payload.guild_id is None:
@@ -748,6 +1641,7 @@ class QuestionDropsService:
             await self._delete_message_if_exists(record["channel_id"], record.get("message_id"))
         if participant_ids:
             await self._record_participation_batch(
+                guild_id=record["guild_id"],
                 category=record["category"],
                 difficulty=int(record["difficulty"]),
                 participant_ids=participant_ids,
