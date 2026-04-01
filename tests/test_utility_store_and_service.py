@@ -1,4 +1,5 @@
 import os
+import json
 import types
 import unittest
 from datetime import timedelta
@@ -133,13 +134,14 @@ class FakePool:
 
 
 class FakeReloadConnection:
-    def __init__(self, *, later_rows=None, reminder_rows=None):
+    def __init__(self, *, watch_rows=None, later_rows=None, reminder_rows=None):
+        self._watch_rows = watch_rows or []
         self._later_rows = later_rows or []
         self._reminder_rows = reminder_rows or []
 
     async def fetch(self, query):
         if "FROM utility_watch_configs" in query:
-            return []
+            return self._watch_rows
         if "FROM utility_watch_keywords" in query:
             return []
         if "FROM utility_return_watches" in query:
@@ -926,6 +928,19 @@ class UtilityStoreAndServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_postgres_reload_preserves_later_attachments_and_reminder_retry_fields(self):
         now = ge.now_utc()
         connection = FakeReloadConnection(
+            watch_rows=[
+                {
+                    "user_id": 1,
+                    "mention_global": True,
+                    "mention_guild_ids": json.dumps([10, 10, 11]),
+                    "mention_channel_ids": json.dumps([20]),
+                    "reply_global": False,
+                    "reply_guild_ids": json.dumps([12]),
+                    "reply_channel_ids": json.dumps([21, 22]),
+                    "excluded_channel_ids": json.dumps([99]),
+                    "ignored_user_ids": json.dumps([5, 5]),
+                }
+            ],
             later_rows=[
                 {
                     "user_id": 1,
@@ -940,7 +955,7 @@ class UtilityStoreAndServiceTests(unittest.IsolatedAsyncioTestCase):
                     "author_name": "Mira",
                     "author_id": 1,
                     "preview": "Saved message",
-                    "attachment_labels": ["image.png", "clip.mp4"],
+                    "attachment_labels": json.dumps(["image.png", "clip.mp4"]),
                 }
             ],
             reminder_rows=[
@@ -967,8 +982,16 @@ class UtilityStoreAndServiceTests(unittest.IsolatedAsyncioTestCase):
 
         await store._reload_from_db()
 
+        watch = store.state["watch"]["1"]
         marker = store.state["later"]["1"]["20"]
         reminder = store.state["reminders"]["reminder1"]
+        self.assertTrue(watch["mention_global"])
+        self.assertEqual(watch["mention_guild_ids"], [10, 11])
+        self.assertEqual(watch["mention_channel_ids"], [20])
+        self.assertEqual(watch["reply_guild_ids"], [12])
+        self.assertEqual(watch["reply_channel_ids"], [21, 22])
+        self.assertEqual(watch["excluded_channel_ids"], [99])
+        self.assertEqual(watch["ignored_user_ids"], [5])
         self.assertEqual(marker["attachment_labels"], ["image.png", "clip.mp4"])
         self.assertEqual(reminder["delivery_attempts"], 2)
         self.assertEqual(reminder["retry_after"], serialize_datetime(now + timedelta(minutes=10)))

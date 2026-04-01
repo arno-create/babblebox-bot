@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
+from babblebox.postgres_json import decode_postgres_json_array
+
 
 DEFAULT_BACKEND = "postgres"
 VALID_FOLLOWUP_MODES = {"auto_remove", "review"}
@@ -602,9 +604,18 @@ def _config_from_row(row) -> dict[str, Any]:
             "warning_template": row["warning_template"],
             "kick_template": row["kick_template"],
             "invite_link": row["invite_link"],
-            "excluded_user_ids": list(row["excluded_user_ids"] or []),
-            "excluded_role_ids": list(row["excluded_role_ids"] or []),
-            "trusted_role_ids": list(row["trusted_role_ids"] or []),
+            "excluded_user_ids": decode_postgres_json_array(
+                row["excluded_user_ids"],
+                label="admin_guild_configs.excluded_user_ids",
+            ),
+            "excluded_role_ids": decode_postgres_json_array(
+                row["excluded_role_ids"],
+                label="admin_guild_configs.excluded_role_ids",
+            ),
+            "trusted_role_ids": decode_postgres_json_array(
+                row["trusted_role_ids"],
+                label="admin_guild_configs.trusted_role_ids",
+            ),
             "followup_exempt_staff": row["followup_exempt_staff"],
             "verification_exempt_staff": row["verification_exempt_staff"],
             "verification_exempt_bots": row["verification_exempt_bots"],

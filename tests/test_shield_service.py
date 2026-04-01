@@ -1,12 +1,13 @@
 import types
 import unittest
+import json
 from copy import deepcopy
 from typing import Optional
 from unittest.mock import AsyncMock, patch
 
 from babblebox.shield_ai import SHIELD_AI_ALLOWED_GUILD_ID, ShieldAIReviewResult
 from babblebox.shield_service import ShieldDecision, ShieldMatch, ShieldService
-from babblebox.shield_store import ShieldStateStore, _MemoryShieldStore
+from babblebox.shield_store import SHIELD_META_GLOBAL_AI_OVERRIDE_KEY, ShieldStateStore, _MemoryShieldStore, _PostgresShieldStore
 
 
 class FakeRole:
@@ -133,6 +134,120 @@ class FakeAIProvider:
 
     async def close(self):
         return None
+
+
+class _FakeShieldAcquireContext:
+    def __init__(self, connection):
+        self.connection = connection
+
+    async def __aenter__(self):
+        return self.connection
+
+    async def __aexit__(self, exc_type, exc, tb):
+        return False
+
+
+class _FakeShieldPool:
+    def __init__(self, connection):
+        self.connection = connection
+
+    def acquire(self):
+        return _FakeShieldAcquireContext(self.connection)
+
+
+class _FakeShieldReloadConnection:
+    def __init__(self, *, config_rows=None, pattern_rows=None, meta_rows=None):
+        self._config_rows = config_rows or []
+        self._pattern_rows = pattern_rows or []
+        self._meta_rows = meta_rows or []
+
+    async def fetch(self, query):
+        if "FROM shield_guild_configs" in query:
+            return self._config_rows
+        if "FROM shield_custom_patterns" in query:
+            return self._pattern_rows
+        if "FROM shield_meta" in query:
+            return self._meta_rows
+        raise AssertionError(f"Unexpected fetch query: {query}")
+
+
+class ShieldPostgresReloadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_reload_decodes_json_string_config_lists_and_meta(self):
+        connection = _FakeShieldReloadConnection(
+            config_rows=[
+                {
+                    "guild_id": 10,
+                    "module_enabled": True,
+                    "log_channel_id": 50,
+                    "alert_role_id": 60,
+                    "scan_mode": "all",
+                    "included_channel_ids": json.dumps([20, 21]),
+                    "excluded_channel_ids": json.dumps([22]),
+                    "included_user_ids": json.dumps([30]),
+                    "excluded_user_ids": json.dumps([31]),
+                    "included_role_ids": json.dumps([40]),
+                    "excluded_role_ids": json.dumps([41]),
+                    "trusted_role_ids": json.dumps([42, 42]),
+                    "allow_domains": json.dumps(["example.com"]),
+                    "allow_invite_codes": json.dumps(["abc123"]),
+                    "allow_phrases": json.dumps(["friendly server"]),
+                    "privacy_enabled": True,
+                    "privacy_action": "log",
+                    "privacy_low_action": "log",
+                    "privacy_medium_action": "log",
+                    "privacy_high_action": "log",
+                    "privacy_sensitivity": "normal",
+                    "promo_enabled": True,
+                    "promo_action": "delete_log",
+                    "promo_low_action": "log",
+                    "promo_medium_action": "delete_log",
+                    "promo_high_action": "delete_log",
+                    "promo_sensitivity": "high",
+                    "scam_enabled": True,
+                    "scam_action": "delete_escalate",
+                    "scam_low_action": "log",
+                    "scam_medium_action": "delete_log",
+                    "scam_high_action": "delete_escalate",
+                    "scam_sensitivity": "high",
+                    "ai_enabled": True,
+                    "ai_min_confidence": "medium",
+                    "ai_enabled_packs": json.dumps(["privacy", "promo"]),
+                    "escalation_threshold": 3,
+                    "escalation_window_minutes": 15,
+                    "timeout_minutes": 10,
+                }
+            ],
+            meta_rows=[
+                {
+                    "key": SHIELD_META_GLOBAL_AI_OVERRIDE_KEY,
+                    "value": json.dumps(
+                        {
+                            "enabled": True,
+                            "updated_by": 77,
+                            "updated_at": "2026-04-02T00:00:00+00:00",
+                        }
+                    ),
+                }
+            ],
+        )
+        store = _PostgresShieldStore("postgresql://shield-user:secret@db.example.com:5432/app")
+        store._pool = _FakeShieldPool(connection)
+
+        await store._reload_from_db()
+
+        config = store.state["guilds"]["10"]
+        meta = store.state["meta"]
+        self.assertEqual(config["included_channel_ids"], [20, 21])
+        self.assertEqual(config["excluded_channel_ids"], [22])
+        self.assertEqual(config["included_user_ids"], [30])
+        self.assertEqual(config["excluded_user_ids"], [31])
+        self.assertEqual(config["trusted_role_ids"], [42])
+        self.assertEqual(config["allow_domains"], ["example.com"])
+        self.assertEqual(config["allow_invite_codes"], ["abc123"])
+        self.assertEqual(config["allow_phrases"], ["friendly server"])
+        self.assertEqual(config["ai_enabled_packs"], ["privacy", "promo"])
+        self.assertTrue(meta["global_ai_override_enabled"])
+        self.assertEqual(meta["global_ai_override_updated_by"], 77)
 
 
 class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):

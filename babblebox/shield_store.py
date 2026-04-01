@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
+from babblebox.postgres_json import decode_postgres_json_array, decode_postgres_json_object
 from babblebox.shield_ai import SHIELD_AI_MIN_CONFIDENCE_CHOICES, SHIELD_AI_REVIEW_PACKS
 
 
@@ -500,16 +501,46 @@ class _PostgresShieldStore(_BaseShieldStore):
                 "log_channel_id": row["log_channel_id"],
                 "alert_role_id": row["alert_role_id"],
                 "scan_mode": row["scan_mode"],
-                "included_channel_ids": list(row["included_channel_ids"] or []),
-                "excluded_channel_ids": list(row["excluded_channel_ids"] or []),
-                "included_user_ids": list(row["included_user_ids"] or []),
-                "excluded_user_ids": list(row["excluded_user_ids"] or []),
-                "included_role_ids": list(row["included_role_ids"] or []),
-                "excluded_role_ids": list(row["excluded_role_ids"] or []),
-                "trusted_role_ids": list(row["trusted_role_ids"] or []),
-                "allow_domains": list(row["allow_domains"] or []),
-                "allow_invite_codes": list(row["allow_invite_codes"] or []),
-                "allow_phrases": list(row["allow_phrases"] or []),
+                "included_channel_ids": decode_postgres_json_array(
+                    row["included_channel_ids"],
+                    label="shield_guild_configs.included_channel_ids",
+                ),
+                "excluded_channel_ids": decode_postgres_json_array(
+                    row["excluded_channel_ids"],
+                    label="shield_guild_configs.excluded_channel_ids",
+                ),
+                "included_user_ids": decode_postgres_json_array(
+                    row["included_user_ids"],
+                    label="shield_guild_configs.included_user_ids",
+                ),
+                "excluded_user_ids": decode_postgres_json_array(
+                    row["excluded_user_ids"],
+                    label="shield_guild_configs.excluded_user_ids",
+                ),
+                "included_role_ids": decode_postgres_json_array(
+                    row["included_role_ids"],
+                    label="shield_guild_configs.included_role_ids",
+                ),
+                "excluded_role_ids": decode_postgres_json_array(
+                    row["excluded_role_ids"],
+                    label="shield_guild_configs.excluded_role_ids",
+                ),
+                "trusted_role_ids": decode_postgres_json_array(
+                    row["trusted_role_ids"],
+                    label="shield_guild_configs.trusted_role_ids",
+                ),
+                "allow_domains": decode_postgres_json_array(
+                    row["allow_domains"],
+                    label="shield_guild_configs.allow_domains",
+                ),
+                "allow_invite_codes": decode_postgres_json_array(
+                    row["allow_invite_codes"],
+                    label="shield_guild_configs.allow_invite_codes",
+                ),
+                "allow_phrases": decode_postgres_json_array(
+                    row["allow_phrases"],
+                    label="shield_guild_configs.allow_phrases",
+                ),
                 "privacy_enabled": bool(row["privacy_enabled"]),
                 "privacy_action": row["privacy_action"],
                 "privacy_low_action": row["privacy_low_action"],
@@ -530,7 +561,10 @@ class _PostgresShieldStore(_BaseShieldStore):
                 "scam_sensitivity": row["scam_sensitivity"],
                 "ai_enabled": bool(row["ai_enabled"]),
                 "ai_min_confidence": row["ai_min_confidence"],
-                "ai_enabled_packs": list(row["ai_enabled_packs"] or []),
+                "ai_enabled_packs": decode_postgres_json_array(
+                    row["ai_enabled_packs"],
+                    label="shield_guild_configs.ai_enabled_packs",
+                ),
                 "escalation_threshold": int(row["escalation_threshold"]),
                 "escalation_window_minutes": int(row["escalation_window_minutes"]),
                 "timeout_minutes": int(row["timeout_minutes"]),
@@ -551,7 +585,10 @@ class _PostgresShieldStore(_BaseShieldStore):
         for row in meta_rows:
             if row["key"] != SHIELD_META_GLOBAL_AI_OVERRIDE_KEY:
                 continue
-            value = row["value"] if isinstance(row["value"], dict) else {}
+            value = decode_postgres_json_object(
+                row["value"],
+                label="shield_meta.value",
+            )
             loaded["meta"] = {
                 "global_ai_override_enabled": bool(value.get("enabled")),
                 "global_ai_override_updated_by": value.get("updated_by") if isinstance(value.get("updated_by"), int) and value.get("updated_by") > 0 else None,

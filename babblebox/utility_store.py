@@ -10,6 +10,8 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
+from babblebox.postgres_json import decode_postgres_json_array
+
 
 DEFAULT_LEGACY_JSON_PATH = Path(__file__).resolve().parent.parent / ".cache" / "utility_state.json"
 
@@ -568,13 +570,55 @@ class _PostgresUtilityStore(_BaseUtilityStore):
         for row in watch_rows:
             loaded["watch"][str(row["user_id"])] = {
                 "mention_global": bool(row["mention_global"]),
-                "mention_guild_ids": [guild_id for guild_id in (row["mention_guild_ids"] or []) if isinstance(guild_id, int)],
-                "mention_channel_ids": [channel_id for channel_id in (row["mention_channel_ids"] or []) if isinstance(channel_id, int)],
+                "mention_guild_ids": [
+                    guild_id
+                    for guild_id in decode_postgres_json_array(
+                        row["mention_guild_ids"],
+                        label="utility_watch_configs.mention_guild_ids",
+                    )
+                    if isinstance(guild_id, int)
+                ],
+                "mention_channel_ids": [
+                    channel_id
+                    for channel_id in decode_postgres_json_array(
+                        row["mention_channel_ids"],
+                        label="utility_watch_configs.mention_channel_ids",
+                    )
+                    if isinstance(channel_id, int)
+                ],
                 "reply_global": bool(row["reply_global"]),
-                "reply_guild_ids": [guild_id for guild_id in (row["reply_guild_ids"] or []) if isinstance(guild_id, int)],
-                "reply_channel_ids": [channel_id for channel_id in (row["reply_channel_ids"] or []) if isinstance(channel_id, int)],
-                "excluded_channel_ids": [channel_id for channel_id in (row["excluded_channel_ids"] or []) if isinstance(channel_id, int)],
-                "ignored_user_ids": [ignored_user_id for ignored_user_id in (row["ignored_user_ids"] or []) if isinstance(ignored_user_id, int)],
+                "reply_guild_ids": [
+                    guild_id
+                    for guild_id in decode_postgres_json_array(
+                        row["reply_guild_ids"],
+                        label="utility_watch_configs.reply_guild_ids",
+                    )
+                    if isinstance(guild_id, int)
+                ],
+                "reply_channel_ids": [
+                    channel_id
+                    for channel_id in decode_postgres_json_array(
+                        row["reply_channel_ids"],
+                        label="utility_watch_configs.reply_channel_ids",
+                    )
+                    if isinstance(channel_id, int)
+                ],
+                "excluded_channel_ids": [
+                    channel_id
+                    for channel_id in decode_postgres_json_array(
+                        row["excluded_channel_ids"],
+                        label="utility_watch_configs.excluded_channel_ids",
+                    )
+                    if isinstance(channel_id, int)
+                ],
+                "ignored_user_ids": [
+                    ignored_user_id
+                    for ignored_user_id in decode_postgres_json_array(
+                        row["ignored_user_ids"],
+                        label="utility_watch_configs.ignored_user_ids",
+                    )
+                    if isinstance(ignored_user_id, int)
+                ],
                 "keywords": [],
             }
         for row in keyword_rows:
@@ -612,7 +656,14 @@ class _PostgresUtilityStore(_BaseUtilityStore):
                 "author_name": row["author_name"],
                 "author_id": row["author_id"],
                 "preview": row["preview"],
-                "attachment_labels": [label for label in (row["attachment_labels"] or []) if isinstance(label, str) and label.strip()],
+                "attachment_labels": [
+                    label
+                    for label in decode_postgres_json_array(
+                        row["attachment_labels"],
+                        label="utility_later_markers.attachment_labels",
+                    )
+                    if isinstance(label, str) and label.strip()
+                ],
             }
         for row in reminder_rows:
             loaded["reminders"][row["id"]] = {

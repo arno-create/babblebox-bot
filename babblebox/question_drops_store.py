@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
+from babblebox.postgres_json import decode_postgres_json_array, decode_postgres_json_object
+
 
 DEFAULT_BACKEND = "postgres"
 QUESTION_DROP_MIN_DROPS_PER_DAY = 1
@@ -627,10 +629,22 @@ def _config_from_row(row) -> dict[str, Any]:
             "activity_gate": row["activity_gate"],
             "active_start_hour": row["active_start_hour"],
             "active_end_hour": row["active_end_hour"],
-            "enabled_channel_ids": row["enabled_channel_ids"] or [],
-            "enabled_categories": row["enabled_categories"] or [],
-            "category_mastery": dict(row["category_mastery"] or {}),
-            "scholar_ladder": dict(row["scholar_ladder"] or {}),
+            "enabled_channel_ids": decode_postgres_json_array(
+                row["enabled_channel_ids"],
+                label="question_drop_configs.enabled_channel_ids",
+            ),
+            "enabled_categories": decode_postgres_json_array(
+                row["enabled_categories"],
+                label="question_drop_configs.enabled_categories",
+            ),
+            "category_mastery": decode_postgres_json_object(
+                row["category_mastery"],
+                label="question_drop_configs.category_mastery",
+            ),
+            "scholar_ladder": decode_postgres_json_object(
+                row["scholar_ladder"],
+                label="question_drop_configs.scholar_ladder",
+            ),
             "ai_celebrations_enabled": row["ai_celebrations_enabled"],
         },
     )
@@ -639,13 +653,10 @@ def _config_from_row(row) -> dict[str, Any]:
 def _meta_from_row(row) -> dict[str, Any] | None:
     if row is None:
         return None
-    value = row["value"]
-    if isinstance(value, str):
-        try:
-            value = json.loads(value)
-        except json.JSONDecodeError:
-            value = {}
-    payload = value if isinstance(value, dict) else {}
+    payload = decode_postgres_json_object(
+        row["value"],
+        label="question_drop_meta.value",
+    )
     payload["updated_at"] = _serialize_datetime(row.get("updated_at"))
     return normalize_question_drops_meta(payload)
 
@@ -663,12 +674,18 @@ def _active_drop_from_row(row) -> dict[str, Any] | None:
             "category": row["category"],
             "difficulty": row["difficulty"],
             "prompt": row["prompt"],
-            "answer_spec": dict(row["answer_spec"] or {}),
+            "answer_spec": decode_postgres_json_object(
+                row["answer_spec"],
+                label="question_drop_active.answer_spec",
+            ),
             "asked_at": _serialize_datetime(row["asked_at"]),
             "expires_at": _serialize_datetime(row["expires_at"]),
             "slot_key": row["slot_key"],
             "tone_mode": row["tone_mode"],
-            "participant_user_ids": row["participant_user_ids"] or [],
+            "participant_user_ids": decode_postgres_json_array(
+                row["participant_user_ids"],
+                label="question_drop_active.participant_user_ids",
+            ),
         }
     )
 
