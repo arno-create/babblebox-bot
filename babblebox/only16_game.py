@@ -40,6 +40,10 @@ _ANSWER_LEAD_RE = re.compile(
     r"^\s*(?:it(?:'s| is)?|answer(?: is|'s)?|my guess is|i(?:'d| would)? say|i think|maybe|probably|there (?:is|are)|just)\s+(?P<payload>.+?)\s*$",
     re.IGNORECASE,
 )
+_SMART_STANDALONE_LEAD_RE = re.compile(
+    r"^\s*(?:it(?:'s| is)?|answer(?: is|'s)?|my guess is)\s+(?P<payload>.+?)\s*$",
+    re.IGNORECASE,
+)
 _DIGIT_RE = re.compile(r"(?<![\w/])([+-]?\d+)(?![\w/])")
 _INTEGER_FULL_RE = re.compile(r"^[+-]?\d+$")
 _MATH_TEXT_RE = re.compile(r"^[\d\s()+\-*/^]+$")
@@ -461,11 +465,8 @@ def _only16_player_names(game: dict[str, Any]) -> str:
     return ge.join_limited_lines([f"**{index + 1}.** {player.display_name}" for index, player in enumerate(game.get("players", []))])
 
 
-def _only16_mode_blurb(mode: str | None) -> str:
-    normalized = str(mode or "strict").casefold()
-    if normalized == "smart":
-        return "Replies are safest. Smart can also judge one unmistakable standalone answer. Unrelated chatter is ignored."
-    return "Only direct replies count. Anything else is ignored, and ambiguity always resolves in favor of the player."
+def _only16_mode_guide() -> str:
+    return "Strict: replies only.\nSmart: replies plus one clear standalone answer.\nUnrelated chatter is ignored."
 
 
 def _only16_supported_math_copy() -> str:
@@ -481,23 +482,30 @@ def _format_fraction(value: Fraction | int) -> str:
 
 def _classify_smart_follow_up(text: str | None, parsed: Only16ParseResult) -> str:
     content = str(text or "").strip()
-    if not content or "?" in content or len(content) > 60:
+    if not content or len(content) > 60:
         return "ignore"
-    if has_question_intent(content):
+    if "?" in content or has_question_intent(content):
+        return "ignore"
+    exact = _parse_exact_numeric_payload(content)
+    if exact.kind == "single":
+        return "judge"
+    if exact.kind == "unsupported":
         return "void"
-    candidates = _exact_payload_candidates(content)
-    for candidate in candidates:
-        exact = _parse_exact_numeric_payload(candidate)
-        if exact.kind == "single":
-            return "judge"
-        if exact.kind in {"ambiguous", "unsupported"}:
-            return "void"
-    if len(candidates) > 1:
-        payload = candidates[-1]
-        payload_parsed = parse_only16_numeric_answer(payload)
-        if payload_parsed.kind in {"ambiguous", "unsupported"}:
-            return "void"
-    if parsed.kind in {"ambiguous", "unsupported"} and _parse_exact_numeric_payload(content).kind in {"ambiguous", "unsupported"}:
+    lead_match = _SMART_STANDALONE_LEAD_RE.match(content)
+    if lead_match is None:
+        return "ignore"
+    payload = str(lead_match.group("payload") or "").strip()
+    if not payload:
+        return "ignore"
+    payload_exact = _parse_exact_numeric_payload(payload)
+    if payload_exact.kind == "single":
+        return "judge"
+    if payload_exact.kind == "unsupported":
+        return "void"
+    payload_parsed = parse_only16_numeric_answer(payload)
+    if payload_parsed.kind == "ambiguous":
+        return "void"
+    if parsed.kind == "unsupported":
         return "void"
     return "ignore"
 
@@ -505,8 +513,8 @@ def _classify_smart_follow_up(text: str | None, parsed: Only16ParseResult) -> st
 def _trap_live_copy(mode: str | None) -> str:
     normalized = str(mode or "strict").casefold()
     if normalized == "smart":
-        return "Trap live. Replies are safest, but one unmistakable standalone answer can still count."
-    return "Trap live. Direct replies are the only judged answer lane."
+        return "Trap live. Smart mode is on: replies plus one clear standalone answer can count. Unrelated chatter is ignored."
+    return "Trap live. Strict mode is on: replies only. Unrelated chatter is ignored."
 
 
 async def start_only16_game_locked(guild_id: int, game: dict[str, Any]):
@@ -520,7 +528,7 @@ async def start_only16_game_locked(guild_id: int, game: dict[str, Any]):
         ),
         color=discord.Color.orange(),
     )
-    intro.add_field(name="Judging", value=_only16_mode_blurb(state.get("mode")), inline=False)
+    intro.add_field(name="Judging", value=f"Current mode: **{only16_mode_label(state.get('mode'))}**\n{_only16_mode_guide()}", inline=False)
     intro.add_field(name="Safe Math", value=_only16_supported_math_copy(), inline=False)
     intro.add_field(name="Live Players", value=_only16_player_names(game), inline=False)
     intro = ge.style_embed(intro, footer="Babblebox Only 16 | Ambiguity never eliminates")
@@ -629,7 +637,7 @@ async def _handle_only16_answer_locked(message: discord.Message, guild_id: int, 
             guild_id,
             game,
             title="Trap Voided",
-            reason="Smart mode saw a fuzzy or unsupported non-reply answer lane, so Babblebox refused to guess intent.",
+            reason="Smart mode only counts one clear standalone answer, so Babblebox refused to guess through a fuzzy non-reply lane.",
         )
         return True
     return await _resolve_only16_answer_locked(message, guild_id, game, trap, parsed)
@@ -766,7 +774,8 @@ async def _start_only16_turn_locked(guild_id: int, game: dict[str, Any]):
             "Your Trap Turn",
             (
                 f"{current_asker.mention}, ask a clear quantity question in the next **{ONLY16_ASK_WINDOW_SECONDS} seconds**.\n"
-                f"Mode: **{only16_mode_label(state.get('mode'))}** | {_only16_mode_blurb(state.get('mode'))}"
+                f"Mode: **{only16_mode_label(state.get('mode'))}**\n"
+                f"{_only16_mode_guide()}"
             ),
             tone="accent",
             footer="Babblebox Only 16 | Explicit numbers only",

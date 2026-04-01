@@ -862,35 +862,91 @@ class ProfileService:
         granted_points = max(0, int(points))
         async with self._lock:
             today = ge.now_utc().date()
-            profile = await self._ensure_profile(user_id)
-            profile["question_drop_attempts"] = int(profile.get("question_drop_attempts", 0) or 0) + 1
-            if correct:
-                profile["question_drop_correct"] = int(profile.get("question_drop_correct", 0) or 0) + 1
-                profile["question_drop_points"] = int(profile.get("question_drop_points", 0) or 0) + granted_points
-                next_streak = int(profile.get("question_drop_current_streak", 0) or 0) + 1
-                profile["question_drop_current_streak"] = next_streak
-                profile["question_drop_best_streak"] = max(int(profile.get("question_drop_best_streak", 0) or 0), next_streak)
-                self._grant_xp(profile, bucket="daily", amount=min(DAILY_CLEAR_XP, max(1, granted_points)), today=today)
-                mood = "proud"
-            else:
-                profile["question_drop_current_streak"] = 0
-                mood = "focused"
-            category_row = await self.store.fetch_question_drop_category(user_id=user_id, category=category_id)
-            if category_row is None:
-                category_row = _blank_question_drop_category(user_id, category_id)
-            category_row["attempts"] = int(category_row.get("attempts", 0) or 0) + 1
-            if correct:
-                category_row["correct_count"] = int(category_row.get("correct_count", 0) or 0) + 1
-                category_row["points"] = int(category_row.get("points", 0) or 0) + granted_points
-                next_category_streak = int(category_row.get("current_streak", 0) or 0) + 1
-                category_row["current_streak"] = next_category_streak
-                category_row["best_streak"] = max(int(category_row.get("best_streak", 0) or 0), next_category_streak)
-            else:
-                category_row["current_streak"] = 0
-            self._touch_profile(profile, mood=mood)
-            self._sync_identity_fields(profile, today)
-            await self.store.save_question_drop_category(category_row)
-            await self.store.save_profile(profile)
+            await self._apply_question_drop_result_locked(
+                today=today,
+                user_id=user_id,
+                category_id=category_id,
+                correct=bool(correct),
+                granted_points=granted_points,
+            )
+
+    async def record_question_drop_results_batch(self, results: list[dict[str, Any]]):
+        if not self.storage_ready:
+            return
+        normalized: dict[tuple[int, str], dict[str, Any]] = {}
+        for raw in results:
+            if not isinstance(raw, dict):
+                continue
+            user_id = raw.get("user_id")
+            if not isinstance(user_id, int) or user_id <= 0:
+                continue
+            category_id = str(raw.get("category") or "").strip().lower()
+            if not category_id:
+                continue
+            key = (user_id, category_id)
+            candidate = normalized.setdefault(
+                key,
+                {
+                    "user_id": user_id,
+                    "category_id": category_id,
+                    "correct": False,
+                    "points": 0,
+                },
+            )
+            candidate["correct"] = bool(candidate["correct"] or raw.get("correct"))
+            if raw.get("correct"):
+                candidate["points"] = max(int(candidate["points"]), max(0, int(raw.get("points", 0) or 0)))
+        if not normalized:
+            return
+        async with self._lock:
+            today = ge.now_utc().date()
+            for result in normalized.values():
+                await self._apply_question_drop_result_locked(
+                    today=today,
+                    user_id=int(result["user_id"]),
+                    category_id=str(result["category_id"]),
+                    correct=bool(result["correct"]),
+                    granted_points=max(0, int(result["points"])),
+                )
+
+    async def _apply_question_drop_result_locked(
+        self,
+        *,
+        today,
+        user_id: int,
+        category_id: str,
+        correct: bool,
+        granted_points: int,
+    ):
+        profile = await self._ensure_profile(user_id)
+        profile["question_drop_attempts"] = int(profile.get("question_drop_attempts", 0) or 0) + 1
+        if correct:
+            profile["question_drop_correct"] = int(profile.get("question_drop_correct", 0) or 0) + 1
+            profile["question_drop_points"] = int(profile.get("question_drop_points", 0) or 0) + granted_points
+            next_streak = int(profile.get("question_drop_current_streak", 0) or 0) + 1
+            profile["question_drop_current_streak"] = next_streak
+            profile["question_drop_best_streak"] = max(int(profile.get("question_drop_best_streak", 0) or 0), next_streak)
+            self._grant_xp(profile, bucket="daily", amount=min(DAILY_CLEAR_XP, max(1, granted_points)), today=today)
+            mood = "proud"
+        else:
+            profile["question_drop_current_streak"] = 0
+            mood = "focused"
+        category_row = await self.store.fetch_question_drop_category(user_id=user_id, category=category_id)
+        if category_row is None:
+            category_row = _blank_question_drop_category(user_id, category_id)
+        category_row["attempts"] = int(category_row.get("attempts", 0) or 0) + 1
+        if correct:
+            category_row["correct_count"] = int(category_row.get("correct_count", 0) or 0) + 1
+            category_row["points"] = int(category_row.get("points", 0) or 0) + granted_points
+            next_category_streak = int(category_row.get("current_streak", 0) or 0) + 1
+            category_row["current_streak"] = next_category_streak
+            category_row["best_streak"] = max(int(category_row.get("best_streak", 0) or 0), next_category_streak)
+        else:
+            category_row["current_streak"] = 0
+        self._touch_profile(profile, mood=mood)
+        self._sync_identity_fields(profile, today)
+        await self.store.save_question_drop_category(category_row)
+        await self.store.save_profile(profile)
 
     def _resolve_user_label(self, user_id: int) -> str:
         cached = self.bot.get_user(user_id)

@@ -11,7 +11,8 @@ from urllib.parse import urlsplit, urlunsplit
 
 
 DEFAULT_BACKEND = "postgres"
-QUESTION_DROP_MAX_DROPS_PER_DAY = 4
+QUESTION_DROP_MIN_DROPS_PER_DAY = 1
+QUESTION_DROP_MAX_DROPS_PER_DAY = 10
 
 
 class QuestionDropsStorageUnavailable(RuntimeError):
@@ -41,7 +42,9 @@ def normalize_question_drops_config(guild_id: int, payload: Any) -> dict[str, An
     cleaned["enabled"] = bool(payload.get("enabled"))
     drops_per_day = payload.get("drops_per_day")
     cleaned["drops_per_day"] = (
-        drops_per_day if isinstance(drops_per_day, int) and 1 <= drops_per_day <= QUESTION_DROP_MAX_DROPS_PER_DAY else 2
+        drops_per_day
+        if isinstance(drops_per_day, int) and QUESTION_DROP_MIN_DROPS_PER_DAY <= drops_per_day <= QUESTION_DROP_MAX_DROPS_PER_DAY
+        else 2
     )
     timezone_name = payload.get("timezone")
     cleaned["timezone"] = timezone_name.strip() if isinstance(timezone_name, str) and timezone_name.strip() else "UTC"

@@ -1200,7 +1200,9 @@ def get_lobby_embed(guild_id):
             name="Only 16 Mode",
             value=(
                 f"**{str(game.get('only16_mode', 'strict')).title()}**\n"
-                "Strict only judges direct replies. Smart can also judge one unmistakable standalone answer while unrelated chatter is ignored."
+                "Strict: replies only.\n"
+                "Smart: replies plus one clear standalone answer.\n"
+                "Unrelated chatter is ignored."
             ),
             inline=False,
         )

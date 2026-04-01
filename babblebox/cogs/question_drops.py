@@ -142,7 +142,7 @@ class QuestionDropsCog(commands.Cog):
     @app_commands.default_permissions(manage_guild=True)
     @app_commands.describe(
         enabled="Turn scheduled drops on or off",
-        drops_per_day="How many drops per day to schedule (1-4)",
+        drops_per_day="How many drops per day to schedule (1-10)",
         timezone_name="Server timezone like Asia/Yerevan or UTC+04:00",
         answer_window_seconds="How many seconds answers stay open",
         tone_mode="Wrong-answer tone",

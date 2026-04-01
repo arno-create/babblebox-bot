@@ -38,12 +38,10 @@ HELP_PAGES: list[dict[str, str]] = [
         "emoji": "\U0001f389",
         "description": "Short multiplayer rooms for live server energy.",
         "body": (
-            "`/play` opens the lobby.\n"
-            "Broken Telephone, Exquisite Corpse, Spyfall, Word Bomb, Only 16, and Pattern Hunt all start there.\n"
-            "Only 16 Strict only judges direct replies; Smart can also judge one unmistakable standalone answer while unrelated chatter is ignored.\n"
-            "Pattern Hunt keeps its rules machine-checkable, and the `Contains Digits` guess family means digits `0-9` only.\n"
-            "`/hunt status` and `/hunt guess` stay quiet until a Pattern Hunt room is live.\n"
-            "If the room is quiet, Babblebox points people toward Daily, Profile, and utilities instead of dead-ending."
+            "`/play` opens the lobby for Broken Telephone, Exquisite Corpse, Spyfall, Word Bomb, Only 16, and Pattern Hunt.\n"
+            "Only 16 judge guide: Strict: replies only. Smart: replies plus one clear standalone answer. Unrelated chatter is ignored.\n"
+            "Pattern Hunt stays machine-checkable, and the `Contains Digits` guess family means digits `0-9` only.\n"
+            "`/hunt status` and `/hunt guess` stay quiet until a Pattern Hunt room is live."
         ),
         "try": "`/play`, `/hunt status`",
     },
@@ -66,10 +64,10 @@ HELP_PAGES: list[dict[str, str]] = [
             "`/daily` opens Shuffle, Emoji, and Signal.\n"
             "`/daily play <guess>` still defaults to Shuffle Booth.\n"
             "`/drops panel`, `/drops config`, `/drops channels`, `/drops categories`, and `/drops stats` cover the scheduled trivia lane.\n"
+            "Admins can run **1-10 drops/day** across selected channels.\n"
             "Question Drops accept clean natural answers, and multiple-choice prompts also accept the correct option letter or option text.\n"
-            "A live drop keeps the same channel closed to new party rooms until it resolves or expires.\n"
-            "`/daily`, `/daily play`, `/daily stats`, `/daily share`, and `/daily leaderboard` all lean public by default.\n"
-            "Public Daily cards stay spoiler-safe, while warnings and storage issues stay private."
+            "Light activity gating keeps idle channels quiet, and a live drop blocks `/play` in that same channel until it resolves.\n"
+            "`/daily`, `/daily play`, `/daily stats`, `/daily share`, and `/daily leaderboard` lean public by default while warnings stay private."
         ),
         "try": "`/daily`, `/drops status`, `/drops stats`",
     },

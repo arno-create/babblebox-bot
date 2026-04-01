@@ -115,6 +115,20 @@ class PartyGameLogicTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(channel.sent[-1][1]["embed"].title, "Still Alive")
         advance.assert_awaited_once()
 
+    async def test_only16_smart_mode_accepts_clean_standalone_word_and_math(self):
+        for content in ("sixteen", "17-1"):
+            with self.subTest(content=content):
+                game, _asker, responder, channel = self._make_only16_game(mode="smart")
+                message = DummyMessage(channel=channel, author=responder, content=content)
+
+                with patch("babblebox.only16_game._advance_to_next_asker_locked", new=AsyncMock()) as advance:
+                    handled = await handle_only16_message_locked(message, 99, game)
+
+                self.assertTrue(handled)
+                self.assertIsNone(ensure_only16_state(game).get("trap"))
+                self.assertEqual(channel.sent[-1][1]["embed"].title, "Still Alive")
+                advance.assert_awaited_once()
+
     async def test_only16_strict_mode_ignores_non_reply_answers(self):
         game, _asker, responder, _channel = self._make_only16_game(mode="strict")
         message = DummyMessage(channel=game["channel"], author=responder, content="16")
@@ -137,6 +151,19 @@ class PartyGameLogicTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(ensure_only16_state(game).get("trap"))
         self.assertEqual(channel.sent[-1][1]["embed"].title, "Trap Voided")
         advance.assert_awaited_once()
+
+    async def test_only16_smart_mode_ignores_soft_standalone_wrappers(self):
+        for content in ("i think 16", "maybe sixteen", "there are 16", "just 16"):
+            with self.subTest(content=content):
+                game, _asker, responder, _channel = self._make_only16_game(mode="smart")
+                message = DummyMessage(channel=game["channel"], author=responder, content=content)
+
+                with patch("babblebox.only16_game._advance_to_next_asker_locked", new=AsyncMock()) as advance:
+                    handled = await handle_only16_message_locked(message, 99, game)
+
+                self.assertFalse(handled)
+                self.assertIsNotNone(ensure_only16_state(game).get("trap"))
+                advance.assert_not_awaited()
 
     def test_pattern_rule_matchers_are_machine_checkable(self):
         rule = [
@@ -205,6 +232,32 @@ class PartyGameLogicTests(unittest.IsolatedAsyncioTestCase):
         values = "\n".join(field.value for field in embed.fields)
         self.assertIn("digits `0-9` only", values)
         self.assertIn("/hunt guess", values)
+
+    async def test_pattern_hunt_reveal_recap_uses_prompt_to_answer_wording(self):
+        guesser = DummyUser(10)
+        coder = DummyUser(11)
+        channel = DummyChannel()
+        game = {
+            "players": [guesser, coder],
+            "starting_players": [guesser, coder],
+            "channel": channel,
+            "turn_task": None,
+            "pattern_hunt": {
+                "guesser_id": guesser.id,
+                "rule_atoms": [RuleAtom("contains_digits")],
+                "accepted_answers": [{"coder": coder.display_name, "answer": "7 foxes sprint!", "prompt": "fox clue"}],
+            },
+        }
+
+        with patch("babblebox.pattern_hunt_game.ge.cleanup_game", new=AsyncMock()):
+            from babblebox.pattern_hunt_game import _finish_pattern_hunt_locked
+
+            await _finish_pattern_hunt_locked(99, game, guesser_won=False, reason="Coders held the pattern.")
+
+        recap = next(field.value for field in channel.sent[-1][1]["embed"].fields if field.name == "Clue Recap")
+        self.assertIn("Prompt:", recap)
+        self.assertIn("answered", recap)
+        self.assertNotIn("asked for", recap)
 
     async def test_pattern_guess_compares_structured_atoms(self):
         guesser = DummyUser(10)

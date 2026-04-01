@@ -179,6 +179,32 @@ class ProfileServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(summary["categories"][1]["attempts"], 1)
         self.assertEqual(summary["categories"][1]["correct_count"], 0)
 
+    async def test_question_drop_batch_results_dedupe_user_updates(self):
+        await self.service.record_question_drop_results_batch(
+            [
+                {"user_id": 55, "category": "logic", "correct": False, "points": 0},
+                {"user_id": 55, "category": "logic", "correct": True, "points": 12},
+                {"user_id": 55, "category": "logic", "correct": True, "points": 8},
+                {"user_id": 55, "category": "science", "correct": False, "points": 10},
+            ]
+        )
+
+        profile = await self.service.get_profile(55)
+        self.assertEqual(profile["question_drop_attempts"], 2)
+        self.assertEqual(profile["question_drop_correct"], 1)
+        self.assertEqual(profile["question_drop_points"], 12)
+        self.assertEqual(profile["question_drop_current_streak"], 0)
+        self.assertEqual(profile["question_drop_best_streak"], 1)
+
+        summary = await self.service.get_question_drop_summary(55)
+        self.assertEqual(summary["categories"][0]["category"], "logic")
+        self.assertEqual(summary["categories"][0]["attempts"], 1)
+        self.assertEqual(summary["categories"][0]["correct_count"], 1)
+        self.assertEqual(summary["categories"][0]["points"], 12)
+        self.assertEqual(summary["categories"][1]["category"], "science")
+        self.assertEqual(summary["categories"][1]["attempts"], 1)
+        self.assertEqual(summary["categories"][1]["correct_count"], 0)
+
     async def test_new_party_game_round_and_win_fields_are_recorded(self):
         await self.service.record_game_started(game_type="only16", host_id=70, player_ids=[70, 71])
         await self.service.record_game_started(game_type="pattern_hunt", host_id=70, player_ids=[70, 71, 72])

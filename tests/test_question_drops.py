@@ -63,6 +63,7 @@ class DummyBot:
         self.profile_service = types.SimpleNamespace(
             storage_ready=True,
             record_question_drop_result=AsyncMock(),
+            record_question_drop_results_batch=AsyncMock(),
             get_question_drop_summary=AsyncMock(
                 return_value={"profile": {}, "categories": [], "top_categories": []}
             ),
@@ -208,6 +209,9 @@ class QuestionDropsServiceTests(unittest.IsolatedAsyncioTestCase):
                 return f"guess {candidate}"
         return "guess zebra"
 
+    def _last_batch_results(self):
+        return self.bot.profile_service.record_question_drop_results_batch.await_args.args[0]
+
     async def test_selector_avoids_recent_concept_repeats(self):
         old_variant = self.service._select_variant(
             self.guild.id,
@@ -241,6 +245,56 @@ class QuestionDropsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(next_variant)
         self.assertNotEqual(next_variant.concept_id, old_variant.concept_id)
 
+    async def test_selector_avoids_same_day_concept_reuse_when_alternatives_exist(self):
+        first_variant = self.service._select_variant(
+            self.guild.id,
+            self.channel.id,
+            exposures=[],
+            slot_key="2026-03-30:0",
+            config=self.service.get_config(self.guild.id),
+        )
+        self.assertIsNotNone(first_variant)
+        exposure = await self.store.insert_exposure(
+            {
+                "guild_id": self.guild.id,
+                "channel_id": self.channel.id,
+                "concept_id": first_variant.concept_id,
+                "variant_hash": first_variant.variant_hash,
+                "category": first_variant.category,
+                "difficulty": first_variant.difficulty,
+                "asked_at": ge.now_utc(),
+                "resolved_at": None,
+                "winner_user_id": None,
+                "slot_key": "2026-03-30:1",
+            }
+        )
+
+        next_variant = self.service._select_variant(
+            self.guild.id,
+            self.channel.id,
+            exposures=[exposure],
+            slot_key="2026-03-30:2",
+            config=self.service.get_config(self.guild.id),
+        )
+
+        self.assertIsNotNone(next_variant)
+        self.assertNotEqual(next_variant.concept_id, first_variant.concept_id)
+
+    async def test_update_config_accepts_maximum_drop_range(self):
+        ok, message = await self.service.update_config(self.guild.id, drops_per_day=10)
+
+        self.assertTrue(ok, message)
+        self.assertEqual(self.service.get_config(self.guild.id)["drops_per_day"], 10)
+
+    async def test_update_config_rejects_out_of_range_drop_counts(self):
+        for invalid in (0, 11):
+            with self.subTest(invalid=invalid):
+                ok, message = await self.service.update_config(self.guild.id, drops_per_day=invalid)
+
+                self.assertFalse(ok)
+                self.assertIn("between 1 and 10", message)
+                self.assertEqual(self.service.get_config(self.guild.id)["drops_per_day"], 1)
+
     async def test_scheduler_posts_single_active_drop_and_correct_answer_resolves(self):
         active = await self._post_one_drop()
         answer = str(active["answer_spec"].get("value", active["answer_spec"].get("accepted", [""])[0]))
@@ -250,11 +304,17 @@ class QuestionDropsServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(handled)
         self.assertEqual(len(self.service._active_drops), 0)
-        self.bot.profile_service.record_question_drop_result.assert_awaited_once_with(
-            44,
-            category=active["category"],
-            correct=True,
-            points=answer_points_for_difficulty(int(active["difficulty"])),
+        self.bot.profile_service.record_question_drop_results_batch.assert_awaited_once()
+        self.assertEqual(
+            self._last_batch_results(),
+            [
+                {
+                    "user_id": 44,
+                    "category": active["category"],
+                    "correct": True,
+                    "points": answer_points_for_difficulty(int(active["difficulty"])),
+                }
+            ],
         )
 
     async def test_wrong_feedback_is_rate_limited_and_attempts_only_count_once_per_user(self):
@@ -266,7 +326,7 @@ class QuestionDropsServiceTests(unittest.IsolatedAsyncioTestCase):
         await self.service.handle_message(wrong)
         await self.service.handle_message(wrong)
 
-        self.assertEqual(self.bot.profile_service.record_question_drop_result.await_count, 0)
+        self.assertEqual(self.bot.profile_service.record_question_drop_results_batch.await_count, 0)
         exposure_id = int(active["exposure_id"])
         self.assertEqual(self.service._wrong_feedback_count[exposure_id], 1)
         self.assertEqual(self.service._attempted_users[exposure_id], {55})
@@ -285,11 +345,17 @@ class QuestionDropsServiceTests(unittest.IsolatedAsyncioTestCase):
         await self.service.handle_message(wrong)
         await self.service.handle_message(correct)
 
-        self.bot.profile_service.record_question_drop_result.assert_awaited_once_with(
-            55,
-            category=active["category"],
-            correct=True,
-            points=answer_points_for_difficulty(int(active["difficulty"])),
+        self.bot.profile_service.record_question_drop_results_batch.assert_awaited_once()
+        self.assertEqual(
+            self._last_batch_results(),
+            [
+                {
+                    "user_id": 55,
+                    "category": active["category"],
+                    "correct": True,
+                    "points": answer_points_for_difficulty(int(active["difficulty"])),
+                }
+            ],
         )
 
     async def test_expiring_drop_records_first_wrong_attempt_once(self):
@@ -300,11 +366,17 @@ class QuestionDropsServiceTests(unittest.IsolatedAsyncioTestCase):
 
         await self.service._expire_drop(active, timed_out=True)
 
-        self.bot.profile_service.record_question_drop_result.assert_awaited_once_with(
-            61,
-            category=active["category"],
-            correct=False,
-            points=0,
+        self.bot.profile_service.record_question_drop_results_batch.assert_awaited_once()
+        self.assertEqual(
+            self._last_batch_results(),
+            [
+                {
+                    "user_id": 61,
+                    "category": active["category"],
+                    "correct": False,
+                    "points": 0,
+                }
+            ],
         )
 
     async def test_send_failure_does_not_burn_slot_or_create_ghost_exposure(self):
@@ -385,7 +457,7 @@ class QuestionDropsServiceTests(unittest.IsolatedAsyncioTestCase):
         exposure_id = int(active["exposure_id"])
         self.assertEqual(self.service._wrong_feedback_count[exposure_id], 0)
         self.assertEqual(self.service._attempted_users[exposure_id], set())
-        self.bot.profile_service.record_question_drop_result.assert_not_awaited()
+        self.bot.profile_service.record_question_drop_results_batch.assert_not_awaited()
 
     async def test_party_game_overlap_retires_live_drop_before_judging(self):
         active = await self._post_one_drop()
@@ -518,11 +590,10 @@ class QuestionDropsServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(service._active_drops), 0)
             exposures = await store.list_exposures_for_guild(self.guild.id)
             self.assertIsNotNone(exposures[0]["resolved_at"])
-            bot.profile_service.record_question_drop_result.assert_awaited_once_with(
-                88,
-                category="science",
-                correct=False,
-                points=0,
+            bot.profile_service.record_question_drop_results_batch.assert_awaited_once()
+            self.assertEqual(
+                bot.profile_service.record_question_drop_results_batch.await_args.args[0],
+                [{"user_id": 88, "category": "science", "correct": False, "points": 0}],
             )
         finally:
             await service.close()

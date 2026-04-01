@@ -519,6 +519,17 @@ QUESTION_DROP_SEEDS: tuple[dict[str, Any], ...] = (
         ),
     },
     {
+        "concept_id": "science:earth-satellite",
+        "category": "science",
+        "difficulty": 1,
+        "source_type": "curated",
+        "generator_type": "static_pack",
+        "variants": (
+            {"prompt": "What is Earth's natural satellite?", "answer_spec": {"type": "text", "accepted": ["moon", "the moon"]}},
+            {"prompt": "Name the natural satellite that orbits Earth.", "answer_spec": {"type": "text", "accepted": ["moon", "the moon"]}},
+        ),
+    },
+    {
         "concept_id": "history:moon-landing-year",
         "category": "history",
         "difficulty": 2,
@@ -552,6 +563,17 @@ QUESTION_DROP_SEEDS: tuple[dict[str, Any], ...] = (
         ),
     },
     {
+        "concept_id": "history:titanic",
+        "category": "history",
+        "difficulty": 1,
+        "source_type": "curated",
+        "generator_type": "static_pack",
+        "variants": (
+            {"prompt": "What was the name of the ship that hit an iceberg and sank in 1912?", "answer_spec": {"type": "text", "accepted": ["titanic", "the titanic"]}},
+            {"prompt": "Name the famous ocean liner that sank after striking an iceberg in 1912.", "answer_spec": {"type": "text", "accepted": ["titanic", "the titanic"]}},
+        ),
+    },
+    {
         "concept_id": "geography:nile-continent",
         "category": "geography",
         "difficulty": 1,
@@ -582,6 +604,17 @@ QUESTION_DROP_SEEDS: tuple[dict[str, Any], ...] = (
         "variants": (
             {"prompt": "What is the largest ocean on Earth?", "answer_spec": {"type": "text", "accepted": ["pacific", "pacific ocean"]}},
             {"prompt": "Name Earth's largest ocean.", "answer_spec": {"type": "text", "accepted": ["pacific", "pacific ocean"]}},
+        ),
+    },
+    {
+        "concept_id": "geography:sahara",
+        "category": "geography",
+        "difficulty": 1,
+        "source_type": "curated",
+        "generator_type": "static_pack",
+        "variants": (
+            {"prompt": "What is the largest hot desert on Earth?", "answer_spec": {"type": "text", "accepted": ["sahara", "sahara desert", "the sahara"]}},
+            {"prompt": "Name Earth's largest hot desert.", "answer_spec": {"type": "text", "accepted": ["sahara", "sahara desert", "the sahara"]}},
         ),
     },
     {
@@ -684,6 +717,17 @@ QUESTION_DROP_SEEDS: tuple[dict[str, Any], ...] = (
         "variants": (
             {"prompt": "How many keys does a standard piano have?", "answer_spec": {"type": "numeric", "value": 88}},
             {"prompt": "A standard piano has how many keys?", "answer_spec": {"type": "numeric", "value": 88}},
+        ),
+    },
+    {
+        "concept_id": "culture:monopoly",
+        "category": "culture",
+        "difficulty": 1,
+        "source_type": "curated",
+        "generator_type": "static_pack",
+        "variants": (
+            {"prompt": "Which board game is built around properties, railroads, and hotels?", "answer_spec": {"type": "text", "accepted": ["monopoly"]}},
+            {"prompt": "Name the board game where players buy properties and build hotels.", "answer_spec": {"type": "text", "accepted": ["monopoly"]}},
         ),
     },
     {

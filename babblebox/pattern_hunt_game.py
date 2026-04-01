@@ -444,11 +444,11 @@ def build_pattern_hunt_status_embed(game: dict[str, Any], *, public: bool, title
     state = ensure_pattern_hunt_state(game)
     guesser = ge.get_snapshot_player(game, state.get("guesser_id"))
     coder = ge.get_snapshot_player(game, current_pattern_hunt_coder_id(game))
-    description = "The guesser asks for clues, coders answer once in public, and the hidden rule stays private."
+    description = "The guesser asks for one clue at a time, the current coder answers once in public, and the hidden rule stays private."
     if public and state.get("hint_text"):
         description += f"\nHint: {state['hint_text']}"
     if not public:
-        description += "\nStructured guesses use `/hunt guess`. `Contains Digits` means numeric characters `0-9` only."
+        description += "\nUse `/hunt guess` for a 1-3 family theory. `Contains Digits` means digits `0-9` only."
     embed = discord.Embed(title=title, description=description, color=discord.Color.dark_teal())
     embed.add_field(name="Guesser", value=ge.display_name_of(guesser) if guesser else "Unknown", inline=True)
     embed.add_field(name="Current Coder", value=ge.display_name_of(coder) if coder else "Unknown", inline=True)
@@ -471,7 +471,7 @@ def build_pattern_hunt_status_embed(game: dict[str, Any], *, public: bool, title
             name="Guessing",
             value=(
                 "Use 1-3 rule families in `/hunt guess`.\n"
-                "Families that need a value still use simple inputs like a letter, `?`, `food`, `3`, or `3-5`.\n"
+                "Families that need a value use simple inputs like `a`, `?`, `food`, `3`, or `3-5`.\n"
                 "`Contains Digits` means digits `0-9` only."
             ),
             inline=False,
@@ -482,9 +482,9 @@ def build_pattern_hunt_status_embed(game: dict[str, Any], *, public: bool, title
             clue = ge.safe_field_text(item["answer"], limit=64)
             prompt = ge.safe_field_text(item.get("prompt") or "", limit=36)
             if prompt:
-                lines.append(f"**{item['coder']}**: {clue}  |  prompt: {prompt}")
+                lines.append(f"Prompt: `{prompt}` -> **{item['coder']}** answered {clue}")
             else:
-                lines.append(f"**{item['coder']}**: {clue}")
+                lines.append(f"**{item['coder']}** answered {clue}")
         embed.add_field(name="Public Clues", value="\n".join(lines), inline=False)
     return ge.style_embed(embed, footer="Babblebox Pattern Hunt | Hidden rule stays private")
 
@@ -514,7 +514,7 @@ async def handle_pattern_hunt_message_locked(message: discord.Message, guild_id:
         await game["channel"].send(
             embed=ge.make_status_embed(
                 "Coder Turn",
-                f"{coder.mention if coder is not None else 'Coder'}, answer once without explaining the rule.",
+                f"{coder.mention if coder is not None else 'Coder'}, answer once with a clue that fits the rule. Do not explain the rule.",
                 tone="accent",
                 footer="Babblebox Pattern Hunt",
             ),
@@ -535,7 +535,7 @@ async def handle_pattern_hunt_message_locked(message: discord.Message, guild_id:
         await game["channel"].send(
             embed=ge.make_status_embed(
                 "Accepted",
-                f"{message.author.mention}'s clue is locked in.",
+                f"{message.author.mention}'s clue is locked in for the guesser.",
                 tone="success",
                 footer="Babblebox Pattern Hunt",
             ),
@@ -548,7 +548,7 @@ async def handle_pattern_hunt_message_locked(message: discord.Message, guild_id:
         await game["channel"].send(
             embed=ge.make_status_embed(
                 "Try Again",
-                f"{message.author.mention}, that clue does not fit. Retry once without explaining why.",
+                f"{message.author.mention}, that clue does not fit. Retry once with a clue only, no rule talk.",
                 tone="warning",
                 footer="Babblebox Pattern Hunt",
             ),
@@ -584,7 +584,7 @@ async def submit_pattern_guess_locked(
             reason=f"{actor.mention} ran out of guesses. The coders held the pattern.",
         )
         return True, "Wrong and out of guesses"
-    return False, f"Wrong guess. You have **{remaining}** guess(es) left."
+    return False, f"Not it. You have **{remaining}** structured guess(es) left."
 
 
 async def _begin_pattern_turn_locked(guild_id: int, game: dict[str, Any]):
@@ -599,7 +599,7 @@ async def _begin_pattern_turn_locked(guild_id: int, game: dict[str, Any]):
     await game["channel"].send(
         embed=ge.make_status_embed(
             "Prompt Phase",
-            f"{guesser.mention if guesser else 'Guesser'}, ask for a clue. {coder.mention if coder else 'Coder'} answers next.",
+            f"{guesser.mention if guesser else 'Guesser'}, ask for one clue. {coder.mention if coder else 'Coder'} answers once in public.",
             tone="accent",
             footer="Babblebox Pattern Hunt",
         ),
@@ -666,9 +666,9 @@ async def _finish_pattern_hunt_locked(guild_id: int, game: dict[str, Any], *, gu
             clue = ge.safe_field_text(item["answer"], limit=54)
             prompt = ge.safe_field_text(item.get("prompt") or "", limit=30)
             if prompt:
-                lines.append(f"**{item['coder']}** asked for `{prompt}` -> {clue}")
+                lines.append(f"Prompt: `{prompt}` -> **{item['coder']}** answered {clue}")
             else:
-                lines.append(f"**{item['coder']}** -> {clue}")
+                lines.append(f"**{item['coder']}** answered {clue}")
         embed.add_field(name="Clue Recap", value="\n".join(lines), inline=False)
     await game["channel"].send(embed=ge.style_embed(embed, footer="Babblebox Pattern Hunt | Rule revealed"))
     await ge.cleanup_game(guild_id)

@@ -29,6 +29,8 @@ from babblebox.question_drops_content import (
     validate_content_pack,
 )
 from babblebox.question_drops_store import (
+    QUESTION_DROP_MAX_DROPS_PER_DAY,
+    QUESTION_DROP_MIN_DROPS_PER_DAY,
     QuestionDropsStorageUnavailable,
     QuestionDropsStore,
     default_question_drops_config,
@@ -101,17 +103,17 @@ def _tone_failure_line(tone_mode: str) -> str | None:
     if tone_mode == "playful":
         return random.choice(
             (
-                "Not quite. The box remains unimpressed.",
-                "Swing and a miss. Someone else can snag it.",
-                "Close in spirit, wrong in reality.",
+                "Not this one. Another clean guess can still steal it.",
+                "Close enough to keep trying, not close enough to score.",
+                "The box declines, politely.",
             )
         )
     if tone_mode == "roast-light":
         return random.choice(
             (
-                "Respectfully: that answer was brave, not correct.",
-                "That guess had confidence. Accuracy is still pending.",
-                "The question asked for a winner, not a plot twist.",
+                "Confident answer. Wrong answer.",
+                "That guess had energy. The points stayed put.",
+                "Clean format, wrong target.",
             )
         )
     return None
@@ -309,6 +311,13 @@ class QuestionDropsService:
             if enabled is not None:
                 current["enabled"] = bool(enabled)
             if drops_per_day is not None:
+                if not isinstance(drops_per_day, int) or isinstance(drops_per_day, bool):
+                    return False, f"Drops/day must be a whole number from {QUESTION_DROP_MIN_DROPS_PER_DAY}-{QUESTION_DROP_MAX_DROPS_PER_DAY}."
+                if not QUESTION_DROP_MIN_DROPS_PER_DAY <= drops_per_day <= QUESTION_DROP_MAX_DROPS_PER_DAY:
+                    return (
+                        False,
+                        f"Drops/day must stay between {QUESTION_DROP_MIN_DROPS_PER_DAY} and {QUESTION_DROP_MAX_DROPS_PER_DAY}.",
+                    )
                 current["drops_per_day"] = drops_per_day
             if timezone_name is not None:
                 timezone_text = str(timezone_name).strip()
@@ -423,36 +432,36 @@ class QuestionDropsService:
         config = snapshot.config
         enabled_categories = config.get("enabled_categories") or list(QUESTION_DROP_CATEGORIES)
         enabled_category_labels = [QUESTION_DROP_CATEGORY_LABELS.get(category, category.title()) for category in enabled_categories]
-        description = "Compact scheduled prompts with offline content, cautious repeat control, and same-channel conflict blocking."
+        description = "Compact scheduled prompts with offline content, honest repeat control, optional activity gating, and same-channel /play blocking."
         if not config.get("enabled"):
-            description = "Question Drops are currently disabled for this server."
+            description = "Question Drops are currently off for this server."
         embed = discord.Embed(
             title="Question Drops",
             description=description,
             color=ge.EMBED_THEME["accent"],
         )
         embed.add_field(
-            name="Status",
+            name="Schedule",
             value=(
                 f"Enabled: **{'Yes' if config.get('enabled') else 'No'}**\n"
-                f"Drops/day: **{config.get('drops_per_day', 2)}**\n"
+                f"Drops/day: **{config.get('drops_per_day', 2)}** (1-10)\n"
                 f"Window: **{config.get('active_start_hour', 10):02d}:00-{config.get('active_end_hour', 22):02d}:00**"
             ),
             inline=True,
         )
         embed.add_field(
-            name="Style",
+            name="Rules",
             value=(
                 f"Timezone: **{config.get('timezone', 'UTC')}**\n"
                 f"Answer window: **{config.get('answer_window_seconds', 60)}s**\n"
-                f"Tone: **{str(config.get('tone_mode', 'clean')).title()}**"
+                f"Activity gate: **{str(config.get('activity_gate', 'light')).title()}**"
             ),
             inline=True,
         )
         embed.add_field(
-            name="Routing",
+            name="Delivery",
             value=(
-                f"Activity gate: **{str(config.get('activity_gate', 'light')).title()}**\n"
+                f"Tone: **{str(config.get('tone_mode', 'clean')).title()}**\n"
                 f"Configured channels: **{len(snapshot.enabled_channel_mentions)}**\n"
                 f"Active drops now: **{snapshot.active_drop_count}**"
             ),
@@ -617,12 +626,25 @@ class QuestionDropsService:
         if winner_user_id is not None and winner_user_id > 0:
             participant_set.add(winner_user_id)
         points = answer_points_for_difficulty(int(difficulty))
-        for user_id in sorted(participant_set):
+        results = [
+            {
+                "user_id": user_id,
+                "category": category,
+                "correct": user_id == winner_user_id,
+                "points": points if user_id == winner_user_id else 0,
+            }
+            for user_id in sorted(participant_set)
+        ]
+        batch_recorder = getattr(profile_service, "record_question_drop_results_batch", None)
+        if callable(batch_recorder):
+            await batch_recorder(results)
+            return
+        for result in results:
             await profile_service.record_question_drop_result(
-                user_id,
-                category=category,
-                correct=user_id == winner_user_id,
-                points=points if user_id == winner_user_id else 0,
+                int(result["user_id"]),
+                category=str(result["category"]),
+                correct=bool(result["correct"]),
+                points=int(result["points"]),
             )
 
     async def handle_raw_message_delete(self, payload: discord.RawMessageDeleteEvent):
@@ -854,9 +876,9 @@ class QuestionDropsService:
             ),
             inline=False,
         )
-        answer_lane = "Reply to this drop or send a clean standalone answer."
+        answer_lane = "Reply to this drop or send one clean standalone answer."
         if variant.answer_spec.get("type") == "multiple_choice":
-            answer_lane = "Reply to this drop or send the option text. Matching letters like `C` or `option c` also work."
+            answer_lane = "Reply to this drop or send the option text. The right letter also works, like `C` or `option c`."
         embed.add_field(name="Answering", value=answer_lane, inline=False)
         embed = ge.style_embed(embed, footer="Babblebox Question Drops | First correct answer scores")
         message = None
@@ -970,8 +992,10 @@ class QuestionDropsService:
         source_counts = Counter()
         category_concept_counts = Counter()
         category_variant_capacity = Counter()
+        same_day_concepts: set[str] = set()
         seen_category_concepts: set[tuple[str, str]] = set()
         now = ge.now_utc()
+        slot_day_key = str(slot_key).split(":", 1)[0]
         for candidate in candidates:
             category_variant_capacity[candidate.category] += 1
             concept_key = (candidate.category, candidate.concept_id)
@@ -984,12 +1008,16 @@ class QuestionDropsService:
                 asked_at = asked_at.replace(tzinfo=timezone.utc)
             recent_by_concept.setdefault(record["concept_id"], asked_at)
             recent_by_variant.setdefault(record["variant_hash"], asked_at)
+            if str(record.get("slot_key") or "").split(":", 1)[0] == slot_day_key:
+                same_day_concepts.add(str(record["concept_id"]))
             if (now - asked_at).days <= 14:
                 category_counts[record["category"]] += 1
                 difficulty_counts[int(record["difficulty"])] += 1
                 seed = question_drop_seed_for_concept(record["concept_id"]) or {}
                 source_counts[str(seed.get("source_type", "curated"))] += 1
         scored: list[tuple[float, QuestionDropVariant]] = []
+        same_day_scored: list[tuple[float, QuestionDropVariant]] = []
+        generated_gap = max(0, source_counts["curated"] - source_counts["generated"])
         for variant in candidates:
             concept_cooldown_days, variant_cooldown_days, preferred_concept_days, preferred_variant_days = self._repeat_windows_for_variant(
                 variant,
@@ -1007,16 +1035,25 @@ class QuestionDropsService:
             freshness = 18.0 if concept_seen_at is None else min(days_since_concept * 4.0, 16.0)
             variant_freshness = 9.0 if variant_seen_at is None else min(days_since_variant * 2.0, 8.0)
             if days_since_concept is not None and days_since_concept < preferred_concept_days:
-                freshness -= (preferred_concept_days - days_since_concept) * (4.0 if variant.source_type == "curated" else 2.0)
+                freshness -= (preferred_concept_days - days_since_concept) * (6.0 if variant.source_type == "curated" else 2.5)
             if days_since_variant is not None and days_since_variant < preferred_variant_days:
-                variant_freshness -= (preferred_variant_days - days_since_variant) * (3.0 if variant.source_type == "curated" else 1.5)
+                variant_freshness -= (preferred_variant_days - days_since_variant) * (4.0 if variant.source_type == "curated" else 1.75)
             category_balance = 8.0 - category_counts[variant.category]
             difficulty_balance = 5.0 - difficulty_counts[int(variant.difficulty)]
-            source_balance = 3.0 - source_counts[variant.source_type]
-            pool_depth_bonus = min(category_variant_capacity[variant.category], 12) * (0.15 if variant.source_type == "generated" else 0.08)
+            if variant.source_type == "generated":
+                source_balance = 2.5 + min(generated_gap * 0.75, 4.0)
+                pool_depth_bonus = min(category_variant_capacity[variant.category], 12) * 0.22
+            else:
+                source_balance = 1.5 - min(generated_gap * 0.35, 3.0)
+                pool_depth_bonus = min(category_variant_capacity[variant.category], 12) * 0.06
             jitter = (int(build_variant_hash(slot_key, variant.variant_hash), 16) % 1000) / 1000.0
             score = freshness + variant_freshness + category_balance + difficulty_balance + source_balance + pool_depth_bonus + jitter
-            scored.append((score, variant))
+            if variant.concept_id in same_day_concepts:
+                same_day_scored.append((score - 12.0, variant))
+            else:
+                scored.append((score, variant))
+        if not scored:
+            scored = same_day_scored
         if not scored:
             return None
         scored.sort(key=lambda item: item[0], reverse=True)
