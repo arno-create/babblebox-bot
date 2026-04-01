@@ -313,7 +313,7 @@ class _PostgresProfileStore(_BaseProfileStore):
         raise ProfileStorageUnavailable(f"Could not connect to Babblebox profile storage: {last_error}") from last_error
 
     async def _ensure_schema(self):
-        statements = [
+        table_statements = [
             "CREATE TABLE IF NOT EXISTS bb_identity_meta (key TEXT PRIMARY KEY, value JSONB NOT NULL DEFAULT '{}'::jsonb, updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc', now()))",
             (
                 "CREATE TABLE IF NOT EXISTS bb_user_profiles ("
@@ -364,10 +364,6 @@ class _PostgresProfileStore(_BaseProfileStore):
                 "updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc', now())"
                 ")"
             ),
-            "CREATE INDEX IF NOT EXISTS ix_bb_profiles_total_daily_clears ON bb_user_profiles (total_daily_clears DESC)",
-            "CREATE INDEX IF NOT EXISTS ix_bb_profiles_best_daily_streak ON bb_user_profiles (best_daily_streak DESC)",
-            "CREATE INDEX IF NOT EXISTS ix_bb_profiles_xp_total ON bb_user_profiles (xp_total DESC)",
-            "CREATE INDEX IF NOT EXISTS ix_bb_profiles_question_drop_points ON bb_user_profiles (question_drop_points DESC)",
             (
                 "CREATE TABLE IF NOT EXISTS bb_daily_results ("
                 "challenge_id TEXT NOT NULL, "
@@ -381,8 +377,6 @@ class _PostgresProfileStore(_BaseProfileStore):
                 "PRIMARY KEY (challenge_id, puzzle_date, user_id)"
                 ")"
             ),
-            "CREATE INDEX IF NOT EXISTS ix_bb_daily_results_user_date ON bb_daily_results (user_id, puzzle_date DESC)",
-            "CREATE INDEX IF NOT EXISTS ix_bb_daily_results_date ON bb_daily_results (puzzle_date DESC)",
             (
                 "CREATE TABLE IF NOT EXISTS bb_question_drop_categories ("
                 "user_id BIGINT NOT NULL, "
@@ -396,23 +390,61 @@ class _PostgresProfileStore(_BaseProfileStore):
                 "PRIMARY KEY (user_id, category)"
                 ")"
             ),
+        ]
+        profile_column_migrations = (
+            "ADD COLUMN IF NOT EXISTS only16_rounds INTEGER NOT NULL DEFAULT 0",
+            "ADD COLUMN IF NOT EXISTS only16_wins INTEGER NOT NULL DEFAULT 0",
+            "ADD COLUMN IF NOT EXISTS pattern_hunt_rounds INTEGER NOT NULL DEFAULT 0",
+            "ADD COLUMN IF NOT EXISTS pattern_hunt_wins INTEGER NOT NULL DEFAULT 0",
+            "ADD COLUMN IF NOT EXISTS question_drop_attempts INTEGER NOT NULL DEFAULT 0",
+            "ADD COLUMN IF NOT EXISTS question_drop_correct INTEGER NOT NULL DEFAULT 0",
+            "ADD COLUMN IF NOT EXISTS question_drop_points INTEGER NOT NULL DEFAULT 0",
+            "ADD COLUMN IF NOT EXISTS question_drop_current_streak INTEGER NOT NULL DEFAULT 0",
+            "ADD COLUMN IF NOT EXISTS question_drop_best_streak INTEGER NOT NULL DEFAULT 0",
+        )
+        index_statements = [
+            # Profile indexes can reference columns added by additive migrations, so they must run after
+            # ALTER TABLE ... ADD COLUMN IF NOT EXISTS statements on legacy deployments.
+            "CREATE INDEX IF NOT EXISTS ix_bb_profiles_total_daily_clears ON bb_user_profiles (total_daily_clears DESC)",
+            "CREATE INDEX IF NOT EXISTS ix_bb_profiles_best_daily_streak ON bb_user_profiles (best_daily_streak DESC)",
+            "CREATE INDEX IF NOT EXISTS ix_bb_profiles_xp_total ON bb_user_profiles (xp_total DESC)",
+            "CREATE INDEX IF NOT EXISTS ix_bb_profiles_question_drop_points ON bb_user_profiles (question_drop_points DESC)",
+            "CREATE INDEX IF NOT EXISTS ix_bb_daily_results_user_date ON bb_daily_results (user_id, puzzle_date DESC)",
+            "CREATE INDEX IF NOT EXISTS ix_bb_daily_results_date ON bb_daily_results (puzzle_date DESC)",
             "CREATE INDEX IF NOT EXISTS ix_bb_question_drop_categories_user_points ON bb_question_drop_categories (user_id, points DESC, correct_count DESC)",
         ]
         async with self._pool.acquire() as conn:
-            for statement in statements:
-                await conn.execute(statement)
-            for column_sql in (
-                "ADD COLUMN IF NOT EXISTS only16_rounds INTEGER NOT NULL DEFAULT 0",
-                "ADD COLUMN IF NOT EXISTS only16_wins INTEGER NOT NULL DEFAULT 0",
-                "ADD COLUMN IF NOT EXISTS pattern_hunt_rounds INTEGER NOT NULL DEFAULT 0",
-                "ADD COLUMN IF NOT EXISTS pattern_hunt_wins INTEGER NOT NULL DEFAULT 0",
-                "ADD COLUMN IF NOT EXISTS question_drop_attempts INTEGER NOT NULL DEFAULT 0",
-                "ADD COLUMN IF NOT EXISTS question_drop_correct INTEGER NOT NULL DEFAULT 0",
-                "ADD COLUMN IF NOT EXISTS question_drop_points INTEGER NOT NULL DEFAULT 0",
-                "ADD COLUMN IF NOT EXISTS question_drop_current_streak INTEGER NOT NULL DEFAULT 0",
-                "ADD COLUMN IF NOT EXISTS question_drop_best_streak INTEGER NOT NULL DEFAULT 0",
-            ):
-                await conn.execute(f"ALTER TABLE bb_user_profiles {column_sql}")
+            transaction = getattr(conn, "transaction", None)
+            if callable(transaction):
+                async with transaction():
+                    await self._apply_schema_statements(
+                        conn,
+                        table_statements=table_statements,
+                        profile_column_migrations=profile_column_migrations,
+                        index_statements=index_statements,
+                    )
+            else:
+                await self._apply_schema_statements(
+                    conn,
+                    table_statements=table_statements,
+                    profile_column_migrations=profile_column_migrations,
+                    index_statements=index_statements,
+                )
+
+    async def _apply_schema_statements(
+        self,
+        conn,
+        *,
+        table_statements: list[str],
+        profile_column_migrations: tuple[str, ...],
+        index_statements: list[str],
+    ):
+        for statement in table_statements:
+            await conn.execute(statement)
+        for column_sql in profile_column_migrations:
+            await conn.execute(f"ALTER TABLE bb_user_profiles {column_sql}")
+        for statement in index_statements:
+            await conn.execute(statement)
 
     def _row_to_dict(self, row) -> dict[str, Any] | None:
         if row is None:
