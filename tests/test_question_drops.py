@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import types
 import unittest
+from collections import Counter
 from datetime import timedelta
 from unittest.mock import AsyncMock, patch
 
@@ -162,6 +163,7 @@ class QuestionDropsContentTests(unittest.TestCase):
         self.assertFalse(is_answer_attempt(ordered, "it is true"))
 
     def test_render_answer_instruction_matches_answer_type(self):
+        self.assertIn("Reply here or send", render_answer_instruction({"type": "numeric", "value": 12}))
         self.assertIn("option text", render_answer_instruction({"type": "multiple_choice", "choices": ["a"], "answer": "a"}))
         self.assertIn("number words", render_answer_instruction({"type": "numeric", "value": 12}))
         self.assertIn("true", render_answer_instruction({"type": "boolean", "value": True}))
@@ -367,6 +369,44 @@ class QuestionDropsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(low_pick, curated_variant)
         self.assertEqual(high_pick, generated_variant)
 
+    async def test_selector_high_drop_pressure_keeps_category_spread_healthier(self):
+        high_config = {**self.service.get_config(self.guild.id), "drops_per_day": 10}
+        exposures: list[dict[str, object]] = []
+        category_counts: Counter[str] = Counter()
+        base_now = ge.now_utc()
+
+        for day_offset in range(2):
+            slot_day = (base_now - timedelta(days=2 - day_offset)).date()
+            for slot_index in range(10):
+                slot_key = f"{slot_day.isoformat()}:{slot_index}"
+                variant = self.service._select_variant(
+                    self.guild.id,
+                    self.channel.id,
+                    exposures=exposures,
+                    slot_key=slot_key,
+                    config=high_config,
+                )
+                self.assertIsNotNone(variant)
+                category_counts[variant.category] += 1
+                exposures.insert(
+                    0,
+                    {
+                        "guild_id": self.guild.id,
+                        "channel_id": self.channel.id,
+                        "concept_id": variant.concept_id,
+                        "variant_hash": variant.variant_hash,
+                        "category": variant.category,
+                        "difficulty": variant.difficulty,
+                        "asked_at": (base_now - timedelta(days=2 - day_offset, minutes=slot_index)).isoformat(),
+                        "resolved_at": None,
+                        "winner_user_id": None,
+                        "slot_key": slot_key,
+                    },
+                )
+
+        self.assertGreaterEqual(len(category_counts), 4)
+        self.assertLessEqual(max(category_counts.values()), 8)
+
     async def test_update_config_accepts_maximum_drop_range(self):
         ok, message = await self.service.update_config(self.guild.id, drops_per_day=10)
 
@@ -403,6 +443,7 @@ class QuestionDropsServiceTests(unittest.IsolatedAsyncioTestCase):
                 }
             ],
         )
+        self.assertEqual(self.channel.sent[-1][1]["embed"].title, "Solved")
 
     async def test_wrong_feedback_is_rate_limited_and_attempts_only_count_once_per_user(self):
         await self.service.update_config(self.guild.id, tone_mode="playful")
@@ -417,6 +458,7 @@ class QuestionDropsServiceTests(unittest.IsolatedAsyncioTestCase):
         exposure_id = int(active["exposure_id"])
         self.assertEqual(self.service._wrong_feedback_count[exposure_id], 1)
         self.assertEqual(self.service._attempted_users[exposure_id], {55})
+        self.assertEqual(self.channel.sent[-1][1]["embed"].title, "Not Yet")
 
     async def test_same_user_wrong_then_correct_counts_once_as_correct_participation(self):
         active = await self._post_one_drop()
@@ -552,8 +594,17 @@ class QuestionDropsServiceTests(unittest.IsolatedAsyncioTestCase):
         snapshot = await self.service.get_status_snapshot(self.guild)
         embed = self.service.build_status_embed(self.guild, snapshot)
 
-        self.assertIn("Idle channels can skip a slot.", embed.description)
-        self.assertIn("Higher daily counts reuse concepts sooner.", embed.description)
+        self.assertIn("Quiet channels can skip a slot.", embed.description)
+        self.assertIn("Higher daily counts recycle sooner once the fresh pool thins.", embed.description)
+
+    async def test_timed_out_drop_uses_clean_closure_copy(self):
+        active = await self._post_one_drop()
+
+        await self.service._expire_drop(active, timed_out=True)
+
+        self.assertEqual(len(self.service._active_drops), 0)
+        self.assertEqual(self.channel.sent[-1][1]["embed"].title, "Time's Up")
+        self.assertIn("No clean solve this time.", self.channel.sent[-1][1]["embed"].description)
 
     async def test_party_game_overlap_retires_live_drop_before_judging(self):
         active = await self._post_one_drop()

@@ -1180,8 +1180,8 @@ def get_lobby_embed(guild_id):
         "corpse": ("📝 Exquisite Corpse", "Blind collaborative nonsense for 3+ players.", discord.Color.purple()),
         "spyfall": ("🕵️ Spyfall", "Find the spy before the room turns on itself. 3+ players.", discord.Color.dark_gray()),
         "bomb": ("💣 Word Bomb", "Fast typing survival for 2+ players.", discord.Color.red()),
-        "only16": ("Only 16", "Fair quantity-trap elimination with explicit numeric judging. 2+ players.", discord.Color.orange()),
-        "pattern_hunt": ("Pattern Hunt", "One guesser, hidden machine-checkable rule, public clues, structured guesses. 3+ players.", discord.Color.dark_teal()),
+        "only16": ("Only 16", "Fair quantity traps with explicit numeric judging and low-noise Smart mode. 2+ players.", discord.Color.orange()),
+        "pattern_hunt": ("Pattern Hunt", "One guesser, hidden machine-judged rule, public clues, structured guesses. 3+ players.", discord.Color.dark_teal()),
     }
 
     title, desc, color = titles.get(gt, titles["none"])
@@ -1200,9 +1200,9 @@ def get_lobby_embed(guild_id):
             name="Only 16 Mode",
             value=(
                 f"**{str(game.get('only16_mode', 'strict')).title()}**\n"
-                "Strict: reply to the armed question only.\n"
-                "Smart: reply to the armed question or give one clear standalone answer.\n"
-                "Unrelated chatter is ignored."
+                "Strict: only direct replies to the armed question count.\n"
+                "Smart: direct replies count, plus one clean standalone answer like `16!` or `sixteen.`.\n"
+                "Chatter stays out, and ambiguity never eliminates."
             ),
             inline=False,
         )

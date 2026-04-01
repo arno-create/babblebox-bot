@@ -433,14 +433,14 @@ class QuestionDropsService:
         config = snapshot.config
         enabled_categories = config.get("enabled_categories") or list(QUESTION_DROP_CATEGORIES)
         enabled_category_labels = [QUESTION_DROP_CATEGORY_LABELS.get(category, category.title()) for category in enabled_categories]
-        description = "Compact scheduled prompts with offline content, honest repeat control, and same-channel /play blocking."
+        description = "Compact scheduled trivia with offline content, honest freshness rules, and same-channel `/play` protection."
         if not config.get("enabled"):
-            description = "Question Drops are currently off for this server."
+            description = "Question Drops are off for this server."
         else:
             if str(config.get("activity_gate", "light")).casefold() == "light":
-                description += " Idle channels can skip a slot."
+                description += " Quiet channels can skip a slot."
             if int(config.get("drops_per_day", 2) or 2) >= 6:
-                description += " Higher daily counts reuse concepts sooner."
+                description += " Higher daily counts recycle sooner once the fresh pool thins."
         embed = discord.Embed(
             title="Question Drops",
             description=description,
@@ -493,7 +493,7 @@ class QuestionDropsService:
         categories = summary["top_categories"]
         embed = discord.Embed(
             title="Question Drops Stats",
-            description=f"Performance snapshot for **{ge.display_name_of(user)}**.",
+            description=f"Quick read on **{ge.display_name_of(user)}**.",
             color=ge.EMBED_THEME["info"],
         )
         participations = int(profile.get("question_drop_attempts", 0) or 0)
@@ -503,7 +503,7 @@ class QuestionDropsService:
             name="Overall",
             value=(
                 f"Points: **{int(profile.get('question_drop_points', 0) or 0)}**\n"
-                f"Solves: **{correct} / {participations} participated drops**\n"
+                f"Solved: **{correct} / {participations} drops**\n"
                 f"Accuracy: **{accuracy:.0f}%**"
             ),
             inline=True,
@@ -521,7 +521,7 @@ class QuestionDropsService:
             for entry in categories[:4]:
                 label = QUESTION_DROP_CATEGORY_LABELS.get(entry["category"], entry["category"].title())
                 lines.append(
-                    f"**{label}**: {int(entry.get('correct_count', 0) or 0)} correct, {int(entry.get('points', 0) or 0)} pts"
+                    f"**{label}**: {int(entry.get('correct_count', 0) or 0)} solves, {int(entry.get('points', 0) or 0)} pts"
                 )
             embed.add_field(name="Top Categories", value="\n".join(lines), inline=False)
         return ge.style_embed(embed, footer="Babblebox Question Drops | Aggregates only, no answer archive")
@@ -595,8 +595,8 @@ class QuestionDropsService:
             with contextlib.suppress(discord.HTTPException):
                 await message.channel.send(
                     embed=ge.make_status_embed(
-                        "Correct",
-                        f"{message.author.mention} solved the drop and earned **{answer_points_for_difficulty(result_payload['difficulty'])}** points.",
+                        "Solved",
+                        f"{message.author.mention} took the drop for **{answer_points_for_difficulty(result_payload['difficulty'])}** points.",
                         tone="success",
                         footer=f"Babblebox Question Drops | {QUESTION_DROP_CATEGORY_LABELS.get(result_payload['category'], result_payload['category'].title())}",
                     ),
@@ -607,7 +607,7 @@ class QuestionDropsService:
             with contextlib.suppress(discord.HTTPException):
                 await message.channel.send(
                     embed=ge.make_status_embed(
-                        "Nope",
+                        "Not Yet",
                         feedback_line,
                         tone="warning",
                         footer="Babblebox Question Drops",
@@ -743,12 +743,12 @@ class QuestionDropsService:
         if channel is None:
             return
         answer = render_answer_summary(record["answer_spec"])
-        title = "Time's Up" if timed_out else "Question Closed"
+        title = "Time's Up" if timed_out else "Drop Closed"
         with contextlib.suppress(discord.HTTPException):
             await channel.send(
                 embed=ge.make_status_embed(
                     title,
-                    f"No clean solve this round. The answer was **{answer}**.",
+                    f"No clean solve this time. Answer: **{answer}**.",
                     tone="info",
                     footer="Babblebox Question Drops",
                 )
@@ -996,6 +996,8 @@ class QuestionDropsService:
         source_counts = Counter()
         category_concept_counts = Counter()
         category_variant_capacity = Counter()
+        candidate_categories = {candidate.category for candidate in candidates}
+        candidate_difficulties = {int(candidate.difficulty) for candidate in candidates}
         same_day_concepts: set[str] = set()
         seen_category_concepts: set[tuple[str, str]] = set()
         now = ge.now_utc()
@@ -1023,6 +1025,8 @@ class QuestionDropsService:
         same_day_scored: list[tuple[float, QuestionDropVariant]] = []
         generated_gap = max(0, source_counts["curated"] - source_counts["generated"])
         drop_pressure = max(0, int(config.get("drops_per_day", 2) or 2) - 2)
+        category_floor = min((category_counts[category] for category in candidate_categories), default=0)
+        difficulty_floor = min((difficulty_counts[difficulty] for difficulty in candidate_difficulties), default=0)
         for variant in candidates:
             concept_cooldown_days, variant_cooldown_days, preferred_concept_days, preferred_variant_days = self._repeat_windows_for_variant(
                 variant,
@@ -1051,12 +1055,22 @@ class QuestionDropsService:
             if days_since_variant is not None and days_since_variant < preferred_variant_days:
                 variant_freshness -= (preferred_variant_days - days_since_variant) * (4.0 if variant.source_type == "curated" else 1.75)
             category_balance = 8.0 - category_counts[variant.category]
+            category_gap = max(0, category_counts[variant.category] - category_floor)
+            free_category_repeats = 2 if drop_pressure >= 4 else 1
+            if category_gap > free_category_repeats:
+                spread_penalty = category_gap - free_category_repeats
+                category_balance -= spread_penalty * (0.9 + min(drop_pressure * 0.2, 1.6))
+                if variant.source_type == "generated":
+                    category_balance -= spread_penalty * min(drop_pressure * 0.18, 1.2)
             difficulty_balance = 5.0 - difficulty_counts[int(variant.difficulty)]
+            difficulty_gap = max(0, difficulty_counts[int(variant.difficulty)] - difficulty_floor - 1)
+            if difficulty_gap:
+                difficulty_balance -= difficulty_gap * (0.35 + min(drop_pressure * 0.08, 0.6))
             if variant.source_type == "generated":
-                source_balance = 2.5 + min(generated_gap * 0.75, 4.0) + min(drop_pressure * 0.7, 4.0)
-                pool_depth_bonus = (min(category_variant_capacity[variant.category], 12) * 0.22) + min(drop_pressure * 0.25, 1.5)
+                source_balance = 2.5 + min(generated_gap * 0.75, 4.0) + min(drop_pressure * 0.5, 3.0)
+                pool_depth_bonus = (min(category_variant_capacity[variant.category], 12) * 0.16) + min(drop_pressure * 0.2, 1.2)
             else:
-                source_balance = 1.5 - min(generated_gap * 0.35, 3.0) - min(drop_pressure * 0.55, 3.0)
+                source_balance = 1.5 - min(generated_gap * 0.25, 2.0) - min(drop_pressure * 0.35, 2.0)
                 pool_depth_bonus = min(category_variant_capacity[variant.category], 12) * 0.06
             jitter = (int(build_variant_hash(slot_key, variant.variant_hash), 16) % 1000) / 1000.0
             score = freshness + variant_freshness + category_balance + difficulty_balance + source_balance + pool_depth_bonus + jitter

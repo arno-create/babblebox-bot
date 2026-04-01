@@ -383,7 +383,7 @@ def _daily_active_progress_line(
         return f"Progress: Clear {attempts}/{DAILY_MAX_ATTEMPTS} | share ready"
     if result.get("completed_at") is not None:
         if public:
-            return f"Progress: Wrapped {attempts}/{DAILY_MAX_ATTEMPTS} | share-ready summary"
+            return f"Progress: Wrapped {attempts}/{DAILY_MAX_ATTEMPTS} | share ready summary"
         return f"Progress: Wrapped {attempts}/{DAILY_MAX_ATTEMPTS} | answer **{puzzle.answer.upper()}**"
     remaining = max(0, DAILY_MAX_ATTEMPTS - attempts)
     return f"Progress: {attempts}/{DAILY_MAX_ATTEMPTS} used | {remaining} left"
@@ -1057,14 +1057,6 @@ class ProfileService:
         for row in recent[:6]:
             mode = challenge_modes.get(row["challenge_id"], "shuffle")
             label = _daily_mode_label(mode)
-            marker = "cleared" if row.get("solved") else "tried"
-            recent_lines.append(
-                f"**{row['puzzle_date'].isoformat()}** • {_daily_mode_icon(mode)} {label} • {marker} {int(row.get('attempt_count', 0) or 0)}/{DAILY_MAX_ATTEMPTS}"
-            )
-        recent_lines = []
-        for row in recent[:6]:
-            mode = challenge_modes.get(row["challenge_id"], "shuffle")
-            label = _daily_mode_label(mode)
             recent_lines.append(
                 f"{row['puzzle_date'].isoformat()} | {_daily_mode_icon(mode)} {label} | {_daily_progress_line(row)}"
             )
@@ -1129,7 +1121,7 @@ class ProfileService:
             name="Question Drops",
             value=(
                 f"Points: **{profile['question_drop_points']}**\n"
-                f"Solves: **{profile['question_drop_correct']} / {profile['question_drop_attempts']} participated drops**\n"
+                f"Solved: **{profile['question_drop_correct']} / {profile['question_drop_attempts']} drops**\n"
                 f"Streak: **{profile['question_drop_current_streak']}**"
             ),
             inline=True,
@@ -1189,7 +1181,7 @@ class ProfileService:
             title=title,
             description=(
                 f"**{ge.display_name_of(target)}** with buddy **{profile['buddy_name']}** in the Babblebox lounge.\n"
-                f"{'Private snapshot with live utility context.' if is_vault else 'Showable snapshot of arcade, buddy, and party energy.'}"
+                f"{'Private snapshot with live utility context.' if is_vault else 'Showable snapshot of arcade, buddy, and party highlights.'}"
             ),
             color=profile["style_meta"]["color"],
         )
@@ -1216,7 +1208,7 @@ class ProfileService:
             name="Question Drops",
             value=(
                 f"Points: **{profile['question_drop_points']}**\n"
-                f"Solves: **{profile['question_drop_correct']} / {profile['question_drop_attempts']} participated drops**\n"
+                f"Solved: **{profile['question_drop_correct']} / {profile['question_drop_attempts']} drops**\n"
                 f"Best streak: **{profile['question_drop_best_streak']}**"
             ),
             inline=True,

@@ -179,14 +179,36 @@ class FakeLobbyView:
 class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
     def test_help_pages_reflect_hardened_only16_and_pattern_hunt_copy(self):
         party_page = next(page for page in HELP_PAGES if page["title"] == "Party Games")
-        self.assertIn("Strict: reply to the armed question only.", party_page["body"])
-        self.assertIn("Smart: reply to the armed question or give one clear standalone answer.", party_page["body"])
+        self.assertIn("Strict: only direct replies to the armed question count.", party_page["body"])
+        self.assertIn("`16!` or `sixteen.`", party_page["body"])
         self.assertIn("digits `0-9` only", party_page["body"])
 
     def test_help_pages_reflect_question_drop_option_copy(self):
         daily_page = next(page for page in HELP_PAGES if page["title"] == "Daily Arcade")
-        self.assertIn("1-10 drops/day", daily_page["body"])
+        self.assertIn("1-10 drops a day", daily_page["body"])
         self.assertIn("option letter or option text", daily_page["body"])
+        self.assertIn("Quiet channels can skip a slot", daily_page["body"])
+
+    def test_only16_lobby_copy_stays_aligned_with_manual(self):
+        saved_games = ge.games
+        host = FakeAuthor(1)
+        ge.games = {
+            55: {
+                "host": host,
+                "players": [host, FakeAuthor(2)],
+                "game_type": "only16",
+                "only16_mode": "smart",
+            }
+        }
+        try:
+            embed = ge.get_lobby_embed(55)
+        finally:
+            ge.games = saved_games
+
+        mode_field = next(field.value for field in embed.fields if field.name == "Only 16 Mode")
+        self.assertIn("Strict: only direct replies to the armed question count.", mode_field)
+        self.assertIn("`16!` or `sixteen.`", mode_field)
+        self.assertIn("ambiguity never eliminates", mode_field)
 
     async def test_ping_command_responds_through_context_send(self):
         cog = MetaCog(object())

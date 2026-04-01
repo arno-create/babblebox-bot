@@ -44,6 +44,7 @@ _SMART_STANDALONE_LEAD_RE = re.compile(
     r"^\s*(?:it(?:'s| is)|answer(?::|\s+is|'s)|my guess is)\s+(?P<payload>.+?)\s*$",
     re.IGNORECASE,
 )
+_STANDALONE_TRAILING_PUNCTUATION_RE = re.compile(r"^(?P<body>.+?)(?P<punct>[.!]+)$")
 _DIGIT_RE = re.compile(r"(?<![\w/])([+-]?\d+)(?![\w/])")
 _INTEGER_FULL_RE = re.compile(r"^[+-]?\d+$")
 _MATH_TEXT_RE = re.compile(r"^[\d\s()+\-*/^]+$")
@@ -472,14 +473,31 @@ def _only16_player_names(game: dict[str, Any]) -> str:
 
 def _only16_mode_guide() -> str:
     return (
-        "Strict: reply to the armed question only.\n"
-        "Smart: reply to the armed question or give one clear standalone answer.\n"
-        "Unrelated chatter is ignored."
+        "Strict: only direct replies to the armed question count.\n"
+        "Smart: direct replies count, plus one clean standalone answer like `16!` or `sixteen.`.\n"
+        "Chatter stays out, and ambiguity never eliminates."
     )
 
 
 def _only16_supported_math_copy() -> str:
-    return "Safe math supports integers with `+ - * / ^`, unary `+/-`, and parentheses."
+    return "Safe math uses integers with `+ - * / ^`, unary `+/-`, and parentheses."
+
+
+def _smart_exact_payload(text: str | None) -> Only16ParseResult:
+    content = str(text or "").strip()
+    if not content:
+        return Only16ParseResult("none")
+    candidates = [content]
+    punctuated_match = _STANDALONE_TRAILING_PUNCTUATION_RE.match(content)
+    if punctuated_match is not None:
+        trimmed = str(punctuated_match.group("body") or "").strip()
+        if trimmed and trimmed not in candidates:
+            candidates.append(trimmed)
+    for candidate in candidates:
+        parsed = _parse_exact_numeric_payload(candidate)
+        if parsed.kind != "none":
+            return parsed
+    return Only16ParseResult("none")
 
 
 def _format_fraction(value: Fraction | int) -> str:
@@ -489,41 +507,41 @@ def _format_fraction(value: Fraction | int) -> str:
     return f"{fraction.numerator}/{fraction.denominator}"
 
 
-def _classify_smart_follow_up(text: str | None, parsed: Only16ParseResult) -> str:
+def _classify_smart_follow_up(text: str | None, parsed: Only16ParseResult) -> tuple[str, Only16ParseResult]:
     content = str(text or "").strip()
     if not content or len(content) > 60:
-        return "ignore"
+        return "ignore", parsed
     if "?" in content or has_question_intent(content):
-        return "ignore"
-    exact = _parse_exact_numeric_payload(content)
+        return "ignore", parsed
+    exact = _smart_exact_payload(content)
     if exact.kind == "single":
-        return "judge"
+        return "judge", exact
     if exact.kind == "unsupported":
-        return "void"
+        return "void", exact
     lead_match = _SMART_STANDALONE_LEAD_RE.match(content)
     if lead_match is None:
-        return "ignore"
+        return "ignore", parsed
     payload = str(lead_match.group("payload") or "").strip()
     if not payload:
-        return "ignore"
-    payload_exact = _parse_exact_numeric_payload(payload)
+        return "ignore", parsed
+    payload_exact = _smart_exact_payload(payload)
     if payload_exact.kind == "single":
-        return "judge"
+        return "judge", payload_exact
     if payload_exact.kind == "unsupported":
-        return "void"
+        return "void", payload_exact
     payload_parsed = parse_only16_numeric_answer(payload)
     if payload_parsed.kind == "ambiguous":
-        return "void"
+        return "void", payload_parsed
     if parsed.kind == "unsupported":
-        return "void"
-    return "ignore"
+        return "void", parsed
+    return "ignore", parsed
 
 
 def _trap_live_copy(mode: str | None) -> str:
     normalized = str(mode or "strict").casefold()
     if normalized == "smart":
-        return "Trap live. Smart mode is on: replies to the armed question or one clear standalone answer can count. Unrelated chatter is ignored."
-    return "Trap live. Strict mode is on: only replies to the armed question count. Unrelated chatter is ignored."
+        return "Trap live. Smart mode counts direct replies and one clean standalone answer. Chatter stays out."
+    return "Trap live. Strict mode counts direct replies to the armed question only. Chatter stays out."
 
 
 def _message_created_at_utc(message: discord.Message) -> Any:
@@ -540,7 +558,7 @@ async def start_only16_game_locked(guild_id: int, game: dict[str, Any]):
         title="Only 16",
         description=(
             f"Mode: **{only16_mode_label(state.get('mode'))}**\n"
-            "Ask a clear number question. Explicit numbers include digits, safe number words, or bounded math like `8*2`, `17-1`, or `(10+6)`."
+            "Ask one clean number question. Babblebox only judges explicit answers: digits, clear number words, or safe math like `8*2`, `17-1`, or `(10+6)`."
         ),
         color=discord.Color.orange(),
     )
@@ -602,7 +620,7 @@ async def manually_arm_only16_message(message: discord.Message, guild_id: int, g
     if ask_started_at is None or created_at is None or created_at < ask_started_at:
         return False, "You can only arm a question from your current ask window."
     await _arm_only16_trap_locked(guild_id, game, message, manual=True)
-    return True, "16 trap armed."
+    return True, "Trap armed. Babblebox is watching for 16."
 
 
 async def _arm_only16_trap_locked(guild_id: int, game: dict[str, Any], message: discord.Message, *, manual: bool):
@@ -624,7 +642,7 @@ async def _arm_only16_trap_locked(guild_id: int, game: dict[str, Any], message: 
             embed=ge.make_status_embed(
                 "Trap Live",
                 (
-                    f"{message.author.mention} armed a 16 trap. {_trap_live_copy(trap.get('mode'))}"
+                    f"{message.author.mention} armed the trap. {_trap_live_copy(trap.get('mode'))}"
                     if manual
                     else _trap_live_copy(trap.get("mode"))
                 ),
@@ -649,15 +667,19 @@ async def _handle_only16_answer_locked(message: discord.Message, guild_id: int, 
 
     if mode != "smart":
         return False
-    smart_outcome = _classify_smart_follow_up(message.content, parsed)
+    smart_outcome, smart_parsed = _classify_smart_follow_up(message.content, parsed)
     if smart_outcome == "ignore":
         return False
+    if smart_outcome == "judge":
+        parsed = smart_parsed
     if smart_outcome == "void":
+        if smart_parsed.kind in {"ambiguous", "unsupported"}:
+            return await _resolve_only16_answer_locked(message, guild_id, game, trap, smart_parsed)
         await _consume_only16_trap_locked(
             guild_id,
             game,
             title="Trap Voided",
-            reason="Smart mode only counts one clear standalone answer, so Babblebox refused to guess through a fuzzy non-reply lane.",
+            reason="Smart mode only takes one clean standalone answer, so Babblebox refused to judge a fuzzy non-reply lane.",
         )
         return True
     return await _resolve_only16_answer_locked(message, guild_id, game, trap, parsed)
@@ -676,7 +698,7 @@ async def _resolve_only16_answer_locked(
     asker_id = trap["asker_id"]
 
     if parsed.kind == "none":
-        body = f"{message.author.mention} did not give one clear explicit number, so Babblebox lets it pass."
+        body = f"{message.author.mention} never gave one clear explicit number, so the trap passes harmlessly."
         await game["channel"].send(
             embed=ge.make_status_embed("Safe Pass", body, tone="info", footer="Babblebox Only 16"),
             allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
@@ -687,7 +709,7 @@ async def _resolve_only16_answer_locked(
         await game["channel"].send(
             embed=ge.make_status_embed(
                 "Trap Voided",
-                f"{message.author.mention} gave more than one explicit number, so Babblebox voided the catch on fairness.",
+                f"{message.author.mention} gave more than one explicit number, so Babblebox voided the trap on fairness.",
                 tone="info",
                 footer="Babblebox Only 16",
             ),
@@ -700,7 +722,7 @@ async def _resolve_only16_answer_locked(
             embed=ge.make_status_embed(
                 "Trap Voided",
                 (
-                    f"{message.author.mention} used math outside the safe judge grammar, so Babblebox refused to auto-eliminate on it.\n"
+                    f"{message.author.mention} used math outside the safe judge grammar, so Babblebox would not auto-eliminate on it.\n"
                     f"{_only16_supported_math_copy()}"
                 ),
                 tone="info",
@@ -716,9 +738,9 @@ async def _resolve_only16_answer_locked(
     rendered_value = _format_fraction(numeric_value)
     if numeric_value == 16:
         body = (
-            f"{message.author.mention}'s math evaluates to **16**, so they slip through."
+            f"{message.author.mention}'s math lands on **16**, so they slip through."
             if parsed.source == "expression"
-            else f"{message.author.mention} answered with **16** and slips through."
+            else f"{message.author.mention} lands on **16** and slips through."
         )
         await game["channel"].send(
             embed=ge.make_status_embed("Still Alive", body, tone="success", footer="Babblebox Only 16"),
@@ -731,9 +753,9 @@ async def _resolve_only16_answer_locked(
     if eliminated is not None:
         game["players"] = [player for player in game["players"] if player.id != message.author.id]
     body = (
-        f"{message.author.mention}'s math evaluates to **{rendered_value}** instead of **16**, and they are out."
+        f"{message.author.mention}'s math lands on **{rendered_value}**, not **16**, and they are out."
         if parsed.source == "expression"
-        else f"{message.author.mention} said **{rendered_value}** instead of **16** and is out."
+        else f"{message.author.mention} lands on **{rendered_value}**, not **16**, and is out."
     )
     await game["channel"].send(
         embed=ge.make_status_embed("Eliminated", body, tone="danger", footer="Babblebox Only 16"),
@@ -794,7 +816,7 @@ async def _start_only16_turn_locked(guild_id: int, game: dict[str, Any]):
         embed=ge.make_status_embed(
             "Your Trap Turn",
             (
-                f"{current_asker.mention}, ask a clear number question in the next **{ONLY16_ASK_WINDOW_SECONDS} seconds**.\n"
+                f"{current_asker.mention}, ask one clean number question in the next **{ONLY16_ASK_WINDOW_SECONDS} seconds**.\n"
                 f"Mode: **{only16_mode_label(state.get('mode'))}**\n"
                 f"{_only16_mode_guide()}"
             ),
@@ -845,7 +867,7 @@ async def _only16_ask_timeout(guild_id: int, token: int):
         await game["channel"].send(
             embed=ge.make_status_embed(
                 "Turn Skipped",
-                f"{current_asker.mention} did not arm a clear number question in time, so the turn moves on.",
+                f"{current_asker.mention} did not arm a clean number question in time, so the turn moves on.",
                 tone="info",
                 footer="Babblebox Only 16",
             ),
@@ -873,5 +895,5 @@ async def _only16_trap_timeout(guild_id: int, token: int):
             guild_id,
             game,
             title="Trap Window Closed",
-            reason="Nobody took the bait before the trap window closed.",
+            reason="Nobody bit before the trap window closed.",
         )

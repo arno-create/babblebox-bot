@@ -477,14 +477,14 @@ def render_answer_summary(answer_spec: dict[str, Any]) -> str:
 def render_answer_instruction(answer_spec: dict[str, Any]) -> str:
     answer_type = answer_spec.get("type")
     if answer_type == "multiple_choice":
-        return "Reply to this drop or send the option text. The correct letter also works, like `C` or `option c`."
+        return "Reply here or send the option text. The correct letter also works, like `C` or `option c`."
     if answer_type == "numeric":
-        return "Reply to this drop or send the number itself. Clean digits or simple number words both work."
+        return "Reply here or send just the number. Clean digits and simple number words both work."
     if answer_type == "boolean":
-        return "Reply to this drop or send `true` / `false` or `yes` / `no`."
+        return "Reply here or send `true` / `false` or `yes` / `no`."
     if answer_type == "ordered_tokens":
-        return "Reply to this drop or send the full sequence in order, like `red, blue, green`."
-    return "Reply to this drop or send a short clean answer."
+        return "Reply here or send the full sequence in order, like `red, blue, green`."
+    return "Reply here or send a short clean answer."
 
 
 def answer_points_for_difficulty(difficulty: int) -> int:

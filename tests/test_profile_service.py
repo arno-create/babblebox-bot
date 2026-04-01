@@ -205,6 +205,18 @@ class ProfileServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(summary["categories"][1]["attempts"], 1)
         self.assertEqual(summary["categories"][1]["correct_count"], 0)
 
+    async def test_profile_embed_uses_clean_question_drop_copy(self):
+        await self.service.record_question_drop_result(88, category="logic", correct=True, points=12)
+        profile = await self.service.get_profile(88)
+        user = types.SimpleNamespace(display_name="User 88")
+
+        embed = self.service.build_profile_embed(user, profile, utility_summary=None, session_stats=None)
+        question_drops = next(field.value for field in embed.fields if field.name == "Question Drops")
+
+        self.assertIn("Solved: **1 / 1 drops**", question_drops)
+        self.assertNotIn("participated drops", question_drops)
+        self.assertIn("party highlights", embed.description)
+
     async def test_new_party_game_round_and_win_fields_are_recorded(self):
         await self.service.record_game_started(game_type="only16", host_id=70, player_ids=[70, 71])
         await self.service.record_game_started(game_type="pattern_hunt", host_id=70, player_ids=[70, 71, 72])

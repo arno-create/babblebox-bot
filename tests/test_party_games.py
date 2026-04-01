@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import types
 import unittest
 from datetime import timedelta
@@ -10,11 +11,14 @@ from babblebox.only16_game import (
     detect_count_question,
     ensure_only16_state,
     handle_only16_message_locked,
+    handle_only16_message_delete_locked,
     manually_arm_only16_message,
     parse_only16_numeric_answer,
 )
 from babblebox.pattern_hunt_game import (
     RuleAtom,
+    _pattern_hunt_answer_timeout,
+    _pattern_hunt_prompt_timeout,
     _SAMPLE_MESSAGES,
     _bundle_quality_ok,
     build_pattern_hunt_status_embed,
@@ -22,6 +26,7 @@ from babblebox.pattern_hunt_game import (
     message_matches_rule,
     parse_guess_atom,
     select_rule_bundle,
+    start_pattern_hunt_game_locked,
     submit_pattern_guess_locked,
 )
 
@@ -161,6 +166,20 @@ class PartyGameLogicTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(channel.sent[-1][1]["embed"].title, "Still Alive")
         advance.assert_awaited_once()
 
+    async def test_only16_smart_mode_accepts_clean_punctuation_wrappers(self):
+        for content in ("16!", "16.", "sixteen!", "answer: 16!"):
+            with self.subTest(content=content):
+                game, _asker, responder, channel = self._make_only16_game(mode="smart")
+                message = DummyMessage(channel=channel, author=responder, content=content)
+
+                with patch("babblebox.only16_game._advance_to_next_asker_locked", new=AsyncMock()) as advance:
+                    handled = await handle_only16_message_locked(message, 99, game)
+
+                self.assertTrue(handled)
+                self.assertIsNone(ensure_only16_state(game).get("trap"))
+                self.assertEqual(channel.sent[-1][1]["embed"].title, "Still Alive")
+                advance.assert_awaited_once()
+
     async def test_only16_strict_mode_ignores_non_reply_answers(self):
         game, _asker, responder, _channel = self._make_only16_game(mode="strict")
         message = DummyMessage(channel=game["channel"], author=responder, content="16")
@@ -198,6 +217,19 @@ class PartyGameLogicTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(handled)
         self.assertIsNone(ensure_only16_state(game).get("trap"))
         self.assertEqual(channel.sent[-1][1]["embed"].title, "Trap Voided")
+        advance.assert_awaited_once()
+
+    async def test_only16_smart_mode_voids_punctuated_unsupported_math_without_elimination(self):
+        game, _asker, responder, channel = self._make_only16_game(mode="smart")
+        message = DummyMessage(channel=channel, author=responder, content="16/0!")
+
+        with patch("babblebox.only16_game._advance_to_next_asker_locked", new=AsyncMock()) as advance:
+            handled = await handle_only16_message_locked(message, 99, game)
+
+        self.assertTrue(handled)
+        self.assertIsNone(ensure_only16_state(game).get("trap"))
+        self.assertEqual(channel.sent[-1][1]["embed"].title, "Trap Voided")
+        self.assertIn("safe judge grammar", channel.sent[-1][1]["embed"].description)
         advance.assert_awaited_once()
 
     async def test_only16_smart_mode_ignores_soft_standalone_wrappers(self):
@@ -240,6 +272,18 @@ class PartyGameLogicTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(ok)
         self.assertIn("clear number question", note)
+
+    async def test_only16_deleting_the_armed_question_voids_and_advances(self):
+        game, _asker, _responder, channel = self._make_only16_game(mode="smart")
+
+        with patch("babblebox.only16_game._advance_to_next_asker_locked", new=AsyncMock()) as advance:
+            handled = await handle_only16_message_delete_locked(100, 99, game)
+
+        self.assertTrue(handled)
+        self.assertIsNone(ensure_only16_state(game).get("trap"))
+        self.assertEqual(channel.sent[-1][1]["embed"].title, "Trap Voided")
+        self.assertIn("armed question vanished", channel.sent[-1][1]["embed"].description)
+        advance.assert_awaited_once()
 
     def test_pattern_rule_matchers_are_machine_checkable(self):
         rule = [
@@ -377,7 +421,7 @@ class PartyGameLogicTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(handled)
         retry_copy = channel.sent[-1][1]["embed"].description
-        self.assertIn("Retry once with a new clue only.", retry_copy)
+        self.assertIn("Rewrite it once with a fresh clue only.", retry_copy)
         self.assertNotIn("rule", retry_copy.casefold())
 
     async def test_pattern_hunt_reveal_recap_uses_prompt_to_answer_wording(self):
@@ -402,9 +446,111 @@ class PartyGameLogicTests(unittest.IsolatedAsyncioTestCase):
             await _finish_pattern_hunt_locked(99, game, guesser_won=False, reason="Coders held the pattern.")
 
         recap = next(field.value for field in channel.sent[-1][1]["embed"].fields if field.name == "Clue Recap")
-        self.assertIn("Prompt:", recap)
-        self.assertIn("answered", recap)
-        self.assertNotIn("asked for", recap)
+        self.assertIn("`fox clue` ->", recap)
+        self.assertIn("7 foxes sprint!", recap)
+        self.assertNotIn("Prompt:", recap)
+
+    async def test_pattern_hunt_dm_failure_cleans_up_without_starting(self):
+        guesser = DummyUser(10)
+        coder_one = DummyUser(11)
+        coder_two = DummyUser(12)
+        channel = DummyChannel()
+        game = {
+            "players": [guesser, coder_one, coder_two],
+            "starting_players": [guesser, coder_one, coder_two],
+            "channel": channel,
+            "turn_task": None,
+            "game_type": "pattern_hunt",
+            "active": True,
+            "closing": False,
+            "lock": asyncio.Lock(),
+        }
+        fake_rng = types.SimpleNamespace(choice=lambda players: players[0], randrange=lambda *_args, **_kwargs: 42)
+
+        with patch("babblebox.pattern_hunt_game.random.SystemRandom", return_value=fake_rng), patch(
+            "babblebox.pattern_hunt_game.select_rule_bundle",
+            return_value=([RuleAtom("contains_digits")], ["7 foxes sprint!", "12 bold owls watch."], "Blue bears bake bread!"),
+        ), patch("babblebox.pattern_hunt_game.ge.cleanup_game", new=AsyncMock()) as cleanup:
+            await start_pattern_hunt_game_locked(99, game)
+
+        self.assertEqual(channel.sent[-1][1]["embed"].title, "DM Failure")
+        self.assertIn("hidden rule got uneven", channel.sent[-1][1]["embed"].description)
+        cleanup.assert_awaited_once_with(99)
+
+    async def test_pattern_hunt_prompt_timeout_applies_a_strike(self):
+        guesser = DummyUser(10)
+        coder = DummyUser(11)
+        channel = DummyChannel()
+        game = {
+            "players": [guesser, coder],
+            "starting_players": [guesser, coder],
+            "channel": channel,
+            "turn_task": None,
+            "game_type": "pattern_hunt",
+            "active": True,
+            "closing": False,
+            "lock": asyncio.Lock(),
+            "turn_token": 7,
+            "pattern_hunt": {
+                "guesser_id": guesser.id,
+                "coder_order": [coder.id],
+                "current_coder_index": 0,
+                "phase": "prompt",
+                "rule_atoms": [RuleAtom("contains_digits")],
+            },
+        }
+        saved_games = ge.games
+        ge.games = {99: game}
+        try:
+            with patch("babblebox.pattern_hunt_game.asyncio.sleep", new=AsyncMock()), patch(
+                "babblebox.pattern_hunt_game._apply_pattern_strike_locked",
+                new=AsyncMock(),
+            ) as strike:
+                await _pattern_hunt_prompt_timeout(99, 7)
+        finally:
+            ge.games = saved_games
+
+        strike.assert_awaited_once()
+        self.assertEqual(strike.await_args.kwargs["reason"], "The guesser ran out of time before asking for a clue.")
+
+    async def test_pattern_hunt_answer_timeout_applies_a_strike(self):
+        guesser = DummyUser(10)
+        coder = DummyUser(11)
+        channel = DummyChannel()
+        game = {
+            "players": [guesser, coder],
+            "starting_players": [guesser, coder],
+            "channel": channel,
+            "turn_task": None,
+            "game_type": "pattern_hunt",
+            "active": True,
+            "closing": False,
+            "lock": asyncio.Lock(),
+            "turn_token": 9,
+            "pattern_hunt": {
+                "guesser_id": guesser.id,
+                "coder_order": [coder.id],
+                "current_coder_index": 0,
+                "phase": "answer",
+                "rule_atoms": [RuleAtom("contains_digits")],
+            },
+        }
+        saved_games = ge.games
+        ge.games = {99: game}
+        try:
+            with patch("babblebox.pattern_hunt_game.asyncio.sleep", new=AsyncMock()), patch(
+                "babblebox.pattern_hunt_game._apply_pattern_strike_locked",
+                new=AsyncMock(),
+            ) as strike:
+                await _pattern_hunt_answer_timeout(99, 9)
+        finally:
+            ge.games = saved_games
+
+        strike.assert_awaited_once()
+        reason = strike.await_args.kwargs["reason"]
+        self.assertIn(coder.mention, reason)
+        self.assertIn("ran out of time", reason)
+        self.assertIn("coder team took a strike", reason)
 
     async def test_pattern_guess_compares_structured_atoms(self):
         guesser = DummyUser(10)
