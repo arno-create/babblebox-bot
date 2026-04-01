@@ -24,7 +24,12 @@ class WebsiteDocsTests(unittest.TestCase):
             self.assertIn(command, help_html)
         self.assertIn("Strict = reply to the armed question only", help_html)
         self.assertIn("1-10 drops per day", help_html)
+        self.assertIn("/drops leaderboard", help_html)
+        self.assertIn("/drops mastery category", help_html)
+        self.assertIn("scholar ladder", help_html)
+        self.assertIn("Pattern Hunt", help_html)
         self.assertNotIn("shieldaiglobal", help_html.casefold())
+        self.assertNotIn("dropscelebaiglobal", help_html.casefold())
 
     def test_help_page_is_linked_from_site_shells(self):
         index_html = (ROOT / "index.html").read_text(encoding="utf-8")
@@ -39,3 +44,31 @@ class WebsiteDocsTests(unittest.TestCase):
         sitemap = (ROOT / "sitemap.xml").read_text(encoding="utf-8")
 
         self.assertIn("help.html", sitemap)
+
+    def test_readme_and_homepage_reflect_recent_feature_set(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        index_html = (ROOT / "index.html").read_text(encoding="utf-8")
+
+        for text in (
+            "Only 16",
+            "Pattern Hunt",
+            "Question Drops",
+            "category mastery roles",
+            "guild scholar ladder",
+            "/drops leaderboard",
+            "/hunt guess",
+        ):
+            self.assertIn(text, readme)
+
+        for text in (
+            "Only 16",
+            "Pattern Hunt",
+            "Question Drops",
+            "mastery",
+            "scholar",
+            "/drops status",
+        ):
+            self.assertIn(text, index_html)
+
+        self.assertNotIn("dropscelebaiglobal", readme.casefold())
+        self.assertNotIn("dropscelebaiglobal", index_html.casefold())

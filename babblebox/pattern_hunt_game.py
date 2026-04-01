@@ -16,10 +16,10 @@ from babblebox import game_engine as ge
 
 PATTERN_HUNT_GUESS_LIMIT = 3
 PATTERN_HUNT_STRIKE_LIMIT = 3
-PATTERN_HUNT_TUTORIAL_PROMPT_TIMEOUT_SECONDS = 75
-PATTERN_HUNT_PROMPT_TIMEOUT_SECONDS = 60
-PATTERN_HUNT_TUTORIAL_ANSWER_TIMEOUT_SECONDS = 60
-PATTERN_HUNT_ANSWER_TIMEOUT_SECONDS = 50
+PATTERN_HUNT_TUTORIAL_PROMPT_TIMEOUT_SECONDS = 90
+PATTERN_HUNT_PROMPT_TIMEOUT_SECONDS = 75
+PATTERN_HUNT_TUTORIAL_ANSWER_TIMEOUT_SECONDS = 75
+PATTERN_HUNT_ANSWER_TIMEOUT_SECONDS = 60
 PATTERN_HUNT_RECENT_SIGNATURES = 6
 _PATTERN_HUNT_ANCHOR_SLOT = "pattern_hunt"
 PATTERN_HUNT_RULE_FAMILIES = (
@@ -419,6 +419,12 @@ def _pattern_hunt_progress_lines(state: dict[str, Any]) -> str:
     )
 
 
+def _pattern_hunt_next_step_copy(state: dict[str, Any]) -> str:
+    if str(state.get("phase", "setup")).casefold() == "answer":
+        return "Once the clue lands, the next coder takes the room and the guesser can keep reading the pattern."
+    return "Once the guesser asks, the current coder answers with one clue in public chat."
+
+
 def _pattern_hunt_now_copy(game: dict[str, Any]) -> str:
     state = ensure_pattern_hunt_state(game)
     guesser = ge.get_snapshot_player(game, state.get("guesser_id"))
@@ -427,11 +433,11 @@ def _pattern_hunt_now_copy(game: dict[str, Any]) -> str:
     coder_name = ge.display_name_of(coder) if coder is not None else "the coder"
     if str(state.get("phase", "setup")).casefold() == "answer":
         return (
-            f"{coder_name}, type one clue in chat that fits the hidden rule without explaining it. "
-            f"{guesser_name} can keep asking or use `/hunt guess` privately."
+            f"{coder_name}, post one clue in chat that fits the hidden rule.\n"
+            f"{guesser_name} can keep asking in chat or lock in a private theory with `/hunt guess`."
         )
     return (
-        f"{guesser_name}, type one short clue request in chat for {coder_name}. "
+        f"{guesser_name}, ask {coder_name} for one clue in chat.\n"
         "If you think you have it, use `/hunt guess` privately."
     )
 
@@ -482,16 +488,16 @@ async def start_pattern_hunt_game_locked(guild_id: int, game: dict[str, Any]):
                         description="Keep this private. Give one public clue that fits the rule, and never explain the logic out loud.",
                         color=ge.EMBED_THEME["accent"],
                     ).add_field(name="Secret Rule", value=render_rule(rule_atoms), inline=False).add_field(
-                        name="Fits the Rule",
+                        name="Good Clue Examples",
                         value=f"- {valid_examples[0]}\n- {valid_examples[1]}",
                         inline=False,
                     ).add_field(
-                        name="Fails the Rule",
+                        name="Misses the Rule",
                         value=f"- {invalid_example}",
                         inline=False,
                     ).add_field(
-                        name="Coder Note",
-                        value="One clue per turn. If Babblebox rejects it, send one fresh clue and keep the logic offstage.",
+                        name="Guardrails",
+                        value="One clue per turn. Keep the logic offstage. If Babblebox rejects a clue, send a fresh one.",
                         inline=False,
                     ),
                     footer="Babblebox Pattern Hunt | The guesser never sees this DM",
@@ -545,21 +551,28 @@ def build_pattern_hunt_status_embed(game: dict[str, Any], *, public: bool) -> di
     state = ensure_pattern_hunt_state(game)
     guesser = ge.get_snapshot_player(game, state.get("guesser_id"))
     coder = ge.get_snapshot_player(game, current_pattern_hunt_coder_id(game))
-    description = "Ask in public chat. Clues stay public. Guesses stay private with `/hunt guess`."
+    description = "One public clue loop. One hidden rule. Private guesses stay in `/hunt guess`."
     if state.get("tutorial_cycle_active"):
         description += "\nFirst round is slower and forgiving on purpose so everyone can catch the rhythm first."
     if public and state.get("hint_text"):
-        description += f"\nHint: {state['hint_text']}"
+        description += f"\nShared hint: {state['hint_text']}"
     if not public:
         description += "\nUse `/hunt guess` for a clean 1-3 family theory. `Contains Digits` means digits `0-9` only."
 
     embed = discord.Embed(title="🧩 Pattern Hunt", description=description, color=discord.Color.dark_teal())
-    embed.add_field(name="Guesser", value=ge.display_name_of(guesser) if guesser else "Unknown", inline=True)
-    embed.add_field(name="Current Coder", value=ge.display_name_of(coder) if coder else "Unknown", inline=True)
-    embed.add_field(name="Time", value=_pattern_hunt_deadline_copy(state.get("deadline_at")), inline=True)
+    embed.add_field(
+        name="Who's Up",
+        value=(
+            f"Guesser: **{ge.display_name_of(guesser) if guesser else 'Unknown'}**\n"
+            f"Coder: **{ge.display_name_of(coder) if coder else 'Unknown'}**"
+        ),
+        inline=True,
+    )
+    embed.add_field(name="Time Left", value=_pattern_hunt_deadline_copy(state.get("deadline_at")), inline=True)
     embed.add_field(name="Do This Now", value=_pattern_hunt_now_copy(game), inline=False)
     if state.get("current_prompt"):
         embed.add_field(name="Current Ask", value=ge.safe_field_text(state.get("current_prompt"), limit=240), inline=False)
+    embed.add_field(name="What Happens Next", value=_pattern_hunt_next_step_copy(state), inline=False)
     embed.add_field(name="Progress", value=_pattern_hunt_progress_lines(state), inline=False)
     if state.get("tutorial_cycle_active"):
         embed.add_field(
@@ -725,9 +738,9 @@ async def _handle_pattern_penalty_locked(guild_id: int, game: dict[str, Any], *,
     if not state.get("tutorial_grace_used"):
         state["tutorial_grace_used"] = True
         if reset_phase == "answer":
-            body = "First round stays forgiving. The same coder gets a fresh clue timer."
+            body = "Opening round stays forgiving. Same coder, fresh clue timer."
         else:
-            body = "First round stays forgiving. The guesser gets a fresh prompt timer."
+            body = "Opening round stays forgiving. Same guesser, fresh prompt timer."
         await game["channel"].send(
             embed=ge.make_status_embed("🕊️ Opening Grace", body, tone="info", footer="Babblebox Pattern Hunt"),
             allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
@@ -820,7 +833,7 @@ async def _pattern_hunt_prompt_timeout(guild_id: int, token: int, timeout_second
         await _handle_pattern_penalty_locked(
             guild_id,
             game,
-            reason="The guesser took too long to ask for a clue.",
+            reason="The guesser ran out of time to ask for a clue.",
             reset_phase="prompt",
         )
 
@@ -840,6 +853,6 @@ async def _pattern_hunt_answer_timeout(guild_id: int, token: int, timeout_second
         await _handle_pattern_penalty_locked(
             guild_id,
             game,
-            reason=f"{coder.mention if coder else 'The current coder'} took too long to send a clue.",
+            reason=f"{coder.mention if coder else 'The current coder'} ran out of time to send a clue.",
             reset_phase="answer",
         )

@@ -180,16 +180,18 @@ class FakeLobbyView:
 class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
     def test_help_pages_reflect_hardened_only16_and_pattern_hunt_copy(self):
         party_page = next(page for page in HELP_PAGES if page["title"] == "Party Games")
-        self.assertIn("ask one number question, then wait for the first clear answer", party_page["body"])
+        self.assertIn("ask one clean number question, then wait for the first clear answer", party_page["body"])
         self.assertIn("Strict = reply to the armed question only", party_page["body"])
-        self.assertIn("guesses stay private with `/hunt guess`", party_page["body"])
+        self.assertIn("private guesses with `/hunt guess`", party_page["body"])
         self.assertIn("digits `0-9` only", party_page["body"])
 
     def test_help_pages_reflect_question_drop_option_copy(self):
+        question_drops_page = next(page for page in HELP_PAGES if page["title"] == "Question Drops")
+        self.assertIn("/drops panel", question_drops_page["body"])
+        self.assertIn("/drops mastery category", question_drops_page["body"])
+        self.assertIn("scholar ladder", question_drops_page["body"])
         daily_page = next(page for page in HELP_PAGES if page["title"] == "Daily Arcade")
-        self.assertIn("1-10 drops a day", daily_page["body"])
-        self.assertIn("option letter or option text", daily_page["body"])
-        self.assertIn("Quiet channels can skip a slot", daily_page["body"])
+        self.assertIn("Question Drops stay separate as the guild knowledge lane", daily_page["body"])
 
     def test_only16_lobby_copy_stays_aligned_with_manual(self):
         saved_games = ge.games
@@ -208,9 +210,9 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             ge.games = saved_games
 
         mode_field = next(field.value for field in embed.fields if field.name == "Only 16 Mode")
-        self.assertIn("Strict = reply to the armed question only.", mode_field)
-        self.assertIn("Smart = optional chaos mode that also counts one clean standalone answer like `16!`.", mode_field)
-        self.assertIn("Start with Strict so the room learns the rhythm first.", mode_field)
+        self.assertIn("Strict = reply to the armed question only. Best for first-time rooms.", mode_field)
+        self.assertIn("Smart = also counts one clean standalone answer like `16!`.", mode_field)
+        self.assertIn("Start with Strict, then switch to Smart if the room wants extra chaos.", mode_field)
 
     async def test_ping_command_responds_through_context_send(self):
         cog = MetaCog(object())

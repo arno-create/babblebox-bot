@@ -17,10 +17,10 @@ ONLY16_MODE_LABELS = {
     "strict": "Strict (Recommended)",
     "smart": "Smart (Advanced)",
 }
-ONLY16_TUTORIAL_ASK_WINDOW_SECONDS = 60
-ONLY16_ASK_WINDOW_SECONDS = 45
-ONLY16_TUTORIAL_TRAP_WINDOW_SECONDS = 30
-ONLY16_TRAP_WINDOW_SECONDS = 24
+ONLY16_TUTORIAL_ASK_WINDOW_SECONDS = 75
+ONLY16_ASK_WINDOW_SECONDS = 60
+ONLY16_TUTORIAL_TRAP_WINDOW_SECONDS = 45
+ONLY16_TRAP_WINDOW_SECONDS = 30
 ONLY16_MAX_EXPRESSION_LENGTH = 48
 ONLY16_MAX_EXPRESSION_TOKENS = 24
 ONLY16_MAX_EXPRESSION_DEPTH = 6
@@ -477,7 +477,7 @@ def _only16_player_names(game: dict[str, Any]) -> str:
 
 
 def _only16_anchor_mode_label(mode: str | None) -> str:
-    return "Smart" if str(mode or "").casefold() == "smart" else "Strict"
+    return "Smart" if str(mode or "").casefold() == "smart" else "Strict (Recommended)"
 
 
 def _only16_supported_math_copy() -> str:
@@ -486,20 +486,22 @@ def _only16_supported_math_copy() -> str:
 
 def _only16_anchor_counts_copy(mode: str | None) -> str:
     lines = [
-        "Strict = reply to the armed question only.",
-        "Clear answers can be digits, simple number words, or safe math like `8+8`.",
-        "If a message is fuzzy or includes more than one number, the trap is voided instead of knocking anyone out.",
+        "Reply with one clear number only.",
+        "Digits, simple number words, and safe math like `8+8` all count.",
+        "Fuzzy replies, multiple clear numbers, or unsupported math void the trap instead of knocking anyone out.",
     ]
     if str(mode or "").casefold() == "smart":
-        lines.append("Smart also counts one clean standalone answer like `16!`.")
+        lines.append("Smart also accepts one clean standalone answer like `16!`.")
+    else:
+        lines.insert(0, "Strict keeps it simple: reply to the armed question only.")
     return "\n".join(lines)
 
 
 def _only16_first_round_copy() -> str:
     return (
-        "1. Ask one clean number question.\n"
-        "2. Reply to that message with one clear number.\n"
-        "3. The first miss is safe so everyone can learn the rhythm."
+        "1. The current asker posts one clean number question.\n"
+        "2. Everyone else replies with one clear number.\n"
+        "3. The first miss is safe so the room can learn the rhythm."
     )
 
 
@@ -605,38 +607,40 @@ def build_only16_anchor_embed(game: dict[str, Any]) -> discord.Embed:
         deadline = trap.get("expires_at")
         trap_asker = ge.get_snapshot_player(game, trap.get("asker_id"))
         asker_name = ge.display_name_of(trap_asker) if trap_asker is not None else turn_name
+        who_is_up = f"{asker_name} armed the live trap."
         do_now = (
-            f"Reply to {asker_name}'s armed question with one clear number before the window closes.\n"
-            "If you think you have it, keep it clean and short."
+            f"Anyone except {asker_name} can reply to the live question below.\n"
+            "Keep the answer short so Babblebox can judge it cleanly."
         )
-        who_can_answer = f"Anyone still in can answer except {asker_name}."
-        next_field = "Babblebox judges the first clear answer, then the turn moves on."
+        next_field = "Babblebox judges the first clear answer, then passes the ask to the next player."
         if _only16_is_tutorial_round(state):
-            next_field += "\nThis warm-up round is still safe on the first miss."
+            next_field += "\nOpening round safety is still on, so the first miss stays harmless."
     else:
         deadline = state.get("ask_expires_at")
+        who_is_up = f"{turn_name} is asking now."
         do_now = f"{turn_name}, ask one clean number question in chat to arm the trap."
+        next_field = "Once the trap is armed, everyone else can answer. If time runs out, the turn moves on."
 
     embed = discord.Embed(
         title="🎯 Only 16",
-        description="Ask one number question, wait for one clear answer, and hope somebody lands exactly on 16.",
+        description="A social number trap: ask one clean number question, wait for one clear answer, and hope it lands on 16.",
         color=discord.Color.orange(),
     )
     if _only16_is_tutorial_round(state):
         embed.description += "\nOpening round is slower and forgiving so the room can learn the rhythm first."
-    embed.add_field(name="Turn", value=turn_name, inline=True)
+    embed.add_field(name="Who's Up", value=who_is_up, inline=True)
     embed.add_field(name="Mode", value=_only16_anchor_mode_label(mode), inline=True)
-    embed.add_field(name="Time", value=_only16_deadline_copy(deadline), inline=True)
+    embed.add_field(name="Time Left", value=_only16_deadline_copy(deadline), inline=True)
     if trap_live:
-        embed.add_field(name="Armed Question", value=question_text or "The armed question is missing.", inline=False)
+        embed.add_field(name="Live Trap", value=question_text or "The armed question is missing.", inline=False)
         embed.add_field(name="Do This Now", value=do_now, inline=False)
         embed.add_field(name="What Counts", value=_only16_anchor_counts_copy(mode), inline=False)
-        embed.add_field(name="Who Can Answer", value=who_can_answer, inline=False)
         embed.add_field(name="What Happens Next", value=f"{next_field}\n{next_copy}", inline=False)
         embed.add_field(name="Players Left", value=_only16_player_names(game), inline=False)
     else:
         embed.add_field(name="Do This Now", value=do_now, inline=False)
         embed.add_field(name="What Counts", value=_only16_anchor_counts_copy(mode), inline=False)
+        embed.add_field(name="What Happens Next", value=f"{next_field}\n{next_copy}", inline=False)
         embed.add_field(name="Players Left", value=_only16_player_names(game), inline=False)
         if _only16_is_tutorial_round(state):
             embed.add_field(name="First Round", value=_only16_first_round_copy(), inline=False)
@@ -791,7 +795,7 @@ async def _resolve_only16_answer_locked(
     if parsed.kind == "none":
         _close_only16_tutorial(state)
         body = (
-            f"{message.author.mention} never pinned down one clear number, so the trap slips by harmlessly.\n"
+            f"{message.author.mention} never landed on one clear number, so the trap slips by harmlessly.\n"
             f"{_only16_next_step_copy(game, asker_id)}"
         )
         await game["channel"].send(
@@ -840,9 +844,9 @@ async def _resolve_only16_answer_locked(
     if numeric_value == 16:
         _close_only16_tutorial(state)
         body = (
-            f"{message.author.mention}'s math lands on **16**, so they slip through."
+            f"{message.author.mention}'s math lands on **16**, so they stay in."
             if parsed.source == "expression"
-            else f"{message.author.mention} lands on **16** and slips through."
+            else f"{message.author.mention} lands on **16** and stays in."
         )
         body += f"\n{_only16_next_step_copy(game, asker_id)}"
         await game["channel"].send(
@@ -982,7 +986,7 @@ async def _only16_ask_timeout(guild_id: int, token: int, timeout_seconds: int):
             embed=ge.make_status_embed(
                 "⏭️ Turn Moved On",
                 (
-                    f"{current_asker.mention} did not ask a clean number question in time, so the room moves along.\n"
+                    f"{current_asker.mention} did not arm a clean number question in time.\n"
                     f"{_only16_next_step_copy(game, current_asker.id)}"
                 ),
                 tone="info",
@@ -1012,5 +1016,5 @@ async def _only16_trap_timeout(guild_id: int, token: int, timeout_seconds: int):
             guild_id,
             game,
             title="⏳ Window Closed",
-            reason="Nobody answered before the trap window closed.",
+            reason="No one answered before the trap window closed.",
         )

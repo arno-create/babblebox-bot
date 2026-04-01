@@ -39,11 +39,23 @@ HELP_PAGES: list[dict[str, str]] = [
         "description": "Short multiplayer rooms for live server energy.",
         "body": (
             "`/play` opens the lobby for Broken Telephone, Exquisite Corpse, Spyfall, Word Bomb, Only 16, and Pattern Hunt.\n"
-            "Only 16: ask one number question, then wait for the first clear answer. Strict = reply to the armed question only. Smart = optional chaos mode that also counts one clean standalone answer like `16!`.\n"
-            "Pattern Hunt: the guesser asks in public chat, the current coder answers in public chat, and guesses stay private with `/hunt guess`. `Contains Digits` means digits `0-9` only.\n"
+            "Only 16: ask one clean number question, then wait for the first clear answer. Strict = reply to the armed question only. Smart = also counts one clean standalone answer like `16!`.\n"
+            "Pattern Hunt: one public clue loop, one hidden rule, and private guesses with `/hunt guess`. `Contains Digits` means digits `0-9` only.\n"
             "`/hunt status` mirrors the live state card privately, and `/hunt guess` stays quiet until a Pattern Hunt room is live."
         ),
         "try": "`/play`, `/hunt status`",
+    },
+    {
+        "title": "Question Drops",
+        "emoji": "\U0001f4da",
+        "description": "Guild knowledge drops with visible mastery, scholar ranks, and low-noise progression.",
+        "body": (
+            "`/drops panel` and `/drops status` show the guild knowledge lane clearly.\n"
+            "`/drops stats` and `/drops leaderboard` stay guild-first, while Buddy and Profile surfaces fold the knowledge lane into identity cleanly.\n"
+            "`/drops mastery category ...` configures category mastery roles, and `/drops mastery scholar ...` configures the guild scholar ladder.\n"
+            "Admins can run 1-10 drops a day, pick channels and categories, and opt into rare AI celebration copy without turning the lane into spam."
+        ),
+        "try": "`/drops panel`, `/drops stats`, `/drops leaderboard`",
     },
     {
         "title": "Everyday Utilities",
@@ -64,9 +76,9 @@ HELP_PAGES: list[dict[str, str]] = [
             "`/daily` opens Shuffle, Emoji, and Signal.\n"
             "`/daily play <guess>` still defaults to Shuffle Booth.\n"
             "Daily stays arcade-only, so clears and streaks here do not feed Question Drops mastery roles or scholar ranks.\n"
-            "Question Drops live under `/drops` as the guild knowledge lane with `/drops status`, `/drops stats`, `/drops leaderboard`, and `/drops mastery ...`.\n"
-            "Admins can still schedule **1-10 drops a day**, and numeric or multiple-choice drops still accept the correct option letter or option text.\n"
-            "Quiet channels can skip a slot, and a live drop still blocks `/play` in that same channel until it resolves.\n"
+            "Question Drops stay separate as the guild knowledge lane, so the arcade never blurs into mastery progression.\n"
+            "Numeric or multiple-choice drops still accept the correct option letter or option text, and quiet channels can skip a slot.\n"
+            "A live drop still blocks `/play` in that same channel until it resolves.\n"
             "`/daily`, `/daily play`, `/daily stats`, `/daily share`, and `/daily leaderboard` lean public by default while warnings stay private."
         ),
         "try": "`/daily`, `/daily stats`, `/drops status`",
@@ -79,6 +91,7 @@ HELP_PAGES: list[dict[str, str]] = [
             "`/buddy` and `/profile` are public-friendly by default.\n"
             "`/vault` stays more personal.\n"
             "Buddy style, streaks, titles, badges, utilities, multiplayer highlights, and guild-first knowledge flavor all meet here.\n"
+            "Question Drops mastery roles, scholar ranks, and leaderboard position show up here without turning the card into a giant stat slab.\n"
             "Profiles keep Knowledge, Daily Arcade, and party-game highlights separate so the lanes stay easy to understand."
         ),
         "try": "`/buddy`, `/profile`, `/vault`",

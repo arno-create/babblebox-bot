@@ -1207,8 +1207,8 @@ def get_lobby_embed(guild_id):
         "corpse": ("📝 Exquisite Corpse", "Blind collaborative nonsense for 3+ players.", discord.Color.purple()),
         "spyfall": ("🕵️ Spyfall", "Find the spy before the room turns on itself. 3+ players.", discord.Color.dark_gray()),
         "bomb": ("💣 Word Bomb", "Fast typing survival for 2+ players.", discord.Color.red()),
-        "only16": ("Only 16", "Ask one number question. The first clear answer decides the trap. 2+ players.", discord.Color.orange()),
-        "pattern_hunt": ("Pattern Hunt", "The guesser asks in chat, coders answer in chat, and guesses stay private. 3+ players.", discord.Color.dark_teal()),
+        "only16": ("Only 16", "Funny number trap. Ask one clean number question; the first clear answer decides it. 2+ players.", discord.Color.orange()),
+        "pattern_hunt": ("Pattern Hunt", "One public clue loop, private rule guesses. 3+ players.", discord.Color.dark_teal()),
     }
 
     title, desc, color = titles.get(gt, titles["none"])
@@ -1226,10 +1226,10 @@ def get_lobby_embed(guild_id):
         embed.add_field(
             name="Only 16 Mode",
             value=(
-                f"**{'Strict (Recommended)' if str(game.get('only16_mode', 'strict')).casefold() == 'strict' else 'Smart (Advanced)'}**\n"
-                "Strict = reply to the armed question only.\n"
-                "Smart = optional chaos mode that also counts one clean standalone answer like `16!`.\n"
-                "Start with Strict so the room learns the rhythm first."
+                f"**{'Strict (Recommended)' if str(game.get('only16_mode', 'strict')).casefold() == 'strict' else 'Smart (Visible chaos mode)'}**\n"
+                "Strict = reply to the armed question only. Best for first-time rooms.\n"
+                "Smart = also counts one clean standalone answer like `16!`.\n"
+                "Start with Strict, then switch to Smart if the room wants extra chaos."
             ),
             inline=False,
         )
@@ -1386,7 +1386,7 @@ class Only16ModeButton(discord.ui.Button):
 
     def refresh(self):
         game = games.get(self.guild_id)
-        mode = "Strict (Recommended)" if not game or str(game.get("only16_mode", "strict")).casefold() == "strict" else "Smart (Advanced)"
+        mode = "Strict (Recommended)" if not game or str(game.get("only16_mode", "strict")).casefold() == "strict" else "Smart (Visible)"
         self.label = f"Only 16: {mode}"
         self.disabled = not game or game.get("game_type") != "only16" or game.get("active") or game.get("closing")
 
