@@ -103,9 +103,6 @@ class EventsCog(commands.Cog):
             await utility_service.handle_return_watch_message(message)
         if question_drops_service is not None:
             question_drops_service.observe_message_activity(message)
-            handled_drop = await question_drops_service.handle_message(message)
-            if handled_drop:
-                return
 
         if isinstance(message.channel, discord.DMChannel):
             guild_id = ge.dm_routes.get(message.author.id)
@@ -131,6 +128,14 @@ class EventsCog(commands.Cog):
         if message.guild:
             guild_id = message.guild.id
             game = ge.games.get(guild_id)
+            if (
+                question_drops_service is not None
+                and game
+                and not game.get("closing")
+                and game.get("active")
+                and message.channel.id == getattr(game.get("channel"), "id", None)
+            ):
+                await question_drops_service.retire_drop_for_party_game(guild_id, message.channel.id)
             if (
                 game
                 and not game.get("closing")
@@ -173,6 +178,10 @@ class EventsCog(commands.Cog):
                         if current_player and current_player.id == message.author.id:
                             await ge.handle_bomb_turn_locked(message, guild_id, game)
                             return
+            if question_drops_service is not None:
+                handled_drop = await question_drops_service.handle_message(message)
+                if handled_drop:
+                    return
 
     @commands.Cog.listener()
     async def on_member_remove(self, member: discord.Member):

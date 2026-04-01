@@ -21,9 +21,9 @@ from babblebox.question_drops_content import (
     QuestionDropVariant,
     answer_points_for_difficulty,
     build_variant_hash,
+    is_answer_attempt,
     iter_candidate_variants,
     judge_answer,
-    normalize_answer_text,
     question_drop_seed_for_concept,
     render_answer_summary,
     validate_content_pack,
@@ -38,10 +38,11 @@ from babblebox.question_drops_store import (
 from babblebox.utility_helpers import canonicalize_afk_timezone, load_afk_timezone
 
 
-QUESTION_DROP_CONCEPT_COOLDOWN_DAYS = 4
-QUESTION_DROP_STATIC_VARIANT_COOLDOWN_DAYS = 10
-QUESTION_DROP_GENERATED_CONCEPT_COOLDOWN_DAYS = 1
-QUESTION_DROP_GENERATED_VARIANT_COOLDOWN_DAYS = 2
+QUESTION_DROP_CURATED_CONCEPT_MIN_DAYS = 1
+QUESTION_DROP_CURATED_VARIANT_MIN_DAYS = 3
+QUESTION_DROP_GENERATED_CONCEPT_MIN_DAYS = 0
+QUESTION_DROP_GENERATED_VARIANT_MIN_DAYS = 1
+QUESTION_DROP_PENDING_LEASE_SECONDS = 5 * 60
 QUESTION_DROP_EXPOSURE_RETENTION_DAYS = 90
 QUESTION_DROP_ACTIVITY_WINDOW_SECONDS = 90 * 60
 QUESTION_DROP_SLOT_GRACE_SECONDS = 45 * 60
@@ -49,6 +50,7 @@ QUESTION_DROP_SCHEDULER_INTERVAL_SECONDS = 45.0
 QUESTION_DROP_WRONG_FEEDBACK_GLOBAL_LIMIT = 2
 QUESTION_DROP_PRUNE_INTERVAL_SECONDS = 6 * 60 * 60
 QUESTION_DROP_EXPOSURE_FETCH_LIMIT = 220
+QUESTION_DROP_GENERATED_VARIANTS_PER_SEED = 8
 
 
 def _config_signature(config: dict[str, Any]) -> str:
@@ -144,6 +146,7 @@ class QuestionDropsService:
         self._scheduler_task: asyncio.Task | None = None
         self._configs: dict[int, dict[str, Any]] = {}
         self._active_drops: dict[tuple[int, int], dict[str, Any]] = {}
+        self._pending_posts: dict[tuple[int, str], dict[str, Any]] = {}
         self._recent_activity: dict[tuple[int, int], datetime] = {}
         self._wrong_feedback_users: dict[int, set[int]] = defaultdict(set)
         self._wrong_feedback_count: dict[int, int] = defaultdict(int)
@@ -172,6 +175,7 @@ class QuestionDropsService:
         self.storage_ready = True
         self.storage_error = None
         self._configs = await self.store.fetch_all_configs()
+        await self._sweep_pending_posts(await self.store.list_pending_posts(), force=True)
         self._next_prune_at = ge.now_utc()
         await self._restore_active_rows(await self.store.list_active_drops())
         self._scheduler_task = asyncio.create_task(self._scheduler_loop(), name="babblebox-question-drops-scheduler")
@@ -191,6 +195,9 @@ class QuestionDropsService:
         for record in active_rows:
             if not self._active_drop_is_live(record, now=now):
                 await self._expire_drop(record, timed_out=True, announce=False)
+                continue
+            if self._channel_has_live_party_session(record["guild_id"], record["channel_id"]):
+                await self._expire_drop(record, timed_out=False, announce=False, delete_post_message=True)
                 continue
             if not await self._message_still_exists(record):
                 await self._expire_drop(record, timed_out=False, announce=False)
@@ -216,9 +223,62 @@ class QuestionDropsService:
             return True
         return True
 
+    async def _delete_message_if_exists(self, channel_id: int, message_id: int | None):
+        if not isinstance(message_id, int) or message_id <= 0:
+            return
+        channel = self.bot.get_channel(channel_id) if hasattr(self.bot, "get_channel") else None
+        if channel is None:
+            return
+        fetch_message = getattr(channel, "fetch_message", None)
+        if fetch_message is None or not callable(fetch_message):
+            return
+        try:
+            message = await fetch_message(message_id)
+        except (discord.NotFound, discord.HTTPException):
+            return
+        with contextlib.suppress(discord.NotFound, discord.HTTPException):
+            await message.delete()
+
+    async def _sweep_pending_posts(self, pending_rows: list[dict[str, Any]], *, force: bool = False):
+        self._pending_posts = {}
+        now = ge.now_utc()
+        for record in pending_rows:
+            if not force and not self._pending_post_is_stale(record, now=now):
+                self._pending_posts[(record["guild_id"], record["slot_key"])] = record
+                continue
+            await self._delete_message_if_exists(record["channel_id"], record.get("message_id"))
+            await self.store.release_pending_post(record["guild_id"], record["slot_key"])
+
+    def _pending_post_is_stale(self, record: dict[str, Any], *, now: datetime) -> bool:
+        lease_raw = record.get("lease_expires_at")
+        if isinstance(lease_raw, datetime):
+            lease_expires_at = lease_raw.astimezone(timezone.utc) if lease_raw.tzinfo else lease_raw.replace(tzinfo=timezone.utc)
+        else:
+            lease_expires_at = datetime.fromisoformat(str(lease_raw))
+            if lease_expires_at.tzinfo is None:
+                lease_expires_at = lease_expires_at.replace(tzinfo=timezone.utc)
+        return lease_expires_at <= now
+
+    async def _release_pending_post(self, guild_id: int, slot_key: str):
+        self._pending_posts.pop((guild_id, slot_key), None)
+        await self.store.release_pending_post(guild_id, slot_key)
+
+    def _channel_has_pending_post(self, guild_id: int, channel_id: int) -> bool:
+        return any(
+            record["guild_id"] == guild_id and record["channel_id"] == channel_id
+            for record in self._pending_posts.values()
+        )
+
     def has_live_drop(self, guild_id: int, channel_id: int) -> bool:
         record = self._active_drops.get((guild_id, channel_id))
         return record is not None and self._active_drop_is_live(record, now=ge.now_utc())
+
+    async def retire_drop_for_party_game(self, guild_id: int, channel_id: int) -> bool:
+        record = self._active_drops.get((guild_id, channel_id))
+        if record is None:
+            return False
+        await self._expire_drop(record, timed_out=False, announce=False, delete_post_message=True)
+        return True
 
     def storage_message(self, feature_name: str = "Question Drops") -> str:
         return f"{feature_name} are temporarily unavailable because Babblebox could not reach the Question Drops database."
@@ -421,14 +481,14 @@ class QuestionDropsService:
             description=f"Performance snapshot for **{ge.display_name_of(user)}**.",
             color=ge.EMBED_THEME["info"],
         )
-        attempts = int(profile.get("question_drop_attempts", 0) or 0)
+        participations = int(profile.get("question_drop_attempts", 0) or 0)
         correct = int(profile.get("question_drop_correct", 0) or 0)
-        accuracy = (correct / attempts * 100.0) if attempts else 0.0
+        accuracy = (correct / participations * 100.0) if participations else 0.0
         embed.add_field(
             name="Overall",
             value=(
                 f"Points: **{int(profile.get('question_drop_points', 0) or 0)}**\n"
-                f"Solves: **{correct} / {attempts} participations**\n"
+                f"Solves: **{correct} / {participations} participated drops**\n"
                 f"Accuracy: **{accuracy:.0f}%**"
             ),
             inline=True,
@@ -462,18 +522,24 @@ class QuestionDropsService:
         active = self._active_drops.get((message.guild.id, message.channel.id))
         if active is None:
             return False
+        if self._channel_has_live_party_session(message.guild.id, message.channel.id):
+            await self._expire_drop(active, timed_out=False, announce=False, delete_post_message=True)
+            return False
         now = ge.now_utc()
         if not self._active_drop_is_live(active, now=now):
             await self._expire_drop(active, timed_out=True)
             return False
-        answer_text = normalize_answer_text(message.content)
-        if not answer_text:
+        reply_target_id = _extract_reply_target_id(message)
+        if not is_answer_attempt(active["answer_spec"], message.content, direct_reply=reply_target_id == int(active["message_id"])):
             return False
         result_payload: dict[str, Any] | None = None
         feedback_line: str | None = None
         async with self._lock:
             current = self._active_drops.get((message.guild.id, message.channel.id))
             if current is None or int(current["message_id"]) != int(active["message_id"]):
+                return False
+            if self._channel_has_live_party_session(current["guild_id"], current["channel_id"]):
+                await self._expire_drop(current, timed_out=False, announce=False, delete_post_message=True)
                 return False
             exposure_id = int(current["exposure_id"])
             participants = self._attempted_users.setdefault(exposure_id, set(current.get("participant_user_ids", []) or []))
@@ -578,12 +644,18 @@ class QuestionDropsService:
         while True:
             self._wake_event.clear()
             await self._expire_due_drops()
+            await self._expire_stale_pending_posts()
             await self._maybe_post_due_drops()
             await self._prune_old_exposures()
             try:
                 await asyncio.wait_for(self._wake_event.wait(), timeout=QUESTION_DROP_SCHEDULER_INTERVAL_SECONDS)
             except asyncio.TimeoutError:
                 continue
+
+    async def _expire_stale_pending_posts(self):
+        if not self._pending_posts:
+            return
+        await self._sweep_pending_posts(list(self._pending_posts.values()), force=False)
 
     async def _prune_old_exposures(self):
         if not self.storage_ready:
@@ -612,7 +684,14 @@ class QuestionDropsService:
                 continue
             await self._expire_drop(record, timed_out=True)
 
-    async def _expire_drop(self, record: dict[str, Any], *, timed_out: bool, announce: bool = True):
+    async def _expire_drop(
+        self,
+        record: dict[str, Any],
+        *,
+        timed_out: bool,
+        announce: bool = True,
+        delete_post_message: bool = False,
+    ):
         exposure_id = int(record["exposure_id"])
         await self.store.resolve_exposure(exposure_id, resolved_at=ge.now_utc(), winner_user_id=None)
         await self.store.delete_active_drop(record["guild_id"], record["channel_id"])
@@ -621,6 +700,8 @@ class QuestionDropsService:
         self._wrong_feedback_users.pop(exposure_id, None)
         self._wrong_feedback_count.pop(exposure_id, None)
         self._attempted_users.pop(exposure_id, None)
+        if delete_post_message:
+            await self._delete_message_if_exists(record["channel_id"], record.get("message_id"))
         if participant_ids:
             await self._record_participation_batch(
                 category=record["category"],
@@ -664,6 +745,9 @@ class QuestionDropsService:
                 for (active_guild_id, _), record in self._active_drops.items()
                 if active_guild_id == guild_id
             }
+            active_slot_keys.update(
+                record["slot_key"] for (pending_guild_id, _), record in self._pending_posts.items() if pending_guild_id == guild_id
+            )
             due_slots: list[str] = []
             for index, local_slot in enumerate(slots):
                 slot_key = _slot_key(now_local.date(), index)
@@ -698,6 +782,8 @@ class QuestionDropsService:
         candidates = []
         for channel_id in config.get("enabled_channel_ids", []):
             if (guild_id, channel_id) in self._active_drops:
+                continue
+            if self._channel_has_pending_post(guild_id, channel_id):
                 continue
             if self._channel_has_live_party_session(guild_id, channel_id):
                 continue
@@ -736,6 +822,22 @@ class QuestionDropsService:
         variant = self._select_variant(guild_id, getattr(channel, "id", 0), exposures=exposures, slot_key=slot_key, config=config)
         if variant is None:
             return
+        channel_id = getattr(channel, "id", 0)
+        pending = await self.store.claim_pending_post(
+            {
+                "guild_id": guild_id,
+                "channel_id": channel_id,
+                "slot_key": slot_key,
+                "concept_id": variant.concept_id,
+                "variant_hash": variant.variant_hash,
+                "claimed_at": asked_at,
+                "lease_expires_at": asked_at + timedelta(seconds=QUESTION_DROP_PENDING_LEASE_SECONDS),
+                "message_id": None,
+            }
+        )
+        if pending is None:
+            return
+        self._pending_posts[(guild_id, slot_key)] = pending
         prompt = variant.prompt
         embed = discord.Embed(
             title="Question Drop",
@@ -752,16 +854,25 @@ class QuestionDropsService:
             ),
             inline=False,
         )
+        answer_lane = "Reply to this drop or send a clean standalone answer."
         if variant.answer_spec.get("type") == "multiple_choice":
-            embed.add_field(name="Answering", value="Reply with the option text or the matching letter.", inline=False)
+            answer_lane = "Reply to this drop or send the option text. Matching letters like `C` or `option c` also work."
+        embed.add_field(name="Answering", value=answer_lane, inline=False)
         embed = ge.style_embed(embed, footer="Babblebox Question Drops | First correct answer scores")
+        message = None
         try:
             message = await channel.send(embed=embed)
-        except discord.HTTPException:
+            await self.store.attach_pending_post_message(guild_id, slot_key, message.id)
+            self._pending_posts[(guild_id, slot_key)]["message_id"] = message.id
+        except Exception:
+            if message is not None:
+                with contextlib.suppress(discord.HTTPException, AttributeError):
+                    await message.delete()
+            await self._release_pending_post(guild_id, slot_key)
             return
         exposure_record = {
             "guild_id": guild_id,
-            "channel_id": getattr(channel, "id", 0),
+            "channel_id": channel_id,
             "concept_id": variant.concept_id,
             "variant_hash": variant.variant_hash,
             "category": variant.category,
@@ -773,7 +884,7 @@ class QuestionDropsService:
         }
         active_record = {
             "guild_id": guild_id,
-            "channel_id": getattr(channel, "id", 0),
+            "channel_id": channel_id,
             "message_id": message.id,
             "author_user_id": int(getattr(getattr(self.bot, "user", None), "id", 1) or 1),
             "concept_id": variant.concept_id,
@@ -789,30 +900,51 @@ class QuestionDropsService:
             "participant_user_ids": [],
         }
         try:
-            stored_exposure, stored_active = await self.store.register_posted_drop(exposure_record, active_record)
+            stored_exposure, stored_active = await self.store.finalize_pending_post(
+                guild_id,
+                slot_key,
+                exposure_record=exposure_record,
+                active_record=active_record,
+            )
         except Exception:
             with contextlib.suppress(discord.HTTPException):
                 await message.delete()
+            await self._release_pending_post(guild_id, slot_key)
             return
         normalized_record = normalize_active_drop(stored_active)
         if normalized_record is None:
-            with contextlib.suppress(Exception):
-                await self.store.delete_active_drop(guild_id, getattr(channel, "id", 0))
-                await self.store.delete_exposure(int(stored_exposure["id"]))
             with contextlib.suppress(discord.HTTPException):
                 await message.delete()
+            await self.store.delete_active_drop(guild_id, channel_id)
+            exposure_id = stored_exposure.get("id")
+            if isinstance(exposure_id, int) and exposure_id > 0:
+                await self.store.delete_exposure(exposure_id)
             return
-        self._active_drops[(guild_id, getattr(channel, "id", 0))] = normalized_record
+        self._pending_posts.pop((guild_id, slot_key), None)
+        self._active_drops[(guild_id, channel_id)] = normalized_record
         exposure_id = int(normalized_record["exposure_id"])
         self._wrong_feedback_users[exposure_id] = set()
         self._wrong_feedback_count[exposure_id] = 0
         self._attempted_users[exposure_id] = set()
 
-    def _repeat_windows_for_variant(self, variant: QuestionDropVariant) -> tuple[int, int]:
-        seed = question_drop_seed_for_concept(variant.concept_id) or {}
-        if seed.get("source_type") == "generated":
-            return QUESTION_DROP_GENERATED_CONCEPT_COOLDOWN_DAYS, QUESTION_DROP_GENERATED_VARIANT_COOLDOWN_DAYS
-        return QUESTION_DROP_CONCEPT_COOLDOWN_DAYS, QUESTION_DROP_STATIC_VARIANT_COOLDOWN_DAYS
+    def _repeat_windows_for_variant(self, variant: QuestionDropVariant, *, category_variant_capacity: Counter, category_concept_counts: Counter) -> tuple[int, int, float, float]:
+        if variant.source_type == "generated":
+            preferred_concept_days = 1.0 if category_variant_capacity[variant.category] <= 8 else 2.0
+            preferred_variant_days = 2.0 if category_variant_capacity[variant.category] <= 8 else 3.0
+            return (
+                QUESTION_DROP_GENERATED_CONCEPT_MIN_DAYS,
+                QUESTION_DROP_GENERATED_VARIANT_MIN_DAYS,
+                preferred_concept_days,
+                preferred_variant_days,
+            )
+        preferred_concept_days = 2.0 if category_concept_counts[variant.category] <= 3 else 3.0
+        preferred_variant_days = 4.0 if category_variant_capacity[variant.category] <= 6 else 6.0
+        return (
+            QUESTION_DROP_CURATED_CONCEPT_MIN_DAYS,
+            QUESTION_DROP_CURATED_VARIANT_MIN_DAYS,
+            preferred_concept_days,
+            preferred_variant_days,
+        )
 
     def _select_variant(
         self,
@@ -824,7 +956,11 @@ class QuestionDropsService:
         config: dict[str, Any],
     ) -> QuestionDropVariant | None:
         allowed_categories = set(config.get("enabled_categories") or QUESTION_DROP_CATEGORIES)
-        candidates = iter_candidate_variants(categories=allowed_categories, seed_material=_slot_seed_material(guild_id, channel_id, slot_key), variants_per_seed=6)
+        candidates = iter_candidate_variants(
+            categories=allowed_categories,
+            seed_material=_slot_seed_material(guild_id, channel_id, slot_key),
+            variants_per_seed=QUESTION_DROP_GENERATED_VARIANTS_PER_SEED,
+        )
         if not candidates:
             return None
         recent_by_concept: dict[str, datetime] = {}
@@ -832,7 +968,16 @@ class QuestionDropsService:
         category_counts = Counter()
         difficulty_counts = Counter()
         source_counts = Counter()
+        category_concept_counts = Counter()
+        category_variant_capacity = Counter()
+        seen_category_concepts: set[tuple[str, str]] = set()
         now = ge.now_utc()
+        for candidate in candidates:
+            category_variant_capacity[candidate.category] += 1
+            concept_key = (candidate.category, candidate.concept_id)
+            if concept_key not in seen_category_concepts:
+                seen_category_concepts.add(concept_key)
+                category_concept_counts[candidate.category] += 1
         for record in exposures:
             asked_at = datetime.fromisoformat(record["asked_at"])
             if asked_at.tzinfo is None:
@@ -846,20 +991,31 @@ class QuestionDropsService:
                 source_counts[str(seed.get("source_type", "curated"))] += 1
         scored: list[tuple[float, QuestionDropVariant]] = []
         for variant in candidates:
-            concept_cooldown_days, variant_cooldown_days = self._repeat_windows_for_variant(variant)
+            concept_cooldown_days, variant_cooldown_days, preferred_concept_days, preferred_variant_days = self._repeat_windows_for_variant(
+                variant,
+                category_variant_capacity=category_variant_capacity,
+                category_concept_counts=category_concept_counts,
+            )
             concept_seen_at = recent_by_concept.get(variant.concept_id)
-            if concept_seen_at is not None and (now - concept_seen_at).days < concept_cooldown_days:
+            days_since_concept = ((now - concept_seen_at).total_seconds() / 86400.0) if concept_seen_at is not None else None
+            if days_since_concept is not None and days_since_concept < concept_cooldown_days:
                 continue
             variant_seen_at = recent_by_variant.get(variant.variant_hash)
-            if variant_seen_at is not None and (now - variant_seen_at).days < variant_cooldown_days:
+            days_since_variant = ((now - variant_seen_at).total_seconds() / 86400.0) if variant_seen_at is not None else None
+            if days_since_variant is not None and days_since_variant < variant_cooldown_days:
                 continue
-            freshness = 26.0 if concept_seen_at is None else min((now - concept_seen_at).days * 2.0, 18.0)
-            variant_freshness = 10.0 if variant_seen_at is None else min((now - variant_seen_at).days * 0.75, 8.0)
+            freshness = 18.0 if concept_seen_at is None else min(days_since_concept * 4.0, 16.0)
+            variant_freshness = 9.0 if variant_seen_at is None else min(days_since_variant * 2.0, 8.0)
+            if days_since_concept is not None and days_since_concept < preferred_concept_days:
+                freshness -= (preferred_concept_days - days_since_concept) * (4.0 if variant.source_type == "curated" else 2.0)
+            if days_since_variant is not None and days_since_variant < preferred_variant_days:
+                variant_freshness -= (preferred_variant_days - days_since_variant) * (3.0 if variant.source_type == "curated" else 1.5)
             category_balance = 8.0 - category_counts[variant.category]
             difficulty_balance = 5.0 - difficulty_counts[int(variant.difficulty)]
             source_balance = 3.0 - source_counts[variant.source_type]
+            pool_depth_bonus = min(category_variant_capacity[variant.category], 12) * (0.15 if variant.source_type == "generated" else 0.08)
             jitter = (int(build_variant_hash(slot_key, variant.variant_hash), 16) % 1000) / 1000.0
-            score = freshness + variant_freshness + category_balance + difficulty_balance + source_balance + jitter
+            score = freshness + variant_freshness + category_balance + difficulty_balance + source_balance + pool_depth_bonus + jitter
             scored.append((score, variant))
         if not scored:
             return None
@@ -879,6 +1035,9 @@ class QuestionDropsService:
             for (active_guild_id, _), record in self._active_drops.items()
             if active_guild_id == guild_id
         }
+        active_slot_keys.update(
+            record["slot_key"] for (pending_guild_id, _), record in self._pending_posts.items() if pending_guild_id == guild_id
+        )
         for day_offset in range(0, 2):
             local_day = now.astimezone(tzinfo).date() + timedelta(days=day_offset)
             for index, local_slot in enumerate(_daily_slot_datetimes(guild_id, local_day, config)):
@@ -887,3 +1046,17 @@ class QuestionDropsService:
                     continue
                 return local_slot.astimezone(timezone.utc)
         return None
+
+
+def _extract_reply_target_id(message: discord.Message) -> int | None:
+    reference = getattr(message, "reference", None)
+    message_id = getattr(reference, "message_id", None)
+    if isinstance(message_id, int):
+        return message_id
+    resolved = getattr(reference, "resolved", None)
+    cached = getattr(reference, "cached_message", None)
+    for candidate in (resolved, cached):
+        candidate_id = getattr(candidate, "id", None)
+        if isinstance(candidate_id, int):
+            return candidate_id
+    return None

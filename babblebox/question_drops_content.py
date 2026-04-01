@@ -37,6 +37,61 @@ _PUNCT_RE = re.compile(r"[^\w\s#&+\-]")
 _SPACE_RE = re.compile(r"\s+")
 _NUMERIC_TOKEN_RE = re.compile(r"(?<![\w/])[-+]?(?:\d{1,3}(?:,\d{3})+|\d+)(?:\.\d+)?(?![\w/])")
 _CHOICE_LETTER_RE = re.compile(r"^\s*(?:option|answer)?\s*\(?([a-z])\)?(?:[\)\].:\-])?(?:\s+(.*))?\s*$", re.IGNORECASE)
+_ANSWER_LEAD_RE = re.compile(
+    r"^\s*(?:answer|answer is|guess|guess is|my guess|my guess is|i pick|i choose|i(?:'ll| will) go with|it(?:'s| is))\s*:?\s+(?P<payload>.+?)\s*$",
+    re.IGNORECASE,
+)
+_URL_RE = re.compile(r"https?://|\bdiscord\.gg/\S+", re.IGNORECASE)
+_MENTION_RE = re.compile(r"<[@#]&?\d+>")
+_CHATTER_LEAD_TOKENS = {
+    "and",
+    "because",
+    "bro",
+    "bruh",
+    "but",
+    "damn",
+    "hey",
+    "how",
+    "huh",
+    "i",
+    "if",
+    "it",
+    "lol",
+    "lmao",
+    "nah",
+    "nope",
+    "ok",
+    "okay",
+    "same",
+    "seriously",
+    "that",
+    "this",
+    "wait",
+    "what",
+    "when",
+    "where",
+    "why",
+    "wild",
+    "wow",
+    "yeah",
+    "yep",
+    "you",
+}
+_CHATTER_TOKENS = {
+    "bro",
+    "bruh",
+    "crazy",
+    "huh",
+    "lol",
+    "lmao",
+    "same",
+    "seriously",
+    "thanks",
+    "thank",
+    "wait",
+    "wild",
+    "wow",
+}
 
 
 @dataclass(frozen=True)
@@ -106,6 +161,37 @@ def _parse_choice_letter(raw_answer: str | None, answer_spec: dict[str, Any]) ->
     if trailing and trailing not in choices:
         return None
     return letter or None
+
+
+def _answer_payload_candidates(raw_answer: str | None) -> list[str]:
+    content = str(raw_answer or "").strip()
+    if not content:
+        return []
+    candidates = [content]
+    lead_match = _ANSWER_LEAD_RE.match(content)
+    if lead_match is not None:
+        payload = str(lead_match.group("payload") or "").strip()
+        if payload and payload not in candidates:
+            candidates.append(payload)
+    return candidates
+
+
+def _contains_attempt_noise(raw_answer: str) -> bool:
+    return _URL_RE.search(raw_answer) is not None or _MENTION_RE.search(raw_answer) is not None
+
+
+def _looks_like_free_text_guess(raw_answer: str | None, *, max_tokens: int) -> bool:
+    raw = str(raw_answer or "").strip()
+    if not raw or "?" in raw or "\n" in raw:
+        return False
+    tokens = _normalize_token_sequence(raw)
+    if not tokens or len(tokens) > max_tokens:
+        return False
+    if tokens[0] in _CHATTER_LEAD_TOKENS:
+        return False
+    if sum(1 for token in tokens if token in _CHATTER_TOKENS) >= 2:
+        return False
+    return True
 
 
 def validate_answer_spec(spec: dict[str, Any]) -> tuple[bool, str | None]:
@@ -179,6 +265,55 @@ def judge_answer(answer_spec: dict[str, Any], raw_answer: str | None) -> bool:
         candidate_tokens = _normalize_token_sequence(raw_answer)
         expected_tokens = tuple(normalize_answer_text(token) for token in answer_spec.get("tokens", []))
         return bool(candidate_tokens) and candidate_tokens == expected_tokens
+    return False
+
+
+def is_answer_attempt(answer_spec: dict[str, Any], raw_answer: str | None, *, direct_reply: bool = False) -> bool:
+    content = str(raw_answer or "").strip()
+    if not content or len(content) > 120 or _contains_attempt_noise(content):
+        return False
+    candidates = _answer_payload_candidates(content)
+    if not candidates:
+        return False
+    answer_type = answer_spec.get("type")
+    if answer_type == "multiple_choice":
+        choices = {normalize_answer_text(choice) for choice in answer_spec.get("choices", []) if isinstance(choice, str)}
+        for candidate in candidates:
+            normalized = normalize_answer_text(candidate)
+            if normalized and normalized in choices:
+                return True
+            if _parse_choice_letter(candidate, answer_spec) is not None:
+                return True
+        return False
+    if answer_type == "numeric":
+        return any(extract_single_number(candidate) is not None for candidate in candidates)
+    if answer_type == "boolean":
+        normalized_values = {normalize_answer_text(candidate) for candidate in candidates if normalize_answer_text(candidate)}
+        return bool(normalized_values.intersection(TRUE_ALIASES | FALSE_ALIASES))
+    if answer_type == "ordered_tokens":
+        expected_tokens = tuple(normalize_answer_text(token) for token in answer_spec.get("tokens", []))
+        if not expected_tokens:
+            return False
+        for candidate in candidates:
+            candidate_tokens = _normalize_token_sequence(candidate)
+            if candidate_tokens and len(candidate_tokens) == len(expected_tokens):
+                return True
+        return False
+    if answer_type == "text":
+        accepted = {normalize_answer_text(item) for item in answer_spec.get("accepted", []) if isinstance(item, str)}
+        max_alias_tokens = max((len(_normalize_token_sequence(item)) for item in accepted), default=1)
+        standalone_max_tokens = max(3, max_alias_tokens + 1)
+        for candidate in candidates:
+            normalized = normalize_answer_text(candidate)
+            if normalized and normalized in accepted:
+                return True
+        if len(candidates) > 1 and _looks_like_free_text_guess(candidates[-1], max_tokens=standalone_max_tokens + 1):
+            return True
+        if direct_reply and _looks_like_free_text_guess(candidates[0], max_tokens=standalone_max_tokens + 1):
+            return True
+        if _looks_like_free_text_guess(candidates[0], max_tokens=standalone_max_tokens):
+            return True
+        return False
     return False
 
 

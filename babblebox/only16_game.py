@@ -464,8 +464,12 @@ def _only16_player_names(game: dict[str, Any]) -> str:
 def _only16_mode_blurb(mode: str | None) -> str:
     normalized = str(mode or "strict").casefold()
     if normalized == "smart":
-        return "Replies are safest. Smart can also judge one clean first follow-up before chatter voids the trap."
-    return "Only direct replies count. Ambiguity always resolves in favor of the player."
+        return "Replies are safest. Smart can also judge one unmistakable standalone answer. Unrelated chatter is ignored."
+    return "Only direct replies count. Anything else is ignored, and ambiguity always resolves in favor of the player."
+
+
+def _only16_supported_math_copy() -> str:
+    return "Safe math supports integers with `+ - * / ^`, unary `+/-`, and parentheses."
 
 
 def _format_fraction(value: Fraction | int) -> str:
@@ -475,23 +479,33 @@ def _format_fraction(value: Fraction | int) -> str:
     return f"{fraction.numerator}/{fraction.denominator}"
 
 
-def _looks_like_smart_follow_up(text: str | None, parsed: Only16ParseResult) -> bool:
-    if not parsed.is_single:
-        return False
+def _classify_smart_follow_up(text: str | None, parsed: Only16ParseResult) -> str:
     content = str(text or "").strip()
     if not content or "?" in content or len(content) > 60:
-        return False
-    for candidate in _exact_payload_candidates(content):
+        return "ignore"
+    if has_question_intent(content):
+        return "void"
+    candidates = _exact_payload_candidates(content)
+    for candidate in candidates:
         exact = _parse_exact_numeric_payload(candidate)
         if exact.kind == "single":
-            return True
-    return False
+            return "judge"
+        if exact.kind in {"ambiguous", "unsupported"}:
+            return "void"
+    if len(candidates) > 1:
+        payload = candidates[-1]
+        payload_parsed = parse_only16_numeric_answer(payload)
+        if payload_parsed.kind in {"ambiguous", "unsupported"}:
+            return "void"
+    if parsed.kind in {"ambiguous", "unsupported"} and _parse_exact_numeric_payload(content).kind in {"ambiguous", "unsupported"}:
+        return "void"
+    return "ignore"
 
 
 def _trap_live_copy(mode: str | None) -> str:
     normalized = str(mode or "strict").casefold()
     if normalized == "smart":
-        return "Trap live. Replies are safest, but one clean first follow-up can still count."
+        return "Trap live. Replies are safest, but one unmistakable standalone answer can still count."
     return "Trap live. Direct replies are the only judged answer lane."
 
 
@@ -502,11 +516,12 @@ async def start_only16_game_locked(guild_id: int, game: dict[str, Any]):
         title="Only 16",
         description=(
             f"Mode: **{only16_mode_label(state.get('mode'))}**\n"
-            "Ask a clear count question. Explicit numbers include digits, spelled-out whole numbers up to hundreds, or simple math like `8*2`."
+            "Ask a clear count question. Explicit numbers include digits, safe number words, or bounded math like `8*2`, `17-1`, or `(10+6)`."
         ),
         color=discord.Color.orange(),
     )
     intro.add_field(name="Judging", value=_only16_mode_blurb(state.get("mode")), inline=False)
+    intro.add_field(name="Safe Math", value=_only16_supported_math_copy(), inline=False)
     intro.add_field(name="Live Players", value=_only16_player_names(game), inline=False)
     intro = ge.style_embed(intro, footer="Babblebox Only 16 | Ambiguity never eliminates")
     await game["channel"].send(embed=intro)
@@ -571,7 +586,6 @@ async def _arm_only16_trap_locked(guild_id: int, game: dict[str, Any], message: 
         "armed_at": ge.now_utc(),
         "expires_at": ge.now_utc() + timedelta(seconds=ONLY16_TRAP_WINDOW_SECONDS),
         "mode": state.get("mode", "strict"),
-        "non_reply_seen": False,
         "manual": manual,
     }
     state["trap"] = trap
@@ -607,15 +621,16 @@ async def _handle_only16_answer_locked(message: discord.Message, guild_id: int, 
 
     if mode != "smart":
         return False
-    if has_question_intent(message.content):
-        await _consume_only16_trap_locked(guild_id, game, reason="Smart mode saw another question, so Babblebox voided the trap instead of guessing intent.")
-        return True
-    if trap.get("non_reply_seen"):
-        await _consume_only16_trap_locked(guild_id, game, reason="Smart mode only trusts the first clean follow-up. Extra chatter voided the trap.")
-        return True
-    trap["non_reply_seen"] = True
-    if not _looks_like_smart_follow_up(message.content, parsed):
-        await _consume_only16_trap_locked(guild_id, game, reason="That first follow-up was too fuzzy to judge safely, so nobody gets clipped.")
+    smart_outcome = _classify_smart_follow_up(message.content, parsed)
+    if smart_outcome == "ignore":
+        return False
+    if smart_outcome == "void":
+        await _consume_only16_trap_locked(
+            guild_id,
+            game,
+            title="Trap Voided",
+            reason="Smart mode saw a fuzzy or unsupported non-reply answer lane, so Babblebox refused to guess intent.",
+        )
         return True
     return await _resolve_only16_answer_locked(message, guild_id, game, trap, parsed)
 
@@ -635,7 +650,7 @@ async def _resolve_only16_answer_locked(
     if parsed.kind == "none":
         body = f"{message.author.mention} answered without a clear explicit number, so Babblebox let it pass."
         await game["channel"].send(
-            embed=ge.make_status_embed("Trap Consumed", body, tone="info", footer="Babblebox Only 16"),
+            embed=ge.make_status_embed("Safe Pass", body, tone="info", footer="Babblebox Only 16"),
             allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
         )
         await _advance_to_next_asker_locked(guild_id, game, asker_id=asker_id)
@@ -643,7 +658,7 @@ async def _resolve_only16_answer_locked(
     if parsed.kind == "ambiguous":
         await game["channel"].send(
             embed=ge.make_status_embed(
-                "Trap Consumed",
+                "Trap Voided",
                 f"{message.author.mention} gave more than one explicit number, so Babblebox voided the catch on fairness.",
                 tone="info",
                 footer="Babblebox Only 16",
@@ -655,8 +670,11 @@ async def _resolve_only16_answer_locked(
     if parsed.kind == "unsupported":
         await game["channel"].send(
             embed=ge.make_status_embed(
-                "Trap Consumed",
-                f"{message.author.mention} used math outside the safe judge grammar, so Babblebox refused to auto-eliminate on it.",
+                "Trap Voided",
+                (
+                    f"{message.author.mention} used math outside the safe judge grammar, so Babblebox refused to auto-eliminate on it.\n"
+                    f"{_only16_supported_math_copy()}"
+                ),
                 tone="info",
                 footer="Babblebox Only 16",
             ),
@@ -702,7 +720,7 @@ async def _resolve_only16_answer_locked(
     return True
 
 
-async def _consume_only16_trap_locked(guild_id: int, game: dict[str, Any], *, reason: str):
+async def _consume_only16_trap_locked(guild_id: int, game: dict[str, Any], *, reason: str, title: str = "Trap Voided"):
     await ge.cancel_task(game.get("turn_task"))
     state = ensure_only16_state(game)
     trap = state.get("trap")
@@ -710,7 +728,7 @@ async def _consume_only16_trap_locked(guild_id: int, game: dict[str, Any], *, re
     state["trap"] = None
     await game["channel"].send(
         embed=ge.make_status_embed(
-            "Trap Expired",
+            title,
             reason,
             tone="info",
             footer="Babblebox Only 16",
@@ -821,4 +839,9 @@ async def _only16_trap_timeout(guild_id: int, token: int):
         trap = state.get("trap")
         if not _trap_is_live(trap):
             return
-        await _consume_only16_trap_locked(guild_id, game, reason="Nobody took the bait before the trap window closed.")
+        await _consume_only16_trap_locked(
+            guild_id,
+            game,
+            title="Trap Window Closed",
+            reason="Nobody took the bait before the trap window closed.",
+        )

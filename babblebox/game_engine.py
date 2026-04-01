@@ -1180,8 +1180,8 @@ def get_lobby_embed(guild_id):
         "corpse": ("📝 Exquisite Corpse", "Blind collaborative nonsense for 3+ players.", discord.Color.purple()),
         "spyfall": ("🕵️ Spyfall", "Find the spy before the room turns on itself. 3+ players.", discord.Color.dark_gray()),
         "bomb": ("💣 Word Bomb", "Fast typing survival for 2+ players.", discord.Color.red()),
-        "only16": ("Only 16", "Social elimination built around explicit quantity traps. 2+ players.", discord.Color.orange()),
-        "pattern_hunt": ("Pattern Hunt", "One guesser, secret machine-checkable rule, public clues. 3+ players.", discord.Color.dark_teal()),
+        "only16": ("Only 16", "Fair quantity-trap elimination with explicit numeric judging. 2+ players.", discord.Color.orange()),
+        "pattern_hunt": ("Pattern Hunt", "One guesser, hidden machine-checkable rule, public clues, structured guesses. 3+ players.", discord.Color.dark_teal()),
     }
 
     title, desc, color = titles.get(gt, titles["none"])
@@ -1200,7 +1200,7 @@ def get_lobby_embed(guild_id):
             name="Only 16 Mode",
             value=(
                 f"**{str(game.get('only16_mode', 'strict')).title()}**\n"
-                "Strict only judges direct replies. Smart can catch one clean first follow-up before chatter voids the trap."
+                "Strict only judges direct replies. Smart can also judge one unmistakable standalone answer while unrelated chatter is ignored."
             ),
             inline=False,
         )

@@ -13,6 +13,7 @@ from babblebox import game_engine as ge
 from babblebox.question_drops_content import (
     answer_points_for_difficulty,
     build_variant,
+    is_answer_attempt,
     judge_answer,
     normalize_answer_text,
     validate_content_pack,
@@ -39,7 +40,7 @@ class DummyChannel:
     async def send(self, *args, **kwargs):
         if self.fail_send:
             raise discord.HTTPException(types.SimpleNamespace(status=500, reason="fail"), "send failed")
-        message = types.SimpleNamespace(id=5000 + len(self.sent), channel=self, kwargs=kwargs)
+        message = types.SimpleNamespace(id=5000 + len(self.sent), channel=self, kwargs=kwargs, delete=AsyncMock())
         self.sent.append((args, kwargs, message))
         return message
 
@@ -75,11 +76,12 @@ class DummyBot:
 
 
 class DummyMessage:
-    def __init__(self, *, guild: DummyGuild, channel: DummyChannel, author: DummyUser, content: str):
+    def __init__(self, *, guild: DummyGuild, channel: DummyChannel, author: DummyUser, content: str, reference=None):
         self.guild = guild
         self.channel = channel
         self.author = author
         self.content = content
+        self.reference = reference
 
 
 class DummyDeletePayload:
@@ -124,6 +126,24 @@ class QuestionDropsContentTests(unittest.TestCase):
         self.assertTrue(judge_answer({"type": "ordered_tokens", "tokens": ["red", "blue", "green"]}, "red, blue, green"))
         self.assertEqual(normalize_answer_text("  Hello,  World! "), "hello world")
 
+    def test_answer_attempt_gate_accepts_clean_guesses_and_rejects_chatter(self):
+        text_spec = {"type": "text", "accepted": ["mars"]}
+        self.assertTrue(is_answer_attempt(text_spec, "venus"))
+        self.assertTrue(is_answer_attempt(text_spec, "guess venus"))
+        self.assertTrue(is_answer_attempt(text_spec, "maybe venus", direct_reply=True))
+        self.assertFalse(is_answer_attempt(text_spec, "wait that's wild"))
+        self.assertFalse(is_answer_attempt(text_spec, "what do you mean"))
+
+        numeric_spec = {"type": "numeric", "value": 16}
+        self.assertTrue(is_answer_attempt(numeric_spec, "16"))
+        self.assertTrue(is_answer_attempt(numeric_spec, "answer 16"))
+        self.assertFalse(is_answer_attempt(numeric_spec, "numbers are hard lol"))
+
+        multiple_choice = {"type": "multiple_choice", "choices": ["red", "yellow", "green"], "answer": "green"}
+        self.assertTrue(is_answer_attempt(multiple_choice, "option c"))
+        self.assertTrue(is_answer_attempt(multiple_choice, "green"))
+        self.assertFalse(is_answer_attempt(multiple_choice, "which one was c again"))
+
 
 class QuestionDropsServiceTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -163,6 +183,30 @@ class QuestionDropsServiceTests(unittest.IsolatedAsyncioTestCase):
             await self.service._maybe_post_due_drops()
         self.assertEqual(len(self.service._active_drops), 1)
         return next(iter(self.service._active_drops.values()))
+
+    def _wrong_attempt_content(self, active: dict[str, object]) -> str:
+        answer_spec = active["answer_spec"]
+        answer_type = str(answer_spec.get("type"))
+        if answer_type == "numeric":
+            return str(int(answer_spec.get("value", 0)) + 1)
+        if answer_type == "boolean":
+            return "no" if bool(answer_spec.get("value")) else "yes"
+        if answer_type == "multiple_choice":
+            answer = normalize_answer_text(answer_spec.get("answer"))
+            for index, choice in enumerate(answer_spec.get("choices", [])):
+                if normalize_answer_text(choice) != answer:
+                    return f"option {chr(ord('a') + index)}"
+            return "option a"
+        if answer_type == "ordered_tokens":
+            tokens = [str(token) for token in answer_spec.get("tokens", [])]
+            if len(tokens) >= 2:
+                return ", ".join(reversed(tokens))
+            return "alpha beta"
+        accepted = {normalize_answer_text(item) for item in answer_spec.get("accepted", []) if isinstance(item, str)}
+        for candidate in ("venus", "saturn", "alpha", "banana"):
+            if normalize_answer_text(candidate) not in accepted:
+                return f"guess {candidate}"
+        return "guess zebra"
 
     async def test_selector_avoids_recent_concept_repeats(self):
         old_variant = self.service._select_variant(
@@ -217,7 +261,7 @@ class QuestionDropsServiceTests(unittest.IsolatedAsyncioTestCase):
         await self.service.update_config(self.guild.id, tone_mode="playful")
         active = await self._post_one_drop()
         author = DummyUser(55)
-        wrong = DummyMessage(guild=self.guild, channel=self.channel, author=author, content="wrong answer")
+        wrong = DummyMessage(guild=self.guild, channel=self.channel, author=author, content=self._wrong_attempt_content(active))
 
         await self.service.handle_message(wrong)
         await self.service.handle_message(wrong)
@@ -230,7 +274,7 @@ class QuestionDropsServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_same_user_wrong_then_correct_counts_once_as_correct_participation(self):
         active = await self._post_one_drop()
         winner = DummyUser(55)
-        wrong = DummyMessage(guild=self.guild, channel=self.channel, author=winner, content="wrong answer")
+        wrong = DummyMessage(guild=self.guild, channel=self.channel, author=winner, content=self._wrong_attempt_content(active))
         correct = DummyMessage(
             guild=self.guild,
             channel=self.channel,
@@ -251,7 +295,7 @@ class QuestionDropsServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_expiring_drop_records_first_wrong_attempt_once(self):
         active = await self._post_one_drop()
         author = DummyUser(61)
-        wrong = DummyMessage(guild=self.guild, channel=self.channel, author=author, content="wrong answer")
+        wrong = DummyMessage(guild=self.guild, channel=self.channel, author=author, content=self._wrong_attempt_content(active))
         await self.service.handle_message(wrong)
 
         await self.service._expire_drop(active, timed_out=True)
@@ -293,6 +337,110 @@ class QuestionDropsServiceTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(len(await store.list_exposures_for_guild(guild.id)), 0)
             self.assertEqual(len(service._active_drops), 0)
+        finally:
+            await service.close()
+
+    async def test_attach_failure_releases_pending_claim_and_deletes_post(self):
+        active_store = QuestionDropsStore(backend="memory")
+        await active_store.load()
+        service = QuestionDropsService(self.bot, store=active_store)
+        try:
+            self.assertTrue(await service.start())
+            if service._scheduler_task is not None:
+                service._scheduler_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await service._scheduler_task
+                service._scheduler_task = None
+            await service.update_config(
+                self.guild.id,
+                enabled=True,
+                drops_per_day=1,
+                timezone_name="UTC",
+                activity_gate="off",
+                active_start_hour=0,
+                active_end_hour=23,
+            )
+            await service.update_channels(self.guild.id, action="add", channel_id=self.channel.id)
+            service.store.attach_pending_post_message = AsyncMock(side_effect=RuntimeError("db attach failed"))
+            now = ge.now_utc().replace(second=0, microsecond=0)
+
+            with patch("babblebox.question_drops_service._daily_slot_datetimes", return_value=[now.astimezone(ge.now_utc().tzinfo)]):
+                await service._maybe_post_due_drops()
+
+            self.assertEqual(len(await service.store.list_pending_posts()), 0)
+            self.assertEqual(len(await service.store.list_exposures_for_guild(self.guild.id)), 0)
+            self.assertEqual(len(service._active_drops), 0)
+            self.channel.sent[-1][2].delete.assert_awaited_once()
+        finally:
+            await service.close()
+
+    async def test_non_answer_chatter_does_not_count_as_attempt_or_feedback(self):
+        active = await self._post_one_drop()
+        author = DummyUser(56)
+        chatter = DummyMessage(guild=self.guild, channel=self.channel, author=author, content="wait that's wild")
+
+        handled = await self.service.handle_message(chatter)
+
+        self.assertFalse(handled)
+        exposure_id = int(active["exposure_id"])
+        self.assertEqual(self.service._wrong_feedback_count[exposure_id], 0)
+        self.assertEqual(self.service._attempted_users[exposure_id], set())
+        self.bot.profile_service.record_question_drop_result.assert_not_awaited()
+
+    async def test_party_game_overlap_retires_live_drop_before_judging(self):
+        active = await self._post_one_drop()
+        saved_games = ge.games
+        ge.games = {
+            self.guild.id: {
+                "channel": self.channel,
+                "closing": False,
+            }
+        }
+        try:
+            handled = await self.service.handle_message(
+                DummyMessage(
+                    guild=self.guild,
+                    channel=self.channel,
+                    author=DummyUser(77),
+                    content=self._wrong_attempt_content(active),
+                )
+            )
+        finally:
+            ge.games = saved_games
+
+        self.assertFalse(handled)
+        self.assertEqual(len(self.service._active_drops), 0)
+        self.assertIsNone(await self.store.fetch_active_drop(self.guild.id, self.channel.id))
+
+    async def test_startup_sweeps_stale_pending_posts(self):
+        store = QuestionDropsStore(backend="memory")
+        await store.load()
+        claimed = await store.claim_pending_post(
+            {
+                "guild_id": self.guild.id,
+                "channel_id": self.channel.id,
+                "slot_key": "2026-04-01:0",
+                "concept_id": "science:planet-red",
+                "variant_hash": "pending-abc",
+                "claimed_at": ge.now_utc() - timedelta(minutes=15),
+                "lease_expires_at": ge.now_utc() - timedelta(minutes=10),
+                "message_id": None,
+            }
+        )
+        self.assertIsNotNone(claimed)
+        store.load = AsyncMock()
+        bot = DummyBot(self.guild, [self.channel])
+        service = QuestionDropsService(bot, store=store)
+        try:
+            self.assertTrue(await service.start())
+            if service._scheduler_task is not None:
+                service._scheduler_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await service._scheduler_task
+                service._scheduler_task = None
+
+            self.assertEqual(await store.list_pending_posts(), [])
+            self.assertEqual(service._pending_posts, {})
         finally:
             await service.close()
 

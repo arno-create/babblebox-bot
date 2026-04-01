@@ -94,7 +94,7 @@ class QuestionDropsCog(commands.Cog):
     @commands.hybrid_group(
         name="drops",
         with_app_command=True,
-        description="Configure and inspect Babblebox Question Drops",
+        description="Configure and inspect scheduled Question Drops",
         invoke_without_command=True,
     )
     async def drops_group(self, ctx: commands.Context):
@@ -138,7 +138,7 @@ class QuestionDropsCog(commands.Cog):
         snapshot = await self.service.get_status_snapshot(ctx.guild)
         await send_hybrid_response(ctx, embed=self.service.build_status_embed(ctx.guild, snapshot), ephemeral=True)
 
-    @drops_group.command(name="config", with_app_command=True, description="Update Question Drops timing and tone")
+    @drops_group.command(name="config", with_app_command=True, description="Update Question Drops schedule, window, and tone")
     @app_commands.default_permissions(manage_guild=True)
     @app_commands.describe(
         enabled="Turn scheduled drops on or off",
@@ -241,7 +241,7 @@ class QuestionDropsCog(commands.Cog):
             ephemeral=True,
         )
 
-    @drops_group.command(name="stats", with_app_command=True, description="View Question Drops progress and top categories")
+    @drops_group.command(name="stats", with_app_command=True, description="View Question Drops points, solves, and top categories")
     @app_commands.describe(user="Whose Question Drops stats to view", visibility="Show the card publicly or only to you")
     @app_commands.choices(visibility=VISIBILITY_CHOICES)
     async def drops_stats_command(self, ctx: commands.Context, user: Optional[discord.User] = None, visibility: str = "public"):

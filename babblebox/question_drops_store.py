@@ -170,6 +170,35 @@ def normalize_exposure(payload: Any) -> dict[str, Any] | None:
     }
 
 
+def normalize_pending_post(payload: Any) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    required_ints = ("guild_id", "channel_id")
+    for field in required_ints:
+        if not isinstance(payload.get(field), int) or int(payload[field]) <= 0:
+            return None
+    string_fields = ("slot_key", "concept_id", "variant_hash")
+    if not all(isinstance(payload.get(field), str) and payload[field].strip() for field in string_fields):
+        return None
+    claimed_at = _serialize_datetime(_parse_datetime(payload.get("claimed_at")))
+    lease_expires_at = _serialize_datetime(_parse_datetime(payload.get("lease_expires_at")))
+    if claimed_at is None or lease_expires_at is None:
+        return None
+    message_id = payload.get("message_id")
+    if message_id is not None and (not isinstance(message_id, int) or message_id <= 0):
+        return None
+    return {
+        "guild_id": int(payload["guild_id"]),
+        "channel_id": int(payload["channel_id"]),
+        "slot_key": payload["slot_key"].strip(),
+        "concept_id": payload["concept_id"].strip(),
+        "variant_hash": payload["variant_hash"].strip(),
+        "claimed_at": claimed_at,
+        "lease_expires_at": lease_expires_at,
+        "message_id": int(message_id) if isinstance(message_id, int) and message_id > 0 else None,
+    }
+
+
 def _resolve_database_url(configured: str | None = None) -> tuple[str, str | None]:
     if configured is not None and configured.strip():
         return configured.strip(), "argument"
@@ -220,10 +249,32 @@ class _BaseQuestionDropsStore:
     async def list_active_drops(self) -> list[dict[str, Any]]:
         raise NotImplementedError
 
+    async def list_pending_posts(self) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
     async def fetch_active_drop(self, guild_id: int, channel_id: int) -> dict[str, Any] | None:
         raise NotImplementedError
 
     async def upsert_active_drop(self, record: dict[str, Any]):
+        raise NotImplementedError
+
+    async def claim_pending_post(self, record: dict[str, Any]) -> dict[str, Any] | None:
+        raise NotImplementedError
+
+    async def attach_pending_post_message(self, guild_id: int, slot_key: str, message_id: int):
+        raise NotImplementedError
+
+    async def finalize_pending_post(
+        self,
+        guild_id: int,
+        slot_key: str,
+        *,
+        exposure_record: dict[str, Any],
+        active_record: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        raise NotImplementedError
+
+    async def release_pending_post(self, guild_id: int, slot_key: str):
         raise NotImplementedError
 
     async def register_posted_drop(self, exposure_record: dict[str, Any], active_record: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -257,12 +308,14 @@ class _MemoryQuestionDropsStore(_BaseQuestionDropsStore):
     def __init__(self):
         self.configs: dict[int, dict[str, Any]] = {}
         self.active_drops: dict[tuple[int, int], dict[str, Any]] = {}
+        self.pending_posts: dict[tuple[int, str], dict[str, Any]] = {}
         self.exposures: dict[int, dict[str, Any]] = {}
         self._next_exposure_id = 1
 
     async def load(self):
         self.configs = {}
         self.active_drops = {}
+        self.pending_posts = {}
         self.exposures = {}
         self._next_exposure_id = 1
 
@@ -280,6 +333,9 @@ class _MemoryQuestionDropsStore(_BaseQuestionDropsStore):
     async def list_active_drops(self) -> list[dict[str, Any]]:
         return [deepcopy(record) for record in self.active_drops.values()]
 
+    async def list_pending_posts(self) -> list[dict[str, Any]]:
+        return [deepcopy(record) for record in self.pending_posts.values()]
+
     async def fetch_active_drop(self, guild_id: int, channel_id: int) -> dict[str, Any] | None:
         record = self.active_drops.get((guild_id, channel_id))
         return deepcopy(record) if record is not None else None
@@ -288,6 +344,70 @@ class _MemoryQuestionDropsStore(_BaseQuestionDropsStore):
         normalized = normalize_active_drop(record)
         if normalized is not None:
             self.active_drops[(normalized["guild_id"], normalized["channel_id"])] = normalized
+
+    async def claim_pending_post(self, record: dict[str, Any]) -> dict[str, Any] | None:
+        normalized = normalize_pending_post(record)
+        if normalized is None:
+            return None
+        pending_key = (normalized["guild_id"], normalized["slot_key"])
+        active_key = (normalized["guild_id"], normalized["channel_id"])
+        if pending_key in self.pending_posts:
+            return None
+        if active_key in self.active_drops:
+            return None
+        if any(
+            pending["guild_id"] == normalized["guild_id"] and pending["channel_id"] == normalized["channel_id"]
+            for pending in self.pending_posts.values()
+        ):
+            return None
+        if any(
+            exposure["guild_id"] == normalized["guild_id"] and exposure["slot_key"] == normalized["slot_key"]
+            for exposure in self.exposures.values()
+        ):
+            return None
+        self.pending_posts[pending_key] = deepcopy(normalized)
+        return deepcopy(normalized)
+
+    async def attach_pending_post_message(self, guild_id: int, slot_key: str, message_id: int):
+        pending = self.pending_posts.get((guild_id, slot_key))
+        if pending is None:
+            return
+        if isinstance(message_id, int) and message_id > 0:
+            pending["message_id"] = message_id
+
+    async def finalize_pending_post(
+        self,
+        guild_id: int,
+        slot_key: str,
+        *,
+        exposure_record: dict[str, Any],
+        active_record: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        pending = self.pending_posts.get((guild_id, slot_key))
+        normalized_exposure = normalize_exposure(exposure_record)
+        normalized_active = normalize_active_drop(active_record, allow_missing_exposure_id=True)
+        if pending is None:
+            raise ValueError("Question Drops slot was not reserved.")
+        if normalized_exposure is None or normalized_active is None:
+            raise ValueError("Invalid Question Drops record.")
+        active_key = (normalized_active["guild_id"], normalized_active["channel_id"])
+        if active_key in self.active_drops:
+            raise ValueError("Question Drops channel already has an active drop.")
+        if any(
+            exposure["guild_id"] == normalized_exposure["guild_id"] and exposure["slot_key"] == normalized_exposure["slot_key"]
+            for exposure in self.exposures.values()
+        ):
+            raise ValueError("Question Drops slot already registered.")
+        normalized_exposure["id"] = self._next_exposure_id
+        self._next_exposure_id += 1
+        self.exposures[int(normalized_exposure["id"])] = deepcopy(normalized_exposure)
+        normalized_active["exposure_id"] = int(normalized_exposure["id"])
+        self.active_drops[active_key] = deepcopy(normalized_active)
+        self.pending_posts.pop((guild_id, slot_key), None)
+        return deepcopy(normalized_exposure), deepcopy(normalized_active)
+
+    async def release_pending_post(self, guild_id: int, slot_key: str):
+        self.pending_posts.pop((guild_id, slot_key), None)
 
     async def register_posted_drop(self, exposure_record: dict[str, Any], active_record: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
         normalized_exposure = normalize_exposure(exposure_record)
@@ -416,6 +536,21 @@ def _exposure_from_row(row) -> dict[str, Any] | None:
     )
 
 
+def _pending_post_from_row(row) -> dict[str, Any] | None:
+    return normalize_pending_post(
+        {
+            "guild_id": row["guild_id"],
+            "channel_id": row["channel_id"],
+            "slot_key": row["slot_key"],
+            "concept_id": row["concept_id"],
+            "variant_hash": row["variant_hash"],
+            "claimed_at": _serialize_datetime(row["claimed_at"]),
+            "lease_expires_at": _serialize_datetime(row["lease_expires_at"]),
+            "message_id": row["message_id"],
+        }
+    )
+
+
 class _PostgresQuestionDropsStore(_BaseQuestionDropsStore):
     backend_name = "postgres"
 
@@ -503,6 +638,21 @@ class _PostgresQuestionDropsStore(_BaseQuestionDropsStore):
                 ") dedupe WHERE rn > 1)"
             ),
             "CREATE UNIQUE INDEX IF NOT EXISTS ux_question_drop_exposures_guild_slot ON question_drop_exposures (guild_id, slot_key)",
+            (
+                "CREATE TABLE IF NOT EXISTS question_drop_pending ("
+                "guild_id BIGINT NOT NULL, "
+                "channel_id BIGINT NOT NULL, "
+                "slot_key TEXT NOT NULL, "
+                "concept_id TEXT NOT NULL, "
+                "variant_hash TEXT NOT NULL, "
+                "claimed_at TIMESTAMPTZ NOT NULL, "
+                "lease_expires_at TIMESTAMPTZ NOT NULL, "
+                "message_id BIGINT NULL, "
+                "PRIMARY KEY (guild_id, slot_key)"
+                ")"
+            ),
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_question_drop_pending_guild_channel ON question_drop_pending (guild_id, channel_id)",
+            "CREATE INDEX IF NOT EXISTS ix_question_drop_pending_lease ON question_drop_pending (lease_expires_at)",
             (
                 "CREATE TABLE IF NOT EXISTS question_drop_active ("
                 "guild_id BIGINT NOT NULL, "
@@ -602,6 +752,16 @@ class _PostgresQuestionDropsStore(_BaseQuestionDropsStore):
             )
         return [record for row in rows if (record := _active_drop_from_row(row)) is not None]
 
+    async def list_pending_posts(self) -> list[dict[str, Any]]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                (
+                    "SELECT guild_id, channel_id, slot_key, concept_id, variant_hash, claimed_at, lease_expires_at, message_id "
+                    "FROM question_drop_pending ORDER BY claimed_at ASC"
+                )
+            )
+        return [record for row in rows if (record := _pending_post_from_row(row)) is not None]
+
     async def fetch_active_drop(self, guild_id: int, channel_id: int) -> dict[str, Any] | None:
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -622,6 +782,126 @@ class _PostgresQuestionDropsStore(_BaseQuestionDropsStore):
         async with self._io_lock:
             async with self._pool.acquire() as conn:
                 await self._upsert_active_drop_with_conn(conn, normalized)
+
+    async def claim_pending_post(self, record: dict[str, Any]) -> dict[str, Any] | None:
+        normalized = normalize_pending_post(record)
+        if normalized is None:
+            return None
+        async with self._io_lock:
+            async with self._pool.acquire() as conn:
+                async with conn.transaction():
+                    if await conn.fetchval(
+                        "SELECT 1 FROM question_drop_exposures WHERE guild_id = $1 AND slot_key = $2",
+                        normalized["guild_id"],
+                        normalized["slot_key"],
+                    ):
+                        return None
+                    if await conn.fetchval(
+                        "SELECT 1 FROM question_drop_active WHERE guild_id = $1 AND channel_id = $2",
+                        normalized["guild_id"],
+                        normalized["channel_id"],
+                    ):
+                        return None
+                    if await conn.fetchval(
+                        "SELECT 1 FROM question_drop_pending WHERE guild_id = $1 AND channel_id = $2",
+                        normalized["guild_id"],
+                        normalized["channel_id"],
+                    ):
+                        return None
+                    row = await conn.fetchrow(
+                        (
+                            "INSERT INTO question_drop_pending ("
+                            "guild_id, channel_id, slot_key, concept_id, variant_hash, claimed_at, lease_expires_at, message_id"
+                            ") VALUES ("
+                            "$1, $2, $3, $4, $5, $6, $7, $8"
+                            ") ON CONFLICT DO NOTHING "
+                            "RETURNING guild_id, channel_id, slot_key, concept_id, variant_hash, claimed_at, lease_expires_at, message_id"
+                        ),
+                        normalized["guild_id"],
+                        normalized["channel_id"],
+                        normalized["slot_key"],
+                        normalized["concept_id"],
+                        normalized["variant_hash"],
+                        _parse_datetime(normalized["claimed_at"]),
+                        _parse_datetime(normalized["lease_expires_at"]),
+                        normalized["message_id"],
+                    )
+        return _pending_post_from_row(row) if row is not None else None
+
+    async def attach_pending_post_message(self, guild_id: int, slot_key: str, message_id: int):
+        if not isinstance(message_id, int) or message_id <= 0:
+            return
+        async with self._io_lock:
+            async with self._pool.acquire() as conn:
+                await conn.execute(
+                    "UPDATE question_drop_pending SET message_id = $3 WHERE guild_id = $1 AND slot_key = $2",
+                    guild_id,
+                    slot_key,
+                    message_id,
+                )
+
+    async def finalize_pending_post(
+        self,
+        guild_id: int,
+        slot_key: str,
+        *,
+        exposure_record: dict[str, Any],
+        active_record: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        normalized_exposure = normalize_exposure(exposure_record)
+        normalized_active = normalize_active_drop(active_record, allow_missing_exposure_id=True)
+        if normalized_exposure is None or normalized_active is None:
+            raise ValueError("Invalid Question Drops record.")
+        async with self._io_lock:
+            async with self._pool.acquire() as conn:
+                async with conn.transaction():
+                    pending = await conn.fetchrow(
+                        (
+                            "SELECT guild_id, channel_id, slot_key, concept_id, variant_hash, claimed_at, lease_expires_at, message_id "
+                            "FROM question_drop_pending WHERE guild_id = $1 AND slot_key = $2"
+                        ),
+                        guild_id,
+                        slot_key,
+                    )
+                    if pending is None:
+                        raise ValueError("Question Drops slot was not reserved.")
+                    row = await conn.fetchrow(
+                        (
+                            "INSERT INTO question_drop_exposures ("
+                            "guild_id, channel_id, concept_id, variant_hash, category, difficulty, asked_at, resolved_at, winner_user_id, slot_key"
+                            ") VALUES ("
+                            "$1, $2, $3, $4, $5, $6, $7, $8, $9, $10"
+                            ") ON CONFLICT (guild_id, slot_key) DO NOTHING RETURNING id"
+                        ),
+                        normalized_exposure["guild_id"],
+                        normalized_exposure["channel_id"],
+                        normalized_exposure["concept_id"],
+                        normalized_exposure["variant_hash"],
+                        normalized_exposure["category"],
+                        normalized_exposure["difficulty"],
+                        _parse_datetime(normalized_exposure["asked_at"]),
+                        _parse_datetime(normalized_exposure["resolved_at"]),
+                        normalized_exposure["winner_user_id"],
+                        normalized_exposure["slot_key"],
+                    )
+                    if row is None:
+                        raise ValueError("Question Drops slot already registered.")
+                    normalized_exposure["id"] = int(row["id"])
+                    normalized_active["exposure_id"] = int(row["id"])
+                    if await conn.fetchval(
+                        "SELECT 1 FROM question_drop_active WHERE guild_id = $1 AND channel_id = $2",
+                        normalized_active["guild_id"],
+                        normalized_active["channel_id"],
+                    ):
+                        raise ValueError("Question Drops channel already has an active drop.")
+                    await self._upsert_active_drop_with_conn(conn, normalize_active_drop(normalized_active))
+                    await conn.execute("DELETE FROM question_drop_pending WHERE guild_id = $1 AND slot_key = $2", guild_id, slot_key)
+        return normalized_exposure, normalize_active_drop(normalized_active)
+
+    async def release_pending_post(self, guild_id: int, slot_key: str):
+        async with self._io_lock:
+            async with self._pool.acquire() as conn:
+                await conn.execute("DELETE FROM question_drop_pending WHERE guild_id = $1 AND slot_key = $2", guild_id, slot_key)
 
     async def _upsert_active_drop_with_conn(self, conn, normalized: dict[str, Any]):
         await conn.execute(
@@ -843,11 +1123,38 @@ class QuestionDropsStore:
     async def list_active_drops(self) -> list[dict[str, Any]]:
         return await self._store.list_active_drops()
 
+    async def list_pending_posts(self) -> list[dict[str, Any]]:
+        return await self._store.list_pending_posts()
+
     async def fetch_active_drop(self, guild_id: int, channel_id: int) -> dict[str, Any] | None:
         return await self._store.fetch_active_drop(guild_id, channel_id)
 
     async def upsert_active_drop(self, record: dict[str, Any]):
         await self._store.upsert_active_drop(record)
+
+    async def claim_pending_post(self, record: dict[str, Any]) -> dict[str, Any] | None:
+        return await self._store.claim_pending_post(record)
+
+    async def attach_pending_post_message(self, guild_id: int, slot_key: str, message_id: int):
+        await self._store.attach_pending_post_message(guild_id, slot_key, message_id)
+
+    async def finalize_pending_post(
+        self,
+        guild_id: int,
+        slot_key: str,
+        *,
+        exposure_record: dict[str, Any],
+        active_record: dict[str, Any],
+    ) -> tuple[dict[str, Any], dict[str, Any]]:
+        return await self._store.finalize_pending_post(
+            guild_id,
+            slot_key,
+            exposure_record=exposure_record,
+            active_record=active_record,
+        )
+
+    async def release_pending_post(self, guild_id: int, slot_key: str):
+        await self._store.release_pending_post(guild_id, slot_key)
 
     async def register_posted_drop(self, exposure_record: dict[str, Any], active_record: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
         return await self._store.register_posted_drop(exposure_record, active_record)

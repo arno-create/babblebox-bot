@@ -95,6 +95,12 @@ _SAMPLE_MESSAGES = (
     "Do cats carry cookies?",
     "Golden grapes grow.",
     "7 sleepy sharks smile.",
+    "Blue bears bake bread 🍞!",
+    "Do green grapes glow ✨?",
+    "7 tiny foxes sprint 🦊.",
+    "Sunny soup sings 🍜!",
+    "Can black cats cook 🐈?",
+    "Do white whales wink 🐳?",
 )
 _RECENT_RULE_SIGNATURES: dict[int, deque[tuple[tuple[str, str], ...]]] = defaultdict(
     lambda: deque(maxlen=PATTERN_HUNT_RECENT_SIGNATURES)
@@ -195,6 +201,21 @@ def render_rule(rule_atoms: list[RuleAtom]) -> str:
     return "; ".join(render_rule_atom(atom) for atom in rule_atoms)
 
 
+def validate_pattern_guess_atoms(guessed_atoms: list[RuleAtom]) -> tuple[bool, str | None]:
+    if not guessed_atoms:
+        return False, "Add at least one rule family to make a real guess."
+    atoms: list[RuleAtom] = []
+    seen_families: set[str] = set()
+    for atom in guessed_atoms:
+        if atom.family in seen_families:
+            return False, "Use each rule family at most once per Pattern Hunt guess."
+        if not _compatible(atoms, atom):
+            return False, "That combination overlaps awkwardly. Try a cleaner rule bundle."
+        atoms.append(atom)
+        seen_families.add(atom.family)
+    return True, None
+
+
 def parse_guess_atom(family: str | None, value: str | None) -> tuple[bool, RuleAtom | str]:
     normalized_family = str(family or "").strip().casefold()
     if not normalized_family:
@@ -247,14 +268,27 @@ def _compatible(existing: list[RuleAtom], candidate: RuleAtom) -> bool:
             return False
         if atom.family == "word_count_range" and candidate.family == "exact_word_count":
             return False
-        if atom.family == "question_form" and candidate.family == "ends_with_punctuation" and candidate.value != "?":
+        if atom.family == "question_form" and candidate.family == "ends_with_punctuation":
             return False
-        if candidate.family == "question_form" and atom.family == "ends_with_punctuation" and atom.value != "?":
+        if candidate.family == "question_form" and atom.family == "ends_with_punctuation":
             return False
         if atom.family == "forbid_letter" and candidate.family == "starts_with_letter" and atom.value == candidate.value:
             return False
         if atom.family == "starts_with_letter" and candidate.family == "forbid_letter" and atom.value == candidate.value:
             return False
+        if atom.family == "same_initial_letter" and candidate.family == "starts_with_letter":
+            return False
+        if atom.family == "starts_with_letter" and candidate.family == "same_initial_letter":
+            return False
+    return True
+
+
+def _bundle_quality_ok(atoms: list[RuleAtom], valid_examples: list[str], invalid_examples: list[str]) -> bool:
+    if len(valid_examples) < 3 or len(invalid_examples) < 3:
+        return False
+    unique_valid = {sample.casefold() for sample in valid_examples}
+    if len(unique_valid) < 3:
+        return False
     return True
 
 
@@ -297,7 +331,7 @@ def select_rule_bundle(
         signature = _rule_signature(atoms)
         valid_examples = [sample for sample in _SAMPLE_MESSAGES if message_matches_rule(atoms, sample)]
         invalid_examples = [sample for sample in _SAMPLE_MESSAGES if not message_matches_rule(atoms, sample)]
-        if len(valid_examples) < 2 or not invalid_examples:
+        if not _bundle_quality_ok(atoms, valid_examples, invalid_examples):
             continue
         rng.shuffle(valid_examples)
         rng.shuffle(invalid_examples)
@@ -345,15 +379,24 @@ async def start_pattern_hunt_game_locked(guild_id: int, game: dict[str, Any]):
     for coder in coders:
         try:
             await coder.send(
-                embed=ge.make_status_embed(
-                    "Pattern Hunt Rule",
-                    (
-                        f"Keep this hidden: **{render_rule(rule_atoms)}**\n"
-                        f"Fits:\n- {valid_examples[0]}\n- {valid_examples[1]}\n"
-                        f"Does not fit:\n- {invalid_example}\n"
-                        "Answer the guesser cleanly. If Babblebox rejects a clue, retry without explaining why."
+                embed=ge.style_embed(
+                    discord.Embed(
+                        title="Pattern Hunt Rule",
+                        description="Keep this private from the guesser. Public clues should fit the rule without explaining it.",
+                        color=ge.EMBED_THEME["accent"],
+                    ).add_field(name="Secret Rule", value=render_rule(rule_atoms), inline=False).add_field(
+                        name="Fits",
+                        value=f"- {valid_examples[0]}\n- {valid_examples[1]}",
+                        inline=False,
+                    ).add_field(
+                        name="Does Not Fit",
+                        value=f"- {invalid_example}",
+                        inline=False,
+                    ).add_field(
+                        name="Coder Note",
+                        value="Answer once in public. If Babblebox rejects a clue, retry without leaking why.",
+                        inline=False,
                     ),
-                    tone="accent",
                     footer="Babblebox Pattern Hunt | The guesser never sees this DM",
                 )
             )
@@ -401,15 +444,21 @@ def build_pattern_hunt_status_embed(game: dict[str, Any], *, public: bool, title
     state = ensure_pattern_hunt_state(game)
     guesser = ge.get_snapshot_player(game, state.get("guesser_id"))
     coder = ge.get_snapshot_player(game, current_pattern_hunt_coder_id(game))
-    description = "The guesser asks for clues, coders answer in public, and the hidden rule stays private."
+    description = "The guesser asks for clues, coders answer once in public, and the hidden rule stays private."
     if public and state.get("hint_text"):
         description += f"\nHint: {state['hint_text']}"
+    if not public:
+        description += "\nStructured guesses use `/hunt guess`. `Contains Digits` means numeric characters `0-9` only."
     embed = discord.Embed(title=title, description=description, color=discord.Color.dark_teal())
     embed.add_field(name="Guesser", value=ge.display_name_of(guesser) if guesser else "Unknown", inline=True)
     embed.add_field(name="Current Coder", value=ge.display_name_of(coder) if coder else "Unknown", inline=True)
-    embed.add_field(name="Phase", value=str(state.get("phase", "setup")).title(), inline=True)
+    phase_label = {
+        "prompt": "Guesser Asking",
+        "answer": "Coder Answering",
+    }.get(str(state.get("phase", "setup")).casefold(), str(state.get("phase", "setup")).title())
+    embed.add_field(name="Phase", value=phase_label, inline=True)
     embed.add_field(
-        name="Pressure",
+        name="Budget",
         value=(
             f"Guesses left: **{int(state.get('guess_limit', 3)) - int(state.get('guesses_used', 0))}**\n"
             f"Strikes: **{int(state.get('strikes', 0))}/{int(state.get('strike_limit', 3))}**\n"
@@ -417,11 +466,26 @@ def build_pattern_hunt_status_embed(game: dict[str, Any], *, public: bool, title
         ),
         inline=True,
     )
+    if not public:
+        embed.add_field(
+            name="Guessing",
+            value=(
+                "Use 1-3 rule families in `/hunt guess`.\n"
+                "Families that need a value still use simple inputs like a letter, `?`, `food`, `3`, or `3-5`.\n"
+                "`Contains Digits` means digits `0-9` only."
+            ),
+            inline=False,
+        )
     if state.get("accepted_answers"):
         lines = []
         for item in state["accepted_answers"][-4:]:
-            lines.append(f"**{item['coder']}**: {ge.safe_field_text(item['answer'], limit=80)}")
-        embed.add_field(name="Accepted Clues", value="\n".join(lines), inline=False)
+            clue = ge.safe_field_text(item["answer"], limit=64)
+            prompt = ge.safe_field_text(item.get("prompt") or "", limit=36)
+            if prompt:
+                lines.append(f"**{item['coder']}**: {clue}  |  prompt: {prompt}")
+            else:
+                lines.append(f"**{item['coder']}**: {clue}")
+        embed.add_field(name="Public Clues", value="\n".join(lines), inline=False)
     return ge.style_embed(embed, footer="Babblebox Pattern Hunt | Hidden rule stays private")
 
 
@@ -504,6 +568,9 @@ async def submit_pattern_guess_locked(
     state = ensure_pattern_hunt_state(game)
     if actor.id != state.get("guesser_id"):
         return False, "Only the current guesser can submit a Pattern Hunt guess."
+    valid_bundle, validation_message = validate_pattern_guess_atoms(guessed_atoms)
+    if not valid_bundle:
+        return False, validation_message or "That Pattern Hunt guess needs a cleaner rule bundle."
     if _rule_signature(guessed_atoms) == _rule_signature(state.get("rule_atoms", [])):
         await _finish_pattern_hunt_locked(guild_id, game, guesser_won=True, reason=f"{actor.mention} cracked the rule: **{render_rule(state['rule_atoms'])}**.")
         return True, "Correct"
@@ -596,7 +663,12 @@ async def _finish_pattern_hunt_locked(guild_id: int, game: dict[str, Any], *, gu
     if state.get("accepted_answers"):
         lines = []
         for item in state["accepted_answers"][-5:]:
-            lines.append(f"**{item['coder']}**: {ge.safe_field_text(item['answer'], limit=90)}")
+            clue = ge.safe_field_text(item["answer"], limit=54)
+            prompt = ge.safe_field_text(item.get("prompt") or "", limit=30)
+            if prompt:
+                lines.append(f"**{item['coder']}** asked for `{prompt}` -> {clue}")
+            else:
+                lines.append(f"**{item['coder']}** -> {clue}")
         embed.add_field(name="Clue Recap", value="\n".join(lines), inline=False)
     await game["channel"].send(embed=ge.style_embed(embed, footer="Babblebox Pattern Hunt | Rule revealed"))
     await ge.cleanup_game(guild_id)

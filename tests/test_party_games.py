@@ -2,11 +2,15 @@ from __future__ import annotations
 
 import types
 import unittest
+from datetime import timedelta
 from unittest.mock import AsyncMock, patch
 
-from babblebox.only16_game import detect_count_question, parse_only16_numeric_answer
+from babblebox import game_engine as ge
+from babblebox.only16_game import detect_count_question, ensure_only16_state, handle_only16_message_locked, parse_only16_numeric_answer
 from babblebox.pattern_hunt_game import (
     RuleAtom,
+    _SAMPLE_MESSAGES,
+    build_pattern_hunt_status_embed,
     message_matches_rule,
     parse_guess_atom,
     select_rule_bundle,
@@ -21,7 +25,51 @@ class DummyUser:
         self.display_name = f"User {user_id}"
 
 
+class DummyChannel:
+    def __init__(self, channel_id: int = 20):
+        self.id = channel_id
+        self.sent = []
+
+    async def send(self, *args, **kwargs):
+        self.sent.append((args, kwargs))
+
+
+class DummyMessage:
+    def __init__(self, *, channel: DummyChannel, author: DummyUser, content: str, message_id: int = 999, reference=None):
+        self.channel = channel
+        self.author = author
+        self.content = content
+        self.id = message_id
+        self.reference = reference
+
+
 class PartyGameLogicTests(unittest.IsolatedAsyncioTestCase):
+    def _make_only16_game(self, *, mode: str = "smart"):
+        asker = DummyUser(1)
+        responder = DummyUser(2)
+        channel = DummyChannel()
+        game = {
+            "channel": channel,
+            "players": [asker, responder],
+            "current_player_index": 0,
+            "turn_task": None,
+            "game_type": "only16",
+            "active": True,
+            "closing": False,
+            "only16_mode": mode,
+        }
+        state = ensure_only16_state(game)
+        state["mode"] = mode
+        state["trap"] = {
+            "asker_id": asker.id,
+            "question_message_id": 100,
+            "armed_at": ge.now_utc(),
+            "expires_at": ge.now_utc() + timedelta(seconds=10),
+            "mode": mode,
+            "manual": False,
+        }
+        return game, asker, responder, channel
+
     def test_only16_question_detection_prefers_clear_quantity_and_math_prompts(self):
         self.assertTrue(detect_count_question("How many moons does Mars have?"))
         self.assertTrue(detect_count_question("What number is on the jersey?"))
@@ -43,6 +91,52 @@ class PartyGameLogicTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(parse_only16_numeric_answer("I think 12 or maybe 16").kind, "ambiguous")
         self.assertEqual(parse_only16_numeric_answer("16/0").kind, "unsupported")
         self.assertEqual(parse_only16_numeric_answer("probably sixteen-ish").kind, "none")
+
+    async def test_only16_smart_mode_ignores_unrelated_chatter(self):
+        game, _asker, responder, _channel = self._make_only16_game(mode="smart")
+        message = DummyMessage(channel=game["channel"], author=responder, content="wait that's wild")
+
+        with patch("babblebox.only16_game._advance_to_next_asker_locked", new=AsyncMock()) as advance:
+            handled = await handle_only16_message_locked(message, 99, game)
+
+        self.assertFalse(handled)
+        self.assertIsNotNone(ensure_only16_state(game).get("trap"))
+        advance.assert_not_awaited()
+
+    async def test_only16_smart_mode_accepts_clean_standalone_number(self):
+        game, _asker, responder, channel = self._make_only16_game(mode="smart")
+        message = DummyMessage(channel=channel, author=responder, content="16")
+
+        with patch("babblebox.only16_game._advance_to_next_asker_locked", new=AsyncMock()) as advance:
+            handled = await handle_only16_message_locked(message, 99, game)
+
+        self.assertTrue(handled)
+        self.assertIsNone(ensure_only16_state(game).get("trap"))
+        self.assertEqual(channel.sent[-1][1]["embed"].title, "Still Alive")
+        advance.assert_awaited_once()
+
+    async def test_only16_strict_mode_ignores_non_reply_answers(self):
+        game, _asker, responder, _channel = self._make_only16_game(mode="strict")
+        message = DummyMessage(channel=game["channel"], author=responder, content="16")
+
+        with patch("babblebox.only16_game._advance_to_next_asker_locked", new=AsyncMock()) as advance:
+            handled = await handle_only16_message_locked(message, 99, game)
+
+        self.assertFalse(handled)
+        self.assertIsNotNone(ensure_only16_state(game).get("trap"))
+        advance.assert_not_awaited()
+
+    async def test_only16_smart_mode_voids_unsupported_exact_math_without_elimination(self):
+        game, _asker, responder, channel = self._make_only16_game(mode="smart")
+        message = DummyMessage(channel=channel, author=responder, content="16/0")
+
+        with patch("babblebox.only16_game._advance_to_next_asker_locked", new=AsyncMock()) as advance:
+            handled = await handle_only16_message_locked(message, 99, game)
+
+        self.assertTrue(handled)
+        self.assertIsNone(ensure_only16_state(game).get("trap"))
+        self.assertEqual(channel.sent[-1][1]["embed"].title, "Trap Voided")
+        advance.assert_awaited_once()
 
     def test_pattern_rule_matchers_are_machine_checkable(self):
         rule = [
@@ -78,6 +172,39 @@ class PartyGameLogicTests(unittest.IsolatedAsyncioTestCase):
         recent = {tuple(sorted((atom.family, str(atom.value)) for atom in atoms))}
         new_atoms, _, _ = select_rule_bundle(42, recent_signatures=recent)
         self.assertNotEqual(tuple(sorted((atom.family, str(atom.value)) for atom in new_atoms)), next(iter(recent)))
+
+    def test_pattern_hunt_sample_pool_supports_contains_digits_and_contains_emoji(self):
+        self.assertTrue(any(message_matches_rule([RuleAtom("contains_digits")], sample) for sample in _SAMPLE_MESSAGES))
+        self.assertTrue(any(message_matches_rule([RuleAtom("contains_emoji")], sample) for sample in _SAMPLE_MESSAGES))
+
+    def test_pattern_hunt_status_embed_clarifies_contains_digits_and_guess_flow(self):
+        guesser = DummyUser(10)
+        coder = DummyUser(11)
+        game = {
+            "players": [guesser, coder],
+            "starting_players": [guesser, coder],
+            "channel": DummyChannel(),
+            "pattern_hunt": {
+                "guesser_id": guesser.id,
+                "coder_order": [coder.id],
+                "current_coder_index": 0,
+                "phase": "prompt",
+                "guess_limit": 3,
+                "guesses_used": 1,
+                "strike_limit": 3,
+                "strikes": 1,
+                "turn_limit": 6,
+                "turns_used": 2,
+                "accepted_answers": [{"coder": coder.display_name, "answer": "7 foxes sprint!"}],
+                "hint_text": None,
+            },
+        }
+
+        embed = build_pattern_hunt_status_embed(game, public=False)
+
+        values = "\n".join(field.value for field in embed.fields)
+        self.assertIn("digits `0-9` only", values)
+        self.assertIn("/hunt guess", values)
 
     async def test_pattern_guess_compares_structured_atoms(self):
         guesser = DummyUser(10)

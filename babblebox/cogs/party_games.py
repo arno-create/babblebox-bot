@@ -31,7 +31,7 @@ class PartyGamesCog(commands.Cog):
     def cog_unload(self):
         self.bot.tree.remove_command(self._arm_16_menu.name, type=self._arm_16_menu.type)
 
-    @commands.hybrid_group(name="hunt", with_app_command=True, description="Pattern Hunt guess tools", invoke_without_command=True)
+    @commands.hybrid_group(name="hunt", with_app_command=True, description="Pattern Hunt status and structured guesses", invoke_without_command=True)
     async def hunt_group(self, ctx: commands.Context):
         if ctx.guild is None:
             await send_hybrid_response(
@@ -54,7 +54,7 @@ class PartyGamesCog(commands.Cog):
     async def hunt_status_command(self, ctx: commands.Context):
         await PartyGamesCog.hunt_group.callback(self, ctx)
 
-    @hunt_group.command(name="guess", with_app_command=True, description="Submit a structured Pattern Hunt guess")
+    @hunt_group.command(name="guess", with_app_command=True, description="Submit a 1-3 family Pattern Hunt theory")
     @app_commands.describe(
         atom_one="First rule family",
         value_one="Value for the first family, if needed",

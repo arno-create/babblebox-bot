@@ -1073,7 +1073,7 @@ class ProfileService:
             name="Question Drops",
             value=(
                 f"Points: **{profile['question_drop_points']}**\n"
-                f"Solves: **{profile['question_drop_correct']} / {profile['question_drop_attempts']} participations**\n"
+                f"Solves: **{profile['question_drop_correct']} / {profile['question_drop_attempts']} participated drops**\n"
                 f"Streak: **{profile['question_drop_current_streak']}**"
             ),
             inline=True,
@@ -1160,7 +1160,7 @@ class ProfileService:
             name="Question Drops",
             value=(
                 f"Points: **{profile['question_drop_points']}**\n"
-                f"Solves: **{profile['question_drop_correct']} / {profile['question_drop_attempts']} participations**\n"
+                f"Solves: **{profile['question_drop_correct']} / {profile['question_drop_attempts']} participated drops**\n"
                 f"Best streak: **{profile['question_drop_best_streak']}**"
             ),
             inline=True,
