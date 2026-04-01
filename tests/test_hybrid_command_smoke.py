@@ -941,7 +941,7 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await cog.service.close()
 
-    async def test_hidden_drops_ai_override_ignores_guild_invocation(self):
+    async def test_hidden_drops_ai_override_rejects_guild_invocation(self):
         bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
         cog = QuestionDropsCog(bot)
         try:
@@ -955,7 +955,8 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
 
             await QuestionDropsCog.drops_celebration_ai_global_override_command.callback(cog, ctx, "status")
 
-            self.assertEqual(ctx.send_calls, [])
+            self.assertEqual(len(ctx.send_calls), 1)
+            self.assertEqual(ctx.send_calls[0]["content"], "That command is only available in DM.")
         finally:
             await cog.service.close()
 
@@ -988,14 +989,32 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
 
             await QuestionDropsCog.drops_celebration_ai_global_override_command.callback(cog, ctx, "status")
             await QuestionDropsCog.drops_celebration_ai_global_override_command.callback(cog, ctx, "rare")
+            await QuestionDropsCog.drops_celebration_ai_global_override_command.callback(cog, ctx, "event_only")
             await QuestionDropsCog.drops_celebration_ai_global_override_command.callback(cog, ctx, "off")
 
-            self.assertEqual(len(ctx.send_calls), 3)
+            self.assertEqual(len(ctx.send_calls), 4)
             self.assertEqual(ctx.send_calls[0]["embed"].title, "Question Drops AI Override")
             self.assertIn("Private maintainer status", ctx.send_calls[0]["embed"].description)
             self.assertIn("now `rare`", ctx.send_calls[1]["embed"].description.lower())
-            self.assertIn("now `off`", ctx.send_calls[2]["embed"].description.lower())
+            self.assertIn("now `event_only`", ctx.send_calls[2]["embed"].description.lower())
+            self.assertIn("now `off`", ctx.send_calls[3]["embed"].description.lower())
             self.assertEqual(cog.service.get_meta()["ai_celebration_mode"], "off")
+        finally:
+            await cog.service.close()
+
+    async def test_hidden_drops_ai_override_invalid_mode_in_dm_shows_usage(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
+        cog = QuestionDropsCog(bot)
+        try:
+            cog.service.storage_ready = True
+            owner = FakeAuthor(user_id=1266444952779620413)
+            ctx = FakeContext(interaction=None, guild=None, channel=FakeChannel(), author=owner)
+
+            await QuestionDropsCog.drops_celebration_ai_global_override_command.callback(cog, ctx, "loud")
+
+            self.assertEqual(len(ctx.send_calls), 1)
+            self.assertEqual(ctx.send_calls[0]["embed"].title, "Question Drops AI Override")
+            self.assertIn("Use `status`, `off`, `rare`, or `event_only`.", ctx.send_calls[0]["embed"].description)
         finally:
             await cog.service.close()
 

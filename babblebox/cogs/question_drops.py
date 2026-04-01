@@ -484,6 +484,7 @@ class QuestionDropsCog(commands.Cog):
     @commands.command(name="dropscelebaiglobal", hidden=True)
     async def drops_celebration_ai_global_override_command(self, ctx: commands.Context, mode: str = "status"):
         if ctx.guild is not None:
+            await ctx.send(content="That command is only available in DM.")
             return
         author_id = getattr(ctx.author, "id", 0)
         if not self._is_override_owner(author_id):

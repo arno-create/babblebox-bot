@@ -12,6 +12,7 @@ import discord
 
 from babblebox import game_engine as ge
 from babblebox.question_drops_content import (
+    QUESTION_DROP_CATEGORIES,
     QuestionDropVariant,
     answer_points_for_difficulty,
     build_variant,
@@ -57,11 +58,22 @@ class DummyUser:
 
 
 class DummyChannel:
-    def __init__(self, channel_id: int, *, fail_send: bool = False):
+    def __init__(
+        self,
+        channel_id: int,
+        *,
+        fail_send: bool = False,
+        can_view: bool = True,
+        can_send: bool = True,
+        can_embed: bool = True,
+    ):
         self.id = channel_id
         self.mention = f"<#{channel_id}>"
         self.sent = []
         self.fail_send = fail_send
+        self.can_view = can_view
+        self.can_send = can_send
+        self.can_embed = can_embed
 
     async def send(self, *args, **kwargs):
         if self.fail_send:
@@ -69,6 +81,13 @@ class DummyChannel:
         message = types.SimpleNamespace(id=5000 + len(self.sent), channel=self, kwargs=kwargs, delete=AsyncMock())
         self.sent.append((args, kwargs, message))
         return message
+
+    def permissions_for(self, member):
+        return types.SimpleNamespace(
+            view_channel=self.can_view,
+            send_messages=self.can_send,
+            embed_links=self.can_embed,
+        )
 
 
 class DummyGuild:
@@ -666,6 +685,87 @@ class QuestionDropsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Quiet channels can skip a slot.", embed.description)
         self.assertIn("Higher daily counts recycle sooner once the fresh pool thins.", embed.description)
 
+    async def test_disabling_all_categories_pauses_selection_and_next_slot(self):
+        for category in list(self.service.get_config(self.guild.id)["enabled_categories"]):
+            ok, message = await self.service.update_categories(self.guild.id, action="disable", category=category)
+            self.assertTrue(ok, message)
+
+        config = self.service.get_config(self.guild.id)
+        self.assertEqual(config["enabled_categories"], [])
+        self.assertIsNone(
+            self.service._select_variant(
+                self.guild.id,
+                self.channel.id,
+                exposures=[],
+                slot_key="2026-03-30:0",
+                config=config,
+            )
+        )
+        self.assertIsNone(await self.service._next_slot_for_guild(self.guild.id, config=config))
+
+        snapshot = await self.service.get_status_snapshot(self.guild)
+        embed = self.service.build_status_embed(self.guild, snapshot)
+        categories_field = next(field.value for field in embed.fields if field.name == "Categories")
+        self.assertIn("No enabled categories", categories_field)
+
+    async def test_reset_restores_all_categories_explicitly(self):
+        for category in list(self.service.get_config(self.guild.id)["enabled_categories"]):
+            ok, message = await self.service.update_categories(self.guild.id, action="disable", category=category)
+            self.assertTrue(ok, message)
+
+        ok, message = await self.service.update_categories(self.guild.id, action="reset")
+        self.assertTrue(ok, message)
+        self.assertCountEqual(self.service.get_config(self.guild.id)["enabled_categories"], QUESTION_DROP_CATEGORIES)
+
+    async def test_status_embed_distinguishes_off_setup_needed_and_ready_progression(self):
+        def field_value(embed: discord.Embed, name: str) -> str:
+            return next(field.value for field in embed.fields if field.name == name)
+
+        snapshot = await self.service.get_status_snapshot(self.guild)
+        embed = self.service.build_status_embed(self.guild, snapshot)
+        knowledge_lane = field_value(embed, "Knowledge Lane")
+        self.assertIn("Mastery: **Off**", knowledge_lane)
+        self.assertIn("Scholar ladder: **Off**", knowledge_lane)
+
+        await self.service.update_category_mastery(self.guild.id, category="science", enabled=True)
+        await self.service.update_scholar_ladder(self.guild.id, enabled=True)
+        snapshot = await self.service.get_status_snapshot(self.guild)
+        embed = self.service.build_status_embed(self.guild, snapshot)
+        knowledge_lane = field_value(embed, "Knowledge Lane")
+        self.assertIn("Mastery: **Setup needed**", knowledge_lane)
+        self.assertIn("Scholar ladder: **Setup needed**", knowledge_lane)
+        self.assertIn("thresholds and roles still need setup", field_value(embed, "Mastery Setup"))
+        self.assertIn("thresholds and roles still need setup", field_value(embed, "Scholar Ladder"))
+
+        science_role = DummyRole(8801, position=10, name="Science Explorer")
+        scholar_role = DummyRole(8802, position=11, name="Scholar I")
+        ready_guild = DummyGuild(
+            self.guild.id,
+            channels=[self.channel],
+            roles=[science_role, scholar_role],
+            me=DummyBotMember(position=50),
+        )
+        await self.service.update_category_mastery(
+            self.guild.id,
+            category="science",
+            enabled=True,
+            tier=1,
+            role_id=science_role.id,
+            threshold=10,
+        )
+        await self.service.update_scholar_ladder(
+            self.guild.id,
+            enabled=True,
+            tier=1,
+            role_id=scholar_role.id,
+            threshold=25,
+        )
+        snapshot = await self.service.get_status_snapshot(ready_guild)
+        embed = self.service.build_status_embed(ready_guild, snapshot)
+        knowledge_lane = field_value(embed, "Knowledge Lane")
+        self.assertIn("Mastery: **Ready**", knowledge_lane)
+        self.assertIn("Scholar ladder: **Ready**", knowledge_lane)
+
     async def test_exact_threshold_category_role_unlocks_once_without_regrant(self):
         member = DummyUser(91)
         role = DummyRole(301, position=10, name="Science Explorer")
@@ -807,6 +907,143 @@ class QuestionDropsServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(events), 1)
             self.assertEqual(announce_channel.sent, [])
             self.assertEqual(self.channel.sent, [])
+        finally:
+            await service.close()
+            await profile_service.close()
+
+    async def test_unusable_announcement_channel_falls_back_to_solve_channel(self):
+        member = DummyUser(94)
+        mastery_role = DummyRole(601, position=10, name="History Scholar")
+        blocked_channel = DummyChannel(99, can_send=False)
+        guild = DummyGuild(
+            10,
+            channels=[self.channel, blocked_channel],
+            roles=[mastery_role],
+            members=[member],
+            me=DummyBotMember(position=50),
+        )
+        bot = DummyBot(guild, [self.channel, blocked_channel])
+        store = QuestionDropsStore(backend="memory")
+        await store.load()
+        service = QuestionDropsService(bot, store=store)
+        profile_service = ProfileService(types.SimpleNamespace(get_user=lambda user_id: None), store=ProfileStore(backend="memory"))
+        try:
+            self.assertTrue(await service.start())
+            self.assertTrue(await profile_service.start())
+            if service._scheduler_task is not None:
+                service._scheduler_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await service._scheduler_task
+                service._scheduler_task = None
+            bot.profile_service = profile_service
+            await service.update_category_mastery(
+                guild.id,
+                category="history",
+                enabled=True,
+                tier=1,
+                role_id=mastery_role.id,
+                threshold=10,
+                announcement_channel_id=blocked_channel.id,
+            )
+
+            update = await profile_service.record_question_drop_result(member.id, guild_id=guild.id, category="history", correct=True, points=10)
+            events = await service._grant_progression_rewards(
+                guild=guild,
+                member=member,
+                fallback_channel=self.channel,
+                category="history",
+                update=update,
+            )
+
+            self.assertEqual(len(events), 1)
+            self.assertEqual(blocked_channel.sent, [])
+            self.assertEqual(len(self.channel.sent), 1)
+            self.assertIn("Unlocked", self.channel.sent[-1][1]["embed"].title)
+        finally:
+            await service.close()
+            await profile_service.close()
+
+    async def test_recalculate_mastery_roles_preview_execute_and_no_regrant(self):
+        member = DummyUser(95)
+        mastery_role = DummyRole(701, position=10, name="Logic Explorer")
+        guild = DummyGuild(10, channels=[self.channel], roles=[mastery_role], members=[member], me=DummyBotMember(position=50))
+        bot = DummyBot(guild, [self.channel])
+        store = QuestionDropsStore(backend="memory")
+        await store.load()
+        service = QuestionDropsService(bot, store=store)
+        profile_service = ProfileService(types.SimpleNamespace(get_user=lambda user_id: None), store=ProfileStore(backend="memory"))
+        try:
+            self.assertTrue(await service.start())
+            self.assertTrue(await profile_service.start())
+            if service._scheduler_task is not None:
+                service._scheduler_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await service._scheduler_task
+                service._scheduler_task = None
+            bot.profile_service = profile_service
+            await service.update_category_mastery(
+                guild.id,
+                category="logic",
+                enabled=True,
+                tier=1,
+                role_id=mastery_role.id,
+                threshold=10,
+            )
+            await profile_service.record_question_drop_result(member.id, guild_id=guild.id, category="logic", correct=True, points=12)
+
+            preview = await service.recalculate_mastery_roles(guild, member=member, preview=True)
+            self.assertEqual(preview, {"preview": True, "scanned": 1, "pending": 1, "granted": 0})
+            member.add_roles.assert_not_awaited()
+
+            execute = await service.recalculate_mastery_roles(guild, member=member, preview=False)
+            self.assertEqual(execute, {"preview": False, "scanned": 1, "pending": 1, "granted": 1})
+            self.assertEqual(member.add_roles.await_count, 1)
+
+            rerun = await service.recalculate_mastery_roles(guild, member=member, preview=False)
+            self.assertEqual(rerun, {"preview": False, "scanned": 1, "pending": 0, "granted": 0})
+            self.assertEqual(member.add_roles.await_count, 1)
+        finally:
+            await service.close()
+            await profile_service.close()
+
+    async def test_disabled_progression_features_do_not_tease_next_tiers(self):
+        member = DummyUser(96)
+        role = DummyRole(801, position=10, name="Science Explorer")
+        guild = DummyGuild(10, channels=[self.channel], roles=[role], members=[member], me=DummyBotMember(position=50))
+        bot = DummyBot(guild, [self.channel])
+        store = QuestionDropsStore(backend="memory")
+        await store.load()
+        service = QuestionDropsService(bot, store=store)
+        profile_service = ProfileService(types.SimpleNamespace(get_user=lambda user_id: None), store=ProfileStore(backend="memory"))
+        try:
+            self.assertTrue(await service.start())
+            self.assertTrue(await profile_service.start())
+            if service._scheduler_task is not None:
+                service._scheduler_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await service._scheduler_task
+                service._scheduler_task = None
+            bot.profile_service = profile_service
+            await service.update_category_mastery(guild.id, category="science", tier=1, role_id=role.id, threshold=20)
+            await service.update_scholar_ladder(guild.id, tier=1, role_id=role.id, threshold=30)
+
+            update = await profile_service.record_question_drop_result(member.id, guild_id=guild.id, category="science", correct=True, points=12)
+            summary = await profile_service.get_question_drop_summary(member.id, guild_id=guild.id)
+            stats_embed = service.build_stats_embed(member, summary)
+            stats_fields = {field.name: field.value for field in stats_embed.fields}
+
+            self.assertNotIn("Next:", stats_fields["Scholar"])
+            self.assertNotIn(" to Tier ", stats_fields["Top Categories"])
+
+            solve_embed = await service._build_solve_embed(
+                winner=member,
+                category="science",
+                answer_spec={"type": "text", "accepted": ["mars"]},
+                update=update,
+                role_events=[],
+                fallback_points=12,
+            )
+            self.assertNotIn(" pts to ", solve_embed.description)
         finally:
             await service.close()
             await profile_service.close()

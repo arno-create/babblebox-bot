@@ -1177,12 +1177,14 @@ class ProfileService:
         guild_profile = summary.get("guild_profile")
         guild_categories = summary.get("guild_categories") or []
         unlocks = summary.get("guild_unlocks") or []
-        primary_profile = guild_profile if isinstance(guild_profile, dict) else global_profile
-        primary_categories = guild_categories if guild_categories else global_categories
-        scope_label = "This server" if isinstance(guild_profile, dict) else "Lifetime"
+        has_guild_scope = isinstance(guild_profile, dict)
+        primary_profile = guild_profile if has_guild_scope else global_profile
+        primary_categories = guild_categories if has_guild_scope else global_categories
+        scope_label = "This server" if has_guild_scope else "Lifetime"
         scholar_tier = _scholar_tier_from_unlocks(unlocks)
         mastery_category, mastery_tier = _top_mastery_from_unlocks(unlocks)
         top_category = primary_categories[0] if primary_categories else None
+        lifetime_top_category = global_categories[0] if has_guild_scope and not primary_categories and global_categories else None
         return {
             "scope_label": scope_label,
             "primary_profile": primary_profile,
@@ -1195,6 +1197,8 @@ class ProfileService:
             "mastery_category": mastery_category,
             "mastery_tier": mastery_tier,
             "top_category": top_category,
+            "top_category_scope_label": scope_label if top_category is not None else None,
+            "lifetime_top_category": lifetime_top_category,
         }
 
     def build_daily_embed(self, user: discord.abc.User, daily_status: dict[str, Any], *, public: bool = False) -> discord.Embed:
@@ -1336,11 +1340,19 @@ class ProfileService:
         knowledge = self._knowledge_context(profile, knowledge_summary)
         primary = knowledge["primary_profile"]
         top_category = knowledge["top_category"]
-        top_category_text = (
-            f"{category_label_with_emoji(top_category['category'])} | **{int(top_category.get('points', 0) or 0)}** pts"
-            if isinstance(top_category, dict)
-            else "No category lead yet"
-        )
+        lifetime_top_category = knowledge.get("lifetime_top_category")
+        if isinstance(top_category, dict):
+            lead_prefix = "Lifetime lead" if knowledge.get("top_category_scope_label") == "Lifetime" else "Server lead"
+            top_category_text = (
+                f"{lead_prefix}: {category_label_with_emoji(top_category['category'])} | **{int(top_category.get('points', 0) or 0)}** pts"
+            )
+        elif isinstance(lifetime_top_category, dict):
+            top_category_text = (
+                f"Lifetime lead: {category_label_with_emoji(lifetime_top_category['category'])} | "
+                f"**{int(lifetime_top_category.get('points', 0) or 0)}** pts"
+            )
+        else:
+            top_category_text = "No category lead yet"
         mastery_text = (
             f"{progression_emoji('mastery')} {category_label_with_emoji(knowledge['mastery_category'])} | Tier **{knowledge['mastery_tier']}**"
             if knowledge["mastery_category"] and int(knowledge["mastery_tier"] or 0) > 0
@@ -1398,6 +1410,17 @@ class ProfileService:
     def build_buddy_stats_embed(self, user: discord.abc.User, profile: dict[str, Any], *, knowledge_summary: dict[str, Any] | None = None) -> discord.Embed:
         knowledge = self._knowledge_context(profile, knowledge_summary)
         primary = knowledge["primary_profile"]
+        lifetime_top_category = knowledge.get("lifetime_top_category") or knowledge.get("top_category")
+        flavor_lines = [
+            f"{progression_emoji('scholar')} {knowledge['scholar_label']}",
+            f"{progression_emoji('streak')} Best streak: **{int(primary.get('best_streak', 0) or 0)}**",
+            f"{progression_emoji('next')} Lifetime total: **{int(knowledge['global_profile'].get('points', 0) or 0)}** pts",
+        ]
+        if isinstance(lifetime_top_category, dict):
+            flavor_lines.append(
+                f"Lifetime lead: {category_label_with_emoji(lifetime_top_category['category'])} | "
+                f"**{int(lifetime_top_category.get('points', 0) or 0)}** pts"
+            )
         embed = discord.Embed(
             title=f"Buddy Stats | {profile['buddy_name']}",
             description="Progress, titles, badges, and the activity mix shaping your companion.",
@@ -1420,11 +1443,7 @@ class ProfileService:
         embed.add_field(name="Badges", value=_format_badges(profile["badges_unlocked"]), inline=False)
         embed.add_field(
             name="Knowledge Flavor",
-            value=(
-                f"{progression_emoji('scholar')} {knowledge['scholar_label']}\n"
-                f"{progression_emoji('streak')} Best streak: **{int(primary.get('best_streak', 0) or 0)}**\n"
-                f"{progression_emoji('next')} Lifetime flavor: **{int(knowledge['global_profile'].get('points', 0) or 0)}** pts"
-            ),
+            value="\n".join(flavor_lines),
             inline=False,
         )
         embed.add_field(
@@ -1450,11 +1469,20 @@ class ProfileService:
         primary = knowledge["primary_profile"]
         guild_rank_text = f"#{knowledge['guild_rank']}" if isinstance(knowledge.get("guild_rank"), int) else "Unranked"
         top_category = knowledge["top_category"]
-        top_category_text = (
-            f"{category_label_with_emoji(top_category['category'])} | **{int(top_category.get('points', 0) or 0)}** pts"
-            if isinstance(top_category, dict)
-            else "No top category yet"
-        )
+        lifetime_top_category = knowledge.get("lifetime_top_category")
+        if isinstance(top_category, dict):
+            lead_prefix = "Lifetime lead" if knowledge.get("top_category_scope_label") == "Lifetime" else "Server lead"
+            top_category_text = (
+                f"{lead_prefix}: {category_label_with_emoji(top_category['category'])} | "
+                f"**{int(top_category.get('points', 0) or 0)}** pts"
+            )
+        elif isinstance(lifetime_top_category, dict):
+            top_category_text = (
+                f"Lifetime lead: {category_label_with_emoji(lifetime_top_category['category'])} | "
+                f"**{int(lifetime_top_category.get('points', 0) or 0)}** pts"
+            )
+        else:
+            top_category_text = "No top category yet"
         embed = discord.Embed(
             title=title,
             description=(

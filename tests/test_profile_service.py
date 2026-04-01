@@ -244,6 +244,37 @@ class ProfileServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(profile["total_daily_clears"], 1)
         self.assertEqual(profile["question_drop_points"], 10)
 
+    async def test_profile_and_buddy_surfaces_label_lifetime_flavor_when_local_knowledge_is_empty(self):
+        await self.service.record_question_drop_result(202, guild_id=self.guild_id, category="science", correct=True, points=12)
+        profile = await self.service.get_profile(202)
+        summary = await self.service.get_question_drop_summary(202, guild_id=999)
+        user = types.SimpleNamespace(display_name="User 202")
+
+        profile_embed = self.service.build_profile_embed(
+            user,
+            profile,
+            knowledge_summary=summary,
+            utility_summary=None,
+            session_stats=None,
+        )
+        buddy_embed = self.service.build_buddy_embed(user, profile, knowledge_summary=summary)
+        buddy_stats_embed = self.service.build_buddy_stats_embed(user, profile, knowledge_summary=summary)
+
+        profile_fields = "\n".join(f"{field.name}: {field.value}" for field in profile_embed.fields)
+        buddy_fields = "\n".join(f"{field.name}: {field.value}" for field in buddy_embed.fields)
+        buddy_stats_fields = "\n".join(f"{field.name}: {field.value}" for field in buddy_stats_embed.fields)
+
+        self.assertIn("This server: **0** pts", profile_fields)
+        self.assertIn("Lifetime lead:", profile_fields)
+        self.assertNotIn("Server lead: 🔬 Science", profile_fields)
+
+        self.assertIn("This server: **0** pts", buddy_fields)
+        self.assertIn("Lifetime lead:", buddy_fields)
+
+        self.assertIn("This server knowledge: **0** pts", buddy_stats_fields)
+        self.assertIn("Lifetime total: **12** pts", buddy_stats_fields)
+        self.assertIn("Lifetime lead:", buddy_stats_fields)
+
     async def test_question_drop_guild_leaderboard_orders_by_guild_points(self):
         await self.service.record_question_drop_result(1, guild_id=self.guild_id, category="logic", correct=True, points=12)
         await self.service.record_question_drop_result(2, guild_id=self.guild_id, category="science", correct=True, points=8)

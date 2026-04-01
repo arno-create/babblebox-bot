@@ -42,7 +42,7 @@ def default_question_drops_config(guild_id: int | None = None) -> dict[str, Any]
         "active_start_hour": 10,
         "active_end_hour": 22,
         "enabled_channel_ids": [],
-        "enabled_categories": [],
+        "enabled_categories": list(QUESTION_DROP_KNOWLEDGE_CATEGORIES),
         "category_mastery": default_question_drop_category_mastery(),
         "scholar_ladder": default_question_drop_scholar_ladder(),
         "ai_celebrations_enabled": False,

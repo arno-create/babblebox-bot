@@ -312,6 +312,40 @@ class QuestionDropsService:
     def get_meta(self) -> dict[str, Any]:
         return normalize_question_drops_meta(self._meta)
 
+    def _enabled_categories(self, config: dict[str, Any]) -> list[str]:
+        return [
+            category
+            for category in config.get("enabled_categories", [])
+            if str(category).strip().casefold() in QUESTION_DROP_CATEGORIES
+        ]
+
+    def _feature_status_label(self, *, enabled_count: int, configured_count: int) -> str:
+        if enabled_count <= 0:
+            return "Off"
+        if configured_count <= 0:
+            return "Setup needed"
+        if configured_count < enabled_count:
+            return f"Partial ({configured_count}/{enabled_count} ready)"
+        return "Ready"
+
+    def _announcement_channel_issue(self, guild: discord.Guild, channel_id: int | None, *, label: str) -> str | None:
+        if not isinstance(channel_id, int) or channel_id <= 0 or not hasattr(guild, "get_channel"):
+            return None
+        channel = guild.get_channel(channel_id)
+        if channel is None:
+            return f"{label}: announcement channel is missing."
+        permissions_for = getattr(channel, "permissions_for", None)
+        bot_member = self._bot_member_for_guild(guild)
+        if callable(permissions_for) and bot_member is not None:
+            perms = permissions_for(bot_member)
+            if not bool(getattr(perms, "view_channel", False)):
+                return f"{label}: cannot view the announcement channel."
+            if not bool(getattr(perms, "send_messages", False)):
+                return f"{label}: cannot send messages in the announcement channel."
+            if not bool(getattr(perms, "embed_links", False)):
+                return f"{label}: missing `Embed Links` in the announcement channel."
+        return None
+
     async def update_config(
         self,
         guild_id: int,
@@ -416,7 +450,7 @@ class QuestionDropsService:
             config = dict(self.get_config(guild_id))
             categories = set(config.get("enabled_categories", []))
             if action == "reset":
-                categories = set()
+                categories = set(QUESTION_DROP_CATEGORIES)
             else:
                 normalized_category = str(category or "").strip().casefold()
                 if normalized_category not in QUESTION_DROP_CATEGORIES:
@@ -657,39 +691,37 @@ class QuestionDropsService:
     async def _resolve_announcement_channel(self, guild: discord.Guild, channel_id: int | None):
         if not isinstance(channel_id, int) or channel_id <= 0:
             return None
-        channel = guild.get_channel(channel_id)
-        if channel is None:
+        if self._announcement_channel_issue(guild, channel_id, label="Announcement") is not None:
             return None
-        permissions_for = getattr(channel, "permissions_for", None)
-        bot_member = self._bot_member_for_guild(guild)
-        if callable(permissions_for) and bot_member is not None:
-            perms = permissions_for(bot_member)
-            if not bool(getattr(perms, "view_channel", False)):
-                return None
-        return channel
+        return guild.get_channel(channel_id)
 
     async def _announce_role_grant(self, guild: discord.Guild, fallback_channel, event: dict[str, Any]):
-        channel = await self._resolve_announcement_channel(guild, event.get("announcement_channel_id"))
-        if channel is None:
-            channel = fallback_channel
-        if channel is None:
-            return
         description = (
             f"{progression_emoji('role')} {event['member_mention']} earned <@&{event['role_id']}> "
             f"for {event['scope_label']} at **{event['threshold']}** points."
         )
         if event.get("tier") == 3:
             description += f" {progression_emoji('mastery')} Top tier secured."
-        with contextlib.suppress(discord.HTTPException):
-            await channel.send(
-                embed=ge.make_status_embed(
-                    f"{event['headline']} Unlocked",
-                    description,
-                    tone="success",
-                    footer="Babblebox Question Drops",
-                ),
-                allowed_mentions=discord.AllowedMentions(users=True, roles=True, everyone=False),
-            )
+        channels_to_try = []
+        configured_channel = await self._resolve_announcement_channel(guild, event.get("announcement_channel_id"))
+        if configured_channel is not None:
+            channels_to_try.append(configured_channel)
+        if fallback_channel is not None and fallback_channel not in channels_to_try:
+            channels_to_try.append(fallback_channel)
+        for channel in channels_to_try:
+            try:
+                await channel.send(
+                    embed=ge.make_status_embed(
+                        f"{event['headline']} Unlocked",
+                        description,
+                        tone="success",
+                        footer="Babblebox Question Drops",
+                    ),
+                    allowed_mentions=discord.AllowedMentions(users=True, roles=True, everyone=False),
+                )
+                return
+            except discord.HTTPException:
+                continue
 
     def _resolve_user_label(self, user_id: int) -> str:
         get_user = getattr(self.bot, "get_user", None)
@@ -721,7 +753,7 @@ class QuestionDropsService:
 
     def build_status_embed(self, guild: discord.Guild, snapshot: QuestionDropStatusSnapshot) -> discord.Embed:
         config = snapshot.config
-        enabled_categories = config.get("enabled_categories") or list(QUESTION_DROP_CATEGORIES)
+        enabled_categories = self._enabled_categories(config)
         enabled_category_labels = [category_label_with_emoji(category) for category in enabled_categories]
         meta = self.get_meta()
         scholar = dict(config.get("scholar_ladder", {}))
@@ -729,6 +761,8 @@ class QuestionDropsService:
         if not config.get("enabled"):
             description = "Question Drops are off for this server."
         else:
+            if not enabled_categories:
+                description += " No categories are enabled, so scheduled drops are paused until you re-enable at least one."
             if str(config.get("activity_gate", "light")).casefold() == "light":
                 description += " Quiet channels can skip a slot."
             if int(config.get("drops_per_day", 2) or 2) >= 6:
@@ -740,28 +774,40 @@ class QuestionDropsService:
             operability_lines.append("Bot member could not be resolved for role checks.")
         elif not bool(getattr(bot_perms, "manage_roles", False)):
             operability_lines.append("Missing `Manage Roles`, so mastery and scholar roles cannot be granted.")
-        for category in enabled_categories:
+        if config.get("enabled") and not enabled_categories:
+            operability_lines.append("No categories are enabled, so scheduled drops cannot post yet.")
+        if config.get("enabled") and not config.get("enabled_channel_ids"):
+            operability_lines.append("No delivery channels are enabled, so scheduled drops cannot post yet.")
+        enabled_mastery_categories = [
+            category
+            for category in QUESTION_DROP_CATEGORIES
+            if self._configured_category_mastery(config, category).get("enabled")
+        ]
+        mastery_lines = []
+        mastery_setup_lines = []
+        configured_mastery_count = 0
+        for category in enabled_mastery_categories:
             category_mastery = self._configured_category_mastery(config, category)
+            announcement_issue = self._announcement_channel_issue(
+                guild,
+                category_mastery.get("announcement_channel_id"),
+                label=f"{category_label(category)} mastery",
+            )
+            if announcement_issue is not None:
+                operability_lines.append(announcement_issue)
             if not category_mastery.get("enabled"):
                 continue
-            for tier in self._configured_unlock_tiers(category_mastery):
+            tiers = self._configured_unlock_tiers(category_mastery)
+            if not tiers:
+                mastery_setup_lines.append(f"{category_label_with_emoji(category)} enabled, but thresholds and roles still need setup.")
+                continue
+            configured_mastery_count += 1
+            for tier in tiers:
                 role = guild.get_role(int(tier["role_id"])) if hasattr(guild, "get_role") else None
                 if role is None:
                     operability_lines.append(
                         f"{category_label(category)} {tier_label(int(tier['tier']))}: configured role is missing."
                     )
-        for tier in self._configured_unlock_tiers(scholar):
-            role = guild.get_role(int(tier["role_id"])) if hasattr(guild, "get_role") else None
-            if role is None:
-                operability_lines.append(f"{scholar_label(int(tier['tier']))}: configured role is missing.")
-        mastery_lines = []
-        for category in enabled_categories:
-            category_mastery = self._configured_category_mastery(config, category)
-            if not category_mastery.get("enabled"):
-                continue
-            tiers = self._configured_unlock_tiers(category_mastery)
-            if not tiers:
-                continue
             tier_text = ", ".join(
                 f"{tier_label(int(item['tier']))} `{int(item['threshold'])}`"
                 for item in sorted(tiers, key=lambda item: int(item.get("tier", 0) or 0))
@@ -772,9 +818,31 @@ class QuestionDropsService:
             if isinstance(category_mastery.get("announcement_channel_id"), int):
                 flags.append(f"announce <#{int(category_mastery['announcement_channel_id'])}>")
             mastery_lines.append(f"{category_label_with_emoji(category)} {tier_text}" + (f" [{' | '.join(flags)}]" if flags else ""))
+        scholar_tiers = self._configured_unlock_tiers(scholar)
+        scholar_enabled = bool(scholar.get("enabled"))
+        if scholar_enabled:
+            announcement_issue = self._announcement_channel_issue(
+                guild,
+                scholar.get("announcement_channel_id"),
+                label="Scholar ladder",
+            )
+            if announcement_issue is not None:
+                operability_lines.append(announcement_issue)
+        for tier in scholar_tiers:
+            role = guild.get_role(int(tier["role_id"])) if hasattr(guild, "get_role") else None
+            if role is None:
+                operability_lines.append(f"{scholar_label(int(tier['tier']))}: configured role is missing.")
+        mastery_status = self._feature_status_label(
+            enabled_count=len(enabled_mastery_categories),
+            configured_count=configured_mastery_count,
+        )
+        scholar_status = self._feature_status_label(
+            enabled_count=1 if scholar_enabled else 0,
+            configured_count=1 if scholar_tiers else 0,
+        )
         scholar_lines = [
             f"{scholar_label(int(item['tier']))} `{int(item['threshold'])}`"
-            for item in sorted(self._configured_unlock_tiers(scholar), key=lambda item: int(item.get("tier", 0) or 0))
+            for item in sorted(scholar_tiers, key=lambda item: int(item.get("tier", 0) or 0))
         ]
         embed = discord.Embed(
             title="Question Drops",
@@ -812,18 +880,20 @@ class QuestionDropsService:
             name="Knowledge Lane",
             value=(
                 f"Categories: **{len(enabled_categories)}**\n"
-                f"{progression_emoji('role')} Mastery: **{'On' if mastery_lines else 'Off'}**\n"
-                f"{progression_emoji('scholar')} Scholar ladder: **{'On' if scholar_lines else 'Off'}**"
+                f"{progression_emoji('role')} Mastery: **{mastery_status}**\n"
+                f"{progression_emoji('scholar')} Scholar ladder: **{scholar_status}**"
             ),
             inline=True,
         )
         embed.add_field(
             name="Categories",
-            value=", ".join(enabled_category_labels),
+            value=", ".join(enabled_category_labels) if enabled_category_labels else "No enabled categories. Re-enable one to resume scheduled drops.",
             inline=False,
         )
         if mastery_lines:
             embed.add_field(name="Mastery Roles", value="\n".join(mastery_lines[:6]), inline=False)
+        if mastery_setup_lines:
+            embed.add_field(name="Mastery Setup", value="\n".join(mastery_setup_lines[:6]), inline=False)
         if scholar_lines:
             scholar_flags = []
             if scholar.get("silent_grant"):
@@ -834,6 +904,8 @@ class QuestionDropsService:
             if scholar_flags:
                 scholar_value += f"\nSettings: {' | '.join(scholar_flags)}"
             embed.add_field(name="Scholar Ladder", value=scholar_value, inline=False)
+        elif scholar_enabled:
+            embed.add_field(name="Scholar Ladder", value="Enabled, but thresholds and roles still need setup.", inline=False)
         if snapshot.enabled_channel_mentions:
             embed.add_field(name="Channels", value="\n".join(snapshot.enabled_channel_mentions[:8]), inline=False)
         if snapshot.next_slot_at is not None:
@@ -859,7 +931,8 @@ class QuestionDropsService:
         profile = summary["profile"]
         guild_profile = summary.get("guild_profile")
         primary = guild_profile if isinstance(guild_profile, dict) else summary.get("global_profile", {})
-        categories = summary.get("guild_categories") or summary.get("top_categories") or []
+        guild_categories = summary.get("guild_categories") or []
+        categories = guild_categories if guild_categories else summary.get("top_categories") or []
         unlocks = summary.get("guild_unlocks") or []
         guild_id = summary.get("guild_id")
         config = self.get_config(guild_id) if isinstance(guild_id, int) and guild_id > 0 else None
@@ -897,9 +970,10 @@ class QuestionDropsService:
             )
         scholar_tier = self._current_scope_tier(unlocks, scope_type="scholar", scope_key="global")
         scholar_next = None
-        if config is not None:
+        scholar_config = dict(config.get("scholar_ladder", {})) if config is not None else {}
+        if config is not None and scholar_config.get("enabled"):
             scholar_next = self._next_scope_tier(
-                self._configured_unlock_tiers(dict(config.get("scholar_ladder", {}))),
+                self._configured_unlock_tiers(scholar_config),
                 points=int(primary.get("points", 0) or 0),
                 current_tier=scholar_tier,
             )
@@ -908,6 +982,8 @@ class QuestionDropsService:
             scholar_lines.append(
                 f"{progression_emoji('next')} Next: **{scholar_label(int(scholar_next['tier']))}** in **{int(scholar_next['remaining'])}** pts"
             )
+        elif config is not None and scholar_config.get("enabled") and not self._configured_unlock_tiers(scholar_config):
+            scholar_lines.append(f"{progression_emoji('next')} Setup needed before scholar ranks can grant.")
         embed.add_field(name="Scholar", value="\n".join(scholar_lines), inline=False)
         if categories:
             lines = []
@@ -915,9 +991,10 @@ class QuestionDropsService:
                 category_id = str(entry.get("category", "")).strip().casefold()
                 current_tier = self._current_scope_tier(unlocks, scope_type="category", scope_key=category_id)
                 next_tier = None
-                if config is not None:
+                category_config = self._configured_category_mastery(config, category_id) if config is not None else {}
+                if guild_categories and config is not None and category_config.get("enabled"):
                     next_tier = self._next_scope_tier(
-                        self._configured_unlock_tiers(self._configured_category_mastery(config, category_id)),
+                        self._configured_unlock_tiers(category_config),
                         points=int(entry.get("points", 0) or 0),
                         current_tier=current_tier,
                     )
@@ -930,7 +1007,7 @@ class QuestionDropsService:
                 if next_tier is not None:
                     line += f" | {progression_emoji('next')} {int(next_tier['remaining'])} to {tier_label(int(next_tier['tier']))}"
                 lines.append(line)
-            embed.add_field(name="Top Categories", value="\n".join(lines), inline=False)
+            embed.add_field(name="Top Categories" if guild_categories else "Lifetime Category Flavor", value="\n".join(lines), inline=False)
         if isinstance(guild_profile, dict):
             global_profile = summary.get("global_profile", {})
             embed.add_field(
@@ -1536,17 +1613,23 @@ class QuestionDropsService:
             )
         config = self.get_config(int(update.get("guild_id", 0) or 0))
         current_category_tier = self._current_scope_tier(unlocks, scope_type="category", scope_key=category_id)
-        next_category_tier = self._next_scope_tier(
-            self._configured_unlock_tiers(self._configured_category_mastery(config, category_id)),
-            points=int(category_after.get("points", 0) or 0),
-            current_tier=current_category_tier,
-        )
+        category_config = self._configured_category_mastery(config, category_id)
+        next_category_tier = None
+        if category_config.get("enabled"):
+            next_category_tier = self._next_scope_tier(
+                self._configured_unlock_tiers(category_config),
+                points=int(category_after.get("points", 0) or 0),
+                current_tier=current_category_tier,
+            )
         current_scholar_tier = self._current_scope_tier(unlocks, scope_type="scholar", scope_key="global")
-        next_scholar_tier = self._next_scope_tier(
-            self._configured_unlock_tiers(dict(config.get("scholar_ladder", {}))),
-            points=int(guild_after.get("points", 0) or 0),
-            current_tier=current_scholar_tier,
-        )
+        scholar_config = dict(config.get("scholar_ladder", {}))
+        next_scholar_tier = None
+        if scholar_config.get("enabled"):
+            next_scholar_tier = self._next_scope_tier(
+                self._configured_unlock_tiers(scholar_config),
+                points=int(guild_after.get("points", 0) or 0),
+                current_tier=current_scholar_tier,
+            )
         if next_category_tier is not None:
             highlight_lines.append(
                 f"{progression_emoji('next')} {int(next_category_tier['remaining'])} pts to {tier_label(int(next_category_tier['tier']))} in {category_label(category_id)}"
@@ -1891,7 +1974,9 @@ class QuestionDropsService:
         slot_key: str,
         config: dict[str, Any],
     ) -> QuestionDropVariant | None:
-        allowed_categories = set(config.get("enabled_categories") or QUESTION_DROP_CATEGORIES)
+        allowed_categories = set(self._enabled_categories(config))
+        if not allowed_categories:
+            return None
         candidates = iter_candidate_variants(
             categories=allowed_categories,
             seed_material=_slot_seed_material(guild_id, channel_id, slot_key),
@@ -1998,6 +2083,10 @@ class QuestionDropsService:
     async def _next_slot_for_guild(self, guild_id: int, *, config: dict[str, Any] | None = None) -> datetime | None:
         config = config or self.get_config(guild_id)
         if not config.get("enabled"):
+            return None
+        if not self._enabled_categories(config):
+            return None
+        if not config.get("enabled_channel_ids"):
             return None
         tzinfo = load_afk_timezone(config.get("timezone")) or timezone.utc
         now = ge.now_utc()
