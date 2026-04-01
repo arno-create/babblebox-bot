@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import hashlib
 import random
+import traceback
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
@@ -190,13 +191,29 @@ class QuestionDropsService:
             self.storage_error = str(exc)
             print(f"Question Drops storage unavailable: {exc}")
             return False
+        try:
+            self._configs = await self.store.fetch_all_configs()
+            self._meta = normalize_question_drops_meta(await self.store.fetch_meta() or default_question_drops_meta())
+            await self._sweep_pending_posts(await self.store.list_pending_posts(), force=True)
+            self._next_prune_at = ge.now_utc()
+            await self._restore_active_rows(await self.store.list_active_drops())
+        except Exception as exc:
+            self.storage_ready = False
+            self.storage_error = f"Question Drops storage state could not be loaded: {exc}"
+            self._configs = {}
+            self._active_drops = {}
+            self._pending_posts = {}
+            self._recent_activity.clear()
+            self._wrong_feedback_users.clear()
+            self._wrong_feedback_count.clear()
+            self._attempted_users.clear()
+            self._next_prune_at = None
+            self._meta = default_question_drops_meta()
+            print(f"Question Drops storage hydration failed: {exc}")
+            traceback.print_exc()
+            return False
         self.storage_ready = True
         self.storage_error = None
-        self._configs = await self.store.fetch_all_configs()
-        self._meta = normalize_question_drops_meta(await self.store.fetch_meta() or default_question_drops_meta())
-        await self._sweep_pending_posts(await self.store.list_pending_posts(), force=True)
-        self._next_prune_at = ge.now_utc()
-        await self._restore_active_rows(await self.store.list_active_drops())
         self._scheduler_task = asyncio.create_task(self._scheduler_loop(), name="babblebox-question-drops-scheduler")
         self._wake_event.set()
         return True
@@ -301,7 +318,7 @@ class QuestionDropsService:
         return True
 
     def storage_message(self, feature_name: str = "Question Drops") -> str:
-        return f"{feature_name} are temporarily unavailable because Babblebox could not reach the Question Drops database."
+        return f"{feature_name} are temporarily unavailable because Babblebox could not load their storage state."
 
     def get_config(self, guild_id: int) -> dict[str, Any]:
         config = self._configs.get(guild_id)

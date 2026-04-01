@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import types
 import unittest
 from collections import Counter
@@ -23,7 +24,7 @@ from babblebox.question_drops_content import (
     validate_content_pack,
 )
 from babblebox.question_drops_service import QuestionDropsService
-from babblebox.question_drops_store import QuestionDropsStore
+from babblebox.question_drops_store import QuestionDropsStore, _active_drop_from_row, _config_from_row
 from babblebox.profile_service import ProfileService
 from babblebox.profile_store import ProfileStore
 
@@ -225,6 +226,128 @@ class QuestionDropsContentTests(unittest.TestCase):
         self.assertIn("true", render_answer_instruction({"type": "boolean", "value": True}))
         self.assertIn("full sequence", render_answer_instruction({"type": "ordered_tokens", "tokens": ["red", "blue"]}))
         self.assertIn("short clean answer", render_answer_instruction({"type": "text", "accepted": ["mars"]}))
+
+
+class QuestionDropsPostgresDecodeTests(unittest.TestCase):
+    def test_config_row_decodes_json_string_fields(self):
+        row = {
+            "guild_id": 10,
+            "enabled": True,
+            "drops_per_day": 3,
+            "timezone": "UTC",
+            "answer_window_seconds": 75,
+            "tone_mode": "clean",
+            "activity_gate": "light",
+            "active_start_hour": 9,
+            "active_end_hour": 22,
+            "enabled_channel_ids": json.dumps([20, 30, 30]),
+            "enabled_categories": json.dumps(["science", "math", "invalid"]),
+            "category_mastery": json.dumps(
+                {
+                    "science": {
+                        "enabled": True,
+                        "announcement_channel_id": 88,
+                        "silent_grant": True,
+                        "tiers": [{"tier": 1, "role_id": 301, "threshold": 10}],
+                    }
+                }
+            ),
+            "scholar_ladder": json.dumps(
+                {
+                    "enabled": True,
+                    "announcement_channel_id": 99,
+                    "silent_grant": False,
+                    "tiers": [{"tier": 1, "role_id": 401, "threshold": 25}],
+                }
+            ),
+            "ai_celebrations_enabled": True,
+        }
+
+        config = _config_from_row(row)
+
+        self.assertEqual(config["enabled_channel_ids"], [20, 30])
+        self.assertEqual(config["enabled_categories"], ["math", "science"])
+        self.assertTrue(config["category_mastery"]["science"]["enabled"])
+        self.assertEqual(config["category_mastery"]["science"]["announcement_channel_id"], 88)
+        self.assertEqual(config["category_mastery"]["science"]["tiers"][0]["role_id"], 301)
+        self.assertEqual(config["scholar_ladder"]["tiers"][0]["threshold"], 25)
+
+    def test_config_row_malformed_json_falls_back_without_raising(self):
+        row = {
+            "guild_id": 10,
+            "enabled": True,
+            "drops_per_day": 2,
+            "timezone": "UTC",
+            "answer_window_seconds": 60,
+            "tone_mode": "clean",
+            "activity_gate": "light",
+            "active_start_hour": 10,
+            "active_end_hour": 22,
+            "enabled_channel_ids": "{\"broken\": true}",
+            "enabled_categories": '{"broken"',
+            "category_mastery": '["wrong-shape"]',
+            "scholar_ladder": '{"enabled": true',
+            "ai_celebrations_enabled": False,
+        }
+
+        config = _config_from_row(row)
+
+        self.assertEqual(config["enabled_channel_ids"], [])
+        self.assertEqual(config["enabled_categories"], [])
+        self.assertFalse(config["category_mastery"]["science"]["enabled"])
+        self.assertFalse(config["scholar_ladder"]["enabled"])
+
+    def test_active_drop_row_decodes_json_string_fields(self):
+        now = ge.now_utc()
+        row = {
+            "guild_id": 10,
+            "channel_id": 20,
+            "message_id": 30,
+            "author_user_id": 40,
+            "exposure_id": 50,
+            "concept_id": "science:planet",
+            "variant_hash": "abc123",
+            "category": "science",
+            "difficulty": 2,
+            "prompt": "Which planet is known as the Red Planet?",
+            "answer_spec": json.dumps({"type": "text", "accepted": ["Mars"]}),
+            "asked_at": now,
+            "expires_at": now + timedelta(minutes=1),
+            "slot_key": "2026-04-02:0",
+            "tone_mode": "clean",
+            "participant_user_ids": json.dumps([5, 7, 7]),
+        }
+
+        record = _active_drop_from_row(row)
+
+        self.assertIsNotNone(record)
+        assert record is not None
+        self.assertEqual(record["answer_spec"]["accepted"], ["Mars"])
+        self.assertEqual(record["participant_user_ids"], [5, 7])
+
+
+class QuestionDropsStartupFailureTests(unittest.IsolatedAsyncioTestCase):
+    async def test_start_fails_soft_when_storage_hydration_breaks(self):
+        store = types.SimpleNamespace(
+            load=AsyncMock(),
+            fetch_all_configs=AsyncMock(side_effect=ValueError("bad legacy json")),
+            fetch_meta=AsyncMock(),
+            list_pending_posts=AsyncMock(),
+            list_active_drops=AsyncMock(),
+            close=AsyncMock(),
+        )
+        service = QuestionDropsService(types.SimpleNamespace(), store=store)
+        try:
+            started = await service.start()
+
+            self.assertFalse(started)
+            self.assertFalse(service.storage_ready)
+            self.assertIn("could not be loaded", str(service.storage_error))
+            self.assertIsNone(service._scheduler_task)
+            self.assertIn("could not load", service.storage_message().lower())
+            self.assertNotIn("could not reach", service.storage_message().lower())
+        finally:
+            await service.close()
 
 
 class QuestionDropsServiceTests(unittest.IsolatedAsyncioTestCase):

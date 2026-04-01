@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import discord
 import types
 import unittest
@@ -12,6 +13,7 @@ from babblebox.admin_service import AdminService
 from babblebox.admin_store import (
     AdminStore,
     _PostgresAdminStore,
+    _config_from_row as _admin_config_from_row,
     default_admin_config,
     normalize_admin_config,
     normalize_verification_state,
@@ -201,6 +203,42 @@ class AdminStoreNormalizationTests(unittest.TestCase):
         self.assertEqual(normalized["review_message_id"], 75)
         self.assertEqual(normalized["last_result_code"], "kick:blocked:missing_kick_members")
         self.assertEqual(normalized["last_notified_code"], "kick:blocked:missing_kick_members")
+
+    def test_postgres_config_row_decodes_json_string_id_lists(self):
+        config = _admin_config_from_row(
+            {
+                "guild_id": 10,
+                "followup_enabled": True,
+                "followup_role_id": 70,
+                "followup_mode": "review",
+                "followup_duration_value": 30,
+                "followup_duration_unit": "days",
+                "verification_enabled": True,
+                "verification_role_id": 80,
+                "verification_logic": "must_have_role",
+                "verification_deadline_action": "auto_kick",
+                "verification_kick_after_seconds": 604800,
+                "verification_warning_lead_seconds": 86400,
+                "verification_help_channel_id": 60,
+                "verification_help_extension_seconds": 86400,
+                "verification_max_extensions": 1,
+                "admin_log_channel_id": 50,
+                "admin_alert_role_id": 90,
+                "warning_template": None,
+                "kick_template": None,
+                "invite_link": None,
+                "excluded_user_ids": json.dumps([11, 12, 12]),
+                "excluded_role_ids": json.dumps([21, 22]),
+                "trusted_role_ids": json.dumps([31, 31]),
+                "followup_exempt_staff": True,
+                "verification_exempt_staff": True,
+                "verification_exempt_bots": True,
+            }
+        )
+
+        self.assertEqual(config["excluded_user_ids"], [11, 12])
+        self.assertEqual(config["excluded_role_ids"], [21, 22])
+        self.assertEqual(config["trusted_role_ids"], [31])
 
 
 class _FakeSchemaConnection:
