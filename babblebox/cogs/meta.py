@@ -39,8 +39,8 @@ HELP_PAGES: list[dict[str, str]] = [
         "description": "Short multiplayer rooms for live server energy.",
         "body": (
             "`/play` opens the lobby for Broken Telephone, Exquisite Corpse, Spyfall, Word Bomb, Only 16, and Pattern Hunt.\n"
-            "Only 16: ask a number question, wait for one clear answer, and 16 survives. Strict is the recommended default; Smart is the advanced variant.\n"
-            "Pattern Hunt: one player reads the room while the coders protect a hidden rule with public clues. `Contains Digits` means digits `0-9` only.\n"
+            "Only 16: ask one number question, then wait for the first clear answer. Strict = reply to the armed question only. Smart = optional chaos mode that also counts one clean standalone answer like `16!`.\n"
+            "Pattern Hunt: the guesser asks in public chat, the current coder answers in public chat, and guesses stay private with `/hunt guess`. `Contains Digits` means digits `0-9` only.\n"
             "`/hunt status` mirrors the live state card privately, and `/hunt guess` stays quiet until a Pattern Hunt room is live."
         ),
         "try": "`/play`, `/hunt status`",

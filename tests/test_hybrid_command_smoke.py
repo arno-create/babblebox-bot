@@ -179,8 +179,9 @@ class FakeLobbyView:
 class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
     def test_help_pages_reflect_hardened_only16_and_pattern_hunt_copy(self):
         party_page = next(page for page in HELP_PAGES if page["title"] == "Party Games")
-        self.assertIn("ask a number question, wait for one clear answer, and 16 survives", party_page["body"])
-        self.assertIn("Strict is the recommended default", party_page["body"])
+        self.assertIn("ask one number question, then wait for the first clear answer", party_page["body"])
+        self.assertIn("Strict = reply to the armed question only", party_page["body"])
+        self.assertIn("guesses stay private with `/hunt guess`", party_page["body"])
         self.assertIn("digits `0-9` only", party_page["body"])
 
     def test_help_pages_reflect_question_drop_option_copy(self):
@@ -206,9 +207,9 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             ge.games = saved_games
 
         mode_field = next(field.value for field in embed.fields if field.name == "Only 16 Mode")
-        self.assertIn("Strict: reply to the armed question with one clear number.", mode_field)
-        self.assertIn("Smart: replies still count, plus one clean standalone answer like `16!`.", mode_field)
-        self.assertIn("ambiguity never knocks anyone out", mode_field)
+        self.assertIn("Strict = reply to the armed question only.", mode_field)
+        self.assertIn("Smart = optional chaos mode that also counts one clean standalone answer like `16!`.", mode_field)
+        self.assertIn("Start with Strict so the room learns the rhythm first.", mode_field)
 
     async def test_ping_command_responds_through_context_send(self):
         cog = MetaCog(object())

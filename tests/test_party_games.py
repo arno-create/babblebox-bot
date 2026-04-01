@@ -17,12 +17,15 @@ from babblebox.only16_game import (
     manually_arm_only16_message,
     parse_only16_numeric_answer,
     _arm_only16_trap_locked,
+    _only16_trap_window_seconds,
     _start_only16_turn_locked,
 )
 from babblebox.pattern_hunt_game import (
     RuleAtom,
     _pattern_hunt_answer_timeout,
+    _pattern_hunt_answer_timeout_seconds,
     _pattern_hunt_prompt_timeout,
+    _pattern_hunt_prompt_timeout_seconds,
     _handle_pattern_penalty_locked,
     _SAMPLE_MESSAGES,
     _bundle_quality_ok,
@@ -164,7 +167,7 @@ class PartyGameLogicTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(handled)
         self.assertIsNone(ensure_only16_state(game).get("trap"))
-        self.assertEqual(channel.sent[-1][1]["embed"].title, "Still Alive")
+        self.assertEqual(channel.sent[-1][1]["embed"].title, "✅ Safe")
         advance.assert_awaited_once()
 
     async def test_only16_smart_mode_accepts_clean_standalone_word_and_math(self):
@@ -178,7 +181,7 @@ class PartyGameLogicTests(unittest.IsolatedAsyncioTestCase):
 
                 self.assertTrue(handled)
                 self.assertIsNone(ensure_only16_state(game).get("trap"))
-                self.assertEqual(channel.sent[-1][1]["embed"].title, "Still Alive")
+                self.assertEqual(channel.sent[-1][1]["embed"].title, "✅ Safe")
                 advance.assert_awaited_once()
 
     async def test_only16_smart_mode_accepts_compact_answer_wrapper(self):
@@ -190,7 +193,7 @@ class PartyGameLogicTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(handled)
         self.assertIsNone(ensure_only16_state(game).get("trap"))
-        self.assertEqual(channel.sent[-1][1]["embed"].title, "Still Alive")
+        self.assertEqual(channel.sent[-1][1]["embed"].title, "✅ Safe")
         advance.assert_awaited_once()
 
     async def test_only16_smart_mode_accepts_clean_punctuation_wrappers(self):
@@ -204,7 +207,7 @@ class PartyGameLogicTests(unittest.IsolatedAsyncioTestCase):
 
                 self.assertTrue(handled)
                 self.assertIsNone(ensure_only16_state(game).get("trap"))
-                self.assertEqual(channel.sent[-1][1]["embed"].title, "Still Alive")
+                self.assertEqual(channel.sent[-1][1]["embed"].title, "✅ Safe")
                 advance.assert_awaited_once()
 
     async def test_only16_strict_mode_ignores_non_reply_answers(self):
@@ -243,7 +246,7 @@ class PartyGameLogicTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(handled)
         self.assertIsNone(ensure_only16_state(game).get("trap"))
-        self.assertEqual(channel.sent[-1][1]["embed"].title, "Trap Voided")
+        self.assertEqual(channel.sent[-1][1]["embed"].title, "⚖️ Trap Voided")
         advance.assert_awaited_once()
 
     async def test_only16_smart_mode_voids_punctuated_unsupported_math_without_elimination(self):
@@ -255,7 +258,7 @@ class PartyGameLogicTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(handled)
         self.assertIsNone(ensure_only16_state(game).get("trap"))
-        self.assertEqual(channel.sent[-1][1]["embed"].title, "Trap Voided")
+        self.assertEqual(channel.sent[-1][1]["embed"].title, "⚖️ Trap Voided")
         self.assertIn("safe judge grammar", channel.sent[-1][1]["embed"].description)
         advance.assert_awaited_once()
 
@@ -308,7 +311,7 @@ class PartyGameLogicTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(handled)
         self.assertIsNone(ensure_only16_state(game).get("trap"))
-        self.assertEqual(channel.sent[-1][1]["embed"].title, "Trap Voided")
+        self.assertEqual(channel.sent[-1][1]["embed"].title, "⚖️ Trap Voided")
         self.assertIn("armed question vanished", channel.sent[-1][1]["embed"].description)
         advance.assert_awaited_once()
 
@@ -326,12 +329,12 @@ class PartyGameLogicTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(handled)
         self.assertEqual(len(game["players"]), 2)
-        self.assertEqual(channel.sent[-1][1]["embed"].title, "Practice Save")
+        self.assertEqual(channel.sent[-1][1]["embed"].title, "🛟 Warm-Up Save")
         self.assertTrue(ensure_only16_state(game)["tutorial_complete"])
         advance.assert_awaited_once()
 
     async def test_only16_turn_deadlines_use_tutorial_then_standard_windows(self):
-        game, asker, _responder, _channel = self._make_only16_game(mode="strict")
+        game, asker, _responder, channel = self._make_only16_game(mode="strict")
         state = ensure_only16_state(game)
         state["trap"] = None
 
@@ -339,15 +342,21 @@ class PartyGameLogicTests(unittest.IsolatedAsyncioTestCase):
         tutorial_seconds = int((state["ask_expires_at"] - state["ask_started_at"]).total_seconds())
         await ge.cancel_task(game.get("turn_task"))
 
-        self.assertEqual(tutorial_seconds, 50)
+        self.assertEqual(tutorial_seconds, 60)
         self.assertIn("only16", game["state_anchors"])
+        first_embed = channel.sent[0][1]["embed"]
+        field_names = [field.name for field in first_embed.fields]
+        field_values = "\n".join(field.value for field in first_embed.fields)
+        self.assertEqual(field_names[:3], ["Turn", "Mode", "Time"])
+        self.assertIn("First Round", field_names)
+        self.assertIn("Strict = reply to the armed question only.", field_values)
 
         state["tutorial_complete"] = True
         await _start_only16_turn_locked(99, game)
         standard_seconds = int((state["ask_expires_at"] - state["ask_started_at"]).total_seconds())
         await ge.cancel_task(game.get("turn_task"))
 
-        self.assertEqual(standard_seconds, 35)
+        self.assertEqual(standard_seconds, 45)
         self.assertEqual(game["current_player_index"], 0)
         self.assertEqual(game["players"][0].id, asker.id)
 
@@ -367,9 +376,34 @@ class PartyGameLogicTests(unittest.IsolatedAsyncioTestCase):
         anchor_message = game["state_anchors"]["only16"]
         self.assertEqual(len(anchor_message.edits), 1)
         edited_embed = anchor_message.edits[-1][1]["embed"]
+        self.assertEqual(edited_embed.title, "🎯 Only 16")
+        field_names = [field.name for field in edited_embed.fields]
         values = "\n".join(field.value for field in edited_embed.fields)
-        self.assertIn("Trap is live", values)
+        self.assertIn("Armed Question", field_names)
+        self.assertIn("Who Can Answer", field_names)
         self.assertIn("How many moons does Mars have?", values)
+        self.assertIn("Strict = reply to the armed question only.", values)
+        self.assertIn("Anyone still in can answer except", values)
+
+    def test_only16_trap_deadlines_use_tutorial_then_standard_windows(self):
+        state = {"tutorial_complete": False}
+        self.assertEqual(_only16_trap_window_seconds(state), 30)
+        state["tutorial_complete"] = True
+        self.assertEqual(_only16_trap_window_seconds(state), 24)
+
+    async def test_only16_smart_anchor_calls_out_optional_standalone_answer(self):
+        game, asker, _responder, _channel = self._make_only16_game(mode="smart")
+        state = ensure_only16_state(game)
+        state["trap"] = None
+
+        await _start_only16_turn_locked(99, game)
+        message = DummyMessage(channel=game["channel"], author=asker, content="How many slices are left?", message_id=101)
+        await _arm_only16_trap_locked(99, game, message, manual=False)
+        await ge.cancel_task(game.get("turn_task"))
+
+        edited_embed = game["state_anchors"]["only16"].edits[-1][1]["embed"]
+        values = "\n".join(field.value for field in edited_embed.fields)
+        self.assertIn("Smart also counts one clean standalone answer like `16!`.", values)
 
     async def test_shared_game_anchor_recreates_after_missing_message(self):
         channel = DummyChannel()
@@ -456,11 +490,44 @@ class PartyGameLogicTests(unittest.IsolatedAsyncioTestCase):
 
         embed = build_pattern_hunt_status_embed(game, public=False)
 
+        self.assertEqual(embed.title, "🧩 Pattern Hunt")
         values = "\n".join(field.value for field in embed.fields)
         self.assertIn("digits `0-9` only", values)
         self.assertIn("/hunt guess", values)
-        self.assertIn("Clues left", values)
-        self.assertIn("Team misses left", values)
+        self.assertIn("type one short clue request in chat", values)
+        self.assertIn("Clues: **2/6**", values)
+        self.assertIn("Misses left: **2**", values)
+
+    def test_pattern_hunt_public_answer_embed_shows_current_ask_and_private_guess_note(self):
+        guesser = DummyUser(10)
+        coder = DummyUser(11)
+        game = {
+            "players": [guesser, coder],
+            "starting_players": [guesser, coder],
+            "channel": DummyChannel(),
+            "pattern_hunt": {
+                "guesser_id": guesser.id,
+                "coder_order": [coder.id],
+                "current_coder_index": 0,
+                "phase": "answer",
+                "current_prompt": "animal clue",
+                "guess_limit": 3,
+                "guesses_used": 0,
+                "strike_limit": 3,
+                "strikes": 0,
+                "clue_limit": 5,
+                "clues_used": 1,
+                "accepted_answers": [],
+                "deadline_at": ge.now_utc() + timedelta(seconds=30),
+                "tutorial_cycle_active": False,
+            },
+        }
+
+        embed = build_pattern_hunt_status_embed(game, public=True)
+        fields = {field.name: field.value for field in embed.fields}
+        self.assertIn("Current Ask", fields)
+        self.assertIn("`/hunt guess` privately", fields["Do This Now"])
+        self.assertIn("animal clue", fields["Current Ask"])
 
     async def test_pattern_hunt_valid_clue_advances_without_extra_acceptance_chatter(self):
         guesser = DummyUser(10)
@@ -523,7 +590,7 @@ class PartyGameLogicTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(handled)
         retry_copy = channel.sent[-1][1]["embed"].description
-        self.assertIn("Try one fresh clue", retry_copy)
+        self.assertIn("Send one fresh clue", retry_copy)
         self.assertNotIn("rule", retry_copy.casefold())
 
     async def test_pattern_hunt_reveal_recap_uses_prompt_to_answer_wording(self):
@@ -608,6 +675,9 @@ class PartyGameLogicTests(unittest.IsolatedAsyncioTestCase):
             await start_pattern_hunt_game_locked(99, game)
 
         self.assertEqual(game["pattern_hunt"]["clue_limit"], 7)
+        dm_embed = coder_one.send.await_args.kwargs["embed"]
+        self.assertEqual(dm_embed.title, "🔐 Pattern Hunt Role")
+        self.assertIn("keep the logic offstage", next(field.value for field in dm_embed.fields if field.name == "Coder Note"))
         begin.assert_awaited_once()
 
     async def test_pattern_hunt_tutorial_grace_absorbs_first_penalty(self):
@@ -636,7 +706,7 @@ class PartyGameLogicTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(game["pattern_hunt"]["tutorial_grace_used"])
         self.assertEqual(game["pattern_hunt"].get("strikes", 0), 0)
-        self.assertEqual(channel.sent[-1][1]["embed"].title, "Warm-Up Reset")
+        self.assertEqual(channel.sent[-1][1]["embed"].title, "🕊️ Opening Grace")
         begin.assert_awaited_once()
 
     async def test_pattern_hunt_second_penalty_becomes_team_miss(self):
@@ -666,8 +736,16 @@ class PartyGameLogicTests(unittest.IsolatedAsyncioTestCase):
             await _handle_pattern_penalty_locked(99, game, reason="The guesser stalled.", reset_phase="prompt")
 
         self.assertEqual(game["pattern_hunt"]["strikes"], 1)
-        self.assertEqual(channel.sent[-1][1]["embed"].title, "Team Miss")
+        self.assertEqual(channel.sent[-1][1]["embed"].title, "⚠️ Missed Beat")
         advance.assert_awaited_once()
+
+    def test_pattern_hunt_timeout_profiles_use_tutorial_then_standard_windows(self):
+        state = {"tutorial_cycle_active": True}
+        self.assertEqual(_pattern_hunt_prompt_timeout_seconds(state), 75)
+        self.assertEqual(_pattern_hunt_answer_timeout_seconds(state), 60)
+        state["tutorial_cycle_active"] = False
+        self.assertEqual(_pattern_hunt_prompt_timeout_seconds(state), 60)
+        self.assertEqual(_pattern_hunt_answer_timeout_seconds(state), 50)
 
     async def test_pattern_hunt_prompt_timeout_applies_a_strike(self):
         guesser = DummyUser(10)
@@ -704,7 +782,7 @@ class PartyGameLogicTests(unittest.IsolatedAsyncioTestCase):
             ge.games = saved_games
 
         penalty.assert_awaited_once()
-        self.assertEqual(penalty.await_args.kwargs["reason"], "The guesser ran out of time before asking for a clue.")
+        self.assertEqual(penalty.await_args.kwargs["reason"], "The guesser took too long to ask for a clue.")
 
     async def test_pattern_hunt_answer_timeout_applies_a_strike(self):
         guesser = DummyUser(10)
@@ -743,8 +821,8 @@ class PartyGameLogicTests(unittest.IsolatedAsyncioTestCase):
         penalty.assert_awaited_once()
         reason = penalty.await_args.kwargs["reason"]
         self.assertIn(coder.mention, reason)
-        self.assertIn("ran out of time", reason)
-        self.assertIn("sending a clue", reason)
+        self.assertIn("took too long", reason)
+        self.assertIn("send a clue", reason)
 
     async def test_pattern_guess_compares_structured_atoms(self):
         guesser = DummyUser(10)
