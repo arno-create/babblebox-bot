@@ -445,6 +445,30 @@ class QuestionDropsServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(self.channel.sent[-1][1]["embed"].title, "Solved")
 
+    async def test_first_try_correct_solve_skips_participant_persist_write(self):
+        active = await self._post_one_drop()
+        self.service.store.update_active_drop_participants = AsyncMock()
+        answer = str(active["answer_spec"].get("value", active["answer_spec"].get("accepted", [""])[0]))
+
+        handled = await self.service.handle_message(
+            DummyMessage(guild=self.guild, channel=self.channel, author=DummyUser(45), content=answer)
+        )
+
+        self.assertTrue(handled)
+        self.service.store.update_active_drop_participants.assert_not_awaited()
+        self.bot.profile_service.record_question_drop_results_batch.assert_awaited_once()
+
+    async def test_first_wrong_attempt_persists_participant_state(self):
+        active = await self._post_one_drop()
+        self.service.store.update_active_drop_participants = AsyncMock()
+        author = DummyUser(54)
+        wrong = DummyMessage(guild=self.guild, channel=self.channel, author=author, content=self._wrong_attempt_content(active))
+
+        handled = await self.service.handle_message(wrong)
+
+        self.assertFalse(handled)
+        self.service.store.update_active_drop_participants.assert_awaited_once_with(self.guild.id, self.channel.id, [54])
+
     async def test_wrong_feedback_is_rate_limited_and_attempts_only_count_once_per_user(self):
         await self.service.update_config(self.guild.id, tone_mode="playful")
         active = await self._post_one_drop()

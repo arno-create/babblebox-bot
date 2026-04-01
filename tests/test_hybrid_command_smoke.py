@@ -179,7 +179,7 @@ class FakeLobbyView:
 class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
     def test_help_pages_reflect_hardened_only16_and_pattern_hunt_copy(self):
         party_page = next(page for page in HELP_PAGES if page["title"] == "Party Games")
-        self.assertIn("Strict: only direct replies to the armed question count.", party_page["body"])
+        self.assertIn("Strict judges direct replies to the armed question only.", party_page["body"])
         self.assertIn("`16!` or `sixteen.`", party_page["body"])
         self.assertIn("digits `0-9` only", party_page["body"])
 
@@ -206,7 +206,7 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             ge.games = saved_games
 
         mode_field = next(field.value for field in embed.fields if field.name == "Only 16 Mode")
-        self.assertIn("Strict: only direct replies to the armed question count.", mode_field)
+        self.assertIn("Strict: direct replies to the armed question only.", mode_field)
         self.assertIn("`16!` or `sixteen.`", mode_field)
         self.assertIn("ambiguity never eliminates", mode_field)
 

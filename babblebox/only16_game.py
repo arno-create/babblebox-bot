@@ -473,14 +473,14 @@ def _only16_player_names(game: dict[str, Any]) -> str:
 
 def _only16_mode_guide() -> str:
     return (
-        "Strict: only direct replies to the armed question count.\n"
-        "Smart: direct replies count, plus one clean standalone answer like `16!` or `sixteen.`.\n"
+        "Strict: direct replies to the armed question only.\n"
+        "Smart: direct replies plus one clean standalone answer like `16!` or `sixteen.`.\n"
         "Chatter stays out, and ambiguity never eliminates."
     )
 
 
 def _only16_supported_math_copy() -> str:
-    return "Safe math uses integers with `+ - * / ^`, unary `+/-`, and parentheses."
+    return "Safe math: integers with `+ - * / ^`, unary `+/-`, and parentheses."
 
 
 def _smart_exact_payload(text: str | None) -> Only16ParseResult:
@@ -540,7 +540,7 @@ def _classify_smart_follow_up(text: str | None, parsed: Only16ParseResult) -> tu
 def _trap_live_copy(mode: str | None) -> str:
     normalized = str(mode or "strict").casefold()
     if normalized == "smart":
-        return "Trap live. Smart mode counts direct replies and one clean standalone answer. Chatter stays out."
+        return "Trap live. Smart mode counts direct replies plus one clean standalone answer. Chatter stays out."
     return "Trap live. Strict mode counts direct replies to the armed question only. Chatter stays out."
 
 
@@ -679,7 +679,7 @@ async def _handle_only16_answer_locked(message: discord.Message, guild_id: int, 
             guild_id,
             game,
             title="Trap Voided",
-            reason="Smart mode only takes one clean standalone answer, so Babblebox refused to judge a fuzzy non-reply lane.",
+            reason="Smart mode only judges one clean standalone answer, so Babblebox skipped that fuzzy non-reply.",
         )
         return True
     return await _resolve_only16_answer_locked(message, guild_id, game, trap, parsed)

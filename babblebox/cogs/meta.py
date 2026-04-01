@@ -39,8 +39,8 @@ HELP_PAGES: list[dict[str, str]] = [
         "description": "Short multiplayer rooms for live server energy.",
         "body": (
             "`/play` opens the lobby for Broken Telephone, Exquisite Corpse, Spyfall, Word Bomb, Only 16, and Pattern Hunt.\n"
-            "Only 16 judge guide: Strict: only direct replies to the armed question count. Smart: direct replies count, plus one clean standalone answer like `16!` or `sixteen.`. Chatter stays out, and ambiguity never eliminates.\n"
-            "Pattern Hunt stays machine-checkable, and the `Contains Digits` guess family means digits `0-9` only.\n"
+            "Only 16: Strict judges direct replies to the armed question only. Smart also takes one clean standalone answer like `16!` or `sixteen.`. Chatter stays out, and ambiguity never eliminates.\n"
+            "Pattern Hunt stays machine-checkable. `Contains Digits` means digits `0-9` only.\n"
             "`/hunt status` and `/hunt guess` stay quiet until a Pattern Hunt room is live."
         ),
         "try": "`/play`, `/hunt status`",
@@ -63,10 +63,10 @@ HELP_PAGES: list[dict[str, str]] = [
         "body": (
             "`/daily` opens Shuffle, Emoji, and Signal.\n"
             "`/daily play <guess>` still defaults to Shuffle Booth.\n"
-            "`/drops panel`, `/drops config`, `/drops channels`, `/drops categories`, and `/drops stats` cover the scheduled trivia lane.\n"
-            "Admins can run **1-10 drops a day** across selected channels.\n"
-            "Question Drops accept clean natural answers. Numeric drops accept clean digits or simple number words, and multiple-choice prompts also accept the correct option letter or option text.\n"
-            "Quiet channels can skip a slot, and higher daily counts recycle sooner once the fresh pool thins. A live drop blocks `/play` in that same channel until it resolves.\n"
+            "`/drops panel`, `/drops config`, `/drops channels`, `/drops categories`, and `/drops stats` run the scheduled trivia lane.\n"
+            "Admins can schedule **1-10 drops a day** in selected channels.\n"
+            "Numeric drops accept clean digits or simple number words. Multiple-choice prompts also accept the correct option letter or option text.\n"
+            "Quiet channels can skip a slot. Higher daily counts recycle sooner once the fresh pool thins. A live drop blocks `/play` in that same channel until it resolves.\n"
             "`/daily`, `/daily play`, `/daily stats`, `/daily share`, and `/daily leaderboard` lean public by default while warnings stay private."
         ),
         "try": "`/daily`, `/drops status`, `/drops stats`",

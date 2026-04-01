@@ -106,7 +106,7 @@ def _tone_failure_line(tone_mode: str) -> str | None:
             (
                 "Not this one. Another clean guess can still steal it.",
                 "Close enough to keep trying, not close enough to score.",
-                "The box declines, politely.",
+                "Clean guess, wrong answer. The drop is still live.",
             )
         )
     if tone_mode == "roast-light":
@@ -468,8 +468,8 @@ class QuestionDropsService:
             name="Delivery",
             value=(
                 f"Tone: **{str(config.get('tone_mode', 'clean')).title()}**\n"
-                f"Configured channels: **{len(snapshot.enabled_channel_mentions)}**\n"
-                f"Active drops now: **{snapshot.active_drop_count}**"
+                f"Channels: **{len(snapshot.enabled_channel_mentions)}**\n"
+                f"Live now: **{snapshot.active_drop_count}**"
             ),
             inline=True,
         )
@@ -559,18 +559,31 @@ class QuestionDropsService:
             exposure_id = int(current["exposure_id"])
             participants = self._attempted_users.setdefault(exposure_id, set(current.get("participant_user_ids", []) or []))
             first_attempt = message.author.id not in participants
+            correct = judge_answer(current["answer_spec"], message.content)
+            persisted_participants = False
             if first_attempt:
                 participants.add(message.author.id)
-                await self.store.update_active_drop_participants(current["guild_id"], current["channel_id"], sorted(participants))
-                current["participant_user_ids"] = sorted(participants)
-            if judge_answer(current["answer_spec"], message.content):
-                participant_ids = sorted(participants | {message.author.id})
-                await self.store.resolve_exposure(exposure_id, resolved_at=now, winner_user_id=message.author.id)
-                await self.store.delete_active_drop(current["guild_id"], current["channel_id"])
+                participant_ids = sorted(participants)
+                current["participant_user_ids"] = participant_ids
+                if not correct:
+                    await self.store.update_active_drop_participants(current["guild_id"], current["channel_id"], participant_ids)
+                    persisted_participants = True
+            if correct:
+                participant_ids = sorted(participants)
+                try:
+                    await self.store.resolve_exposure(exposure_id, resolved_at=now, winner_user_id=message.author.id)
+                    await self.store.delete_active_drop(current["guild_id"], current["channel_id"])
+                except Exception:
+                    if first_attempt and not persisted_participants:
+                        with contextlib.suppress(Exception):
+                            await self.store.update_active_drop_participants(
+                                current["guild_id"],
+                                current["channel_id"],
+                                participant_ids,
+                            )
+                    raise
                 self._active_drops.pop((current["guild_id"], current["channel_id"]), None)
-                self._wrong_feedback_users.pop(exposure_id, None)
-                self._wrong_feedback_count.pop(exposure_id, None)
-                self._attempted_users.pop(exposure_id, None)
+                self._clear_active_drop_runtime_state(exposure_id)
                 result_payload = {
                     "category": current["category"],
                     "difficulty": int(current["difficulty"]),
@@ -616,6 +629,11 @@ class QuestionDropsService:
                     allowed_mentions=discord.AllowedMentions.none(),
                 )
         return False
+
+    def _clear_active_drop_runtime_state(self, exposure_id: int):
+        self._wrong_feedback_users.pop(exposure_id, None)
+        self._wrong_feedback_count.pop(exposure_id, None)
+        self._attempted_users.pop(exposure_id, None)
 
     async def _record_participation_batch(
         self,
@@ -725,9 +743,7 @@ class QuestionDropsService:
         await self.store.delete_active_drop(record["guild_id"], record["channel_id"])
         self._active_drops.pop((record["guild_id"], record["channel_id"]), None)
         participant_ids = sorted(self._attempted_users.get(exposure_id, set(record.get("participant_user_ids", []) or [])))
-        self._wrong_feedback_users.pop(exposure_id, None)
-        self._wrong_feedback_count.pop(exposure_id, None)
-        self._attempted_users.pop(exposure_id, None)
+        self._clear_active_drop_runtime_state(exposure_id)
         if delete_post_message:
             await self._delete_message_if_exists(record["channel_id"], record.get("message_id"))
         if participant_ids:

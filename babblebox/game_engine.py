@@ -1200,8 +1200,8 @@ def get_lobby_embed(guild_id):
             name="Only 16 Mode",
             value=(
                 f"**{str(game.get('only16_mode', 'strict')).title()}**\n"
-                "Strict: only direct replies to the armed question count.\n"
-                "Smart: direct replies count, plus one clean standalone answer like `16!` or `sixteen.`.\n"
+                "Strict: direct replies to the armed question only.\n"
+                "Smart: direct replies plus one clean standalone answer like `16!` or `sixteen.`.\n"
                 "Chatter stays out, and ambiguity never eliminates."
             ),
             inline=False,

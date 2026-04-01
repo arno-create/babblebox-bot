@@ -477,9 +477,9 @@ def render_answer_summary(answer_spec: dict[str, Any]) -> str:
 def render_answer_instruction(answer_spec: dict[str, Any]) -> str:
     answer_type = answer_spec.get("type")
     if answer_type == "multiple_choice":
-        return "Reply here or send the option text. The correct letter also works, like `C` or `option c`."
+        return "Reply here or send the option text. The correct letter also works: `C` or `option c`."
     if answer_type == "numeric":
-        return "Reply here or send just the number. Clean digits and simple number words both work."
+        return "Reply here or send just the number. Clean digits or simple number words both count."
     if answer_type == "boolean":
         return "Reply here or send `true` / `false` or `yes` / `no`."
     if answer_type == "ordered_tokens":
