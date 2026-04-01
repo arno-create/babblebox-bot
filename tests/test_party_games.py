@@ -565,6 +565,126 @@ class PartyGameLogicTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(game["pattern_hunt"]["accepted_answers"][0]["prompt"], "digit clue")
         advance.assert_awaited_once()
 
+    async def test_pattern_hunt_prompt_phase_rejects_low_signal_guesser_chatter(self):
+        guesser = DummyUser(10)
+        coder = DummyUser(11)
+        channel = DummyChannel()
+        game = {
+            "players": [guesser, coder],
+            "starting_players": [guesser, coder],
+            "channel": channel,
+            "turn_task": None,
+            "pattern_hunt": {
+                "guesser_id": guesser.id,
+                "coder_order": [coder.id],
+                "current_coder_index": 0,
+                "phase": "prompt",
+                "current_prompt": None,
+                "accepted_answers": [],
+            },
+        }
+
+        with patch("babblebox.pattern_hunt_game._start_pattern_answer_locked", new=AsyncMock()) as start_answer:
+            handled = await handle_pattern_hunt_message_locked(
+                DummyMessage(channel=channel, author=guesser, content="lol"),
+                99,
+                game,
+            )
+
+        self.assertTrue(handled)
+        self.assertEqual(game["pattern_hunt"]["phase"], "prompt")
+        self.assertIsNone(game["pattern_hunt"]["current_prompt"])
+        self.assertEqual(channel.sent[-1][0][0], "Pattern Hunt: ask for one real clue or theme so the coder has something to answer.")
+        self.assertEqual(channel.sent[-1][1]["delete_after"], 4.0)
+        start_answer.assert_not_awaited()
+
+    async def test_pattern_hunt_prompt_phase_rejects_whitespace_without_advancing(self):
+        guesser = DummyUser(10)
+        coder = DummyUser(11)
+        channel = DummyChannel()
+        game = {
+            "players": [guesser, coder],
+            "starting_players": [guesser, coder],
+            "channel": channel,
+            "turn_task": None,
+            "pattern_hunt": {
+                "guesser_id": guesser.id,
+                "coder_order": [coder.id],
+                "current_coder_index": 0,
+                "phase": "prompt",
+                "current_prompt": None,
+                "accepted_answers": [],
+            },
+        }
+
+        with patch("babblebox.pattern_hunt_game._start_pattern_answer_locked", new=AsyncMock()) as start_answer:
+            handled = await handle_pattern_hunt_message_locked(
+                DummyMessage(channel=channel, author=guesser, content="   "),
+                99,
+                game,
+            )
+
+        self.assertTrue(handled)
+        self.assertEqual(game["pattern_hunt"]["phase"], "prompt")
+        self.assertIsNone(game["pattern_hunt"]["current_prompt"])
+        start_answer.assert_not_awaited()
+
+    async def test_pattern_hunt_prompt_phase_accepts_natural_prompt_and_normalizes_spacing(self):
+        guesser = DummyUser(10)
+        coder = DummyUser(11)
+        channel = DummyChannel()
+        game = {
+            "players": [guesser, coder],
+            "starting_players": [guesser, coder],
+            "channel": channel,
+            "turn_task": None,
+            "pattern_hunt": {
+                "guesser_id": guesser.id,
+                "coder_order": [coder.id],
+                "current_coder_index": 0,
+                "phase": "prompt",
+                "current_prompt": None,
+                "accepted_answers": [],
+            },
+        }
+
+        with patch("babblebox.pattern_hunt_game._start_pattern_answer_locked", new=AsyncMock()) as start_answer:
+            handled = await handle_pattern_hunt_message_locked(
+                DummyMessage(channel=channel, author=guesser, content="  animal   clue?  "),
+                99,
+                game,
+            )
+
+        self.assertTrue(handled)
+        self.assertEqual(game["pattern_hunt"]["current_prompt"], "animal clue?")
+        start_answer.assert_awaited_once()
+
+    async def test_pattern_hunt_invalid_prompt_feedback_is_throttled(self):
+        guesser = DummyUser(10)
+        coder = DummyUser(11)
+        channel = DummyChannel()
+        game = {
+            "players": [guesser, coder],
+            "starting_players": [guesser, coder],
+            "channel": channel,
+            "turn_task": None,
+            "pattern_hunt": {
+                "guesser_id": guesser.id,
+                "coder_order": [coder.id],
+                "current_coder_index": 0,
+                "phase": "prompt",
+                "current_prompt": None,
+                "accepted_answers": [],
+            },
+        }
+
+        with patch("babblebox.pattern_hunt_game._start_pattern_answer_locked", new=AsyncMock()) as start_answer:
+            await handle_pattern_hunt_message_locked(DummyMessage(channel=channel, author=guesser, content="lol"), 99, game)
+            await handle_pattern_hunt_message_locked(DummyMessage(channel=channel, author=guesser, content="ok"), 99, game)
+
+        self.assertEqual(len(channel.sent), 1)
+        start_answer.assert_not_awaited()
+
     async def test_pattern_hunt_retry_feedback_stays_non_leaky(self):
         guesser = DummyUser(10)
         coder = DummyUser(11)
@@ -650,6 +770,8 @@ class PartyGameLogicTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(channel.sent[-1][1]["embed"].title, "DM Failure")
         self.assertIn("hidden rule got uneven", channel.sent[-1][1]["embed"].description)
+        self.assertIn("open server DMs", channel.sent[-1][1]["embed"].description)
+        self.assertIn("start the room again", channel.sent[-1][1]["embed"].description)
         cleanup.assert_awaited_once_with(99)
 
     async def test_pattern_hunt_clue_budget_scales_with_coder_count(self):

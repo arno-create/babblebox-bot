@@ -28,6 +28,7 @@ class WebsiteDocsTests(unittest.TestCase):
         self.assertIn("/drops mastery category", help_html)
         self.assertIn("scholar ladder", help_html)
         self.assertIn("Pattern Hunt", help_html)
+        self.assertIn("Coders need server DMs open before the room starts.", help_html)
         self.assertNotIn("shieldaiglobal", help_html.casefold())
         self.assertNotIn("dropscelebaiglobal", help_html.casefold())
 
@@ -57,6 +58,7 @@ class WebsiteDocsTests(unittest.TestCase):
             "guild scholar ladder",
             "/drops leaderboard",
             "/hunt guess",
+            "Pattern Hunt coder role DMs",
         ):
             self.assertIn(text, readme)
 
@@ -67,8 +69,37 @@ class WebsiteDocsTests(unittest.TestCase):
             "mastery",
             "scholar",
             "/drops status",
+            "Pattern Hunt coders need server DMs open before the round starts.",
         ):
             self.assertIn(text, index_html)
 
         self.assertNotIn("dropscelebaiglobal", readme.casefold())
         self.assertNotIn("dropscelebaiglobal", index_html.casefold())
+
+    def test_readme_examples_drop_known_fake_prefix_shapes(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+        for bad_example in (
+            "bb!hunt guess contains_digits contains_category_word:animal",
+            "bb!drops config enabled:true drops_per_day:4",
+            "bb!drops mastery category science enabled true tier 1 @Role 25",
+            "bb!shield rules pack promo enabled true action log sensitivity normal",
+            "bb!shield filters only_included trusted_role_ids on @Mods",
+            "bb!admin followup enabled true @Probation review 30d",
+            "bb!admin verification enabled true @Verified must_have_role 7d 2d",
+            "bb!admin exclusions trusted_role_ids on @Mods",
+            "bb!admin templates invite_link https://discord.gg/example",
+        ):
+            self.assertNotIn(bad_example, readme)
+
+        for expected_text in (
+            "Use slash for multi-family Pattern Hunt guesses.",
+            "Slash is recommended for multi-option setup here.",
+            "Slash is the best fit for multi-option admin setup here.",
+            "Slash is recommended for the heavier config flows here.",
+            "bb!hunt guess contains_digits",
+            "bb!drops config true 4",
+            "bb!shield rules true promo true log",
+            "bb!admin followup true @Probation review 30d",
+        ):
+            self.assertIn(expected_text, readme)

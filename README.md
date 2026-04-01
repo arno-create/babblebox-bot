@@ -171,32 +171,36 @@ Party game flow still starts from `/play`.
 - Spyfall: 3+ players
 - Word Bomb: 2+ players
 - Only 16: 2+ players, anchor-first number trap, Strict recommended, Smart visible for extra chaos
-- Pattern Hunt: 3+ players, public clue loop, private rule guesses, coder DMs stay hidden
+- Pattern Hunt: 3+ players, public clue loop, private rule guesses, and coder role DMs that stay hidden from the room
 
 Babblebox now nudges solo users toward Daily Arcade, Buddy, Profile, and utilities instead of leaving them at dead ends.
 
 Related party-game commands:
 
+Use slash for multi-family Pattern Hunt guesses. Prefix stays positional, so the example below keeps it to one clean family.
+
 | Slash | Prefix | Purpose |
 | --- | --- | --- |
 | `/hunt` | `bb!hunt` | Open the private Pattern Hunt card |
 | `/hunt status` | `bb!hunt status` | Mirror the live Pattern Hunt state card privately |
-| `/hunt guess` | `bb!hunt guess contains_digits contains_category_word:animal` | Submit a private 1-3 family rule theory |
+| `/hunt guess` | `bb!hunt guess contains_digits` | Submit a private 1-3 family rule theory |
 
 ### Question Drops
+
+Slash is recommended for multi-option setup here. Prefix stays positional, so the examples below keep to the shortest truthful forms.
 
 | Slash | Prefix | Purpose |
 | --- | --- | --- |
 | `/drops panel` | `bb!drops panel` | Open the Question Drops knowledge panel |
 | `/drops status` | `bb!drops status` | View schedule, channels, categories, and operability |
-| `/drops config` | `bb!drops config enabled:true drops_per_day:4` | Configure cadence, timing, tone, and AI opt-in |
+| `/drops config` | `bb!drops config true 4` | Configure cadence, timing, tone, and AI opt-in |
 | `/drops channels` | `bb!drops channels add #trivia` | Add or remove Question Drops channels |
 | `/drops categories` | `bb!drops categories disable math` | Enable, disable, or reset knowledge categories |
 | `/drops stats` | `bb!drops stats @name` | View guild-first Question Drops progress |
 | `/drops leaderboard` | `bb!drops leaderboard science` | View the guild knowledge board |
-| `/drops mastery category` | `bb!drops mastery category science enabled true tier 1 @Role 25` | Configure category mastery roles |
-| `/drops mastery scholar` | `bb!drops mastery scholar enabled true tier 1 @Role 100` | Configure the guild scholar ladder |
-| `/drops mastery recalc` | `bb!drops mastery recalc preview` | Preview or execute a grant-only role recalculation |
+| `/drops mastery category` | `bb!drops mastery category science true 1 @Role 25` | Configure category mastery roles |
+| `/drops mastery scholar` | `bb!drops mastery scholar true 1 @Role 100` | Configure the guild scholar ladder |
+| `/drops mastery recalc` | `bb!drops mastery recalc` | Preview or execute a grant-only role recalculation |
 
 Question Drops notes:
 
@@ -249,14 +253,15 @@ AFK examples:
 ### Shield / Safety
 
 Shield commands are private/admin-facing by default. The streamlined slash surface is centered on `/shield panel`.
+Slash is the best fit for multi-option admin setup here. Prefix stays positional, so the examples below stay intentionally short.
 
 | Slash | Prefix | Purpose |
 | --- | --- | --- |
 | `/shield panel` | `bb!shield panel` | Open the Shield admin panel |
-| `/shield rules` | `bb!shield rules pack promo enabled true action log sensitivity normal` | Configure module, packs, and escalation |
+| `/shield rules` | `bb!shield rules true promo true log` | Configure module, packs, and escalation |
 | `/shield logs` | `bb!shield logs #shield-log @Mods` | Set the mod-log channel and optional alert role |
-| `/shield filters` | `bb!shield filters only_included trusted_role_ids on @Mods` | Tune scope, includes, excludes, and trusted roles |
-| `/shield allowlist` | `bb!shield allowlist allow_domains on example.com` | Manage domain, invite, and phrase allowlists |
+| `/shield filters` | `bb!shield filters` | Tune scope, includes, excludes, and trusted roles |
+| `/shield allowlist` | `bb!shield allowlist` | Manage domain, invite, and phrase allowlists |
 | `/shield ai` | `bb!shield ai true high true false true` | Configure optional AI second-pass review |
 | `/shield advanced add` | `bb!shield advanced add Gift claim*gift wildcard log` | Add a safe advanced pattern |
 | `/shield advanced list` | `bb!shield advanced list` | Review advanced patterns |
@@ -265,16 +270,17 @@ Shield commands are private/admin-facing by default. The streamlined slash surfa
 ### Admin Lifecycle
 
 Admin lifecycle commands are private/admin-facing by default. The streamlined surface is centered on `/admin panel`.
+Slash is recommended for the heavier config flows here. Prefix stays positional, so the examples below show the safest compact forms.
 
 | Slash | Prefix | Purpose |
 | --- | --- | --- |
 | `/admin panel` | `bb!admin panel` | Open the admin lifecycle control panel |
 | `/admin status` | `bb!admin status` | View overview counts or inspect one member |
-| `/admin followup` | `bb!admin followup enabled true @Probation review 30d` | Configure returned-after-ban follow-up roles |
-| `/admin verification` | `bb!admin verification enabled true @Verified must_have_role 7d 2d` | Configure warning-before-kick verification cleanup and the shared review queue |
+| `/admin followup` | `bb!admin followup true @Probation review 30d` | Configure returned-after-ban follow-up roles |
+| `/admin verification` | `bb!admin verification true @Verified must_have_role review 7d 2d` | Configure warning-before-kick verification cleanup and the shared review queue |
 | `/admin logs` | `bb!admin logs #admin-log @Mods` | Set the shared admin log channel and alert role |
-| `/admin exclusions` | `bb!admin exclusions trusted_role_ids on @Mods` | Configure shared exclusions and trusted roles |
-| `/admin templates` | `bb!admin templates invite_link https://discord.gg/example` | Configure warning/kick DMs and optional rejoin link |
+| `/admin exclusions` | `bb!admin exclusions` | Configure shared exclusions and trusted roles |
+| `/admin templates` | `bb!admin templates` | Configure warning/kick DMs and optional rejoin link |
 | `/admin sync` | `bb!admin sync` | One-time catch-up scan for current unverified members |
 
 Verification cleanup is batch-first: routine sweeps emit grouped summaries, review mode uses one persistent queue message, and startup reconciliation resumes quietly without paging staff about unchanged backlog.
@@ -643,6 +649,7 @@ These features rely on DMs being open:
 
 - Broken Telephone
 - Exquisite Corpse
+- Pattern Hunt coder role DMs
 - Spyfall role messages
 - Watch alerts
 - Later markers

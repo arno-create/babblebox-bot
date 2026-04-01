@@ -183,6 +183,7 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("ask one clean number question, then wait for the first clear answer", party_page["body"])
         self.assertIn("Strict = reply to the armed question only", party_page["body"])
         self.assertIn("private guesses with `/hunt guess`", party_page["body"])
+        self.assertIn("Coders need server DMs open before start", party_page["body"])
         self.assertIn("digits `0-9` only", party_page["body"])
 
     def test_help_pages_reflect_question_drop_option_copy(self):
@@ -213,6 +214,25 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Strict = reply to the armed question only. Best for first-time rooms.", mode_field)
         self.assertIn("Smart = also counts one clean standalone answer like `16!`.", mode_field)
         self.assertIn("Start with Strict, then switch to Smart if the room wants extra chaos.", mode_field)
+
+    def test_pattern_hunt_lobby_copy_surfaces_dm_requirement_and_private_guess_flow(self):
+        saved_games = ge.games
+        host = FakeAuthor(1)
+        ge.games = {
+            77: {
+                "host": host,
+                "players": [host, FakeAuthor(2), FakeAuthor(3)],
+                "game_type": "pattern_hunt",
+            }
+        }
+        try:
+            embed = ge.get_lobby_embed(77)
+        finally:
+            ge.games = saved_games
+
+        setup_field = next(field.value for field in embed.fields if field.name == "Pattern Hunt Setup")
+        self.assertIn("Coders need server DMs open before the room starts.", setup_field)
+        self.assertIn("private rule theories stay in `/hunt guess`", setup_field)
 
     async def test_ping_command_responds_through_context_send(self):
         cog = MetaCog(object())

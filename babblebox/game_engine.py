@@ -1233,6 +1233,15 @@ def get_lobby_embed(guild_id):
             ),
             inline=False,
         )
+    if gt == "pattern_hunt":
+        embed.add_field(
+            name="Pattern Hunt Setup",
+            value=(
+                "Coders need server DMs open before the room starts.\n"
+                "The guesser asks for one real clue or theme in chat, and private rule theories stay in `/hunt guess`."
+            ),
+            inline=False,
+        )
 
     if gt != "none":
         min_players = 2 if gt in {"bomb", "only16"} else 3

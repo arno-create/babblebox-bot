@@ -36,6 +36,7 @@ PATTERN_HUNT_RULE_FAMILIES = (
 )
 
 _WORD_RE = re.compile(r"[a-zA-Z']+")
+_PROMPT_TOKEN_RE = re.compile(r"[a-zA-Z0-9']+")
 _EMOJI_RE = re.compile(r"[\U0001F300-\U0001FAFF\u2600-\u27BF]")
 _DIGIT_RE = re.compile(r"\d")
 _COLOR_WORDS = {"red", "blue", "green", "yellow", "orange", "purple", "black", "white"}
@@ -61,6 +62,64 @@ _FAMILY_LABELS = {
 _PATTERN_HUNT_DRY_SOLO_FAMILIES = {"exact_word_count", "word_count_range", "ends_with_punctuation", "starts_with_letter", "forbid_letter"}
 _PATTERN_HUNT_FINE_GRAINED_FAMILIES = {"exact_word_count", "word_count_range", "ends_with_punctuation", "starts_with_letter", "forbid_letter"}
 _PATTERN_HUNT_SOCIAL_FAMILIES = {"contains_category_word", "question_form", "same_initial_letter", "contains_emoji", "contains_digits"}
+_PATTERN_HUNT_LOW_SIGNAL_PROMPTS = {
+    "fr",
+    "help",
+    "hmm",
+    "hmmm",
+    "huh",
+    "idk",
+    "k",
+    "kk",
+    "lmao",
+    "lmfao",
+    "lol",
+    "nah",
+    "no",
+    "nope",
+    "ok",
+    "okay",
+    "omg",
+    "real",
+    "same",
+    "sure",
+    "uh",
+    "uhh",
+    "umm",
+    "wait",
+    "what",
+    "wild",
+    "why",
+    "yep",
+    "yup",
+}
+_PATTERN_HUNT_LOW_SIGNAL_WORDS = _PATTERN_HUNT_LOW_SIGNAL_PROMPTS | {"haha", "hehe", "pls", "plz", "yo"}
+_PATTERN_HUNT_PROMPT_ACTION_WORDS = {
+    "animal",
+    "another",
+    "category",
+    "clue",
+    "color",
+    "digit",
+    "drop",
+    "emoji",
+    "food",
+    "give",
+    "hint",
+    "line",
+    "message",
+    "number",
+    "phrase",
+    "prompt",
+    "question",
+    "send",
+    "show",
+    "something",
+    "theme",
+    "topic",
+    "vibe",
+    "word",
+}
 _SAMPLE_MESSAGES = (
     "Blue bears bake bread!",
     "Do green grapes glow?",
@@ -124,8 +183,16 @@ def _normalize_text(text: str | None) -> str:
     return " ".join(str(text or "").strip().casefold().split())
 
 
+def _normalize_pattern_prompt(text: str | None) -> str:
+    return " ".join(str(text or "").split())
+
+
 def _words(text: str | None) -> list[str]:
     return [token.casefold() for token in _WORD_RE.findall(str(text or ""))]
+
+
+def _prompt_tokens(text: str | None) -> list[str]:
+    return [token.casefold() for token in _PROMPT_TOKEN_RE.findall(str(text or ""))]
 
 
 def _singularish_words(words: list[str]) -> list[str]:
@@ -261,6 +328,36 @@ def parse_guess_atom(family: str | None, value: str | None) -> tuple[bool, RuleA
             return False, "The lower bound must come first."
         return True, RuleAtom(normalized_family, (left, right))
     return False, "Unsupported rule family."
+
+
+def validate_pattern_prompt(text: str | None) -> tuple[bool, str | None]:
+    prompt = _normalize_pattern_prompt(text)
+    if not prompt:
+        return False, None
+    lowered = prompt.casefold()
+    if lowered in _PATTERN_HUNT_LOW_SIGNAL_PROMPTS:
+        return False, None
+    tokens = _prompt_tokens(prompt)
+    if not tokens:
+        return False, None
+    meaningful = [token for token in tokens if token not in _PATTERN_HUNT_LOW_SIGNAL_WORDS]
+    if not meaningful:
+        return False, None
+    if prompt.endswith("?"):
+        if len(meaningful) >= 2:
+            return True, prompt
+        if any(token in _PATTERN_HUNT_PROMPT_ACTION_WORDS for token in meaningful):
+            return True, prompt
+        if len(meaningful[0]) >= 3:
+            return True, prompt
+        return False, None
+    if len(meaningful) >= 2:
+        return True, prompt
+    if any(token in _PATTERN_HUNT_PROMPT_ACTION_WORDS for token in meaningful):
+        return True, prompt
+    if len(meaningful[0]) >= 4:
+        return True, prompt
+    return False, None
 
 
 def _rule_signature(rule_atoms: list[RuleAtom]) -> tuple[tuple[str, str], ...]:
@@ -507,7 +604,10 @@ async def start_pattern_hunt_game_locked(guild_id: int, game: dict[str, Any]):
             await game["channel"].send(
                 embed=ge.make_status_embed(
                     "DM Failure",
-                    f"I could not DM {coder.mention}, so Pattern Hunt stopped before the hidden rule got uneven.",
+                    (
+                        f"I could not DM {coder.mention}, so Pattern Hunt stopped before the hidden rule got uneven. "
+                        "Ask every coder to open server DMs, then start the room again."
+                    ),
                     tone="danger",
                     footer="Babblebox Pattern Hunt",
                 ),
@@ -617,7 +717,16 @@ async def handle_pattern_hunt_message_locked(message: discord.Message, guild_id:
     if not ge.is_player_in_game(game, message.author.id):
         return False
     if state.get("phase") == "prompt" and message.author.id == state.get("guesser_id"):
-        state["current_prompt"] = message.content
+        valid_prompt, cleaned_prompt = validate_pattern_prompt(message.content)
+        if not valid_prompt:
+            if ge.can_emit_notice(game, "last_pattern_prompt_notice_at", interval=4.0):
+                with contextlib.suppress(discord.HTTPException):
+                    await message.channel.send(
+                        "Pattern Hunt: ask for one real clue or theme so the coder has something to answer.",
+                        delete_after=4.0,
+                    )
+            return True
+        state["current_prompt"] = cleaned_prompt
         await _start_pattern_answer_locked(guild_id, game)
         return True
     if state.get("phase") != "answer" or message.author.id != current_pattern_hunt_coder_id(game):
