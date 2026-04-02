@@ -229,6 +229,9 @@ class _BaseProfileStore:
     async def fetch_question_drop_unlocks(self, *, guild_id: int, user_id: int) -> list[dict[str, Any]]:
         raise NotImplementedError
 
+    async def fetch_question_drop_unlocks_for_period(self, *, guild_id: int, start: datetime, end: datetime) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
     async def save_question_drop_unlock(self, row: dict[str, Any]):
         raise NotImplementedError
 
@@ -416,6 +419,23 @@ class _MemoryProfileStore(_BaseProfileStore):
                 int(item.get("tier", 0) or 0),
                 int(item.get("role_id", 0) or 0),
             )
+        )
+        return rows
+
+    async def fetch_question_drop_unlocks_for_period(self, *, guild_id: int, start: datetime, end: datetime) -> list[dict[str, Any]]:
+        rows = [
+            _copy_payload(row)
+            for (row_guild_id, _, _, _, _, _), row in self.state["question_drop_unlocks"].items()
+            if row_guild_id == guild_id and isinstance(row.get("granted_at"), datetime) and start <= row["granted_at"] < end
+        ]
+        rows.sort(
+            key=lambda item: (
+                int(item.get("tier", 0) or 0),
+                1 if str(item.get("scope_type", "")).casefold() == "scholar" else 0,
+                item.get("granted_at"),
+                int(item.get("user_id", 0) or 0),
+            ),
+            reverse=True,
         )
         return rows
 
@@ -627,6 +647,7 @@ class _PostgresProfileStore(_BaseProfileStore):
             "CREATE INDEX IF NOT EXISTS ix_bb_question_drop_guild_categories_lookup ON bb_question_drop_guild_categories (guild_id, user_id, points DESC, correct_count DESC)",
             "CREATE INDEX IF NOT EXISTS ix_bb_question_drop_guild_categories_leaderboard ON bb_question_drop_guild_categories (guild_id, category, points DESC, correct_count DESC, attempts DESC, user_id ASC)",
             "CREATE INDEX IF NOT EXISTS ix_bb_question_drop_unlocks_lookup ON bb_question_drop_unlocks (guild_id, user_id, scope_type, scope_key, tier)",
+            "CREATE INDEX IF NOT EXISTS ix_bb_question_drop_unlocks_period ON bb_question_drop_unlocks (guild_id, granted_at DESC)",
         ]
         async with self._pool.acquire() as conn:
             transaction = getattr(conn, "transaction", None)
@@ -910,6 +931,18 @@ class _PostgresProfileStore(_BaseProfileStore):
             )
         return [dict(row) for row in rows]
 
+    async def fetch_question_drop_unlocks_for_period(self, *, guild_id: int, start: datetime, end: datetime) -> list[dict[str, Any]]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT guild_id, user_id, scope_type, scope_key, tier, role_id, granted_at "
+                "FROM bb_question_drop_unlocks WHERE guild_id = $1 AND granted_at >= $2 AND granted_at < $3 "
+                "ORDER BY tier DESC, CASE WHEN scope_type = 'scholar' THEN 1 ELSE 0 END DESC, granted_at DESC, user_id ASC",
+                guild_id,
+                start,
+                end,
+            )
+        return [dict(row) for row in rows]
+
     async def save_question_drop_unlock(self, row: dict[str, Any]):
         columns_sql = ", ".join(QUESTION_DROP_UNLOCK_COLUMNS)
         placeholders_sql = ", ".join(f"${index}" for index in range(1, len(QUESTION_DROP_UNLOCK_COLUMNS) + 1))
@@ -1063,6 +1096,9 @@ class ProfileStore:
 
     async def fetch_question_drop_unlocks(self, *, guild_id: int, user_id: int) -> list[dict[str, Any]]:
         return await self._store.fetch_question_drop_unlocks(guild_id=guild_id, user_id=user_id)
+
+    async def fetch_question_drop_unlocks_for_period(self, *, guild_id: int, start: datetime, end: datetime) -> list[dict[str, Any]]:
+        return await self._store.fetch_question_drop_unlocks_for_period(guild_id=guild_id, start=start, end=end)
 
     async def save_question_drop_unlock(self, row: dict[str, Any]):
         await self._store.save_question_drop_unlock(row)

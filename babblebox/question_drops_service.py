@@ -41,11 +41,14 @@ from babblebox.question_drops_style import (
     tier_label,
 )
 from babblebox.question_drops_store import (
+    QUESTION_DROP_DIGEST_KINDS,
+    QUESTION_DROP_DIGEST_MENTION_MODES,
     QUESTION_DROP_MAX_DROPS_PER_DAY,
     QUESTION_DROP_MIN_DROPS_PER_DAY,
     QUESTION_DROP_MASTERY_TIERS,
     QuestionDropsStorageUnavailable,
     QuestionDropsStore,
+    default_question_drop_digest_settings,
     default_question_drops_config,
     default_question_drops_meta,
     normalize_active_drop,
@@ -68,6 +71,13 @@ QUESTION_DROP_WRONG_FEEDBACK_GLOBAL_LIMIT = 2
 QUESTION_DROP_PRUNE_INTERVAL_SECONDS = 6 * 60 * 60
 QUESTION_DROP_EXPOSURE_FETCH_LIMIT = 220
 QUESTION_DROP_GENERATED_VARIANTS_PER_SEED = 8
+QUESTION_DROP_PARTICIPATION_RETENTION_DAYS = 180
+QUESTION_DROP_DIGEST_LEASE_SECONDS = 10 * 60
+QUESTION_DROP_DIGEST_POST_HOUR = 9
+QUESTION_DROP_DIGEST_WEEKLY_MIN_SOLVES = 4
+QUESTION_DROP_DIGEST_WEEKLY_MIN_PARTICIPANTS = 2
+QUESTION_DROP_DIGEST_MONTHLY_MIN_SOLVES = 10
+QUESTION_DROP_DIGEST_MONTHLY_MIN_PARTICIPANTS = 3
 
 
 def _config_signature(config: dict[str, Any]) -> str:
@@ -140,6 +150,17 @@ class QuestionDropStatusSnapshot:
     active_drop_count: int
     next_slot_at: datetime | None
     enabled_channel_mentions: tuple[str, ...]
+    digest_status: dict[str, Any]
+
+
+@dataclass(frozen=True)
+class QuestionDropDigestPeriod:
+    kind: str
+    period_key: str
+    period_start_at: datetime
+    period_end_at: datetime
+    scheduled_post_at: datetime
+    timezone_name: str
 
 
 class QuestionDropsService:
@@ -363,6 +384,117 @@ class QuestionDropsService:
                 return f"{label}: missing `Embed Links` in the announcement channel."
         return None
 
+    def _effective_digest_settings(self, config: dict[str, Any]) -> dict[str, Any]:
+        merged = default_question_drop_digest_settings()
+        raw = config.get("digest_settings", {})
+        if isinstance(raw, dict):
+            merged.update(raw)
+        timezone_name = str(merged.get("timezone") or config.get("timezone") or "UTC").strip() or "UTC"
+        merged["timezone"] = timezone_name
+        merged["weekly_enabled"] = bool(merged.get("weekly_enabled"))
+        merged["monthly_enabled"] = bool(merged.get("monthly_enabled"))
+        merged["skip_low_activity"] = bool(merged.get("skip_low_activity", True))
+        mention_mode = str(merged.get("mention_mode", "none")).strip().casefold()
+        merged["mention_mode"] = mention_mode if mention_mode in QUESTION_DROP_DIGEST_MENTION_MODES else "none"
+        for field in ("weekly_channel_id", "monthly_channel_id"):
+            value = merged.get(field)
+            merged[field] = int(value) if isinstance(value, int) and value > 0 else None
+        return merged
+
+    def _digest_timezone(self, settings: dict[str, Any]):
+        return load_afk_timezone(settings.get("timezone")) or timezone.utc
+
+    def _digest_channel_issue(self, guild: discord.Guild, channel_id: int | None, *, label: str) -> str | None:
+        if not isinstance(channel_id, int) or channel_id <= 0:
+            return f"{label}: digest channel is not configured."
+        if not hasattr(guild, "get_channel"):
+            return f"{label}: digest channel could not be resolved."
+        channel = guild.get_channel(channel_id)
+        if channel is None:
+            return f"{label}: digest channel is missing."
+        permissions_for = getattr(channel, "permissions_for", None)
+        bot_member = self._bot_member_for_guild(guild)
+        if callable(permissions_for) and bot_member is not None:
+            perms = permissions_for(bot_member)
+            if not bool(getattr(perms, "view_channel", False)):
+                return f"{label}: cannot view the digest channel."
+            if not bool(getattr(perms, "send_messages", False)):
+                return f"{label}: cannot send messages in the digest channel."
+            if not bool(getattr(perms, "embed_links", False)):
+                return f"{label}: missing `Embed Links` in the digest channel."
+        return None
+
+    def _digest_period_for(self, *, kind: str, timezone_name: str, now: datetime) -> QuestionDropDigestPeriod:
+        tzinfo = load_afk_timezone(timezone_name) or timezone.utc
+        local_now = now.astimezone(tzinfo)
+        if kind == "weekly":
+            current_week_start_date = local_now.date() - timedelta(days=local_now.weekday())
+            period_end_local = datetime.combine(current_week_start_date, time(hour=0, minute=0, tzinfo=tzinfo))
+            period_start_local = period_end_local - timedelta(days=7)
+            scheduled_post_at = period_end_local + timedelta(hours=QUESTION_DROP_DIGEST_POST_HOUR)
+            period_key = f"weekly:{period_start_local.date().isoformat()}"
+        else:
+            current_month_start_date = date(local_now.year, local_now.month, 1)
+            period_end_local = datetime.combine(current_month_start_date, time(hour=0, minute=0, tzinfo=tzinfo))
+            if current_month_start_date.month == 1:
+                period_start_date = date(current_month_start_date.year - 1, 12, 1)
+            else:
+                period_start_date = date(current_month_start_date.year, current_month_start_date.month - 1, 1)
+            period_start_local = datetime.combine(period_start_date, time(hour=0, minute=0, tzinfo=tzinfo))
+            scheduled_post_at = period_end_local + timedelta(hours=QUESTION_DROP_DIGEST_POST_HOUR)
+            period_key = f"monthly:{period_start_local.year:04d}-{period_start_local.month:02d}"
+        return QuestionDropDigestPeriod(
+            kind=kind,
+            period_key=period_key,
+            period_start_at=period_start_local.astimezone(timezone.utc),
+            period_end_at=period_end_local.astimezone(timezone.utc),
+            scheduled_post_at=scheduled_post_at.astimezone(timezone.utc),
+            timezone_name=timezone_name,
+        )
+
+    def _next_digest_post_at(self, *, kind: str, timezone_name: str, now: datetime) -> datetime:
+        tzinfo = load_afk_timezone(timezone_name) or timezone.utc
+        local_now = now.astimezone(tzinfo)
+        if kind == "weekly":
+            current_week_start_date = local_now.date() - timedelta(days=local_now.weekday())
+            candidate = datetime.combine(current_week_start_date, time(hour=QUESTION_DROP_DIGEST_POST_HOUR, tzinfo=tzinfo))
+            if local_now >= candidate:
+                candidate += timedelta(days=7)
+            return candidate.astimezone(timezone.utc)
+        month_start = datetime.combine(date(local_now.year, local_now.month, 1), time(hour=QUESTION_DROP_DIGEST_POST_HOUR, tzinfo=tzinfo))
+        if local_now >= month_start:
+            year = local_now.year + (1 if local_now.month == 12 else 0)
+            month = 1 if local_now.month == 12 else local_now.month + 1
+            month_start = datetime.combine(date(year, month, 1), time(hour=QUESTION_DROP_DIGEST_POST_HOUR, tzinfo=tzinfo))
+        return month_start.astimezone(timezone.utc)
+
+    def _digest_period_window_label(self, period: QuestionDropDigestPeriod) -> str:
+        tzinfo = load_afk_timezone(period.timezone_name) or timezone.utc
+        local_start = period.period_start_at.astimezone(tzinfo)
+        local_end = period.period_end_at.astimezone(tzinfo)
+        if period.kind == "weekly":
+            final_day = local_end - timedelta(days=1)
+            return f"{local_start:%b} {local_start.day} to {final_day:%b} {final_day.day}"
+        return f"{local_start:%B %Y}"
+
+    def _format_digest_run_summary(self, run: dict[str, Any] | None) -> str:
+        if not isinstance(run, dict):
+            return "No run yet."
+        status = str(run.get("status") or "").strip().title() or "Unknown"
+        detail = str(run.get("detail") or "").strip()
+        completed_at = run.get("completed_at")
+        if isinstance(completed_at, str):
+            completed_at = datetime.fromisoformat(completed_at)
+            if completed_at.tzinfo is None:
+                completed_at = completed_at.replace(tzinfo=timezone.utc)
+        completed_text = ge.format_timestamp(completed_at, "R") if completed_at is not None else ""
+        summary = status
+        if detail:
+            summary += f" - {detail}"
+        if completed_text:
+            summary += f" ({completed_text})"
+        return summary
+
     async def update_config(
         self,
         guild_id: int,
@@ -420,6 +552,73 @@ class QuestionDropsService:
             self._configs[guild_id] = normalized
         self._wake_event.set()
         return True, "Question Drops settings updated."
+
+    async def update_digest_config(
+        self,
+        guild: discord.Guild | None,
+        *,
+        weekly_enabled: bool | None = None,
+        monthly_enabled: bool | None = None,
+        timezone_name: str | None = None,
+        shared_channel_id: int | None = None,
+        weekly_channel_id: int | None = None,
+        monthly_channel_id: int | None = None,
+        skip_low_activity: bool | None = None,
+        mention_mode: str | None = None,
+    ) -> tuple[bool, str]:
+        if not self.storage_ready:
+            return False, self.storage_message()
+        guild_id = int(getattr(guild, "id", 0) or 0)
+        if guild_id <= 0:
+            return False, "This update needs a server context."
+        async with self._lock:
+            current = dict(self.get_config(guild_id))
+            raw_digest = current.get("digest_settings", {})
+            digest = default_question_drop_digest_settings()
+            if isinstance(raw_digest, dict):
+                digest.update(raw_digest)
+            if weekly_enabled is not None:
+                digest["weekly_enabled"] = bool(weekly_enabled)
+            if monthly_enabled is not None:
+                digest["monthly_enabled"] = bool(monthly_enabled)
+            if timezone_name is not None:
+                timezone_text = str(timezone_name).strip()
+                if timezone_text.casefold() in {"utc", "z"}:
+                    ok, canonical, error = True, "UTC", None
+                else:
+                    ok, canonical, error = canonicalize_afk_timezone(timezone_text)
+                if not ok or canonical is None:
+                    return False, error or "Use a valid timezone like `Asia/Yerevan` or `UTC+04:00`."
+                digest["timezone"] = canonical
+            if shared_channel_id is not None:
+                normalized_channel_id = int(shared_channel_id) if int(shared_channel_id) > 0 else None
+                digest["weekly_channel_id"] = normalized_channel_id
+                digest["monthly_channel_id"] = normalized_channel_id
+            if weekly_channel_id is not None:
+                digest["weekly_channel_id"] = int(weekly_channel_id) if int(weekly_channel_id) > 0 else None
+            if monthly_channel_id is not None:
+                digest["monthly_channel_id"] = int(monthly_channel_id) if int(monthly_channel_id) > 0 else None
+            if skip_low_activity is not None:
+                digest["skip_low_activity"] = bool(skip_low_activity)
+            if mention_mode is not None:
+                normalized_mention_mode = str(mention_mode).strip().casefold()
+                if normalized_mention_mode not in QUESTION_DROP_DIGEST_MENTION_MODES:
+                    return False, "Mention mode must be `none` or `here`."
+                digest["mention_mode"] = normalized_mention_mode
+            current["digest_settings"] = digest
+            normalized = normalize_question_drops_config(guild_id, current)
+            effective = self._effective_digest_settings(normalized)
+            for kind in QUESTION_DROP_DIGEST_KINDS:
+                if not effective.get(f"{kind}_enabled"):
+                    continue
+                channel_id = effective.get(f"{kind}_channel_id")
+                issue = self._digest_channel_issue(guild, channel_id, label=f"{kind.title()} digest")
+                if issue is not None:
+                    return False, issue
+            await self.store.upsert_config(normalized)
+            self._configs[guild_id] = normalized
+        self._wake_event.set()
+        return True, "Knowledge digest settings updated."
 
     async def update_channels(
         self,
@@ -747,6 +946,42 @@ class QuestionDropsService:
             return ge.display_name_of(cached)
         return f"User {user_id}"
 
+    def _resolve_guild_user_label(self, guild: discord.Guild, user_id: int) -> str:
+        get_member = getattr(guild, "get_member", None)
+        member = get_member(user_id) if callable(get_member) else None
+        if member is not None:
+            return ge.display_name_of(member)
+        return self._resolve_user_label(user_id)
+
+    async def _build_digest_status_snapshot(self, guild: discord.Guild, config: dict[str, Any]) -> dict[str, Any]:
+        settings = self._effective_digest_settings(config)
+        now = ge.now_utc()
+        cadence: dict[str, Any] = {}
+        issues: list[str] = []
+        latest_runs: dict[str, Any] = {}
+        for kind in QUESTION_DROP_DIGEST_KINDS:
+            channel_id = settings.get(f"{kind}_channel_id")
+            latest_runs[kind] = await self.store.fetch_latest_digest_run(guild.id, digest_kind=kind)
+            if settings.get(f"{kind}_enabled"):
+                issue = self._digest_channel_issue(guild, channel_id, label=f"{kind.title()} digest")
+                if issue is not None:
+                    issues.append(issue)
+            cadence[kind] = {
+                "enabled": bool(settings.get(f"{kind}_enabled")),
+                "channel_id": channel_id,
+                "next_post_at": self._next_digest_post_at(kind=kind, timezone_name=settings["timezone"], now=now),
+                "last_run": latest_runs[kind],
+            }
+        return {
+            "settings": settings,
+            "cadence": cadence,
+            "issues": issues,
+            "shared_channel": bool(
+                isinstance(settings.get("weekly_channel_id"), int)
+                and settings.get("weekly_channel_id") == settings.get("monthly_channel_id")
+            ),
+        }
+
     async def get_status_snapshot(self, guild: discord.Guild) -> QuestionDropStatusSnapshot:
         await self._ensure_guild_backfill(guild.id)
         config = self.get_config(guild.id)
@@ -766,10 +1001,13 @@ class QuestionDropsService:
             active_drop_count=len(active_channels),
             next_slot_at=next_slot_at,
             enabled_channel_mentions=tuple(enabled_channel_mentions),
+            digest_status=await self._build_digest_status_snapshot(guild, config),
         )
 
     def build_status_embed(self, guild: discord.Guild, snapshot: QuestionDropStatusSnapshot) -> discord.Embed:
         config = snapshot.config
+        digest_status = snapshot.digest_status
+        digest_settings = digest_status.get("settings", {}) if isinstance(digest_status, dict) else {}
         enabled_categories = self._enabled_categories(config)
         enabled_category_labels = [category_label_with_emoji(category) for category in enabled_categories]
         meta = self.get_meta()
@@ -795,6 +1033,7 @@ class QuestionDropsService:
             operability_lines.append("No categories are enabled, so scheduled drops cannot post yet.")
         if config.get("enabled") and not config.get("enabled_channel_ids"):
             operability_lines.append("No delivery channels are enabled, so scheduled drops cannot post yet.")
+        operability_lines.extend(digest_status.get("issues", []) if isinstance(digest_status, dict) else [])
         enabled_mastery_categories = [
             category
             for category in QUESTION_DROP_CATEGORIES
@@ -902,6 +1141,23 @@ class QuestionDropsService:
             ),
             inline=True,
         )
+        weekly_channel_id = digest_settings.get("weekly_channel_id")
+        monthly_channel_id = digest_settings.get("monthly_channel_id")
+        weekly_line = "Off"
+        monthly_line = "Off"
+        if digest_settings.get("weekly_enabled"):
+            weekly_line = f"<#{weekly_channel_id}>" if isinstance(weekly_channel_id, int) else "Setup needed"
+        if digest_settings.get("monthly_enabled"):
+            monthly_line = f"<#{monthly_channel_id}>" if isinstance(monthly_channel_id, int) else "Setup needed"
+        embed.add_field(
+            name="Knowledge Digests",
+            value=(
+                f"Weekly: **{weekly_line}**\n"
+                f"Monthly: **{monthly_line}**\n"
+                f"Timezone: **{digest_settings.get('timezone', 'UTC')}**"
+            ),
+            inline=True,
+        )
         embed.add_field(
             name="Categories",
             value=", ".join(enabled_category_labels) if enabled_category_labels else "No enabled categories. Re-enable one to resume scheduled drops.",
@@ -931,6 +1187,17 @@ class QuestionDropsService:
                 value=f"{ge.format_timestamp(snapshot.next_slot_at, 'R')} ({ge.format_timestamp(snapshot.next_slot_at, 'f')})",
                 inline=False,
             )
+        if isinstance(digest_status, dict):
+            cadence = digest_status.get("cadence", {})
+            weekly = cadence.get("weekly", {})
+            monthly = cadence.get("monthly", {})
+            digest_lines = [
+                f"Weekly: {self._format_digest_run_summary(weekly.get('last_run'))}",
+                f"Monthly: {self._format_digest_run_summary(monthly.get('last_run'))}",
+                f"Low activity: **{'Skip' if digest_settings.get('skip_low_activity', True) else 'Post anyway'}**",
+                f"Mentions: **{'@here' if digest_settings.get('mention_mode') == 'here' else 'No pings'}**",
+            ]
+            embed.add_field(name="Digest Runs", value="\n".join(digest_lines), inline=False)
         embed.add_field(
             name="AI Celebrations",
             value=(
@@ -943,6 +1210,494 @@ class QuestionDropsService:
         if operability_lines:
             embed.add_field(name="Operability", value="\n".join(operability_lines[:6]), inline=False)
         return ge.style_embed(embed, footer="Babblebox Question Drops | Compact, offline, channel-safe")
+
+    def build_digest_status_embed(self, guild: discord.Guild, snapshot: QuestionDropStatusSnapshot) -> discord.Embed:
+        digest_status = snapshot.digest_status if isinstance(snapshot.digest_status, dict) else {}
+        settings = digest_status.get("settings", {}) if isinstance(digest_status, dict) else {}
+        cadence = digest_status.get("cadence", {}) if isinstance(digest_status, dict) else {}
+        weekly_channel_text = f"<#{int(settings['weekly_channel_id'])}>" if isinstance(settings.get("weekly_channel_id"), int) else "Not set"
+        monthly_channel_text = f"<#{int(settings['monthly_channel_id'])}>" if isinstance(settings.get("monthly_channel_id"), int) else "Not set"
+        embed = discord.Embed(
+            title="Knowledge Digests",
+            description="Weekly and monthly prestige recaps for the Question Drops knowledge lane.",
+            color=ge.EMBED_THEME["accent"],
+        )
+        weekly = cadence.get("weekly", {})
+        monthly = cadence.get("monthly", {})
+        embed.add_field(
+            name="Cadence",
+            value=(
+                f"Weekly: **{'On' if settings.get('weekly_enabled') else 'Off'}**\n"
+                f"Monthly: **{'On' if settings.get('monthly_enabled') else 'Off'}**\n"
+                f"Timezone: **{settings.get('timezone', 'UTC')}**"
+            ),
+            inline=True,
+        )
+        embed.add_field(
+            name="Delivery",
+            value=(
+                f"Weekly channel: {weekly_channel_text}\n"
+                f"Monthly channel: {monthly_channel_text}\n"
+                f"Mentions: **{'@here' if settings.get('mention_mode') == 'here' else 'No pings'}**"
+            ),
+            inline=True,
+        )
+        embed.add_field(
+            name="Posting Rules",
+            value=(
+                f"Low activity: **{'Skip' if settings.get('skip_low_activity', True) else 'Post anyway'}**\n"
+                f"Weekly post time: **Monday 09:00** local\n"
+                f"Monthly post time: **Day 1 at 09:00** local"
+            ),
+            inline=True,
+        )
+        embed.add_field(
+            name="Last Runs",
+            value=(
+                f"Weekly: {self._format_digest_run_summary(weekly.get('last_run'))}\n"
+                f"Monthly: {self._format_digest_run_summary(monthly.get('last_run'))}"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Next Windows",
+            value=(
+                f"Weekly: {ge.format_timestamp(weekly.get('next_post_at'), 'R') if weekly.get('next_post_at') is not None else 'Not scheduled'}\n"
+                f"Monthly: {ge.format_timestamp(monthly.get('next_post_at'), 'R') if monthly.get('next_post_at') is not None else 'Not scheduled'}"
+            ),
+            inline=False,
+        )
+        issues = digest_status.get("issues", []) if isinstance(digest_status, dict) else []
+        if issues:
+            embed.add_field(name="Operability", value="\n".join(issues[:6]), inline=False)
+        return ge.style_embed(embed, footer="Babblebox Question Drops | Digest control surface")
+
+    def _digest_activity_thresholds(self, kind: str) -> tuple[int, int]:
+        if kind == "monthly":
+            return QUESTION_DROP_DIGEST_MONTHLY_MIN_SOLVES, QUESTION_DROP_DIGEST_MONTHLY_MIN_PARTICIPANTS
+        return QUESTION_DROP_DIGEST_WEEKLY_MIN_SOLVES, QUESTION_DROP_DIGEST_WEEKLY_MIN_PARTICIPANTS
+
+    async def _collect_digest_period_data(self, guild_id: int, period: QuestionDropDigestPeriod) -> dict[str, Any]:
+        events = await self.store.list_participation_events_for_guild(
+            guild_id,
+            start=period.period_start_at,
+            end=period.period_end_at,
+        )
+        user_rows: dict[int, dict[str, Any]] = {}
+        user_events: dict[int, list[dict[str, Any]]] = defaultdict(list)
+        category_rows: dict[str, dict[str, Any]] = {}
+        distinct_participants: set[int] = set()
+        solved_exposures: set[int] = set()
+        total_points = 0
+        for event in events:
+            user_id = int(event["user_id"])
+            category_id = str(event["category"]).strip().casefold()
+            row = user_rows.setdefault(
+                user_id,
+                {
+                    "user_id": user_id,
+                    "attempt_count": 0,
+                    "correct_count": 0,
+                    "miss_count": 0,
+                    "points_awarded": 0,
+                    "best_streak": 0,
+                },
+            )
+            row["attempt_count"] += 1
+            distinct_participants.add(user_id)
+            if event.get("correct"):
+                row["correct_count"] += 1
+                solved_exposures.add(int(event["exposure_id"]))
+            else:
+                row["miss_count"] += 1
+            points_awarded = int(event.get("points_awarded", 0) or 0)
+            row["points_awarded"] += points_awarded
+            total_points += points_awarded
+            user_events[user_id].append(event)
+            category_row = category_rows.setdefault(
+                category_id,
+                {
+                    "category": category_id,
+                    "points_awarded": 0,
+                    "solves": 0,
+                    "unique_scorers": set(),
+                },
+            )
+            category_row["points_awarded"] += points_awarded
+            if event.get("correct"):
+                category_row["solves"] += 1
+            if points_awarded > 0:
+                category_row["unique_scorers"].add(user_id)
+        hot_streak = None
+        for user_id, rows in user_events.items():
+            current_streak = 0
+            best_streak = 0
+            for event in rows:
+                if event.get("correct"):
+                    current_streak += 1
+                    best_streak = max(best_streak, current_streak)
+                else:
+                    current_streak = 0
+            user_rows[user_id]["best_streak"] = best_streak
+            if best_streak <= 0:
+                continue
+            candidate = {
+                "user_id": user_id,
+                "streak": best_streak,
+                "points_awarded": int(user_rows[user_id]["points_awarded"]),
+                "correct_count": int(user_rows[user_id]["correct_count"]),
+            }
+            if hot_streak is None or (
+                candidate["streak"],
+                candidate["points_awarded"],
+                candidate["correct_count"],
+                -candidate["user_id"],
+            ) > (
+                hot_streak["streak"],
+                hot_streak["points_awarded"],
+                hot_streak["correct_count"],
+                -hot_streak["user_id"],
+            ):
+                hot_streak = candidate
+        ranked_users = sorted(
+            user_rows.values(),
+            key=lambda item: (
+                -int(item["points_awarded"]),
+                -int(item["correct_count"]),
+                int(item["miss_count"]),
+                int(item["user_id"]),
+            ),
+        )
+        ranked_categories = sorted(
+            (
+                {
+                    "category": row["category"],
+                    "points_awarded": int(row["points_awarded"]),
+                    "solves": int(row["solves"]),
+                    "unique_scorers": len(row["unique_scorers"]),
+                }
+                for row in category_rows.values()
+            ),
+            key=lambda item: (
+                -int(item["points_awarded"]),
+                -int(item["solves"]),
+                -int(item["unique_scorers"]),
+                str(item["category"]),
+            ),
+        )
+        return {
+            "events": events,
+            "ranked_users": ranked_users,
+            "ranked_categories": ranked_categories,
+            "hot_streak": hot_streak,
+            "solved_drops": len(solved_exposures),
+            "distinct_participants": len(distinct_participants),
+            "total_points": total_points,
+        }
+
+    async def _fetch_digest_unlock_highlights(self, guild_id: int, period: QuestionDropDigestPeriod) -> list[dict[str, Any]]:
+        profile_service = self._profile_service()
+        profile_store = getattr(profile_service, "store", None) if profile_service is not None else None
+        if profile_store is None or not hasattr(profile_store, "fetch_question_drop_unlocks_for_period"):
+            return []
+        rows = await profile_store.fetch_question_drop_unlocks_for_period(
+            guild_id=guild_id,
+            start=period.period_start_at,
+            end=period.period_end_at,
+        )
+        return list(rows[:4]) if isinstance(rows, list) else []
+
+    async def _digest_next_milestone_note(
+        self,
+        guild_id: int,
+        ranked_users: list[dict[str, Any]],
+        config: dict[str, Any],
+    ) -> dict[str, Any] | None:
+        profile_service = self._profile_service()
+        profile_store = getattr(profile_service, "store", None) if profile_service is not None else None
+        if profile_store is None:
+            return None
+        best_candidate = None
+        for row in ranked_users[:5]:
+            user_id = int(row["user_id"])
+            unlocks = await profile_store.fetch_question_drop_unlocks(guild_id=guild_id, user_id=user_id)
+            guild_profile = await profile_store.fetch_question_drop_guild_profile(guild_id=guild_id, user_id=user_id)
+            guild_points = int((guild_profile or {}).get("points", 0) or 0)
+            scholar_config = dict(config.get("scholar_ladder", {}))
+            if scholar_config.get("enabled"):
+                next_scholar = self._next_scope_tier(
+                    self._configured_unlock_tiers(scholar_config),
+                    points=guild_points,
+                    current_tier=self._current_scope_tier(unlocks, scope_type="scholar", scope_key="global"),
+                )
+                if next_scholar is not None:
+                    candidate = {
+                        "remaining": int(next_scholar["remaining"]),
+                        "user_id": user_id,
+                        "label": f"{scholar_label(int(next_scholar['tier']))}",
+                        "scope": "scholar",
+                    }
+                    if best_candidate is None or (
+                        candidate["remaining"],
+                        -int(row["points_awarded"]),
+                        int(candidate["user_id"]),
+                    ) < (
+                        best_candidate["remaining"],
+                        -int(best_candidate["points_awarded"]),
+                        int(best_candidate["user_id"]),
+                    ):
+                        candidate["points_awarded"] = int(row["points_awarded"])
+                        best_candidate = candidate
+            for category_row in sorted(
+                await profile_store.fetch_question_drop_guild_categories(guild_id=guild_id, user_id=user_id),
+                key=lambda item: (-int(item.get("points", 0) or 0), str(item.get("category", ""))),
+            ):
+                category_id = str(category_row.get("category") or "").strip().casefold()
+                category_config = self._configured_category_mastery(config, category_id)
+                if not category_config.get("enabled"):
+                    continue
+                next_category = self._next_scope_tier(
+                    self._configured_unlock_tiers(category_config),
+                    points=int(category_row.get("points", 0) or 0),
+                    current_tier=self._current_scope_tier(unlocks, scope_type="category", scope_key=category_id),
+                )
+                if next_category is None:
+                    continue
+                candidate = {
+                    "remaining": int(next_category["remaining"]),
+                    "user_id": user_id,
+                    "label": f"{category_label(category_id)} {tier_label(int(next_category['tier']))}",
+                    "scope": "category",
+                    "points_awarded": int(row["points_awarded"]),
+                }
+                if best_candidate is None or (
+                    candidate["remaining"],
+                    -int(candidate["points_awarded"]),
+                    int(candidate["user_id"]),
+                ) < (
+                    best_candidate["remaining"],
+                    -int(best_candidate["points_awarded"]),
+                    int(best_candidate["user_id"]),
+                ):
+                    best_candidate = candidate
+                break
+        return best_candidate
+
+    def _render_digest_unlock_line(self, guild: discord.Guild, row: dict[str, Any]) -> str:
+        user_label = self._resolve_guild_user_label(guild, int(row.get("user_id", 0) or 0))
+        scope_type = str(row.get("scope_type") or "").casefold()
+        tier = int(row.get("tier", 0) or 0)
+        if scope_type == "scholar":
+            return f"{progression_emoji('scholar')} **{user_label}** reached **{scholar_label(tier)}**"
+        category_id = str(row.get("scope_key") or "").strip().casefold()
+        return f"{progression_emoji('role')} **{user_label}** unlocked **{category_label(category_id)} {tier_label(tier)}**"
+
+    def _build_digest_embed(
+        self,
+        guild: discord.Guild,
+        *,
+        period: QuestionDropDigestPeriod,
+        metrics: dict[str, Any],
+        unlock_rows: list[dict[str, Any]],
+        next_milestone: dict[str, Any] | None,
+    ) -> discord.Embed:
+        ranked_users = metrics.get("ranked_users", [])
+        ranked_categories = metrics.get("ranked_categories", [])
+        title = f"{progression_emoji('scholar')} {'Weekly' if period.kind == 'weekly' else 'Monthly'} Knowledge Digest"
+        description = f"**{guild.name}** | {self._digest_period_window_label(period)}"
+        color = ge.EMBED_THEME["accent"] if period.kind == "weekly" else ge.EMBED_THEME["info"]
+        embed = discord.Embed(title=title, description=description, color=color)
+        if ranked_users:
+            podium_lines = []
+            for index, row in enumerate(ranked_users[:3], start=1):
+                user_label = self._resolve_guild_user_label(guild, int(row["user_id"]))
+                bits = [f"{int(row['points_awarded'])} pts", f"{int(row['correct_count'])} solves"]
+                if int(row.get("miss_count", 0) or 0) > 0:
+                    bits.append(f"{int(row['miss_count'])} misses")
+                podium_lines.append(f"{leaderboard_marker(index)} **{user_label}** - {' | '.join(bits)}")
+            embed.add_field(name="Podium", value="\n".join(podium_lines), inline=False)
+        hot_streak = metrics.get("hot_streak")
+        if period.kind == "weekly" and isinstance(hot_streak, dict):
+            user_label = self._resolve_guild_user_label(guild, int(hot_streak["user_id"]))
+            embed.add_field(
+                name="🔥 Hot Streak",
+                value=f"**{user_label}** ran off **{int(hot_streak['streak'])}** straight solves.",
+                inline=False,
+            )
+        if ranked_categories:
+            if period.kind == "weekly":
+                leader = ranked_categories[0]
+                embed.add_field(
+                    name="🧠 Category Spotlight",
+                    value=(
+                        f"{category_label_with_emoji(str(leader['category']))} led with **{int(leader['points_awarded'])}** pts, "
+                        f"**{int(leader['solves'])}** solves, and **{int(leader['unique_scorers'])}** scorers."
+                    ),
+                    inline=False,
+                )
+            else:
+                lines = [
+                    (
+                        f"{category_label_with_emoji(str(row['category']))} **{int(row['points_awarded'])}** pts | "
+                        f"**{int(row['solves'])}** solves"
+                    )
+                    for row in ranked_categories[:2]
+                ]
+                embed.add_field(name="Category Leaders", value="\n".join(lines), inline=False)
+        if unlock_rows:
+            field_name = "Prestige Moments" if period.kind == "monthly" else "Unlock Highlights"
+            embed.add_field(
+                name=field_name,
+                value="\n".join(self._render_digest_unlock_line(guild, row) for row in unlock_rows[:2]),
+                inline=False,
+            )
+        if next_milestone is not None:
+            user_label = self._resolve_guild_user_label(guild, int(next_milestone["user_id"]))
+            embed.add_field(
+                name="📈 Up Next",
+                value=f"**{user_label}** is **{int(next_milestone['remaining'])}** pts from **{next_milestone['label']}**.",
+                inline=False,
+            )
+        summary_line = (
+            f"🧠 **{int(metrics.get('total_points', 0) or 0)}** pts across **{int(metrics.get('solved_drops', 0) or 0)}** solved drops "
+            f"from **{int(metrics.get('distinct_participants', 0) or 0)}** scholars."
+        )
+        field_name = "Month In Knowledge" if period.kind == "monthly" else "Period Note"
+        embed.add_field(name=field_name, value=summary_line, inline=False)
+        footer = f"Babblebox Question Drops | {self._digest_period_window_label(period)} | Knowledge digest"
+        return ge.style_embed(embed, footer=footer)
+
+    def _digest_skip_reason(self, *, kind: str, settings: dict[str, Any], metrics: dict[str, Any]) -> str | None:
+        solved_drops = int(metrics.get("solved_drops", 0) or 0)
+        distinct_participants = int(metrics.get("distinct_participants", 0) or 0)
+        if solved_drops <= 0 or distinct_participants <= 0:
+            return "No meaningful activity in this period."
+        if not settings.get("skip_low_activity", True):
+            return None
+        min_solves, min_participants = self._digest_activity_thresholds(kind)
+        if solved_drops < min_solves or distinct_participants < min_participants:
+            return (
+                f"Skipped for low activity ({solved_drops} solves, {distinct_participants} participants; "
+                f"needs {min_solves} and {min_participants})."
+            )
+        return None
+
+    async def _post_digest_for_period(self, guild: discord.Guild, *, config: dict[str, Any], kind: str, now: datetime):
+        settings = self._effective_digest_settings(config)
+        period = self._digest_period_for(kind=kind, timezone_name=settings["timezone"], now=now)
+        if now < period.scheduled_post_at:
+            return
+        channel_id = settings.get(f"{kind}_channel_id")
+        claimed = await self.store.claim_digest_run(
+            {
+                "guild_id": guild.id,
+                "digest_kind": kind,
+                "period_key": period.period_key,
+                "period_start_at": period.period_start_at,
+                "period_end_at": period.period_end_at,
+                "scheduled_post_at": period.scheduled_post_at,
+                "status": "claimed",
+                "claimed_at": now,
+                "lease_expires_at": now + timedelta(seconds=QUESTION_DROP_DIGEST_LEASE_SECONDS),
+                "completed_at": None,
+                "detail": "",
+                "channel_id": channel_id,
+                "message_id": None,
+            }
+        )
+        if claimed is None:
+            return
+        issue = self._digest_channel_issue(guild, channel_id, label=f"{kind.title()} digest")
+        if issue is not None:
+            await self.store.finish_digest_run(
+                guild.id,
+                kind,
+                period.period_key,
+                status="failed",
+                detail=issue,
+                channel_id=channel_id,
+                completed_at=ge.now_utc(),
+            )
+            return
+        channel = guild.get_channel(int(channel_id)) if hasattr(guild, "get_channel") and isinstance(channel_id, int) else None
+        if channel is None:
+            await self.store.finish_digest_run(
+                guild.id,
+                kind,
+                period.period_key,
+                status="failed",
+                detail="Digest channel is unavailable.",
+                channel_id=channel_id,
+                completed_at=ge.now_utc(),
+            )
+            return
+        metrics = await self._collect_digest_period_data(guild.id, period)
+        skip_reason = self._digest_skip_reason(kind=kind, settings=settings, metrics=metrics)
+        if skip_reason is not None:
+            await self.store.finish_digest_run(
+                guild.id,
+                kind,
+                period.period_key,
+                status="skipped",
+                detail=skip_reason,
+                channel_id=channel_id,
+                completed_at=ge.now_utc(),
+            )
+            return
+        unlock_rows = await self._fetch_digest_unlock_highlights(guild.id, period)
+        next_milestone = await self._digest_next_milestone_note(guild.id, metrics.get("ranked_users", []), config)
+        embed = self._build_digest_embed(
+            guild,
+            period=period,
+            metrics=metrics,
+            unlock_rows=unlock_rows,
+            next_milestone=next_milestone,
+        )
+        content = "@here" if settings.get("mention_mode") == "here" else None
+        allowed_mentions = (
+            discord.AllowedMentions(users=False, roles=False, everyone=True)
+            if content is not None
+            else discord.AllowedMentions.none()
+        )
+        try:
+            message = await channel.send(content=content, embed=embed, allowed_mentions=allowed_mentions)
+        except discord.HTTPException as exc:
+            await self.store.finish_digest_run(
+                guild.id,
+                kind,
+                period.period_key,
+                status="failed",
+                detail=f"Send failed: {exc}",
+                channel_id=channel_id,
+                completed_at=ge.now_utc(),
+            )
+            return
+        await self.store.finish_digest_run(
+            guild.id,
+            kind,
+            period.period_key,
+            status="posted",
+            detail=f"Posted {kind} digest.",
+            channel_id=channel_id,
+            message_id=int(getattr(message, "id", 0) or 0) or None,
+            completed_at=ge.now_utc(),
+        )
+
+    async def _maybe_post_due_digests(self):
+        if not self.storage_ready:
+            return
+        now = ge.now_utc()
+        for guild_id, config in list(self._configs.items()):
+            settings = self._effective_digest_settings(config)
+            if not settings.get("weekly_enabled") and not settings.get("monthly_enabled"):
+                continue
+            guild = self.bot.get_guild(guild_id) if hasattr(self.bot, "get_guild") else None
+            if guild is None:
+                continue
+            for kind in QUESTION_DROP_DIGEST_KINDS:
+                if not settings.get(f"{kind}_enabled"):
+                    continue
+                await self._post_digest_for_period(guild, config=config, kind=kind, now=now)
 
     def build_stats_embed(self, user: discord.abc.User, summary: dict[str, Any]) -> discord.Embed:
         profile = summary["profile"]
@@ -1231,6 +1986,8 @@ class QuestionDropsService:
                 result_payload = {
                     "guild_id": current["guild_id"],
                     "channel_id": current["channel_id"],
+                    "exposure_id": exposure_id,
+                    "occurred_at": current["asked_at"],
                     "category": current["category"],
                     "difficulty": int(current["difficulty"]),
                     "participant_ids": participant_ids,
@@ -1248,6 +2005,8 @@ class QuestionDropsService:
         if result_payload is not None:
             updates = await self._record_participation_batch(
                 guild_id=result_payload["guild_id"],
+                exposure_id=result_payload["exposure_id"],
+                occurred_at=result_payload["occurred_at"],
                 category=result_payload["category"],
                 difficulty=result_payload["difficulty"],
                 participant_ids=result_payload["participant_ids"],
@@ -1300,6 +2059,8 @@ class QuestionDropsService:
         self,
         *,
         guild_id: int,
+        exposure_id: int,
+        occurred_at: datetime | str,
         category: str,
         difficulty: int,
         participant_ids: list[int],
@@ -1321,6 +2082,20 @@ class QuestionDropsService:
             }
             for user_id in sorted(participant_set)
         ]
+        await self.store.record_participation_events(
+            [
+                {
+                    "guild_id": guild_id,
+                    "exposure_id": exposure_id,
+                    "user_id": int(result["user_id"]),
+                    "occurred_at": occurred_at,
+                    "category": category,
+                    "correct": bool(result["correct"]),
+                    "points_awarded": int(result["points"]),
+                }
+                for result in results
+            ]
+        )
         batch_recorder = getattr(profile_service, "record_question_drop_results_batch", None)
         if callable(batch_recorder):
             updates = await batch_recorder(results, guild_id=guild_id)
@@ -1685,6 +2460,7 @@ class QuestionDropsService:
             await self._expire_due_drops()
             await self._expire_stale_pending_posts()
             await self._maybe_post_due_drops()
+            await self._maybe_post_due_digests()
             await self._prune_old_exposures()
             try:
                 await asyncio.wait_for(self._wake_event.wait(), timeout=QUESTION_DROP_SCHEDULER_INTERVAL_SECONDS)
@@ -1704,6 +2480,8 @@ class QuestionDropsService:
             return
         cutoff = ge.now_utc() - timedelta(days=QUESTION_DROP_EXPOSURE_RETENTION_DAYS)
         await self.store.prune_exposures(before=cutoff, limit=500)
+        participation_cutoff = ge.now_utc() - timedelta(days=QUESTION_DROP_PARTICIPATION_RETENTION_DAYS)
+        await self.store.prune_participation_events(before=participation_cutoff, limit=500)
         self._next_prune_at = now + timedelta(seconds=QUESTION_DROP_PRUNE_INTERVAL_SECONDS)
 
     def _active_drop_is_live(self, record: dict[str, Any], *, now: datetime) -> bool:
@@ -1742,6 +2520,8 @@ class QuestionDropsService:
         if participant_ids:
             await self._record_participation_batch(
                 guild_id=record["guild_id"],
+                exposure_id=exposure_id,
+                occurred_at=record["asked_at"],
                 category=record["category"],
                 difficulty=int(record["difficulty"]),
                 participant_ids=participant_ids,

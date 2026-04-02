@@ -47,6 +47,10 @@ RECALC_MODE_CHOICES = [
     app_commands.Choice(name="Preview", value="preview"),
     app_commands.Choice(name="Execute", value="execute"),
 ]
+DIGEST_MENTION_CHOICES = [
+    app_commands.Choice(name="No pings", value="none"),
+    app_commands.Choice(name="@here", value="here"),
+]
 
 
 class QuestionDropsCog(commands.Cog):
@@ -312,6 +316,81 @@ class QuestionDropsCog(commands.Cog):
             return
         entries = await profile_service.get_question_drop_leaderboard(guild_id=ctx.guild.id, category=category)
         await send_hybrid_response(ctx, embed=self.service.build_leaderboard_embed(ctx.guild, entries, category=category), ephemeral=False)
+
+    @drops_group.group(name="digest", with_app_command=True, invoke_without_command=True, description="Configure weekly and monthly knowledge digests")
+    async def drops_digest_group(self, ctx: commands.Context):
+        if ctx.guild is None:
+            await send_hybrid_response(
+                ctx,
+                embed=ge.make_status_embed("Server Only", "This command only works inside a server.", tone="warning", footer="Babblebox Question Drops"),
+                ephemeral=True,
+            )
+            return
+        if not await self._require_storage(ctx, "Question Drops", defer_response=False):
+            return
+        if not await self._require_admin(ctx):
+            return
+        snapshot = await self.service.get_status_snapshot(ctx.guild)
+        await send_hybrid_response(ctx, embed=self.service.build_digest_status_embed(ctx.guild, snapshot), ephemeral=True)
+
+    @drops_digest_group.command(name="config", with_app_command=True, description="Update digest cadence, channels, timezone, and ping behavior")
+    @app_commands.default_permissions(manage_guild=True)
+    @app_commands.describe(
+        weekly="Turn the weekly digest on or off",
+        monthly="Turn the monthly digest on or off",
+        timezone_name="Digest timezone like Asia/Yerevan or UTC+04:00",
+        shared_channel="Use one channel for both weekly and monthly digests",
+        weekly_channel="Weekly digest channel when you want it separate",
+        monthly_channel="Monthly digest channel when you want it separate",
+        skip_low_activity="Skip quiet periods instead of posting thin digests",
+        mention_mode="Digest ping behavior",
+    )
+    @app_commands.choices(weekly=STATE_CHOICES, monthly=STATE_CHOICES, skip_low_activity=STATE_CHOICES, mention_mode=DIGEST_MENTION_CHOICES)
+    async def drops_digest_config_command(
+        self,
+        ctx: commands.Context,
+        *,
+        weekly: Optional[str] = None,
+        monthly: Optional[str] = None,
+        timezone_name: Optional[str] = None,
+        shared_channel: Optional[discord.TextChannel] = None,
+        weekly_channel: Optional[discord.TextChannel] = None,
+        monthly_channel: Optional[discord.TextChannel] = None,
+        skip_low_activity: Optional[str] = None,
+        mention_mode: Optional[str] = None,
+    ):
+        if ctx.guild is None:
+            await send_hybrid_response(
+                ctx,
+                embed=ge.make_status_embed("Server Only", "This command only works inside a server.", tone="warning", footer="Babblebox Question Drops"),
+                ephemeral=True,
+            )
+            return
+        if not await self._require_storage(ctx, "Question Drops"):
+            return
+        if not await self._require_admin(ctx):
+            return
+        ok, message = await self.service.update_digest_config(
+            ctx.guild,
+            weekly_enabled={"on": True, "off": False}.get(weekly) if weekly is not None else None,
+            monthly_enabled={"on": True, "off": False}.get(monthly) if monthly is not None else None,
+            timezone_name=timezone_name,
+            shared_channel_id=shared_channel.id if shared_channel is not None else None,
+            weekly_channel_id=weekly_channel.id if weekly_channel is not None else None,
+            monthly_channel_id=monthly_channel.id if monthly_channel is not None else None,
+            skip_low_activity={"on": True, "off": False}.get(skip_low_activity) if skip_low_activity is not None else None,
+            mention_mode=mention_mode,
+        )
+        await send_hybrid_response(
+            ctx,
+            embed=ge.make_status_embed(
+                "Knowledge Digests",
+                message,
+                tone="success" if ok else "warning",
+                footer="Babblebox Question Drops",
+            ),
+            ephemeral=True,
+        )
 
     @drops_group.group(name="mastery", with_app_command=True, invoke_without_command=True, description="Configure mastery roles, scholar ranks, and recalculation")
     async def drops_mastery_group(self, ctx: commands.Context):
