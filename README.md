@@ -657,18 +657,22 @@ These features rely on DMs being open:
 
 ## Screenshots
 
-### Lobby
+### Party Games
 
-![Lobby](assets/lobby.png)
+![Babblebox party-game lobby](assets/lobby.png)
 
-### Spyfall Voting
+### Question Drops
 
-![Spyfall Voting](assets/spyfall_voting.png)
+![Babblebox Question Drops status](assets/drops_status_example.png)
 
-### Word Bomb
+### Buddy / Profile
 
-![Word Bomb](assets/wordbomb_gameplay.png)
+![Babblebox Buddy and profile example](assets/buddy_profile_example.png)
 
-### Exquisite Corpse
+### Quiet Utilities
 
-![Exquisite Corpse](assets/exquisite_corpse.png)
+![Babblebox Watch settings](assets/watch_settings.png)
+
+### Shield / Safety
+
+![Babblebox Shield panel](assets/shield_panel_example.png)
