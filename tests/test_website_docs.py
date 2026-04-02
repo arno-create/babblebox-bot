@@ -27,8 +27,11 @@ class WebsiteDocsTests(unittest.TestCase):
         self.assertIn("/drops leaderboard", help_html)
         self.assertIn("/drops roles status", help_html)
         self.assertIn("/drops mastery category", help_html)
-        self.assertIn("/drops mastery category-template", help_html)
-        self.assertIn("/drops mastery scholar-template", help_html)
+        self.assertIn("template_action", help_html)
+        self.assertIn("{user.mention}", help_html)
+        self.assertIn("{category.name}", help_html)
+        self.assertNotIn("/drops mastery category-template", help_html)
+        self.assertNotIn("/drops mastery scholar-template", help_html)
         self.assertIn("scholar ladder", help_html)
         self.assertIn("Pattern Hunt", help_html)
         self.assertIn("Coders need server DMs open before the room starts.", help_html)
@@ -61,7 +64,10 @@ class WebsiteDocsTests(unittest.TestCase):
             "guild scholar ladder",
             "/drops leaderboard",
             "/drops roles status",
-            "/drops mastery category-template",
+            "/drops mastery category",
+            "template_action",
+            "{user.mention}",
+            "{category.name}",
             "/hunt guess",
             "Pattern Hunt coder role DMs",
         ):
@@ -75,7 +81,9 @@ class WebsiteDocsTests(unittest.TestCase):
             "scholar",
             "/drops status",
             "/drops roles status",
-            "custom mastery announcement copy",
+            "/drops mastery category",
+            "{user.mention}",
+            "{category.name}",
             "Pattern Hunt coders need server DMs open before the round starts.",
         ):
             self.assertIn(text, index_html)
@@ -109,6 +117,10 @@ class WebsiteDocsTests(unittest.TestCase):
         self.assertIn("/drops status", help_html)
         self.assertNotIn("/drops panel", readme)
         self.assertNotIn("/drops panel", help_html)
+        self.assertNotIn("category-template", readme)
+        self.assertNotIn("scholar-template", readme)
+        self.assertNotIn("category-template", help_html)
+        self.assertNotIn("scholar-template", help_html)
 
     def test_homepage_keeps_trust_and_utility_positioning_grounded(self):
         index_html = (ROOT / "index.html").read_text(encoding="utf-8")

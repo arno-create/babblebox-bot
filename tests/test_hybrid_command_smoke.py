@@ -197,7 +197,10 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/drops roles status", question_drops_page["body"])
         self.assertNotIn("/drops panel", question_drops_page["body"])
         self.assertIn("/drops mastery category", question_drops_page["body"])
-        self.assertIn("/drops mastery category-template", question_drops_page["body"])
+        self.assertIn("template_action", question_drops_page["body"])
+        self.assertIn("{user.mention}", question_drops_page["body"])
+        self.assertIn("{category.name}", question_drops_page["body"])
+        self.assertNotIn("category-template", question_drops_page["body"])
         self.assertIn("scholar ladder", question_drops_page["body"])
         daily_page = next(page for page in HELP_PAGES if page["title"] == "Daily Arcade")
         self.assertIn("Question Drops stay separate as the guild knowledge lane", daily_page["body"])
@@ -210,8 +213,10 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("roles", command_names)
         self.assertIn("status", command_names)
         self.assertNotIn("panel", command_names)
-        self.assertIn("category-template", mastery_command_names)
-        self.assertIn("scholar-template", mastery_command_names)
+        self.assertIn("category", mastery_command_names)
+        self.assertIn("scholar", mastery_command_names)
+        self.assertNotIn("category-template", mastery_command_names)
+        self.assertNotIn("scholar-template", mastery_command_names)
 
     def test_only16_lobby_copy_stays_aligned_with_manual(self):
         saved_games = ge.games
@@ -1051,13 +1056,17 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await cog.service.close()
 
-    async def test_drops_mastery_category_template_edit_opens_modal_for_slash(self):
+    async def test_drops_mastery_category_template_action_edit_opens_modal_for_slash(self):
         bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
         cog = QuestionDropsCog(bot)
         try:
             cog.service.storage_ready = True
             cog.service.get_category_mastery_announcement_status = AsyncMock(
-                return_value={"status": "ok", "announcement_template": "Hello {user.mention}"}
+                return_value={
+                    "status": "ok",
+                    "announcement_template": "Hello {user.mention}",
+                    "placeholder_tokens": ("{user.mention}", "{user.name}", "{user.display_name}", "{role.name}", "{tier.label}", "{threshold}", "{category.name}"),
+                }
             )
             guild = FakeGuild(10, members=[FakeAuthor(user_id=9, manage_guild=True)])
             interaction = FakeInteraction(guild=guild, user=FakeAuthor(user_id=9, manage_guild=True))
@@ -1068,16 +1077,57 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
                 author=FakeAuthor(user_id=9, manage_guild=True),
             )
 
-            await QuestionDropsCog.drops_mastery_category_template_command.callback(
+            await QuestionDropsCog.drops_mastery_category_command.callback(
                 cog,
                 ctx,
                 category="science",
-                action="edit",
+                template_action="edit",
             )
 
             self.assertEqual(len(interaction.response.modal_calls), 1)
-            self.assertEqual(interaction.response.modal_calls[0].title, "Edit Science Mastery Announcement")
+            modal = interaction.response.modal_calls[0]
+            self.assertEqual(modal.title, "Edit Science Mastery Announcement")
+            self.assertIn("{user.mention}", modal.template_input.placeholder)
+            self.assertIn("{category.name}", modal.template_input.placeholder)
+            self.assertNotIn("Plain text only", modal.template_input.placeholder)
             self.assertEqual(ctx.send_calls, [])
+        finally:
+            await cog.service.close()
+
+    async def test_drops_mastery_scholar_template_action_edit_opens_tier_modal_for_slash(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
+        cog = QuestionDropsCog(bot)
+        try:
+            cog.service.storage_ready = True
+            cog.service.get_scholar_announcement_status = AsyncMock(
+                return_value={
+                    "status": "ok",
+                    "announcement_template": "Hello {user.mention}",
+                    "placeholder_tokens": ("{user.mention}", "{user.name}", "{user.display_name}", "{role.name}", "{tier.label}", "{threshold}"),
+                }
+            )
+            guild = FakeGuild(10, members=[FakeAuthor(user_id=10, manage_guild=True)])
+            interaction = FakeInteraction(guild=guild, user=FakeAuthor(user_id=10, manage_guild=True))
+            ctx = FakeContext(
+                interaction=interaction,
+                guild=guild,
+                channel=FakeChannel(),
+                author=FakeAuthor(user_id=10, manage_guild=True),
+            )
+
+            await QuestionDropsCog.drops_mastery_scholar_command.callback(
+                cog,
+                ctx,
+                tier=2,
+                template_action="edit",
+            )
+
+            self.assertEqual(len(interaction.response.modal_calls), 1)
+            modal = interaction.response.modal_calls[0]
+            self.assertEqual(modal.title, "Edit Scholar II Announcement")
+            self.assertIn("{user.mention}", modal.template_input.placeholder)
+            self.assertIn("{threshold}", modal.template_input.placeholder)
+            self.assertNotIn("{category.name}", modal.template_input.placeholder)
         finally:
             await cog.service.close()
 
@@ -1093,10 +1143,10 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
                 author=FakeAuthor(user_id=10, manage_guild=True),
             )
 
-            await QuestionDropsCog.drops_mastery_scholar_template_command.callback(
+            await QuestionDropsCog.drops_mastery_scholar_command.callback(
                 cog,
                 ctx,
-                action="edit",
+                enabled="edit",
             )
 
             self.assertEqual(len(ctx.send_calls), 1)
@@ -1109,11 +1159,11 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         cog = QuestionDropsCog(bot)
         try:
             cog.service.storage_ready = True
-            cog.service.clear_category_mastery_announcement_template = AsyncMock(return_value=(True, "Science mastery announcement template cleared."))
+            cog.service.clear_category_mastery_announcement_template = AsyncMock(return_value=(True, "Science Tier II announcement override cleared."))
             cog.service.get_category_mastery_announcement_status = AsyncMock(
-                return_value={"status": "ok", "title": "Science Mastery Announcement"}
+                return_value={"status": "ok", "title": "Science Tier II Announcement"}
             )
-            cog.service.build_mastery_announcement_status_embed = lambda payload, note=None: discord.Embed(title="Science Mastery Announcement")
+            cog.service.build_mastery_announcement_status_embed = lambda payload, note=None: discord.Embed(title="Science Tier II Announcement")
             guild = FakeGuild(10, members=[FakeAuthor(user_id=11, manage_guild=True)])
             ctx = FakeContext(
                 interaction=FakeInteraction(guild=guild, user=FakeAuthor(user_id=11, manage_guild=True)),
@@ -1122,17 +1172,46 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
                 author=FakeAuthor(user_id=11, manage_guild=True),
             )
 
-            await QuestionDropsCog.drops_mastery_category_template_command.callback(
+            await QuestionDropsCog.drops_mastery_category_command.callback(
                 cog,
                 ctx,
                 category="science",
-                action="clear",
+                tier=2,
+                template_action="clear",
             )
 
             self.assertEqual(len(ctx.send_calls), 1)
             self.assertTrue(ctx.send_calls[0]["ephemeral"])
-            self.assertEqual(ctx.send_calls[0]["embed"].title, "Science Mastery Announcement")
-            cog.service.clear_category_mastery_announcement_template.assert_awaited_once()
+            self.assertEqual(ctx.send_calls[0]["embed"].title, "Science Tier II Announcement")
+            cog.service.clear_category_mastery_announcement_template.assert_awaited_once_with(guild.id, category="science", tier=2)
+        finally:
+            await cog.service.close()
+
+    async def test_drops_mastery_template_mode_rejects_mixed_role_fields(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
+        cog = QuestionDropsCog(bot)
+        try:
+            cog.service.storage_ready = True
+            guild = FakeGuild(10, members=[FakeAuthor(user_id=12, manage_guild=True)])
+            role = types.SimpleNamespace(id=222, mention="<@&222>")
+            ctx = FakeContext(
+                interaction=FakeInteraction(guild=guild, user=FakeAuthor(user_id=12, manage_guild=True)),
+                guild=guild,
+                channel=FakeChannel(),
+                author=FakeAuthor(user_id=12, manage_guild=True),
+            )
+
+            await QuestionDropsCog.drops_mastery_category_command.callback(
+                cog,
+                ctx,
+                category="science",
+                template_action="status",
+                role=role,
+            )
+
+            self.assertEqual(len(ctx.send_calls), 1)
+            self.assertTrue(ctx.send_calls[0]["ephemeral"])
+            self.assertIn("template mode only uses", ctx.send_calls[0]["embed"].description.casefold())
         finally:
             await cog.service.close()
 
