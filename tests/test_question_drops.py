@@ -44,9 +44,10 @@ class DummyBotMember:
 
 
 class DummyUser:
-    def __init__(self, user_id: int, *, display_name: str | None = None, roles=None, bot: bool = False):
+    def __init__(self, user_id: int, *, display_name: str | None = None, name: str | None = None, roles=None, bot: bool = False):
         self.id = user_id
         self.display_name = display_name or f"User {user_id}"
+        self.name = name or self.display_name
         self.mention = f"<@{user_id}>"
         self.bot = bot
         self.roles = list(roles or [])
@@ -252,6 +253,7 @@ class QuestionDropsPostgresDecodeTests(unittest.TestCase):
                     "science": {
                         "enabled": True,
                         "announcement_channel_id": 88,
+                        "announcement_template": "{user.mention} reached {category.name}.",
                         "silent_grant": True,
                         "tiers": [{"tier": 1, "role_id": 301, "threshold": 10}],
                     }
@@ -261,6 +263,7 @@ class QuestionDropsPostgresDecodeTests(unittest.TestCase):
                 {
                     "enabled": True,
                     "announcement_channel_id": 99,
+                    "announcement_template": "{user.mention} reached {tier.label}.",
                     "silent_grant": False,
                     "tiers": [{"tier": 1, "role_id": 401, "threshold": 25}],
                 }
@@ -284,8 +287,10 @@ class QuestionDropsPostgresDecodeTests(unittest.TestCase):
         self.assertEqual(config["enabled_categories"], ["math", "science"])
         self.assertTrue(config["category_mastery"]["science"]["enabled"])
         self.assertEqual(config["category_mastery"]["science"]["announcement_channel_id"], 88)
+        self.assertEqual(config["category_mastery"]["science"]["announcement_template"], "{user.mention} reached {category.name}.")
         self.assertEqual(config["category_mastery"]["science"]["tiers"][0]["role_id"], 301)
         self.assertEqual(config["scholar_ladder"]["tiers"][0]["threshold"], 25)
+        self.assertEqual(config["scholar_ladder"]["announcement_template"], "{user.mention} reached {tier.label}.")
         self.assertTrue(config["digest_settings"]["weekly_enabled"])
         self.assertEqual(config["digest_settings"]["weekly_channel_id"], 77)
         self.assertEqual(config["digest_settings"]["mention_mode"], "here")
@@ -1478,6 +1483,278 @@ class QuestionDropsMemberRolePreferenceTests(QuestionDropsServiceTests):
         self.assertEqual([record["role_id"] for record in partial["removed"]], [removable_role.id])
         self.assertEqual([item["record"]["role_id"] for item in partial["issues"]], [blocked_role.id])
         self.assertEqual([role.id for role in member.roles], [blocked_role.id])
+
+    async def test_category_template_save_status_and_clear_round_trip(self):
+        ok, message = await self.service.save_category_mastery_announcement_template(
+            self.guild.id,
+            category="science",
+            template="  {user.mention} reached {category.name} at {threshold}.  ",
+        )
+
+        self.assertTrue(ok, message)
+        payload = await self.service.get_category_mastery_announcement_status(self.guild, category="science")
+        self.assertTrue(payload["has_custom_template"])
+        self.assertEqual(payload["announcement_template"], "{user.mention} reached {category.name} at {threshold}.")
+        self.assertIn("{category.name}", payload["placeholder_tokens"])
+        self.assertIn("Ava", payload["preview"])
+
+        ok, message = await self.service.clear_category_mastery_announcement_template(self.guild.id, category="science")
+        self.assertTrue(ok, message)
+        cleared = await self.service.get_category_mastery_announcement_status(self.guild, category="science")
+        self.assertFalse(cleared["has_custom_template"])
+        self.assertIsNone(cleared["announcement_template"])
+
+    async def test_scholar_template_save_and_scope_specific_placeholder_validation(self):
+        ok, message = await self.service.save_scholar_announcement_template(
+            self.guild.id,
+            template="{user.mention} reached {tier.label} at {threshold}.",
+        )
+        self.assertTrue(ok, message)
+
+        payload = await self.service.get_scholar_announcement_status(self.guild)
+        self.assertTrue(payload["has_custom_template"])
+        self.assertEqual(payload["announcement_template"], "{user.mention} reached {tier.label} at {threshold}.")
+
+        ok, message = await self.service.save_scholar_announcement_template(
+            self.guild.id,
+            template="{user.mention} reached {category.name}.",
+        )
+        self.assertFalse(ok)
+        self.assertIn("Unsupported placeholder", message)
+
+    async def test_template_validation_rejects_unsafe_or_invalid_copy(self):
+        cases = (
+            ("{user.password}", "Unsupported placeholder"),
+            ("Visit https://bad.example", "links or invites"),
+            ("[click](https://bad.example)", "links or invites"),
+            ("@everyone won {threshold}", "raw mentions"),
+            ("horny {user.mention}", "blocked or inappropriate"),
+            ("   ", "cannot be empty"),
+            ("x" * 221, "220 characters or fewer"),
+        )
+
+        for template, expected in cases:
+            ok, message = await self.service.save_category_mastery_announcement_template(
+                self.guild.id,
+                category="science",
+                template=template,
+            )
+            self.assertFalse(ok)
+            self.assertIn(expected, message)
+
+    async def test_default_built_in_announcement_copy_remains_when_no_template_is_configured(self):
+        profile_service = await self._attach_real_profile_service()
+        member = DummyUser(211)
+        mastery_role = DummyRole(9951, position=10, name="History Scholar")
+        announce_channel = DummyChannel(99)
+        guild = DummyGuild(
+            10,
+            channels=[self.channel, announce_channel],
+            roles=[mastery_role],
+            members=[member],
+            me=DummyBotMember(position=50),
+        )
+        self.bot.guild = guild
+        self.bot._channels[announce_channel.id] = announce_channel
+        self.bot.profile_service = profile_service
+
+        await self.service.update_category_mastery(
+            guild.id,
+            category="history",
+            enabled=True,
+            tier=1,
+            role_id=mastery_role.id,
+            threshold=10,
+            announcement_channel_id=announce_channel.id,
+        )
+
+        update = await profile_service.record_question_drop_result(member.id, guild_id=guild.id, category="history", correct=True, points=10)
+        events = await self.service._grant_progression_rewards(
+            guild=guild,
+            member=member,
+            fallback_channel=self.channel,
+            category="history",
+            update=update,
+        )
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(len(announce_channel.sent), 1)
+        self.assertNotIn("content", announce_channel.sent[-1][1])
+        self.assertIn("Unlocked", announce_channel.sent[-1][1]["embed"].title)
+        self.assertIn(member.mention, announce_channel.sent[-1][1]["embed"].description)
+        self.assertIn(f"<@&{mastery_role.id}>", announce_channel.sent[-1][1]["embed"].description)
+        self.assertTrue(announce_channel.sent[-1][1]["allowed_mentions"].users)
+        self.assertTrue(announce_channel.sent[-1][1]["allowed_mentions"].roles)
+
+    async def test_custom_template_renders_safely_with_users_only_mentions(self):
+        profile_service = await self._attach_real_profile_service()
+        member = DummyUser(212, display_name="**Ada** @here")
+        mastery_role = DummyRole(9952, position=10, name="[Elite](https://bad.example) @everyone")
+        announce_channel = DummyChannel(100)
+        guild = DummyGuild(
+            10,
+            channels=[self.channel, announce_channel],
+            roles=[mastery_role],
+            members=[member],
+            me=DummyBotMember(position=50),
+        )
+        self.bot.guild = guild
+        self.bot._channels[announce_channel.id] = announce_channel
+        self.bot.profile_service = profile_service
+
+        await self.service.update_category_mastery(
+            guild.id,
+            category="science",
+            enabled=True,
+            tier=1,
+            role_id=mastery_role.id,
+            threshold=10,
+            announcement_channel_id=announce_channel.id,
+        )
+        ok, message = await self.service.save_category_mastery_announcement_template(
+            guild.id,
+            category="science",
+            template="{user.mention} | {user.display_name} | {role.name} | {category.name} | {threshold}",
+        )
+        self.assertTrue(ok, message)
+
+        update = await profile_service.record_question_drop_result(member.id, guild_id=guild.id, category="science", correct=True, points=10)
+        events = await self.service._grant_progression_rewards(
+            guild=guild,
+            member=member,
+            fallback_channel=self.channel,
+            category="science",
+            update=update,
+        )
+
+        self.assertEqual(len(events), 1)
+        sent = announce_channel.sent[-1][1]
+        self.assertEqual(sent["content"].count(member.mention), 1)
+        self.assertIn("this role", sent["content"])
+        self.assertNotIn(f"<@&{mastery_role.id}>", sent["content"])
+        self.assertFalse(sent["allowed_mentions"].roles)
+        self.assertTrue(sent["allowed_mentions"].users)
+        self.assertFalse(sent["allowed_mentions"].everyone)
+
+    async def test_missing_or_blocked_announcement_channel_skips_template_announcement_without_fallback(self):
+        profile_service = await self._attach_real_profile_service()
+        member = DummyUser(213)
+        mastery_role = DummyRole(9953, position=10, name="History I")
+        blocked_channel = DummyChannel(101, can_send=False)
+        guild = DummyGuild(
+            10,
+            channels=[self.channel, blocked_channel],
+            roles=[mastery_role],
+            members=[member],
+            me=DummyBotMember(position=50),
+        )
+        self.bot.guild = guild
+        self.bot._channels[blocked_channel.id] = blocked_channel
+        self.bot.profile_service = profile_service
+
+        await self.service.update_category_mastery(
+            guild.id,
+            category="history",
+            enabled=True,
+            tier=1,
+            role_id=mastery_role.id,
+            threshold=10,
+            announcement_channel_id=blocked_channel.id,
+        )
+        ok, message = await self.service.save_category_mastery_announcement_template(
+            guild.id,
+            category="history",
+            template="{user.mention} reached {category.name}.",
+        )
+        self.assertTrue(ok, message)
+
+        update = await profile_service.record_question_drop_result(member.id, guild_id=guild.id, category="history", correct=True, points=10)
+        events = await self.service._grant_progression_rewards(
+            guild=guild,
+            member=member,
+            fallback_channel=self.channel,
+            category="history",
+            update=update,
+        )
+
+        self.assertEqual(len(events), 1)
+        self.assertEqual(blocked_channel.sent, [])
+        self.assertEqual(self.channel.sent, [])
+
+    async def test_recalculate_mastery_roles_never_posts_custom_template_announcements(self):
+        profile_service = await self._attach_real_profile_service()
+        member = DummyUser(214)
+        mastery_role = DummyRole(9954, position=10, name="Logic I")
+        announce_channel = DummyChannel(102)
+        guild = DummyGuild(
+            10,
+            channels=[self.channel, announce_channel],
+            roles=[mastery_role],
+            members=[member],
+            me=DummyBotMember(position=50),
+        )
+        self.bot.guild = guild
+        self.bot._channels[announce_channel.id] = announce_channel
+        self.bot.profile_service = profile_service
+
+        await self.service.update_category_mastery(
+            guild.id,
+            category="logic",
+            enabled=True,
+            tier=1,
+            role_id=mastery_role.id,
+            threshold=10,
+            announcement_channel_id=announce_channel.id,
+        )
+        ok, message = await self.service.save_category_mastery_announcement_template(
+            guild.id,
+            category="logic",
+            template="{user.mention} reached {category.name}.",
+        )
+        self.assertTrue(ok, message)
+        await profile_service.record_question_drop_result(member.id, guild_id=guild.id, category="logic", correct=True, points=12)
+
+        preview = await self.service.recalculate_mastery_roles(guild, member=member, preview=True)
+        execute = await self.service.recalculate_mastery_roles(guild, member=member, preview=False)
+
+        self.assertEqual(preview["pending"], 1)
+        self.assertEqual(execute["granted"], 1)
+        self.assertEqual(announce_channel.sent, [])
+
+    async def test_status_embed_surfaces_default_vs_custom_copy_flags(self):
+        science_role = DummyRole(9955, position=10, name="Science I")
+        scholar_role = DummyRole(9956, position=11, name="Scholar I")
+        self.guild._roles[science_role.id] = science_role
+        self.guild._roles[scholar_role.id] = scholar_role
+        await self.service.update_category_mastery(
+            self.guild.id,
+            category="science",
+            enabled=True,
+            tier=1,
+            role_id=science_role.id,
+            threshold=10,
+        )
+        await self.service.update_scholar_ladder(
+            self.guild.id,
+            enabled=True,
+            tier=1,
+            role_id=scholar_role.id,
+            threshold=20,
+        )
+        ok, message = await self.service.save_scholar_announcement_template(
+            self.guild.id,
+            template="{user.mention} reached {tier.label}.",
+        )
+        self.assertTrue(ok, message)
+
+        embed = self.service.build_status_embed(self.guild, await self.service.get_status_snapshot(self.guild))
+        mastery_roles = next(field.value for field in embed.fields if field.name == "Mastery Roles")
+        scholar_field = next(field.value for field in embed.fields if field.name == "Scholar Ladder")
+
+        self.assertIn("default copy", mastery_roles)
+        self.assertIn("announce off", mastery_roles)
+        self.assertIn("custom copy", scholar_field)
+        self.assertIn("announce off", scholar_field)
     async def test_non_answer_chatter_does_not_count_as_attempt_or_feedback(self):
         active = await self._post_one_drop()
         author = DummyUser(56)
@@ -1726,7 +2003,7 @@ class QuestionDropsMemberRolePreferenceTests(QuestionDropsServiceTests):
             await service.close()
             await profile_service.close()
 
-    async def test_unusable_announcement_channel_falls_back_to_solve_channel(self):
+    async def test_unusable_announcement_channel_skips_default_announcement_without_fallback(self):
         member = DummyUser(94)
         mastery_role = DummyRole(601, position=10, name="History Scholar")
         blocked_channel = DummyChannel(99, can_send=False)
@@ -1772,8 +2049,7 @@ class QuestionDropsMemberRolePreferenceTests(QuestionDropsServiceTests):
 
             self.assertEqual(len(events), 1)
             self.assertEqual(blocked_channel.sent, [])
-            self.assertEqual(len(self.channel.sent), 1)
-            self.assertIn("Unlocked", self.channel.sent[-1][1]["embed"].title)
+            self.assertEqual(self.channel.sent, [])
         finally:
             await service.close()
             await profile_service.close()

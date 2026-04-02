@@ -27,6 +27,8 @@ class WebsiteDocsTests(unittest.TestCase):
         self.assertIn("/drops leaderboard", help_html)
         self.assertIn("/drops roles status", help_html)
         self.assertIn("/drops mastery category", help_html)
+        self.assertIn("/drops mastery category-template", help_html)
+        self.assertIn("/drops mastery scholar-template", help_html)
         self.assertIn("scholar ladder", help_html)
         self.assertIn("Pattern Hunt", help_html)
         self.assertIn("Coders need server DMs open before the room starts.", help_html)
@@ -59,6 +61,7 @@ class WebsiteDocsTests(unittest.TestCase):
             "guild scholar ladder",
             "/drops leaderboard",
             "/drops roles status",
+            "/drops mastery category-template",
             "/hunt guess",
             "Pattern Hunt coder role DMs",
         ):
@@ -72,6 +75,7 @@ class WebsiteDocsTests(unittest.TestCase):
             "scholar",
             "/drops status",
             "/drops roles status",
+            "custom mastery announcement copy",
             "Pattern Hunt coders need server DMs open before the round starts.",
         ):
             self.assertIn(text, index_html)

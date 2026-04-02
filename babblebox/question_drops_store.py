@@ -10,6 +10,7 @@ from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 from babblebox.postgres_json import decode_postgres_json_array, decode_postgres_json_object
+from babblebox.text_safety import normalize_plain_text
 
 
 DEFAULT_BACKEND = "postgres"
@@ -68,6 +69,7 @@ def default_question_drop_category_mastery() -> dict[str, Any]:
         category: {
             "enabled": False,
             "announcement_channel_id": None,
+            "announcement_template": None,
             "silent_grant": False,
             "tiers": default_question_drop_tiers(),
         }
@@ -79,6 +81,7 @@ def default_question_drop_scholar_ladder() -> dict[str, Any]:
     return {
         "enabled": False,
         "announcement_channel_id": None,
+        "announcement_template": None,
         "silent_grant": False,
         "tiers": default_question_drop_tiers(),
     }
@@ -112,6 +115,13 @@ def _normalize_nonnegative_int(value: Any, *, default: int = 0) -> int:
     return int(value) if isinstance(value, int) and value >= 0 else default
 
 
+def _normalize_optional_template(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    cleaned = normalize_plain_text(value)
+    return cleaned or None
+
+
 def _normalize_question_drop_tiers(payload: Any) -> list[dict[str, Any]]:
     normalized_by_tier = {tier: default_question_drop_tier(tier) for tier in QUESTION_DROP_MASTERY_TIERS}
     raw_items = payload if isinstance(payload, list) else []
@@ -142,6 +152,7 @@ def _normalize_category_mastery(payload: Any) -> dict[str, Any]:
         cleaned[category] = {
             "enabled": bool(raw_category.get("enabled")),
             "announcement_channel_id": _normalize_positive_int(raw_category.get("announcement_channel_id")),
+            "announcement_template": _normalize_optional_template(raw_category.get("announcement_template")),
             "silent_grant": bool(raw_category.get("silent_grant")),
             "tiers": _normalize_question_drop_tiers(raw_category.get("tiers")),
         }
@@ -155,6 +166,7 @@ def _normalize_scholar_ladder(payload: Any) -> dict[str, Any]:
     return {
         "enabled": bool(payload.get("enabled")),
         "announcement_channel_id": _normalize_positive_int(payload.get("announcement_channel_id")),
+        "announcement_template": _normalize_optional_template(payload.get("announcement_template")),
         "silent_grant": bool(payload.get("silent_grant")),
         "tiers": _normalize_question_drop_tiers(payload.get("tiers")),
     }
