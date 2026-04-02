@@ -86,6 +86,18 @@ class WebsiteDocsTests(unittest.TestCase):
         self.assertNotIn("/drops panel", readme)
         self.assertNotIn("/drops panel", help_html)
 
+    def test_homepage_keeps_trust_and_utility_positioning_grounded(self):
+        index_html = (ROOT / "index.html").read_text(encoding="utf-8")
+
+        for text in (
+            "private-first",
+            "off by default",
+            "/shield panel",
+            "Watch is DM-only by design",
+            "AFK stays clear about time",
+        ):
+            self.assertIn(text, index_html)
+
     def test_readme_examples_drop_known_fake_prefix_shapes(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
 
