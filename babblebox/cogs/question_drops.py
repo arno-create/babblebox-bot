@@ -51,10 +51,115 @@ DIGEST_MENTION_CHOICES = [
     app_commands.Choice(name="No pings", value="none"),
     app_commands.Choice(name="@here", value="here"),
 ]
+TEMPLATE_ACTION_CHOICES = [
+    app_commands.Choice(name="Status", value="status"),
+    app_commands.Choice(name="Edit", value="edit"),
+    app_commands.Choice(name="Clear", value="clear"),
+]
 ROLE_PREFERENCE_MODE_CHOICES = [
     app_commands.Choice(name="Stop future grants", value="stop"),
     app_commands.Choice(name="Receive roles again", value="receive"),
 ]
+
+
+class CategoryAnnouncementTemplateModal(discord.ui.Modal):
+    def __init__(self, *, cog: "QuestionDropsCog", category: str, current_template: str | None = None):
+        super().__init__(title=f"Edit {category.title()} Mastery Announcement")
+        self.cog = cog
+        self.category = str(category or "").strip().casefold()
+        self.template_input = discord.ui.TextInput(
+            label="Template",
+            style=discord.TextStyle.paragraph,
+            required=True,
+            max_length=220,
+            default=current_template or "",
+            placeholder="Plain text only. Use approved placeholders only. No links or raw mentions.",
+        )
+        self.add_item(self.template_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                embed=ge.make_status_embed("Server Only", "This editor only works inside a server.", tone="warning", footer="Babblebox Question Drops"),
+                ephemeral=True,
+            )
+            return
+        if not self.cog._is_admin(interaction.user):
+            await interaction.response.send_message(
+                embed=ge.make_status_embed(
+                    "Admin Only",
+                    "You need **Manage Server** or administrator access to configure Question Drops.",
+                    tone="warning",
+                    footer="Babblebox Question Drops",
+                ),
+                ephemeral=True,
+            )
+            return
+        ok, message = await self.cog.service.save_category_mastery_announcement_template(
+            interaction.guild.id,
+            category=self.category,
+            template=str(self.template_input.value),
+        )
+        if not ok:
+            await interaction.response.send_message(
+                embed=ge.make_status_embed("Category Mastery Announcement", message, tone="warning", footer="Babblebox Question Drops"),
+                ephemeral=True,
+            )
+            return
+        payload = await self.cog.service.get_category_mastery_announcement_status(interaction.guild, category=self.category)
+        await interaction.response.send_message(
+            embed=self.cog.service.build_mastery_announcement_status_embed(payload, note=message),
+            ephemeral=True,
+        )
+
+
+class ScholarAnnouncementTemplateModal(discord.ui.Modal):
+    def __init__(self, *, cog: "QuestionDropsCog", current_template: str | None = None):
+        super().__init__(title="Edit Scholar Announcement")
+        self.cog = cog
+        self.template_input = discord.ui.TextInput(
+            label="Template",
+            style=discord.TextStyle.paragraph,
+            required=True,
+            max_length=220,
+            default=current_template or "",
+            placeholder="Plain text only. Use approved placeholders only. No links or raw mentions.",
+        )
+        self.add_item(self.template_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if interaction.guild is None:
+            await interaction.response.send_message(
+                embed=ge.make_status_embed("Server Only", "This editor only works inside a server.", tone="warning", footer="Babblebox Question Drops"),
+                ephemeral=True,
+            )
+            return
+        if not self.cog._is_admin(interaction.user):
+            await interaction.response.send_message(
+                embed=ge.make_status_embed(
+                    "Admin Only",
+                    "You need **Manage Server** or administrator access to configure Question Drops.",
+                    tone="warning",
+                    footer="Babblebox Question Drops",
+                ),
+                ephemeral=True,
+            )
+            return
+        ok, message = await self.cog.service.save_scholar_announcement_template(
+            interaction.guild.id,
+            template=str(self.template_input.value),
+        )
+        if not ok:
+            await interaction.response.send_message(
+                embed=ge.make_status_embed("Scholar Announcement", message, tone="warning", footer="Babblebox Question Drops"),
+                ephemeral=True,
+            )
+            return
+        payload = await self.cog.service.get_scholar_announcement_status(interaction.guild)
+        await interaction.response.send_message(
+            embed=self.cog.service.build_mastery_announcement_status_embed(payload, note=message),
+            ephemeral=True,
+        )
 
 
 class QuestionDropsCog(commands.Cog):
@@ -133,6 +238,18 @@ class QuestionDropsCog(commands.Cog):
 
     def _is_override_owner(self, user_id: int) -> bool:
         return int(user_id or 0) in OWNER_AI_OVERRIDE_IDS
+
+    async def _send_modal_only_notice(self, ctx: commands.Context, *, title: str):
+        await send_hybrid_response(
+            ctx,
+            embed=ge.make_status_embed(
+                title,
+                "Use the slash form of this command to open the Babblebox template editor modal.",
+                tone="info",
+                footer="Babblebox Question Drops",
+            ),
+            ephemeral=True,
+        )
 
     @commands.hybrid_group(
         name="drops",
@@ -619,6 +736,120 @@ class QuestionDropsCog(commands.Cog):
         await send_hybrid_response(
             ctx,
             embed=ge.make_status_embed("Scholar Ladder", message, tone="success" if ok else "warning", footer="Babblebox Question Drops"),
+            ephemeral=True,
+        )
+
+    @drops_mastery_group.command(name="category-template", with_app_command=True, description="Preview, edit, or clear a category mastery announcement template")
+    @app_commands.default_permissions(manage_guild=True)
+    @app_commands.describe(category="Which category announcement to manage", action="Check the current copy, open the editor, or clear the custom copy")
+    @app_commands.choices(category=CATEGORY_CHOICES, action=TEMPLATE_ACTION_CHOICES)
+    async def drops_mastery_category_template_command(self, ctx: commands.Context, *, category: str, action: str = "status"):
+        if ctx.guild is None:
+            await send_hybrid_response(
+                ctx,
+                embed=ge.make_status_embed("Server Only", "This command only works inside a server.", tone="warning", footer="Babblebox Question Drops"),
+                ephemeral=True,
+            )
+            return
+        if not await self._require_storage(ctx, "Question Drops", defer_response=action != "edit"):
+            return
+        if not await self._require_admin(ctx):
+            return
+        normalized_action = str(action or "status").strip().casefold()
+        if normalized_action == "edit":
+            interaction = getattr(ctx, "interaction", None)
+            if interaction is None:
+                await self._send_modal_only_notice(ctx, title="Category Mastery Announcement")
+                return
+            payload = await self.service.get_category_mastery_announcement_status(ctx.guild, category=category)
+            if payload.get("status") != "ok":
+                await send_hybrid_response(
+                    ctx,
+                    embed=ge.make_status_embed("Category Mastery Announcement", "Unknown category.", tone="warning", footer="Babblebox Question Drops"),
+                    ephemeral=True,
+                )
+                return
+            await interaction.response.send_modal(
+                CategoryAnnouncementTemplateModal(
+                    cog=self,
+                    category=category,
+                    current_template=payload.get("announcement_template"),
+                )
+            )
+            return
+        if normalized_action == "clear":
+            ok, message = await self.service.clear_category_mastery_announcement_template(ctx.guild.id, category=category)
+            if not ok:
+                await send_hybrid_response(
+                    ctx,
+                    embed=ge.make_status_embed("Category Mastery Announcement", message, tone="warning", footer="Babblebox Question Drops"),
+                    ephemeral=True,
+                )
+                return
+            payload = await self.service.get_category_mastery_announcement_status(ctx.guild, category=category)
+            await send_hybrid_response(
+                ctx,
+                embed=self.service.build_mastery_announcement_status_embed(payload, note=message),
+                ephemeral=True,
+            )
+            return
+        payload = await self.service.get_category_mastery_announcement_status(ctx.guild, category=category)
+        await send_hybrid_response(
+            ctx,
+            embed=self.service.build_mastery_announcement_status_embed(payload),
+            ephemeral=True,
+        )
+
+    @drops_mastery_group.command(name="scholar-template", with_app_command=True, description="Preview, edit, or clear the scholar announcement template")
+    @app_commands.default_permissions(manage_guild=True)
+    @app_commands.describe(action="Check the current copy, open the editor, or clear the custom copy")
+    @app_commands.choices(action=TEMPLATE_ACTION_CHOICES)
+    async def drops_mastery_scholar_template_command(self, ctx: commands.Context, *, action: str = "status"):
+        if ctx.guild is None:
+            await send_hybrid_response(
+                ctx,
+                embed=ge.make_status_embed("Server Only", "This command only works inside a server.", tone="warning", footer="Babblebox Question Drops"),
+                ephemeral=True,
+            )
+            return
+        if not await self._require_storage(ctx, "Question Drops", defer_response=action != "edit"):
+            return
+        if not await self._require_admin(ctx):
+            return
+        normalized_action = str(action or "status").strip().casefold()
+        if normalized_action == "edit":
+            interaction = getattr(ctx, "interaction", None)
+            if interaction is None:
+                await self._send_modal_only_notice(ctx, title="Scholar Announcement")
+                return
+            payload = await self.service.get_scholar_announcement_status(ctx.guild)
+            await interaction.response.send_modal(
+                ScholarAnnouncementTemplateModal(
+                    cog=self,
+                    current_template=payload.get("announcement_template"),
+                )
+            )
+            return
+        if normalized_action == "clear":
+            ok, message = await self.service.clear_scholar_announcement_template(ctx.guild.id)
+            if not ok:
+                await send_hybrid_response(
+                    ctx,
+                    embed=ge.make_status_embed("Scholar Announcement", message, tone="warning", footer="Babblebox Question Drops"),
+                    ephemeral=True,
+                )
+                return
+            payload = await self.service.get_scholar_announcement_status(ctx.guild)
+            await send_hybrid_response(
+                ctx,
+                embed=self.service.build_mastery_announcement_status_embed(payload, note=message),
+                ephemeral=True,
+            )
+            return
+        payload = await self.service.get_scholar_announcement_status(ctx.guild)
+        await send_hybrid_response(
+            ctx,
+            embed=self.service.build_mastery_announcement_status_embed(payload),
             ephemeral=True,
         )
 

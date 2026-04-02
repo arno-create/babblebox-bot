@@ -27,6 +27,7 @@ class FakeResponse:
         self._done = False
         self.send_calls = []
         self.edit_calls = []
+        self.modal_calls = []
 
     def is_done(self):
         return self._done
@@ -38,6 +39,10 @@ class FakeResponse:
     async def edit_message(self, *args, **kwargs):
         self._done = True
         self.edit_calls.append((args, kwargs))
+
+    async def send_modal(self, modal):
+        self._done = True
+        self.modal_calls.append(modal)
 
 
 class FakeInteraction:
@@ -192,6 +197,7 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/drops roles status", question_drops_page["body"])
         self.assertNotIn("/drops panel", question_drops_page["body"])
         self.assertIn("/drops mastery category", question_drops_page["body"])
+        self.assertIn("/drops mastery category-template", question_drops_page["body"])
         self.assertIn("scholar ladder", question_drops_page["body"])
         daily_page = next(page for page in HELP_PAGES if page["title"] == "Daily Arcade")
         self.assertIn("Question Drops stay separate as the guild knowledge lane", daily_page["body"])
@@ -199,10 +205,13 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
     def test_question_drops_group_no_longer_registers_duplicate_panel_command(self):
         cog = QuestionDropsCog(types.SimpleNamespace(loop=None))
         command_names = {command.name for command in cog.drops_group.commands}
+        mastery_command_names = {command.name for command in cog.drops_mastery_group.commands}
 
         self.assertIn("roles", command_names)
         self.assertIn("status", command_names)
         self.assertNotIn("panel", command_names)
+        self.assertIn("category-template", mastery_command_names)
+        self.assertIn("scholar-template", mastery_command_names)
 
     def test_only16_lobby_copy_stays_aligned_with_manual(self):
         saved_games = ge.games
@@ -1039,6 +1048,91 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(ctx.send_calls[0]["ephemeral"])
             self.assertEqual(ctx.send_calls[0]["embed"].title, "Question Drops Role Grants Off")
             cog.service.update_member_role_preference.assert_awaited_once()
+        finally:
+            await cog.service.close()
+
+    async def test_drops_mastery_category_template_edit_opens_modal_for_slash(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
+        cog = QuestionDropsCog(bot)
+        try:
+            cog.service.storage_ready = True
+            cog.service.get_category_mastery_announcement_status = AsyncMock(
+                return_value={"status": "ok", "announcement_template": "Hello {user.mention}"}
+            )
+            guild = FakeGuild(10, members=[FakeAuthor(user_id=9, manage_guild=True)])
+            interaction = FakeInteraction(guild=guild, user=FakeAuthor(user_id=9, manage_guild=True))
+            ctx = FakeContext(
+                interaction=interaction,
+                guild=guild,
+                channel=FakeChannel(),
+                author=FakeAuthor(user_id=9, manage_guild=True),
+            )
+
+            await QuestionDropsCog.drops_mastery_category_template_command.callback(
+                cog,
+                ctx,
+                category="science",
+                action="edit",
+            )
+
+            self.assertEqual(len(interaction.response.modal_calls), 1)
+            self.assertEqual(interaction.response.modal_calls[0].title, "Edit Science Mastery Announcement")
+            self.assertEqual(ctx.send_calls, [])
+        finally:
+            await cog.service.close()
+
+    async def test_drops_mastery_scholar_template_edit_requires_slash_for_prefix(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
+        cog = QuestionDropsCog(bot)
+        try:
+            cog.service.storage_ready = True
+            ctx = FakeContext(
+                interaction=None,
+                guild=FakeGuild(10),
+                channel=FakeChannel(),
+                author=FakeAuthor(user_id=10, manage_guild=True),
+            )
+
+            await QuestionDropsCog.drops_mastery_scholar_template_command.callback(
+                cog,
+                ctx,
+                action="edit",
+            )
+
+            self.assertEqual(len(ctx.send_calls), 1)
+            self.assertIn("slash form", ctx.send_calls[0]["embed"].description.lower())
+        finally:
+            await cog.service.close()
+
+    async def test_drops_mastery_category_template_clear_stays_private(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
+        cog = QuestionDropsCog(bot)
+        try:
+            cog.service.storage_ready = True
+            cog.service.clear_category_mastery_announcement_template = AsyncMock(return_value=(True, "Science mastery announcement template cleared."))
+            cog.service.get_category_mastery_announcement_status = AsyncMock(
+                return_value={"status": "ok", "title": "Science Mastery Announcement"}
+            )
+            cog.service.build_mastery_announcement_status_embed = lambda payload, note=None: discord.Embed(title="Science Mastery Announcement")
+            guild = FakeGuild(10, members=[FakeAuthor(user_id=11, manage_guild=True)])
+            ctx = FakeContext(
+                interaction=FakeInteraction(guild=guild, user=FakeAuthor(user_id=11, manage_guild=True)),
+                guild=guild,
+                channel=FakeChannel(),
+                author=FakeAuthor(user_id=11, manage_guild=True),
+            )
+
+            await QuestionDropsCog.drops_mastery_category_template_command.callback(
+                cog,
+                ctx,
+                category="science",
+                action="clear",
+            )
+
+            self.assertEqual(len(ctx.send_calls), 1)
+            self.assertTrue(ctx.send_calls[0]["ephemeral"])
+            self.assertEqual(ctx.send_calls[0]["embed"].title, "Science Mastery Announcement")
+            cog.service.clear_category_mastery_announcement_template.assert_awaited_once()
         finally:
             await cog.service.close()
 

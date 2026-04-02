@@ -18,6 +18,8 @@ CARD_RE = re.compile(r"\b(?:\d[ -]?){13,19}\b")
 SSN_RE = re.compile(r"\b\d{3}-\d{2}-\d{4}\b")
 MENTION_RE = re.compile(r"(?i)@(?:everyone|here)|<@!?&?\d+>|<#\d+>")
 MARKDOWN_LINK_RE = re.compile(r"\[[^\]]{1,80}\]\((?:[^)]+)\)")
+TEMPLATE_PLACEHOLDER_RE = re.compile(r"\{[a-z]+(?:\.[a-z_]+)+\}")
+TEMPLATE_BRACED_VALUE_RE = re.compile(r"\{[^{}]{1,80}\}")
 
 BLOCKLIST = {
     "anal",
@@ -170,3 +172,54 @@ def sanitize_short_plain_text(
         return False, f"{field_name} contains blocked or inappropriate words. Use short plain text only."
 
     return True, cleaned
+
+
+def extract_template_placeholders(text: str) -> list[str]:
+    return [match.group(0) for match in TEMPLATE_BRACED_VALUE_RE.finditer(text)]
+
+
+def sanitize_short_plain_template(
+    text: str | None,
+    *,
+    field_name: str,
+    max_length: int,
+    allowed_placeholders: set[str],
+    sentence_limit: int | None = None,
+) -> tuple[bool, str | None, str | None]:
+    cleaned = normalize_plain_text(text)
+
+    if not cleaned:
+        return False, None, f"{field_name} cannot be empty. Use `clear` to restore the default copy."
+
+    if len(cleaned) > max_length:
+        return False, None, f"{field_name} must be {max_length} characters or fewer."
+
+    placeholders = extract_template_placeholders(cleaned)
+    unknown = sorted({token for token in placeholders if token not in allowed_placeholders})
+    if unknown:
+        if len(unknown) == 1:
+            return False, None, f"Unsupported placeholder: `{unknown[0]}`."
+        rendered = ", ".join(f"`{token}`" for token in unknown[:4])
+        return False, None, f"Unsupported placeholders: {rendered}."
+
+    stripped = cleaned
+    for token in allowed_placeholders:
+        stripped = stripped.replace(token, "template value")
+    if "{" in stripped or "}" in stripped:
+        return False, None, f"{field_name} has unsupported placeholder syntax. Use the approved placeholders only."
+
+    if sentence_limit is not None:
+        sentence_parts = [part.strip() for part in re.split(r"[.!?]+", stripped) if part.strip()]
+        if len(sentence_parts) > sentence_limit:
+            return False, None, f"{field_name} must be at most {sentence_limit} short sentences."
+
+    label = find_private_pattern(stripped)
+    if label is not None:
+        if label == "mentions":
+            return False, None, f"{field_name} cannot contain raw mentions. Use approved placeholders instead."
+        return False, None, f"{field_name} cannot contain {label}. Use short plain text only."
+
+    if contains_blocklisted_term(stripped):
+        return False, None, f"{field_name} contains blocked or inappropriate words. Use short plain text only."
+
+    return True, cleaned, None
