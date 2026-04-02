@@ -6,14 +6,14 @@
   <title>Babblebox | Make Your Discord Feel Alive</title>
   <meta
     name="description"
-    content="Party games when the server is active. Useful tools when it is not. Babblebox brings Only 16, Pattern Hunt, Question Drops, Daily Arcade, public-friendly profile cards, quiet utilities, and compact safety to Discord."
+    content="Babblebox is a premium Discord bot for social servers: party games when the server is active, useful tools when it is not, Question Drops, Daily Arcade, Buddy and profile surfaces, quiet utilities, and optional compact safety."
   />
   <meta name="robots" content="index,follow,max-image-preview:large" />
   <link rel="canonical" href="https://arno-create.github.io/babblebox-bot/" />
   <meta property="og:title" content="Babblebox | Make Your Discord Feel Alive" />
   <meta
     property="og:description"
-    content="Babblebox gives Discord servers party games, Question Drops, Daily Arcade, public-friendly Buddy and profile cards, quiet utilities, and optional compact safety without the usual bot clutter."
+    content="Party games, replay-worthy daily surfaces, quieter private-first utilities, and compact optional safety for Discord."
   />
   <meta property="og:url" content="https://arno-create.github.io/babblebox-bot/" />
   <meta property="og:type" content="website" />
@@ -22,36 +22,33 @@
   <meta name="twitter:title" content="Babblebox | Make Your Discord Feel Alive" />
   <meta
     name="twitter:description"
-    content="Party games when the server is active. Useful tools when it is not. Only 16, Pattern Hunt, Question Drops, Daily Arcade, Buddy, profile cards, and compact optional Shield safety for Discord."
+    content="Babblebox gives Discord servers party games, Question Drops, Daily Arcade, public-friendly identity, quieter utilities, and compact optional safety without bot clutter."
   />
   <meta name="twitter:image" content="https://arno-create.github.io/babblebox-bot/banner.png" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-  <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Sora:wght@500;600;700&display=swap" rel="stylesheet" />
+  <link
+    href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Sora:wght@500;600;700;800&display=swap"
+    rel="stylesheet"
+  />
   <style>
     :root {
-      --bg-0: #050913;
-      --bg-1: #09111d;
-      --bg-2: #0d1729;
-      --panel: rgba(13, 21, 36, 0.78);
-      --panel-strong: rgba(15, 25, 43, 0.92);
-      --panel-solid: #0f1828;
-      --line: rgba(169, 190, 255, 0.14);
-      --line-strong: rgba(169, 190, 255, 0.26);
+      --bg-0: #040914;
+      --bg-1: #09111c;
+      --bg-2: #0d1727;
+      --panel: rgba(11, 18, 32, 0.82);
+      --panel-strong: rgba(13, 21, 38, 0.94);
+      --line: rgba(173, 196, 255, 0.13);
       --text: #f5f7ff;
-      --soft: #e2e9ff;
-      --muted: #a4aec3;
-      --cyan: #7ddcff;
-      --blue: #78a8ff;
-      --mint: #81f0bb;
-      --amber: #ffbb70;
-      --rose: #ff839b;
-      --shadow: 0 40px 110px rgba(1, 4, 10, 0.55);
-      --radius-xl: 34px;
-      --radius-lg: 28px;
-      --radius-md: 22px;
-      --radius-sm: 16px;
-      --max-width: 1200px;
+      --soft: #e4eaff;
+      --muted: #9eabc5;
+      --cyan: #83ddff;
+      --blue: #7ca9ff;
+      --mint: #8ae9be;
+      --amber: #ffbe76;
+      --rose: #ff869f;
+      --shadow: 0 32px 90px rgba(1, 4, 10, 0.48);
+      --max-width: 1240px;
     }
 
     * {
@@ -70,40 +67,39 @@
       font-family: "Manrope", sans-serif;
       line-height: 1.6;
       background:
-        radial-gradient(circle at 10% 10%, rgba(120, 168, 255, 0.16), transparent 34%),
-        radial-gradient(circle at 88% 12%, rgba(255, 131, 155, 0.14), transparent 26%),
-        radial-gradient(circle at 62% 76%, rgba(129, 240, 187, 0.11), transparent 24%),
-        linear-gradient(180deg, #060a14 0%, #08101b 28%, #050913 100%);
+        radial-gradient(circle at 8% 10%, rgba(124, 169, 255, 0.18), transparent 34%),
+        radial-gradient(circle at 90% 8%, rgba(255, 134, 159, 0.14), transparent 28%),
+        radial-gradient(circle at 68% 74%, rgba(138, 233, 190, 0.08), transparent 26%),
+        linear-gradient(180deg, #060a13 0%, #08101a 32%, #050913 100%);
     }
 
     body::before,
     body::after {
       content: "";
       position: fixed;
-      inset: auto;
+      z-index: 0;
       width: 34rem;
       height: 34rem;
       border-radius: 50%;
       filter: blur(100px);
       opacity: 0.18;
       pointer-events: none;
-      z-index: 0;
     }
 
     body::before {
       top: -10rem;
-      left: -8rem;
-      background: rgba(125, 220, 255, 0.6);
+      left: -9rem;
+      background: rgba(131, 221, 255, 0.68);
     }
 
     body::after {
       right: -10rem;
-      bottom: -14rem;
-      background: rgba(255, 131, 155, 0.52);
+      bottom: -12rem;
+      background: rgba(255, 134, 159, 0.56);
     }
 
     ::selection {
-      background: rgba(125, 220, 255, 0.28);
+      background: rgba(131, 221, 255, 0.28);
       color: var(--text);
     }
 
@@ -125,39 +121,115 @@
     }
 
     a:focus-visible,
-    button:focus-visible,
     .btn:focus-visible {
-      outline: 3px solid rgba(125, 220, 255, 0.38);
+      outline: 3px solid rgba(131, 221, 255, 0.38);
       outline-offset: 3px;
     }
 
     code {
       font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.94em;
+    }
+
+    .site-shell {
+      position: relative;
+      z-index: 1;
     }
 
     .container {
-      width: min(var(--max-width), calc(100% - 40px));
+      width: min(var(--max-width), calc(100% - 48px));
       margin: 0 auto;
       position: relative;
       z-index: 1;
     }
 
     section[id] {
-      scroll-margin-top: 100px;
+      scroll-margin-top: 104px;
     }
 
     .section {
-      position: relative;
-      padding: clamp(72px, 9vw, 120px) 0;
+      padding: clamp(64px, 8vw, 108px) 0;
+    }
+
+    .section-head {
+      max-width: 760px;
+      margin-bottom: 34px;
+    }
+
+    .section-kicker {
+      display: inline-flex;
+      align-items: center;
+      gap: 10px;
+      color: var(--soft);
+      font-size: 0.8rem;
+      font-weight: 800;
+      letter-spacing: 0.16em;
+      text-transform: uppercase;
+    }
+
+    .section-kicker::before {
+      content: "";
+      width: 10px;
+      height: 10px;
+      border-radius: 999px;
+      background: linear-gradient(135deg, var(--amber), var(--rose));
+      box-shadow: 0 0 0 4px rgba(255, 134, 159, 0.08);
+    }
+
+    h1,
+    h2,
+    h3,
+    h4 {
+      margin: 0;
+      font-family: "Sora", sans-serif;
+      letter-spacing: -0.05em;
+      line-height: 1.02;
+    }
+
+    h1 {
+      margin-top: 22px;
+      max-width: 11ch;
+      font-size: clamp(3.3rem, 6.2vw, 6.4rem);
+    }
+
+    h2 {
+      margin-top: 14px;
+      font-size: clamp(2.3rem, 4vw, 4.2rem);
+    }
+
+    h3 {
+      font-size: clamp(1.7rem, 2.6vw, 2.6rem);
+    }
+
+    h4 {
+      font-size: 1.06rem;
+    }
+
+    p {
+      margin: 0;
+    }
+
+    .section-copy,
+    .story-copy p,
+    .hero-lede,
+    .hero-subhead,
+    .support-bar p,
+    .trust-card p,
+    .proof-card p,
+    .story-point p,
+    .trust-rail p,
+    .scan-card p,
+    .shot-frame figcaption span {
+      color: var(--muted);
     }
 
     .nav-shell {
       position: sticky;
       top: 0;
       z-index: 30;
-      backdrop-filter: blur(18px);
-      background: rgba(6, 10, 19, 0.74);
-      border-bottom: 1px solid rgba(169, 190, 255, 0.1);
+      border-bottom: 1px solid rgba(173, 196, 255, 0.1);
+      background: rgba(5, 10, 18, 0.76);
+      backdrop-filter: blur(20px);
     }
 
     nav {
@@ -181,7 +253,7 @@
       border-radius: 16px;
       object-fit: cover;
       border: 1px solid rgba(255, 255, 255, 0.08);
-      box-shadow: 0 18px 36px rgba(0, 0, 0, 0.28);
+      box-shadow: 0 18px 36px rgba(0, 0, 0, 0.26);
     }
 
     .brand-title {
@@ -194,7 +266,7 @@
 
     .brand-subtitle {
       display: block;
-      margin-top: 3px;
+      margin-top: 4px;
       color: var(--muted);
       font-size: 0.72rem;
       font-weight: 700;
@@ -209,13 +281,16 @@
       flex-wrap: wrap;
     }
 
-    .nav-links a {
+    .nav-links a,
+    .nav-quiet,
+    .link-quiet {
       color: var(--muted);
-      font-size: 0.96rem;
       transition: color 0.18s ease;
     }
 
-    .nav-links a:hover {
+    .nav-links a:hover,
+    .nav-quiet:hover,
+    .link-quiet:hover {
       color: var(--text);
     }
 
@@ -226,14 +301,8 @@
     }
 
     .nav-quiet {
-      color: var(--muted);
       font-size: 0.94rem;
       font-weight: 700;
-      transition: color 0.18s ease;
-    }
-
-    .nav-quiet:hover {
-      color: var(--text);
     }
 
     .btn {
@@ -242,7 +311,7 @@
       justify-content: center;
       gap: 10px;
       min-height: 48px;
-      padding: 0 20px;
+      padding: 0 22px;
       border-radius: 999px;
       border: 1px solid transparent;
       font-weight: 800;
@@ -250,8 +319,8 @@
         transform 0.18s ease,
         border-color 0.18s ease,
         background 0.18s ease,
-        box-shadow 0.18s ease,
-        color 0.18s ease;
+        color 0.18s ease,
+        box-shadow 0.18s ease;
     }
 
     .btn:hover {
@@ -259,55 +328,30 @@
     }
 
     .btn-primary {
-      color: #081018;
-      background: linear-gradient(135deg, var(--amber) 0%, #ff8f83 44%, var(--cyan) 100%);
-      box-shadow: 0 18px 40px rgba(255, 143, 131, 0.22);
+      background: linear-gradient(135deg, var(--blue), var(--cyan));
+      color: #05101c;
+      box-shadow: 0 18px 42px rgba(124, 169, 255, 0.28);
     }
 
     .btn-secondary {
-      color: var(--text);
-      background: rgba(16, 26, 43, 0.72);
-      border-color: var(--line);
-    }
-
-    .btn-secondary:hover {
-      background: rgba(19, 31, 53, 0.84);
-      border-color: var(--line-strong);
-    }
-
-    .btn-small {
-      min-height: 40px;
-      padding: 0 16px;
-      font-size: 0.94rem;
-    }
-
-    .link-quiet {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      color: var(--muted);
-      font-weight: 700;
-      transition: color 0.18s ease;
-    }
-
-    .link-quiet:hover {
-      color: var(--text);
+      border-color: rgba(173, 196, 255, 0.16);
+      background: rgba(255, 255, 255, 0.04);
+      color: var(--soft);
     }
 
     .hero-wrap {
-      padding-top: clamp(38px, 6vw, 78px);
-      padding-bottom: clamp(30px, 4vw, 58px);
+      padding: clamp(40px, 7vw, 84px) 0 clamp(26px, 4vw, 44px);
     }
 
     .hero {
       display: grid;
-      grid-template-columns: minmax(0, 1.02fr) minmax(0, 0.98fr);
-      gap: clamp(28px, 4vw, 48px);
-      align-items: center;
+      grid-template-columns: minmax(0, 0.94fr) minmax(0, 1.06fr);
+      gap: clamp(28px, 4vw, 52px);
+      align-items: start;
     }
 
     .hero-copy {
-      max-width: 640px;
+      max-width: 620px;
     }
 
     .eyebrow {
@@ -329,81 +373,63 @@
       content: "";
       width: 10px;
       height: 10px;
-      border-radius: 50%;
+      border-radius: 999px;
       background: linear-gradient(135deg, var(--amber), var(--rose));
-      box-shadow: 0 0 0 4px rgba(255, 131, 155, 0.1);
+      box-shadow: 0 0 0 4px rgba(255, 134, 159, 0.1);
     }
 
-    h1,
-    h2,
-    h3,
-    h4 {
-      margin: 0;
-      font-family: "Sora", sans-serif;
-      letter-spacing: -0.05em;
-      line-height: 1.02;
-    }
-
-    h1 {
-      margin-top: 22px;
-      max-width: 11ch;
-      font-size: clamp(3.2rem, 6vw, 6.2rem);
-    }
-
-    h2 {
-      font-size: clamp(2.2rem, 4vw, 4rem);
-    }
-
-    h3 {
-      font-size: clamp(1.2rem, 2vw, 1.55rem);
-    }
-
-    p {
-      margin: 0;
+    .hero-lede {
+      max-width: 56ch;
+      margin-top: 24px;
+      color: var(--soft);
+      font-size: clamp(1.08rem, 1.8vw, 1.24rem);
+      line-height: 1.75;
     }
 
     .hero-subhead {
-      max-width: 54ch;
-      margin-top: 22px;
-      color: var(--soft);
-      font-size: clamp(1.08rem, 1.8vw, 1.22rem);
-      line-height: 1.7;
-    }
-
-    .hero-body {
-      max-width: 56ch;
-      margin-top: 14px;
-      color: var(--muted);
+      max-width: 58ch;
+      margin-top: 16px;
       font-size: 0.98rem;
-      line-height: 1.7;
+      line-height: 1.78;
     }
 
     .hero-actions {
       display: flex;
       flex-wrap: wrap;
       gap: 14px;
-      align-items: center;
       margin-top: 30px;
     }
 
-    .hero-meta {
+    .hero-links {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 18px;
+      margin-top: 16px;
+    }
+
+    .link-quiet {
+      font-size: 0.95rem;
+      font-weight: 700;
+    }
+
+    .hero-scan {
       display: grid;
       grid-template-columns: repeat(3, minmax(0, 1fr));
       gap: 12px;
-      margin-top: 28px;
+      margin-top: 30px;
     }
 
-    .meta-chip {
-      padding: 16px;
-      border-radius: 20px;
+    .scan-card {
+      padding: 18px;
+      border-radius: 22px;
       border: 1px solid var(--line);
-      background: rgba(12, 20, 34, 0.62);
+      background: rgba(12, 18, 31, 0.64);
       backdrop-filter: blur(10px);
     }
 
-    .meta-chip strong {
+    .scan-card strong {
       display: block;
-      margin-bottom: 5px;
+      margin-bottom: 6px;
       color: var(--soft);
       font-size: 0.78rem;
       font-weight: 800;
@@ -411,59 +437,26 @@
       text-transform: uppercase;
     }
 
-    .meta-chip span {
-      color: var(--muted);
+    .scan-card p {
       font-size: 0.92rem;
-      line-height: 1.6;
+      line-height: 1.64;
     }
 
-    .command-ribbon {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 10px;
-      margin-top: 26px;
-    }
-
-    .hero-quiet-links {
-      margin-top: 14px;
-    }
-
-    .hero-quiet-links .link-quiet {
-      color: rgba(217, 223, 255, 0.72);
-      font-size: 0.94rem;
-    }
-
-    .command-pill {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      padding: 11px 14px;
-      border-radius: 999px;
-      border: 1px solid rgba(169, 190, 255, 0.12);
-      background: rgba(10, 16, 29, 0.72);
-      color: var(--soft);
-      font-size: 0.92rem;
-      font-weight: 800;
-    }
-
-    .command-pill code {
+    .scan-card code {
       color: var(--cyan);
-      font-size: 0.92rem;
     }
 
     .hero-stage {
       position: relative;
       display: grid;
-      grid-template-columns: 1fr;
-      gap: 14px;
-      align-content: start;
-      min-height: 0;
-      overflow: hidden;
-      padding: 22px;
+      grid-template-columns: repeat(12, minmax(0, 1fr));
+      gap: 16px;
+      padding: 20px;
       border-radius: 36px;
-      border: 1px solid rgba(169, 190, 255, 0.16);
-      background: linear-gradient(180deg, rgba(10, 15, 27, 0.94), rgba(8, 12, 22, 0.98));
+      border: 1px solid rgba(173, 196, 255, 0.14);
+      background: linear-gradient(180deg, rgba(10, 15, 27, 0.95), rgba(7, 11, 21, 0.98));
       box-shadow: var(--shadow);
+      overflow: hidden;
     }
 
     .hero-stage::before {
@@ -471,1249 +464,328 @@
       position: absolute;
       inset: 0;
       background:
-        linear-gradient(180deg, rgba(4, 8, 16, 0.44), rgba(4, 8, 16, 0.82)),
-        radial-gradient(circle at 18% 18%, rgba(125, 220, 255, 0.1), transparent 26%),
-        radial-gradient(circle at 84% 22%, rgba(255, 131, 155, 0.08), transparent 22%),
-        url("banner.png") center 14% / cover no-repeat;
-      opacity: 0.44;
-    }
-
-    .hero-stage::after {
-      content: "";
-      position: absolute;
-      inset: 0;
-      background: linear-gradient(135deg, rgba(125, 220, 255, 0.03), transparent 42%, rgba(255, 187, 112, 0.04));
-      mix-blend-mode: screen;
-      opacity: 0.65;
+        radial-gradient(circle at 16% 18%, rgba(131, 221, 255, 0.11), transparent 26%),
+        radial-gradient(circle at 84% 18%, rgba(255, 134, 159, 0.09), transparent 24%),
+        linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent 36%);
       pointer-events: none;
     }
 
-    .hero-card {
+    .stage-card {
       position: relative;
       z-index: 1;
-      border: 1px solid rgba(187, 205, 255, 0.14);
-      background: rgba(10, 15, 27, 0.76);
-      backdrop-filter: blur(16px);
-      box-shadow: 0 26px 60px rgba(0, 0, 0, 0.28);
-    }
-
-    .hero-daily {
-      padding: 18px;
-      border-radius: 28px;
-    }
-
-    .hero-support-row {
-      position: relative;
-      z-index: 1;
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 14px;
-    }
-
-    .hero-identity {
-      padding: 16px;
-      border-radius: 26px;
-    }
-
-    .hero-moment {
-      padding: 16px;
-      border-radius: 26px;
-    }
-
-    .hero-lobby {
-      overflow: hidden;
+      padding: 14px;
       border-radius: 24px;
+      border: 1px solid rgba(173, 196, 255, 0.12);
+      background: rgba(11, 17, 31, 0.76);
     }
 
-    .window-chrome {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 12px;
-      margin-bottom: 16px;
+    .stage-anchor {
+      grid-column: 1 / -1;
     }
 
-    .window-dots {
-      display: flex;
-      gap: 6px;
+    .stage-utility,
+    .stage-admin {
+      grid-column: span 6;
     }
 
-    .window-dots span {
-      width: 8px;
-      height: 8px;
-      border-radius: 50%;
-      background: rgba(255, 255, 255, 0.28);
-    }
-
-    .window-label {
-      color: var(--muted);
-      font-size: 0.78rem;
+    .stage-label {
+      display: inline-flex;
+      margin-bottom: 10px;
+      color: var(--soft);
+      font-size: 0.74rem;
       font-weight: 800;
       letter-spacing: 0.14em;
       text-transform: uppercase;
     }
 
-    .daily-top {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
+    .shot-frame {
+      display: grid;
       gap: 12px;
-      margin-bottom: 14px;
     }
 
-    .daily-title {
+    .shot-media {
+      overflow: hidden;
+      border-radius: 20px;
+      border: 1px solid rgba(173, 196, 255, 0.12);
+      background: rgba(8, 13, 25, 0.88);
+      box-shadow: 0 18px 46px rgba(0, 0, 0, 0.24);
+    }
+
+    .shot-media img {
+      width: 100%;
+      height: 100%;
+      object-fit: cover;
+      object-position: top center;
+    }
+
+    .shot-media.contain {
+      padding: 12px;
+    }
+
+    .shot-media.contain img {
+      object-fit: contain;
+    }
+
+    .ratio-hero {
+      aspect-ratio: 786 / 450;
+    }
+
+    .ratio-square {
+      aspect-ratio: 1.14 / 1;
+    }
+
+    .ratio-game {
+      aspect-ratio: 820 / 711;
+    }
+
+    .ratio-wide {
+      aspect-ratio: 16 / 10;
+    }
+
+    .ratio-ultrawide {
+      aspect-ratio: 2.35 / 1;
+    }
+
+    .ratio-tall {
+      aspect-ratio: 682 / 727;
+    }
+
+    .ratio-admin {
+      aspect-ratio: 615 / 756;
+    }
+
+    .shot-frame figcaption {
+      display: grid;
+      gap: 4px;
+      font-size: 0.92rem;
+      line-height: 1.66;
+    }
+
+    .shot-frame figcaption strong {
+      color: var(--soft);
       font-size: 0.9rem;
       font-weight: 800;
-      letter-spacing: 0.12em;
-      text-transform: uppercase;
+      letter-spacing: 0.02em;
     }
 
-    .daily-note {
-      display: inline-flex;
-      padding: 8px 12px;
-      border-radius: 999px;
-      background: rgba(125, 220, 255, 0.12);
-      color: var(--cyan);
-      font-size: 0.76rem;
-      font-weight: 800;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-    }
-
-    .booth-grid {
+    .proof-strip {
       display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 12px;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 16px;
     }
 
-    .booth-card {
-      min-height: 0;
-      padding: 16px 14px;
-      border-radius: 20px;
-      border: 1px solid rgba(169, 190, 255, 0.12);
-      background: linear-gradient(180deg, rgba(21, 31, 55, 0.94), rgba(11, 18, 31, 0.94));
+    .proof-card,
+    .story-point,
+    .trust-card,
+    .trust-rail article,
+    .return-note {
+      padding: 20px;
+      border-radius: 22px;
+      border: 1px solid var(--line);
+      background: rgba(11, 17, 31, 0.58);
     }
 
-    .booth-tag {
-      display: inline-flex;
-      margin-bottom: 12px;
-      padding: 6px 10px;
-      border-radius: 999px;
-      background: rgba(255, 255, 255, 0.06);
+    .proof-card h3,
+    .trust-card h3,
+    .trust-rail strong,
+    .return-note strong {
       color: var(--soft);
-      font-size: 0.72rem;
-      font-weight: 800;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-    }
-
-    .booth-card strong {
-      display: block;
-      margin-bottom: 10px;
       font-size: 1rem;
-    }
-
-    .booth-clue {
-      margin-bottom: 10px;
-      font-size: 1.18rem;
-      font-weight: 800;
+      line-height: 1.3;
       letter-spacing: -0.03em;
     }
 
-    .booth-card p {
-      color: var(--muted);
-      font-size: 0.84rem;
-      line-height: 1.55;
-    }
-
-    .booth-card.shuffle .booth-clue {
-      color: var(--amber);
-    }
-
-    .booth-card.emoji .booth-clue {
-      color: var(--mint);
-    }
-
-    .booth-card.signal .booth-clue {
-      color: var(--cyan);
-    }
-
-    .daily-footer {
-      display: grid;
-      grid-template-columns: 1.2fr 0.8fr;
-      gap: 12px;
-      margin-top: 12px;
-    }
-
-    .share-strip,
-    .streak-card {
-      padding: 14px 16px;
-      border-radius: 18px;
-      border: 1px solid rgba(169, 190, 255, 0.12);
-      background: rgba(12, 20, 34, 0.72);
-    }
-
-    .share-strip strong,
-    .streak-card strong {
-      display: block;
-      margin-bottom: 8px;
-      color: var(--soft);
-      font-size: 0.86rem;
-      font-weight: 800;
-      letter-spacing: 0.1em;
-      text-transform: uppercase;
-    }
-
-    .share-row {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-    }
-
-    .tiny-pill {
-      display: inline-flex;
-      padding: 8px 10px;
-      border-radius: 999px;
-      background: rgba(255, 255, 255, 0.05);
-      color: var(--muted);
-      font-size: 0.82rem;
-      font-weight: 700;
-    }
-
-    .streak-card p {
-      color: var(--muted);
-      font-size: 0.9rem;
-      line-height: 1.65;
-    }
-
-    .streak-bar {
-      display: flex;
-      gap: 8px;
-      margin-top: 10px;
-    }
-
-    .streak-bar span {
-      flex: 1;
-      height: 8px;
-      border-radius: 999px;
-      background: rgba(255, 255, 255, 0.09);
-    }
-
-    .streak-bar span.active {
-      background: linear-gradient(90deg, var(--amber), var(--rose));
-    }
-
-    .identity-main {
-      display: grid;
-      gap: 10px;
-    }
-
-    .profile-plate {
-      padding: 14px;
-      border-radius: 20px;
-      border: 1px solid rgba(169, 190, 255, 0.12);
-      background: linear-gradient(180deg, rgba(20, 30, 53, 0.94), rgba(13, 20, 35, 0.94));
-    }
-
-    .profile-row {
-      display: flex;
-      align-items: center;
-      gap: 12px;
-    }
-
-    .avatar-orb {
-      position: relative;
-      width: 52px;
-      height: 52px;
-      overflow: hidden;
-      border-radius: 18px;
-      background: linear-gradient(135deg, var(--amber), var(--rose) 58%, var(--cyan));
-      box-shadow: inset 0 0 20px rgba(255, 255, 255, 0.18);
-    }
-
-    .avatar-orb::after {
-      content: "";
-      position: absolute;
-      inset: 10px;
-      border-radius: 14px;
-      background: linear-gradient(135deg, rgba(7, 14, 25, 0.9), rgba(255, 255, 255, 0.02));
-    }
-
-    .profile-name strong {
-      display: block;
-      font-size: 1rem;
-    }
-
-    .profile-name span {
-      color: var(--muted);
-      font-size: 0.88rem;
-    }
-
-    .badge-row {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 8px;
-      margin-top: 12px;
-    }
-
-    .badge {
-      display: inline-flex;
-      padding: 7px 10px;
-      border-radius: 999px;
-      border: 1px solid rgba(169, 190, 255, 0.1);
-      background: rgba(125, 220, 255, 0.08);
-      color: var(--soft);
-      font-size: 0.77rem;
-      font-weight: 700;
-    }
-
-    .profile-surface {
-      display: grid;
-      gap: 8px;
-      margin-top: 12px;
-    }
-
-    .profile-line {
-      display: flex;
-      justify-content: space-between;
-      gap: 12px;
-      padding: 9px 12px;
-      border-radius: 14px;
-      background: rgba(255, 255, 255, 0.04);
-      color: var(--muted);
-      font-size: 0.88rem;
-    }
-
-    .profile-line strong {
-      color: var(--soft);
-      font-size: 0.88rem;
-    }
-
-    .private-vault {
-      padding: 12px 14px;
-      border-radius: 16px;
-      border: 1px solid rgba(255, 187, 112, 0.16);
-      background: rgba(255, 187, 112, 0.08);
-      color: var(--soft);
-      font-size: 0.88rem;
-    }
-
-    .private-vault span {
-      display: block;
-      margin-bottom: 6px;
-      color: var(--amber);
-      font-size: 0.74rem;
-      font-weight: 800;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-    }
-
-    .moment-card-shell {
-      display: grid;
-      gap: 10px;
-    }
-
-    .hero-panel-head {
-      display: flex;
-      justify-content: space-between;
-      gap: 12px;
-      align-items: flex-start;
-      margin-bottom: 14px;
-    }
-
-    .hero-panel-head h4 {
-      margin: 6px 0 0;
-      font-size: 1.3rem;
-    }
-
-    .hero-panel-copy {
-      color: var(--muted);
-      font-size: 0.92rem;
-      line-height: 1.65;
-    }
-
-    .message-bubble {
-      padding: 12px 14px;
-      border-radius: 18px;
-      border: 1px solid rgba(169, 190, 255, 0.12);
-      background: rgba(255, 255, 255, 0.05);
-    }
-
-    .message-bubble strong {
-      display: block;
-      margin-bottom: 4px;
-      color: var(--soft);
-      font-size: 0.85rem;
-    }
-
-    .message-bubble p {
-      color: var(--muted);
-      font-size: 0.9rem;
-      line-height: 1.55;
-    }
-
-    .moment-link {
-      display: inline-flex;
-      width: fit-content;
-      align-items: center;
-      gap: 8px;
-      padding: 8px 10px;
-      border-radius: 999px;
-      background: rgba(129, 240, 187, 0.09);
-      color: var(--mint);
-      font-size: 0.74rem;
-      font-weight: 800;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-    }
-
-    .moment-keepsake {
-      padding: 14px;
-      border-radius: 20px;
-      border: 1px solid rgba(255, 255, 255, 0.12);
-      background: linear-gradient(160deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.02));
-    }
-
-    .moment-keepsake strong {
-      display: block;
-      margin-bottom: 8px;
-      font-size: 0.9rem;
-    }
-
-    .moment-keepsake p {
-      color: var(--soft);
-      font-size: 0.95rem;
-      line-height: 1.7;
-    }
-
-    .hero-lobby img {
-      width: 100%;
-      aspect-ratio: 16 / 10;
-      object-fit: cover;
-    }
-
-    .frame-caption {
-      padding: 12px 14px;
-      background: rgba(10, 15, 27, 0.92);
-      color: var(--soft);
-      font-size: 0.86rem;
-    }
-
-    .frame-caption span {
-      display: block;
-      margin-top: 4px;
-      color: var(--muted);
-      font-size: 0.82rem;
-    }
-
-    .section-kicker {
-      display: inline-flex;
-      align-items: center;
-      gap: 10px;
-      margin-bottom: 14px;
-      color: var(--cyan);
-      font-size: 0.78rem;
-      font-weight: 800;
-      letter-spacing: 0.12em;
-      text-transform: uppercase;
-    }
-
-    .section-kicker::before {
-      content: "";
-      width: 24px;
-      height: 1px;
-      background: linear-gradient(90deg, transparent, rgba(125, 220, 255, 0.7));
-    }
-
-    .section-intro {
-      max-width: 720px;
-      margin-bottom: 30px;
-    }
-
-    .section-intro p {
-      margin-top: 14px;
-      color: var(--muted);
-      font-size: 1.02rem;
-      line-height: 1.8;
-    }
-
-    .pillars {
-      display: grid;
-      grid-template-columns: 1.08fr 0.92fr;
-      grid-template-areas:
-        "start return"
-        "start quiet";
-      gap: 18px;
-    }
-
-    .pillar {
-      position: relative;
-      overflow: hidden;
-      padding: 26px;
-      border-radius: 28px;
-      border: 1px solid var(--line);
-      background: linear-gradient(180deg, rgba(14, 21, 36, 0.82), rgba(10, 16, 29, 0.92));
-      box-shadow: var(--shadow);
-    }
-
-    .pillar::before {
-      content: "";
-      position: absolute;
-      inset: auto -10% -20% auto;
-      width: 220px;
-      height: 220px;
-      border-radius: 50%;
-      background: radial-gradient(circle, rgba(125, 220, 255, 0.16), transparent 70%);
-      pointer-events: none;
-    }
-
-    .pillar-start {
-      grid-area: start;
-    }
-
-    .pillar-return {
-      grid-area: return;
-    }
-
-    .pillar-quiet {
-      grid-area: quiet;
-    }
-
-    .pillar h3 {
-      margin-bottom: 12px;
-      font-size: 1.5rem;
-    }
-
-    .pillar p {
-      color: var(--muted);
-      line-height: 1.8;
-    }
-
-    .feature-pill-row,
-    .utility-pill-row,
-    .game-chip-row {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 10px;
-      margin-top: 18px;
-    }
-
-    .feature-pill,
-    .utility-pill,
-    .game-chip {
-      display: inline-flex;
-      align-items: center;
-      padding: 10px 12px;
-      border-radius: 999px;
-      border: 1px solid rgba(169, 190, 255, 0.12);
-      background: rgba(255, 255, 255, 0.05);
-      color: var(--soft);
-      font-size: 0.9rem;
-      font-weight: 700;
-    }
-
-    .flow-strip {
-      display: grid;
-      gap: 12px;
-      margin-top: 18px;
-    }
-
-    .flow-item {
-      display: flex;
-      justify-content: space-between;
-      align-items: center;
-      gap: 12px;
-      padding: 12px 14px;
-      border-radius: 16px;
-      border: 1px solid rgba(169, 190, 255, 0.08);
-      background: rgba(255, 255, 255, 0.04);
-    }
-
-    .flow-item strong {
-      font-size: 0.95rem;
-    }
-
-    .flow-item span {
-      color: var(--muted);
-      font-size: 0.88rem;
-      text-align: right;
-    }
-
-    .private-banner {
-      margin-top: 18px;
-      padding: 14px 16px;
-      border-radius: 18px;
-      border: 1px solid rgba(129, 240, 187, 0.16);
-      background: rgba(129, 240, 187, 0.08);
-      color: var(--soft);
-      font-size: 0.92rem;
-      line-height: 1.7;
-    }
-
-    .private-banner strong {
-      display: block;
-      margin-bottom: 6px;
-      color: var(--mint);
-      font-size: 0.8rem;
-      font-weight: 800;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-    }
-
-    .showcase-shell {
-      display: grid;
-      grid-template-columns: minmax(240px, 0.34fr) minmax(0, 0.66fr);
-      gap: 22px;
-      align-items: start;
-    }
-
-    .showcase-nav {
-      position: sticky;
-      top: 108px;
-      display: grid;
-      gap: 10px;
-    }
-
-    .showcase-tab {
-      width: 100%;
-      padding: 18px 18px 16px;
-      border-radius: 22px;
-      border: 1px solid var(--line);
-      background: rgba(12, 20, 34, 0.58);
-      color: var(--muted);
-      text-align: left;
-      cursor: pointer;
-      transition:
-        border-color 0.18s ease,
-        transform 0.18s ease,
-        background 0.18s ease,
-        color 0.18s ease;
-    }
-
-    .showcase-tab:hover {
-      transform: translateY(-1px);
-      border-color: var(--line-strong);
-      color: var(--soft);
-    }
-
-    .showcase-tab.active {
-      border-color: rgba(125, 220, 255, 0.28);
-      background: linear-gradient(180deg, rgba(19, 31, 53, 0.92), rgba(12, 19, 34, 0.94));
-      color: var(--text);
-      box-shadow: 0 24px 54px rgba(0, 0, 0, 0.22);
-    }
-
-    .showcase-tab strong {
-      display: block;
-      margin-bottom: 6px;
-      font-size: 1rem;
-      font-family: "Sora", sans-serif;
-      letter-spacing: -0.04em;
-    }
-
-    .showcase-tab span {
-      display: block;
-      font-size: 0.88rem;
-      line-height: 1.55;
-    }
-
-    .showcase-panel {
-      padding: 28px;
-      border-radius: 32px;
-      border: 1px solid var(--line);
-      background: linear-gradient(180deg, rgba(13, 20, 36, 0.82), rgba(8, 13, 24, 0.96));
-      box-shadow: var(--shadow);
-    }
-
-    .showcase-panel[hidden] {
-      display: none;
-    }
-
-    .panel-grid {
-      display: grid;
-      grid-template-columns: minmax(0, 0.46fr) minmax(0, 0.54fr);
-      gap: 22px;
-      align-items: center;
-    }
-
-    .panel-copy h3 {
-      margin-bottom: 14px;
-      font-size: clamp(1.9rem, 2.4vw, 2.6rem);
-    }
-
-    .panel-copy p {
-      color: var(--muted);
-      font-size: 1rem;
-      line-height: 1.8;
-    }
-
-    .panel-points {
-      display: grid;
-      gap: 10px;
-      margin-top: 20px;
-    }
-
-    .panel-point {
-      padding: 12px 14px;
-      border-radius: 16px;
-      border: 1px solid rgba(169, 190, 255, 0.08);
-      background: rgba(255, 255, 255, 0.04);
-      color: var(--soft);
-      font-size: 0.92rem;
-      line-height: 1.65;
-    }
-
-    .panel-commands {
-      display: flex;
-      flex-wrap: wrap;
-      gap: 10px;
-      margin-top: 20px;
-    }
-
-    .visual-card {
-      position: relative;
-      min-height: 420px;
-      overflow: hidden;
-      padding: 20px;
-      border-radius: 26px;
-      border: 1px solid rgba(169, 190, 255, 0.12);
-      background: rgba(10, 16, 29, 0.84);
-    }
-
-    .visual-card::before {
-      content: "";
-      position: absolute;
-      inset: 0;
-      background:
-        radial-gradient(circle at 18% 18%, rgba(125, 220, 255, 0.12), transparent 28%),
-        radial-gradient(circle at 80% 18%, rgba(255, 131, 155, 0.12), transparent 24%),
-        linear-gradient(180deg, rgba(255, 255, 255, 0.02), transparent 40%);
-      pointer-events: none;
-    }
-
-    .visual-card > * {
-      position: relative;
-      z-index: 1;
-    }
-
-    .mini-label {
-      display: inline-flex;
-      margin-bottom: 8px;
-      color: var(--muted);
-      font-size: 0.75rem;
-      font-weight: 800;
-      letter-spacing: 0.12em;
-      text-transform: uppercase;
-    }
-
-    .board-head {
-      display: flex;
-      justify-content: space-between;
-      gap: 12px;
-      align-items: flex-start;
-      margin-bottom: 14px;
-    }
-
-    .board-head h4,
-    .profile-showcase h4,
-    .moment-showcase h4,
-    .party-stage h4,
-    .shield-stage h4 {
-      font-size: 1.08rem;
-      letter-spacing: -0.04em;
-    }
-
-    .quiet-badge {
-      display: inline-flex;
-      padding: 8px 10px;
-      border-radius: 999px;
-      background: rgba(125, 220, 255, 0.12);
-      color: var(--cyan);
-      font-size: 0.76rem;
-      font-weight: 800;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-      white-space: nowrap;
-    }
-
-    .mini-booth-grid {
-      display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 10px;
-      margin-top: 14px;
-    }
-
-    .mini-booth {
-      padding: 14px;
-      border-radius: 18px;
-      border: 1px solid rgba(169, 190, 255, 0.12);
-      background: rgba(255, 255, 255, 0.05);
-    }
-
-    .mini-booth strong {
-      display: block;
-      margin-bottom: 8px;
-      font-size: 0.95rem;
-    }
-
-    .mini-booth p {
-      color: var(--muted);
-      font-size: 0.86rem;
-      line-height: 1.6;
-    }
-
-    .mini-booth .clue {
-      display: block;
-      margin-bottom: 8px;
-      font-size: 1rem;
-      font-weight: 800;
-    }
-
-    .ledger-strip {
-      display: grid;
-      grid-template-columns: 1.1fr 0.9fr;
-      gap: 12px;
-      margin-top: 14px;
-    }
-
-    .ledger-card,
-    .activity-card {
-      padding: 14px;
-      border-radius: 18px;
-      border: 1px solid rgba(169, 190, 255, 0.12);
-      background: rgba(255, 255, 255, 0.05);
-    }
-
-    .ledger-card p,
-    .activity-card p {
-      color: var(--muted);
-      font-size: 0.88rem;
-      line-height: 1.65;
-    }
-
-    .mini-command {
-      display: inline-flex;
-      margin-top: 10px;
-      padding: 8px 10px;
-      border-radius: 999px;
-      background: rgba(255, 255, 255, 0.05);
-      color: var(--soft);
-      font-size: 0.82rem;
-      font-weight: 800;
-    }
-
-    .mini-command code {
-      color: var(--amber);
-    }
-
-    .activity-rows {
-      display: grid;
-      gap: 10px;
-      margin-top: 10px;
-    }
-
-    .activity-row {
-      display: flex;
-      justify-content: space-between;
-      gap: 12px;
-      padding: 10px 12px;
-      border-radius: 14px;
-      background: rgba(255, 255, 255, 0.04);
-      color: var(--soft);
-      font-size: 0.86rem;
-    }
-
-    .activity-row span {
-      color: var(--muted);
-      text-align: right;
-    }
-
-    .profile-showcase {
-      display: grid;
-      gap: 14px;
-    }
-
-    .profile-showcase-main {
-      padding: 16px;
-      border-radius: 20px;
-      border: 1px solid rgba(169, 190, 255, 0.12);
-      background: linear-gradient(180deg, rgba(20, 31, 53, 0.94), rgba(12, 19, 33, 0.94));
-    }
-
-    .profile-showcase-grid {
-      display: grid;
-      grid-template-columns: 1fr 1fr;
-      gap: 12px;
-    }
-
-    .profile-showcase-side {
-      padding: 14px;
-      border-radius: 18px;
-      border: 1px solid rgba(169, 190, 255, 0.12);
-      background: rgba(255, 255, 255, 0.05);
-    }
-
-    .profile-showcase-side p {
+    .proof-card p,
+    .trust-card p,
+    .trust-rail p,
+    .return-note p {
       margin-top: 8px;
-      color: var(--muted);
-      font-size: 0.86rem;
-      line-height: 1.6;
-    }
-
-    .moment-showcase {
-      display: grid;
-      gap: 14px;
-    }
-
-    .thread-card,
-    .keepsake-card,
-    .link-card {
-      padding: 14px;
-      border-radius: 18px;
-      border: 1px solid rgba(169, 190, 255, 0.12);
-      background: rgba(255, 255, 255, 0.05);
-    }
-
-    .thread-card p,
-    .keepsake-card p,
-    .link-card p {
-      color: var(--muted);
-      font-size: 0.88rem;
-      line-height: 1.68;
-    }
-
-    .thread-stack {
-      display: grid;
-      gap: 10px;
-      margin-top: 10px;
-    }
-
-    .thread-bubble {
-      padding: 12px;
-      border-radius: 16px;
-      background: rgba(10, 17, 29, 0.72);
-      color: var(--soft);
-      font-size: 0.9rem;
-    }
-
-    .keepsake-card {
-      background: linear-gradient(150deg, rgba(255, 255, 255, 0.08), rgba(255, 255, 255, 0.03));
-    }
-
-    .keepsake-card blockquote {
-      margin: 10px 0 0;
-      color: var(--soft);
-      font-size: 1rem;
+      font-size: 0.95rem;
       line-height: 1.72;
     }
 
-    .link-card strong {
-      display: inline-flex;
-      padding: 8px 10px;
-      border-radius: 999px;
-      background: rgba(129, 240, 187, 0.08);
-      color: var(--mint);
-      font-size: 0.76rem;
-      font-weight: 800;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-    }
-
-    .party-stage {
+    .story-stack {
       display: grid;
-      gap: 12px;
+      gap: 52px;
     }
 
-    .shot-frame {
-      overflow: hidden;
-      border-radius: 20px;
-      border: 1px solid rgba(169, 190, 255, 0.12);
-      background: rgba(255, 255, 255, 0.04);
-    }
-
-    .shot-frame img {
-      width: 100%;
-      aspect-ratio: 16 / 10;
-      object-fit: cover;
-    }
-
-    .shot-caption {
-      padding: 12px 14px;
-      color: var(--muted);
-      font-size: 0.86rem;
-      line-height: 1.6;
-    }
-
-    .floating-shot {
-      position: absolute;
-      right: 22px;
-      bottom: 24px;
-      width: min(220px, 42%);
-      overflow: hidden;
-      border-radius: 18px;
-      border: 1px solid rgba(169, 190, 255, 0.16);
-      box-shadow: 0 24px 50px rgba(0, 0, 0, 0.36);
-    }
-
-    .floating-shot img {
-      width: 100%;
-      aspect-ratio: 4 / 3;
-      object-fit: cover;
-    }
-
-    .floating-shot span {
-      display: block;
-      padding: 10px 12px;
-      background: rgba(10, 15, 27, 0.92);
-      color: var(--soft);
-      font-size: 0.8rem;
-    }
-
-    .utility-shell {
+    .story {
       display: grid;
-      grid-template-columns: minmax(0, 0.45fr) minmax(0, 0.55fr);
-      gap: 24px;
+      grid-template-columns: minmax(0, 0.94fr) minmax(0, 1.06fr);
+      gap: 32px;
       align-items: start;
     }
 
-    .utility-lead {
-      position: sticky;
-      top: 108px;
+    .story-copy h3 {
+      margin-top: 12px;
+      max-width: 14ch;
     }
 
-    .utility-lead p {
-      margin-top: 14px;
-      color: var(--muted);
-      font-size: 1rem;
-      line-height: 1.84;
-    }
-
-    .utility-note {
-      margin-top: 20px;
-      padding: 18px 20px;
-      border-radius: 22px;
-      border: 1px solid var(--line);
-      background: linear-gradient(180deg, rgba(17, 27, 46, 0.82), rgba(10, 16, 29, 0.94));
-      color: var(--soft);
-    }
-
-    .utility-note strong {
-      display: block;
-      margin-bottom: 8px;
-      font-size: 0.96rem;
-    }
-
-    .utility-grid {
-      display: grid;
-      grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 18px;
-    }
-
-    .utility-card {
-      position: relative;
-      overflow: hidden;
-      min-height: 220px;
-      padding: 22px;
-      border-radius: 24px;
-      border: 1px solid var(--line);
-      background: linear-gradient(180deg, rgba(14, 21, 36, 0.78), rgba(10, 16, 29, 0.94));
-    }
-
-    .utility-card::before {
-      content: "";
-      position: absolute;
-      inset: auto -12% -26% auto;
-      width: 180px;
-      height: 180px;
-      border-radius: 50%;
-      background: radial-gradient(circle, rgba(125, 220, 255, 0.12), transparent 72%);
-      pointer-events: none;
-    }
-
-    .utility-card > * {
-      position: relative;
-      z-index: 1;
-    }
-
-    .utility-card h3 {
-      margin-bottom: 10px;
-      font-size: 1.3rem;
-    }
-
-    .utility-card p {
-      color: var(--muted);
-      font-size: 0.95rem;
-      line-height: 1.75;
-    }
-
-    .utility-card.span-2 {
-      grid-column: span 2;
-    }
-
-    .afk-card::after {
-      content: "";
-      position: absolute;
-      inset: 0;
-      background:
-        linear-gradient(180deg, rgba(11, 17, 29, 0.62), rgba(11, 17, 29, 0.96)),
-        url("assets/afk.png") center center / cover no-repeat;
-      opacity: 0.18;
-      pointer-events: none;
-    }
-
-    .owner-shell {
-      display: grid;
-      grid-template-columns: minmax(0, 0.42fr) minmax(0, 0.58fr);
-      gap: 24px;
-      align-items: center;
-    }
-
-    .owner-copy p {
-      margin-top: 14px;
-      color: var(--muted);
-      font-size: 1rem;
-      line-height: 1.84;
-    }
-
-    .shield-stage {
-      position: relative;
-      overflow: hidden;
-      padding: 26px;
-      border-radius: 30px;
-      border: 1px solid var(--line);
-      background: linear-gradient(180deg, rgba(12, 19, 34, 0.72), rgba(9, 14, 26, 0.96));
-      box-shadow: var(--shadow);
-    }
-
-    .shield-stage::before {
-      content: "";
-      position: absolute;
-      inset: 0;
-      background:
-        radial-gradient(circle at 16% 18%, rgba(255, 187, 112, 0.12), transparent 26%),
-        radial-gradient(circle at 86% 18%, rgba(125, 220, 255, 0.1), transparent 26%);
-      pointer-events: none;
-    }
-
-    .shield-stage > * {
-      position: relative;
-      z-index: 1;
-    }
-
-    .shield-top {
-      display: flex;
-      justify-content: space-between;
-      gap: 12px;
-      align-items: center;
-      margin-bottom: 18px;
-    }
-
-    .status-chip {
-      display: inline-flex;
-      padding: 8px 12px;
-      border-radius: 999px;
-      border: 1px solid rgba(255, 187, 112, 0.18);
-      background: rgba(255, 187, 112, 0.1);
-      color: var(--amber);
-      font-size: 0.76rem;
-      font-weight: 800;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
-      white-space: nowrap;
-    }
-
-    .module-grid {
-      display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 12px;
-    }
-
-    .module-card {
-      padding: 16px;
-      border-radius: 18px;
-      border: 1px solid rgba(169, 190, 255, 0.09);
-      background: rgba(255, 255, 255, 0.04);
-    }
-
-    .module-card strong {
-      display: block;
-      margin-bottom: 6px;
-      font-size: 0.94rem;
-    }
-
-    .module-card p {
-      color: var(--muted);
-      font-size: 0.86rem;
-      line-height: 1.62;
-    }
-
-    .shield-lines {
-      display: grid;
-      gap: 12px;
+    .story-copy p {
       margin-top: 16px;
-    }
-
-    .shield-line {
-      display: flex;
-      justify-content: space-between;
-      gap: 16px;
-      padding: 12px 14px;
-      border-radius: 16px;
-      background: rgba(255, 255, 255, 0.04);
-      color: var(--soft);
-      font-size: 0.92rem;
-    }
-
-    .shield-line span {
-      color: var(--muted);
-      font-size: 0.88rem;
-      text-align: right;
-    }
-
-    .trust-shell {
-      padding: 32px;
-      border-radius: 32px;
-      border: 1px solid var(--line);
-      background: linear-gradient(180deg, rgba(12, 20, 34, 0.76), rgba(8, 13, 24, 0.94));
-      box-shadow: var(--shadow);
-    }
-
-    .trust-header {
-      display: grid;
-      grid-template-columns: minmax(0, 0.44fr) minmax(0, 0.56fr);
-      gap: 24px;
-      align-items: start;
-    }
-
-    .trust-header p {
-      color: var(--muted);
       font-size: 1rem;
       line-height: 1.82;
     }
 
-    .trust-grid {
+    .story-points {
+      display: grid;
+      gap: 12px;
+      margin-top: 24px;
+    }
+
+    .story-point h4 {
+      color: var(--soft);
+    }
+
+    .story-point p {
+      margin-top: 8px;
+      font-size: 0.94rem;
+      line-height: 1.7;
+    }
+
+    .pill-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 10px;
+      margin-top: 22px;
+    }
+
+    .pill {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 10px 14px;
+      border-radius: 999px;
+      border: 1px solid rgba(173, 196, 255, 0.12);
+      background: rgba(255, 255, 255, 0.04);
+      color: var(--soft);
+      font-size: 0.9rem;
+      font-weight: 800;
+      white-space: nowrap;
+    }
+
+    .pill code {
+      color: var(--cyan);
+    }
+
+    .games-grid {
+      display: grid;
+      grid-template-columns: repeat(12, minmax(0, 1fr));
+      gap: 16px;
+    }
+
+    .games-grid .shot-primary {
+      grid-column: 1 / -1;
+    }
+
+    .games-grid .shot-secondary {
+      grid-column: span 6;
+    }
+
+    .return-media {
+      display: grid;
+      gap: 16px;
+    }
+
+    .return-notes {
       display: grid;
       grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 16px;
-      margin-top: 28px;
+      gap: 12px;
     }
 
-    .trust-card {
-      padding: 20px;
-      border-radius: 22px;
-      border: 1px solid rgba(169, 190, 255, 0.08);
-      background: rgba(255, 255, 255, 0.04);
+    .section-utilities {
+      position: relative;
     }
 
-    .trust-card h3 {
-      margin-bottom: 10px;
-      font-size: 1.08rem;
+    .section-utilities::before {
+      content: "";
+      position: absolute;
+      inset: 4% 0 auto;
+      height: 74%;
+      background:
+        linear-gradient(180deg, rgba(124, 169, 255, 0.05), rgba(5, 9, 19, 0)),
+        radial-gradient(circle at 14% 22%, rgba(131, 221, 255, 0.08), transparent 20%),
+        radial-gradient(circle at 84% 18%, rgba(255, 134, 159, 0.08), transparent 18%);
+      pointer-events: none;
     }
 
-    .trust-card p {
+    .utility-shell {
+      display: grid;
+      grid-template-columns: minmax(0, 0.9fr) minmax(0, 1.1fr);
+      gap: 32px;
+      align-items: start;
+    }
+
+    .utility-callout {
+      padding: 24px;
+      border-radius: 24px;
+      border: 1px solid rgba(131, 221, 255, 0.18);
+      background: linear-gradient(180deg, rgba(14, 24, 42, 0.84), rgba(10, 16, 29, 0.94));
+      box-shadow: 0 22px 50px rgba(0, 0, 0, 0.2);
+    }
+
+    .utility-callout strong {
+      display: block;
+      color: var(--soft);
+      font-size: 1rem;
+      letter-spacing: -0.03em;
+    }
+
+    .utility-callout p {
+      margin-top: 10px;
       color: var(--muted);
-      font-size: 0.94rem;
-      line-height: 1.72;
+      font-size: 0.98rem;
+      line-height: 1.8;
+    }
+
+    .utility-points {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+    }
+
+    .utility-collage {
+      display: grid;
+      grid-template-columns: repeat(12, minmax(0, 1fr));
+      gap: 16px;
+    }
+
+    .utility-watch {
+      grid-column: span 6;
+      grid-row: span 2;
+    }
+
+    .utility-alert {
+      grid-column: span 6;
+    }
+
+    .utility-afk {
+      grid-column: span 6;
+    }
+
+    .utility-reminder {
+      grid-column: 1 / -1;
+    }
+
+    .admin-media {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+    }
+
+    .trust-rail {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 16px;
+      margin-top: 24px;
+    }
+
+    .trust-rail article strong {
+      display: block;
+    }
+
+    .trust-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 16px;
     }
 
     .support-bar {
@@ -1721,82 +793,70 @@
       justify-content: space-between;
       align-items: center;
       gap: 20px;
-      flex-wrap: wrap;
-      margin-top: 24px;
-      padding-top: 24px;
-      border-top: 1px solid rgba(169, 190, 255, 0.1);
+      margin-top: 28px;
+      padding: 26px 28px;
+      border-radius: 28px;
+      border: 1px solid var(--line);
+      background: linear-gradient(180deg, rgba(11, 18, 32, 0.72), rgba(8, 13, 24, 0.92));
+      box-shadow: var(--shadow);
+    }
+
+    .support-bar strong {
+      display: block;
+      color: var(--soft);
+      font-size: 1rem;
+      letter-spacing: -0.03em;
     }
 
     .support-bar p {
-      color: var(--muted);
-      line-height: 1.72;
+      margin-top: 8px;
+      max-width: 58ch;
+      font-size: 0.96rem;
+      line-height: 1.74;
     }
 
     .support-links {
       display: flex;
-      gap: 12px;
       flex-wrap: wrap;
-      align-items: center;
+      gap: 12px 18px;
+      justify-content: flex-end;
+    }
+
+    .support-links a {
+      font-size: 0.95rem;
+      font-weight: 700;
+    }
+
+    .section-final {
+      padding-bottom: clamp(64px, 8vw, 100px);
     }
 
     .final-cta {
-      position: relative;
-      z-index: 1;
       display: grid;
-      grid-template-columns: minmax(0, 0.6fr) minmax(280px, 0.4fr);
-      gap: 24px;
+      grid-template-columns: minmax(0, 1fr) auto;
+      gap: 32px;
       align-items: center;
-      overflow: hidden;
-      padding: clamp(30px, 5vw, 44px);
-      border-radius: 34px;
-      border: 1px solid rgba(169, 190, 255, 0.18);
-      background: linear-gradient(135deg, rgba(14, 26, 46, 0.98), rgba(15, 21, 36, 0.94) 48%, rgba(31, 12, 26, 0.9));
+      padding: clamp(28px, 4vw, 40px);
+      border-radius: 32px;
+      border: 1px solid rgba(173, 196, 255, 0.16);
+      background:
+        linear-gradient(180deg, rgba(14, 24, 42, 0.88), rgba(8, 13, 24, 0.96)),
+        radial-gradient(circle at 18% 22%, rgba(131, 221, 255, 0.08), transparent 28%);
       box-shadow: var(--shadow);
     }
 
-    .final-cta::before {
-      content: "";
-      position: absolute;
-      inset: -20% 42% auto -10%;
-      height: 240px;
-      background: radial-gradient(circle, rgba(125, 220, 255, 0.32), transparent 68%);
-      filter: blur(30px);
-      pointer-events: none;
-    }
-
-    .final-cta::after {
-      content: "";
-      position: absolute;
-      inset: auto -8% -35% auto;
-      width: 300px;
-      height: 300px;
-      background: radial-gradient(circle, rgba(255, 131, 155, 0.26), transparent 66%);
-      filter: blur(30px);
-      pointer-events: none;
-    }
-
-    .final-cta > * {
-      position: relative;
-      z-index: 1;
-    }
-
-    .final-cta h2 {
-      max-width: 12ch;
-      margin-bottom: 14px;
-      font-size: clamp(2rem, 3.2vw, 3.4rem);
-    }
-
     .final-cta p {
-      max-width: 54ch;
-      color: rgba(245, 247, 255, 0.78);
+      margin-top: 16px;
+      max-width: 56ch;
+      color: var(--muted);
+      font-size: 1rem;
       line-height: 1.8;
     }
 
     .final-actions {
-      display: flex;
-      flex-direction: column;
-      gap: 12px;
-      align-items: stretch;
+      display: grid;
+      gap: 14px;
+      min-width: 250px;
     }
 
     .final-actions .btn {
@@ -1804,12 +864,11 @@
     }
 
     .final-actions .link-quiet {
-      justify-content: center;
-      padding-top: 4px;
+      justify-self: center;
     }
 
     footer {
-      padding: 26px 0 46px;
+      padding: 24px 0 42px;
     }
 
     .footer-row {
@@ -1818,7 +877,7 @@
       gap: 18px;
       flex-wrap: wrap;
       padding-top: 24px;
-      border-top: 1px solid rgba(169, 190, 255, 0.1);
+      border-top: 1px solid rgba(173, 196, 255, 0.1);
       color: var(--muted);
       font-size: 0.95rem;
     }
@@ -1831,7 +890,7 @@
 
     .footer-meta {
       display: grid;
-      gap: 16px;
+      gap: 14px;
       justify-items: end;
     }
 
@@ -1843,10 +902,10 @@
     }
 
     .footer-label {
-      color: rgba(226, 233, 255, 0.7);
+      color: rgba(228, 234, 255, 0.72);
       font-size: 0.72rem;
       font-weight: 800;
-      letter-spacing: 0.18em;
+      letter-spacing: 0.16em;
       text-transform: uppercase;
     }
 
@@ -1861,7 +920,7 @@
       color: var(--text);
     }
 
-    @media (max-width: 1120px) {
+    @media (max-width: 1180px) {
       nav {
         grid-template-columns: auto 1fr;
       }
@@ -1876,81 +935,60 @@
       }
 
       .hero,
+      .story,
       .utility-shell,
-      .owner-shell,
-      .trust-header,
       .final-cta {
         grid-template-columns: 1fr;
       }
 
-      .showcase-shell {
-        grid-template-columns: 1fr;
+      .hero-copy {
+        max-width: none;
       }
 
-      .showcase-nav {
-        position: static;
-        grid-template-columns: repeat(2, minmax(0, 1fr));
-      }
-
-      .panel-grid {
-        grid-template-columns: 1fr;
-      }
-
-      .utility-lead {
-        position: static;
-      }
-
-      .footer-meta {
-        justify-items: start;
-      }
-
-      .footer-group {
-        align-items: flex-start;
-      }
-
-      .footer-links {
+      .support-links {
         justify-content: flex-start;
       }
     }
 
+    @media (max-width: 1040px) {
+      .proof-strip,
+      .trust-rail,
+      .trust-grid {
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .return-notes,
+      .utility-points {
+        grid-template-columns: 1fr;
+      }
+
+      .admin-media {
+        grid-template-columns: 1fr;
+      }
+    }
+
     @media (max-width: 920px) {
-      .hero-stage {
-        min-height: auto;
-      }
-
-      .hero-support-row,
-      .booth-grid,
-      .mini-booth-grid,
-      .module-grid,
-      .trust-grid,
-      .utility-grid,
-      .profile-showcase-grid {
+      .hero-scan,
+      .proof-strip,
+      .trust-rail,
+      .trust-grid {
         grid-template-columns: 1fr;
       }
 
-      .daily-footer,
-      .ledger-strip {
-        grid-template-columns: 1fr;
+      .stage-utility,
+      .stage-admin,
+      .games-grid .shot-secondary,
+      .utility-watch,
+      .utility-alert,
+      .utility-afk,
+      .utility-reminder {
+        grid-column: 1 / -1;
+        grid-row: auto;
       }
 
-      .pillars {
-        grid-template-columns: 1fr;
-        grid-template-areas:
-          "start"
-          "return"
-          "quiet";
-      }
-
-      .hero-meta {
-        grid-template-columns: 1fr;
-      }
-
-      .utility-card.span-2 {
-        grid-column: auto;
-      }
-
-      .showcase-nav {
-        grid-template-columns: 1fr;
+      .support-bar {
+        flex-direction: column;
+        align-items: flex-start;
       }
     }
 
@@ -1977,12 +1015,14 @@
         width: 100%;
       }
 
-      .hero-actions {
+      .hero-actions,
+      .support-links {
         flex-direction: column;
         align-items: stretch;
       }
 
-      .hero-actions .btn {
+      .hero-actions .btn,
+      .support-links .btn {
         width: 100%;
       }
 
@@ -1990,32 +1030,22 @@
         max-width: 9.5ch;
       }
 
-      .support-links {
-        width: 100%;
+      .hero-stage {
+        padding: 14px;
       }
 
-      .support-links .btn {
-        flex: 1 1 100%;
+      .final-actions {
+        min-width: 0;
       }
 
-      .floating-shot {
-        position: static;
-        width: 100%;
-        margin-top: 12px;
-      }
-
-      .shield-line,
-      .flow-item,
-      .activity-row,
-      .profile-line {
-        flex-direction: column;
+      .footer-meta,
+      .footer-group {
+        justify-items: start;
         align-items: flex-start;
       }
 
-      .shield-line span,
-      .flow-item span,
-      .activity-row span {
-        text-align: left;
+      .footer-links {
+        justify-content: flex-start;
       }
     }
 
@@ -2031,808 +1061,667 @@
   </style>
 </head>
 <body>
-  <div class="nav-shell">
-    <div class="container">
-      <nav aria-label="Primary">
-        <a class="brand" href="#top" aria-label="Babblebox home">
-          <img src="logo.jpg" alt="Babblebox logo" />
-          <span>
-            <span class="brand-title">Babblebox</span>
-            <span class="brand-subtitle">Party games, knowledge drops, and quiet utilities for Discord</span>
-          </span>
-        </a>
-        <div class="nav-links">
-          <a href="#product">Product</a>
-          <a href="#showcase">Showcase</a>
-          <a href="#utilities">Utilities</a>
-          <a href="#safety">Safety</a>
-          <a href="help.html">Help</a>
-        </div>
-        <div class="nav-actions">
-          <a class="nav-quiet" href="https://github.com/arno-create/babblebox-bot" target="_blank" rel="noopener noreferrer">GitHub</a>
-          <a class="btn btn-small btn-primary" href="https://discord.com/oauth2/authorize?client_id=1480903089518022739" target="_blank" rel="noopener noreferrer">Invite Babblebox</a>
-        </div>
-      </nav>
+  <div class="site-shell">
+    <div class="nav-shell">
+      <div class="container">
+        <nav aria-label="Primary">
+          <a class="brand" href="#top" aria-label="Babblebox home">
+            <img src="logo.jpg" alt="Babblebox logo" width="48" height="48" />
+            <span>
+              <span class="brand-title">Babblebox</span>
+              <span class="brand-subtitle">Party games, replay loops, and quiet utilities for Discord</span>
+            </span>
+          </a>
+          <div class="nav-links">
+            <a href="#product">Product</a>
+            <a href="#showcase">Showcase</a>
+            <a href="#utilities">Utilities</a>
+            <a href="#safety">Safety</a>
+            <a href="help.html">Help</a>
+          </div>
+          <div class="nav-actions">
+            <a class="nav-quiet" href="https://github.com/arno-create/babblebox-bot" target="_blank" rel="noopener noreferrer">GitHub</a>
+            <a
+              class="btn btn-primary"
+              href="https://discord.com/oauth2/authorize?client_id=1480903089518022739"
+              target="_blank"
+              rel="noopener noreferrer"
+            >Invite Babblebox</a>
+          </div>
+        </nav>
+      </div>
     </div>
-  </div>
 
-  <header id="top" class="hero-wrap">
-    <div class="container">
-      <div class="hero">
+    <header id="top" class="hero-wrap">
+      <div class="container hero">
         <div class="hero-copy">
           <div class="eyebrow">Open-source Discord bot for social servers</div>
-          <h1>Make your Discord feel alive.</h1>
-          <p class="hero-subhead">
-            Babblebox starts game night fast, gives people something to share between sessions, and stays useful when the
-            room goes quiet.
+          <h1>Starts the room fast. Stays useful when it goes quiet.</h1>
+          <p class="hero-lede">
+            Babblebox is a real Discord product for active communities: Only 16, Pattern Hunt, Broken Telephone,
+            Exquisite Corpse, Spyfall, Word Bomb, Question Drops, Daily Arcade, Buddy, <code>/profile</code>, and
+            quieter utility flows built to feel native inside chat.
           </p>
-            <p class="hero-body">
-            Only 16, Pattern Hunt, Question Drops, Daily Arcade, Buddy, <code>/profile</code>, and quiet utilities that
-            stay out of the way.
+          <p class="hero-subhead">
+            Party games when the server is active. Useful tools when it is not. Optional compact safety when admins need
+            it. No economy grind. No command-spam identity crisis. Just a cleaner, lower-noise bot designed with real
+            product thinking.
           </p>
           <div class="hero-actions">
-            <a class="btn btn-primary" href="https://discord.com/oauth2/authorize?client_id=1480903089518022739" target="_blank" rel="noopener noreferrer">Invite Babblebox</a>
-            <a class="btn btn-secondary" href="https://discord.com/servers/inevitable-friendship-1322933864360050688" target="_blank" rel="noopener noreferrer">Join Support Server</a>
+            <a
+              class="btn btn-primary"
+              href="https://discord.com/oauth2/authorize?client_id=1480903089518022739"
+              target="_blank"
+              rel="noopener noreferrer"
+            >Invite Babblebox</a>
+            <a class="btn btn-secondary" href="help.html">Read Help</a>
           </div>
-          <div class="command-ribbon" aria-label="Command highlights">
-            <span class="command-pill"><code>/play</code></span>
-            <span class="command-pill"><code>/drops status</code></span>
-            <span class="command-pill"><code>/daily</code></span>
-            <span class="command-pill"><code>/profile</code></span>
-            <span class="command-pill"><code>/hunt guess</code></span>
+          <div class="hero-links">
+            <a
+              class="link-quiet"
+              href="https://discord.com/servers/inevitable-friendship-1322933864360050688"
+              target="_blank"
+              rel="noopener noreferrer"
+            >Join Support Server</a>
+            <a
+              class="link-quiet"
+              href="https://github.com/arno-create/babblebox-bot"
+              target="_blank"
+              rel="noopener noreferrer"
+            >Browse GitHub</a>
           </div>
-          <div class="hero-quiet-links">
-            <a class="link-quiet" href="https://github.com/arno-create/babblebox-bot" target="_blank" rel="noopener noreferrer">View GitHub</a>
-          </div>
-        </div>
-
-        <div class="hero-stage" aria-label="Babblebox product preview">
-          <article class="hero-card hero-daily">
-            <div class="daily-top">
-              <div class="daily-title">Daily Arcade</div>
-              <div class="daily-note">Public by default</div>
-            </div>
-            <div class="booth-grid">
-              <div class="booth-card shuffle">
-                <div class="booth-tag">Shuffle</div>
-                <div class="booth-clue">T E A L T</div>
-                <p>Same UTC board for everyone.</p>
-              </div>
-              <div class="booth-card emoji">
-                <div class="booth-tag">Emoji</div>
-                <div class="booth-clue">&#128247; &#10024;</div>
-                <p>Shared results stay spoiler-safe.</p>
-              </div>
-              <div class="booth-card signal">
-                <div class="booth-tag">Signal</div>
-                <div class="booth-clue">D P A Z</div>
-                <p>Small attempt limits, no rerolls.</p>
-              </div>
-            </div>
-          </article>
-
-          <div class="hero-support-row">
-            <article class="hero-card hero-identity">
-              <div class="identity-main">
-                <div class="profile-plate">
-                  <div class="mini-label">Buddy &amp; Profile</div>
-                  <div class="profile-row">
-                    <div class="avatar-orb" aria-hidden="true"></div>
-                    <div class="profile-name">
-                      <strong>Made to be shared</strong>
-                      <span>Identity without the economy grind</span>
-                    </div>
-                  </div>
-                  <div class="badge-row">
-                    <span class="badge">Style</span>
-                    <span class="badge">Mood</span>
-                    <span class="badge">Badges</span>
-                  </div>
-                  <div class="profile-surface">
-                    <div class="profile-line">
-                      <strong>Buddy</strong>
-                      <span>Style, mood, title, featured badge</span>
-                    </div>
-                    <div class="profile-line">
-                      <strong>/profile</strong>
-                      <span>Daily, party, and guild knowledge totals together</span>
-                    </div>
-                    <div class="profile-line">
-                      <strong>Question Drops</strong>
-                      <span>Mastery flavor, scholar rank, and guild-first knowledge progress</span>
-                    </div>
-                  </div>
-                </div>
-                <div class="private-vault">
-                  <span>Vault</span>
-                  <div>Private view stays personal and can include live utility context.</div>
-                </div>
-              </div>
+          <div class="hero-scan" aria-label="Babblebox quick proof">
+            <article class="scan-card">
+              <strong>Starts the room</strong>
+              <p><code>/play</code> opens one clean lobby for Broken Telephone, Exquisite Corpse, Spyfall, Word Bomb, Only 16, and Pattern Hunt.</p>
             </article>
-
-            <article class="hero-card hero-moment">
-              <div class="moment-card-shell">
-                <div class="hero-panel-head">
-                  <div>
-                    <div class="moment-link">Moment Card</div>
-                    <h4>Live-linked keepsake</h4>
-                  </div>
-                </div>
-                <div class="message-bubble">
-                  <strong>&quot;Save that one instead of losing it in scrollback.&quot;</strong>
-                  <p>Built from a visible server message and linked back to the original moment.</p>
-                </div>
-                <p class="hero-panel-copy">Not a quote archive, and not a private note dump.</p>
-              </div>
+            <article class="scan-card">
+              <strong>Brings people back</strong>
+              <p><code>/drops status</code>, Daily Arcade, Buddy / Profile / Vault, mastery, and scholar progression keep the bot visible between game nights.</p>
+            </article>
+            <article class="scan-card">
+              <strong>Stays lower-noise</strong>
+              <p>Watch, Later, Capture, <code>/remind</code>, and AFK lean private-first where that matters instead of turning routine utility flows into channel clutter.</p>
             </article>
           </div>
-
-          <figure class="hero-card hero-lobby">
-            <img src="assets/lobby.png" alt="Babblebox party-game lobby in Discord" />
-            <figcaption class="frame-caption">
-              Real lobby flow
-              <span>Open <code>/play</code>, choose a game, and get people moving instead of staring at setup friction.</span>
-            </figcaption>
-          </figure>
-        </div>
-      </div>
-      <div class="hero-meta" aria-label="Babblebox value pillars">
-        <div class="meta-chip">
-          <strong>Starts the room</strong>
-          <span>Broken Telephone, Exquisite Corpse, Spyfall, Word Bomb, Only 16, and Pattern Hunt lead when people are around.</span>
-        </div>
-        <div class="meta-chip">
-          <strong>Brings people back</strong>
-          <span>Question Drops, Daily Arcade, Buddy, and <code>/profile</code> are made to be shared between game nights.</span>
-        </div>
-        <div class="meta-chip">
-          <strong>Stays useful quietly</strong>
-          <span>Watch, Later, Capture, Remind, and AFK stay compact while admins get lightweight safety controls when needed.</span>
-        </div>
-      </div>
-    </div>
-  </header>
-
-  <main>
-    <section id="product" class="section">
-      <div class="container">
-        <div class="section-intro">
-          <div class="section-kicker">Why servers keep Babblebox</div>
-          <h2>It earns a permanent slot across the whole server rhythm.</h2>
-          <p>
-            Babblebox is built around party games, Question Drops, Daily Arcade, Buddy / Profile / Vault, everyday utilities, and optional
-            compact safety instead of trying to be an all-in-one blob.
-          </p>
         </div>
 
-        <div class="pillars">
-          <article class="pillar pillar-start">
-            <div class="section-kicker">Starts the room</div>
-            <h3>Party games that feel like an event, not setup work.</h3>
-            <p>
-              When people are around, Babblebox opens a clean lobby and gets straight to the fun. Broken Telephone,
-              Exquisite Corpse, Spyfall, Word Bomb, Only 16, and Pattern Hunt all fit the same clean entry point.
-            </p>
-            <div class="feature-pill-row">
-              <span class="feature-pill">Broken Telephone</span>
-              <span class="feature-pill">Exquisite Corpse</span>
-              <span class="feature-pill">Spyfall</span>
-              <span class="feature-pill">Word Bomb</span>
-              <span class="feature-pill">Only 16</span>
-              <span class="feature-pill">Pattern Hunt</span>
-            </div>
-            <div class="flow-strip">
-              <div class="flow-item">
-                <strong>Open <code>/play</code></strong>
-                <span>One clean entry point for game night.</span>
+        <div class="hero-stage" aria-label="Babblebox product proof">
+          <article class="stage-card stage-anchor">
+            <div class="stage-label">Real party-game proof</div>
+            <figure class="shot-frame">
+              <div class="shot-media ratio-hero">
+                <img
+                  src="assets/lobby.png"
+                  alt="Babblebox party-game lobby in Discord"
+                  width="786"
+                  height="450"
+                />
               </div>
-              <div class="flow-item">
-                <strong>Choose the room&apos;s mood</strong>
-                <span>Party chaos, interrogation, collaboration, or typing pressure.</span>
-              </div>
-              <div class="flow-item">
-                <strong>When the room is quiet</strong>
-                <span>Babblebox nudges people toward Question Drops, Daily, Buddy, or <code>/profile</code> instead of dead-ending.</span>
-              </div>
-            </div>
+              <figcaption>
+                <strong>One clean lobby matters.</strong>
+                <span>Babblebox starts with a real Discord surface that gets people moving instead of making them parse setup friction.</span>
+              </figcaption>
+            </figure>
           </article>
 
-          <article class="pillar pillar-return">
-            <div class="section-kicker">Brings people back</div>
-            <h3>Question Drops, Daily Arcade, and public-friendly identity keep the bot visible.</h3>
-            <p>
-              People have something clean to open, compare, and share even when only a few are online. Scheduled knowledge
-              drops, arcade booths, and identity cards are part of the product, not an afterthought.
-            </p>
-            <div class="flow-strip">
-              <div class="flow-item">
-                <strong><code>/drops status</code></strong>
-                <span>Guild-first knowledge lane with mastery and scholar progression.</span>
+          <article class="stage-card stage-utility">
+            <div class="stage-label">Quiet utility proof</div>
+            <figure class="shot-frame">
+              <div class="shot-media ratio-square">
+                <img
+                  src="assets/watchalert_example.png"
+                  alt="Babblebox Watch DM alert example"
+                  width="712"
+                  height="409"
+                />
               </div>
-              <div class="flow-item">
-                <strong><code>/daily</code></strong>
-                <span>The same UTC arcade board for the day.</span>
-              </div>
-              <div class="flow-item">
-                <strong><code>/profile</code></strong>
-                <span>Public-friendly identity with knowledge, daily, and party lanes kept separate.</span>
-              </div>
-            </div>
+              <figcaption>
+                <strong>Watch keeps alerts DM-only.</strong>
+                <span>Useful signal lands quietly instead of turning into public surveillance theater or noisy ping bait.</span>
+              </figcaption>
+            </figure>
           </article>
 
-          <article class="pillar pillar-quiet">
-            <div class="section-kicker">Stays useful quietly</div>
-            <h3>The useful side stays low-noise and private-first.</h3>
-            <p>
-              Watch, Later, Capture, Remind, and AFK solve normal Discord moments without turning the bot into a noisy
-              utility dashboard.
-            </p>
-            <div class="utility-pill-row">
-              <span class="utility-pill">Watch</span>
-              <span class="utility-pill">Later</span>
-              <span class="utility-pill">Capture</span>
-              <span class="utility-pill">Remind</span>
-              <span class="utility-pill">AFK</span>
-            </div>
-            <div class="private-banner">
-              <strong>Private-first when it matters</strong>
-              Watch setup, reminders, Later, Capture, Shield config, and other sensitive utility surfaces stay private by default.
-            </div>
+          <article class="stage-card stage-admin">
+            <div class="stage-label">Compact admin proof</div>
+            <figure class="shot-frame">
+              <div class="shot-media ratio-square">
+                <img
+                  src="assets/shield_panel_example.png"
+                  alt="Babblebox Shield admin panel"
+                  width="571"
+                  height="779"
+                />
+              </div>
+              <figcaption>
+                <strong>Optional Shield stays compact.</strong>
+                <span>Admin-facing controls, bounded policy, and a product that feels disciplined instead of bloated.</span>
+              </figcaption>
+            </figure>
           </article>
         </div>
       </div>
-    </section>
+    </header>
 
-    <section id="showcase" class="section">
-      <div class="container">
-        <div class="section-intro">
-          <div class="section-kicker">Showcase</div>
-          <h2>The surfaces that make Babblebox feel like a real product.</h2>
-          <p>
-            The best parts of Babblebox are the ones people actually see: a shared daily board, a public-friendly profile
-            card, a keepsake pulled from a real server message, or a lobby that makes people join instead of scroll past.
-          </p>
+    <main>
+      <section id="product" class="section">
+        <div class="container">
+          <div class="section-head">
+            <div class="section-kicker">Why Babblebox</div>
+            <h2>Built for the full rhythm of a Discord server.</h2>
+            <p class="section-copy">
+              The homepage now has one job: prove that Babblebox is a premium Discord-native product, not a hobby bot
+              with random feature sprawl. These are the four reasons it earns a permanent slot.
+            </p>
+          </div>
+          <div class="proof-strip">
+            <article class="proof-card">
+              <h3>Starts the room fast</h3>
+              <p>Party games when the server is active, with a clean entry point instead of a scattered command maze.</p>
+            </article>
+            <article class="proof-card">
+              <h3>Gives people reasons to come back</h3>
+              <p>Question Drops, Daily Arcade, Buddy, <code>/profile</code>, Vault, mastery, and scholar progress keep the bot worth reopening.</p>
+            </article>
+            <article class="proof-card">
+              <h3>Keeps utilities quieter</h3>
+              <p>Watch, AFK, reminders, Later, and Capture are designed around private-first, lower-noise, bounded behavior.</p>
+            </article>
+            <article class="proof-card">
+              <h3>Feels engineered, not bloated</h3>
+              <p>Open-source credibility, compact optional safety, and a low-overhead product-first design keep the footprint believable.</p>
+            </article>
+          </div>
         </div>
+      </section>
 
-        <div class="showcase-shell">
-          <div class="showcase-nav" role="tablist" aria-label="Babblebox showcase">
-            <button class="showcase-tab active" id="tab-daily" role="tab" aria-selected="true" aria-controls="panel-daily" data-target="daily">
-              <strong>Daily + Drops</strong>
-              <span>Shared UTC booths plus a guild-first knowledge lane with mastery and scholar progression.</span>
-            </button>
-            <button class="showcase-tab" id="tab-profile" role="tab" aria-selected="false" aria-controls="panel-profile" data-target="profile">
-              <strong>Profile and Buddy</strong>
-              <span>Buddy, public-friendly <code>/profile</code>, and personal Vault views without an economy grind.</span>
-            </button>
-            <button class="showcase-tab" id="tab-moment" role="tab" aria-selected="false" aria-controls="panel-moment" data-target="moment">
-              <strong>Moment Cards</strong>
-              <span>Live-linked keepsakes built from visible server messages, not a quote archive.</span>
-            </button>
-            <button class="showcase-tab" id="tab-party" role="tab" aria-selected="false" aria-controls="panel-party" data-target="party">
-              <strong>Game Night</strong>
-              <span>Clean party-game flow that still feels native to Discord.</span>
-            </button>
+      <section id="showcase" class="section">
+        <div class="container">
+          <div class="section-head">
+            <div class="section-kicker">Showcase</div>
+            <h2>Real screenshots. Real product surfaces. Less filler.</h2>
+            <p class="section-copy">
+              Babblebox is strongest when the page proves what it does inside Discord: start game night, keep identity
+              visible, and earn quiet days without bloating the server.
+            </p>
           </div>
 
-          <div>
-            <article class="showcase-panel" id="panel-daily" role="tabpanel" aria-labelledby="tab-daily" data-panel="daily">
-              <div class="panel-grid">
-                <div class="panel-copy">
-                  <div class="section-kicker">Daily Arcade + Question Drops</div>
-                  <h3>Three booths, one guild knowledge lane, and a reason to check back tomorrow.</h3>
-                  <p>
-                    Shuffle, Emoji, and Signal generate the same board for everyone each UTC day. The public card flow
-                    stays spoiler-safe, while Question Drops keep a low-noise shared knowledge lane running in the background.
-                  </p>
-                  <div class="panel-points">
-                    <div class="panel-point">Same UTC board for everyone, easy to compare in-server.</div>
-                    <div class="panel-point">Question Drops add mastery roles, scholar ranks, and guild leaderboards without flooding chat.</div>
-                    <div class="panel-point">Clears, streaks, and knowledge totals feed back into Buddy and <code>/profile</code>.</div>
-                  </div>
-                  <div class="panel-commands">
-                    <span class="command-pill"><code>/drops status</code></span>
-                    <span class="command-pill"><code>/daily</code></span>
-                    <span class="command-pill"><code>/daily share</code></span>
-                  </div>
+          <div class="story-stack">
+            <article class="story">
+              <div class="story-copy">
+                <div class="section-kicker">Game night</div>
+                <h3>Starts the room fast and keeps the night moving.</h3>
+                <p>
+                  Open <code>/play</code> once and Babblebox handles Broken Telephone, Exquisite Corpse, Spyfall, Word
+                  Bomb, Only 16, and Pattern Hunt from one polished lobby. Only 16 stays readable under pressure, Pattern
+                  Hunt stays mysterious, and the whole flow still feels native to Discord instead of bolted on.
+                </p>
+                <p>
+                  Pattern Hunt coders need server DMs open before the round starts. That detail belongs on the page
+                  because this site is supposed to sell the real product, not smooth over it with abstract marketing.
+                </p>
+                <div class="story-points">
+                  <article class="story-point">
+                    <h4>One entry point, six replayable games</h4>
+                    <p>Good party bots remove setup drag. Babblebox puts the whole live-room lane behind one clean lobby instead of spreading it across unrelated commands.</p>
+                  </article>
+                  <article class="story-point">
+                    <h4>Replay value over novelty filler</h4>
+                    <p>Only 16 and Pattern Hunt add real differentiation, while Broken Telephone, Exquisite Corpse, Spyfall, and Word Bomb keep the room accessible.</p>
+                  </article>
+                  <article class="story-point">
+                    <h4>Discord-native by design</h4>
+                    <p>The product is meant to feel like it belongs in chat: readable, shareable, and quick to scan from desktop or mobile.</p>
+                  </article>
                 </div>
-                <div class="visual-card">
-                  <div class="window-chrome">
-                    <div class="window-dots" aria-hidden="true">
-                      <span></span>
-                      <span></span>
-                      <span></span>
-                    </div>
-                    <div class="window-label">Today in Babblebox</div>
-                  </div>
-                  <div class="board-head">
-                    <div>
-                      <span class="mini-label">Same UTC board</span>
-                      <h4>Daily Arcade board</h4>
-                    </div>
-                    <div class="quiet-badge">Public by default</div>
-                  </div>
-                  <div class="mini-booth-grid">
-                    <div class="mini-booth">
-                      <strong>Shuffle</strong>
-                      <span class="clue" style="color: var(--amber);">T E A L T</span>
-                      <p>Quick to open, easy to compare, and still tied to the same daily board.</p>
-                    </div>
-                    <div class="mini-booth">
-                      <strong>Emoji</strong>
-                      <span class="clue" style="color: var(--mint);">&#128247; &#10024;</span>
-                      <p>Public cards stay spoiler-safe and do not post failed guesses in-channel.</p>
-                    </div>
-                    <div class="mini-booth">
-                      <strong>Signal</strong>
-                      <span class="clue" style="color: var(--cyan);">D P A Z</span>
-                      <p>Same UTC booth for everyone today, with small attempt limits and no rerolls.</p>
-                    </div>
-                  </div>
-                  <div class="ledger-strip">
-                    <div class="ledger-card">
-                      <span class="mini-label">Share</span>
-                      <h4>Clean result cards</h4>
-                      <p>Share a completed booth cleanly without revealing failed guesses in-channel.</p>
-                      <div class="mini-command"><code>/daily share</code></div>
-                    </div>
-                    <div class="activity-card">
-                      <span class="mini-label">Profile tie-in</span>
-                      <h4>Daily and knowledge carry over</h4>
-                      <div class="activity-rows">
-                        <div class="activity-row">
-                          <strong>Daily Arcade</strong>
-                          <span>streaks, bests, and lifetime clears</span>
-                        </div>
-                        <div class="activity-row">
-                          <strong>Question Drops</strong>
-                          <span>guild knowledge, mastery flavor, and scholar rank</span>
-                        </div>
-                        <div class="activity-row">
-                          <strong>Profile</strong>
-                          <span>same identity layer, no split economy system</span>
-                        </div>
-                      </div>
-                    </div>
-                  </div>
+                <div class="pill-row" aria-label="Babblebox party games">
+                  <span class="pill">Broken Telephone</span>
+                  <span class="pill">Exquisite Corpse</span>
+                  <span class="pill">Spyfall</span>
+                  <span class="pill">Word Bomb</span>
+                  <span class="pill">Only 16</span>
+                  <span class="pill">Pattern Hunt</span>
                 </div>
+              </div>
+
+              <div class="games-grid">
+                <figure class="shot-frame shot-primary">
+                  <div class="shot-media ratio-hero">
+                    <img
+                      src="assets/lobby.png"
+                      alt="Babblebox party-game lobby screen"
+                      width="786"
+                      height="450"
+                      loading="lazy"
+                      decoding="async"
+                    />
+                  </div>
+                  <figcaption>
+                    <strong>The first thing people see is real product proof.</strong>
+                    <span>A lobby that feels deliberate is part of the conversion story, not a small implementation detail.</span>
+                  </figcaption>
+                </figure>
+                <figure class="shot-frame shot-secondary">
+                  <div class="shot-media ratio-game">
+                    <img
+                      src="assets/wordbomb_gameplay.png"
+                      alt="Babblebox Word Bomb gameplay"
+                      width="820"
+                      height="711"
+                      loading="lazy"
+                      decoding="async"
+                    />
+                  </div>
+                  <figcaption>
+                    <strong>Word Bomb stays readable at speed.</strong>
+                    <span>Gameplay surfaces need to keep the room moving, not bury the fun in heavy chrome.</span>
+                  </figcaption>
+                </figure>
+                <figure class="shot-frame shot-secondary">
+                  <div class="shot-media ratio-game">
+                    <img
+                      src="assets/spyfall_gameplay.png"
+                      alt="Babblebox Spyfall gameplay"
+                      width="666"
+                      height="701"
+                      loading="lazy"
+                      decoding="async"
+                    />
+                  </div>
+                  <figcaption>
+                    <strong>Spyfall still feels like Discord, not a web app pasted into chat.</strong>
+                    <span>That product discipline is part of why Babblebox feels sharper than a generic multipurpose bot.</span>
+                  </figcaption>
+                </figure>
               </div>
             </article>
 
-            <article class="showcase-panel" id="panel-profile" role="tabpanel" aria-labelledby="tab-profile" data-panel="profile" hidden>
-              <div class="panel-grid">
-                <div class="panel-copy">
-                  <div class="section-kicker">Profile and Buddy</div>
-                  <h3>Public-friendly identity without becoming an economy grind.</h3>
-                  <p>
-                    Buddy gives each user a lightweight companion, <code>/profile</code> is public-friendly by default,
-                    and <code>/vault</code> keeps the more personal snapshot private while the knowledge lane folds in cleanly.
-                  </p>
-                  <div class="panel-points">
-                    <div class="panel-point">Buddy is one lightweight companion per user, cosmetic-first and tied to real use.</div>
-                    <div class="panel-point"><code>/profile</code> is designed to be public-friendly and clean in-channel.</div>
-                    <div class="panel-point">Vault stays personal while pulling in utility context without exposing private settings.</div>
+            <article class="story">
+              <div class="return-media">
+                <figure class="shot-frame">
+                  <div class="shot-media ratio-wide contain">
+                    <img
+                      src="assets/buddy_profile_example.png"
+                      alt="Babblebox Buddy and profile example"
+                      width="705"
+                      height="631"
+                      loading="lazy"
+                      decoding="async"
+                    />
                   </div>
-                  <div class="panel-commands">
-                    <span class="command-pill"><code>/buddy</code></span>
-                    <span class="command-pill"><code>/profile</code></span>
-                  </div>
-                </div>
-                <div class="visual-card">
-                  <div class="profile-showcase">
-                    <div class="profile-showcase-main">
-                      <span class="mini-label">Public-friendly by default</span>
-                      <h4>A clean in-channel profile</h4>
-                      <div class="profile-row" style="margin-top: 12px;">
-                        <div class="avatar-orb" aria-hidden="true"></div>
-                        <div class="profile-name">
-                          <strong>Buddy and profile</strong>
-                        <span>daily, knowledge, party, and buddy identity in one clean surface</span>
-                        </div>
-                      </div>
-                      <div class="badge-row">
-                        <span class="badge">Featured title</span>
-                        <span class="badge">Featured badge</span>
-                        <span class="badge">Buddy mood</span>
-                      </div>
-                      <div class="profile-surface">
-                        <div class="profile-line">
-                          <strong>Buddy</strong>
-                          <span>species, style, mood, title, and badges</span>
-                        </div>
-                        <div class="profile-line">
-                          <strong>Daily Arcade</strong>
-                          <span>streak, best, and lifetime clears</span>
-                        </div>
-                        <div class="profile-line">
-                          <strong>Question Drops</strong>
-                          <span>guild-first knowledge, mastery flavor, and scholar rank</span>
-                        </div>
-                        <div class="profile-line">
-                          <strong>Party games</strong>
-                          <span>rounds and highlights without a giant stats dump</span>
-                        </div>
-                      </div>
-                    </div>
-                    <div class="profile-showcase-grid">
-                      <div class="profile-showcase-side">
-                        <span class="mini-label">Buddy</span>
-                        <h4>Lightweight charm</h4>
-                        <p>One companion per user, cosmetic-first, with daily XP caps so it does not turn grindy.</p>
-                      </div>
-                      <div class="profile-showcase-side">
-                        <span class="mini-label">Vault</span>
-                        <h4>Private by design</h4>
-                        <p>The personal view can include live utility context without pushing private settings into the public card.</p>
-                      </div>
-                    </div>
-                  </div>
+                  <figcaption>
+                    <strong>Buddy / Profile / Vault make the bot visible between sessions.</strong>
+                    <span>Identity stays public-friendly where it should, while the more personal lane still has a quieter place to live.</span>
+                  </figcaption>
+                </figure>
+                <div class="return-notes">
+                  <article class="return-note">
+                    <strong>Question Drops</strong>
+                    <p>A guild-first knowledge lane that stays public-friendly, compact, and worth checking back for.</p>
+                  </article>
+                  <article class="return-note">
+                    <strong>Daily Arcade</strong>
+                    <p>Three shared UTC booths keep the product active even when there is no full room ready for party games.</p>
+                  </article>
+                  <article class="return-note">
+                    <strong>Mastery and scholar</strong>
+                    <p>Progression is visible, structured, and folded into the identity layer instead of becoming a second grind system.</p>
+                  </article>
                 </div>
               </div>
-            </article>
 
-            <article class="showcase-panel" id="panel-moment" role="tabpanel" aria-labelledby="tab-moment" data-panel="moment" hidden>
-              <div class="panel-grid">
-                <div class="panel-copy">
-                  <div class="section-kicker">Moment Cards</div>
-                  <h3>Keepsakes from visible server messages, not a quote feed.</h3>
-                  <p>
-                    Moment Cards turn a real server message or small exchange into something memorable without becoming a
-                    stored archive. They stay linked to the original context, which keeps them honest and lightweight.
-                  </p>
-                  <div class="panel-points">
-                    <div class="panel-point">Built from a reply, a message link, or a recent server moment.</div>
-                    <div class="panel-point">Live-linked back to the original message instead of becoming a quote database.</div>
-                    <div class="panel-point">Shareable in-channel, but still built live from server messages.</div>
-                  </div>
-                  <div class="panel-commands">
-                    <span class="command-pill"><code>/moment create</code></span>
-                    <span class="command-pill"><code>/moment from-reply</code></span>
-                  </div>
+              <div class="story-copy">
+                <div class="section-kicker">Return systems</div>
+                <h3>Gives people reasons to come back when the room is half full.</h3>
+                <p>
+                  This is where Babblebox stops feeling like a one-night party bot. Question Drops, Daily Arcade, Buddy,
+                  <code>/profile</code>, and Vault turn the product into something people revisit, compare, and show off
+                  without falling into an economy grind.
+                </p>
+                <p>
+                  <code>/drops status</code> anchors the knowledge lane. Daily Arcade keeps a consistent daily ritual.
+                  Buddy, mastery, and scholar progress make that return loop visible in a surface that still feels clean
+                  in a real channel.
+                </p>
+                <div class="story-points">
+                  <article class="story-point">
+                    <h4>Question Drops stay separate and legible</h4>
+                    <p>That lane adds shared knowledge, mastery flavor, and scholar progression without turning the server into a spammy trivia cannon.</p>
+                  </article>
+                  <article class="story-point">
+                    <h4>Buddy and profile feel showable</h4>
+                    <p>The identity layer is designed to be public-friendly, not an overloaded admin slab or a lootbox treadmill.</p>
+                  </article>
+                  <article class="story-point">
+                    <h4>Vault keeps the quieter lane separate</h4>
+                    <p>Babblebox keeps personal context and public-facing identity distinct, which makes the overall product feel better designed.</p>
+                  </article>
                 </div>
-                <div class="visual-card">
-                  <div class="moment-showcase">
-                    <div class="thread-card">
-                      <span class="mini-label">Visible message</span>
-                      <h4>Start from a real moment</h4>
-                      <div class="thread-stack">
-                        <div class="thread-bubble">That round was pure chaos.</div>
-                        <div class="thread-bubble">Save this one. We are running it back tomorrow.</div>
-                      </div>
-                    </div>
-                    <div class="link-card">
-                      <strong>Live-linked</strong>
-                      <p>Moment Cards stay connected to the original message and channel scene that made them worth saving.</p>
-                    </div>
-                    <div class="keepsake-card">
-                      <span class="mini-label">Moment Card</span>
-                      <h4>A keepsake, not an archive</h4>
-                      <blockquote>
-                        &quot;Save this one. We are running it back tomorrow.&quot;
-                      </blockquote>
-                    </div>
-                  </div>
-                </div>
-              </div>
-            </article>
-
-            <article class="showcase-panel" id="panel-party" role="tabpanel" aria-labelledby="tab-party" data-panel="party" hidden>
-              <div class="panel-grid">
-                <div class="panel-copy">
-                  <div class="section-kicker">Game Night</div>
-                  <h3>When the room fills up, Babblebox knows what to do.</h3>
-                  <p>
-                    Open <code>/play</code>, choose a game, and Babblebox handles the lobby cleanly. Only 16 stays readable,
-                    Pattern Hunt stays mysterious, and quiet rooms still have somewhere to go next. Pattern Hunt coders need server DMs open before the round starts.
-                  </p>
-                  <div class="panel-points">
-                    <div class="panel-point">One clear party-game entry point instead of a command maze.</div>
-                    <div class="panel-point">Broken Telephone, Exquisite Corpse, Spyfall, Word Bomb, Only 16, and Pattern Hunt stay in one polished lobby.</div>
-                    <div class="panel-point">Real Discord surfaces that still feel polished and deliberate.</div>
-                  </div>
-                  <div class="panel-commands">
-                    <span class="command-pill"><code>/play</code></span>
-                  </div>
-                </div>
-                <div class="visual-card">
-                  <div class="party-stage">
-                    <div class="shot-frame">
-                      <img src="assets/lobby.png" alt="Babblebox party-game lobby in Discord" />
-                      <div class="shot-caption">A clean lobby matters. It is the first thing people see before the night starts moving.</div>
-                    </div>
-                    <div class="game-chip-row">
-                      <span class="game-chip">Broken Telephone</span>
-                      <span class="game-chip">Exquisite Corpse</span>
-                      <span class="game-chip">Spyfall</span>
-                      <span class="game-chip">Word Bomb</span>
-                      <span class="game-chip">Only 16</span>
-                      <span class="game-chip">Pattern Hunt</span>
-                    </div>
-                    <div class="floating-shot">
-                      <img src="assets/wordbomb_gameplay.png" alt="Babblebox Word Bomb gameplay in Discord" />
-                      <span>Word Bomb stays fast, readable, and social once the round begins.</span>
-                    </div>
-                  </div>
+                <div class="pill-row" aria-label="Babblebox retention features">
+                  <span class="pill"><code>/drops status</code></span>
+                  <span class="pill"><code>/daily</code></span>
+                  <span class="pill"><code>/buddy</code></span>
+                  <span class="pill"><code>/profile</code></span>
+                  <span class="pill"><code>/vault</code></span>
                 </div>
               </div>
             </article>
           </div>
         </div>
-      </div>
-    </section>
+      </section>
 
-    <section id="utilities" class="section">
-      <div class="container">
-        <div class="utility-shell">
-          <div class="utility-lead">
-            <div class="section-kicker">Utilities</div>
-            <h2>Useful without turning into bot clutter.</h2>
-            <p>
-              Babblebox earns its slot even when nobody wants to start a game. The utility side is built for normal Discord
-              moments, with private-first flows where that matters and a lower-noise feel than the usual general bot grab bag.
+      <section id="utilities" class="section section-utilities">
+        <div class="container">
+          <div class="section-head">
+            <div class="section-kicker">Safe utilities</div>
+            <h2>Useful in the quiet hours, with lower-noise defaults and tighter boundaries.</h2>
+            <p class="section-copy">
+              The utility side was undersold before. This is where Babblebox differentiates itself from bloated Discord
+              bots: sensitive setup stays private-first, Watch stays DM-only, reminders do not spill into chat, AFK stays
+              clear about time, and the overall design avoids a lot of the obvious spam-prone public utility patterns.
             </p>
-            <div class="utility-note">
-              <strong>Sensitive surfaces stay private-first.</strong>
-              Watch setup, reminders, Later, Capture, Shield config, and other personal utility flows stay out of the public
-              channel by default.
-            </div>
           </div>
 
-          <div class="utility-grid">
-            <article class="utility-card span-2">
-              <div class="section-kicker">Watch</div>
-              <h3>DM-only signal for mentions, replies, and keywords.</h3>
-              <p>
-                Watch keeps up with the server without turning into a public alarm system. Mentions, replies, and scoped
-                keywords stay compact, deduped, and DM-only on delivery.
-              </p>
-              <div class="utility-pill-row">
-                <span class="utility-pill">Mentions</span>
-                <span class="utility-pill">Replies</span>
-                <span class="utility-pill">Keywords</span>
-                <span class="utility-pill">Ignore filters</span>
-                <span class="utility-pill">DM delivery</span>
+          <div class="utility-shell">
+            <div class="utility-copy">
+              <div class="utility-callout">
+                <strong>Why the utility side feels safer and cleaner</strong>
+                <p>
+                  Babblebox is not pretending to be a security product here. The claim is simpler and more credible:
+                  these flows are built to stay bounded, quieter, and less abuse-prone than the average Discord utility
+                  bot that turns every reminder, watchlist, and setup state into public command chatter.
+                </p>
               </div>
-            </article>
-
-            <article class="utility-card">
-              <div class="section-kicker">Later, Capture, Remind</div>
-              <h3>Pick a channel back up without archiving the world.</h3>
-              <p>
-                Save a reading marker, DM yourself recent context, or set a one-time reminder without turning Babblebox
-                into a giant archive or inbox clone.
-              </p>
-              <div class="utility-pill-row">
-                <span class="utility-pill">Jump back cleanly</span>
-                <span class="utility-pill">Private snapshots</span>
-                <span class="utility-pill">One-time reminders</span>
+              <div class="story-points utility-points">
+                <article class="story-point">
+                  <h4>Watch is DM-only by design</h4>
+                  <p>Mentions, replies, and scoped keywords deliver privately. Bots, webhooks, and self-messages are ignored, and dedupe plus cooldown protection stay in place.</p>
+                </article>
+                <article class="story-point">
+                  <h4>Reminders stay private-first</h4>
+                  <p><code>/remind</code> setup and failure states stay out of the channel, which reduces spam risk and avoids turning routine utility into public housekeeping noise.</p>
+                </article>
+                <article class="story-point">
+                  <h4>AFK stays clear about time</h4>
+                  <p><code>/afk</code> supports quick durations, scheduled starts, recurring schedules, and saved timezones so absence windows feel deliberate instead of messy.</p>
+                </article>
+                <article class="story-point">
+                  <h4>Later and Capture stay bounded</h4>
+                  <p>Save a place or DM yourself useful context without turning the bot into an archive, an inbox clone, or a public reminder loophole.</p>
+                </article>
               </div>
-            </article>
-
-            <article class="utility-card afk-card">
-              <div class="section-kicker">AFK</div>
-              <h3>Clear status windows for work, sleep, study, or a short break.</h3>
-              <p>
-                AFK stays clear about time and return windows, with quick durations, scheduled starts, recurring
-                local-time schedules, and saved timezones.
-              </p>
-              <div class="utility-pill-row">
-                <span class="utility-pill">Quick durations</span>
-                <span class="utility-pill">Scheduled starts</span>
-                <span class="utility-pill">Recurring schedules</span>
-                <span class="utility-pill">Timezone-aware</span>
-              </div>
-            </article>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <section id="safety" class="section">
-      <div class="container">
-        <div class="owner-shell">
-          <div class="owner-copy">
-            <div class="section-kicker">For server owners</div>
-            <h2>If you need moderation help, Babblebox keeps it compact.</h2>
-            <p>
-              Shield is optional, conservative, and admin-facing. It sits alongside compact admin lifecycle helpers for
-              follow-up roles and verification cleanup, not as a sprawling moderation suite.
-            </p>
-            <p>
-              It covers likely privacy leaks, promo or invite spam, and scam or malicious-link bait. AI assist stays off
-              by default, only reviews messages local Shield already flagged, and is currently limited to the support server.
-            </p>
-            <div class="panel-commands" style="margin-top: 20px;">
-              <span class="command-pill"><code>/shield panel</code></span>
-              <span class="command-pill"><code>/admin panel</code></span>
-            </div>
-          </div>
-
-          <div class="shield-stage">
-            <div class="shield-top">
-              <div>
-                <span class="mini-label">Shield</span>
-                <h4>Compact optional safety</h4>
-              </div>
-              <div class="status-chip">Off by default</div>
-            </div>
-            <div class="module-grid">
-              <div class="module-card">
-                <strong>Privacy leaks</strong>
-                <p>Catch likely exposed personal info without turning into a giant archive.</p>
-              </div>
-              <div class="module-card">
-                <strong>Promo and invites</strong>
-                <p>Keep common spam pressure under control with bounded rules and allowlists.</p>
-              </div>
-              <div class="module-card">
-                <strong>Scam heuristics</strong>
-                <p>Compact heuristic coverage for obvious bad patterns without promising magic.</p>
+              <div class="pill-row" aria-label="Babblebox utility commands">
+                <span class="pill">Watch</span>
+                <span class="pill">Later</span>
+                <span class="pill">Capture</span>
+                <span class="pill">Remind</span>
+                <span class="pill">AFK</span>
               </div>
             </div>
-            <div class="shield-lines">
-              <div class="shield-line">
-                <strong>Lifecycle helpers</strong>
-                <span>Optional <code>/admin panel</code> covers follow-up roles and verification cleanup.</span>
-              </div>
-              <div class="shield-line">
-                <strong>Log-first behavior</strong>
-                <span>Moderator context goes where admins need it instead of a giant moderation warehouse.</span>
-              </div>
-              <div class="shield-line">
-                <strong>AI second pass</strong>
-                <span>Off by default, second-pass only, and never the main moderation hook.</span>
-              </div>
+
+            <div class="utility-collage">
+              <figure class="shot-frame utility-watch">
+                <div class="shot-media ratio-tall contain">
+                  <img
+                    src="assets/watch_settings.png"
+                    alt="Babblebox Watch settings screen"
+                    width="682"
+                    height="727"
+                    loading="lazy"
+                    decoding="async"
+                  />
+                </div>
+                <figcaption>
+                  <strong>Watch settings prove the product discipline.</strong>
+                  <span>Mentions, replies, scoped keywords, ignore lists, and recent counts stay together in one DM-oriented surface.</span>
+                </figcaption>
+              </figure>
+
+              <figure class="shot-frame utility-alert">
+                <div class="shot-media ratio-wide contain">
+                  <img
+                    src="assets/watchalert_example.png"
+                    alt="Babblebox Watch alert example"
+                    width="712"
+                    height="409"
+                    loading="lazy"
+                    decoding="async"
+                  />
+                </div>
+                <figcaption>
+                  <strong>Delivery stays private.</strong>
+                  <span>Quiet utility value lands in DMs instead of broadcasting the alert system back into the server.</span>
+                </figcaption>
+              </figure>
+
+              <figure class="shot-frame utility-afk">
+                <div class="shot-media ratio-wide contain">
+                  <img
+                    src="assets/afk_command.png"
+                    alt="Babblebox AFK command example"
+                    width="1030"
+                    height="444"
+                    loading="lazy"
+                    decoding="async"
+                  />
+                </div>
+                <figcaption>
+                  <strong>AFK is explicit, quick, and timezone-aware.</strong>
+                  <span>Work, sleep, study, breaks, and recurring windows stay readable without forcing users to micromanage status messages.</span>
+                </figcaption>
+              </figure>
+
+              <figure class="shot-frame utility-reminder">
+                <div class="shot-media ratio-ultrawide contain">
+                  <img
+                    src="assets/reminder_command.png"
+                    alt="Babblebox reminder command example"
+                    width="1040"
+                    height="246"
+                    loading="lazy"
+                    decoding="async"
+                  />
+                </div>
+                <figcaption>
+                  <strong>Reminder flows stay compact.</strong>
+                  <span>Useful without needing a second productivity bot, and intentionally less noisy than public reminder spam.</span>
+                </figcaption>
+              </figure>
             </div>
           </div>
         </div>
-      </div>
-    </section>
+      </section>
 
-    <section id="privacy" class="section">
-      <div class="container">
-        <div class="trust-shell">
-          <div class="trust-header">
-            <div>
-              <div class="section-kicker">Privacy and discipline</div>
-              <h2>Built to stay bounded.</h2>
-            </div>
-            <p>
-              Babblebox is intentionally compact. No economy grind. No lootboxes. No media/blob archive. No giant
-              moderation event warehouse. The goal is a bot that earns its place every day without sprawling out of control.
+      <section id="safety" class="section">
+        <div class="container">
+          <div class="section-head">
+            <div class="section-kicker">Admins and trust</div>
+            <h2>Optional compact safety, not moderation sprawl.</h2>
+            <p class="section-copy">
+              Babblebox utilities are not the only disciplined part of the product. Shield and admin helpers stay compact,
+              conservative, and admin-facing: useful when a server needs them, but never positioned as a giant all-seeing
+              moderation suite.
             </p>
           </div>
+
+          <div class="admin-media">
+            <figure class="shot-frame">
+              <div class="shot-media ratio-admin contain">
+                <img
+                  src="assets/shield_panel_example.png"
+                  alt="Babblebox Shield panel"
+                  width="571"
+                  height="779"
+                  loading="lazy"
+                  decoding="async"
+                />
+              </div>
+              <figcaption>
+                <strong><code>/shield panel</code> keeps moderation control compact.</strong>
+                <span>Optional Shield is off by default, log-first by default, and built around scoped rules, filters, and allowlists.</span>
+              </figcaption>
+            </figure>
+
+            <figure class="shot-frame">
+              <div class="shot-media ratio-admin contain">
+                <img
+                  src="assets/admin_panel_example.png"
+                  alt="Babblebox admin lifecycle panel"
+                  width="615"
+                  height="756"
+                  loading="lazy"
+                  decoding="async"
+                />
+              </div>
+              <figcaption>
+                <strong><code>/admin panel</code> proves the product is thinking beyond the gimmick layer.</strong>
+                <span>Verification cleanup and follow-up helpers stay lightweight instead of turning into a sprawling ops dashboard.</span>
+              </figcaption>
+            </figure>
+          </div>
+
+          <div class="trust-rail">
+            <article>
+              <strong>Off by default</strong>
+              <p>Shield is optional. A safe starting point is log-first policy with stronger actions reserved for clearer matches.</p>
+            </article>
+            <article>
+              <strong>Scoped and allowlist-aware</strong>
+              <p>Filters, trusted roles, included scope, excluded scope, and allowlists keep the system bounded and server-specific.</p>
+            </article>
+            <article>
+              <strong>AI stays second-pass only</strong>
+              <p>Optional AI review only sees already-flagged messages, stays admin-only, and never becomes the primary punishment engine.</p>
+            </article>
+            <article>
+              <strong>Compact by philosophy</strong>
+              <p>Configured log delivery, short-lived state, and a refusal to build giant archives make the whole safety layer easier to trust.</p>
+            </article>
+          </div>
+        </div>
+      </section>
+
+      <section id="privacy" class="section">
+        <div class="container">
+          <div class="section-head">
+            <div class="section-kicker">Open-source discipline</div>
+            <h2>Built to stay bounded, readable, and believable.</h2>
+            <p class="section-copy">
+              Babblebox has a product-first design and a constrained-hosting mindset. Public where sharing helps. Private-first
+              where setup or alerts should stay personal. Open-source where trust benefits from inspection instead of vague promises.
+            </p>
+          </div>
+
           <div class="trust-grid">
             <article class="trust-card">
-              <h3>Five clear lanes</h3>
-              <p>Party games, Question Drops, everyday utilities, Daily Arcade, Buddy / Profile / Vault, and optional compact safety stay distinct.</p>
+              <h3>Public where it helps</h3>
+              <p>Party lobbies, Daily Arcade cards, Buddy, and <code>/profile</code> are designed to look comfortable in a real Discord channel.</p>
             </article>
             <article class="trust-card">
               <h3>Private-first where it matters</h3>
-              <p>Watch, reminders, Later, Capture, Shield config, and other sensitive utility surfaces stay private by default.</p>
+              <p>Watch, reminders, Later, Capture, Shield config, and other sensitive utility flows stay private-first instead of channel-first.</p>
             </article>
             <article class="trust-card">
-              <h3>Moment Cards stay honest</h3>
-              <p>They are live-linked keepsakes built from visible server messages, not a stored quote-feed archive.</p>
+              <h3>Compact storage philosophy</h3>
+              <p>No giant media archive, no deleted-message warehouse, no feature set that requires pretending the bot is a platform of its own.</p>
+            </article>
+            <article class="trust-card">
+              <h3>Open-source credibility</h3>
+              <p>Read the help page, inspect the GitHub repo, check the privacy policy, and decide with actual product evidence in front of you.</p>
             </article>
           </div>
+
           <div class="support-bar">
-            <p>
-              Babblebox is open source and lives alongside the inevitable friendship support server for issues, feedback,
-              and server setup help.
-            </p>
-            <div class="support-links">
-              <a class="btn btn-secondary" href="https://discord.com/servers/inevitable-friendship-1322933864360050688" target="_blank" rel="noopener noreferrer">Join Support Server</a>
-              <a class="link-quiet" href="https://github.com/arno-create/babblebox-bot" target="_blank" rel="noopener noreferrer">Browse GitHub</a>
+            <div>
+              <strong>Need the details before you invite it?</strong>
+              <p>Babblebox is easier to trust because the supporting pages are specific: help for actual command lanes, privacy for bounded storage and private-first behavior, and terms for service boundaries.</p>
             </div>
-          </div>
-        </div>
-      </div>
-    </section>
-
-    <section id="invite" class="section">
-      <div class="container">
-        <div class="final-cta">
-          <div>
-            <div class="section-kicker">Invite Babblebox</div>
-            <h2>One bot that starts the room and still earns quiet days.</h2>
-            <p>
-              If your server wants party energy, clean return surfaces, and everyday usefulness without economy spam or
-              all-purpose bot clutter, Babblebox is built for that exact mix.
-            </p>
-          </div>
-          <div class="final-actions">
-            <a class="btn btn-primary" href="https://discord.com/oauth2/authorize?client_id=1480903089518022739" target="_blank" rel="noopener noreferrer">Invite Babblebox</a>
-            <a class="btn btn-secondary" href="https://discord.com/servers/inevitable-friendship-1322933864360050688" target="_blank" rel="noopener noreferrer">Join Support Server</a>
-            <a class="link-quiet" href="https://github.com/arno-create/babblebox-bot" target="_blank" rel="noopener noreferrer">View GitHub</a>
-          </div>
-        </div>
-      </div>
-    </section>
-  </main>
-
-  <footer>
-    <div class="container">
-      <div class="footer-row">
-        <div>
-          <strong>Babblebox</strong>
-          <div>Open-source Discord bot by Arno.</div>
-        </div>
-        <div class="footer-meta">
-          <div class="footer-group">
-            <div class="footer-label">Links</div>
-            <div class="footer-links">
-              <a href="https://discord.com/oauth2/authorize?client_id=1480903089518022739" target="_blank" rel="noopener noreferrer">Invite</a>
-              <a href="https://discord.com/servers/inevitable-friendship-1322933864360050688" target="_blank" rel="noopener noreferrer">Support Server</a>
-              <a href="https://github.com/arno-create/babblebox-bot" target="_blank" rel="noopener noreferrer">GitHub</a>
-              <a href="help.html">Help</a>
+            <div class="support-links">
+              <a class="btn btn-secondary" href="help.html">Read Help</a>
               <a href="privacy.html">Privacy Policy</a>
               <a href="terms.html">Terms of Service</a>
-              <a href="https://arno-create.github.io/Bdayblaze/" target="_blank" rel="noopener noreferrer">Bdayzblaze</a>
+              <a
+                href="https://github.com/arno-create/babblebox-bot"
+                target="_blank"
+                rel="noopener noreferrer"
+              >GitHub</a>
             </div>
           </div>
-          <div class="footer-group">
-            <div class="footer-label">Social</div>
-            <div class="footer-links">
-              <a href="https://x.com/arno__if" target="_blank" rel="noopener noreferrer">X</a>
-              <a href="https://instagram.com/arno.if" target="_blank" rel="noopener noreferrer">Instagram</a>
+        </div>
+      </section>
+
+      <section id="invite" class="section section-final">
+        <div class="container">
+          <div class="final-cta">
+            <div>
+              <div class="section-kicker">Invite Babblebox</div>
+              <h2>A premium Discord-native bot for busy nights and quiet days.</h2>
+              <p>
+                If your server wants replayable party games, real return value, quieter utilities, and compact optional
+                safety without feature sprawl, Babblebox is built for that exact mix.
+              </p>
+            </div>
+            <div class="final-actions">
+              <a
+                class="btn btn-primary"
+                href="https://discord.com/oauth2/authorize?client_id=1480903089518022739"
+                target="_blank"
+                rel="noopener noreferrer"
+              >Invite Babblebox</a>
+              <a
+                class="btn btn-secondary"
+                href="https://discord.com/servers/inevitable-friendship-1322933864360050688"
+                target="_blank"
+                rel="noopener noreferrer"
+              >Join Support Server</a>
+              <a
+                class="link-quiet"
+                href="https://github.com/arno-create/babblebox-bot"
+                target="_blank"
+                rel="noopener noreferrer"
+              >View GitHub</a>
+            </div>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <div class="container">
+        <div class="footer-row">
+          <div>
+            <strong>Babblebox</strong>
+            <div>Open-source Discord bot by Arno.</div>
+          </div>
+          <div class="footer-meta">
+            <div class="footer-group">
+              <div class="footer-label">Links</div>
+              <div class="footer-links">
+                <a
+                  href="https://discord.com/oauth2/authorize?client_id=1480903089518022739"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >Invite</a>
+                <a
+                  href="https://discord.com/servers/inevitable-friendship-1322933864360050688"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >Support Server</a>
+                <a
+                  href="https://github.com/arno-create/babblebox-bot"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >GitHub</a>
+                <a href="help.html">Help</a>
+                <a href="privacy.html">Privacy Policy</a>
+                <a href="terms.html">Terms of Service</a>
+              </div>
             </div>
           </div>
         </div>
       </div>
-    </div>
-  </footer>
-
-  <script>
-    (function () {
-      var tabs = Array.prototype.slice.call(document.querySelectorAll(".showcase-tab"));
-      var panels = Array.prototype.slice.call(document.querySelectorAll(".showcase-panel"));
-
-      if (!tabs.length || !panels.length) {
-        return;
-      }
-
-      function activate(target) {
-        tabs.forEach(function (tab) {
-          var isActive = tab.getAttribute("data-target") === target;
-          tab.classList.toggle("active", isActive);
-          tab.setAttribute("aria-selected", isActive ? "true" : "false");
-          tab.tabIndex = isActive ? 0 : -1;
-        });
-
-        panels.forEach(function (panel) {
-          panel.hidden = panel.getAttribute("data-panel") !== target;
-        });
-      }
-
-      tabs.forEach(function (tab, index) {
-        tab.addEventListener("click", function () {
-          activate(tab.getAttribute("data-target"));
-        });
-
-        tab.addEventListener("keydown", function (event) {
-          var key = event.key;
-          var nextIndex = index;
-
-          if (key === "ArrowRight" || key === "ArrowDown") {
-            nextIndex = (index + 1) % tabs.length;
-          } else if (key === "ArrowLeft" || key === "ArrowUp") {
-            nextIndex = (index - 1 + tabs.length) % tabs.length;
-          } else if (key === "Home") {
-            nextIndex = 0;
-          } else if (key === "End") {
-            nextIndex = tabs.length - 1;
-          } else {
-            return;
-          }
-
-          event.preventDefault();
-          tabs[nextIndex].focus();
-          activate(tabs[nextIndex].getAttribute("data-target"));
-        });
-      });
-
-      activate(tabs[0].getAttribute("data-target"));
-    }());
-  </script>
+    </footer>
+  </div>
 </body>
 </html>
