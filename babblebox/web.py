@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from threading import Thread
 
@@ -72,7 +73,11 @@ def static_root_files(filename: str):
 
 
 def run():
-    app.run(host="0.0.0.0", port=8080)
+    try:
+        port = int(os.getenv("PORT", "10000"))
+    except ValueError:
+        port = 10000
+    app.run(host="0.0.0.0", port=port)
 
 
 def keep_alive():
