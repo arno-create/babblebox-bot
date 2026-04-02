@@ -57,7 +57,7 @@ def default_question_drops_config(guild_id: int | None = None) -> dict[str, Any]
 
 
 def default_question_drop_tier(tier: int) -> dict[str, Any]:
-    return {"tier": int(tier), "role_id": None, "threshold": 0}
+    return {"tier": int(tier), "role_id": None, "threshold": 0, "announcement_template": None}
 
 
 def default_question_drop_tiers() -> list[dict[str, Any]]:
@@ -135,6 +135,7 @@ def _normalize_question_drop_tiers(payload: Any) -> list[dict[str, Any]]:
             "tier": tier,
             "role_id": _normalize_positive_int(item.get("role_id")),
             "threshold": _normalize_nonnegative_int(item.get("threshold"), default=0),
+            "announcement_template": _normalize_optional_template(item.get("announcement_template")),
         }
     return [normalized_by_tier[tier] for tier in QUESTION_DROP_MASTERY_TIERS]
 

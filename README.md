@@ -56,7 +56,7 @@ Babblebox is intentionally compact:
 - configurable channels, categories, timing, activity gating, and tone
 - category mastery roles
 - guild scholar ladder
-- custom mastery announcement templates with `/drops mastery category-template` and `/drops mastery scholar-template`
+- custom mastery announcement templates managed inside `/drops mastery category` and `/drops mastery scholar`
 - profile / buddy / vault knowledge tie-ins
 - rare AI celebration copy as a public-facing optional layer
 - numeric, number-word, safe multiple-choice, and spoiler-aware answer judging
@@ -202,10 +202,8 @@ Slash is recommended for multi-option setup here. Prefix stays positional, so th
 | `/drops roles status` | `bb!drops roles status` | View your current Babblebox-managed Question Drops roles and future-grant state |
 | `/drops roles remove` | `bb!drops roles remove @Role` | Remove one current Babblebox-managed role or all current Babblebox Question Drops roles |
 | `/drops roles preference` | `bb!drops roles preference stop true` | Stop future Babblebox role grants or receive them again with optional restore |
-| `/drops mastery category` | `bb!drops mastery category science true 1 @Role 25` | Configure category mastery roles |
-| `/drops mastery scholar` | `bb!drops mastery scholar true 1 @Role 100` | Configure the guild scholar ladder |
-| `/drops mastery category-template` | `bb!drops mastery category-template science status` | Preview, edit, or clear custom category mastery announcement copy |
-| `/drops mastery scholar-template` | `bb!drops mastery scholar-template status` | Preview, edit, or clear custom scholar announcement copy |
+| `/drops mastery category` | `bb!drops mastery category science true 1 @Role 25` | Configure category mastery roles, or manage default and per-tier announcement templates with `template_action` |
+| `/drops mastery scholar` | `bb!drops mastery scholar true 1 @Role 100` | Configure the guild scholar ladder, or manage default and per-tier announcement templates with `template_action` |
 | `/drops mastery recalc` | `bb!drops mastery recalc` | Preview or execute a grant-only role recalculation |
 
 Question Drops notes:
@@ -214,7 +212,9 @@ Question Drops notes:
 - live drops stay compact and block `/play` only in the same channel while unresolved
 - numeric answers accept clean digits, simple number words, and safe judged formats
 - removing current Babblebox roles does not erase earned mastery history, and opt-out is the durable "do not re-grant" switch
-- mastery announcements can use Babblebox's default copy or a short custom template with approved placeholders only
+- mastery announcements can use Babblebox's default copy, a scope default template, or a tier override with fallback order: tier override -> scope default -> Babblebox default
+- category template tokens: `{user.mention}` `{user.name}` `{user.display_name}` `{role.name}` `{tier.label}` `{threshold}` `{category.name}`
+- scholar template tokens: `{user.mention}` `{user.name}` `{user.display_name}` `{role.name}` `{tier.label}` `{threshold}`
 - category mastery and scholar ladder stay guild-first
 - profile, buddy, and vault surfaces fold the knowledge lane in without confusing it with Daily Arcade
 

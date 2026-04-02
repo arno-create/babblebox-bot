@@ -862,6 +862,36 @@ class QuestionDropsService:
             return "Scholar announcement"
         return f"{category_label(str(scope_key or ''))} mastery announcement"
 
+    def _announcement_title(self, *, scope_type: str, scope_key: str | None = None, tier: int | None = None) -> str:
+        normalized_scope_type = str(scope_type).strip().casefold()
+        normalized_scope_key = str(scope_key or "").strip().casefold()
+        if tier in QUESTION_DROP_MASTERY_TIERS:
+            if normalized_scope_type == "scholar":
+                return f"{scholar_label(int(tier))} Announcement"
+            return f"{category_label(normalized_scope_key)} {tier_label(int(tier))} Announcement"
+        if normalized_scope_type == "scholar":
+            return "Scholar Announcement"
+        return f"{category_label(normalized_scope_key)} Mastery Announcement"
+
+    def _announcement_target_label(self, *, scope_type: str, scope_key: str | None = None, tier: int | None = None) -> str:
+        normalized_scope_type = str(scope_type).strip().casefold()
+        normalized_scope_key = str(scope_key or "").strip().casefold()
+        if tier in QUESTION_DROP_MASTERY_TIERS:
+            if normalized_scope_type == "scholar":
+                return f"{scholar_label(int(tier))} override"
+            return f"{category_label(normalized_scope_key)} {tier_label(int(tier))} override"
+        if normalized_scope_type == "scholar":
+            return "Scholar default"
+        return f"{category_label(normalized_scope_key)} default"
+
+    def _announcement_source_label(self, source: str) -> str:
+        normalized_source = str(source or "").strip().casefold()
+        if normalized_source == "tier_override":
+            return "Tier override"
+        if normalized_source == "scope_default":
+            return "Scope default"
+        return "Babblebox default"
+
     def _announcement_scope_config(self, config: dict[str, Any], *, scope_type: str, scope_key: str | None = None) -> dict[str, Any]:
         if str(scope_type).strip().casefold() == "scholar":
             scholar = config.get("scholar_ladder", {})
@@ -873,17 +903,68 @@ class QuestionDropsService:
             return scholar_label(tier)
         return f"{category_label(str(scope_key or ''))} {tier_label(tier)}"
 
-    def _configured_announcement_template(self, payload: dict[str, Any], *, scope_type: str) -> str | None:
-        raw = payload.get("announcement_template") if isinstance(payload, dict) else None
+    def _normalize_announcement_template(self, value: Any, *, scope_type: str) -> str | None:
         allowed = set(self._announcement_placeholder_tokens(scope_type))
         ok, cleaned, _error = sanitize_short_plain_template(
-            raw,
+            value,
             field_name="Announcement template",
             max_length=QUESTION_DROP_ANNOUNCEMENT_TEMPLATE_MAX_LENGTH,
             allowed_placeholders=allowed,
             sentence_limit=QUESTION_DROP_ANNOUNCEMENT_TEMPLATE_SENTENCE_LIMIT,
         )
         return cleaned if ok else None
+
+    def _configured_announcement_template(self, payload: dict[str, Any], *, scope_type: str) -> str | None:
+        raw = payload.get("announcement_template") if isinstance(payload, dict) else None
+        return self._normalize_announcement_template(raw, scope_type=scope_type)
+
+    def _configured_tier(self, payload: dict[str, Any], *, tier: int | None) -> dict[str, Any]:
+        if tier not in QUESTION_DROP_MASTERY_TIERS:
+            return {}
+        for item in self._configured_tiers(payload):
+            if int(item.get("tier", 0) or 0) == int(tier):
+                return dict(item)
+        return {}
+
+    def _configured_tier_announcement_template(self, payload: dict[str, Any], *, scope_type: str, tier: int | None) -> str | None:
+        tier_payload = self._configured_tier(payload, tier=tier)
+        raw = tier_payload.get("announcement_template") if isinstance(tier_payload, dict) else None
+        return self._normalize_announcement_template(raw, scope_type=scope_type)
+
+    def _active_tier_template_overrides(self, payload: dict[str, Any], *, scope_type: str) -> tuple[int, ...]:
+        overrides: list[int] = []
+        for item in self._configured_tiers(payload):
+            tier = int(item.get("tier", 0) or 0)
+            if tier not in QUESTION_DROP_MASTERY_TIERS:
+                continue
+            if self._configured_tier_announcement_template(payload, scope_type=scope_type, tier=tier) is not None:
+                overrides.append(tier)
+        return tuple(sorted(overrides))
+
+    def _effective_announcement_template(
+        self,
+        payload: dict[str, Any],
+        *,
+        scope_type: str,
+        tier: int | None = None,
+    ) -> tuple[str | None, str]:
+        tier_template = self._configured_tier_announcement_template(payload, scope_type=scope_type, tier=tier)
+        if tier_template is not None:
+            return tier_template, "tier_override"
+        scope_template = self._configured_announcement_template(payload, scope_type=scope_type)
+        if scope_template is not None:
+            return scope_template, "scope_default"
+        return None, "babblebox_default"
+
+    def _override_summary_labels(self, *, scope_type: str, tiers: tuple[int, ...]) -> tuple[str, ...]:
+        labels: list[str] = []
+        normalized_scope_type = str(scope_type).strip().casefold()
+        for tier in tiers:
+            if normalized_scope_type == "scholar":
+                labels.append(scholar_label(int(tier)))
+            else:
+                labels.append(tier_label(int(tier)))
+        return tuple(labels)
 
     def _sanitize_announcement_value(self, value: Any, *, fallback: str) -> str:
         cleaned = normalize_plain_text(str(value or ""))
@@ -971,8 +1052,8 @@ class QuestionDropsService:
 
     def _build_announcement_preview(self, payload: dict[str, Any]) -> str:
         event = dict(payload.get("sample_event", {})) if isinstance(payload.get("sample_event"), dict) else {}
-        event["announcement_template"] = payload.get("announcement_template")
-        if payload.get("has_custom_template"):
+        event["announcement_template"] = payload.get("effective_announcement_template")
+        if payload.get("effective_source") != "babblebox_default":
             preview = self._render_custom_announcement_template(event, ping_user=False)
             if preview is not None:
                 return preview
@@ -984,13 +1065,24 @@ class QuestionDropsService:
         *,
         scope_type: str,
         scope_key: str | None = None,
+        tier: int | None = None,
     ) -> dict[str, Any]:
         config = self.get_config(guild.id)
         payload = self._announcement_scope_config(config, scope_type=scope_type, scope_key=scope_key)
         normalized_scope_type = str(scope_type).strip().casefold()
         normalized_scope_key = str(scope_key or "").strip().casefold() if normalized_scope_type == "category" else "global"
+        if tier is not None and tier not in QUESTION_DROP_MASTERY_TIERS:
+            return {
+                "status": "unknown_tier",
+                "title": self._announcement_title(scope_type=normalized_scope_type, scope_key=normalized_scope_key),
+                "scope_label": self._announcement_template_label(scope_type=normalized_scope_type, scope_key=normalized_scope_key),
+            }
         tiers = sorted(self._configured_tiers(payload), key=lambda item: int(item.get("tier", 0) or 0))
-        sample_tier = next((item for item in tiers if int(item.get("tier", 0) or 0) > 0), {"tier": 1, "threshold": 25, "role_id": None})
+        selected_tier = self._configured_tier(payload, tier=tier) if tier is not None else {}
+        sample_tier = selected_tier or next(
+            (item for item in tiers if int(item.get("tier", 0) or 0) > 0),
+            {"tier": int(tier or 1), "threshold": 25, "role_id": None, "announcement_template": None},
+        )
         role_id = int(sample_tier.get("role_id", 0) or 0) or None
         role = guild.get_role(role_id) if role_id is not None and hasattr(guild, "get_role") else None
         headline = self._announcement_scope_headline(scope_type=normalized_scope_type, scope_key=normalized_scope_key, tier=int(sample_tier.get("tier", 1) or 1))
@@ -1008,12 +1100,26 @@ class QuestionDropsService:
             "headline": headline,
             "announcement_channel_id": payload.get("announcement_channel_id"),
         }
-        template = self._configured_announcement_template(payload, scope_type=normalized_scope_type)
+        target_template = (
+            self._configured_tier_announcement_template(payload, scope_type=normalized_scope_type, tier=tier)
+            if tier is not None
+            else self._configured_announcement_template(payload, scope_type=normalized_scope_type)
+        )
+        effective_template, effective_source = self._effective_announcement_template(
+            payload,
+            scope_type=normalized_scope_type,
+            tier=tier,
+        )
+        active_override_tiers = self._active_tier_template_overrides(payload, scope_type=normalized_scope_type)
+        other_override_tiers = tuple(value for value in active_override_tiers if value != tier) if tier is not None else active_override_tiers
         status_payload = {
             "scope_type": normalized_scope_type,
             "scope_key": normalized_scope_key,
+            "target_tier": int(tier) if tier is not None else None,
+            "target_kind": "tier" if tier is not None else "scope",
+            "target_label": self._announcement_target_label(scope_type=normalized_scope_type, scope_key=normalized_scope_key, tier=tier),
             "scope_label": self._announcement_template_label(scope_type=normalized_scope_type, scope_key=normalized_scope_key),
-            "title": "Scholar Announcement" if normalized_scope_type == "scholar" else f"{category_label(normalized_scope_key)} Mastery Announcement",
+            "title": self._announcement_title(scope_type=normalized_scope_type, scope_key=normalized_scope_key, tier=tier),
             "announcement_channel_id": payload.get("announcement_channel_id"),
             "announcement_issue": self._announcement_channel_issue(
                 guild,
@@ -1021,15 +1127,28 @@ class QuestionDropsService:
                 label=self._announcement_template_label(scope_type=normalized_scope_type, scope_key=normalized_scope_key),
             ),
             "silent_grant": bool(payload.get("silent_grant")),
-            "announcement_template": template,
-            "has_custom_template": template is not None,
+            "announcement_template": target_template,
+            "has_target_template": target_template is not None,
+            "has_custom_template": effective_source != "babblebox_default",
+            "effective_announcement_template": effective_template,
+            "effective_source": effective_source,
+            "effective_source_label": self._announcement_source_label(effective_source),
             "placeholder_tokens": self._announcement_placeholder_tokens(normalized_scope_type),
+            "tier_override_count": len(active_override_tiers),
+            "other_tier_overrides": other_override_tiers,
+            "other_tier_override_labels": self._override_summary_labels(scope_type=normalized_scope_type, tiers=other_override_tiers),
             "sample_event": sample_event,
         }
         status_payload["preview"] = self._build_announcement_preview(status_payload)
         return status_payload
 
-    async def get_category_mastery_announcement_status(self, guild: discord.Guild, *, category: str) -> dict[str, Any]:
+    async def get_category_mastery_announcement_status(
+        self,
+        guild: discord.Guild,
+        *,
+        category: str,
+        tier: int | None = None,
+    ) -> dict[str, Any]:
         normalized_category = str(category or "").strip().casefold()
         if normalized_category not in QUESTION_DROP_CATEGORIES:
             return {
@@ -1037,45 +1156,65 @@ class QuestionDropsService:
                 "title": "Category Mastery Announcement",
                 "scope_label": "Category mastery announcement",
             }
-        payload = await self._mastery_announcement_status_payload(guild, scope_type="category", scope_key=normalized_category)
-        payload["status"] = "ok"
+        payload = await self._mastery_announcement_status_payload(
+            guild,
+            scope_type="category",
+            scope_key=normalized_category,
+            tier=tier,
+        )
+        payload.setdefault("status", "ok")
         return payload
 
-    async def get_scholar_announcement_status(self, guild: discord.Guild) -> dict[str, Any]:
-        payload = await self._mastery_announcement_status_payload(guild, scope_type="scholar", scope_key="global")
-        payload["status"] = "ok"
+    async def get_scholar_announcement_status(self, guild: discord.Guild, *, tier: int | None = None) -> dict[str, Any]:
+        payload = await self._mastery_announcement_status_payload(guild, scope_type="scholar", scope_key="global", tier=tier)
+        payload.setdefault("status", "ok")
         return payload
 
     def build_mastery_announcement_status_embed(self, payload: dict[str, Any], *, note: str | None = None, success: bool = False) -> discord.Embed:
         title = str(payload.get("title") or "Mastery Announcement")
         if payload.get("status") == "unknown_category":
             return ge.make_status_embed(title, "Unknown category.", tone="warning", footer="Babblebox Question Drops")
-        description = "Built-in Babblebox copy is active."
-        if payload.get("has_custom_template"):
-            description = "Custom Babblebox copy is active."
+        if payload.get("status") == "unknown_tier":
+            return ge.make_status_embed(title, "Tier must be 1, 2, or 3.", tone="warning", footer="Babblebox Question Drops")
+        description = f"Current source: **{payload.get('effective_source_label', 'Babblebox default')}**."
         if note:
             description = f"{note} {description}"
         embed = discord.Embed(title=title, description=description, color=ge.EMBED_THEME["accent"])
         channel_id = payload.get("announcement_channel_id")
         channel_text = f"<#{int(channel_id)}>" if isinstance(channel_id, int) else "Not set"
-        mode_text = "Custom copy" if payload.get("has_custom_template") else "Default copy"
         embed.add_field(
             name="Announcement",
             value=(
-                f"Mode: **{mode_text}**\n"
+                f"Target: **{payload.get('target_label', 'Default')}**\n"
+                f"In effect: **{payload.get('effective_source_label', 'Babblebox default')}**\n"
                 f"Channel: **{channel_text}**\n"
                 f"Silent grant: **{'On' if payload.get('silent_grant') else 'Off'}**"
             ),
             inline=False,
         )
-        current_copy = payload.get("announcement_template") or "Using Babblebox's built-in mastery announcement."
-        embed.add_field(name="Current Copy", value=ge.safe_field_text(current_copy, limit=1024), inline=False)
+        configured_copy = payload.get("announcement_template")
+        if configured_copy is None:
+            if payload.get("target_kind") == "tier":
+                if payload.get("effective_source") == "scope_default":
+                    configured_copy = "No tier override saved here. This tier is currently using the scope default template."
+                else:
+                    configured_copy = "No tier override saved here. This tier is currently using Babblebox's built-in mastery announcement."
+            else:
+                configured_copy = "Using Babblebox's built-in mastery announcement."
+        embed.add_field(name="Configured Copy", value=ge.safe_field_text(str(configured_copy), limit=1024), inline=False)
         embed.add_field(
             name="Placeholders",
             value=" ".join(f"`{token}`" for token in payload.get("placeholder_tokens", ())),
             inline=False,
         )
         embed.add_field(name="Preview", value=ge.safe_field_text(str(payload.get("preview") or "No preview available."), limit=1024), inline=False)
+        if payload.get("other_tier_override_labels"):
+            field_name = "Other Overrides" if payload.get("target_kind") == "tier" else "Tier Overrides"
+            embed.add_field(
+                name=field_name,
+                value=", ".join(str(label) for label in payload.get("other_tier_override_labels", ())),
+                inline=False,
+            )
         if payload.get("announcement_issue") is not None:
             embed.add_field(name="Channel Check", value=str(payload["announcement_issue"]), inline=False)
         return ge.style_embed(embed, footer="Babblebox Question Drops | Compact, offline, channel-safe")
@@ -1086,6 +1225,7 @@ class QuestionDropsService:
         *,
         scope_type: str,
         scope_key: str | None = None,
+        tier: int | None = None,
         template: str | None = None,
         clear: bool = False,
     ) -> tuple[bool, str]:
@@ -1095,6 +1235,8 @@ class QuestionDropsService:
         normalized_scope_key = str(scope_key or "").strip().casefold()
         if normalized_scope_type == "category" and normalized_scope_key not in QUESTION_DROP_CATEGORIES:
             return False, f"Unknown category. Choose from {', '.join(QUESTION_DROP_CATEGORIES)}."
+        if tier is not None and tier not in QUESTION_DROP_MASTERY_TIERS:
+            return False, "Tier must be 1, 2, or 3."
         if not clear:
             ok, cleaned, error = sanitize_short_plain_template(
                 template,
@@ -1110,36 +1252,103 @@ class QuestionDropsService:
             config = dict(self.get_config(guild_id))
             if normalized_scope_type == "scholar":
                 scholar = dict(config.get("scholar_ladder", {}))
-                scholar["announcement_template"] = None if clear else template
+                if tier is None:
+                    scholar["announcement_template"] = None if clear else template
+                else:
+                    tiers = [dict(item) for item in scholar.get("tiers", [])]
+                    for item in tiers:
+                        if int(item.get("tier", 0) or 0) == int(tier):
+                            item["announcement_template"] = None if clear else template
+                            break
+                    scholar["tiers"] = tiers
                 config["scholar_ladder"] = scholar
             else:
                 mastery = dict(config.get("category_mastery", {}))
                 category_config = dict(mastery.get(normalized_scope_key, {}))
-                category_config["announcement_template"] = None if clear else template
+                if tier is None:
+                    category_config["announcement_template"] = None if clear else template
+                else:
+                    tiers = [dict(item) for item in category_config.get("tiers", [])]
+                    for item in tiers:
+                        if int(item.get("tier", 0) or 0) == int(tier):
+                            item["announcement_template"] = None if clear else template
+                            break
+                    category_config["tiers"] = tiers
                 mastery[normalized_scope_key] = category_config
                 config["category_mastery"] = mastery
             normalized = normalize_question_drops_config(guild_id, config)
             await self.store.upsert_config(normalized)
             self._configs[guild_id] = normalized
         if clear:
+            if tier in QUESTION_DROP_MASTERY_TIERS and normalized_scope_type == "scholar":
+                return True, f"{scholar_label(int(tier))} announcement override cleared."
+            if tier in QUESTION_DROP_MASTERY_TIERS:
+                return True, f"{category_label(normalized_scope_key)} {tier_label(int(tier))} announcement override cleared."
             if normalized_scope_type == "scholar":
                 return True, "Scholar announcement template cleared."
             return True, f"{category_label(normalized_scope_key)} mastery announcement template cleared."
+        if tier in QUESTION_DROP_MASTERY_TIERS and normalized_scope_type == "scholar":
+            return True, f"{scholar_label(int(tier))} announcement override saved."
+        if tier in QUESTION_DROP_MASTERY_TIERS:
+            return True, f"{category_label(normalized_scope_key)} {tier_label(int(tier))} announcement override saved."
         if normalized_scope_type == "scholar":
             return True, "Scholar announcement template saved."
         return True, f"{category_label(normalized_scope_key)} mastery announcement template saved."
 
-    async def save_category_mastery_announcement_template(self, guild_id: int, *, category: str, template: str) -> tuple[bool, str]:
-        return await self._set_mastery_announcement_template(guild_id, scope_type="category", scope_key=category, template=template)
+    async def save_category_mastery_announcement_template(
+        self,
+        guild_id: int,
+        *,
+        category: str,
+        template: str,
+        tier: int | None = None,
+    ) -> tuple[bool, str]:
+        return await self._set_mastery_announcement_template(
+            guild_id,
+            scope_type="category",
+            scope_key=category,
+            tier=tier,
+            template=template,
+        )
 
-    async def clear_category_mastery_announcement_template(self, guild_id: int, *, category: str) -> tuple[bool, str]:
-        return await self._set_mastery_announcement_template(guild_id, scope_type="category", scope_key=category, clear=True)
+    async def clear_category_mastery_announcement_template(
+        self,
+        guild_id: int,
+        *,
+        category: str,
+        tier: int | None = None,
+    ) -> tuple[bool, str]:
+        return await self._set_mastery_announcement_template(
+            guild_id,
+            scope_type="category",
+            scope_key=category,
+            tier=tier,
+            clear=True,
+        )
 
-    async def save_scholar_announcement_template(self, guild_id: int, *, template: str) -> tuple[bool, str]:
-        return await self._set_mastery_announcement_template(guild_id, scope_type="scholar", scope_key="global", template=template)
+    async def save_scholar_announcement_template(
+        self,
+        guild_id: int,
+        *,
+        template: str,
+        tier: int | None = None,
+    ) -> tuple[bool, str]:
+        return await self._set_mastery_announcement_template(
+            guild_id,
+            scope_type="scholar",
+            scope_key="global",
+            tier=tier,
+            template=template,
+        )
 
-    async def clear_scholar_announcement_template(self, guild_id: int) -> tuple[bool, str]:
-        return await self._set_mastery_announcement_template(guild_id, scope_type="scholar", scope_key="global", clear=True)
+    async def clear_scholar_announcement_template(self, guild_id: int, *, tier: int | None = None) -> tuple[bool, str]:
+        return await self._set_mastery_announcement_template(
+            guild_id,
+            scope_type="scholar",
+            scope_key="global",
+            tier=tier,
+            clear=True,
+        )
 
     def _default_role_grant_preference(self, *, guild_id: int, user_id: int) -> dict[str, Any]:
         return {
@@ -1563,7 +1772,15 @@ class QuestionDropsService:
                 flags.append(f"announce <#{int(category_mastery['announcement_channel_id'])}>")
             else:
                 flags.append("announce off")
-            flags.append("custom copy" if self._configured_announcement_template(category_mastery, scope_type="category") is not None else "default copy")
+            flags.append(
+                "custom default"
+                if self._configured_announcement_template(category_mastery, scope_type="category") is not None
+                else "default copy"
+            )
+            override_count = len(self._active_tier_template_overrides(category_mastery, scope_type="category"))
+            if override_count > 0:
+                label = "tier override" if override_count == 1 else "tier overrides"
+                flags.append(f"{override_count} {label}")
             mastery_lines.append(f"{category_label_with_emoji(category)} {tier_text}" + (f" [{' | '.join(flags)}]" if flags else ""))
         scholar_tiers = self._configured_unlock_tiers(scholar)
         scholar_enabled = bool(scholar.get("enabled"))
@@ -1666,7 +1883,15 @@ class QuestionDropsService:
                 scholar_flags.append(f"announce <#{int(scholar['announcement_channel_id'])}>")
             else:
                 scholar_flags.append("announce off")
-            scholar_flags.append("custom copy" if self._configured_announcement_template(scholar, scope_type="scholar") is not None else "default copy")
+            scholar_flags.append(
+                "custom default"
+                if self._configured_announcement_template(scholar, scope_type="scholar") is not None
+                else "default copy"
+            )
+            override_count = len(self._active_tier_template_overrides(scholar, scope_type="scholar"))
+            if override_count > 0:
+                label = "tier override" if override_count == 1 else "tier overrides"
+                scholar_flags.append(f"{override_count} {label}")
             scholar_value = "\n".join(scholar_lines)
             if scholar_flags:
                 scholar_value += f"\nSettings: {' | '.join(scholar_flags)}"
@@ -3213,7 +3438,11 @@ class QuestionDropsService:
                     role_id=role_id,
                     silent_grant=bool(category_config.get("silent_grant")),
                     announcement_channel_id=category_config.get("announcement_channel_id"),
-                    announcement_template=category_config.get("announcement_template"),
+                    announcement_template=self._effective_announcement_template(
+                        category_config,
+                        scope_type="category",
+                        tier=tier,
+                    )[0],
                 )
                 if event is not None:
                     events.append(event)
@@ -3264,7 +3493,11 @@ class QuestionDropsService:
                     role_id=role_id,
                     silent_grant=bool(scholar_config.get("silent_grant")),
                     announcement_channel_id=scholar_config.get("announcement_channel_id"),
-                    announcement_template=scholar_config.get("announcement_template"),
+                    announcement_template=self._effective_announcement_template(
+                        scholar_config,
+                        scope_type="scholar",
+                        tier=tier,
+                    )[0],
                 )
                 if event is not None:
                     events.append(event)

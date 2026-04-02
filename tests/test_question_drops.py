@@ -255,7 +255,7 @@ class QuestionDropsPostgresDecodeTests(unittest.TestCase):
                         "announcement_channel_id": 88,
                         "announcement_template": "{user.mention} reached {category.name}.",
                         "silent_grant": True,
-                        "tiers": [{"tier": 1, "role_id": 301, "threshold": 10}],
+                        "tiers": [{"tier": 1, "role_id": 301, "threshold": 10, "announcement_template": "{user.mention} reached Tier I."}],
                     }
                 }
             ),
@@ -265,7 +265,7 @@ class QuestionDropsPostgresDecodeTests(unittest.TestCase):
                     "announcement_channel_id": 99,
                     "announcement_template": "{user.mention} reached {tier.label}.",
                     "silent_grant": False,
-                    "tiers": [{"tier": 1, "role_id": 401, "threshold": 25}],
+                    "tiers": [{"tier": 1, "role_id": 401, "threshold": 25, "announcement_template": "{user.mention} reached Scholar I."}],
                 }
             ),
             "digest_settings": json.dumps(
@@ -289,7 +289,9 @@ class QuestionDropsPostgresDecodeTests(unittest.TestCase):
         self.assertEqual(config["category_mastery"]["science"]["announcement_channel_id"], 88)
         self.assertEqual(config["category_mastery"]["science"]["announcement_template"], "{user.mention} reached {category.name}.")
         self.assertEqual(config["category_mastery"]["science"]["tiers"][0]["role_id"], 301)
+        self.assertEqual(config["category_mastery"]["science"]["tiers"][0]["announcement_template"], "{user.mention} reached Tier I.")
         self.assertEqual(config["scholar_ladder"]["tiers"][0]["threshold"], 25)
+        self.assertEqual(config["scholar_ladder"]["tiers"][0]["announcement_template"], "{user.mention} reached Scholar I.")
         self.assertEqual(config["scholar_ladder"]["announcement_template"], "{user.mention} reached {tier.label}.")
         self.assertTrue(config["digest_settings"]["weekly_enabled"])
         self.assertEqual(config["digest_settings"]["weekly_channel_id"], 77)
@@ -321,6 +323,46 @@ class QuestionDropsPostgresDecodeTests(unittest.TestCase):
         self.assertFalse(config["category_mastery"]["science"]["enabled"])
         self.assertFalse(config["scholar_ladder"]["enabled"])
         self.assertFalse(config["digest_settings"]["weekly_enabled"])
+
+    def test_config_row_missing_or_invalid_tier_templates_normalize_to_none(self):
+        row = {
+            "guild_id": 10,
+            "enabled": True,
+            "drops_per_day": 2,
+            "timezone": "UTC",
+            "answer_window_seconds": 60,
+            "tone_mode": "clean",
+            "activity_gate": "light",
+            "active_start_hour": 10,
+            "active_end_hour": 22,
+            "enabled_channel_ids": json.dumps([20]),
+            "enabled_categories": json.dumps(["science"]),
+            "category_mastery": json.dumps(
+                {
+                    "science": {
+                        "enabled": True,
+                        "tiers": [
+                            {"tier": 1, "role_id": 301, "threshold": 10},
+                            {"tier": 2, "role_id": 302, "threshold": 20, "announcement_template": 99},
+                        ],
+                    }
+                }
+            ),
+            "scholar_ladder": json.dumps(
+                {
+                    "enabled": True,
+                    "tiers": [{"tier": 1, "role_id": 401, "threshold": 25, "announcement_template": ["bad"]}],
+                }
+            ),
+            "digest_settings": json.dumps({}),
+            "ai_celebrations_enabled": False,
+        }
+
+        config = _config_from_row(row)
+
+        self.assertIsNone(config["category_mastery"]["science"]["tiers"][0]["announcement_template"])
+        self.assertIsNone(config["category_mastery"]["science"]["tiers"][1]["announcement_template"])
+        self.assertIsNone(config["scholar_ladder"]["tiers"][0]["announcement_template"])
 
     def test_active_drop_row_decodes_json_string_fields(self):
         now = ge.now_utc()
@@ -1495,6 +1537,8 @@ class QuestionDropsMemberRolePreferenceTests(QuestionDropsServiceTests):
         payload = await self.service.get_category_mastery_announcement_status(self.guild, category="science")
         self.assertTrue(payload["has_custom_template"])
         self.assertEqual(payload["announcement_template"], "{user.mention} reached {category.name} at {threshold}.")
+        self.assertEqual(payload["effective_source"], "scope_default")
+        self.assertEqual(payload["target_label"], "Science default")
         self.assertIn("{category.name}", payload["placeholder_tokens"])
         self.assertIn("Ava", payload["preview"])
 
@@ -1521,6 +1565,53 @@ class QuestionDropsMemberRolePreferenceTests(QuestionDropsServiceTests):
         )
         self.assertFalse(ok)
         self.assertIn("Unsupported placeholder", message)
+
+    async def test_category_tier_override_precedence_and_clear_fallbacks_to_scope_default(self):
+        ok, message = await self.service.save_category_mastery_announcement_template(
+            self.guild.id,
+            category="science",
+            template="{user.mention} reached {category.name}.",
+        )
+        self.assertTrue(ok, message)
+        ok, message = await self.service.save_category_mastery_announcement_template(
+            self.guild.id,
+            category="science",
+            tier=2,
+            template="{user.mention} locked {tier.label} at {threshold}.",
+        )
+        self.assertTrue(ok, message)
+
+        tier_payload = await self.service.get_category_mastery_announcement_status(self.guild, category="science", tier=2)
+        self.assertEqual(tier_payload["announcement_template"], "{user.mention} locked {tier.label} at {threshold}.")
+        self.assertEqual(tier_payload["effective_source"], "tier_override")
+        self.assertEqual(tier_payload["target_label"], "Science Tier II override")
+
+        scope_payload = await self.service.get_category_mastery_announcement_status(self.guild, category="science")
+        self.assertEqual(scope_payload["effective_source"], "scope_default")
+        self.assertIn("Tier II", scope_payload["other_tier_override_labels"])
+
+        ok, message = await self.service.clear_category_mastery_announcement_template(self.guild.id, category="science", tier=2)
+        self.assertTrue(ok, message)
+        cleared = await self.service.get_category_mastery_announcement_status(self.guild, category="science", tier=2)
+        self.assertIsNone(cleared["announcement_template"])
+        self.assertEqual(cleared["effective_source"], "scope_default")
+        self.assertIn("reached Science", cleared["preview"])
+
+    async def test_tier_override_only_status_works_without_scope_default(self):
+        ok, message = await self.service.save_scholar_announcement_template(
+            self.guild.id,
+            tier=2,
+            template="{user.mention} reached {tier.label} at {threshold}.",
+        )
+        self.assertTrue(ok, message)
+
+        tier_payload = await self.service.get_scholar_announcement_status(self.guild, tier=2)
+        scope_payload = await self.service.get_scholar_announcement_status(self.guild)
+
+        self.assertEqual(tier_payload["effective_source"], "tier_override")
+        self.assertEqual(tier_payload["target_label"], "Scholar II override")
+        self.assertFalse(scope_payload["has_custom_template"])
+        self.assertEqual(scope_payload["effective_source"], "babblebox_default")
 
     async def test_template_validation_rejects_unsafe_or_invalid_copy(self):
         cases = (
@@ -1636,6 +1727,59 @@ class QuestionDropsMemberRolePreferenceTests(QuestionDropsServiceTests):
         self.assertTrue(sent["allowed_mentions"].users)
         self.assertFalse(sent["allowed_mentions"].everyone)
 
+    async def test_tier_override_wins_over_scope_default_for_live_announcements(self):
+        profile_service = await self._attach_real_profile_service()
+        member = DummyUser(215)
+        mastery_role = DummyRole(9957, position=10, name="Science I")
+        announce_channel = DummyChannel(103)
+        guild = DummyGuild(
+            10,
+            channels=[self.channel, announce_channel],
+            roles=[mastery_role],
+            members=[member],
+            me=DummyBotMember(position=50),
+        )
+        self.bot.guild = guild
+        self.bot._channels[announce_channel.id] = announce_channel
+        self.bot.profile_service = profile_service
+
+        await self.service.update_category_mastery(
+            guild.id,
+            category="science",
+            enabled=True,
+            tier=1,
+            role_id=mastery_role.id,
+            threshold=10,
+            announcement_channel_id=announce_channel.id,
+        )
+        ok, message = await self.service.save_category_mastery_announcement_template(
+            guild.id,
+            category="science",
+            template="scope default {threshold}",
+        )
+        self.assertTrue(ok, message)
+        ok, message = await self.service.save_category_mastery_announcement_template(
+            guild.id,
+            category="science",
+            tier=1,
+            template="tier override {tier.label}",
+        )
+        self.assertTrue(ok, message)
+
+        update = await profile_service.record_question_drop_result(member.id, guild_id=guild.id, category="science", correct=True, points=10)
+        events = await self.service._grant_progression_rewards(
+            guild=guild,
+            member=member,
+            fallback_channel=self.channel,
+            category="science",
+            update=update,
+        )
+
+        self.assertEqual(len(events), 1)
+        sent = announce_channel.sent[-1][1]
+        self.assertIn("tier override", sent["content"])
+        self.assertNotIn("scope default", sent["content"])
+
     async def test_missing_or_blocked_announcement_channel_skips_template_announcement_without_fallback(self):
         profile_service = await self._attach_real_profile_service()
         member = DummyUser(213)
@@ -1746,14 +1890,22 @@ class QuestionDropsMemberRolePreferenceTests(QuestionDropsServiceTests):
             template="{user.mention} reached {tier.label}.",
         )
         self.assertTrue(ok, message)
+        ok, message = await self.service.save_category_mastery_announcement_template(
+            self.guild.id,
+            category="science",
+            tier=1,
+            template="{user.mention} reached {tier.label}.",
+        )
+        self.assertTrue(ok, message)
 
         embed = self.service.build_status_embed(self.guild, await self.service.get_status_snapshot(self.guild))
         mastery_roles = next(field.value for field in embed.fields if field.name == "Mastery Roles")
         scholar_field = next(field.value for field in embed.fields if field.name == "Scholar Ladder")
 
         self.assertIn("default copy", mastery_roles)
+        self.assertIn("1 tier override", mastery_roles)
         self.assertIn("announce off", mastery_roles)
-        self.assertIn("custom copy", scholar_field)
+        self.assertIn("custom default", scholar_field)
         self.assertIn("announce off", scholar_field)
     async def test_non_answer_chatter_does_not_count_as_attempt_or_feedback(self):
         active = await self._post_one_drop()
