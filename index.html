@@ -234,14 +234,17 @@
 
     nav {
       display: grid;
-      grid-template-columns: auto minmax(0, 1fr) auto;
+      grid-template-columns: auto minmax(0, 1fr);
       gap: 24px;
       align-items: center;
       padding: 16px 0;
     }
 
     .nav-top {
-      display: contents;
+      display: flex;
+      align-items: center;
+      gap: 24px;
+      min-width: 0;
     }
 
     .brand {
@@ -281,16 +284,16 @@
     .nav-panel {
       display: flex;
       align-items: center;
-      justify-content: space-between;
-      gap: 24px;
+      justify-content: flex-end;
+      gap: 28px;
       min-width: 0;
     }
 
     .nav-links {
       display: flex;
-      justify-content: center;
+      justify-content: flex-start;
       gap: 22px;
-      flex-wrap: wrap;
+      flex-wrap: nowrap;
     }
 
     .nav-links a,
@@ -310,7 +313,7 @@
       display: flex;
       align-items: center;
       gap: 14px;
-      flex-wrap: wrap;
+      flex-wrap: nowrap;
       justify-content: flex-end;
     }
 
@@ -318,6 +321,18 @@
       display: flex;
       align-items: center;
       gap: 12px;
+    }
+
+    .nav-invite {
+      flex-shrink: 0;
+      white-space: nowrap;
+      min-width: 0;
+      line-height: 1.1;
+    }
+
+    .nav-invite-full {
+      display: inline-block;
+      white-space: nowrap;
     }
 
     .nav-quiet {
@@ -1273,7 +1288,8 @@
                 href="https://discord.com/oauth2/authorize?client_id=1480903089518022739"
                 target="_blank"
                 rel="noopener noreferrer"
-              ><span class="nav-invite-full">Invite Babblebox</span><span class="nav-invite-short">Invite</span></a>
+                aria-label="Invite Babblebox"
+              >Invite</a>
               <button
                 class="nav-toggle"
                 type="button"
@@ -1942,6 +1958,11 @@
                   target="_blank"
                   rel="noopener noreferrer"
                 >GitHub</a>
+                <a
+                  href="https://arno-create.github.io/Bdayblaze/"
+                  target="_blank"
+                  rel="noopener noreferrer"
+                >Bdayblaze</a>
                 <a href="help.html">Help</a>
                 <a href="privacy.html">Privacy Policy</a>
                 <a href="terms.html">Terms of Service</a>
