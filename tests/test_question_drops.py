@@ -51,11 +51,16 @@ class DummyUser:
         self.bot = bot
         self.roles = list(roles or [])
         self.add_roles = AsyncMock(side_effect=self._add_roles)
+        self.remove_roles = AsyncMock(side_effect=self._remove_roles)
 
     async def _add_roles(self, *roles, reason: str | None = None):
         for role in roles:
             if all(int(getattr(existing, "id", 0) or 0) != int(getattr(role, "id", 0) or 0) for existing in self.roles):
                 self.roles.append(role)
+
+    async def _remove_roles(self, *roles, reason: str | None = None):
+        remove_ids = {int(getattr(role, "id", 0) or 0) for role in roles}
+        self.roles = [role for role in self.roles if int(getattr(role, "id", 0) or 0) not in remove_ids]
 
 
 class DummyChannel:
@@ -1217,6 +1222,262 @@ class QuestionDropsServiceContinuationTests(QuestionDropsServiceTests):
         finally:
             await service.close()
 
+
+class QuestionDropsMemberRolePreferenceTests(QuestionDropsServiceTests):
+    def _attach_member(self, member: DummyUser, *roles: DummyRole):
+        for role in roles:
+            self.guild._roles[role.id] = role
+        self.guild._members[member.id] = member
+        self.guild.members = [guild_member for guild_member in self.guild._members.values() if guild_member is not self.guild.me]
+
+    async def test_member_role_status_payload_lists_current_roles_preference_and_stale_managed_roles(self):
+        profile_service = await self._attach_real_profile_service()
+        science_role = DummyRole(9101, position=14, name="Science I")
+        unrelated_role = DummyRole(9102, position=4, name="Unrelated")
+        member = DummyUser(201, roles=[science_role, unrelated_role])
+        self._attach_member(member, science_role, unrelated_role)
+        ok, message = await self.service.update_category_mastery(
+            self.guild.id,
+            category="science",
+            enabled=True,
+            tier=1,
+            role_id=science_role.id,
+            threshold=10,
+        )
+        self.assertTrue(ok, message)
+        ok, message = await self.service.update_category_mastery(
+            self.guild.id,
+            category="logic",
+            enabled=True,
+            tier=1,
+            role_id=science_role.id,
+            threshold=25,
+        )
+        self.assertTrue(ok, message)
+        ok, message = await self.service.update_category_mastery(
+            self.guild.id,
+            category="history",
+            tier=1,
+            role_id=999999,
+            threshold=20,
+        )
+        self.assertTrue(ok, message)
+        await profile_service.record_question_drop_result(member.id, guild_id=self.guild.id, category="science", correct=True, points=10)
+
+        payload = await self.service.get_member_roles_status(self.guild, member)
+        embed = self.service.build_member_roles_status_embed(self.guild, member, payload)
+        field_map = {field.name: field.value for field in embed.fields}
+
+        self.assertTrue(payload["preference"]["role_grants_enabled"])
+        self.assertEqual([record["role_id"] for record in payload["held_records"]], [science_role.id])
+        self.assertEqual(payload["stale_managed_count"], 1)
+        self.assertIn("Status: **On**", field_map["Future Grants"])
+        self.assertIn("Science I", field_map["Current Roles"])
+        self.assertNotIn("Unrelated", field_map["Current Roles"])
+
+    async def test_remove_specific_managed_role_only_removes_that_role_and_keeps_history(self):
+        profile_service = await self._attach_real_profile_service()
+        science_role = DummyRole(9201, position=14, name="Science I")
+        scholar_role = DummyRole(9202, position=13, name="Scholar I")
+        unrelated_role = DummyRole(9203, position=3, name="Unrelated")
+        member = DummyUser(202, roles=[science_role, scholar_role, unrelated_role])
+        self._attach_member(member, science_role, scholar_role, unrelated_role)
+        await self.service.update_category_mastery(self.guild.id, category="science", enabled=True, tier=1, role_id=science_role.id, threshold=10)
+        await self.service.update_scholar_ladder(self.guild.id, enabled=True, tier=1, role_id=scholar_role.id, threshold=20)
+        await profile_service.store.save_question_drop_unlock(
+            {
+                "guild_id": self.guild.id,
+                "user_id": member.id,
+                "scope_type": "category",
+                "scope_key": "science",
+                "tier": 1,
+                "role_id": science_role.id,
+                "granted_at": ge.now_utc(),
+            }
+        )
+
+        payload = await self.service.remove_member_managed_roles(self.guild, member, role_id=science_role.id)
+
+        self.assertEqual([record["role_id"] for record in payload["removed"]], [science_role.id])
+        self.assertCountEqual([role.id for role in member.roles], [scholar_role.id, unrelated_role.id])
+        unlocks = await profile_service.store.fetch_question_drop_unlocks(guild_id=self.guild.id, user_id=member.id)
+        self.assertEqual(len(unlocks), 1)
+        self.assertEqual(unlocks[0]["role_id"], science_role.id)
+
+    async def test_remove_all_managed_roles_leaves_unrelated_roles_alone(self):
+        await self._attach_real_profile_service()
+        science_role = DummyRole(9301, position=14, name="Science I")
+        scholar_role = DummyRole(9302, position=13, name="Scholar I")
+        unrelated_role = DummyRole(9303, position=3, name="Unrelated")
+        member = DummyUser(203, roles=[science_role, scholar_role, unrelated_role])
+        self._attach_member(member, science_role, scholar_role, unrelated_role)
+        await self.service.update_category_mastery(self.guild.id, category="science", enabled=True, tier=1, role_id=science_role.id, threshold=10)
+        await self.service.update_scholar_ladder(self.guild.id, enabled=True, tier=1, role_id=scholar_role.id, threshold=20)
+
+        payload = await self.service.remove_member_managed_roles(self.guild, member)
+
+        self.assertEqual(sorted(record["role_id"] for record in payload["removed"]), [science_role.id, scholar_role.id])
+        self.assertEqual([role.id for role in member.roles], [unrelated_role.id])
+
+    async def test_remove_rejects_non_managed_role(self):
+        await self._attach_real_profile_service()
+        unrelated_role = DummyRole(9401, position=3, name="Unrelated")
+        member = DummyUser(204, roles=[unrelated_role])
+        self._attach_member(member, unrelated_role)
+
+        payload = await self.service.remove_member_managed_roles(self.guild, member, role_id=unrelated_role.id)
+
+        self.assertEqual(payload["status"], "not_managed")
+        self.assertEqual([role.id for role in member.roles], [unrelated_role.id])
+
+    async def test_opt_out_can_leave_current_roles_on_or_remove_them(self):
+        await self._attach_real_profile_service()
+        science_role = DummyRole(9501, position=14, name="Science I")
+        member = DummyUser(205, roles=[science_role])
+        self._attach_member(member, science_role)
+        await self.service.update_category_mastery(self.guild.id, category="science", enabled=True, tier=1, role_id=science_role.id, threshold=10)
+
+        keep_payload = await self.service.update_member_role_preference(
+            self.guild,
+            member,
+            mode="stop",
+            remove_current_roles=False,
+        )
+        self.assertFalse(keep_payload["after"]["role_grants_enabled"])
+        self.assertEqual([role.id for role in member.roles], [science_role.id])
+
+        remove_payload = await self.service.update_member_role_preference(
+            self.guild,
+            member,
+            mode="stop",
+            remove_current_roles=True,
+        )
+        self.assertFalse(remove_payload["after"]["role_grants_enabled"])
+        self.assertEqual(len(remove_payload["removal"]["removed"]), 1)
+        self.assertEqual(member.roles, [])
+
+    async def test_opted_out_progression_records_unlock_history_without_granting_role(self):
+        profile_service = await self._attach_real_profile_service()
+        science_role = DummyRole(9601, position=14, name="Science I")
+        member = DummyUser(206)
+        self._attach_member(member, science_role)
+        await self.service.update_category_mastery(self.guild.id, category="science", enabled=True, tier=1, role_id=science_role.id, threshold=10)
+        await profile_service.set_question_drop_role_grants_enabled(member.id, guild_id=self.guild.id, enabled=False)
+
+        update = await profile_service.record_question_drop_result(member.id, guild_id=self.guild.id, category="science", correct=True, points=10)
+        events = await self.service._grant_progression_rewards(
+            guild=self.guild,
+            member=member,
+            fallback_channel=self.channel,
+            category="science",
+            update=update,
+        )
+
+        self.assertEqual(events, [])
+        self.assertEqual(member.roles, [])
+        unlocks = await profile_service.store.fetch_question_drop_unlocks(guild_id=self.guild.id, user_id=member.id)
+        self.assertEqual([(row["scope_type"], row["scope_key"], row["tier"], row["role_id"]) for row in unlocks], [("category", "science", 1, science_role.id)])
+
+    async def test_opt_in_restore_reapplies_currently_eligible_roles_only_when_explicit(self):
+        profile_service = await self._attach_real_profile_service()
+        science_role = DummyRole(9701, position=14, name="Science I")
+        member = DummyUser(207)
+        self._attach_member(member, science_role)
+        await self.service.update_category_mastery(self.guild.id, category="science", enabled=True, tier=1, role_id=science_role.id, threshold=10)
+        await profile_service.set_question_drop_role_grants_enabled(member.id, guild_id=self.guild.id, enabled=False)
+        update = await profile_service.record_question_drop_result(member.id, guild_id=self.guild.id, category="science", correct=True, points=10)
+        await self.service._grant_progression_rewards(
+            guild=self.guild,
+            member=member,
+            fallback_channel=self.channel,
+            category="science",
+            update=update,
+        )
+
+        no_restore = await self.service.update_member_role_preference(
+            self.guild,
+            member,
+            mode="receive",
+            restore_current_roles=False,
+        )
+        self.assertTrue(no_restore["after"]["role_grants_enabled"])
+        self.assertEqual(member.roles, [])
+
+        restored = await self.service.update_member_role_preference(
+            self.guild,
+            member,
+            mode="receive",
+            restore_current_roles=True,
+        )
+        self.assertTrue(restored["after"]["role_grants_enabled"])
+        self.assertEqual([role.id for role in member.roles], [science_role.id])
+        self.assertEqual(len(restored["restore"]["restored"]), 1)
+
+    async def test_opt_in_restore_skips_disabled_legacy_role_configs(self):
+        profile_service = await self._attach_real_profile_service()
+        disabled_role = DummyRole(9801, position=14, name="Legacy History I")
+        member = DummyUser(208)
+        self._attach_member(member, disabled_role)
+        await self.service.update_category_mastery(self.guild.id, category="history", tier=1, role_id=disabled_role.id, threshold=10)
+        await profile_service.store.save_question_drop_unlock(
+            {
+                "guild_id": self.guild.id,
+                "user_id": member.id,
+                "scope_type": "category",
+                "scope_key": "history",
+                "tier": 1,
+                "role_id": disabled_role.id,
+                "granted_at": ge.now_utc(),
+            }
+        )
+
+        payload = await self.service.update_member_role_preference(
+            self.guild,
+            member,
+            mode="receive",
+            restore_current_roles=True,
+        )
+
+        self.assertTrue(payload["after"]["role_grants_enabled"])
+        self.assertEqual(payload["restore"]["status"], "nothing_to_restore")
+        self.assertEqual(member.roles, [])
+
+    async def test_recalculate_mastery_roles_skips_opted_out_members(self):
+        profile_service = await self._attach_real_profile_service()
+        mastery_role = DummyRole(9901, position=14, name="Logic I")
+        member = DummyUser(209)
+        self._attach_member(member, mastery_role)
+        await self.service.update_category_mastery(self.guild.id, category="logic", enabled=True, tier=1, role_id=mastery_role.id, threshold=10)
+        await profile_service.record_question_drop_result(member.id, guild_id=self.guild.id, category="logic", correct=True, points=12)
+        await profile_service.set_question_drop_role_grants_enabled(member.id, guild_id=self.guild.id, enabled=False)
+
+        preview = await self.service.recalculate_mastery_roles(self.guild, member=member, preview=True)
+        execute = await self.service.recalculate_mastery_roles(self.guild, member=member, preview=False)
+
+        self.assertEqual(preview, {"preview": True, "scanned": 1, "pending": 0, "granted": 0, "skipped_opted_out": 1})
+        self.assertEqual(execute, {"preview": False, "scanned": 1, "pending": 0, "granted": 0, "skipped_opted_out": 1})
+        member.add_roles.assert_not_awaited()
+
+    async def test_remove_handles_missing_manage_roles_and_partial_hierarchy_failures_gracefully(self):
+        await self._attach_real_profile_service()
+        removable_role = DummyRole(9911, position=10, name="Science I")
+        blocked_role = DummyRole(9912, position=60, name="Scholar III")
+        member = DummyUser(210, roles=[removable_role, blocked_role])
+        self._attach_member(member, removable_role, blocked_role)
+        await self.service.update_category_mastery(self.guild.id, category="science", enabled=True, tier=1, role_id=removable_role.id, threshold=10)
+        await self.service.update_scholar_ladder(self.guild.id, enabled=True, tier=3, role_id=blocked_role.id, threshold=30)
+
+        self.guild.me.guild_permissions.manage_roles = False
+        no_manage = await self.service.remove_member_managed_roles(self.guild, member)
+        self.assertEqual(len(no_manage["removed"]), 0)
+        self.assertEqual(len(no_manage["issues"]), 2)
+        self.assertCountEqual([role.id for role in member.roles], [removable_role.id, blocked_role.id])
+
+        self.guild.me.guild_permissions.manage_roles = True
+        partial = await self.service.remove_member_managed_roles(self.guild, member)
+        self.assertEqual([record["role_id"] for record in partial["removed"]], [removable_role.id])
+        self.assertEqual([item["record"]["role_id"] for item in partial["issues"]], [blocked_role.id])
+        self.assertEqual([role.id for role in member.roles], [blocked_role.id])
     async def test_non_answer_chatter_does_not_count_as_attempt_or_feedback(self):
         active = await self._post_one_drop()
         author = DummyUser(56)
@@ -1546,15 +1807,15 @@ class QuestionDropsServiceContinuationTests(QuestionDropsServiceTests):
             await profile_service.record_question_drop_result(member.id, guild_id=guild.id, category="logic", correct=True, points=12)
 
             preview = await service.recalculate_mastery_roles(guild, member=member, preview=True)
-            self.assertEqual(preview, {"preview": True, "scanned": 1, "pending": 1, "granted": 0})
+            self.assertEqual(preview, {"preview": True, "scanned": 1, "pending": 1, "granted": 0, "skipped_opted_out": 0})
             member.add_roles.assert_not_awaited()
 
             execute = await service.recalculate_mastery_roles(guild, member=member, preview=False)
-            self.assertEqual(execute, {"preview": False, "scanned": 1, "pending": 1, "granted": 1})
+            self.assertEqual(execute, {"preview": False, "scanned": 1, "pending": 1, "granted": 1, "skipped_opted_out": 0})
             self.assertEqual(member.add_roles.await_count, 1)
 
             rerun = await service.recalculate_mastery_roles(guild, member=member, preview=False)
-            self.assertEqual(rerun, {"preview": False, "scanned": 1, "pending": 0, "granted": 0})
+            self.assertEqual(rerun, {"preview": False, "scanned": 1, "pending": 0, "granted": 0, "skipped_opted_out": 0})
             self.assertEqual(member.add_roles.await_count, 1)
         finally:
             await service.close()

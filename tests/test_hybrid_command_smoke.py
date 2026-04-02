@@ -189,6 +189,7 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
     def test_help_pages_reflect_question_drop_option_copy(self):
         question_drops_page = next(page for page in HELP_PAGES if page["title"] == "Question Drops")
         self.assertIn("/drops status", question_drops_page["body"])
+        self.assertIn("/drops roles status", question_drops_page["body"])
         self.assertNotIn("/drops panel", question_drops_page["body"])
         self.assertIn("/drops mastery category", question_drops_page["body"])
         self.assertIn("scholar ladder", question_drops_page["body"])
@@ -199,6 +200,7 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         cog = QuestionDropsCog(types.SimpleNamespace(loop=None))
         command_names = {command.name for command in cog.drops_group.commands}
 
+        self.assertIn("roles", command_names)
         self.assertIn("status", command_names)
         self.assertNotIn("panel", command_names)
 
@@ -968,6 +970,75 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(ctx.send_calls), 1)
             self.assertTrue(ctx.send_calls[0]["ephemeral"])
             self.assertIn("Manage Server", ctx.send_calls[0]["embed"].description)
+        finally:
+            await cog.service.close()
+
+    async def test_drops_roles_group_rejects_dm_invocation_privately(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop(), profile_service=types.SimpleNamespace(storage_ready=True))
+        cog = QuestionDropsCog(bot)
+        try:
+            cog.service.storage_ready = True
+            ctx = FakeContext(interaction=FakeInteraction(), guild=None, channel=FakeChannel(), author=FakeAuthor())
+
+            await QuestionDropsCog.drops_roles_group.callback(cog, ctx)
+
+            self.assertEqual(len(ctx.send_calls), 1)
+            self.assertTrue(ctx.send_calls[0]["ephemeral"])
+            self.assertIn("only works inside a server", ctx.send_calls[0]["embed"].description.lower())
+        finally:
+            await cog.service.close()
+
+    async def test_drops_roles_group_sends_private_member_status(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop(), profile_service=types.SimpleNamespace(storage_ready=True))
+        cog = QuestionDropsCog(bot)
+        try:
+            cog.service.storage_ready = True
+            cog.service.get_member_roles_status = AsyncMock(return_value={"preference": {"role_grants_enabled": True}, "held_records": []})
+            cog.service.build_member_roles_status_embed = lambda guild, member, payload: discord.Embed(title="Question Drops Roles")
+            guild = FakeGuild(10, members=[FakeAuthor(user_id=7)])
+            ctx = FakeContext(
+                interaction=FakeInteraction(guild=guild),
+                guild=guild,
+                channel=FakeChannel(),
+                author=FakeAuthor(user_id=7),
+            )
+
+            await QuestionDropsCog.drops_roles_group.callback(cog, ctx)
+
+            self.assertEqual(len(ctx.send_calls), 1)
+            self.assertTrue(ctx.send_calls[0]["ephemeral"])
+            self.assertEqual(ctx.send_calls[0]["embed"].title, "Question Drops Roles")
+            cog.service.get_member_roles_status.assert_awaited_once()
+        finally:
+            await cog.service.close()
+
+    async def test_drops_roles_preference_command_stays_private(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop(), profile_service=types.SimpleNamespace(storage_ready=True))
+        cog = QuestionDropsCog(bot)
+        try:
+            cog.service.storage_ready = True
+            cog.service.update_member_role_preference = AsyncMock(return_value={"mode": "stop", "before": {}, "after": {}})
+            cog.service.build_member_role_preference_embed = lambda payload: discord.Embed(title="Question Drops Role Grants Off")
+            guild = FakeGuild(10, members=[FakeAuthor(user_id=8)])
+            ctx = FakeContext(
+                interaction=FakeInteraction(guild=guild),
+                guild=guild,
+                channel=FakeChannel(),
+                author=FakeAuthor(user_id=8),
+            )
+
+            await QuestionDropsCog.drops_roles_preference_command.callback(
+                cog,
+                ctx,
+                mode="stop",
+                remove_current_roles=False,
+                restore_current_roles=False,
+            )
+
+            self.assertEqual(len(ctx.send_calls), 1)
+            self.assertTrue(ctx.send_calls[0]["ephemeral"])
+            self.assertEqual(ctx.send_calls[0]["embed"].title, "Question Drops Role Grants Off")
+            cog.service.update_member_role_preference.assert_awaited_once()
         finally:
             await cog.service.close()
 

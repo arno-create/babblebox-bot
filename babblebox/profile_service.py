@@ -396,6 +396,21 @@ def _knowledge_accuracy(row: dict[str, Any]) -> int:
     return int(round((correct / attempts) * 100.0))
 
 
+def _question_drop_role_preference_payload(
+    *,
+    guild_id: int,
+    user_id: int,
+    opt_out_row: dict[str, Any] | None,
+) -> dict[str, Any]:
+    opted_out_at = opt_out_row.get("opted_out_at") if isinstance(opt_out_row, dict) else None
+    return {
+        "guild_id": guild_id,
+        "user_id": user_id,
+        "role_grants_enabled": opted_out_at is None,
+        "opted_out_at": opted_out_at,
+    }
+
+
 def _daily_booth_line(mode: str, puzzle, result: dict[str, Any] | None, *, active_mode: str) -> str:
     prefix = "\u25b6" if mode == active_mode else "\u2022"
     return f"{prefix} {_daily_mode_icon(mode)} **{puzzle.label}** | {_daily_progress_line(result)}"
@@ -583,6 +598,29 @@ class ProfileService:
             self._sync_identity_fields(profile, today)
             return self._enrich_profile(profile)
 
+    async def get_question_drop_role_preference(self, user_id: int, *, guild_id: int) -> dict[str, Any]:
+        if not self.storage_ready or not isinstance(guild_id, int) or guild_id <= 0:
+            return _question_drop_role_preference_payload(guild_id=max(0, int(guild_id or 0)), user_id=int(user_id), opt_out_row=None)
+        async with self._lock:
+            opt_out_row = await self.store.fetch_question_drop_role_opt_out(guild_id=guild_id, user_id=user_id)
+            return _question_drop_role_preference_payload(guild_id=guild_id, user_id=user_id, opt_out_row=opt_out_row)
+
+    async def set_question_drop_role_grants_enabled(self, user_id: int, *, guild_id: int, enabled: bool) -> dict[str, Any]:
+        if not self.storage_ready or not isinstance(guild_id, int) or guild_id <= 0:
+            return _question_drop_role_preference_payload(guild_id=max(0, int(guild_id or 0)), user_id=int(user_id), opt_out_row=None)
+        async with self._lock:
+            if enabled:
+                await self.store.delete_question_drop_role_opt_out(guild_id=guild_id, user_id=user_id)
+                opt_out_row = None
+            else:
+                opt_out_row = {
+                    "guild_id": guild_id,
+                    "user_id": int(user_id),
+                    "opted_out_at": ge.now_utc(),
+                }
+                await self.store.save_question_drop_role_opt_out(opt_out_row)
+            return _question_drop_role_preference_payload(guild_id=guild_id, user_id=user_id, opt_out_row=opt_out_row)
+
     async def get_question_drop_summary(self, user_id: int, *, guild_id: int | None = None) -> dict[str, Any] | None:
         if not self.storage_ready:
             return None
@@ -595,6 +633,7 @@ class ProfileService:
             guild_categories: list[dict[str, Any]] = []
             guild_rank = None
             guild_unlocks: list[dict[str, Any]] = []
+            guild_role_preference = None
             if isinstance(guild_id, int) and guild_id > 0:
                 guild_profile = await self.store.fetch_question_drop_guild_profile(guild_id=guild_id, user_id=user_id)
                 if guild_profile is None:
@@ -602,6 +641,11 @@ class ProfileService:
                 guild_categories = await self.store.fetch_question_drop_guild_categories(guild_id=guild_id, user_id=user_id)
                 guild_rank = await self.store.fetch_question_drop_guild_rank(guild_id=guild_id, user_id=user_id)
                 guild_unlocks = await self.store.fetch_question_drop_unlocks(guild_id=guild_id, user_id=user_id)
+                guild_role_preference = _question_drop_role_preference_payload(
+                    guild_id=guild_id,
+                    user_id=user_id,
+                    opt_out_row=await self.store.fetch_question_drop_role_opt_out(guild_id=guild_id, user_id=user_id),
+                )
             top_categories = guild_categories[:3] if guild_categories else global_categories[:3]
             return {
                 "profile": self._enrich_profile(profile),
@@ -614,6 +658,7 @@ class ProfileService:
                 "guild_categories": guild_categories,
                 "guild_rank": guild_rank,
                 "guild_unlocks": guild_unlocks,
+                "guild_role_preference": guild_role_preference,
             }
 
     async def get_question_drop_leaderboard(self, *, guild_id: int, category: str | None = None, limit: int = 10) -> list[dict[str, Any]]:

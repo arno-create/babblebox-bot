@@ -108,6 +108,12 @@ QUESTION_DROP_UNLOCK_COLUMNS = (
     "granted_at",
 )
 
+QUESTION_DROP_ROLE_OPT_OUT_COLUMNS = (
+    "guild_id",
+    "user_id",
+    "opted_out_at",
+)
+
 
 class ProfileStorageUnavailable(RuntimeError):
     pass
@@ -150,6 +156,7 @@ def default_profile_store_state() -> dict[str, Any]:
         "question_drop_guild_profiles": {},
         "question_drop_guild_categories": {},
         "question_drop_unlocks": {},
+        "question_drop_role_opt_outs": {},
         "meta": {},
     }
 
@@ -233,6 +240,15 @@ class _BaseProfileStore:
         raise NotImplementedError
 
     async def save_question_drop_unlock(self, row: dict[str, Any]):
+        raise NotImplementedError
+
+    async def fetch_question_drop_role_opt_out(self, *, guild_id: int, user_id: int) -> dict[str, Any] | None:
+        raise NotImplementedError
+
+    async def save_question_drop_role_opt_out(self, row: dict[str, Any]):
+        raise NotImplementedError
+
+    async def delete_question_drop_role_opt_out(self, *, guild_id: int, user_id: int):
         raise NotImplementedError
 
     async def get_meta(self, key: str) -> dict[str, Any] | None:
@@ -443,6 +459,16 @@ class _MemoryProfileStore(_BaseProfileStore):
         key = (row["guild_id"], row["user_id"], row["scope_type"], row["scope_key"], row["tier"], row["role_id"])
         self.state["question_drop_unlocks"][key] = _copy_payload(row)
 
+    async def fetch_question_drop_role_opt_out(self, *, guild_id: int, user_id: int) -> dict[str, Any] | None:
+        return _copy_payload(self.state["question_drop_role_opt_outs"].get((guild_id, user_id)))
+
+    async def save_question_drop_role_opt_out(self, row: dict[str, Any]):
+        key = (row["guild_id"], row["user_id"])
+        self.state["question_drop_role_opt_outs"][key] = _copy_payload(row)
+
+    async def delete_question_drop_role_opt_out(self, *, guild_id: int, user_id: int):
+        self.state["question_drop_role_opt_outs"].pop((guild_id, user_id), None)
+
     async def get_meta(self, key: str) -> dict[str, Any] | None:
         return _copy_payload(self.state["meta"].get(key))
 
@@ -619,6 +645,15 @@ class _PostgresProfileStore(_BaseProfileStore):
                 "role_id BIGINT NOT NULL, "
                 "granted_at TIMESTAMPTZ NOT NULL, "
                 "PRIMARY KEY (guild_id, user_id, scope_type, scope_key, tier, role_id)"
+                ")"
+            ),
+            (
+                "CREATE TABLE IF NOT EXISTS bb_question_drop_role_opt_outs ("
+                "guild_id BIGINT NOT NULL, "
+                "user_id BIGINT NOT NULL, "
+                "opted_out_at TIMESTAMPTZ NOT NULL, "
+                "updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc', now()), "
+                "PRIMARY KEY (guild_id, user_id)"
                 ")"
             ),
         ]
@@ -955,6 +990,38 @@ class _PostgresProfileStore(_BaseProfileStore):
                     *values,
                 )
 
+    async def fetch_question_drop_role_opt_out(self, *, guild_id: int, user_id: int) -> dict[str, Any] | None:
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT guild_id, user_id, opted_out_at "
+                "FROM bb_question_drop_role_opt_outs WHERE guild_id = $1 AND user_id = $2",
+                guild_id,
+                user_id,
+            )
+        return self._row_to_dict(row)
+
+    async def save_question_drop_role_opt_out(self, row: dict[str, Any]):
+        columns_sql = ", ".join(QUESTION_DROP_ROLE_OPT_OUT_COLUMNS)
+        placeholders_sql = ", ".join(f"${index}" for index in range(1, len(QUESTION_DROP_ROLE_OPT_OUT_COLUMNS) + 1))
+        values = [row.get(column) for column in QUESTION_DROP_ROLE_OPT_OUT_COLUMNS]
+        async with self._io_lock:
+            async with self._pool.acquire() as conn:
+                await conn.execute(
+                    f"INSERT INTO bb_question_drop_role_opt_outs ({columns_sql}) VALUES ({placeholders_sql}) "
+                    "ON CONFLICT (guild_id, user_id) DO UPDATE SET "
+                    "opted_out_at = EXCLUDED.opted_out_at, updated_at = timezone('utc', now())",
+                    *values,
+                )
+
+    async def delete_question_drop_role_opt_out(self, *, guild_id: int, user_id: int):
+        async with self._io_lock:
+            async with self._pool.acquire() as conn:
+                await conn.execute(
+                    "DELETE FROM bb_question_drop_role_opt_outs WHERE guild_id = $1 AND user_id = $2",
+                    guild_id,
+                    user_id,
+                )
+
     async def get_meta(self, key: str) -> dict[str, Any] | None:
         async with self._pool.acquire() as conn:
             value = await conn.fetchval("SELECT value FROM bb_identity_meta WHERE key = $1", key)
@@ -1102,6 +1169,15 @@ class ProfileStore:
 
     async def save_question_drop_unlock(self, row: dict[str, Any]):
         await self._store.save_question_drop_unlock(row)
+
+    async def fetch_question_drop_role_opt_out(self, *, guild_id: int, user_id: int) -> dict[str, Any] | None:
+        return await self._store.fetch_question_drop_role_opt_out(guild_id=guild_id, user_id=user_id)
+
+    async def save_question_drop_role_opt_out(self, row: dict[str, Any]):
+        await self._store.save_question_drop_role_opt_out(row)
+
+    async def delete_question_drop_role_opt_out(self, *, guild_id: int, user_id: int):
+        await self._store.delete_question_drop_role_opt_out(guild_id=guild_id, user_id=user_id)
 
     async def get_meta(self, key: str) -> dict[str, Any] | None:
         return await self._store.get_meta(key)

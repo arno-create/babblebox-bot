@@ -840,6 +840,127 @@ class QuestionDropsService:
             if isinstance(item.get("role_id"), int) and int(item["role_id"]) > 0 and int(item.get("threshold", 0) or 0) > 0
         ]
 
+    def _default_role_grant_preference(self, *, guild_id: int, user_id: int) -> dict[str, Any]:
+        return {
+            "guild_id": int(guild_id),
+            "user_id": int(user_id),
+            "role_grants_enabled": True,
+            "opted_out_at": None,
+        }
+
+    async def _member_role_grant_preference(self, *, guild_id: int, user_id: int) -> dict[str, Any]:
+        default_value = self._default_role_grant_preference(guild_id=guild_id, user_id=user_id)
+        profile_service = self._profile_service()
+        if profile_service is None:
+            return default_value
+        getter = getattr(profile_service, "get_question_drop_role_preference", None)
+        if not callable(getter):
+            return default_value
+        payload = await getter(user_id, guild_id=guild_id)
+        return dict(payload) if isinstance(payload, dict) else default_value
+
+    async def _set_member_role_grants_enabled(self, *, guild_id: int, user_id: int, enabled: bool) -> dict[str, Any]:
+        default_value = self._default_role_grant_preference(guild_id=guild_id, user_id=user_id)
+        profile_service = self._profile_service()
+        if profile_service is None:
+            return default_value
+        setter = getattr(profile_service, "set_question_drop_role_grants_enabled", None)
+        if not callable(setter):
+            return default_value
+        payload = await setter(user_id, guild_id=guild_id, enabled=enabled)
+        return dict(payload) if isinstance(payload, dict) else default_value
+
+    def _managed_role_records(self, guild: discord.Guild, *, enabled_only: bool = False) -> list[dict[str, Any]]:
+        config = self.get_config(guild.id)
+        records_by_role_id: dict[int, dict[str, Any]] = {}
+        category_mastery = config.get("category_mastery", {})
+        if isinstance(category_mastery, dict):
+            for category_id, payload in category_mastery.items():
+                if not isinstance(payload, dict):
+                    continue
+                if enabled_only and not payload.get("enabled"):
+                    continue
+                for tier_config in self._configured_tiers(payload):
+                    role_id = int(tier_config.get("role_id", 0) or 0)
+                    if role_id <= 0:
+                        continue
+                    record = records_by_role_id.setdefault(
+                        role_id,
+                        {
+                            "role_id": role_id,
+                            "role": guild.get_role(role_id) if hasattr(guild, "get_role") else None,
+                            "scopes": [],
+                        },
+                    )
+                    record["scopes"].append(
+                        {
+                            "scope_type": "category",
+                            "scope_key": str(category_id).strip().casefold(),
+                            "tier": int(tier_config.get("tier", 0) or 0),
+                        }
+                    )
+        scholar_payload = config.get("scholar_ladder", {})
+        if isinstance(scholar_payload, dict) and (not enabled_only or scholar_payload.get("enabled")):
+            for tier_config in self._configured_tiers(scholar_payload):
+                role_id = int(tier_config.get("role_id", 0) or 0)
+                if role_id <= 0:
+                    continue
+                record = records_by_role_id.setdefault(
+                    role_id,
+                    {
+                        "role_id": role_id,
+                        "role": guild.get_role(role_id) if hasattr(guild, "get_role") else None,
+                        "scopes": [],
+                    },
+                )
+                record["scopes"].append(
+                    {
+                        "scope_type": "scholar",
+                        "scope_key": "global",
+                        "tier": int(tier_config.get("tier", 0) or 0),
+                    }
+                )
+        records = list(records_by_role_id.values())
+        for record in records:
+            record["scopes"].sort(
+                key=lambda item: (
+                    str(item.get("scope_type", "")),
+                    str(item.get("scope_key", "")),
+                    int(item.get("tier", 0) or 0),
+                )
+            )
+        records.sort(
+            key=lambda record: (
+                -int(getattr(record.get("role"), "position", 0) or 0),
+                str(getattr(record.get("role"), "name", "")),
+                int(record.get("role_id", 0) or 0),
+            )
+        )
+        return records
+
+    def _scope_label_for_managed_role(self, scope: dict[str, Any]) -> str:
+        scope_type = str(scope.get("scope_type", "")).casefold()
+        tier = int(scope.get("tier", 0) or 0)
+        if scope_type == "scholar":
+            return scholar_label(tier)
+        return f"{category_label(str(scope.get('scope_key', '')))} {tier_label(tier)}"
+
+    def _role_display(self, role, role_id: int) -> str:
+        mention = getattr(role, "mention", None)
+        if isinstance(mention, str) and mention:
+            return mention
+        name = getattr(role, "name", None)
+        if isinstance(name, str) and name:
+            return f"`{name}`"
+        return f"<@&{int(role_id)}>"
+
+    def _managed_role_line(self, record: dict[str, Any]) -> str:
+        role = record.get("role")
+        role_id = int(record.get("role_id", 0) or 0)
+        scope_labels = [self._scope_label_for_managed_role(scope) for scope in record.get("scopes", [])]
+        suffix = f" | {', '.join(scope_labels)}" if scope_labels else ""
+        return f"{self._role_display(role, role_id)}{suffix}"
+
     def _unlocks_for_scope(self, unlocks: list[dict[str, Any]], *, scope_type: str, scope_key: str) -> list[dict[str, Any]]:
         return [
             item
@@ -851,6 +972,79 @@ class QuestionDropsService:
     def _current_scope_tier(self, unlocks: list[dict[str, Any]], *, scope_type: str, scope_key: str) -> int:
         scoped_unlocks = self._unlocks_for_scope(unlocks, scope_type=scope_type, scope_key=scope_key)
         return max((int(item.get("tier", 0) or 0) for item in scoped_unlocks), default=0)
+
+    def _eligible_unlocks_for_summary(self, summary: dict[str, Any]) -> list[dict[str, Any]]:
+        guild_id = int(summary.get("guild_id", 0) or 0)
+        if guild_id <= 0:
+            return []
+        config = self.get_config(guild_id)
+        unlocks = summary.get("guild_unlocks") or []
+        eligible: list[dict[str, Any]] = []
+        guild_profile = summary.get("guild_profile") or {}
+        scholar_config = dict(config.get("scholar_ladder", {}))
+        if scholar_config.get("enabled"):
+            scholar_points = int(guild_profile.get("points", 0) or 0)
+            for tier_config in self._configured_unlock_tiers(scholar_config):
+                tier = int(tier_config.get("tier", 0) or 0)
+                role_id = int(tier_config.get("role_id", 0) or 0)
+                threshold = int(tier_config.get("threshold", 0) or 0)
+                if scholar_points < threshold:
+                    continue
+                eligible.append(
+                    {
+                        "scope_type": "scholar",
+                        "scope_key": "global",
+                        "scope_label": "the scholar ladder",
+                        "tier": tier,
+                        "threshold": threshold,
+                        "role_id": role_id,
+                        "unlocked": self._unlock_exists(
+                            unlocks,
+                            scope_type="scholar",
+                            scope_key="global",
+                            tier=tier,
+                            role_id=role_id,
+                        ),
+                    }
+                )
+        for row in summary.get("guild_categories") or []:
+            category_id = str(row.get("category", "")).strip().casefold()
+            category_config = self._configured_category_mastery(config, category_id)
+            if not category_config.get("enabled"):
+                continue
+            category_points = int(row.get("points", 0) or 0)
+            for tier_config in self._configured_unlock_tiers(category_config):
+                tier = int(tier_config.get("tier", 0) or 0)
+                role_id = int(tier_config.get("role_id", 0) or 0)
+                threshold = int(tier_config.get("threshold", 0) or 0)
+                if category_points < threshold:
+                    continue
+                eligible.append(
+                    {
+                        "scope_type": "category",
+                        "scope_key": category_id,
+                        "scope_label": category_label_with_emoji(category_id),
+                        "tier": tier,
+                        "threshold": threshold,
+                        "role_id": role_id,
+                        "unlocked": self._unlock_exists(
+                            unlocks,
+                            scope_type="category",
+                            scope_key=category_id,
+                            tier=tier,
+                            role_id=role_id,
+                        ),
+                    }
+                )
+        eligible.sort(
+            key=lambda item: (
+                str(item.get("scope_type", "")),
+                str(item.get("scope_key", "")),
+                int(item.get("tier", 0) or 0),
+                int(item.get("role_id", 0) or 0),
+            )
+        )
+        return eligible
 
     def _next_scope_tier(self, tiers: list[dict[str, Any]], *, points: int, current_tier: int) -> dict[str, Any] | None:
         for tier in sorted(tiers, key=lambda item: int(item.get("tier", 0) or 0)):
@@ -1792,6 +1986,433 @@ class QuestionDropsService:
             )
         return ge.style_embed(embed, footer="Babblebox Question Drops | Aggregates only, no answer archive")
 
+    async def get_member_roles_status(self, guild: discord.Guild, member) -> dict[str, Any]:
+        profile_service = self._profile_service()
+        summary = {}
+        if profile_service is not None:
+            fetched_summary = await profile_service.get_question_drop_summary(int(getattr(member, "id", 0) or 0), guild_id=guild.id)
+            if isinstance(fetched_summary, dict):
+                summary = fetched_summary
+        preference = summary.get("guild_role_preference") if isinstance(summary.get("guild_role_preference"), dict) else None
+        if preference is None:
+            preference = await self._member_role_grant_preference(guild_id=guild.id, user_id=int(getattr(member, "id", 0) or 0))
+        managed_records = self._managed_role_records(guild, enabled_only=False)
+        held_records = [record for record in managed_records if self._member_has_role(member, int(record.get("role_id", 0) or 0))]
+        eligible_candidates = self._eligible_unlocks_for_summary(summary)
+        restorable_role_ids = {
+            int(candidate.get("role_id", 0) or 0)
+            for candidate in eligible_candidates
+            if int(candidate.get("role_id", 0) or 0) > 0 and not self._member_has_role(member, int(candidate.get("role_id", 0) or 0))
+        }
+        stale_managed_count = sum(1 for record in managed_records if record.get("role") is None)
+        return {
+            "member_id": int(getattr(member, "id", 0) or 0),
+            "preference": preference,
+            "summary": summary,
+            "managed_records": managed_records,
+            "held_records": held_records,
+            "eligible_candidates": eligible_candidates,
+            "restorable_role_ids": sorted(restorable_role_ids),
+            "stale_managed_count": stale_managed_count,
+        }
+
+    def build_member_roles_status_embed(self, guild: discord.Guild, member, payload: dict[str, Any]) -> discord.Embed:
+        preference = dict(payload.get("preference") or {})
+        held_records = payload.get("held_records") or []
+        grants_enabled = bool(preference.get("role_grants_enabled", True))
+        restorable_count = len(payload.get("restorable_role_ids") or [])
+        stale_managed_count = int(payload.get("stale_managed_count", 0) or 0)
+        embed = discord.Embed(
+            title="Question Drops Roles",
+            description=f"Private control over Babblebox-managed Question Drops roles for **{ge.display_name_of(member)}** in **{guild.name}**.",
+            color=ge.EMBED_THEME["info" if grants_enabled else "warning"],
+        )
+        future_lines = [
+            f"Status: **{'On' if grants_enabled else 'Off'}**",
+            (
+                "Babblebox can grant future Question Drops roles when you earn them."
+                if grants_enabled
+                else "Babblebox will not grant future Question Drops roles until you turn this back on."
+            ),
+        ]
+        if not grants_enabled and restorable_count > 0:
+            future_lines.append(f"Restore-ready now: **{restorable_count}** role(s)")
+        embed.add_field(name="Future Grants", value="\n".join(future_lines), inline=False)
+        if held_records:
+            held_lines = [self._managed_role_line(record) for record in held_records[:8]]
+            if len(held_records) > 8:
+                held_lines.append(f"...and **{len(held_records) - 8}** more")
+            current_roles_value = "\n".join(held_lines)
+        else:
+            current_roles_value = "You are not wearing any Babblebox-managed Question Drops roles right now."
+        embed.add_field(name="Current Roles", value=current_roles_value, inline=False)
+        control_lines = [
+            "`/drops roles remove` takes off current Babblebox Question Drops roles only.",
+            "`/drops roles preference stop` turns future Babblebox role grants off.",
+        ]
+        if grants_enabled:
+            control_lines.append("Removing roles now does not change future eligibility.")
+            if restorable_count > 0:
+                control_lines.append("Missing eligible roles stay off unless you explicitly choose restore now.")
+        else:
+            control_lines.append("Existing roles stay as they are unless you remove them.")
+            control_lines.append("`/drops roles preference receive` turns grants back on. Add restore now if you want eligible roles back immediately.")
+        embed.add_field(name="What Changes", value="\n".join(control_lines), inline=False)
+        if stale_managed_count > 0:
+            embed.add_field(
+                name="Config Notes",
+                value=f"Babblebox ignored **{stale_managed_count}** managed role id(s) that no longer exist in this server.",
+                inline=False,
+            )
+        return ge.style_embed(embed, footer="Babblebox Question Drops | Current roles and future grants stay separate")
+
+    def _role_update_issue_text(self, code: str) -> str:
+        return {
+            "missing_manage_roles": "Babblebox is missing `Manage Roles`.",
+            "hierarchy_blocked": "Blocked by Discord role hierarchy.",
+            "forbidden": "Discord rejected the role update.",
+            "http_error": "Discord returned an API error.",
+            "member_unavailable": "Member role access is unavailable.",
+            "bot_unavailable": "Bot member could not be resolved.",
+            "missing_role": "Role no longer exists in this server.",
+        }.get(str(code), "Role update failed.")
+
+    async def remove_member_managed_roles(self, guild: discord.Guild, member, *, role_id: int | None = None) -> dict[str, Any]:
+        preference = await self._member_role_grant_preference(guild_id=guild.id, user_id=int(getattr(member, "id", 0) or 0))
+        managed_records = self._managed_role_records(guild, enabled_only=False)
+        managed_by_id = {int(record.get("role_id", 0) or 0): record for record in managed_records}
+        requested_role_id = int(role_id or 0) or None
+        if requested_role_id is not None and requested_role_id not in managed_by_id:
+            return {
+                "status": "not_managed",
+                "preference": preference,
+                "requested_role_id": requested_role_id,
+            }
+        if requested_role_id is not None:
+            target_records = [managed_by_id[requested_role_id]]
+        else:
+            target_records = [record for record in managed_records if self._member_has_role(member, int(record.get("role_id", 0) or 0))]
+        if not target_records:
+            return {
+                "status": "nothing_to_remove",
+                "preference": preference,
+                "requested_role_id": requested_role_id,
+            }
+        removed: list[dict[str, Any]] = []
+        already_missing: list[dict[str, Any]] = []
+        issues: list[dict[str, Any]] = []
+        for record in target_records:
+            role = record.get("role")
+            status = await self._attempt_remove_role(
+                guild,
+                member,
+                role,
+                reason="Babblebox Question Drops role removal requested by member",
+            )
+            if status == "removed":
+                removed.append(record)
+            elif status == "already_missing":
+                already_missing.append(record)
+            else:
+                issues.append({"record": record, "code": status})
+        return {
+            "status": "ok",
+            "preference": preference,
+            "requested_role_id": requested_role_id,
+            "removed": removed,
+            "already_missing": already_missing,
+            "issues": issues,
+        }
+
+    def build_member_roles_remove_embed(self, payload: dict[str, Any]) -> discord.Embed:
+        preference = dict(payload.get("preference") or {})
+        grants_enabled = bool(preference.get("role_grants_enabled", True))
+        status = str(payload.get("status", "ok"))
+        if status == "not_managed":
+            return ge.make_status_embed(
+                "Question Drops Roles",
+                "That role is not a Babblebox-managed Question Drops role, so Babblebox left everything alone.",
+                tone="warning",
+                footer="Babblebox Question Drops",
+            )
+        if status == "nothing_to_remove":
+            return ge.make_status_embed(
+                "Question Drops Roles",
+                "You are not wearing any matching Babblebox-managed Question Drops roles right now.",
+                tone="info",
+                footer="Babblebox Question Drops",
+            )
+        removed = payload.get("removed") or []
+        issues = payload.get("issues") or []
+        already_missing = payload.get("already_missing") or []
+        description_lines = []
+        if removed:
+            description_lines.append(f"Removed **{len(removed)}** Babblebox-managed Question Drops role(s).")
+        else:
+            description_lines.append("No Babblebox-managed Question Drops roles were removed.")
+        description_lines.append(
+            "Future Babblebox role grants are still **on**."
+            if grants_enabled
+            else "Future Babblebox role grants are still **off**."
+        )
+        if grants_enabled:
+            description_lines.append("Use `/drops roles preference stop` if you also want Babblebox to stop future grants.")
+        embed = discord.Embed(
+            title="Question Drops Roles Updated",
+            description="\n".join(description_lines),
+            color=ge.EMBED_THEME["success" if removed and not issues else "info"],
+        )
+        if removed:
+            embed.add_field(name="Removed", value="\n".join(self._managed_role_line(record) for record in removed[:8]), inline=False)
+        if issues:
+            embed.add_field(
+                name="Could Not Remove",
+                value="\n".join(
+                    f"{self._managed_role_line(item['record'])} | {self._role_update_issue_text(str(item.get('code', '')))}"
+                    for item in issues[:8]
+                ),
+                inline=False,
+            )
+        if already_missing:
+            embed.add_field(
+                name="Already Off",
+                value="\n".join(self._managed_role_line(record) for record in already_missing[:8]),
+                inline=False,
+            )
+        return ge.style_embed(embed, footer="Babblebox Question Drops | Role removal does not change achievement history")
+
+    async def restore_member_eligible_roles(self, guild: discord.Guild, member, *, summary: dict[str, Any] | None = None) -> dict[str, Any]:
+        if summary is None:
+            profile_service = self._profile_service()
+            summary = {}
+            if profile_service is not None:
+                fetched_summary = await profile_service.get_question_drop_summary(int(getattr(member, "id", 0) or 0), guild_id=guild.id)
+                if isinstance(fetched_summary, dict):
+                    summary = fetched_summary
+        eligible_candidates = self._eligible_unlocks_for_summary(summary or {})
+        grouped_candidates: dict[int, dict[str, Any]] = {}
+        for candidate in eligible_candidates:
+            role_id = int(candidate.get("role_id", 0) or 0)
+            if role_id <= 0:
+                continue
+            grouped = grouped_candidates.setdefault(
+                role_id,
+                {
+                    "role_id": role_id,
+                    "role": guild.get_role(role_id) if hasattr(guild, "get_role") else None,
+                    "candidates": [],
+                },
+            )
+            grouped["candidates"].append(candidate)
+        if not grouped_candidates:
+            return {"status": "nothing_to_restore", "restored": [], "already_had": [], "issues": []}
+        restored: list[dict[str, Any]] = []
+        already_had: list[dict[str, Any]] = []
+        issues: list[dict[str, Any]] = []
+        records = sorted(
+            grouped_candidates.values(),
+            key=lambda item: (
+                -int(getattr(item.get("role"), "position", 0) or 0),
+                str(getattr(item.get("role"), "name", "")),
+                int(item.get("role_id", 0) or 0),
+            ),
+        )
+        for item in records:
+            role = item.get("role")
+            role_id = int(item.get("role_id", 0) or 0)
+            status = await self._attempt_add_role(
+                guild,
+                member,
+                role,
+                reason="Babblebox Question Drops role restore requested by member",
+            )
+            if status in {"added", "already_has"}:
+                for candidate in item.get("candidates", []):
+                    await self._record_unlock_history(
+                        guild_id=guild.id,
+                        user_id=int(getattr(member, "id", 0) or 0),
+                        scope_type=str(candidate.get("scope_type", "")),
+                        scope_key=str(candidate.get("scope_key", "")),
+                        tier=int(candidate.get("tier", 0) or 0),
+                        role_id=role_id,
+                    )
+                record = {
+                    "role_id": role_id,
+                    "role": role,
+                    "scopes": [
+                        {
+                            "scope_type": candidate.get("scope_type"),
+                            "scope_key": candidate.get("scope_key"),
+                            "tier": candidate.get("tier"),
+                        }
+                        for candidate in item.get("candidates", [])
+                    ],
+                }
+                if status == "added":
+                    restored.append(record)
+                else:
+                    already_had.append(record)
+            else:
+                issues.append(
+                    {
+                        "role_id": role_id,
+                        "role": role,
+                        "scopes": [
+                            {
+                                "scope_type": candidate.get("scope_type"),
+                                "scope_key": candidate.get("scope_key"),
+                                "tier": candidate.get("tier"),
+                            }
+                            for candidate in item.get("candidates", [])
+                        ],
+                        "code": status,
+                    }
+                )
+        return {
+            "status": "ok",
+            "restored": restored,
+            "already_had": already_had,
+            "issues": issues,
+        }
+
+    async def update_member_role_preference(
+        self,
+        guild: discord.Guild,
+        member,
+        *,
+        mode: str,
+        remove_current_roles: bool = False,
+        restore_current_roles: bool = False,
+    ) -> dict[str, Any]:
+        normalized_mode = str(mode or "").strip().casefold()
+        before = await self._member_role_grant_preference(guild_id=guild.id, user_id=int(getattr(member, "id", 0) or 0))
+        profile_service = self._profile_service()
+        summary = {}
+        if profile_service is not None:
+            fetched_summary = await profile_service.get_question_drop_summary(int(getattr(member, "id", 0) or 0), guild_id=guild.id)
+            if isinstance(fetched_summary, dict):
+                summary = fetched_summary
+        if normalized_mode == "stop":
+            after = await self._set_member_role_grants_enabled(
+                guild_id=guild.id,
+                user_id=int(getattr(member, "id", 0) or 0),
+                enabled=False,
+            )
+            removal = None
+            if remove_current_roles:
+                removal = await self.remove_member_managed_roles(guild, member)
+            return {
+                "mode": "stop",
+                "before": before,
+                "after": after,
+                "remove_current_roles": bool(remove_current_roles),
+                "restore_current_roles": False,
+                "removal": removal,
+                "restore": None,
+                "summary": summary,
+            }
+        if normalized_mode == "receive":
+            after = await self._set_member_role_grants_enabled(
+                guild_id=guild.id,
+                user_id=int(getattr(member, "id", 0) or 0),
+                enabled=True,
+            )
+            restore = None
+            if restore_current_roles:
+                restore = await self.restore_member_eligible_roles(guild, member, summary=summary)
+            return {
+                "mode": "receive",
+                "before": before,
+                "after": after,
+                "remove_current_roles": False,
+                "restore_current_roles": bool(restore_current_roles),
+                "removal": None,
+                "restore": restore,
+                "summary": summary,
+            }
+        raise ValueError(f"Unsupported Question Drops role preference mode '{mode}'.")
+
+    def build_member_role_preference_embed(self, payload: dict[str, Any]) -> discord.Embed:
+        mode = str(payload.get("mode", "")).casefold()
+        before = dict(payload.get("before") or {})
+        after = dict(payload.get("after") or {})
+        if mode == "stop":
+            lines = [
+                "Future Babblebox Question Drops role grants are now **off** for you in this server."
+                if bool(before.get("role_grants_enabled", True))
+                else "Future Babblebox Question Drops role grants were already **off** for you in this server.",
+            ]
+            if payload.get("remove_current_roles"):
+                removal = payload.get("removal") or {}
+                removed_count = len(removal.get("removed") or [])
+                issue_count = len(removal.get("issues") or [])
+                lines.append(f"Current role cleanup removed **{removed_count}** role(s)." if removed_count else "Current role cleanup did not remove any roles.")
+                if issue_count:
+                    lines.append(f"Some roles still need attention: **{issue_count}** could not be removed.")
+            else:
+                lines.append("Your current roles stay as they are unless you remove them.")
+            embed = discord.Embed(
+                title="Question Drops Role Grants Off",
+                description="\n".join(lines),
+                color=ge.EMBED_THEME["warning"],
+            )
+            if payload.get("removal"):
+                removal = payload["removal"]
+                if removal.get("removed"):
+                    embed.add_field(
+                        name="Removed Now",
+                        value="\n".join(self._managed_role_line(record) for record in (removal.get("removed") or [])[:8]),
+                        inline=False,
+                    )
+                if removal.get("issues"):
+                    embed.add_field(
+                        name="Could Not Remove",
+                        value="\n".join(
+                            f"{self._managed_role_line(item['record'])} | {self._role_update_issue_text(str(item.get('code', '')))}"
+                            for item in (removal.get("issues") or [])[:8]
+                        ),
+                        inline=False,
+                    )
+            return ge.style_embed(embed, footer="Babblebox Question Drops | Achievement history stays intact")
+        restore = payload.get("restore") or {}
+        lines = [
+            "Future Babblebox Question Drops role grants are now **on** for you in this server."
+            if not bool(before.get("role_grants_enabled", True))
+            else "Future Babblebox Question Drops role grants were already **on** for you in this server.",
+        ]
+        if payload.get("restore_current_roles"):
+            restored_count = len(restore.get("restored") or [])
+            if restored_count:
+                lines.append(f"Restored **{restored_count}** currently eligible role(s) now.")
+            elif str(restore.get("status", "")) == "nothing_to_restore":
+                lines.append("There were no currently eligible Babblebox roles to restore right now.")
+            else:
+                lines.append("No additional roles were restored right now.")
+        else:
+            lines.append("Existing roles stay as they are unless you explicitly restore them.")
+        embed = discord.Embed(
+            title="Question Drops Role Grants On",
+            description="\n".join(lines),
+            color=ge.EMBED_THEME["success"],
+        )
+        if payload.get("restore_current_roles"):
+            if restore.get("restored"):
+                embed.add_field(
+                    name="Restored Now",
+                    value="\n".join(self._managed_role_line(record) for record in (restore.get("restored") or [])[:8]),
+                    inline=False,
+                )
+            if restore.get("issues"):
+                embed.add_field(
+                    name="Could Not Restore",
+                    value="\n".join(
+                        f"{self._managed_role_line(item)} | {self._role_update_issue_text(str(item.get('code', '')))}"
+                        for item in (restore.get("issues") or [])[:8]
+                    ),
+                    inline=False,
+                )
+        return ge.style_embed(embed, footer="Babblebox Question Drops | Opt-in does not post public catch-up grants")
+
     def build_leaderboard_embed(self, guild: discord.Guild, entries: list[dict[str, Any]], *, category: str | None = None) -> discord.Embed:
         normalized_category = str(category or "").strip().casefold()
         if normalized_category:
@@ -1834,53 +2455,7 @@ class QuestionDropsService:
         return []
 
     def _pending_unlocks_for_summary(self, summary: dict[str, Any]) -> list[dict[str, Any]]:
-        guild_id = int(summary.get("guild_id", 0) or 0)
-        if guild_id <= 0:
-            return []
-        config = self.get_config(guild_id)
-        unlocks = summary.get("guild_unlocks") or []
-        pending: list[dict[str, Any]] = []
-        guild_profile = summary.get("guild_profile") or {}
-        scholar_config = dict(config.get("scholar_ladder", {}))
-        if scholar_config.get("enabled"):
-            scholar_points = int(guild_profile.get("points", 0) or 0)
-            for tier_config in self._configured_unlock_tiers(scholar_config):
-                tier = int(tier_config.get("tier", 0) or 0)
-                role_id = int(tier_config.get("role_id", 0) or 0)
-                threshold = int(tier_config.get("threshold", 0) or 0)
-                if scholar_points >= threshold and not self._unlock_exists(unlocks, scope_type="scholar", scope_key="global", tier=tier, role_id=role_id):
-                    pending.append(
-                        {
-                            "scope_type": "scholar",
-                            "scope_key": "global",
-                            "scope_label": "the scholar ladder",
-                            "tier": tier,
-                            "threshold": threshold,
-                            "role_id": role_id,
-                        }
-                    )
-        for row in summary.get("guild_categories") or []:
-            category_id = str(row.get("category", "")).strip().casefold()
-            category_config = self._configured_category_mastery(config, category_id)
-            if not category_config.get("enabled"):
-                continue
-            category_points = int(row.get("points", 0) or 0)
-            for tier_config in self._configured_unlock_tiers(category_config):
-                tier = int(tier_config.get("tier", 0) or 0)
-                role_id = int(tier_config.get("role_id", 0) or 0)
-                threshold = int(tier_config.get("threshold", 0) or 0)
-                if category_points >= threshold and not self._unlock_exists(unlocks, scope_type="category", scope_key=category_id, tier=tier, role_id=role_id):
-                    pending.append(
-                        {
-                            "scope_type": "category",
-                            "scope_key": category_id,
-                            "scope_label": category_label_with_emoji(category_id),
-                            "tier": tier,
-                            "threshold": threshold,
-                            "role_id": role_id,
-                        }
-                    )
-        return pending
+        return [candidate for candidate in self._eligible_unlocks_for_summary(summary) if not bool(candidate.get("unlocked"))]
 
     async def recalculate_mastery_roles(
         self,
@@ -1891,11 +2466,12 @@ class QuestionDropsService:
     ) -> dict[str, Any]:
         profile_service = self._profile_service()
         if profile_service is None:
-            return {"preview": preview, "scanned": 0, "pending": 0, "granted": 0}
+            return {"preview": preview, "scanned": 0, "pending": 0, "granted": 0, "skipped_opted_out": 0}
         await self._ensure_guild_backfill(guild.id)
         targets = [member] if member is not None else self._guild_members_for_recalc(guild)
         pending_total = 0
         granted_total = 0
+        skipped_opted_out = 0
         scanned = 0
         for target in targets:
             if target is None or bool(getattr(target, "bot", False)):
@@ -1903,6 +2479,12 @@ class QuestionDropsService:
             scanned += 1
             summary = await profile_service.get_question_drop_summary(int(target.id), guild_id=guild.id)
             if not isinstance(summary, dict):
+                continue
+            preference = summary.get("guild_role_preference") if isinstance(summary.get("guild_role_preference"), dict) else None
+            if preference is None:
+                preference = await self._member_role_grant_preference(guild_id=guild.id, user_id=int(target.id))
+            if not bool(preference.get("role_grants_enabled", True)):
+                skipped_opted_out += 1
                 continue
             pending_unlocks = self._pending_unlocks_for_summary(summary)
             pending_total += len(pending_unlocks)
@@ -1923,7 +2505,13 @@ class QuestionDropsService:
                 )
                 if event is not None:
                     granted_total += 1
-        return {"preview": preview, "scanned": scanned, "pending": pending_total, "granted": granted_total}
+        return {
+            "preview": preview,
+            "scanned": scanned,
+            "pending": pending_total,
+            "granted": granted_total,
+            "skipped_opted_out": skipped_opted_out,
+        }
 
     def observe_message_activity(self, message: discord.Message):
         if message.guild is None:
@@ -2134,6 +2722,84 @@ class QuestionDropsService:
             return False
         return any(int(getattr(role, "id", 0) or 0) == int(role_id) for role in roles)
 
+    async def _record_unlock_history(
+        self,
+        *,
+        guild_id: int,
+        user_id: int,
+        scope_type: str,
+        scope_key: str,
+        tier: int,
+        role_id: int,
+    ) -> bool:
+        profile_service = self._profile_service()
+        if profile_service is None:
+            return False
+        await profile_service.store.save_question_drop_unlock(
+            {
+                "guild_id": int(guild_id),
+                "user_id": int(user_id),
+                "scope_type": str(scope_type),
+                "scope_key": str(scope_key),
+                "tier": int(tier),
+                "role_id": int(role_id),
+                "granted_at": ge.now_utc(),
+            }
+        )
+        return True
+
+    def _role_manage_block_code(self, guild: discord.Guild, role) -> str | None:
+        bot_member = self._bot_member_for_guild(guild)
+        if bot_member is None:
+            return "bot_unavailable"
+        bot_permissions = getattr(bot_member, "guild_permissions", None)
+        if not bool(getattr(bot_permissions, "manage_roles", False)):
+            return "missing_manage_roles"
+        bot_top_role = getattr(bot_member, "top_role", None)
+        bot_top_position = int(getattr(bot_top_role, "position", 0) or 0)
+        role_position = int(getattr(role, "position", 0) or 0)
+        if bot_top_position and role_position >= bot_top_position:
+            return "hierarchy_blocked"
+        return None
+
+    async def _attempt_add_role(self, guild: discord.Guild, member, role, *, reason: str) -> str:
+        if role is None:
+            return "missing_role"
+        if self._member_has_role(member, int(getattr(role, "id", 0) or 0)):
+            return "already_has"
+        add_roles = getattr(member, "add_roles", None)
+        if not callable(add_roles):
+            return "member_unavailable"
+        block_code = self._role_manage_block_code(guild, role)
+        if block_code is not None:
+            return block_code
+        try:
+            await add_roles(role, reason=reason)
+        except discord.Forbidden:
+            return "forbidden"
+        except discord.HTTPException:
+            return "http_error"
+        return "added"
+
+    async def _attempt_remove_role(self, guild: discord.Guild, member, role, *, reason: str) -> str:
+        if role is None:
+            return "missing_role"
+        if not self._member_has_role(member, int(getattr(role, "id", 0) or 0)):
+            return "already_missing"
+        remove_roles = getattr(member, "remove_roles", None)
+        if not callable(remove_roles):
+            return "member_unavailable"
+        block_code = self._role_manage_block_code(guild, role)
+        if block_code is not None:
+            return block_code
+        try:
+            await remove_roles(role, reason=reason)
+        except discord.Forbidden:
+            return "forbidden"
+        except discord.HTTPException:
+            return "http_error"
+        return "removed"
+
     async def _grant_unlock_role(
         self,
         *,
@@ -2153,37 +2819,23 @@ class QuestionDropsService:
         role = guild.get_role(int(role_id))
         if role is None:
             return None
-        already_has_role = self._member_has_role(member, int(role_id))
-        if not already_has_role:
-            add_roles = getattr(member, "add_roles", None)
-            bot_member = self._bot_member_for_guild(guild)
-            if not callable(add_roles) or bot_member is None:
-                return None
-            bot_permissions = getattr(bot_member, "guild_permissions", None)
-            if not bool(getattr(bot_permissions, "manage_roles", False)):
-                return None
-            bot_top_role = getattr(bot_member, "top_role", None)
-            bot_top_position = int(getattr(bot_top_role, "position", 0) or 0)
-            role_position = int(getattr(role, "position", 0) or 0)
-            if bot_top_position and role_position >= bot_top_position:
-                return None
-            try:
-                await add_roles(role, reason=f"Babblebox Question Drops {scope_type} milestone reached")
-            except (discord.Forbidden, discord.HTTPException):
-                return None
-        profile_service = self._profile_service()
-        if profile_service is None:
+        status = await self._attempt_add_role(
+            guild,
+            member,
+            role,
+            reason=f"Babblebox Question Drops {scope_type} milestone reached",
+        )
+        if status not in {"added", "already_has"}:
             return None
-        unlock_row = {
-            "guild_id": guild.id,
-            "user_id": int(getattr(member, "id", 0) or 0),
-            "scope_type": scope_type,
-            "scope_key": scope_key,
-            "tier": int(tier),
-            "role_id": int(role_id),
-            "granted_at": ge.now_utc(),
-        }
-        await profile_service.store.save_question_drop_unlock(unlock_row)
+        if not await self._record_unlock_history(
+            guild_id=guild.id,
+            user_id=int(getattr(member, "id", 0) or 0),
+            scope_type=scope_type,
+            scope_key=scope_key,
+            tier=tier,
+            role_id=role_id,
+        ):
+            return None
         event = {
             "scope_type": scope_type,
             "scope_key": scope_key,
@@ -2214,6 +2866,8 @@ class QuestionDropsService:
         config = self.get_config(guild.id)
         unlocks = await profile_service.store.fetch_question_drop_unlocks(guild_id=guild.id, user_id=member_id)
         events: list[dict[str, Any]] = []
+        preference = await self._member_role_grant_preference(guild_id=guild.id, user_id=member_id)
+        role_grants_enabled = bool(preference.get("role_grants_enabled", True))
         category_id = str(category or "").strip().casefold()
         category_points = int(update.get("guild_category_after", {}).get("points", 0) or 0)
         guild_points = int(update.get("guild_after", {}).get("points", 0) or 0)
@@ -2224,6 +2878,24 @@ class QuestionDropsService:
                 role_id = int(tier_config.get("role_id", 0) or 0)
                 threshold = int(tier_config.get("threshold", 0) or 0)
                 if category_points < threshold or self._unlock_exists(unlocks, scope_type="category", scope_key=category_id, tier=tier, role_id=role_id):
+                    continue
+                if not role_grants_enabled:
+                    await self._record_unlock_history(
+                        guild_id=guild.id,
+                        user_id=member_id,
+                        scope_type="category",
+                        scope_key=category_id,
+                        tier=tier,
+                        role_id=role_id,
+                    )
+                    unlocks.append(
+                        {
+                            "scope_type": "category",
+                            "scope_key": category_id,
+                            "tier": tier,
+                            "role_id": role_id,
+                        }
+                    )
                     continue
                 event = await self._grant_unlock_role(
                     guild=guild,
@@ -2256,6 +2928,24 @@ class QuestionDropsService:
                 role_id = int(tier_config.get("role_id", 0) or 0)
                 threshold = int(tier_config.get("threshold", 0) or 0)
                 if guild_points < threshold or self._unlock_exists(unlocks, scope_type="scholar", scope_key="global", tier=tier, role_id=role_id):
+                    continue
+                if not role_grants_enabled:
+                    await self._record_unlock_history(
+                        guild_id=guild.id,
+                        user_id=member_id,
+                        scope_type="scholar",
+                        scope_key="global",
+                        tier=tier,
+                        role_id=role_id,
+                    )
+                    unlocks.append(
+                        {
+                            "scope_type": "scholar",
+                            "scope_key": "global",
+                            "tier": tier,
+                            "role_id": role_id,
+                        }
+                    )
                     continue
                 event = await self._grant_unlock_role(
                     guild=guild,

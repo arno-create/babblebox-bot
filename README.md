@@ -52,6 +52,7 @@ Babblebox is intentionally compact:
 
 - scheduled in-channel knowledge prompts
 - guild-first knowledge lane with `/drops status`, `/drops stats`, and `/drops leaderboard`
+- member role controls with `/drops roles status`, `/drops roles remove`, and `/drops roles preference`
 - configurable channels, categories, timing, activity gating, and tone
 - category mastery roles
 - guild scholar ladder
@@ -197,6 +198,9 @@ Slash is recommended for multi-option setup here. Prefix stays positional, so th
 | `/drops categories` | `bb!drops categories disable math` | Enable, disable, or reset knowledge categories |
 | `/drops stats` | `bb!drops stats @name` | View guild-first Question Drops progress |
 | `/drops leaderboard` | `bb!drops leaderboard science` | View the guild knowledge board |
+| `/drops roles status` | `bb!drops roles status` | View your current Babblebox-managed Question Drops roles and future-grant state |
+| `/drops roles remove` | `bb!drops roles remove @Role` | Remove one current Babblebox-managed role or all current Babblebox Question Drops roles |
+| `/drops roles preference` | `bb!drops roles preference stop true` | Stop future Babblebox role grants or receive them again with optional restore |
 | `/drops mastery category` | `bb!drops mastery category science true 1 @Role 25` | Configure category mastery roles |
 | `/drops mastery scholar` | `bb!drops mastery scholar true 1 @Role 100` | Configure the guild scholar ladder |
 | `/drops mastery recalc` | `bb!drops mastery recalc` | Preview or execute a grant-only role recalculation |
@@ -206,6 +210,7 @@ Question Drops notes:
 - 1-10 drops per day
 - live drops stay compact and block `/play` only in the same channel while unresolved
 - numeric answers accept clean digits, simple number words, and safe judged formats
+- removing current Babblebox roles does not erase earned mastery history, and opt-out is the durable "do not re-grant" switch
 - category mastery and scholar ladder stay guild-first
 - profile, buddy, and vault surfaces fold the knowledge lane in without confusing it with Daily Arcade
 

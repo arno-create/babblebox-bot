@@ -25,6 +25,7 @@ class WebsiteDocsTests(unittest.TestCase):
         self.assertIn("Strict = reply to the armed question only", help_html)
         self.assertIn("1-10 drops per day", help_html)
         self.assertIn("/drops leaderboard", help_html)
+        self.assertIn("/drops roles status", help_html)
         self.assertIn("/drops mastery category", help_html)
         self.assertIn("scholar ladder", help_html)
         self.assertIn("Pattern Hunt", help_html)
@@ -57,6 +58,7 @@ class WebsiteDocsTests(unittest.TestCase):
             "category mastery roles",
             "guild scholar ladder",
             "/drops leaderboard",
+            "/drops roles status",
             "/hunt guess",
             "Pattern Hunt coder role DMs",
         ):
@@ -69,6 +71,7 @@ class WebsiteDocsTests(unittest.TestCase):
             "mastery",
             "scholar",
             "/drops status",
+            "/drops roles status",
             "Pattern Hunt coders need server DMs open before the round starts.",
         ):
             self.assertIn(text, index_html)
