@@ -51,6 +51,10 @@ DIGEST_MENTION_CHOICES = [
     app_commands.Choice(name="No pings", value="none"),
     app_commands.Choice(name="@here", value="here"),
 ]
+ROLE_PREFERENCE_MODE_CHOICES = [
+    app_commands.Choice(name="Stop future grants", value="stop"),
+    app_commands.Choice(name="Receive roles again", value="receive"),
+]
 
 
 class QuestionDropsCog(commands.Cog):
@@ -77,6 +81,27 @@ class QuestionDropsCog(commands.Cog):
             embed=ge.make_status_embed(
                 f"{feature_name} Unavailable",
                 self.service.storage_message(feature_name),
+                tone="warning",
+                footer="Babblebox Question Drops",
+            ),
+            ephemeral=True,
+        )
+        return False
+
+    def _profile_service(self):
+        profile_service = getattr(self.bot, "profile_service", None)
+        if profile_service is None or not getattr(profile_service, "storage_ready", False):
+            return None
+        return profile_service
+
+    async def _require_profile_storage(self, ctx: commands.Context, feature_name: str) -> bool:
+        if self._profile_service() is not None:
+            return True
+        await send_hybrid_response(
+            ctx,
+            embed=ge.make_status_embed(
+                "Profile Unavailable",
+                f"{feature_name} need the Babblebox profile store.",
                 tone="warning",
                 footer="Babblebox Question Drops",
             ),
@@ -271,8 +296,8 @@ class QuestionDropsCog(commands.Cog):
     async def drops_stats_command(self, ctx: commands.Context, user: Optional[discord.User] = None, visibility: str = "public"):
         if not await self._require_storage(ctx, "Question Drops", defer_response=False):
             return
-        profile_service = getattr(self.bot, "profile_service", None)
-        if profile_service is None or not getattr(profile_service, "storage_ready", False):
+        profile_service = self._profile_service()
+        if profile_service is None:
             await send_hybrid_response(
                 ctx,
                 embed=ge.make_status_embed(
@@ -292,6 +317,90 @@ class QuestionDropsCog(commands.Cog):
             embed=self.service.build_stats_embed(target, summary),
             ephemeral=self._is_private(visibility),
         )
+
+    @drops_group.group(name="roles", with_app_command=True, invoke_without_command=True, description="Manage your Babblebox Question Drops roles")
+    async def drops_roles_group(self, ctx: commands.Context):
+        if ctx.guild is None:
+            await send_hybrid_response(
+                ctx,
+                embed=ge.make_status_embed("Server Only", "This command only works inside a server.", tone="warning", footer="Babblebox Question Drops"),
+                ephemeral=True,
+            )
+            return
+        if not await self._require_storage(ctx, "Question Drops", defer_response=False):
+            return
+        if not await self._require_profile_storage(ctx, "Question Drops role preferences"):
+            return
+        payload = await self.service.get_member_roles_status(ctx.guild, ctx.author)
+        await send_hybrid_response(ctx, embed=self.service.build_member_roles_status_embed(ctx.guild, ctx.author, payload), ephemeral=True)
+
+    @drops_roles_group.command(name="status", with_app_command=True, description="View your Babblebox Question Drops role state")
+    async def drops_roles_status_command(self, ctx: commands.Context):
+        if ctx.guild is None:
+            await send_hybrid_response(
+                ctx,
+                embed=ge.make_status_embed("Server Only", "This command only works inside a server.", tone="warning", footer="Babblebox Question Drops"),
+                ephemeral=True,
+            )
+            return
+        if not await self._require_storage(ctx, "Question Drops", defer_response=False):
+            return
+        if not await self._require_profile_storage(ctx, "Question Drops role preferences"):
+            return
+        payload = await self.service.get_member_roles_status(ctx.guild, ctx.author)
+        await send_hybrid_response(ctx, embed=self.service.build_member_roles_status_embed(ctx.guild, ctx.author, payload), ephemeral=True)
+
+    @drops_roles_group.command(name="remove", with_app_command=True, description="Remove current Babblebox-managed Question Drops roles")
+    @app_commands.describe(role="One Babblebox-managed Question Drops role to remove; leave blank to remove all current Babblebox roles")
+    async def drops_roles_remove_command(self, ctx: commands.Context, role: Optional[discord.Role] = None):
+        if ctx.guild is None:
+            await send_hybrid_response(
+                ctx,
+                embed=ge.make_status_embed("Server Only", "This command only works inside a server.", tone="warning", footer="Babblebox Question Drops"),
+                ephemeral=True,
+            )
+            return
+        if not await self._require_storage(ctx, "Question Drops", defer_response=False):
+            return
+        if not await self._require_profile_storage(ctx, "Question Drops role preferences"):
+            return
+        payload = await self.service.remove_member_managed_roles(ctx.guild, ctx.author, role_id=role.id if role is not None else None)
+        await send_hybrid_response(ctx, embed=self.service.build_member_roles_remove_embed(payload), ephemeral=True)
+
+    @drops_roles_group.command(name="preference", with_app_command=True, description="Stop or resume future Babblebox Question Drops role grants")
+    @app_commands.describe(
+        mode="Stop future Babblebox role grants or receive them again",
+        remove_current_roles="When stopping future grants, also remove your current Babblebox Question Drops roles now",
+        restore_current_roles="When receiving roles again, also restore currently eligible Babblebox roles now",
+    )
+    @app_commands.choices(mode=ROLE_PREFERENCE_MODE_CHOICES)
+    async def drops_roles_preference_command(
+        self,
+        ctx: commands.Context,
+        *,
+        mode: str,
+        remove_current_roles: bool = False,
+        restore_current_roles: bool = False,
+    ):
+        if ctx.guild is None:
+            await send_hybrid_response(
+                ctx,
+                embed=ge.make_status_embed("Server Only", "This command only works inside a server.", tone="warning", footer="Babblebox Question Drops"),
+                ephemeral=True,
+            )
+            return
+        if not await self._require_storage(ctx, "Question Drops", defer_response=False):
+            return
+        if not await self._require_profile_storage(ctx, "Question Drops role preferences"):
+            return
+        payload = await self.service.update_member_role_preference(
+            ctx.guild,
+            ctx.author,
+            mode=mode,
+            remove_current_roles=remove_current_roles,
+            restore_current_roles=restore_current_roles,
+        )
+        await send_hybrid_response(ctx, embed=self.service.build_member_role_preference_embed(payload), ephemeral=True)
 
     @drops_group.command(name="leaderboard", with_app_command=True, description="View the guild knowledge leaderboard")
     @app_commands.describe(category="Optional category-specific leaderboard")
@@ -531,11 +640,12 @@ class QuestionDropsCog(commands.Cog):
             return
         preview = mode != "execute"
         summary = await self.service.recalculate_mastery_roles(ctx.guild, member=member, preview=preview)
+        skipped_line = f" Skipped opted-out members: **{summary['skipped_opted_out']}**."
         if preview:
-            body = f"Scanned **{summary['scanned']}** member(s). Pending role grants: **{summary['pending']}**."
+            body = f"Scanned **{summary['scanned']}** member(s). Pending role grants: **{summary['pending']}**.{skipped_line}"
             title = "Mastery Recalc Preview"
         else:
-            body = f"Scanned **{summary['scanned']}** member(s). Granted **{summary['granted']}** missing role(s)."
+            body = f"Scanned **{summary['scanned']}** member(s). Granted **{summary['granted']}** missing role(s).{skipped_line}"
             title = "Mastery Recalc"
         await send_hybrid_response(
             ctx,

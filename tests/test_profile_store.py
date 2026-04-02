@@ -102,3 +102,12 @@ class PostgresProfileStoreSchemaTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(connection.question_drop_points_exists)
         self.assertTrue(any("ix_bb_profiles_question_drop_points" in statement for statement in connection.executed))
         self.assertEqual(connection.transaction_entries, 1)
+
+    async def test_schema_bootstrap_creates_question_drop_role_opt_out_table(self):
+        connection = _FakeConnection(legacy_missing_question_drop_points=False)
+        store = _PostgresProfileStore("postgresql://example")
+        store._pool = _FakePool(connection)
+
+        await store._ensure_schema()
+
+        self.assertTrue(any("CREATE TABLE IF NOT EXISTS bb_question_drop_role_opt_outs" in statement for statement in connection.executed))

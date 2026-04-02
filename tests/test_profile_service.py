@@ -211,6 +211,33 @@ class ProfileServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(summary["categories"][1]["correct_count"], 0)
         self.assertEqual(summary["guild_profile"]["points"], 12)
 
+    async def test_question_drop_role_preference_defaults_to_enabled_and_is_visible_in_summary(self):
+        preference = await self.service.get_question_drop_role_preference(55, guild_id=self.guild_id)
+
+        self.assertTrue(preference["role_grants_enabled"])
+        self.assertIsNone(preference["opted_out_at"])
+
+        summary = await self.service.get_question_drop_summary(55, guild_id=self.guild_id)
+        self.assertTrue(summary["guild_role_preference"]["role_grants_enabled"])
+        self.assertIsNone(summary["guild_role_preference"]["opted_out_at"])
+
+    async def test_question_drop_role_preference_can_opt_out_and_back_in(self):
+        opted_out = await self.service.set_question_drop_role_grants_enabled(77, guild_id=self.guild_id, enabled=False)
+
+        self.assertFalse(opted_out["role_grants_enabled"])
+        self.assertIsNotNone(opted_out["opted_out_at"])
+        self.assertIsNotNone(
+            await self.service.store.fetch_question_drop_role_opt_out(guild_id=self.guild_id, user_id=77)
+        )
+
+        opted_in = await self.service.set_question_drop_role_grants_enabled(77, guild_id=self.guild_id, enabled=True)
+
+        self.assertTrue(opted_in["role_grants_enabled"])
+        self.assertIsNone(opted_in["opted_out_at"])
+        self.assertIsNone(
+            await self.service.store.fetch_question_drop_role_opt_out(guild_id=self.guild_id, user_id=77)
+        )
+
     async def test_profile_embed_separates_knowledge_from_arcade(self):
         await self.service.record_question_drop_result(88, guild_id=self.guild_id, category="logic", correct=True, points=12)
         profile = await self.service.get_profile(88)
