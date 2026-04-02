@@ -77,6 +77,23 @@ class WebsiteDocsTests(unittest.TestCase):
         self.assertNotIn("dropscelebaiglobal", index_html.casefold())
         self.assertNotIn("/drops panel", readme)
 
+    def test_homepage_and_readme_use_current_proof_assets(self):
+        index_html = (ROOT / "index.html").read_text(encoding="utf-8")
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        assets_dir = ROOT / "assets"
+
+        self.assertIn("assets/drops_status_example.png", index_html)
+
+        for asset_name in (
+            "lobby.png",
+            "drops_status_example.png",
+            "buddy_profile_example.png",
+            "watch_settings.png",
+            "shield_panel_example.png",
+        ):
+            self.assertIn(f"assets/{asset_name}", readme)
+            self.assertTrue((assets_dir / asset_name).exists())
+
     def test_help_and_readme_do_not_reintroduce_duplicate_drops_panel_copy(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         help_html = (ROOT / "help.html").read_text(encoding="utf-8")

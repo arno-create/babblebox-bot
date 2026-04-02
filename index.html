@@ -234,10 +234,14 @@
 
     nav {
       display: grid;
-      grid-template-columns: auto 1fr auto;
+      grid-template-columns: auto minmax(0, 1fr) auto;
       gap: 24px;
       align-items: center;
       padding: 16px 0;
+    }
+
+    .nav-top {
+      display: contents;
     }
 
     .brand {
@@ -274,6 +278,14 @@
       text-transform: uppercase;
     }
 
+    .nav-panel {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 24px;
+      min-width: 0;
+    }
+
     .nav-links {
       display: flex;
       justify-content: center;
@@ -298,11 +310,77 @@
       display: flex;
       align-items: center;
       gap: 14px;
+      flex-wrap: wrap;
+      justify-content: flex-end;
+    }
+
+    .nav-quick {
+      display: flex;
+      align-items: center;
+      gap: 12px;
     }
 
     .nav-quiet {
       font-size: 0.94rem;
       font-weight: 700;
+    }
+
+    .nav-toggle {
+      display: none;
+      align-items: center;
+      justify-content: center;
+      width: 48px;
+      height: 48px;
+      border-radius: 16px;
+      border: 1px solid rgba(173, 196, 255, 0.14);
+      background: rgba(255, 255, 255, 0.04);
+      color: var(--soft);
+      box-shadow: 0 16px 34px rgba(0, 0, 0, 0.18);
+      transition:
+        border-color 0.18s ease,
+        background 0.18s ease,
+        color 0.18s ease,
+        transform 0.18s ease;
+    }
+
+    .nav-toggle:hover {
+      transform: translateY(-1px);
+      border-color: rgba(131, 221, 255, 0.28);
+      background: rgba(15, 25, 43, 0.92);
+      color: var(--text);
+    }
+
+    .nav-toggle-icon {
+      display: grid;
+      gap: 4px;
+    }
+
+    .nav-toggle-icon span {
+      display: block;
+      width: 18px;
+      height: 2px;
+      border-radius: 999px;
+      background: currentColor;
+    }
+
+    .visually-hidden {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0, 0, 0, 0);
+      white-space: nowrap;
+      border: 0;
+    }
+
+    .nav-invite-short {
+      display: none;
+    }
+
+    .nav-panel-invite {
+      display: none;
     }
 
     .btn {
@@ -504,6 +582,9 @@
     }
 
     .shot-media {
+      display: flex;
+      align-items: center;
+      justify-content: center;
       overflow: hidden;
       border-radius: 20px;
       border: 1px solid rgba(173, 196, 255, 0.12);
@@ -512,46 +593,38 @@
     }
 
     .shot-media img {
+      display: block;
       width: 100%;
+      height: auto;
+    }
+
+    .shot-atmosphere img {
       height: 100%;
       object-fit: cover;
       object-position: top center;
     }
 
-    .shot-media.contain {
-      padding: 12px;
+    .shot-proof {
+      padding: clamp(10px, 1.2vw, 14px);
     }
 
-    .shot-media.contain img {
+    .shot-proof img {
       object-fit: contain;
+    }
+
+    .shot-proof-panel img {
+      width: auto;
+      max-width: 100%;
+      max-height: clamp(320px, 36vw, 520px);
+      margin: 0 auto;
     }
 
     .ratio-hero {
       aspect-ratio: 786 / 450;
     }
 
-    .ratio-square {
-      aspect-ratio: 1.14 / 1;
-    }
-
     .ratio-game {
       aspect-ratio: 820 / 711;
-    }
-
-    .ratio-wide {
-      aspect-ratio: 16 / 10;
-    }
-
-    .ratio-ultrawide {
-      aspect-ratio: 2.35 / 1;
-    }
-
-    .ratio-tall {
-      aspect-ratio: 682 / 727;
-    }
-
-    .ratio-admin {
-      aspect-ratio: 615 / 756;
     }
 
     .shot-frame figcaption {
@@ -577,8 +650,7 @@
     .proof-card,
     .story-point,
     .trust-card,
-    .trust-rail article,
-    .return-note {
+    .trust-rail article {
       padding: 20px;
       border-radius: 22px;
       border: 1px solid var(--line);
@@ -587,8 +659,7 @@
 
     .proof-card h3,
     .trust-card h3,
-    .trust-rail strong,
-    .return-note strong {
+    .trust-rail strong {
       color: var(--soft);
       font-size: 1rem;
       line-height: 1.3;
@@ -597,8 +668,7 @@
 
     .proof-card p,
     .trust-card p,
-    .trust-rail p,
-    .return-note p {
+    .trust-rail p {
       margin-top: 8px;
       font-size: 0.95rem;
       line-height: 1.72;
@@ -684,13 +754,8 @@
 
     .return-media {
       display: grid;
-      gap: 16px;
-    }
-
-    .return-notes {
-      display: grid;
-      grid-template-columns: repeat(3, minmax(0, 1fr));
-      gap: 12px;
+      gap: 18px;
+      align-content: start;
     }
 
     .section-utilities {
@@ -922,16 +987,28 @@
 
     @media (max-width: 1180px) {
       nav {
-        grid-template-columns: auto 1fr;
+        grid-template-columns: 1fr;
+        gap: 18px;
       }
 
-      .nav-links {
+      .nav-top {
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 18px;
+      }
+
+      .nav-panel {
+        flex-wrap: wrap;
         justify-content: flex-start;
       }
 
       .nav-actions {
-        grid-column: 1 / -1;
-        justify-content: space-between;
+        justify-content: flex-start;
+      }
+
+      .nav-links {
+        justify-content: flex-start;
       }
 
       .hero,
@@ -957,7 +1034,6 @@
         grid-template-columns: repeat(2, minmax(0, 1fr));
       }
 
-      .return-notes,
       .utility-points {
         grid-template-columns: 1fr;
       }
@@ -1002,17 +1078,104 @@
       }
 
       nav {
-        grid-template-columns: 1fr;
+        gap: 0;
+        padding: 12px 0;
+      }
+
+      .nav-top {
+        display: grid;
+        grid-template-columns: minmax(0, 1fr) auto;
+        align-items: center;
+        gap: 12px;
+      }
+
+      .brand {
+        gap: 10px;
+      }
+
+      .brand img {
+        width: 38px;
+        height: 38px;
+        border-radius: 12px;
+      }
+
+      .brand-subtitle {
+        display: none;
+      }
+
+      .brand-title {
+        font-size: 0.96rem;
+      }
+
+      .nav-quick {
+        gap: 8px;
+        flex-shrink: 0;
+        justify-content: flex-end;
+      }
+
+      .nav-invite {
+        display: none;
+      }
+
+      .nav-toggle {
+        width: 40px;
+        height: 40px;
+        border-radius: 14px;
+      }
+
+      .nav-invite-full {
+        display: none;
+      }
+
+      .nav-invite-short {
+        display: inline;
+      }
+
+      .nav-toggle {
+        display: inline-flex;
+      }
+
+      .nav-panel {
+        display: grid;
+        gap: 12px;
+        margin-top: 12px;
+        padding: 14px;
+        border-radius: 22px;
+        border: 1px solid rgba(173, 196, 255, 0.12);
+        background: rgba(10, 16, 28, 0.94);
+        box-shadow: 0 18px 36px rgba(0, 0, 0, 0.22);
+      }
+
+      .nav-panel[hidden] {
+        display: none;
+      }
+
+      .nav-panel-invite {
+        display: inline-flex;
+        width: 100%;
       }
 
       .nav-links {
-        flex-wrap: nowrap;
-        overflow-x: auto;
-        padding-bottom: 4px;
+        flex-direction: column;
+        align-items: flex-start;
+        gap: 12px;
       }
 
       .nav-actions {
-        width: 100%;
+        display: grid;
+        grid-template-columns: repeat(2, minmax(0, 1fr));
+        gap: 10px;
+      }
+
+      .nav-actions .nav-quiet {
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        min-height: 44px;
+        padding: 0 12px;
+        border-radius: 14px;
+        border: 1px solid rgba(173, 196, 255, 0.12);
+        background: rgba(255, 255, 255, 0.03);
       }
 
       .hero-actions,
@@ -1034,6 +1197,11 @@
         padding: 14px;
       }
 
+      .shot-proof-panel img {
+        width: 100%;
+        max-height: none;
+      }
+
       .final-actions {
         min-width: 0;
       }
@@ -1046,6 +1214,32 @@
 
       .footer-links {
         justify-content: flex-start;
+      }
+    }
+
+    @media (max-width: 420px) {
+      .nav-top {
+        gap: 8px;
+      }
+
+      .brand img {
+        width: 34px;
+        height: 34px;
+        border-radius: 11px;
+      }
+
+      .brand-title {
+        font-size: 0.9rem;
+      }
+
+      .nav-invite {
+        display: none;
+      }
+
+      .nav-toggle {
+        width: 36px;
+        height: 36px;
+        border-radius: 12px;
       }
     }
 
@@ -1065,28 +1259,60 @@
     <div class="nav-shell">
       <div class="container">
         <nav aria-label="Primary">
-          <a class="brand" href="#top" aria-label="Babblebox home">
-            <img src="logo.jpg" alt="Babblebox logo" width="48" height="48" />
-            <span>
-              <span class="brand-title">Babblebox</span>
-              <span class="brand-subtitle">Party games, replay loops, and quiet utilities for Discord</span>
-            </span>
-          </a>
-          <div class="nav-links">
-            <a href="#product">Product</a>
-            <a href="#showcase">Showcase</a>
-            <a href="#utilities">Utilities</a>
-            <a href="#safety">Safety</a>
-            <a href="help.html">Help</a>
+          <div class="nav-top">
+            <a class="brand" href="#top" aria-label="Babblebox home">
+              <img src="logo.jpg" alt="Babblebox logo" width="48" height="48" />
+              <span>
+                <span class="brand-title">Babblebox</span>
+                <span class="brand-subtitle">Party games, replay loops, and quiet utilities for Discord</span>
+              </span>
+            </a>
+            <div class="nav-quick">
+              <a
+                class="btn btn-primary nav-invite"
+                href="https://discord.com/oauth2/authorize?client_id=1480903089518022739"
+                target="_blank"
+                rel="noopener noreferrer"
+              ><span class="nav-invite-full">Invite Babblebox</span><span class="nav-invite-short">Invite</span></a>
+              <button
+                class="nav-toggle"
+                type="button"
+                aria-expanded="false"
+                aria-controls="primary-nav-panel"
+                data-nav-toggle
+              >
+                <span class="visually-hidden">Toggle navigation</span>
+                <span class="nav-toggle-icon" aria-hidden="true">
+                  <span></span>
+                  <span></span>
+                  <span></span>
+                </span>
+              </button>
+            </div>
           </div>
-          <div class="nav-actions">
-            <a class="nav-quiet" href="https://github.com/arno-create/babblebox-bot" target="_blank" rel="noopener noreferrer">GitHub</a>
+          <div class="nav-panel" id="primary-nav-panel" data-nav-panel>
             <a
-              class="btn btn-primary"
+              class="btn btn-primary nav-panel-invite"
               href="https://discord.com/oauth2/authorize?client_id=1480903089518022739"
               target="_blank"
               rel="noopener noreferrer"
             >Invite Babblebox</a>
+            <div class="nav-links">
+              <a href="#product">Product</a>
+              <a href="#showcase">Showcase</a>
+              <a href="#utilities">Utilities</a>
+              <a href="#safety">Safety</a>
+              <a href="help.html">Help</a>
+            </div>
+            <div class="nav-actions">
+              <a class="nav-quiet" href="https://github.com/arno-create/babblebox-bot" target="_blank" rel="noopener noreferrer">GitHub</a>
+              <a
+                class="nav-quiet"
+                href="https://discord.com/servers/inevitable-friendship-1322933864360050688"
+                target="_blank"
+                rel="noopener noreferrer"
+              >Support</a>
+            </div>
           </div>
         </nav>
       </div>
@@ -1150,7 +1376,7 @@
           <article class="stage-card stage-anchor">
             <div class="stage-label">Real party-game proof</div>
             <figure class="shot-frame">
-              <div class="shot-media ratio-hero">
+              <div class="shot-media shot-atmosphere ratio-hero">
                 <img
                   src="assets/lobby.png"
                   alt="Babblebox party-game lobby in Discord"
@@ -1168,7 +1394,7 @@
           <article class="stage-card stage-utility">
             <div class="stage-label">Quiet utility proof</div>
             <figure class="shot-frame">
-              <div class="shot-media ratio-square">
+              <div class="shot-media shot-proof">
                 <img
                   src="assets/watchalert_example.png"
                   alt="Babblebox Watch DM alert example"
@@ -1186,7 +1412,7 @@
           <article class="stage-card stage-admin">
             <div class="stage-label">Compact admin proof</div>
             <figure class="shot-frame">
-              <div class="shot-media ratio-square">
+              <div class="shot-media shot-proof shot-proof-panel">
                 <img
                   src="assets/shield_panel_example.png"
                   alt="Babblebox Shield admin panel"
@@ -1287,7 +1513,7 @@
 
               <div class="games-grid">
                 <figure class="shot-frame shot-primary">
-                  <div class="shot-media ratio-hero">
+                  <div class="shot-media shot-atmosphere ratio-hero">
                     <img
                       src="assets/lobby.png"
                       alt="Babblebox party-game lobby screen"
@@ -1303,7 +1529,7 @@
                   </figcaption>
                 </figure>
                 <figure class="shot-frame shot-secondary">
-                  <div class="shot-media ratio-game">
+                  <div class="shot-media shot-atmosphere ratio-game">
                     <img
                       src="assets/wordbomb_gameplay.png"
                       alt="Babblebox Word Bomb gameplay"
@@ -1319,7 +1545,7 @@
                   </figcaption>
                 </figure>
                 <figure class="shot-frame shot-secondary">
-                  <div class="shot-media ratio-game">
+                  <div class="shot-media shot-atmosphere ratio-game">
                     <img
                       src="assets/spyfall_gameplay.png"
                       alt="Babblebox Spyfall gameplay"
@@ -1340,7 +1566,7 @@
             <article class="story">
               <div class="return-media">
                 <figure class="shot-frame">
-                  <div class="shot-media ratio-wide contain">
+                  <div class="shot-media shot-proof">
                     <img
                       src="assets/buddy_profile_example.png"
                       alt="Babblebox Buddy and profile example"
@@ -1355,20 +1581,22 @@
                     <span>Identity stays public-friendly where it should, while the more personal lane still has a quieter place to live.</span>
                   </figcaption>
                 </figure>
-                <div class="return-notes">
-                  <article class="return-note">
-                    <strong>Question Drops</strong>
-                    <p>A guild-first knowledge lane that stays public-friendly, compact, and worth checking back for.</p>
-                  </article>
-                  <article class="return-note">
-                    <strong>Daily Arcade</strong>
-                    <p>Three shared UTC booths keep the product active even when there is no full room ready for party games.</p>
-                  </article>
-                  <article class="return-note">
-                    <strong>Mastery and scholar</strong>
-                    <p>Progression is visible, structured, and folded into the identity layer instead of becoming a second grind system.</p>
-                  </article>
-                </div>
+                <figure class="shot-frame">
+                  <div class="shot-media shot-proof shot-proof-panel">
+                    <img
+                      src="assets/drops_status_example.png"
+                      alt="Babblebox Question Drops status panel"
+                      width="616"
+                      height="750"
+                      loading="lazy"
+                      decoding="async"
+                    />
+                  </div>
+                  <figcaption>
+                    <strong><code>/drops status</code> proves Question Drops is a structured return system.</strong>
+                    <span>Schedule, answer window, delivery channels, digests, category lanes, activity gates, and scholar progress all live in one real Discord panel.</span>
+                  </figcaption>
+                </figure>
               </div>
 
               <div class="story-copy">
@@ -1380,14 +1608,15 @@
                   without falling into an economy grind.
                 </p>
                 <p>
-                  <code>/drops status</code> anchors the knowledge lane. Daily Arcade keeps a consistent daily ritual.
+                  <code>/drops status</code> anchors the knowledge lane with schedule, answer windows, digest timing,
+                  categories, and scholar progress in one readable surface. Daily Arcade keeps a consistent daily ritual.
                   Buddy, mastery, and scholar progress make that return loop visible in a surface that still feels clean
                   in a real channel.
                 </p>
                 <div class="story-points">
                   <article class="story-point">
-                    <h4>Question Drops stay separate and legible</h4>
-                    <p>That lane adds shared knowledge, mastery flavor, and scholar progression without turning the server into a spammy trivia cannon.</p>
+                    <h4>Question Drops stay structured and legible</h4>
+                    <p>That lane adds shared knowledge, schedule logic, mastery flavor, digests, and scholar progression without turning the server into a spammy trivia cannon.</p>
                   </article>
                   <article class="story-point">
                     <h4>Buddy and profile feel showable</h4>
@@ -1462,7 +1691,7 @@
 
             <div class="utility-collage">
               <figure class="shot-frame utility-watch">
-                <div class="shot-media ratio-tall contain">
+                <div class="shot-media shot-proof shot-proof-panel">
                   <img
                     src="assets/watch_settings.png"
                     alt="Babblebox Watch settings screen"
@@ -1479,7 +1708,7 @@
               </figure>
 
               <figure class="shot-frame utility-alert">
-                <div class="shot-media ratio-wide contain">
+                <div class="shot-media shot-proof">
                   <img
                     src="assets/watchalert_example.png"
                     alt="Babblebox Watch alert example"
@@ -1496,7 +1725,7 @@
               </figure>
 
               <figure class="shot-frame utility-afk">
-                <div class="shot-media ratio-wide contain">
+                <div class="shot-media shot-proof">
                   <img
                     src="assets/afk_command.png"
                     alt="Babblebox AFK command example"
@@ -1513,7 +1742,7 @@
               </figure>
 
               <figure class="shot-frame utility-reminder">
-                <div class="shot-media ratio-ultrawide contain">
+                <div class="shot-media shot-proof">
                   <img
                     src="assets/reminder_command.png"
                     alt="Babblebox reminder command example"
@@ -1547,7 +1776,7 @@
 
           <div class="admin-media">
             <figure class="shot-frame">
-              <div class="shot-media ratio-admin contain">
+              <div class="shot-media shot-proof shot-proof-panel">
                 <img
                   src="assets/shield_panel_example.png"
                   alt="Babblebox Shield panel"
@@ -1564,7 +1793,7 @@
             </figure>
 
             <figure class="shot-frame">
-              <div class="shot-media ratio-admin contain">
+              <div class="shot-media shot-proof shot-proof-panel">
                 <img
                   src="assets/admin_panel_example.png"
                   alt="Babblebox admin lifecycle panel"
@@ -1723,5 +1952,63 @@
       </div>
     </footer>
   </div>
+  <script>
+    (() => {
+      const toggle = document.querySelector("[data-nav-toggle]");
+      const panel = document.querySelector("[data-nav-panel]");
+
+      if (!toggle || !panel) {
+        return;
+      }
+
+      const mobileQuery = window.matchMedia("(max-width: 720px)");
+
+      const closePanel = () => {
+        toggle.setAttribute("aria-expanded", "false");
+        panel.hidden = true;
+      };
+
+      const syncNav = () => {
+        if (mobileQuery.matches) {
+          if (toggle.getAttribute("aria-expanded") !== "true") {
+            panel.hidden = true;
+          }
+        } else {
+          panel.hidden = false;
+          toggle.setAttribute("aria-expanded", "false");
+        }
+      };
+
+      toggle.addEventListener("click", () => {
+        const isExpanded = toggle.getAttribute("aria-expanded") === "true";
+        const nextExpanded = !isExpanded;
+        toggle.setAttribute("aria-expanded", String(nextExpanded));
+        panel.hidden = !nextExpanded;
+      });
+
+      panel.querySelectorAll("a").forEach((link) => {
+        link.addEventListener("click", () => {
+          if (mobileQuery.matches) {
+            closePanel();
+          }
+        });
+      });
+
+      document.addEventListener("keydown", (event) => {
+        if (event.key === "Escape" && mobileQuery.matches && !panel.hidden) {
+          closePanel();
+          toggle.focus();
+        }
+      });
+
+      if (typeof mobileQuery.addEventListener === "function") {
+        mobileQuery.addEventListener("change", syncNav);
+      } else if (typeof mobileQuery.addListener === "function") {
+        mobileQuery.addListener(syncNav);
+      }
+
+      syncNav();
+    })();
+  </script>
 </body>
 </html>
