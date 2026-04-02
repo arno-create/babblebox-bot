@@ -6,7 +6,7 @@ import json
 import types
 import unittest
 from collections import Counter
-from datetime import timedelta
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, patch
 
 import discord
@@ -260,6 +260,16 @@ class QuestionDropsPostgresDecodeTests(unittest.TestCase):
                     "tiers": [{"tier": 1, "role_id": 401, "threshold": 25}],
                 }
             ),
+            "digest_settings": json.dumps(
+                {
+                    "weekly_enabled": True,
+                    "weekly_channel_id": 77,
+                    "monthly_channel_id": 78,
+                    "timezone": "Asia/Yerevan",
+                    "skip_low_activity": False,
+                    "mention_mode": "here",
+                }
+            ),
             "ai_celebrations_enabled": True,
         }
 
@@ -271,6 +281,9 @@ class QuestionDropsPostgresDecodeTests(unittest.TestCase):
         self.assertEqual(config["category_mastery"]["science"]["announcement_channel_id"], 88)
         self.assertEqual(config["category_mastery"]["science"]["tiers"][0]["role_id"], 301)
         self.assertEqual(config["scholar_ladder"]["tiers"][0]["threshold"], 25)
+        self.assertTrue(config["digest_settings"]["weekly_enabled"])
+        self.assertEqual(config["digest_settings"]["weekly_channel_id"], 77)
+        self.assertEqual(config["digest_settings"]["mention_mode"], "here")
 
     def test_config_row_malformed_json_falls_back_without_raising(self):
         row = {
@@ -287,6 +300,7 @@ class QuestionDropsPostgresDecodeTests(unittest.TestCase):
             "enabled_categories": '{"broken"',
             "category_mastery": '["wrong-shape"]',
             "scholar_ladder": '{"enabled": true',
+            "digest_settings": '{"weekly_enabled": true',
             "ai_celebrations_enabled": False,
         }
 
@@ -296,6 +310,7 @@ class QuestionDropsPostgresDecodeTests(unittest.TestCase):
         self.assertEqual(config["enabled_categories"], [])
         self.assertFalse(config["category_mastery"]["science"]["enabled"])
         self.assertFalse(config["scholar_ladder"]["enabled"])
+        self.assertFalse(config["digest_settings"]["weekly_enabled"])
 
     def test_active_drop_row_decodes_json_string_fields(self):
         now = ge.now_utc()
@@ -752,6 +767,422 @@ class QuestionDropsServiceTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await service.close()
 
+
+class QuestionDropsDigestTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.members = [
+            DummyUser(11, display_name="Ada"),
+            DummyUser(12, display_name="Lin"),
+            DummyUser(13, display_name="Sol"),
+            DummyUser(14, display_name="Mira"),
+        ]
+        self.channel = DummyChannel(20)
+        self.secondary_channel = DummyChannel(21)
+        self.guild = DummyGuild(10, channels=[self.channel, self.secondary_channel], members=self.members)
+        self.bot = DummyBot(self.guild, [self.channel, self.secondary_channel])
+        self.store = QuestionDropsStore(backend="memory")
+        await self.store.load()
+        self.service = QuestionDropsService(self.bot, store=self.store)
+        self.assertTrue(await self.service.start())
+        if self.service._scheduler_task is not None:
+            self.service._scheduler_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await self.service._scheduler_task
+            self.service._scheduler_task = None
+        self.profile_service = ProfileService(types.SimpleNamespace(get_user=lambda user_id: None), store=ProfileStore(backend="memory"))
+        self.assertTrue(await self.profile_service.start())
+        self.bot.profile_service = self.profile_service
+        self._slot_index = 0
+
+    async def asyncTearDown(self):
+        if isinstance(getattr(self, "service", None), QuestionDropsService):
+            await self.service.close()
+        if isinstance(getattr(self, "profile_service", None), ProfileService):
+            await self.profile_service.close()
+
+    async def _configure_digest(
+        self,
+        *,
+        weekly: bool = False,
+        monthly: bool = False,
+        shared_channel: DummyChannel | None = None,
+        weekly_channel: DummyChannel | None = None,
+        monthly_channel: DummyChannel | None = None,
+        timezone_name: str = "UTC",
+        skip_low_activity: bool = True,
+        mention_mode: str = "none",
+    ):
+        ok, message = await self.service.update_digest_config(
+            self.guild,
+            weekly_enabled=weekly,
+            monthly_enabled=monthly,
+            shared_channel_id=shared_channel.id if shared_channel is not None else None,
+            weekly_channel_id=weekly_channel.id if weekly_channel is not None else None,
+            monthly_channel_id=monthly_channel.id if monthly_channel is not None else None,
+            timezone_name=timezone_name,
+            skip_low_activity=skip_low_activity,
+            mention_mode=mention_mode,
+        )
+        self.assertTrue(ok, message)
+
+    async def _record_digest_drop(
+        self,
+        asked_at: datetime,
+        *,
+        category: str,
+        difficulty: int,
+        participant_ids: list[int],
+        winner_user_id: int | None,
+    ):
+        self._slot_index += 1
+        exposure = await self.store.insert_exposure(
+            {
+                "guild_id": self.guild.id,
+                "channel_id": self.channel.id,
+                "concept_id": f"{category}:digest-{self._slot_index}",
+                "variant_hash": f"digest-{self._slot_index}",
+                "category": category,
+                "difficulty": difficulty,
+                "asked_at": asked_at,
+                "resolved_at": asked_at + timedelta(minutes=1),
+                "winner_user_id": winner_user_id,
+                "slot_key": f"{asked_at.date().isoformat()}:{self._slot_index}",
+            }
+        )
+        await self.service._record_participation_batch(
+            guild_id=self.guild.id,
+            exposure_id=int(exposure["id"]),
+            occurred_at=asked_at,
+            category=category,
+            difficulty=difficulty,
+            participant_ids=participant_ids,
+            winner_user_id=winner_user_id,
+        )
+        return exposure
+
+    async def _save_unlock(
+        self,
+        *,
+        user_id: int,
+        scope_type: str,
+        scope_key: str,
+        tier: int,
+        role_id: int,
+        granted_at: datetime,
+    ):
+        await self.profile_service.store.save_question_drop_unlock(
+            {
+                "guild_id": self.guild.id,
+                "user_id": user_id,
+                "scope_type": scope_type,
+                "scope_key": scope_key,
+                "tier": tier,
+                "role_id": role_id,
+                "granted_at": granted_at,
+            }
+        )
+
+    def _fields(self, embed: discord.Embed) -> dict[str, str]:
+        return {field.name: field.value for field in embed.fields}
+
+    async def test_digest_config_rejects_enable_without_channel(self):
+        ok, message = await self.service.update_digest_config(self.guild, weekly_enabled=True)
+
+        self.assertFalse(ok)
+        self.assertIn("digest channel", message.lower())
+
+    async def test_digest_period_boundaries_follow_weekly_and_monthly_rules(self):
+        weekly_now = datetime(2026, 4, 6, 8, 30, tzinfo=timezone.utc)
+        weekly_period = self.service._digest_period_for(kind="weekly", timezone_name="UTC", now=weekly_now)
+        self.assertEqual(weekly_period.period_start_at, datetime(2026, 3, 30, 0, 0, tzinfo=timezone.utc))
+        self.assertEqual(weekly_period.period_end_at, datetime(2026, 4, 6, 0, 0, tzinfo=timezone.utc))
+        self.assertEqual(weekly_period.scheduled_post_at, datetime(2026, 4, 6, 9, 0, tzinfo=timezone.utc))
+
+        monthly_now = datetime(2026, 11, 1, 12, 0, tzinfo=timezone.utc)
+        monthly_period = self.service._digest_period_for(kind="monthly", timezone_name="UTC+04:00", now=monthly_now)
+        self.assertEqual(monthly_period.period_start_at.astimezone(timezone.utc), datetime(2026, 9, 30, 20, 0, tzinfo=timezone.utc))
+        self.assertEqual(monthly_period.period_end_at.astimezone(timezone.utc), datetime(2026, 10, 31, 20, 0, tzinfo=timezone.utc))
+        self.assertEqual(monthly_period.scheduled_post_at.astimezone(timezone.utc), datetime(2026, 11, 1, 5, 0, tzinfo=timezone.utc))
+
+    async def test_record_participation_batch_persists_period_events(self):
+        asked_at = datetime(2026, 3, 31, 12, 0, tzinfo=timezone.utc)
+        await self._record_digest_drop(
+            asked_at,
+            category="science",
+            difficulty=2,
+            participant_ids=[11, 12],
+            winner_user_id=11,
+        )
+
+        rows = await self.store.list_participation_events_for_guild(
+            self.guild.id,
+            start=asked_at - timedelta(minutes=1),
+            end=asked_at + timedelta(minutes=1),
+        )
+
+        self.assertEqual(
+            [(row["user_id"], row["correct"], row["points_awarded"]) for row in rows],
+            [(11, True, answer_points_for_difficulty(2)), (12, False, 0)],
+        )
+
+    async def test_weekly_digest_posts_once_for_active_guild(self):
+        await self._configure_digest(weekly=True, shared_channel=self.channel, skip_low_activity=True)
+        for offset in range(4):
+            await self._record_digest_drop(
+                datetime(2026, 3, 31, 12 + offset, 0, tzinfo=timezone.utc),
+                category="science" if offset % 2 == 0 else "history",
+                difficulty=2,
+                participant_ids=[11, 12],
+                winner_user_id=11 if offset % 2 == 0 else 12,
+            )
+
+        now = datetime(2026, 4, 6, 10, 0, tzinfo=timezone.utc)
+        with patch("babblebox.question_drops_service.ge.now_utc", return_value=now):
+            await self.service._maybe_post_due_digests()
+            await self.service._maybe_post_due_digests()
+
+        self.assertEqual(len(self.channel.sent), 1)
+        embed = self.channel.sent[0][1]["embed"]
+        self.assertIn("Weekly", embed.title)
+        latest = await self.store.fetch_latest_digest_run(self.guild.id, digest_kind="weekly")
+        self.assertEqual(latest["status"], "posted")
+
+    async def test_weekly_digest_skips_low_activity(self):
+        await self._configure_digest(weekly=True, shared_channel=self.channel, skip_low_activity=True)
+        await self._record_digest_drop(
+            datetime(2026, 4, 1, 12, 0, tzinfo=timezone.utc),
+            category="science",
+            difficulty=1,
+            participant_ids=[11],
+            winner_user_id=11,
+        )
+
+        now = datetime(2026, 4, 6, 10, 0, tzinfo=timezone.utc)
+        with patch("babblebox.question_drops_service.ge.now_utc", return_value=now):
+            await self.service._maybe_post_due_digests()
+
+        self.assertEqual(self.channel.sent, [])
+        latest = await self.store.fetch_latest_digest_run(self.guild.id, digest_kind="weekly")
+        self.assertEqual(latest["status"], "skipped")
+        self.assertIn("low activity", latest["detail"].lower())
+
+    async def test_digest_invalid_channel_marks_terminal_failure(self):
+        await self._configure_digest(weekly=True, shared_channel=self.channel)
+        await self._record_digest_drop(
+            datetime(2026, 3, 31, 12, 0, tzinfo=timezone.utc),
+            category="science",
+            difficulty=2,
+            participant_ids=[11, 12],
+            winner_user_id=11,
+        )
+        self.guild._channels.pop(self.channel.id, None)
+
+        now = datetime(2026, 4, 6, 10, 0, tzinfo=timezone.utc)
+        with patch("babblebox.question_drops_service.ge.now_utc", return_value=now):
+            await self.service._maybe_post_due_digests()
+
+        latest = await self.store.fetch_latest_digest_run(self.guild.id, digest_kind="weekly")
+        self.assertEqual(latest["status"], "failed")
+        self.assertIn("missing", latest["detail"].lower())
+
+    async def test_digest_rankings_ignore_out_of_period_activity_and_break_ties_by_user_id(self):
+        period = self.service._digest_period_for(
+            kind="weekly",
+            timezone_name="UTC",
+            now=datetime(2026, 4, 6, 10, 0, tzinfo=timezone.utc),
+        )
+        await self._record_digest_drop(
+            datetime(2026, 3, 20, 12, 0, tzinfo=timezone.utc),
+            category="science",
+            difficulty=3,
+            participant_ids=[13],
+            winner_user_id=13,
+        )
+        await self._record_digest_drop(
+            datetime(2026, 3, 31, 12, 0, tzinfo=timezone.utc),
+            category="science",
+            difficulty=2,
+            participant_ids=[11],
+            winner_user_id=11,
+        )
+        await self._record_digest_drop(
+            datetime(2026, 4, 1, 12, 0, tzinfo=timezone.utc),
+            category="history",
+            difficulty=2,
+            participant_ids=[12],
+            winner_user_id=12,
+        )
+
+        metrics = await self.service._collect_digest_period_data(self.guild.id, period)
+
+        self.assertEqual([row["user_id"] for row in metrics["ranked_users"][:2]], [11, 12])
+        self.assertNotIn(13, [row["user_id"] for row in metrics["ranked_users"]])
+
+    async def test_digest_unlock_highlights_use_only_period_unlocks(self):
+        await self._configure_digest(weekly=True, shared_channel=self.channel, skip_low_activity=False)
+        for offset in range(4):
+            await self._record_digest_drop(
+                datetime(2026, 3, 31, 13 + offset, 0, tzinfo=timezone.utc),
+                category="science",
+                difficulty=2,
+                participant_ids=[11, 12],
+                winner_user_id=11,
+            )
+        await self._save_unlock(
+            user_id=11,
+            scope_type="scholar",
+            scope_key="global",
+            tier=2,
+            role_id=5001,
+            granted_at=datetime(2026, 4, 2, 15, 0, tzinfo=timezone.utc),
+        )
+        await self._save_unlock(
+            user_id=12,
+            scope_type="category",
+            scope_key="science",
+            tier=1,
+            role_id=5002,
+            granted_at=datetime(2026, 4, 3, 15, 0, tzinfo=timezone.utc),
+        )
+        await self._save_unlock(
+            user_id=13,
+            scope_type="scholar",
+            scope_key="global",
+            tier=3,
+            role_id=5003,
+            granted_at=datetime(2026, 3, 20, 15, 0, tzinfo=timezone.utc),
+        )
+
+        now = datetime(2026, 4, 6, 10, 0, tzinfo=timezone.utc)
+        with patch("babblebox.question_drops_service.ge.now_utc", return_value=now):
+            await self.service._maybe_post_due_digests()
+
+        embed = self.channel.sent[-1][1]["embed"]
+        fields = self._fields(embed)
+        self.assertIn("Scholar II", fields["Unlock Highlights"])
+        self.assertIn("Science Tier I", fields["Unlock Highlights"])
+        self.assertNotIn("Tier III", fields["Unlock Highlights"])
+
+    async def test_restart_does_not_double_post_same_period(self):
+        await self._configure_digest(weekly=True, shared_channel=self.channel)
+        for offset in range(4):
+            await self._record_digest_drop(
+                datetime(2026, 3, 31, 12 + offset, 0, tzinfo=timezone.utc),
+                category="logic",
+                difficulty=2,
+                participant_ids=[11, 12],
+                winner_user_id=11 if offset % 2 == 0 else 12,
+            )
+        now = datetime(2026, 4, 6, 10, 0, tzinfo=timezone.utc)
+        with patch("babblebox.question_drops_service.ge.now_utc", return_value=now):
+            await self.service._maybe_post_due_digests()
+
+        self.store.load = AsyncMock()
+        restarted = QuestionDropsService(self.bot, store=self.store)
+        try:
+            self.assertTrue(await restarted.start())
+            if restarted._scheduler_task is not None:
+                restarted._scheduler_task.cancel()
+                with contextlib.suppress(asyncio.CancelledError):
+                    await restarted._scheduler_task
+                restarted._scheduler_task = None
+            with patch("babblebox.question_drops_service.ge.now_utc", return_value=now):
+                await restarted._maybe_post_due_digests()
+            self.assertEqual(len(self.channel.sent), 1)
+        finally:
+            await restarted.close()
+
+    async def test_monthly_and_weekly_can_post_independently_to_shared_channel(self):
+        await self._configure_digest(weekly=True, monthly=True, shared_channel=self.channel, skip_low_activity=False)
+        now = next(
+            datetime(2026, month, 1, 10, 0, tzinfo=timezone.utc)
+            for month in range(1, 13)
+            if datetime(2026, month, 1, 10, 0, tzinfo=timezone.utc).weekday() == 0
+        )
+        weekly_period = self.service._digest_period_for(kind="weekly", timezone_name="UTC", now=now)
+        monthly_period = self.service._digest_period_for(kind="monthly", timezone_name="UTC", now=now)
+        for index in range(4):
+            await self._record_digest_drop(
+                weekly_period.period_start_at + timedelta(days=index + 1, hours=12),
+                category="science",
+                difficulty=2,
+                participant_ids=[11, 12],
+                winner_user_id=11 if index % 2 == 0 else 12,
+            )
+        for index in range(10):
+            await self._record_digest_drop(
+                monthly_period.period_start_at + timedelta(days=index + 2, hours=10),
+                category="history" if index % 2 == 0 else "logic",
+                difficulty=1,
+                participant_ids=[11, 12, 13],
+                winner_user_id=11 if index % 3 == 0 else 12,
+            )
+
+        with patch("babblebox.question_drops_service.ge.now_utc", return_value=now):
+            await self.service._maybe_post_due_digests()
+
+        self.assertEqual(len(self.channel.sent), 2)
+        titles = [entry[1]["embed"].title for entry in self.channel.sent]
+        self.assertTrue(any("Weekly" in title for title in titles))
+        self.assertTrue(any("Monthly" in title for title in titles))
+
+    async def test_digest_status_embed_shows_last_run_outcomes(self):
+        await self._configure_digest(weekly=True, shared_channel=self.channel, skip_low_activity=True)
+        await self._record_digest_drop(
+            datetime(2026, 4, 2, 12, 0, tzinfo=timezone.utc),
+            category="science",
+            difficulty=1,
+            participant_ids=[11],
+            winner_user_id=11,
+        )
+        now = datetime(2026, 4, 6, 10, 0, tzinfo=timezone.utc)
+        with patch("babblebox.question_drops_service.ge.now_utc", return_value=now):
+            await self.service._maybe_post_due_digests()
+            snapshot = await self.service.get_status_snapshot(self.guild)
+
+        embed = self.service.build_digest_status_embed(self.guild, snapshot)
+        fields = self._fields(embed)
+        self.assertIn("Skipped", fields["Last Runs"])
+        self.assertIn("Weekly", fields["Cadence"])
+
+    async def test_overlapping_digest_checks_do_not_double_post(self):
+        await self._configure_digest(weekly=True, shared_channel=self.channel)
+        for offset in range(4):
+            await self._record_digest_drop(
+                datetime(2026, 3, 31, 12 + offset, 0, tzinfo=timezone.utc),
+                category="culture",
+                difficulty=2,
+                participant_ids=[11, 12],
+                winner_user_id=11,
+            )
+        now = datetime(2026, 4, 6, 10, 0, tzinfo=timezone.utc)
+        with patch("babblebox.question_drops_service.ge.now_utc", return_value=now):
+            await asyncio.gather(self.service._maybe_post_due_digests(), self.service._maybe_post_due_digests())
+
+        self.assertEqual(len(self.channel.sent), 1)
+
+    async def test_monthly_digest_uses_here_ping_only_as_message_prefix(self):
+        await self._configure_digest(monthly=True, shared_channel=self.channel, skip_low_activity=False, mention_mode="here")
+        now = datetime(2026, 5, 1, 10, 0, tzinfo=timezone.utc)
+        monthly_period = self.service._digest_period_for(kind="monthly", timezone_name="UTC", now=now)
+        for index in range(10):
+            await self._record_digest_drop(
+                monthly_period.period_start_at + timedelta(days=index + 1, hours=9),
+                category="math",
+                difficulty=1,
+                participant_ids=[11, 12, 13],
+                winner_user_id=11 if index % 2 == 0 else 12,
+            )
+
+        with patch("babblebox.question_drops_service.ge.now_utc", return_value=now):
+            await self.service._maybe_post_due_digests()
+
+        self.assertEqual(self.channel.sent[-1][1]["content"], "@here")
+        self.assertTrue(self.channel.sent[-1][1]["allowed_mentions"].everyone)
+        self.assertNotIn("<@", self.channel.sent[-1][1]["embed"].description)
+
+
+class QuestionDropsServiceContinuationTests(QuestionDropsServiceTests):
     async def test_attach_failure_releases_pending_claim_and_deletes_post(self):
         active_store = QuestionDropsStore(backend="memory")
         await active_store.load()

@@ -26,6 +26,9 @@ QUESTION_DROP_KNOWLEDGE_CATEGORIES = (
 )
 QUESTION_DROP_MASTERY_TIERS = (1, 2, 3)
 QUESTION_DROP_AI_CELEBRATION_MODES = ("off", "rare", "event_only")
+QUESTION_DROP_DIGEST_KINDS = ("weekly", "monthly")
+QUESTION_DROP_DIGEST_MENTION_MODES = ("none", "here")
+QUESTION_DROP_DIGEST_RUN_STATUSES = ("claimed", "posted", "skipped", "failed")
 
 
 class QuestionDropsStorageUnavailable(RuntimeError):
@@ -47,6 +50,7 @@ def default_question_drops_config(guild_id: int | None = None) -> dict[str, Any]
         "enabled_categories": list(QUESTION_DROP_KNOWLEDGE_CATEGORIES),
         "category_mastery": default_question_drop_category_mastery(),
         "scholar_ladder": default_question_drop_scholar_ladder(),
+        "digest_settings": default_question_drop_digest_settings(),
         "ai_celebrations_enabled": False,
     }
 
@@ -77,6 +81,18 @@ def default_question_drop_scholar_ladder() -> dict[str, Any]:
         "announcement_channel_id": None,
         "silent_grant": False,
         "tiers": default_question_drop_tiers(),
+    }
+
+
+def default_question_drop_digest_settings() -> dict[str, Any]:
+    return {
+        "weekly_enabled": False,
+        "monthly_enabled": False,
+        "timezone": None,
+        "weekly_channel_id": None,
+        "monthly_channel_id": None,
+        "skip_low_activity": True,
+        "mention_mode": "none",
     }
 
 
@@ -144,6 +160,22 @@ def _normalize_scholar_ladder(payload: Any) -> dict[str, Any]:
     }
 
 
+def _normalize_digest_settings(payload: Any) -> dict[str, Any]:
+    cleaned = default_question_drop_digest_settings()
+    if not isinstance(payload, dict):
+        return cleaned
+    cleaned["weekly_enabled"] = bool(payload.get("weekly_enabled"))
+    cleaned["monthly_enabled"] = bool(payload.get("monthly_enabled"))
+    timezone_name = payload.get("timezone")
+    cleaned["timezone"] = timezone_name.strip() if isinstance(timezone_name, str) and timezone_name.strip() else None
+    for field in ("weekly_channel_id", "monthly_channel_id"):
+        cleaned[field] = _normalize_positive_int(payload.get(field))
+    cleaned["skip_low_activity"] = bool(payload.get("skip_low_activity", True))
+    mention_mode = str(payload.get("mention_mode", "none")).strip().casefold()
+    cleaned["mention_mode"] = mention_mode if mention_mode in QUESTION_DROP_DIGEST_MENTION_MODES else "none"
+    return cleaned
+
+
 def normalize_question_drops_meta(payload: Any) -> dict[str, Any]:
     cleaned = default_question_drops_meta()
     if not isinstance(payload, dict):
@@ -187,6 +219,7 @@ def normalize_question_drops_config(guild_id: int, payload: Any) -> dict[str, An
     )
     cleaned["category_mastery"] = _normalize_category_mastery(payload.get("category_mastery"))
     cleaned["scholar_ladder"] = _normalize_scholar_ladder(payload.get("scholar_ladder"))
+    cleaned["digest_settings"] = _normalize_digest_settings(payload.get("digest_settings"))
     cleaned["ai_celebrations_enabled"] = bool(payload.get("ai_celebrations_enabled"))
     return cleaned
 
@@ -325,6 +358,61 @@ def normalize_pending_post(payload: Any) -> dict[str, Any] | None:
     }
 
 
+def normalize_participation_event(payload: Any) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    for field in ("guild_id", "exposure_id", "user_id"):
+        if not isinstance(payload.get(field), int) or int(payload[field]) <= 0:
+            return None
+    occurred_at = _serialize_datetime(_parse_datetime(payload.get("occurred_at")))
+    category = str(payload.get("category") or "").strip().casefold()
+    if occurred_at is None or not category:
+        return None
+    points_awarded = payload.get("points_awarded", 0)
+    return {
+        "guild_id": int(payload["guild_id"]),
+        "exposure_id": int(payload["exposure_id"]),
+        "user_id": int(payload["user_id"]),
+        "occurred_at": occurred_at,
+        "category": category,
+        "correct": bool(payload.get("correct")),
+        "points_awarded": int(points_awarded) if isinstance(points_awarded, int) and points_awarded >= 0 else 0,
+    }
+
+
+def normalize_digest_run(payload: Any) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    if not isinstance(payload.get("guild_id"), int) or int(payload["guild_id"]) <= 0:
+        return None
+    digest_kind = str(payload.get("digest_kind") or "").strip().casefold()
+    period_key = str(payload.get("period_key") or "").strip()
+    status = str(payload.get("status") or "").strip().casefold()
+    if digest_kind not in QUESTION_DROP_DIGEST_KINDS or not period_key or status not in QUESTION_DROP_DIGEST_RUN_STATUSES:
+        return None
+    normalized = {
+        "guild_id": int(payload["guild_id"]),
+        "digest_kind": digest_kind,
+        "period_key": period_key,
+        "period_start_at": _serialize_datetime(_parse_datetime(payload.get("period_start_at"))),
+        "period_end_at": _serialize_datetime(_parse_datetime(payload.get("period_end_at"))),
+        "scheduled_post_at": _serialize_datetime(_parse_datetime(payload.get("scheduled_post_at"))),
+        "status": status,
+        "claimed_at": _serialize_datetime(_parse_datetime(payload.get("claimed_at"))),
+        "lease_expires_at": _serialize_datetime(_parse_datetime(payload.get("lease_expires_at"))),
+        "completed_at": _serialize_datetime(_parse_datetime(payload.get("completed_at"))),
+        "detail": str(payload.get("detail") or "").strip(),
+        "channel_id": _normalize_positive_int(payload.get("channel_id")),
+        "message_id": _normalize_positive_int(payload.get("message_id")),
+    }
+    required_datetimes = ("period_start_at", "period_end_at", "scheduled_post_at", "claimed_at", "lease_expires_at")
+    if any(normalized[field] is None for field in required_datetimes):
+        return None
+    if normalized["status"] == "claimed" and normalized["completed_at"] is not None:
+        return None
+    return normalized
+
+
 def _resolve_database_url(configured: str | None = None) -> tuple[str, str | None]:
     if configured is not None and configured.strip():
         return configured.strip(), "argument"
@@ -433,6 +521,35 @@ class _BaseQuestionDropsStore:
     async def prune_exposures(self, *, before: datetime, limit: int = 500) -> int:
         raise NotImplementedError
 
+    async def record_participation_events(self, rows: list[dict[str, Any]]):
+        raise NotImplementedError
+
+    async def list_participation_events_for_guild(self, guild_id: int, *, start: datetime, end: datetime) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    async def prune_participation_events(self, *, before: datetime, limit: int = 500) -> int:
+        raise NotImplementedError
+
+    async def claim_digest_run(self, record: dict[str, Any]) -> dict[str, Any] | None:
+        raise NotImplementedError
+
+    async def finish_digest_run(
+        self,
+        guild_id: int,
+        digest_kind: str,
+        period_key: str,
+        *,
+        status: str,
+        detail: str,
+        channel_id: int | None = None,
+        message_id: int | None = None,
+        completed_at: datetime | None = None,
+    ):
+        raise NotImplementedError
+
+    async def fetch_latest_digest_run(self, guild_id: int, *, digest_kind: str) -> dict[str, Any] | None:
+        raise NotImplementedError
+
 
 class _MemoryQuestionDropsStore(_BaseQuestionDropsStore):
     backend_name = "memory"
@@ -443,6 +560,8 @@ class _MemoryQuestionDropsStore(_BaseQuestionDropsStore):
         self.active_drops: dict[tuple[int, int], dict[str, Any]] = {}
         self.pending_posts: dict[tuple[int, str], dict[str, Any]] = {}
         self.exposures: dict[int, dict[str, Any]] = {}
+        self.participation_events: dict[tuple[int, int, int], dict[str, Any]] = {}
+        self.digest_runs: dict[tuple[int, str, str], dict[str, Any]] = {}
         self._next_exposure_id = 1
 
     async def load(self):
@@ -451,6 +570,8 @@ class _MemoryQuestionDropsStore(_BaseQuestionDropsStore):
         self.active_drops = {}
         self.pending_posts = {}
         self.exposures = {}
+        self.participation_events = {}
+        self.digest_runs = {}
         self._next_exposure_id = 1
 
     async def fetch_all_configs(self) -> dict[int, dict[str, Any]]:
@@ -615,6 +736,105 @@ class _MemoryQuestionDropsStore(_BaseQuestionDropsStore):
                 break
         return removed
 
+    async def record_participation_events(self, rows: list[dict[str, Any]]):
+        for row in rows:
+            normalized = normalize_participation_event(row)
+            if normalized is None:
+                continue
+            key = (normalized["guild_id"], normalized["exposure_id"], normalized["user_id"])
+            self.participation_events[key] = deepcopy(normalized)
+
+    async def list_participation_events_for_guild(self, guild_id: int, *, start: datetime, end: datetime) -> list[dict[str, Any]]:
+        start_iso = _serialize_datetime(start)
+        end_iso = _serialize_datetime(end)
+        rows = [
+            record
+            for record in self.participation_events.values()
+            if record["guild_id"] == guild_id and start_iso <= record["occurred_at"] < end_iso
+        ]
+        rows.sort(
+            key=lambda item: (
+                item["occurred_at"],
+                int(item["exposure_id"]),
+                int(item["user_id"]),
+            )
+        )
+        return [deepcopy(record) for record in rows]
+
+    async def prune_participation_events(self, *, before: datetime, limit: int = 500) -> int:
+        removed = 0
+        before_iso = _serialize_datetime(before)
+        for key, record in list(self.participation_events.items()):
+            occurred_at = record.get("occurred_at")
+            if not isinstance(occurred_at, str) or occurred_at >= before_iso:
+                continue
+            self.participation_events.pop(key, None)
+            removed += 1
+            if removed >= limit:
+                break
+        return removed
+
+    async def claim_digest_run(self, record: dict[str, Any]) -> dict[str, Any] | None:
+        normalized = normalize_digest_run(record)
+        if normalized is None or normalized["status"] != "claimed":
+            return None
+        key = (normalized["guild_id"], normalized["digest_kind"], normalized["period_key"])
+        existing = self.digest_runs.get(key)
+        if existing is None:
+            self.digest_runs[key] = deepcopy(normalized)
+            return deepcopy(normalized)
+        existing_status = str(existing.get("status") or "").casefold()
+        if existing_status in {"posted", "skipped", "failed"}:
+            return None
+        existing_lease = _parse_datetime(existing.get("lease_expires_at"))
+        next_claimed_at = _parse_datetime(normalized["claimed_at"])
+        if existing_lease is not None and next_claimed_at is not None and existing_lease > next_claimed_at:
+            return None
+        self.digest_runs[key] = deepcopy(normalized)
+        return deepcopy(normalized)
+
+    async def finish_digest_run(
+        self,
+        guild_id: int,
+        digest_kind: str,
+        period_key: str,
+        *,
+        status: str,
+        detail: str,
+        channel_id: int | None = None,
+        message_id: int | None = None,
+        completed_at: datetime | None = None,
+    ):
+        key = (guild_id, str(digest_kind).strip().casefold(), period_key)
+        existing = self.digest_runs.get(key)
+        if existing is None:
+            return
+        normalized_status = str(status or "").strip().casefold()
+        if normalized_status not in {"posted", "skipped", "failed"}:
+            return
+        existing["status"] = normalized_status
+        existing["detail"] = str(detail or "").strip()
+        existing["channel_id"] = _normalize_positive_int(channel_id)
+        existing["message_id"] = _normalize_positive_int(message_id)
+        existing["completed_at"] = _serialize_datetime(_parse_datetime(completed_at or datetime.now(timezone.utc)))
+
+    async def fetch_latest_digest_run(self, guild_id: int, *, digest_kind: str) -> dict[str, Any] | None:
+        normalized_kind = str(digest_kind or "").strip().casefold()
+        rows = [
+            record
+            for record in self.digest_runs.values()
+            if record["guild_id"] == guild_id and record["digest_kind"] == normalized_kind
+        ]
+        rows.sort(
+            key=lambda item: (
+                item["scheduled_post_at"],
+                item["period_end_at"],
+                item["period_key"],
+            ),
+            reverse=True,
+        )
+        return deepcopy(rows[0]) if rows else None
+
 
 def _config_from_row(row) -> dict[str, Any]:
     return normalize_question_drops_config(
@@ -644,6 +864,10 @@ def _config_from_row(row) -> dict[str, Any]:
             "scholar_ladder": decode_postgres_json_object(
                 row["scholar_ladder"],
                 label="question_drop_configs.scholar_ladder",
+            ),
+            "digest_settings": decode_postgres_json_object(
+                row["digest_settings"],
+                label="question_drop_configs.digest_settings",
             ),
             "ai_celebrations_enabled": row["ai_celebrations_enabled"],
         },
@@ -723,6 +947,40 @@ def _pending_post_from_row(row) -> dict[str, Any] | None:
     )
 
 
+def _participation_event_from_row(row) -> dict[str, Any] | None:
+    return normalize_participation_event(
+        {
+            "guild_id": row["guild_id"],
+            "exposure_id": row["exposure_id"],
+            "user_id": row["user_id"],
+            "occurred_at": _serialize_datetime(row["occurred_at"]),
+            "category": row["category"],
+            "correct": row["correct"],
+            "points_awarded": row["points_awarded"],
+        }
+    )
+
+
+def _digest_run_from_row(row) -> dict[str, Any] | None:
+    return normalize_digest_run(
+        {
+            "guild_id": row["guild_id"],
+            "digest_kind": row["digest_kind"],
+            "period_key": row["period_key"],
+            "period_start_at": _serialize_datetime(row["period_start_at"]),
+            "period_end_at": _serialize_datetime(row["period_end_at"]),
+            "scheduled_post_at": _serialize_datetime(row["scheduled_post_at"]),
+            "status": row["status"],
+            "claimed_at": _serialize_datetime(row["claimed_at"]),
+            "lease_expires_at": _serialize_datetime(row["lease_expires_at"]),
+            "completed_at": _serialize_datetime(row["completed_at"]),
+            "detail": row["detail"],
+            "channel_id": row["channel_id"],
+            "message_id": row["message_id"],
+        }
+    )
+
+
 class _PostgresQuestionDropsStore(_BaseQuestionDropsStore):
     backend_name = "postgres"
 
@@ -783,6 +1041,7 @@ class _PostgresQuestionDropsStore(_BaseQuestionDropsStore):
                 "enabled_categories JSONB NOT NULL DEFAULT '[]'::jsonb, "
                 "category_mastery JSONB NOT NULL DEFAULT '{}'::jsonb, "
                 "scholar_ladder JSONB NOT NULL DEFAULT '{}'::jsonb, "
+                "digest_settings JSONB NOT NULL DEFAULT '{}'::jsonb, "
                 "ai_celebrations_enabled BOOLEAN NOT NULL DEFAULT FALSE, "
                 "updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc', now())"
                 ")"
@@ -811,6 +1070,7 @@ class _PostgresQuestionDropsStore(_BaseQuestionDropsStore):
             ),
             "ALTER TABLE question_drop_configs ADD COLUMN IF NOT EXISTS category_mastery JSONB NOT NULL DEFAULT '{}'::jsonb",
             "ALTER TABLE question_drop_configs ADD COLUMN IF NOT EXISTS scholar_ladder JSONB NOT NULL DEFAULT '{}'::jsonb",
+            "ALTER TABLE question_drop_configs ADD COLUMN IF NOT EXISTS digest_settings JSONB NOT NULL DEFAULT '{}'::jsonb",
             "ALTER TABLE question_drop_configs ADD COLUMN IF NOT EXISTS ai_celebrations_enabled BOOLEAN NOT NULL DEFAULT FALSE",
             "CREATE INDEX IF NOT EXISTS ix_question_drop_exposures_guild_asked ON question_drop_exposures (guild_id, asked_at DESC)",
             "CREATE INDEX IF NOT EXISTS ix_question_drop_exposures_guild_concept ON question_drop_exposures (guild_id, concept_id, asked_at DESC)",
@@ -861,6 +1121,38 @@ class _PostgresQuestionDropsStore(_BaseQuestionDropsStore):
             ),
             "ALTER TABLE question_drop_active ADD COLUMN IF NOT EXISTS participant_user_ids JSONB NOT NULL DEFAULT '[]'::jsonb",
             "CREATE INDEX IF NOT EXISTS ix_question_drop_active_expires ON question_drop_active (expires_at)",
+            (
+                "CREATE TABLE IF NOT EXISTS question_drop_participation_events ("
+                "guild_id BIGINT NOT NULL, "
+                "exposure_id BIGINT NOT NULL REFERENCES question_drop_exposures(id) ON DELETE CASCADE, "
+                "user_id BIGINT NOT NULL, "
+                "occurred_at TIMESTAMPTZ NOT NULL, "
+                "category TEXT NOT NULL, "
+                "correct BOOLEAN NOT NULL DEFAULT FALSE, "
+                "points_awarded INTEGER NOT NULL DEFAULT 0, "
+                "PRIMARY KEY (guild_id, exposure_id, user_id)"
+                ")"
+            ),
+            "CREATE INDEX IF NOT EXISTS ix_question_drop_participation_events_period ON question_drop_participation_events (guild_id, occurred_at DESC, exposure_id ASC, user_id ASC)",
+            (
+                "CREATE TABLE IF NOT EXISTS question_drop_digest_runs ("
+                "guild_id BIGINT NOT NULL, "
+                "digest_kind TEXT NOT NULL, "
+                "period_key TEXT NOT NULL, "
+                "period_start_at TIMESTAMPTZ NOT NULL, "
+                "period_end_at TIMESTAMPTZ NOT NULL, "
+                "scheduled_post_at TIMESTAMPTZ NOT NULL, "
+                "status TEXT NOT NULL, "
+                "claimed_at TIMESTAMPTZ NOT NULL, "
+                "lease_expires_at TIMESTAMPTZ NOT NULL, "
+                "completed_at TIMESTAMPTZ NULL, "
+                "detail TEXT NOT NULL DEFAULT '', "
+                "channel_id BIGINT NULL, "
+                "message_id BIGINT NULL, "
+                "PRIMARY KEY (guild_id, digest_kind, period_key)"
+                ")"
+            ),
+            "CREATE INDEX IF NOT EXISTS ix_question_drop_digest_runs_lookup ON question_drop_digest_runs (guild_id, digest_kind, scheduled_post_at DESC)",
         ]
         async with self._pool.acquire() as conn:
             for statement in statements:
@@ -872,7 +1164,7 @@ class _PostgresQuestionDropsStore(_BaseQuestionDropsStore):
                 (
                     "SELECT guild_id, enabled, drops_per_day, timezone, answer_window_seconds, tone_mode, activity_gate, "
                     "active_start_hour, active_end_hour, enabled_channel_ids, enabled_categories, "
-                    "category_mastery, scholar_ladder, ai_celebrations_enabled "
+                    "category_mastery, scholar_ladder, digest_settings, ai_celebrations_enabled "
                     "FROM question_drop_configs"
                 )
             )
@@ -884,7 +1176,7 @@ class _PostgresQuestionDropsStore(_BaseQuestionDropsStore):
                 (
                     "SELECT guild_id, enabled, drops_per_day, timezone, answer_window_seconds, tone_mode, activity_gate, "
                     "active_start_hour, active_end_hour, enabled_channel_ids, enabled_categories, "
-                    "category_mastery, scholar_ladder, ai_celebrations_enabled "
+                    "category_mastery, scholar_ladder, digest_settings, ai_celebrations_enabled "
                     "FROM question_drop_configs WHERE guild_id = $1"
                 ),
                 guild_id,
@@ -907,9 +1199,9 @@ class _PostgresQuestionDropsStore(_BaseQuestionDropsStore):
                         "INSERT INTO question_drop_configs ("
                         "guild_id, enabled, drops_per_day, timezone, answer_window_seconds, tone_mode, activity_gate, "
                         "active_start_hour, active_end_hour, enabled_channel_ids, enabled_categories, "
-                        "category_mastery, scholar_ladder, ai_celebrations_enabled, updated_at"
+                        "category_mastery, scholar_ladder, digest_settings, ai_celebrations_enabled, updated_at"
                         ") VALUES ("
-                        "$1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb, $12::jsonb, $13::jsonb, $14, timezone('utc', now())"
+                        "$1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb, $12::jsonb, $13::jsonb, $14::jsonb, $15, timezone('utc', now())"
                         ") ON CONFLICT (guild_id) DO UPDATE SET "
                         "enabled = EXCLUDED.enabled, "
                         "drops_per_day = EXCLUDED.drops_per_day, "
@@ -923,6 +1215,7 @@ class _PostgresQuestionDropsStore(_BaseQuestionDropsStore):
                         "enabled_categories = EXCLUDED.enabled_categories, "
                         "category_mastery = EXCLUDED.category_mastery, "
                         "scholar_ladder = EXCLUDED.scholar_ladder, "
+                        "digest_settings = EXCLUDED.digest_settings, "
                         "ai_celebrations_enabled = EXCLUDED.ai_celebrations_enabled, "
                         "updated_at = timezone('utc', now())"
                     ),
@@ -939,6 +1232,7 @@ class _PostgresQuestionDropsStore(_BaseQuestionDropsStore):
                     json.dumps(normalized["enabled_categories"]),
                     json.dumps(normalized["category_mastery"]),
                     json.dumps(normalized["scholar_ladder"]),
+                    json.dumps(normalized["digest_settings"]),
                     normalized["ai_celebrations_enabled"],
                 )
 
@@ -1291,6 +1585,158 @@ class _PostgresQuestionDropsStore(_BaseQuestionDropsStore):
                 await conn.execute("DELETE FROM question_drop_exposures WHERE id = ANY($1::bigint[])", exposure_ids)
         return len(exposure_ids)
 
+    async def record_participation_events(self, rows: list[dict[str, Any]]):
+        normalized_rows = [normalized for row in rows if (normalized := normalize_participation_event(row)) is not None]
+        if not normalized_rows:
+            return
+        async with self._io_lock:
+            async with self._pool.acquire() as conn:
+                async with conn.transaction():
+                    for row in normalized_rows:
+                        await conn.execute(
+                            (
+                                "INSERT INTO question_drop_participation_events ("
+                                "guild_id, exposure_id, user_id, occurred_at, category, correct, points_awarded"
+                                ") VALUES ("
+                                "$1, $2, $3, $4, $5, $6, $7"
+                                ") ON CONFLICT (guild_id, exposure_id, user_id) DO UPDATE SET "
+                                "occurred_at = EXCLUDED.occurred_at, "
+                                "category = EXCLUDED.category, "
+                                "correct = EXCLUDED.correct, "
+                                "points_awarded = EXCLUDED.points_awarded"
+                            ),
+                            row["guild_id"],
+                            row["exposure_id"],
+                            row["user_id"],
+                            _parse_datetime(row["occurred_at"]),
+                            row["category"],
+                            row["correct"],
+                            row["points_awarded"],
+                        )
+
+    async def list_participation_events_for_guild(self, guild_id: int, *, start: datetime, end: datetime) -> list[dict[str, Any]]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                (
+                    "SELECT guild_id, exposure_id, user_id, occurred_at, category, correct, points_awarded "
+                    "FROM question_drop_participation_events "
+                    "WHERE guild_id = $1 AND occurred_at >= $2 AND occurred_at < $3 "
+                    "ORDER BY occurred_at ASC, exposure_id ASC, user_id ASC"
+                ),
+                guild_id,
+                start,
+                end,
+            )
+        return [record for row in rows if (record := _participation_event_from_row(row)) is not None]
+
+    async def prune_participation_events(self, *, before: datetime, limit: int = 500) -> int:
+        async with self._io_lock:
+            async with self._pool.acquire() as conn:
+                rows = await conn.fetch(
+                    "SELECT guild_id, exposure_id, user_id FROM question_drop_participation_events WHERE occurred_at < $1 ORDER BY occurred_at ASC LIMIT $2",
+                    before,
+                    limit,
+                )
+                if not rows:
+                    return 0
+                keys = [(int(row["guild_id"]), int(row["exposure_id"]), int(row["user_id"])) for row in rows]
+                await conn.executemany(
+                    "DELETE FROM question_drop_participation_events WHERE guild_id = $1 AND exposure_id = $2 AND user_id = $3",
+                    keys,
+                )
+        return len(keys)
+
+    async def claim_digest_run(self, record: dict[str, Any]) -> dict[str, Any] | None:
+        normalized = normalize_digest_run(record)
+        if normalized is None or normalized["status"] != "claimed":
+            return None
+        async with self._io_lock:
+            async with self._pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    (
+                        "INSERT INTO question_drop_digest_runs ("
+                        "guild_id, digest_kind, period_key, period_start_at, period_end_at, scheduled_post_at, "
+                        "status, claimed_at, lease_expires_at, completed_at, detail, channel_id, message_id"
+                        ") VALUES ("
+                        "$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13"
+                        ") ON CONFLICT (guild_id, digest_kind, period_key) DO UPDATE SET "
+                        "period_start_at = EXCLUDED.period_start_at, "
+                        "period_end_at = EXCLUDED.period_end_at, "
+                        "scheduled_post_at = EXCLUDED.scheduled_post_at, "
+                        "status = EXCLUDED.status, "
+                        "claimed_at = EXCLUDED.claimed_at, "
+                        "lease_expires_at = EXCLUDED.lease_expires_at, "
+                        "completed_at = EXCLUDED.completed_at, "
+                        "detail = EXCLUDED.detail, "
+                        "channel_id = EXCLUDED.channel_id, "
+                        "message_id = EXCLUDED.message_id "
+                        "WHERE question_drop_digest_runs.status = 'claimed' "
+                        "AND question_drop_digest_runs.lease_expires_at <= EXCLUDED.claimed_at "
+                        "RETURNING guild_id, digest_kind, period_key, period_start_at, period_end_at, scheduled_post_at, "
+                        "status, claimed_at, lease_expires_at, completed_at, detail, channel_id, message_id"
+                    ),
+                    normalized["guild_id"],
+                    normalized["digest_kind"],
+                    normalized["period_key"],
+                    _parse_datetime(normalized["period_start_at"]),
+                    _parse_datetime(normalized["period_end_at"]),
+                    _parse_datetime(normalized["scheduled_post_at"]),
+                    normalized["status"],
+                    _parse_datetime(normalized["claimed_at"]),
+                    _parse_datetime(normalized["lease_expires_at"]),
+                    _parse_datetime(normalized["completed_at"]),
+                    normalized["detail"],
+                    normalized["channel_id"],
+                    normalized["message_id"],
+                )
+        return _digest_run_from_row(row) if row is not None else None
+
+    async def finish_digest_run(
+        self,
+        guild_id: int,
+        digest_kind: str,
+        period_key: str,
+        *,
+        status: str,
+        detail: str,
+        channel_id: int | None = None,
+        message_id: int | None = None,
+        completed_at: datetime | None = None,
+    ):
+        normalized_status = str(status or "").strip().casefold()
+        if normalized_status not in {"posted", "skipped", "failed"}:
+            return
+        async with self._io_lock:
+            async with self._pool.acquire() as conn:
+                await conn.execute(
+                    (
+                        "UPDATE question_drop_digest_runs SET status = $4, detail = $5, channel_id = $6, message_id = $7, completed_at = $8 "
+                        "WHERE guild_id = $1 AND digest_kind = $2 AND period_key = $3"
+                    ),
+                    guild_id,
+                    str(digest_kind or "").strip().casefold(),
+                    period_key,
+                    normalized_status,
+                    str(detail or "").strip(),
+                    _normalize_positive_int(channel_id),
+                    _normalize_positive_int(message_id),
+                    completed_at or datetime.now(timezone.utc),
+                )
+
+    async def fetch_latest_digest_run(self, guild_id: int, *, digest_kind: str) -> dict[str, Any] | None:
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                (
+                    "SELECT guild_id, digest_kind, period_key, period_start_at, period_end_at, scheduled_post_at, "
+                    "status, claimed_at, lease_expires_at, completed_at, detail, channel_id, message_id "
+                    "FROM question_drop_digest_runs WHERE guild_id = $1 AND digest_kind = $2 "
+                    "ORDER BY scheduled_post_at DESC, period_end_at DESC, period_key DESC LIMIT 1"
+                ),
+                guild_id,
+                str(digest_kind or "").strip().casefold(),
+            )
+        return _digest_run_from_row(row) if row is not None else None
+
 
 class QuestionDropsStore:
     def __init__(self, *, backend: str | None = None, database_url: str | None = None):
@@ -1405,6 +1851,44 @@ class QuestionDropsStore:
 
     async def prune_exposures(self, *, before: datetime, limit: int = 500) -> int:
         return await self._store.prune_exposures(before=before, limit=limit)
+
+    async def record_participation_events(self, rows: list[dict[str, Any]]):
+        await self._store.record_participation_events(rows)
+
+    async def list_participation_events_for_guild(self, guild_id: int, *, start: datetime, end: datetime) -> list[dict[str, Any]]:
+        return await self._store.list_participation_events_for_guild(guild_id, start=start, end=end)
+
+    async def prune_participation_events(self, *, before: datetime, limit: int = 500) -> int:
+        return await self._store.prune_participation_events(before=before, limit=limit)
+
+    async def claim_digest_run(self, record: dict[str, Any]) -> dict[str, Any] | None:
+        return await self._store.claim_digest_run(record)
+
+    async def finish_digest_run(
+        self,
+        guild_id: int,
+        digest_kind: str,
+        period_key: str,
+        *,
+        status: str,
+        detail: str,
+        channel_id: int | None = None,
+        message_id: int | None = None,
+        completed_at: datetime | None = None,
+    ):
+        await self._store.finish_digest_run(
+            guild_id,
+            digest_kind,
+            period_key,
+            status=status,
+            detail=detail,
+            channel_id=channel_id,
+            message_id=message_id,
+            completed_at=completed_at,
+        )
+
+    async def fetch_latest_digest_run(self, guild_id: int, *, digest_kind: str) -> dict[str, Any] | None:
+        return await self._store.fetch_latest_digest_run(guild_id, digest_kind=digest_kind)
 
     def redacted_database_url(self) -> str:
         return _redact_database_url(self.database_url)
