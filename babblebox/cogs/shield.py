@@ -289,15 +289,6 @@ class ShieldCog(commands.Cog):
             f"High action: `{high_action}`"
         )
 
-    def _link_safety_runtime_value(self) -> str:
-        status = self.service.get_link_safety_status()
-        return (
-            f"Bundled intel: `{status['intel_version']}` ({status['intel_source']})\n"
-            "External provider: inactive in phase 1\n"
-            f"Mode: {status['provider_status']}\n"
-            "Cache: bounded in-memory TTL cache"
-        )
-
     def _link_assessment_label(self, assessment) -> str:
         if assessment.category == "malicious":
             return "malicious | matched local intel"
@@ -476,7 +467,6 @@ class ShieldCog(commands.Cog):
             ),
             inline=False,
         )
-        embed.add_field(name="Link Safety Runtime", value=self._link_safety_runtime_value(), inline=False)
         embed.add_field(
             name="Storage Discipline",
             value=(
@@ -508,7 +498,6 @@ class ShieldCog(commands.Cog):
                 f"{self._pack_policy_detail(config, pack)}"
             )
         embed.add_field(name="Link Safety Policy", value="\n\n".join(link_safety_lines), inline=False)
-        embed.add_field(name="Link Safety Runtime", value=self._link_safety_runtime_value(), inline=False)
         embed.add_field(
             name="Escalation",
             value=(
