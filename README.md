@@ -93,13 +93,20 @@ Babblebox is intentionally compact:
 
 ### Anonymous Confessions
 
+- optional feature that only works after admins enable and configure it
 - private composer launched with `/confess`
-- staff-blind moderation by confession ID and case ID only
+- Babblebox keeps the author hidden from members and server staff
+- staff-blind moderation by confession ID and case ID only while the bot still enforces safety internally
 - one trusted link total per confession
 - built-in safe families for mainstream social, docs, wiki, and developer links when trusted links are enabled
+- offensive, vulgar, derogatory, spammy, and private-info patterns are filtered before anything posts
+- adult / 18+ language is blocked by default unless an admin changes that policy
 - shorteners, link-in-bio hubs, storefronts, malicious domains, and adult domains blocked unless a guild explicitly allowlists them
-- image attachments are optional but always routed through private review
+- images are off by default and must be explicitly enabled by admins
+- enabled image support stays bounded and always routes through private review, which requires a separate private review channel
 - attachment filenames and Discord CDN URLs stay out of staff-visible surfaces
+- Babblebox hides the Discord account, but a member-chosen link destination or image itself can still reveal who sent it
+- Babblebox can automatically suspend or confession-ban internally without exposing the author
 - moderation supports approve, deny, delete, pause, clear, and false-positive flows without revealing the author
 - terminal confession records scrub body text, previews, links, fingerprints, and attachment metadata to keep storage bounded
 
@@ -350,11 +357,17 @@ Daily visibility notes:
 
 Confession notes:
 
+- Confessions are optional and stay unavailable until admins enable and configure them
 - staff see confession IDs and case IDs, never the author
-- image confessions always enter the private review queue
+- Babblebox still enforces safety internally and can automatically restrict repeat abuse without exposing identity
+- adult / 18+ language is blocked by default unless admins change that policy
 - trusted-link mode allows Babblebox's bundled safe families for mainstream social, docs, wiki, and developer domains
 - one trusted link total is allowed per confession
+- images are off by default and only work after admins explicitly enable them
+- enabled image confessions always enter the private review queue and require a separate private review channel
+- Babblebox hides the sender's account identity, but a personal link or identifiable image can still reveal them if they include it
 - attachment filenames and raw Discord attachment URLs are kept out of staff-visible embeds
+- `/confessions moderate` supports ID-based moderation plus clear and false-positive override paths
 
 ## Watch V2 Notes
 

@@ -45,7 +45,7 @@ class ConfessionsStoreNormalizationTests(unittest.TestCase):
         self.assertTrue(config["review_mode"])
         self.assertTrue(config["block_adult_language"])
         self.assertTrue(config["allow_trusted_mainstream_links"])
-        self.assertTrue(config["allow_images"])
+        self.assertFalse(config["allow_images"])
         self.assertIsNone(config["panel_channel_id"])
         self.assertIsNone(config["panel_message_id"])
         self.assertEqual(config["max_images"], 3)
@@ -62,6 +62,7 @@ class ConfessionsStoreNormalizationTests(unittest.TestCase):
                 "panel_message_id": 555,
                 "custom_allow_domains": ["YouTube.com", "youtube.com", "google.com"],
                 "custom_block_domains": ["bad.example", "Bad.Example"],
+                "allow_images": True,
                 "max_images": 99,
                 "cooldown_seconds": 1,
                 "burst_limit": 20,
@@ -75,6 +76,7 @@ class ConfessionsStoreNormalizationTests(unittest.TestCase):
         self.assertEqual(config["panel_message_id"], 555)
         self.assertEqual(config["custom_allow_domains"], ["google.com", "youtube.com"])
         self.assertEqual(config["custom_block_domains"], ["bad.example"])
+        self.assertFalse(config["allow_images"])
         self.assertEqual(config["max_images"], 3)
         self.assertEqual(config["cooldown_seconds"], 300)
         self.assertEqual(config["burst_limit"], 3)
@@ -82,6 +84,20 @@ class ConfessionsStoreNormalizationTests(unittest.TestCase):
         self.assertEqual(config["auto_suspend_hours"], 12)
         self.assertEqual(config["strike_temp_ban_threshold"], 9)
         self.assertEqual(config["strike_perm_ban_threshold"], 9)
+
+    def test_normalize_config_keeps_images_enabled_only_with_private_review_channel(self):
+        config = normalize_confession_config(
+            10,
+            {
+                "enabled": True,
+                "confession_channel_id": 111,
+                "review_channel_id": 222,
+                "allow_images": True,
+                "max_images": 2,
+            },
+        )
+        self.assertTrue(config["allow_images"])
+        self.assertEqual(config["max_images"], 2)
 
     def test_normalize_submission_drops_binary_bloat_from_attachment_meta(self):
         record = normalize_submission(
@@ -117,12 +133,17 @@ class ConfessionsStoreNormalizationTests(unittest.TestCase):
             {
                 "guild_id": 10,
                 "submission_id": "sub-1",
-                "attachment_urls": ["https://cdn.discordapp.com/image.png", " ", None],
+                "attachment_urls": [
+                    "https://cdn.discordapp.com/attachments/1/2/image.png",
+                    "https://evil.example/track.png",
+                    " ",
+                    None,
+                ],
                 "created_at": "2026-04-03T00:00:00+00:00",
                 "updated_at": "2026-04-03T00:01:00+00:00",
             }
         )
-        self.assertEqual(record["attachment_urls"], ["https://cdn.discordapp.com/image.png"])
+        self.assertEqual(record["attachment_urls"], ["https://cdn.discordapp.com/attachments/1/2/image.png"])
 
 
 class ConfessionsPostgresStoreTests(unittest.IsolatedAsyncioTestCase):
@@ -163,11 +184,13 @@ class ConfessionsPostgresStoreTests(unittest.IsolatedAsyncioTestCase):
 
         executed = "\n".join(connection.executed)
         self.assertIn("CREATE TABLE IF NOT EXISTS confession_guild_configs", executed)
+        self.assertIn("allow_images BOOLEAN NOT NULL DEFAULT FALSE", executed)
         self.assertIn("CREATE TABLE IF NOT EXISTS confession_submissions", executed)
         self.assertIn("CREATE TABLE IF NOT EXISTS confession_author_links", executed)
         self.assertIn("CREATE TABLE IF NOT EXISTS confession_private_media", executed)
         self.assertIn("CREATE TABLE IF NOT EXISTS confession_enforcement_states", executed)
         self.assertIn("CREATE TABLE IF NOT EXISTS confession_cases", executed)
         self.assertIn("CREATE TABLE IF NOT EXISTS confession_review_queues", executed)
+        self.assertIn("ALTER TABLE confession_guild_configs ALTER COLUMN allow_images SET DEFAULT FALSE", executed)
         self.assertIn("ix_confession_submissions_confession_id", executed)
         self.assertIn("ix_confession_author_links_author_created", executed)

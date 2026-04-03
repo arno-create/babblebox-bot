@@ -100,7 +100,7 @@ class FakeAttachment:
         self.filename = filename
         self.content_type = content_type
         self.size = size
-        self.url = url or f"https://cdn.discordapp.com/{filename}"
+        self.url = url or f"https://cdn.discordapp.com/attachments/1/2/{filename}"
         self.width = 100
         self.height = 100
 
@@ -241,6 +241,7 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
         review_channel: bool = False,
         adult_block: bool = True,
         panel: bool = False,
+        allow_images: bool | None = None,
     ):
         target = guild or self.guild
         ok, message = await self.service.configure_guild(
@@ -251,6 +252,7 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
             review_channel_id=self.review_channel.id if (target is self.guild and review_channel) else None,
             review_mode=review_mode,
             block_adult_language=adult_block,
+            allow_images=allow_images,
         )
         self.assertTrue(ok, message)
 
@@ -290,7 +292,7 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(author_link["author_user_id"], 123456789)
 
     async def test_text_link_and_images_queue_for_review_and_keep_private_media_out_of_staff_storage(self):
-        await self._configure(review_channel=True)
+        await self._configure(review_channel=True, allow_images=True)
 
         result = await self.service.submit_confession(
             self.guild,
@@ -307,7 +309,13 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(submission["shared_link_url"], "https://www.google.com/search?q=babblebox")
         self.assertEqual(len(submission["attachment_meta"]), 2)
         self.assertEqual(set(submission["attachment_meta"][0].keys()), {"kind", "size", "width", "height", "spoiler"})
-        self.assertEqual(private_media["attachment_urls"], ["https://cdn.discordapp.com/one.png", "https://cdn.discordapp.com/two.png"])
+        self.assertEqual(
+            private_media["attachment_urls"],
+            [
+                "https://cdn.discordapp.com/attachments/1/2/one.png",
+                "https://cdn.discordapp.com/attachments/1/2/two.png",
+            ],
+        )
 
         ok, message = await self.service.handle_case_action(self.guild, case_id=result.case_id, action="approve", version=1)
 
@@ -326,9 +334,8 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(first.state, "queued")
         self.assertEqual(second.state, "queued")
-        self.assertEqual(len(self.review_channel.sent), 0)
-        await self.service._sync_review_queue(self.guild, note="refreshed")
         self.assertEqual(len(self.review_channel.sent), 1)
+        self.assertGreaterEqual(len(self.review_channel.sent[0].edits), 1)
         current = await self.service.current_review_target(self.guild.id)
         pending = await self.service.list_review_targets(self.guild.id, limit=10)
         embed = self.service.build_review_queue_embed(self.guild, pending, note="refreshed")
@@ -457,6 +464,27 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(svg.ok)
         self.assertEqual(svg.state, "blocked")
 
+    async def test_images_require_review_channel_and_trusted_discord_attachment_urls(self):
+        await self._configure()
+
+        ok, message = await self.service.configure_guild(self.guild.id, allow_images=True)
+        self.assertFalse(ok)
+        self.assertIn("review channel", message.lower())
+
+        await self.service.configure_guild(self.guild.id, review_channel_id=self.review_channel.id)
+        ok, message = await self.service.configure_guild(self.guild.id, allow_images=True, max_images=2)
+        self.assertTrue(ok, message)
+
+        external = await self.service.submit_confession(
+            self.guild,
+            author_id=451,
+            content="external image",
+            attachments=[FakeAttachment("image.png", url="https://evil.example/image.png")],
+        )
+        self.assertFalse(external.ok)
+        self.assertEqual(external.state, "blocked")
+        self.assertIn("safely accept", external.message.lower())
+
     async def test_strike_escalation_clear_action_and_guild_scoping(self):
         await self._configure()
         await self.service.configure_guild(self.other_guild.id, enabled=True, confession_channel_id=self.other_confession_channel.id, review_mode=False)
@@ -560,6 +588,49 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("cdn.discordapp.com", rendered_detail)
         self.assertNotIn("cdn.discordapp.com", rendered_queue)
 
+    async def test_false_positive_on_review_case_publishes_and_clear_is_rejected(self):
+        await self._configure(review_mode=True, review_channel=True)
+
+        queued = await self.service.submit_confession(self.guild, author_id=904, content="review me", attachments=[])
+        self.assertEqual(queued.state, "queued")
+
+        cleared_ok, cleared_message = await self.service.handle_staff_action(
+            self.guild,
+            target_id=queued.case_id,
+            action="clear",
+        )
+        self.assertFalse(cleared_ok)
+        self.assertIn("approve", cleared_message.lower())
+
+        ok, message = await self.service.handle_staff_action(
+            self.guild,
+            target_id=queued.case_id,
+            action="false_positive",
+        )
+
+        self.assertTrue(ok, message)
+        submission = await self.service.store.fetch_submission_by_confession_id(self.guild.id, queued.confession_id)
+        case = await self.service.store.fetch_case(self.guild.id, queued.case_id)
+        self.assertEqual(submission["status"], "published")
+        self.assertEqual(submission["review_status"], "overridden")
+        self.assertEqual(case["resolution_action"], "false_positive")
+
+    async def test_obfuscated_slur_is_blocked_but_reporting_context_can_still_queue(self):
+        await self._configure(review_mode=True, review_channel=True)
+
+        blocked = await self.service.submit_confession(self.guild, author_id=905, content="nіggеr", attachments=[])
+        self.assertFalse(blocked.ok)
+        self.assertEqual(blocked.state, "blocked")
+
+        quoted = await self.service.submit_confession(
+            self.guild,
+            author_id=906,
+            content='For review: someone said "nіggеr" in chat.',
+            attachments=[],
+        )
+        self.assertTrue(quoted.ok)
+        self.assertEqual(quoted.state, "queued")
+
     async def test_blocked_false_positive_reuses_original_case_and_publishes_without_synthetic_case(self):
         await self._configure(review_mode=False, review_channel=True)
 
@@ -615,6 +686,19 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(disabled_ok, disabled_message)
         self.assertTrue(self.panel_channel.sent[0].view.send_button.disabled)
 
+    async def test_dashboard_counts_distinguish_review_queue_from_other_cases(self):
+        await self._configure(review_mode=True, review_channel=True)
+        queued = await self.service.submit_confession(self.guild, author_id=907, content="queue me", attachments=[])
+        blocked = await self.service.submit_confession(self.guild, author_id=908, content="nigger", attachments=[])
+        self.assertEqual(queued.state, "queued")
+        self.assertEqual(blocked.state, "blocked")
+
+        review_embed = await self.service.build_dashboard_embed(self.guild, section="review")
+        rendered = json.dumps(review_embed.to_dict())
+        self.assertIn("Open queue", rendered)
+        self.assertIn("**1** case", rendered)
+        self.assertIn("Open safety blocks", rendered)
+
 
 class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -664,11 +748,19 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(interaction.response.modal_calls), 1)
         self.assertEqual(interaction.response.modal_calls[0].title, "Anonymous Confession")
+        self.assertIsNone(interaction.response.modal_calls[0].upload_input)
 
     async def test_modal_submission_supports_image_only_and_stays_private(self):
-        await self.cog.service.configure_guild(self.guild.id, enabled=True, confession_channel_id=20, review_channel_id=30, review_mode=False)
+        await self.cog.service.configure_guild(
+            self.guild.id,
+            enabled=True,
+            confession_channel_id=20,
+            review_channel_id=30,
+            review_mode=False,
+            allow_images=True,
+        )
         interaction = FakeInteraction(guild=self.guild, user=FakeUser(13))
-        modal = ConfessionComposerModal(self.cog)
+        modal = ConfessionComposerModal(self.cog, guild_id=self.guild.id)
         modal.body_input._value = ""
         modal.link_input._value = ""
         modal.upload_input._values = [FakeAttachment("image.png")]
@@ -754,10 +846,11 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
 
         self.cog.service.submit_confession = broken_submit
         interaction = FakeInteraction(guild=self.guild, user=FakeUser(13))
-        modal = ConfessionComposerModal(self.cog)
+        modal = ConfessionComposerModal(self.cog, guild_id=self.guild.id)
         modal.body_input._value = "hello"
         modal.link_input._value = ""
-        modal.upload_input._values = []
+        if modal.upload_input is not None:
+            modal.upload_input._values = []
 
         await modal.on_submit(interaction)
 
@@ -786,3 +879,16 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
         state_link = await self.cog.service.store.fetch_author_link((await self.cog.service.store.fetch_submission_by_confession_id(self.guild.id, published.confession_id))["submission_id"])
         state = await self.cog.service.store.fetch_enforcement_state(self.guild.id, state_link["author_user_id"])
         self.assertEqual(state["active_restriction"], "temp_ban")
+
+    async def test_moderate_command_pause_24h_maps_to_suspend(self):
+        await self.cog.service.configure_guild(self.guild.id, enabled=True, confession_channel_id=20, review_mode=False)
+        published = await self.cog.service.submit_confession(self.guild, author_id=78, content="pause me", attachments=[])
+        ctx = FakeContext(guild=self.guild, author=FakeUser(6, manage_guild=True))
+
+        await ConfessionsCog.confessions_moderate_command.callback(self.cog, ctx, published.confession_id, "pause_24h", False)
+
+        state_link = await self.cog.service.store.fetch_author_link(
+            (await self.cog.service.store.fetch_submission_by_confession_id(self.guild.id, published.confession_id))["submission_id"]
+        )
+        state = await self.cog.service.store.fetch_enforcement_state(self.guild.id, state_link["author_user_id"])
+        self.assertEqual(state["active_restriction"], "suspended")

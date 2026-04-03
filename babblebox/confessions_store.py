@@ -15,6 +15,7 @@ from babblebox.text_safety import normalize_plain_text
 
 DEFAULT_BACKEND = "postgres"
 DEFAULT_DATABASE_URL_ENV_ORDER = ("UTILITY_DATABASE_URL", "SUPABASE_DB_URL", "DATABASE_URL")
+DISCORD_MEDIA_HOSTS = frozenset({"cdn.discordapp.com", "media.discordapp.net"})
 VALID_RESTRICTIONS = {"none", "suspended", "temp_ban", "perm_ban"}
 VALID_SUBMISSION_STATUSES = {"blocked", "queued", "published", "denied", "deleted", "overridden"}
 VALID_REVIEW_STATUSES = {"none", "pending", "approved", "denied", "overridden", "blocked"}
@@ -39,7 +40,7 @@ def default_confession_config(guild_id: int | None = None) -> dict[str, Any]:
         "allow_trusted_mainstream_links": True,
         "custom_allow_domains": [],
         "custom_block_domains": [],
-        "allow_images": True,
+        "allow_images": False,
         "max_images": 3,
         "cooldown_seconds": 5 * 60,
         "burst_limit": 3,
@@ -134,12 +135,26 @@ def _clean_string_list(values: Any) -> list[str]:
     return sorted(cleaned)
 
 
-def _clean_url_list(values: Any) -> list[str]:
+def _normalize_private_media_url(raw_value: Any) -> str | None:
+    cleaned = _clean_optional_text(raw_value, max_length=500)
+    if cleaned is None:
+        return None
+    try:
+        parsed = urlsplit(cleaned)
+    except ValueError:
+        return None
+    host = normalize_plain_text(parsed.netloc).casefold().strip()
+    if parsed.scheme != "https" or host not in DISCORD_MEDIA_HOSTS or not normalize_plain_text(parsed.path):
+        return None
+    return urlunsplit(("https", host, parsed.path, parsed.query or "", ""))
+
+
+def _clean_private_media_url_list(values: Any) -> list[str]:
     if not isinstance(values, list):
         return []
     cleaned = []
     for value in values:
-        url = _clean_optional_text(value, max_length=500)
+        url = _normalize_private_media_url(value)
         if url:
             cleaned.append(url)
     return cleaned[:3]
@@ -203,9 +218,9 @@ def normalize_confession_config(guild_id: int, payload: Any) -> dict[str, Any]:
     cleaned["allow_trusted_mainstream_links"] = bool(payload.get("allow_trusted_mainstream_links", True))
     cleaned["custom_allow_domains"] = _clean_domain_list(payload.get("custom_allow_domains"))
     cleaned["custom_block_domains"] = _clean_domain_list(payload.get("custom_block_domains"))
-    cleaned["allow_images"] = bool(payload.get("allow_images", True))
+    cleaned["allow_images"] = bool(payload.get("allow_images", False))
     max_images = payload.get("max_images")
-    cleaned["max_images"] = max_images if isinstance(max_images, int) and 0 <= max_images <= 3 else 3
+    cleaned["max_images"] = max_images if isinstance(max_images, int) and 1 <= max_images <= 3 else 3
     for field, default_value, minimum, maximum in (
         ("cooldown_seconds", 5 * 60, 15, 24 * 3600),
         ("burst_limit", 3, 1, 10),
@@ -221,6 +236,8 @@ def normalize_confession_config(guild_id: int, payload: Any) -> dict[str, Any]:
         cleaned["strike_perm_ban_threshold"] = cleaned["strike_temp_ban_threshold"]
     if cleaned["panel_channel_id"] is None:
         cleaned["panel_message_id"] = None
+    if cleaned["review_channel_id"] is None or cleaned["review_channel_id"] == cleaned["confession_channel_id"]:
+        cleaned["allow_images"] = False
     return cleaned
 
 
@@ -283,7 +300,7 @@ def normalize_private_media(payload: Any) -> dict[str, Any] | None:
     submission_id = _clean_optional_text(payload.get("submission_id"), max_length=64)
     created_at = _serialize_datetime(payload.get("created_at"))
     updated_at = _serialize_datetime(payload.get("updated_at"))
-    attachment_urls = _clean_url_list(payload.get("attachment_urls"))
+    attachment_urls = _clean_private_media_url_list(payload.get("attachment_urls"))
     if guild_id is None or submission_id is None or created_at is None or updated_at is None:
         return None
     return {
@@ -763,7 +780,16 @@ class _MemoryConfessionsStore(_BaseConfessionsStore):
             "queued_submissions": sum(record.get("status") == "queued" for record in submissions),
             "published_submissions": sum(record.get("status") == "published" for record in submissions),
             "blocked_submissions": sum(record.get("status") == "blocked" for record in submissions),
-            "open_cases": sum(record.get("status") == "open" for record in cases),
+            "open_cases_total": sum(record.get("status") == "open" for record in cases),
+            "open_review_cases": sum(
+                record.get("status") == "open" and record.get("case_kind") == "review" for record in cases
+            ),
+            "open_safety_cases": sum(
+                record.get("status") == "open" and record.get("case_kind") == "safety_block" for record in cases
+            ),
+            "open_moderation_cases": sum(
+                record.get("status") == "open" and record.get("case_kind") == "published_moderation" for record in cases
+            ),
         }
 
 
@@ -825,7 +851,7 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                 "allow_trusted_mainstream_links BOOLEAN NOT NULL DEFAULT TRUE, "
                 "custom_allow_domains JSONB NOT NULL DEFAULT '[]'::jsonb, "
                 "custom_block_domains JSONB NOT NULL DEFAULT '[]'::jsonb, "
-                "allow_images BOOLEAN NOT NULL DEFAULT TRUE, "
+                "allow_images BOOLEAN NOT NULL DEFAULT FALSE, "
                 "max_images SMALLINT NOT NULL DEFAULT 3, "
                 "cooldown_seconds INTEGER NOT NULL DEFAULT 300, "
                 "burst_limit SMALLINT NOT NULL DEFAULT 3, "
@@ -927,7 +953,7 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
             "ALTER TABLE confession_guild_configs ADD COLUMN IF NOT EXISTS allow_trusted_mainstream_links BOOLEAN NOT NULL DEFAULT TRUE",
             "ALTER TABLE confession_guild_configs ADD COLUMN IF NOT EXISTS custom_allow_domains JSONB NOT NULL DEFAULT '[]'::jsonb",
             "ALTER TABLE confession_guild_configs ADD COLUMN IF NOT EXISTS custom_block_domains JSONB NOT NULL DEFAULT '[]'::jsonb",
-            "ALTER TABLE confession_guild_configs ADD COLUMN IF NOT EXISTS allow_images BOOLEAN NOT NULL DEFAULT TRUE",
+            "ALTER TABLE confession_guild_configs ADD COLUMN IF NOT EXISTS allow_images BOOLEAN NOT NULL DEFAULT FALSE",
             "ALTER TABLE confession_guild_configs ADD COLUMN IF NOT EXISTS max_images SMALLINT NOT NULL DEFAULT 3",
             "ALTER TABLE confession_guild_configs ADD COLUMN IF NOT EXISTS panel_channel_id BIGINT NULL",
             "ALTER TABLE confession_guild_configs ADD COLUMN IF NOT EXISTS panel_message_id BIGINT NULL",
@@ -944,6 +970,12 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
             "ALTER TABLE confession_cases ADD COLUMN IF NOT EXISTS resolution_note TEXT NULL",
             "ALTER TABLE confession_cases ADD COLUMN IF NOT EXISTS review_message_channel_id BIGINT NULL",
             "ALTER TABLE confession_cases ADD COLUMN IF NOT EXISTS review_message_id BIGINT NULL",
+            "ALTER TABLE confession_guild_configs ALTER COLUMN allow_images SET DEFAULT FALSE",
+            (
+                "UPDATE confession_guild_configs "
+                "SET allow_images = FALSE "
+                "WHERE allow_images = TRUE AND (review_channel_id IS NULL OR review_channel_id = confession_channel_id)"
+            ),
         ]
         index_statements = [
             "CREATE UNIQUE INDEX IF NOT EXISTS ix_confession_submissions_confession_id ON confession_submissions (guild_id, confession_id)",
@@ -1379,16 +1411,23 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                 guild_id,
             )
             case_rows = await conn.fetch(
-                "SELECT status, COUNT(*) AS count FROM confession_cases WHERE guild_id = $1 GROUP BY status",
+                "SELECT case_kind, status, COUNT(*) AS count FROM confession_cases WHERE guild_id = $1 GROUP BY case_kind, status",
                 guild_id,
             )
         submission_counts = {str(row['status']): int(row['count']) for row in submission_rows}
-        case_counts = {str(row['status']): int(row['count']) for row in case_rows}
+        open_case_counts = {
+            str(row["case_kind"]): int(row["count"])
+            for row in case_rows
+            if str(row["status"]) == "open"
+        }
         return {
             "queued_submissions": submission_counts.get("queued", 0),
             "published_submissions": submission_counts.get("published", 0),
             "blocked_submissions": submission_counts.get("blocked", 0),
-            "open_cases": case_counts.get("open", 0),
+            "open_cases_total": sum(open_case_counts.values()),
+            "open_review_cases": open_case_counts.get("review", 0),
+            "open_safety_cases": open_case_counts.get("safety_block", 0),
+            "open_moderation_cases": open_case_counts.get("published_moderation", 0),
         }
 
 
@@ -1406,8 +1445,7 @@ class ConfessionsStore:
             "Confessions storage init: "
             f"backend_preference={requested_backend}, "
             f"database_url_configured={'yes' if self.database_url else 'no'}, "
-            f"database_url_source={self.database_url_source or 'none'}, "
-            f"database_target={_redact_database_url(self.database_url)}"
+            f"database_url_source={self.database_url_source or 'none'}"
         )
         if requested_backend in {"memory", "test", "dev"}:
             self._store = _MemoryConfessionsStore()

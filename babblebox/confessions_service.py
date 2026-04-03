@@ -19,6 +19,7 @@ from babblebox import game_engine as ge
 from babblebox.confessions_store import (
     ConfessionsStorageUnavailable,
     ConfessionsStore,
+    DISCORD_MEDIA_HOSTS,
     default_confession_config,
     default_enforcement_state,
     normalize_confession_config,
@@ -44,6 +45,7 @@ from babblebox.text_safety import (
     PHONE_RE,
     SSN_RE,
     URL_RE,
+    fold_confusable_text,
     normalize_plain_text,
     squash_for_evasion_checks,
 )
@@ -61,7 +63,6 @@ MAX_CONFESSION_LENGTH = 1800
 MAX_STAFF_PREVIEW = 220
 MAX_ATTACHMENT_SIZE = 10 * 1024 * 1024
 REVIEW_PREVIEW_LIMIT = 5
-REVIEW_QUEUE_DEBOUNCE_SECONDS = 120
 EXACT_DUPLICATE_WINDOW_SECONDS = 24 * 3600
 NEAR_DUPLICATE_RATIO = 0.92
 STRIKE_SUSPEND_HOURS = 24
@@ -243,10 +244,24 @@ def _attachment_summary_from_meta(values: Sequence[dict[str, Any]]) -> str | Non
 def _attachment_urls(attachments: Sequence[Any]) -> list[str]:
     urls: list[str] = []
     for item in attachments[:3]:
-        url = normalize_plain_text(getattr(item, "url", None))
+        url = _normalize_attachment_url(getattr(item, "url", None))
         if url:
             urls.append(url)
     return urls
+
+
+def _normalize_attachment_url(raw_url: str | None) -> str | None:
+    cleaned = normalize_plain_text(raw_url)
+    if not cleaned:
+        return None
+    try:
+        parsed = urlsplit(cleaned)
+    except ValueError:
+        return None
+    host = normalize_plain_text(parsed.netloc).casefold().strip()
+    if parsed.scheme != "https" or host not in DISCORD_MEDIA_HOSTS or not normalize_plain_text(parsed.path):
+        return None
+    return urlunsplit(("https", host, parsed.path, parsed.query or "", ""))
 
 
 def _rounded_age_text(iso_value: str | None) -> str:
@@ -436,7 +451,6 @@ class ConfessionsService:
         self._lock = asyncio.Lock()
         self.link_safety = ShieldLinkSafetyEngine()
         self._compiled_configs: dict[int, dict[str, Any]] = {}
-        self._review_queue_refresh_tasks: dict[int, asyncio.Task[Any]] = {}
 
     async def start(self) -> bool:
         if self._startup_storage_error is not None:
@@ -457,12 +471,6 @@ class ConfessionsService:
         return True
 
     async def close(self):
-        for task in list(self._review_queue_refresh_tasks.values()):
-            task.cancel()
-        for task in list(self._review_queue_refresh_tasks.values()):
-            with contextlib.suppress(asyncio.CancelledError, Exception):
-                await task
-        self._review_queue_refresh_tasks.clear()
         await self.link_safety.close()
         await self.store.close()
 
@@ -507,6 +515,13 @@ class ConfessionsService:
                 mutate(config)
             except ValueError as exc:
                 return False, str(exc)
+            requested_allow_images = bool(config.get("allow_images"))
+            requested_review_channel_id = config.get("review_channel_id")
+            requested_confession_channel_id = config.get("confession_channel_id")
+            if requested_allow_images and requested_review_channel_id is None:
+                return False, "Image confessions require a separate private review channel before admins can enable them."
+            if requested_allow_images and requested_review_channel_id == requested_confession_channel_id:
+                return False, "Image confessions require a review channel that is separate from the public confession channel."
             normalized = normalize_confession_config(guild_id, config)
             if (
                 normalized["enabled"]
@@ -773,6 +788,8 @@ class ConfessionsService:
         for attachment in attachments:
             if not self._is_allowed_image(attachment):
                 return False, "Confessions only allow images right now."
+            if _normalize_attachment_url(getattr(attachment, "url", None)) is None:
+                return False, "Babblebox could not safely accept one of those images."
             size = getattr(attachment, "size", 0)
             if isinstance(size, int) and size > MAX_ATTACHMENT_SIZE:
                 return False, "Each confession image must stay under 10 MB."
@@ -926,12 +943,13 @@ class ConfessionsService:
         return tuple(_sorted_unique_text(flags)), tuple(assessments), bool(urls)
 
     def _classify_language(self, compiled: dict[str, Any], text: str, squashed: str) -> SafetyResult | None:
-        lowered = text.casefold()
+        lowered = fold_confusable_text(text)
         dampened = _is_reporting_or_educational_context(lowered)
-        hate_hits = _term_hits(SEVERE_HATE_TERMS, lowered, squashed)
-        adult_hits = _term_hits(ADULT_TERMS, lowered, squashed)
-        derog_hits = _term_hits(DEROGATORY_TERMS, lowered, squashed)
-        vulgar_hits = _term_hits(VULGAR_TERMS, lowered, squashed)
+        squashed_folded = squash_for_evasion_checks(lowered)
+        hate_hits = _term_hits(SEVERE_HATE_TERMS, lowered, squashed_folded)
+        adult_hits = _term_hits(ADULT_TERMS, lowered, squashed_folded)
+        derog_hits = _term_hits(DEROGATORY_TERMS, lowered, squashed_folded)
+        vulgar_hits = _term_hits(VULGAR_TERMS, lowered, squashed_folded)
         targeted = bool(TARGETING_RE.search(lowered))
         harassment_signal = _has_targeted_harassment_signal(lowered)
 
@@ -1189,7 +1207,7 @@ class ConfessionsService:
                     "resolved_at": None,
                 }
             )
-            self._schedule_review_queue_refresh(guild.id)
+            await self._sync_review_queue(guild, note=f"Case `{case_id}` entered review.")
             return ConfessionSubmissionResult(
                 True,
                 "queued",
@@ -1323,10 +1341,15 @@ class ConfessionsService:
     def build_member_panel_embed(self, guild: discord.Guild) -> discord.Embed:
         config = self.get_config(guild.id)
         ready = self.operability_message(guild.id) == "Confessions are ready."
+        image_policy = (
+            f"Enabled (max {config['max_images']}, private review)"
+            if config["allow_images"]
+            else "Off by default"
+        )
         description = (
-            "Share something quietly through a private composer. Babblebox posts without your name, and staff moderate by confession ID only."
+            "Share something quietly through a private composer. When admins enable Confessions, Babblebox keeps the author hidden from members and staff while still enforcing safety internally."
             if ready
-            else "Anonymous confessions are not ready in this server yet. The panel stays here so admins can finish setup without reposting it."
+            else "Anonymous confessions are optional in Babblebox and are not ready in this server yet. The panel stays here so admins can finish setup without reposting it."
         )
         embed = discord.Embed(
             title="Anonymous Confessions",
@@ -1337,8 +1360,8 @@ class ConfessionsService:
             name="How It Works",
             value=(
                 "Tap **Send Confession**.\n"
-                "Add text and at most one trusted link. Images stay optional.\n"
-                "If images are enabled, they always go through private review before Babblebox posts them."
+                "Add text and at most one trusted link.\n"
+                "Images are off by default and only work after admins enable them. Enabled images always go through private review."
             ),
             inline=False,
         )
@@ -1348,8 +1371,13 @@ class ConfessionsService:
                 f"Review mode: **{'On' if config['review_mode'] else 'Off'}**\n"
                 f"Adult content: **{'Blocked' if config['block_adult_language'] else 'Allowed'}**\n"
                 f"Trusted links: **{'Allowed' if config['allow_trusted_mainstream_links'] else 'Blocked'}**\n"
-                f"Images: **{'Allowed' if config['allow_images'] else 'Blocked'}**"
+                f"Images: **{image_policy}**"
             ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Stay Anonymous",
+            value="Babblebox hides your account from staff, but the words, link destination, and image contents you choose can still identify you.",
             inline=False,
         )
         if not ready:
@@ -1357,20 +1385,35 @@ class ConfessionsService:
         return ge.style_embed(embed, footer="Babblebox Confessions | Private composer")
 
     def build_member_panel_help_embed(self, guild: discord.Guild) -> discord.Embed:
+        config = self.get_config(guild.id)
+        image_line = (
+            f"Text, one trusted link total, and up to {config['max_images']} images only if admins explicitly enable them. Enabled images always enter private review."
+            if config["allow_images"]
+            else "Text and one trusted link total. Images are off by default unless admins explicitly enable them."
+        )
         embed = discord.Embed(
             title="How Anonymous Confessions Work",
             description="Confessions are submitted privately and published by Babblebox, not by you.",
             color=ge.EMBED_THEME["info"],
         )
-        embed.add_field(name="Privacy", value="Members and server staff see confession IDs, not the author behind them.", inline=False)
+        embed.add_field(
+            name="Privacy",
+            value="Members and server staff see confession IDs, not the author behind them. Babblebox still enforces safety internally.",
+            inline=False,
+        )
         embed.add_field(
             name="What You Can Add",
-            value="Text, one trusted link total, and up to 3 images when this server allows them. Image confessions always enter private review.",
+            value=image_line,
             inline=False,
         )
         embed.add_field(
             name="What Gets Blocked",
-            value="Mentions, unsafe links, private details, spam, unsupported image types, and anything this server has disabled.",
+            value="Mentions, unsafe links, private details, spam, offensive or derogatory language, unsupported image types, and anything this server has disabled.",
+            inline=False,
+        )
+        embed.add_field(
+            name="Self-Identifying Content",
+            value="Staff cannot see your Discord identity through Babblebox, but a personal profile link, full name, face, screenshot, or document inside your confession can still reveal you.",
             inline=False,
         )
         return ge.style_embed(embed, footer="Babblebox Confessions")
@@ -1381,7 +1424,10 @@ class ConfessionsService:
             "queued_submissions": 0,
             "published_submissions": 0,
             "blocked_submissions": 0,
-            "open_cases": 0,
+            "open_cases_total": 0,
+            "open_review_cases": 0,
+            "open_safety_cases": 0,
+            "open_moderation_cases": 0,
         }
         embed = discord.Embed(
             title="Confessions Control Panel",
@@ -1389,29 +1435,37 @@ class ConfessionsService:
             color=ge.EMBED_THEME["info"],
         )
         if section == "policy":
+            image_policy = (
+                f"Enabled, max {config['max_images']}, always reviewed"
+                if config["allow_images"]
+                else "Disabled by default"
+            )
             embed.add_field(
                 name="Safety",
                 value=(
                     f"Adult content: **{'Blocked' if config['block_adult_language'] else 'Allowed'}**\n"
-                    f"Trusted links: **{'Allowed' if config['allow_trusted_mainstream_links'] else 'Blocked'}**\n"
-                    f"Images: **{'Allowed' if config['allow_images'] else 'Blocked'}** (max {config['max_images']}, always reviewed)"
+                    f"Review mode: **{'On' if config['review_mode'] else 'Off'}**\n"
+                    f"Images: **{image_policy}**"
                 ),
                 inline=False,
             )
             embed.add_field(
-                name="Flood Control",
+                name="Link Policy",
+                value=(
+                    f"Trusted families: **{'Allowed' if config['allow_trusted_mainstream_links'] else 'Blocked'}**\n"
+                    f"Allowlist: **{len(config['custom_allow_domains'])}** custom\n"
+                    f"Blocklist: **{len(config['custom_block_domains'])}** custom\n"
+                    "Unknown links: **Blocked**"
+                ),
+                inline=False,
+            )
+            embed.add_field(
+                name="Restrictions",
                 value=(
                     f"Cooldown: **{format_duration_brief(int(config['cooldown_seconds']))}**\n"
-                    f"Burst window: **{config['burst_limit']} in {format_duration_brief(int(config['burst_window_seconds']))}**\n"
-                    f"Auto suspend: **{config['auto_suspend_hours']}h**"
-                ),
-                inline=False,
-            )
-            embed.add_field(
-                name="Domains",
-                value=(
-                    f"Allowlist: **{len(config['custom_allow_domains'])}** custom\n"
-                    f"Blocklist: **{len(config['custom_block_domains'])}** custom"
+                    f"Burst limit: **{config['burst_limit']} in {format_duration_brief(int(config['burst_window_seconds']))}**\n"
+                    f"Auto suspend: **{config['auto_suspend_hours']}h**\n"
+                    f"Temp ban at **{config['strike_temp_ban_threshold']}** strikes, permanent at **{config['strike_perm_ban_threshold']}**"
                 ),
                 inline=False,
             )
@@ -1421,13 +1475,15 @@ class ConfessionsService:
                 value=(
                     f"Review mode: **{'On' if config['review_mode'] else 'Off'}**\n"
                     f"Review channel: {self._format_channel_label(config['review_channel_id'])}\n"
-                    f"Open queue: **{counts['open_cases']}** case(s)"
+                    f"Open queue: **{counts['open_review_cases']}** case(s)\n"
+                    f"Open safety blocks: **{counts['open_safety_cases']}**\n"
+                    f"Open moderation cases: **{counts['open_moderation_cases']}**"
                 ),
                 inline=False,
             )
             embed.add_field(
                 name="Quick Help",
-                value="Use `/confessions moderate` with a confession ID or case ID to approve, deny, delete, pause, ban, clear, or mark false positive.",
+                value="Use `/confessions moderate` with a confession ID or case ID to approve, deny, delete, pause, ban, clear, or override a false positive without seeing the author.",
                 inline=False,
             )
         elif section == "launch":
@@ -1468,7 +1524,7 @@ class ConfessionsService:
                     f"Queued: **{counts['queued_submissions']}**\n"
                     f"Published: **{counts['published_submissions']}**\n"
                     f"Blocked: **{counts['blocked_submissions']}**\n"
-                    f"Open cases: **{counts['open_cases']}**"
+                    f"Open cases: **{counts['open_cases_total']}**"
                 ),
                 inline=False,
             )
@@ -1641,31 +1697,7 @@ class ConfessionsService:
     async def sync_member_panel(self, guild: discord.Guild, *, channel_id: int | None = None) -> tuple[bool, str]:
         return await self._sync_member_panel(guild, channel_id=channel_id)
 
-    def _cancel_review_queue_refresh(self, guild_id: int):
-        task = self._review_queue_refresh_tasks.pop(guild_id, None)
-        if task is not None:
-            task.cancel()
-
-    def _schedule_review_queue_refresh(self, guild_id: int):
-        if guild_id in self._review_queue_refresh_tasks:
-            return
-
-        async def _runner():
-            try:
-                await asyncio.sleep(REVIEW_QUEUE_DEBOUNCE_SECONDS)
-                self._review_queue_refresh_tasks.pop(guild_id, None)
-                guild = self.bot.get_guild(guild_id)
-                if guild is not None:
-                    await self._sync_review_queue(guild)
-            except asyncio.CancelledError:
-                raise
-            finally:
-                self._review_queue_refresh_tasks.pop(guild_id, None)
-
-        self._review_queue_refresh_tasks[guild_id] = asyncio.create_task(_runner())
-
     async def _retire_review_queue(self, guild: discord.Guild, *, note: str | None = None):
-        self._cancel_review_queue_refresh(guild.id)
         record = await self.store.fetch_review_queue(guild.id)
         if record is None:
             return
@@ -1678,7 +1710,6 @@ class ConfessionsService:
         await self.store.delete_review_queue(guild.id)
 
     async def _sync_review_queue(self, guild: discord.Guild, *, note: str | None = None):
-        self._cancel_review_queue_refresh(guild.id)
         compiled = self.get_compiled_config(guild.id)
         if not compiled["enabled"] or compiled["review_channel_id"] is None:
             await self._retire_review_queue(guild, note=note or "Confession review is inactive.")
@@ -1938,6 +1969,33 @@ class ConfessionsService:
             await self.store.upsert_case(case)
             await self.store.upsert_enforcement_state(relaxed_state)
             return True, f"Case `{case_id}` was resolved and confession `{submission['confession_id']}` was published."
+
+        if action == "false_positive" and case.get("case_kind") == "review":
+            publish_ok, message_id, channel_id, error = await self._publish_submission(guild, submission)
+            if not publish_ok:
+                return False, error or "Babblebox could not publish that confession."
+            submission["status"] = "published"
+            submission["review_status"] = "overridden"
+            submission["posted_channel_id"] = channel_id
+            submission["posted_message_id"] = message_id
+            submission["published_at"] = now_iso
+            submission["resolved_at"] = now_iso
+            await self._scrub_submission_for_terminal_state(submission)
+            case["status"] = "resolved"
+            case["resolution_action"] = "false_positive"
+            case["resolved_at"] = now_iso
+            await self.store.upsert_case(case)
+            if state.get("last_case_id") == case_id and (
+                state.get("is_permanent_ban") or state.get("active_restriction") != "none" or int(state.get("strike_count") or 0) > 0
+            ):
+                await self.store.upsert_enforcement_state(
+                    self._relax_case_penalty(state, case_id=case_id, now_iso=now_iso, clear_strikes=clear_strikes)
+                )
+            await self._sync_review_queue(guild, note=f"Case `{case_id}` was overridden and posted.")
+            return True, f"Case `{case_id}` was overridden and posted as confession `{submission['confession_id']}`."
+
+        if action == "clear" and case.get("case_kind") == "review":
+            return False, "Use approve, deny, or false positive on a queued review case."
 
         if action == "approve":
             publish_ok, message_id, channel_id, error = await self._publish_submission(guild, submission)

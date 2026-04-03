@@ -39,7 +39,12 @@ class WebsiteDocsTests(unittest.TestCase):
         self.assertNotIn("shieldaiglobal", help_html.casefold())
         self.assertNotIn("dropscelebaiglobal", help_html.casefold())
         self.assertIn("staff-blind", help_html)
-        self.assertIn("Image confessions always go through private review", help_html)
+        self.assertIn("optional in Babblebox", help_html)
+        self.assertIn("until admins enable and configure them", help_html)
+        self.assertIn("Babblebox still enforces safety internally", help_html)
+        self.assertIn("adult / 18+ language is blocked by default", help_html)
+        self.assertIn("images stay off by default", help_html)
+        self.assertIn("can still reveal you if you include it", help_html)
 
     def test_help_page_is_linked_from_site_shells(self):
         index_html = (ROOT / "index.html").read_text(encoding="utf-8")
@@ -77,6 +82,11 @@ class WebsiteDocsTests(unittest.TestCase):
             "/confess",
             "/confessions moderate",
             "PYTHONPATH=. pytest -q",
+            "optional feature that only works after admins enable and configure it",
+            "adult / 18+ language is blocked by default",
+            "images are off by default",
+            "automatically suspend or confession-ban",
+            "can still reveal who sent it",
         ):
             self.assertIn(text, readme)
 
@@ -93,6 +103,8 @@ class WebsiteDocsTests(unittest.TestCase):
             "{category.name}",
             "Pattern Hunt coders need server DMs open before the round starts.",
             "anonymous confessions",
+            "admin-enabled anonymous confessions",
+            "images stay off by default unless admins explicitly turn them on",
         ):
             self.assertIn(text, index_html)
 
@@ -111,10 +123,13 @@ class WebsiteDocsTests(unittest.TestCase):
             "raw attachment filenames",
             "raw Discord CDN URLs",
             "Resolved anonymous confession rows scrub previews",
+            "self-identifying link destination or image content",
         ):
             self.assertIn(text, privacy_md if text != "Resolved anonymous confession rows scrub previews" else privacy_html)
         self.assertIn("anonymous confession rows scrub previews", privacy_md.casefold())
         self.assertIn("confession ID and case ID only", privacy_html)
+        self.assertIn("images are off by default", privacy_md)
+        self.assertIn("Babblebox still enforces safety internally", privacy_html)
 
     def test_homepage_and_readme_use_current_proof_assets(self):
         index_html = (ROOT / "index.html").read_text(encoding="utf-8")

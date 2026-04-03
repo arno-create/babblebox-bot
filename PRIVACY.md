@@ -29,7 +29,7 @@ Depending on the feature being used, Babblebox may process or store:
 - Discord identifiers such as user IDs, guild IDs, channel IDs, message IDs, role IDs, and timestamps
 - compact feature configuration and state, including Watch preferences, ignored channels or users, Later markers, reminders, AFK state, AFK schedules, Daily Arcade results, Buddy or profile state, and Shield or admin configuration
 - limited message or attachment context needed to respond to commands, build Moment Cards from visible messages, deliver Watch alerts, process Capture requests, or evaluate locally flagged Shield events
-- anonymous confession submission text, trusted-link fields, compact review metadata, and bot-private author mappings needed to run staff-blind moderation
+- anonymous confession submission text, trusted-link fields, compact review metadata, and bot-private author mappings needed to run staff-blind moderation when a server has Confessions enabled
 
 ## Information Babblebox Intentionally Avoids Storing Durably
 
@@ -65,7 +65,9 @@ Babblebox intentionally uses different visibility defaults depending on the feat
 - Watch alerts are DM-only
 - Capture transcripts are delivered privately rather than kept as long-term database archives
 - Later markers, reminders, and sensitive setup flows are private-first
-- anonymous confessions are submitted privately; staff review by confession ID and case ID only, and image confessions always route through private review when enabled
+- anonymous confessions are optional, are submitted privately when enabled, keep the author hidden from staff, and let staff review by confession ID and case ID only while Babblebox still enforces safety internally
+- images are off by default for Confessions and only work after admins explicitly enable them; enabled image confessions always route through private review
+- Babblebox hides the account behind a confession, but a self-identifying link destination or image content can still reveal the sender if they choose to include it
 - Shield and admin configuration flows are intended for administrators or moderators rather than general public display
 
 Server administrators still influence visibility through Discord permissions, log channels, review channels, and command usage in their own server.

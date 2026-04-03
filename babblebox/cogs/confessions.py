@@ -24,6 +24,7 @@ STAFF_ACTION_CHOICES = [
     app_commands.Choice(name="Approve", value="approve"),
     app_commands.Choice(name="Deny", value="deny"),
     app_commands.Choice(name="Delete", value="delete"),
+    app_commands.Choice(name="Pause 24h", value="pause_24h"),
     app_commands.Choice(name="Pause 7d", value="pause_7d"),
     app_commands.Choice(name="Pause 30d", value="pause_30d"),
     app_commands.Choice(name="Permanent Ban", value="perm_ban"),
@@ -33,6 +34,8 @@ STAFF_ACTION_CHOICES = [
 
 
 def _moderation_action_payload(action: str) -> tuple[str, int | None, bool]:
+    if action == "pause_24h":
+        return "suspend", 24 * 3600, False
     if action == "pause_7d":
         return "temp_ban", 7 * 24 * 3600, False
     if action == "pause_30d":
@@ -43,9 +46,10 @@ def _moderation_action_payload(action: str) -> tuple[str, int | None, bool]:
 
 
 class ConfessionComposerModal(discord.ui.Modal, title="Anonymous Confession"):
-    def __init__(self, cog: "ConfessionsCog"):
+    def __init__(self, cog: "ConfessionsCog", *, guild_id: int):
         super().__init__(timeout=300)
         self.cog = cog
+        config = self.cog.service.get_config(guild_id)
         self.body_input = discord.ui.TextInput(
             label="What do you want to share?",
             style=discord.TextStyle.paragraph,
@@ -56,19 +60,21 @@ class ConfessionComposerModal(discord.ui.Modal, title="Anonymous Confession"):
         self.link_input = discord.ui.TextInput(
             label="Trusted link (optional)",
             style=discord.TextStyle.short,
-            placeholder="One trusted link only",
+            placeholder="One trusted link only. Avoid links that reveal you.",
             required=False,
             max_length=500,
         )
-        self.upload_input = discord.ui.FileUpload(
-            custom_id="bb-confession-modal:files",
-            required=False,
-            min_values=0,
-            max_values=3,
-        )
         self.add_item(self.body_input)
         self.add_item(self.link_input)
-        self.add_item(self.upload_input)
+        self.upload_input: discord.ui.FileUpload | None = None
+        if config["allow_images"]:
+            self.upload_input = discord.ui.FileUpload(
+                custom_id="bb-confession-modal:files",
+                required=False,
+                min_values=0,
+                max_values=int(config["max_images"]),
+            )
+            self.add_item(self.upload_input)
 
     async def on_submit(self, interaction: discord.Interaction):
         if interaction.guild is None or interaction.user is None:
@@ -80,7 +86,7 @@ class ConfessionComposerModal(discord.ui.Modal, title="Anonymous Confession"):
                 author_id=interaction.user.id,
                 content=self.body_input.value,
                 link=self.link_input.value,
-                attachments=list(self.upload_input.values),
+                attachments=list(self.upload_input.values) if self.upload_input is not None else [],
             )
             embed = self.cog.service.build_member_result_embed(result)
             view = self.cog.service.build_member_result_view(result)
@@ -123,7 +129,7 @@ class ConfessionMemberPanelView(discord.ui.View):
                 ephemeral=True,
             )
             return
-        await interaction.response.send_modal(ConfessionComposerModal(self.cog))
+        await interaction.response.send_modal(ConfessionComposerModal(self.cog, guild_id=interaction.guild.id))
 
     @discord.ui.button(
         label="How It Works",
@@ -146,10 +152,11 @@ class ConfessionReviewView(discord.ui.View):
         self.version = version
         self.add_item(self._make_button("approve", "Approve", discord.ButtonStyle.success, row=0))
         self.add_item(self._make_button("deny", "Deny", discord.ButtonStyle.secondary, row=0))
-        self.add_item(self._make_button("pause_7d", "Pause 7d", discord.ButtonStyle.secondary, row=0))
+        self.add_item(self._make_button("pause_24h", "Pause 24h", discord.ButtonStyle.secondary, row=0))
+        self.add_item(self._make_button("pause_7d", "Pause 7d", discord.ButtonStyle.secondary, row=1))
         self.add_item(self._make_button("pause_30d", "Pause 30d", discord.ButtonStyle.secondary, row=1))
         self.add_item(self._make_button("perm_ban", "Perm Ban", discord.ButtonStyle.danger, row=1))
-        self.add_item(self._make_button("override", "Override", discord.ButtonStyle.primary, row=1))
+        self.add_item(self._make_button("override", "Override", discord.ButtonStyle.primary, row=2))
         self.add_item(self._make_button("details", "Details", discord.ButtonStyle.secondary, row=2))
         self.add_item(self._make_button("refresh", "Refresh", discord.ButtonStyle.secondary, row=2))
 
@@ -440,7 +447,7 @@ class ConfessionsCog(commands.Cog):
             await self.service.sync_member_panel(guild)
         await self.service._sync_review_queue(guild)
 
-    @app_commands.command(name="confess", description="Open the anonymous confession composer")
+    @app_commands.command(name="confess", description="Open the private confession composer when a server has Confessions enabled")
     async def confess_command(self, interaction: discord.Interaction):
         if interaction.guild is None or interaction.user is None:
             await interaction.response.send_message("Anonymous confessions only work inside a server.", ephemeral=True)
@@ -450,16 +457,16 @@ class ConfessionsCog(commands.Cog):
             unavailable = ConfessionSubmissionResult(False, "unavailable", ready_message)
             await interaction.response.send_message(embed=self.service.build_member_result_embed(unavailable), ephemeral=True)
             return
-        await interaction.response.send_modal(ConfessionComposerModal(self))
+        await interaction.response.send_modal(ConfessionComposerModal(self, guild_id=interaction.guild.id))
 
-    @commands.hybrid_group(name="confessions", with_app_command=True, description="Admin controls for anonymous confessions", invoke_without_command=True)
+    @commands.hybrid_group(name="confessions", with_app_command=True, description="Admin controls for the optional Confessions feature", invoke_without_command=True)
     @app_commands.default_permissions(manage_guild=True)
     async def confessions_group(self, ctx: commands.Context):
         if not await self._require_admin(ctx):
             return
         await self._send_admin_panel(ctx, section="overview")
 
-    @confessions_group.command(name="status", description="Open the confessions dashboard or inspect one confession/case")
+    @confessions_group.command(name="status", description="Open the Confessions dashboard or inspect one confession/case")
     async def confessions_status_command(self, ctx: commands.Context, target_id: Optional[str] = None):
         if not await self._require_admin(ctx):
             return
@@ -473,12 +480,12 @@ class ConfessionsCog(commands.Cog):
         confession_channel="Public channel for approved confessions",
         panel_channel="Channel where the public confession panel should live",
         review_channel="Private review queue channel",
-        review_mode="Queue safe confessions for review before posting",
+        review_mode="Queue even safe confessions for review before posting",
         clear_confession_channel="Clear the public confession channel",
         clear_panel="Clear the stored public panel location",
         clear_review_channel="Clear the private review channel",
     )
-    @confessions_group.command(name="setup", description="Configure channels and core confession availability")
+    @confessions_group.command(name="setup", description="Enable or configure the optional Confessions feature")
     async def confessions_setup_command(
         self,
         ctx: commands.Context,
@@ -517,8 +524,8 @@ class ConfessionsCog(commands.Cog):
 
     @app_commands.describe(
         block_adult_language="Block adult or 18+ language",
-        allow_trusted_links="Allow Babblebox's trusted mainstream domain set",
-        allow_images="Allow image attachments",
+        allow_trusted_links="Allow Babblebox's trusted link families",
+        allow_images="Enable image attachments for confessions",
         max_images="Maximum images per confession",
         cooldown_seconds="Minimum gap between submissions",
         burst_limit="Max submissions before auto-suspend",
@@ -528,7 +535,7 @@ class ConfessionsCog(commands.Cog):
         temp_ban_days="Temporary ban length",
         strike_perm_ban_threshold="Strike count for permanent ban",
     )
-    @confessions_group.command(name="policy", description="Adjust confession safety and flood controls")
+    @confessions_group.command(name="policy", description="Adjust Confessions safety, link, image, and flood controls")
     async def confessions_policy_command(
         self,
         ctx: commands.Context,
@@ -569,7 +576,7 @@ class ConfessionsCog(commands.Cog):
         )
 
     @app_commands.choices(bucket=DOMAIN_BUCKET_CHOICES, mode=DOMAIN_MODE_CHOICES)
-    @confessions_group.command(name="domains", description="Update the confession domain allowlist or blocklist")
+    @confessions_group.command(name="domains", description="Update the Confessions domain allowlist or blocklist")
     async def confessions_domains_command(self, ctx: commands.Context, bucket: str, mode: str, domain: str):
         if not await self._require_admin(ctx):
             return
@@ -580,7 +587,7 @@ class ConfessionsCog(commands.Cog):
             ephemeral=True,
         )
 
-    @confessions_group.command(name="panel", description="Publish or refresh the public confession panel")
+    @confessions_group.command(name="panel", description="Publish or refresh the public Confessions panel")
     async def confessions_panel_command(self, ctx: commands.Context, channel: Optional[discord.TextChannel] = None):
         if not await self._require_admin(ctx):
             return
@@ -596,7 +603,7 @@ class ConfessionsCog(commands.Cog):
         target_id="A confession ID like CF-XXXXXX or a case ID like CS-XXXXXX",
         clear_strikes="Clear stored strikes when using the clear action",
     )
-    @confessions_group.command(name="moderate", description="Moderate a confession or case without seeing the author")
+    @confessions_group.command(name="moderate", description="Moderate a confession or case by ID without seeing the author")
     async def confessions_moderate_command(
         self,
         ctx: commands.Context,

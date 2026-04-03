@@ -21,6 +21,41 @@ MARKDOWN_LINK_RE = re.compile(r"\[[^\]]{1,80}\]\((?:[^)]+)\)")
 TEMPLATE_PLACEHOLDER_RE = re.compile(r"\{[a-z]+(?:\.[a-z_]+)+\}")
 TEMPLATE_BRACED_VALUE_RE = re.compile(r"\{[^{}]{1,80}\}")
 
+CONFUSABLE_TRANSLATION = str.maketrans(
+    {
+        "@": "a",
+        "$": "s",
+        "0": "o",
+        "1": "i",
+        "3": "e",
+        "4": "a",
+        "5": "s",
+        "7": "t",
+        "8": "b",
+        "а": "a",
+        "е": "e",
+        "і": "i",
+        "к": "k",
+        "м": "m",
+        "о": "o",
+        "р": "p",
+        "с": "c",
+        "т": "t",
+        "у": "y",
+        "х": "x",
+        "α": "a",
+        "β": "b",
+        "ε": "e",
+        "ι": "i",
+        "κ": "k",
+        "ο": "o",
+        "ρ": "p",
+        "τ": "t",
+        "υ": "y",
+        "χ": "x",
+    }
+)
+
 BLOCKLIST = {
     "anal",
     "bdsm",
@@ -123,6 +158,11 @@ def normalize_plain_text(text: str | None) -> str:
 
 def squash_for_evasion_checks(text: str) -> str:
     return re.sub(r"(?<=\w)[\s`~*_.,-]+(?=\w)", "", text)
+
+
+def fold_confusable_text(text: str | None) -> str:
+    cleaned = normalize_plain_text(text or "").casefold()
+    return cleaned.translate(CONFUSABLE_TRANSLATION)
 
 
 def find_private_pattern(text: str) -> str | None:
