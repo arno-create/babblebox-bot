@@ -209,6 +209,12 @@ class ShieldPostgresReloadTests(unittest.IsolatedAsyncioTestCase):
                     "scam_medium_action": "delete_log",
                     "scam_high_action": "delete_escalate",
                     "scam_sensitivity": "high",
+                    "adult_enabled": True,
+                    "adult_action": "delete_log",
+                    "adult_low_action": "log",
+                    "adult_medium_action": "delete_log",
+                    "adult_high_action": "delete_log",
+                    "adult_sensitivity": "normal",
                     "ai_enabled": True,
                     "ai_min_confidence": "medium",
                     "ai_enabled_packs": json.dumps(["privacy", "promo"]),
@@ -328,6 +334,7 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(config["promo_low_action"], "log")
         self.assertEqual(config["promo_medium_action"], "delete_log")
         self.assertEqual(config["promo_high_action"], "delete_log")
+        self.assertFalse(config["adult_enabled"])
 
         self.service._rebuild_config_cache()
         compiled = self.service._compiled_configs[10]
@@ -337,6 +344,7 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(compiled.promo.low_action, "log")
         self.assertEqual(compiled.promo.medium_action, "delete_log")
         self.assertEqual(compiled.promo.high_action, "delete_log")
+        self.assertFalse(compiled.adult.enabled)
 
     async def test_allowlisted_invite_suppresses_promo_match(self):
         ok, _ = await self.service.set_pack_config(10, "promo", enabled=True, action="log", sensitivity="normal")
@@ -387,6 +395,265 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual((config["promo_low_action"], config["promo_medium_action"], config["promo_high_action"]), ("log", "delete_log", "delete_escalate"))
         self.assertEqual((compiled.promo.low_action, compiled.promo.medium_action, compiled.promo.high_action), ("log", "delete_log", "delete_escalate"))
+
+    async def test_known_safe_domain_family_stays_safe_and_does_not_trigger_scam(self):
+        ok, _ = await self.service.set_pack_config(10, "scam", enabled=True, action="delete_log", sensitivity="high")
+        self.assertTrue(ok)
+
+        result = self.service.test_message_details(10, "Claim now https://youtube.com/watch?v=abc123 right away")
+
+        self.assertFalse([match for match in result.matches if match.pack == "scam"])
+        self.assertEqual(result.link_assessments[0].normalized_domain, "youtube.com")
+        self.assertEqual(result.link_assessments[0].category, "safe")
+        self.assertIn("safe_family:social", result.link_assessments[0].matched_signals)
+
+    async def test_safe_family_includes_discord_status_and_google_docs(self):
+        result = self.service.test_message_details(
+            10,
+            "Status https://discordstatus.com and docs https://docs.google.com/document/d/abc123/edit",
+        )
+
+        categories = {item.normalized_domain: item.category for item in result.link_assessments}
+        self.assertEqual(categories["discordstatus.com"], "safe")
+        self.assertEqual(categories["docs.google.com"], "safe")
+
+    async def test_known_malicious_domain_matches_scam_pack(self):
+        ok, _ = await self.service.set_pack_config(10, "scam", enabled=True, action="delete_log", sensitivity="normal")
+        self.assertTrue(ok)
+
+        result = self.service.test_message_details(10, "Free nitro gift https://dlscord-gift.com/claim")
+
+        scam_matches = [match for match in result.matches if match.pack == "scam"]
+        self.assertTrue(scam_matches)
+        self.assertEqual(scam_matches[0].match_class, "known_malicious_domain")
+        self.assertEqual(result.link_assessments[0].category, "malicious")
+
+    async def test_malicious_domain_family_subdomain_matches(self):
+        ok, _ = await self.service.set_pack_config(10, "scam", enabled=True, action="delete_log", sensitivity="normal")
+        self.assertTrue(ok)
+
+        result = self.service.test_message_details(10, "Please verify at https://cdn.dlscord-gift.com/login")
+
+        self.assertTrue([match for match in result.matches if match.pack == "scam"])
+        self.assertEqual(result.link_assessments[0].category, "malicious")
+        self.assertIn("bundled_malicious_domain_family", result.link_assessments[0].matched_signals)
+
+    async def test_adult_domain_matches_when_adult_pack_is_enabled(self):
+        ok, _ = await self.service.set_pack_config(10, "adult", enabled=True, action="delete_log", sensitivity="normal")
+        self.assertTrue(ok)
+
+        result = self.service.test_message_details(10, "Adult link https://pornhub.com/view_video.php?viewkey=test")
+
+        adult_matches = [match for match in result.matches if match.pack == "adult"]
+        self.assertTrue(adult_matches)
+        self.assertEqual(adult_matches[0].match_class, "adult_domain")
+        self.assertEqual(result.link_assessments[0].category, "adult")
+
+    async def test_adult_domain_does_not_match_when_adult_pack_is_disabled(self):
+        result = self.service.test_message_details(10, "Adult link https://xvideos.com/video123")
+
+        self.assertFalse([match for match in result.matches if match.pack == "adult"])
+        self.assertEqual(result.link_assessments[0].category, "adult")
+
+    async def test_adult_warning_context_still_matches_when_enabled(self):
+        ok, _ = await self.service.set_pack_config(10, "adult", enabled=True, action="delete_log", sensitivity="normal")
+        self.assertTrue(ok)
+
+        result = self.service.test_message_details(10, "Warning: NSFW link ahead https://pornhub.com/view_video.php?viewkey=test")
+
+        self.assertTrue([match for match in result.matches if match.pack == "adult"])
+        self.assertEqual(result.link_assessments[0].category, "adult")
+
+    async def test_allowlisted_domain_overrides_local_malicious_intelligence(self):
+        ok, _ = await self.service.set_pack_config(10, "scam", enabled=True, action="delete_log", sensitivity="normal")
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_allow_entry(10, "allow_domains", "dlscord-gift.com", True)
+        self.assertTrue(ok)
+
+        result = self.service.test_message_details(10, "Free nitro https://dlscord-gift.com/claim")
+
+        self.assertFalse([match for match in result.matches if match.pack == "scam"])
+        self.assertEqual(result.link_assessments[0].category, "safe")
+        self.assertIn("guild_allow_domain", result.link_assessments[0].matched_signals)
+
+    async def test_allowlisted_domain_stays_safe_even_with_suspicious_path(self):
+        ok, _ = await self.service.set_allow_entry(10, "allow_domains", "example.com", True)
+        self.assertTrue(ok)
+
+        result = self.service.test_message_details(10, "Please verify https://example.com/login?token=abc123")
+
+        self.assertEqual(result.link_assessments[0].category, "safe")
+        self.assertFalse(result.link_assessments[0].provider_lookup_warranted)
+
+    async def test_allow_phrase_bypasses_known_malicious_domain(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        author = FakeAuthor(42, roles=[FakeRole(11, position=1)])
+        message = FakeMessage(
+            guild=guild,
+            channel=channel,
+            author=author,
+            content="Scam example: https://dlscord-gift.com/claim",
+        )
+
+        ok, _ = await self.service.set_module_enabled(10, True)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_pack_config(10, "scam", enabled=True, action="delete_log", sensitivity="normal")
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_allow_entry(10, "allow_phrases", "scam example", True)
+        self.assertTrue(ok)
+
+        decision = await self.service.handle_message(message)
+
+        self.assertIsNone(decision)
+
+    async def test_test_message_details_reports_allow_phrase_bypass_without_matches(self):
+        ok, _ = await self.service.set_pack_config(10, "scam", enabled=True, action="delete_log", sensitivity="high")
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_allow_entry(10, "allow_phrases", "scam example", True)
+        self.assertTrue(ok)
+
+        result = self.service.test_message_details(10, "scam example https://dlscord-gift.com/claim")
+
+        self.assertFalse(result.matches)
+        self.assertIsNotNone(result.bypass_reason)
+        self.assertIn("allow phrase", result.bypass_reason.lower())
+        self.assertEqual(result.link_assessments[0].category, "malicious")
+
+    async def test_unknown_safe_domain_stays_unknown_without_provider_lookup(self):
+        result = self.service.test_message_details(10, "Reference link https://example.org/guide")
+
+        self.assertEqual(result.link_assessments[0].category, "unknown")
+        self.assertFalse(result.link_assessments[0].provider_lookup_warranted)
+
+    async def test_unknown_login_and_docs_urls_stay_non_actionable_without_host_risk(self):
+        cases = (
+            "Normal page https://accounts.example.com/login",
+            "Reference https://example.com/reset?token=abc123&redirect=dashboard",
+            "Reference https://docs.example.com/guide?redirect=install",
+        )
+
+        for text in cases:
+            result = self.service.test_message_details(10, text)
+
+            self.assertFalse(result.matches)
+            self.assertEqual(result.link_assessments[0].category, "unknown")
+            self.assertFalse(result.link_assessments[0].provider_lookup_warranted)
+            self.assertNotIn("message_social_engineering", result.link_assessments[0].matched_signals)
+
+    async def test_unknown_suspicious_domain_marks_provider_lookup_eligibility_without_matching_pack(self):
+        ok, _ = await self.service.set_pack_config(10, "scam", enabled=True, action="delete_log", sensitivity="normal")
+        self.assertTrue(ok)
+
+        result = self.service.test_message_details(
+            10,
+            "Visit https://wallet-bonus-drop.click/account?redirect=%2Flogin%2Fauth%2Ftoken%2Fseed to claim access.",
+        )
+
+        self.assertFalse([match for match in result.matches if match.pack == "scam"])
+        self.assertEqual(result.link_assessments[0].category, "unknown_suspicious")
+        self.assertTrue(result.link_assessments[0].provider_lookup_warranted)
+
+    async def test_unknown_suspicious_domain_in_report_context_stays_non_lookup(self):
+        result = self.service.test_message_details(
+            10,
+            "Reference https://wallet-bonus-drop.click/account?redirect=%2Flogin%2Fauth%2Ftoken%2Fseed for triage.",
+        )
+
+        self.assertFalse([match for match in result.matches if match.pack == "scam"])
+        self.assertEqual(result.link_assessments[0].category, "unknown_suspicious")
+        self.assertFalse(result.link_assessments[0].provider_lookup_warranted)
+
+    async def test_provider_disabled_status_is_exposed_through_link_safety_runtime(self):
+        status = self.service.get_link_safety_status()
+
+        self.assertEqual(status["intel_source"], "bundled")
+        self.assertFalse(status["provider_available"])
+        self.assertIn("local domain intelligence", status["provider_status"].lower())
+
+    async def test_scam_warning_context_suppresses_known_malicious_domain_action(self):
+        ok, _ = await self.service.set_pack_config(10, "scam", enabled=True, action="delete_log", sensitivity="normal")
+        self.assertTrue(ok)
+
+        result = self.service.test_message_details(10, "Warning: fake gift site https://dlscord-gift.com/claim do not click")
+
+        self.assertFalse([match for match in result.matches if match.pack == "scam"])
+        self.assertEqual(result.link_assessments[0].category, "malicious")
+
+    async def test_bare_malicious_domain_discussion_context_is_not_punished(self):
+        ok, _ = await self.service.set_pack_config(10, "scam", enabled=True, action="delete_log", sensitivity="normal")
+        self.assertTrue(ok)
+
+        for text in (
+            "dlscord-gift.com is malicious",
+            "We blocked dlscord-gift.com yesterday",
+        ):
+            result = self.service.test_message_details(10, text)
+
+            self.assertFalse([match for match in result.matches if match.pack == "scam"])
+            self.assertEqual(result.link_assessments[0].category, "malicious")
+
+    async def test_punycode_lure_with_bait_still_hits_scam_pack(self):
+        ok, _ = await self.service.set_pack_config(10, "scam", enabled=True, action="delete_log", sensitivity="normal")
+        self.assertTrue(ok)
+
+        result = self.service.test_message_details(10, "Claim reward now https://xn--discod-bonus-q5a.click/verify")
+
+        self.assertTrue([match for match in result.matches if match.pack == "scam"])
+        self.assertEqual(result.link_assessments[0].category, "unknown_suspicious")
+        self.assertTrue(result.link_assessments[0].provider_lookup_warranted)
+
+    async def test_weird_query_shape_marks_unknown_domain_as_suspicious(self):
+        result = self.service.test_message_details(
+            10,
+            "Open https://fresh-offer.example.top/download?redirect=%2Fgift%2Fclaim%2Flogin%2Ftoken%2Fsession%2Fwallet",
+        )
+
+        self.assertEqual(result.link_assessments[0].category, "unknown_suspicious")
+        self.assertTrue(result.link_assessments[0].provider_lookup_warranted)
+
+    async def test_multiple_links_produce_safe_and_suspicious_assessments_together(self):
+        ok, _ = await self.service.set_pack_config(10, "scam", enabled=True, action="delete_log", sensitivity="normal")
+        self.assertTrue(ok)
+
+        result = self.service.test_message_details(
+            10,
+            "Compare https://github.com/arno-create/babblebox-bot and https://dlscord-gift.com/claim now",
+        )
+
+        categories = {item.normalized_domain: item.category for item in result.link_assessments}
+        self.assertEqual(categories["github.com"], "safe")
+        self.assertEqual(categories["dlscord-gift.com"], "malicious")
+        self.assertTrue([match for match in result.matches if match.pack == "scam"])
+
+    async def test_shortener_without_other_signals_stays_conservative(self):
+        result = self.service.test_message_details(10, "Useful article https://bit.ly/example")
+
+        self.assertEqual(result.link_assessments[0].category, "unknown")
+        self.assertFalse(result.link_assessments[0].provider_lookup_warranted)
+
+    async def test_malformed_host_is_ignored_in_link_assessment(self):
+        result = self.service.test_message_details(10, "Broken link https://www..example.com/login")
+
+        self.assertFalse(result.matches)
+        self.assertEqual(result.link_assessments, ())
+
+    async def test_malicious_like_wording_without_risky_link_does_not_trigger_scam(self):
+        ok, _ = await self.service.set_pack_config(10, "scam", enabled=True, action="delete_log", sensitivity="high")
+        self.assertTrue(ok)
+
+        result = self.service.test_message_details(10, "Claim reward now and verify your account on https://youtube.com/watch?v=abc123")
+
+        self.assertFalse([match for match in result.matches if match.pack == "scam"])
+        self.assertEqual(result.link_assessments[0].category, "safe")
+
+    async def test_cache_stays_bounded_after_many_unique_domains(self):
+        for index in range(300):
+            self.service.test_message_details(10, f"https://offer-{index}.example.top/claim?token={index}")
+
+        status = self.service.get_link_safety_status()
+
+        self.assertLessEqual(status["cache_entries"], status["cache_max_entries"])
 
     async def test_repeated_tenor_link_stays_low_confidence_noise(self):
         guild = FakeGuild(10)

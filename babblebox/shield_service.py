@@ -5,6 +5,7 @@ import contextlib
 import hashlib
 import ipaddress
 import re
+import time
 import uuid
 from dataclasses import dataclass
 from datetime import timedelta
@@ -24,6 +25,20 @@ from babblebox.shield_ai import (
     sanitize_message_for_ai,
     shield_ai_available_in_guild,
     summarize_attachment_extensions,
+)
+from babblebox.shield_link_safety import (
+    ADULT_LINK_CATEGORY,
+    MALICIOUS_LINK_CATEGORY,
+    MEDIA_EMBED_DOMAINS,
+    SHORTENER_DOMAINS,
+    SOCIAL_PROMO_DOMAINS,
+    STOREFRONT_DOMAINS,
+    UNKNOWN_SUSPICIOUS_LINK_CATEGORY,
+    ShieldLinkAssessment,
+    ShieldLinkSafetyEngine,
+    domain_in_set as link_domain_in_set,
+    domain_matches as link_domain_matches,
+    merge_link_assessments,
 )
 from babblebox.shield_store import (
     LOW_CONFIDENCE_ACTIONS,
@@ -48,7 +63,7 @@ from babblebox.text_safety import (
 from babblebox.utility_helpers import make_attachment_labels, make_message_preview
 
 
-RULE_PACKS = ("privacy", "promo", "scam")
+RULE_PACKS = ("privacy", "promo", "scam", "adult")
 SHIELD_ACTIONS = {"disabled", "detect", "log", "delete_log", "delete_escalate", "timeout_log"}
 SHIELD_SENSITIVITIES = {"low", "normal", "high"}
 CUSTOM_PATTERN_MODES = {"contains", "word", "wildcard"}
@@ -71,7 +86,8 @@ RUNTIME_PRUNE_INTERVAL_SECONDS = 60.0
 PACK_LABELS = {
     "privacy": "Privacy Leak",
     "promo": "Promo / Invite",
-    "scam": "Scam Heuristic",
+    "scam": "Scam / Malicious Links",
+    "adult": "Adult / 18+ Links",
     "advanced": "Advanced Pattern",
 }
 MATCH_CLASS_LABELS = {
@@ -80,6 +96,8 @@ MATCH_CLASS_LABELS = {
     "monetized_promo": "Monetized promo",
     "cta_promo": "Call-to-action promo",
     "repetitive_link_noise": "Repetitive link noise",
+    "known_malicious_domain": "Known malicious domain",
+    "adult_domain": "Known adult domain",
 }
 ESCALATION_BLOCKED_MATCH_CLASSES = {"repetitive_link_noise"}
 ACTION_LABELS = {
@@ -93,7 +111,7 @@ ACTION_LABELS = {
 SENSITIVITY_LABELS = {"low": "Low", "normal": "Normal", "high": "High"}
 ACTION_STRENGTH = {"disabled": -1, "detect": 0, "log": 1, "delete_log": 2, "timeout_log": 3, "delete_escalate": 4}
 CONFIDENCE_STRENGTH = {"low": 1, "medium": 2, "high": 3, "custom": 4}
-PACK_STRENGTH = {"privacy": 1, "promo": 2, "scam": 3, "advanced": 4}
+PACK_STRENGTH = {"privacy": 1, "promo": 2, "scam": 3, "adult": 3, "advanced": 4}
 AI_PRIORITY_LABELS = {"low": "Low", "normal": "Normal", "high": "High"}
 AI_REVIEW_PACK_SET = frozenset(SHIELD_AI_REVIEW_PACKS)
 
@@ -124,51 +142,11 @@ SCAM_BAIT_RE = re.compile(
 )
 BRAND_BAIT_RE = re.compile(r"(?i)\b(?:discord|nitro|steam|epic|wallet|crypto|gift)\b")
 SUSPICIOUS_FILE_RE = re.compile(r"(?i)\.(?:exe|scr|bat|cmd|msi|zip|rar|7z|iso)(?:$|[?#])")
-SCAM_WARNING_RE = re.compile(r"(?i)\b(?:beware|warning|avoid|do not|don't|never|fake|phish(?:ing)?|report(?:ed)?|heads up)\b")
+SCAM_WARNING_RE = re.compile(
+    r"(?i)(?:\b(?:beware|warning|avoid|do not|don't|never|fake|malicious|phish(?:ing)?|report(?:ed|ing)?|blocked|blocklist(?:ed)?|heads up|for review|for triage|triage)\b|\b(?:example|sample)\b.{0,24}\b(?:link|site|domain|url)\b|\b(?:scam|phish(?:ing)?|malicious)\b.{0,24}\b(?:example|sample)\b)"
+)
+LINK_HOST_LABEL_RE = re.compile(r"[a-z0-9-]+")
 GENERIC_DIGIT_RE = re.compile(r"\b\d{4,12}\b")
-SOCIAL_PROMO_DOMAINS = {
-    "instagram.com",
-    "tiktok.com",
-    "youtube.com",
-    "youtu.be",
-    "twitch.tv",
-    "twitter.com",
-    "x.com",
-    "linktr.ee",
-    "beacons.ai",
-    "carrd.co",
-}
-STOREFRONT_DOMAINS = {
-    "patreon.com",
-    "ko-fi.com",
-    "gumroad.com",
-    "etsy.com",
-    "buymeacoffee.com",
-    "myshopify.com",
-    "shopify.com",
-    "sellfy.com",
-}
-MEDIA_EMBED_DOMAINS = {
-    "tenor.com",
-    "media.tenor.com",
-    "giphy.com",
-    "media.giphy.com",
-    "imgur.com",
-    "i.imgur.com",
-    "cdn.discordapp.com",
-    "media.discordapp.net",
-}
-SHORTENER_DOMAINS = {
-    "bit.ly",
-    "tinyurl.com",
-    "t.co",
-    "cutt.ly",
-    "goo.su",
-    "rb.gy",
-    "is.gd",
-}
-
-
 @dataclass(frozen=True)
 class PackSettings:
     enabled: bool
@@ -229,6 +207,7 @@ class CompiledShieldConfig:
     privacy: PackSettings
     promo: PackSettings
     scam: PackSettings
+    adult: PackSettings
     ai_enabled: bool
     ai_min_confidence: str
     ai_enabled_packs: frozenset[str]
@@ -244,6 +223,8 @@ class CompiledShieldConfig:
             return self.promo
         if pack == "scam":
             return self.scam
+        if pack == "adult":
+            return self.adult
         return PackSettings(enabled=True, low_action="log", medium_action="log", high_action="log", sensitivity="normal")
 
 
@@ -252,6 +233,8 @@ class ShieldLink:
     raw_url: str
     canonical_url: str
     domain: str
+    path: str
+    query: str
     category: str
     invite_code: str | None = None
 
@@ -260,6 +243,8 @@ class ShieldLink:
 class ShieldSnapshot:
     text: str
     squashed: str
+    context_text: str
+    context_squashed: str
     urls: tuple[str, ...]
     links: tuple[ShieldLink, ...]
     canonical_links: tuple[str, ...]
@@ -294,6 +279,14 @@ class ShieldDecision:
     escalated: bool = False
     action_note: str | None = None
     ai_review: ShieldAIReviewResult | None = None
+    link_assessments: tuple[ShieldLinkAssessment, ...] = ()
+
+
+@dataclass(frozen=True)
+class ShieldTestResult:
+    matches: tuple[ShieldMatch, ...]
+    link_assessments: tuple[ShieldLinkAssessment, ...]
+    bypass_reason: str | None = None
 
 
 @dataclass(frozen=True)
@@ -326,14 +319,14 @@ def _sorted_unique_text(values: Iterable[Any]) -> list[str]:
 
 
 def _domain_matches(domain: str, candidate: str) -> bool:
-    return domain == candidate or domain.endswith(f".{candidate}")
+    return link_domain_matches(domain, candidate)
 
 
 def _domain_in_set(domain: str, candidates: set[str]) -> bool:
-    return any(_domain_matches(domain, candidate) for candidate in candidates)
+    return link_domain_in_set(domain, candidates)
 
 
-def _extract_domain(raw_url: str) -> str | None:
+def _clean_url_candidate(raw_url: str) -> str | None:
     if not raw_url:
         return None
     candidate = raw_url.strip().strip("()[]{}<>,.!?\"'")
@@ -341,23 +334,67 @@ def _extract_domain(raw_url: str) -> str | None:
         return None
     if "://" not in candidate:
         candidate = f"https://{candidate}"
-    parsed = urlsplit(candidate)
-    domain = parsed.netloc.casefold().strip()
-    if not domain:
+    return candidate
+
+
+def _normalize_link_host(raw_host: str) -> str | None:
+    host = normalize_plain_text(raw_host).casefold().strip()
+    if not host:
         return None
-    if "@" in domain:
-        domain = domain.rsplit("@", 1)[1]
-    if ":" in domain:
-        domain = domain.split(":", 1)[0]
-    if domain.startswith("www."):
-        domain = domain[4:]
-    return domain or None
+    if "@" in host:
+        host = host.rsplit("@", 1)[1]
+    if host.startswith("[") or host.endswith("]"):
+        return None
+    if ":" in host:
+        host = host.split(":", 1)[0]
+    host = host.rstrip(".")
+    if host.startswith("www."):
+        host = host[4:]
+    if not host or host.startswith(".") or host.endswith(".") or ".." in host:
+        return None
+    try:
+        host = host.encode("idna").decode("ascii")
+    except UnicodeError:
+        return None
+    host = host.casefold().rstrip(".")
+    if host.startswith("www."):
+        host = host[4:]
+    if not host or host.startswith(".") or host.endswith(".") or ".." in host:
+        return None
+    labels = host.split(".")
+    if len(labels) < 2:
+        return None
+    for label in labels:
+        if not label or len(label) > 63:
+            return None
+        if label.startswith("-") or label.endswith("-"):
+            return None
+        if LINK_HOST_LABEL_RE.fullmatch(label) is None:
+            return None
+    return host
+
+
+def _extract_domain(raw_url: str) -> str | None:
+    candidate = _clean_url_candidate(raw_url)
+    if candidate is None:
+        return None
+    parsed = urlsplit(candidate)
+    return _normalize_link_host(parsed.netloc)
 
 
 def _extract_urls(text: str) -> tuple[str, ...]:
     if not text:
         return ()
     return tuple(match.group(0) for match in URL_RE.finditer(text))
+
+
+def _strip_urls_from_text(text: str, urls: Sequence[str]) -> str:
+    if not text:
+        return ""
+    stripped = text
+    for url in urls:
+        stripped = stripped.replace(url, " ")
+    return re.sub(r"\s+", " ", stripped).strip()
 
 
 def _extract_invite_codes(urls: Sequence[str]) -> frozenset[str]:
@@ -384,13 +421,13 @@ def _classify_link(domain: str, *, invite_code: str | None) -> str:
 
 
 def _build_link(raw_url: str) -> ShieldLink | None:
-    domain = _extract_domain(raw_url)
+    candidate = _clean_url_candidate(raw_url)
+    if candidate is None:
+        return None
+    parsed = urlsplit(candidate)
+    domain = _normalize_link_host(parsed.netloc)
     if domain is None:
         return None
-    candidate = raw_url.strip().strip("()[]{}<>,.!?\"'")
-    if "://" not in candidate:
-        candidate = f"https://{candidate}"
-    parsed = urlsplit(candidate)
     invite_match = INVITE_RE.search(candidate.casefold())
     invite_code = invite_match.group(1).casefold() if invite_match else None
     path = re.sub(r"/{2,}", "/", (parsed.path or "/").casefold()).rstrip("/")
@@ -400,6 +437,8 @@ def _build_link(raw_url: str) -> ShieldLink | None:
         raw_url=raw_url,
         canonical_url=canonical_url,
         domain=domain,
+        path=path,
+        query=(parsed.query or "").casefold(),
         category=_classify_link(domain, invite_code=invite_code),
         invite_code=invite_code,
     )
@@ -435,6 +474,18 @@ def _match_class_label(match_class: str) -> str:
     return MATCH_CLASS_LABELS.get(match_class, match_class.replace("_", " ").title())
 
 
+def _link_assessment_summary(assessment: ShieldLinkAssessment) -> str:
+    if assessment.category == MALICIOUS_LINK_CATEGORY:
+        return "matched local malicious intel"
+    if assessment.category == ADULT_LINK_CATEGORY:
+        return "matched local adult intel"
+    if assessment.category == UNKNOWN_SUSPICIOUS_LINK_CATEGORY:
+        return "lookup candidate only, no action" if assessment.provider_lookup_warranted else "local caution only, no action"
+    if assessment.category == UNKNOWN_LINK_CATEGORY:
+        return "unknown, no action"
+    return "safe or allowlisted"
+
+
 def _legacy_action_policy(action: str) -> tuple[str, str, str]:
     cleaned = str(action).strip().lower()
     if cleaned == "detect":
@@ -455,6 +506,8 @@ def _build_snapshot(text: str | None, attachments: Sequence[Any] | None = None) 
     squashed = squash_for_evasion_checks(normalized.casefold())
     lowered = normalized.casefold()
     urls = _extract_urls(lowered)
+    context_text = _strip_urls_from_text(lowered, urls)
+    context_squashed = squash_for_evasion_checks(context_text)
     links = tuple(link for link in (_build_link(url) for url in urls) if link is not None)
     domains = frozenset(link.domain for link in links)
     invite_codes = frozenset(link.invite_code for link in links if link.invite_code)
@@ -466,6 +519,8 @@ def _build_snapshot(text: str | None, attachments: Sequence[Any] | None = None) 
     return ShieldSnapshot(
         text=lowered,
         squashed=squashed,
+        context_text=context_text,
+        context_squashed=context_squashed,
         urls=urls,
         links=links,
         canonical_links=tuple(link.canonical_url for link in links),
@@ -588,6 +643,7 @@ class ShieldService:
                 self.storage_error = str(exc)
         self._lock = asyncio.Lock()
         self.ai_provider = build_shield_ai_provider()
+        self.link_safety = ShieldLinkSafetyEngine()
         self._compiled_configs: dict[int, CompiledShieldConfig] = {}
         self._alert_dedup: dict[tuple[int, int], float] = {}
         self._strike_windows: dict[tuple[int, int, str], list[float]] = {}
@@ -614,6 +670,7 @@ class ShieldService:
 
     async def close(self):
         await self.ai_provider.close()
+        await self.link_safety.close()
         await self.store.close()
 
     def storage_message(self, feature_name: str = "Shield") -> str:
@@ -670,6 +727,9 @@ class ShieldService:
             "status": status_message,
         }
 
+    def get_link_safety_status(self) -> dict[str, Any]:
+        return self.link_safety.diagnostics()
+
     async def set_global_ai_override(self, enabled: bool, *, actor_id: int) -> tuple[bool, str]:
         if not self.storage_ready:
             return False, self.storage_message("Shield AI")
@@ -691,10 +751,23 @@ class ShieldService:
         return True, f"Global Shield AI override is now {'on' if enabled else 'off'}."
 
     def test_message(self, guild_id: int, text: str, *, attachments: Sequence[str] | None = None) -> list[ShieldMatch]:
+        return list(self.test_message_details(guild_id, text, attachments=attachments).matches)
+
+    def test_message_details(self, guild_id: int, text: str, *, attachments: Sequence[str] | None = None) -> ShieldTestResult:
         compiled = self._compiled_configs.get(guild_id) or self._compile_config(guild_id, self.get_config(guild_id))
         fake_attachments = [type("Attachment", (), {"filename": value})() for value in (attachments or [])]
         snapshot = _build_snapshot(text, fake_attachments)
-        return list(self._collect_matches(compiled, snapshot))
+        now = time.monotonic()
+        if self._allow_phrase_bypass(compiled, snapshot):
+            link_assessments = self._collect_link_assessments(compiled, snapshot, now=now)
+            return ShieldTestResult(
+                matches=(),
+                link_assessments=link_assessments,
+                bypass_reason="A guild allow phrase matched this sample, so live Shield handling would bypass it.",
+            )
+        link_assessments = self._collect_link_assessments(compiled, snapshot, now=now)
+        matches = tuple(self._collect_matches(compiled, snapshot, link_assessments=link_assessments))
+        return ShieldTestResult(matches=matches, link_assessments=link_assessments)
 
     async def set_module_enabled(self, guild_id: int, enabled: bool) -> tuple[bool, str]:
         return await self._update_config(
@@ -1021,7 +1094,8 @@ class ShieldService:
             return None
 
         repetition = self._track_repetitive_promo(message, compiled, snapshot, now)
-        matches = self._collect_matches(compiled, snapshot, repetitive_promo=repetition)
+        link_assessments = self._collect_link_assessments(compiled, snapshot, now=now)
+        matches = self._collect_matches(compiled, snapshot, repetitive_promo=repetition, link_assessments=link_assessments)
         if not matches:
             return None
 
@@ -1033,7 +1107,13 @@ class ShieldService:
                 PACK_STRENGTH.get(item.pack, 0),
             ),
         )
-        decision = ShieldDecision(matched=True, action=best.action, pack=best.pack, reasons=tuple(matches[:3]))
+        decision = ShieldDecision(
+            matched=True,
+            action=best.action,
+            pack=best.pack,
+            reasons=tuple(matches[:3]),
+            link_assessments=link_assessments,
+        )
 
         if best.action.startswith("delete"):
             decision.deleted = await self._delete_message(message)
@@ -1150,6 +1230,33 @@ class ShieldService:
     def _domain_is_allowlisted(self, domain: str, allow_domains: frozenset[str]) -> bool:
         return any(_domain_matches(domain, candidate) for candidate in allow_domains)
 
+    def _collect_link_assessments(
+        self,
+        compiled: CompiledShieldConfig,
+        snapshot: ShieldSnapshot,
+        *,
+        now: float,
+    ) -> tuple[ShieldLinkAssessment, ...]:
+        if not snapshot.links:
+            return ()
+        by_domain: dict[str, ShieldLinkAssessment] = {}
+        for link in snapshot.links:
+            allowlisted = False
+            if link.invite_code is None:
+                allowlisted = self._domain_is_allowlisted(link.domain, compiled.allow_domains)
+            assessment = self.link_safety.assess_domain(
+                link.domain,
+                path=link.path,
+                query=link.query,
+                message_text=snapshot.context_text,
+                squashed_text=snapshot.context_squashed,
+                has_suspicious_attachment=snapshot.has_suspicious_attachment,
+                allowlisted=allowlisted,
+                now=now,
+            )
+            by_domain[link.domain] = merge_link_assessments(by_domain.get(link.domain), assessment)
+        return tuple(sorted(by_domain.values(), key=lambda item: item.normalized_domain))
+
     def _make_pack_match(
         self,
         *,
@@ -1196,11 +1303,14 @@ class ShieldService:
         snapshot: ShieldSnapshot,
         *,
         repetitive_promo: RepetitionSignals | None = None,
+        link_assessments: Sequence[ShieldLinkAssessment] | None = None,
     ) -> list[ShieldMatch]:
+        active_link_assessments = tuple(link_assessments or ())
         matches: list[ShieldMatch] = []
         matches.extend(self._detect_privacy(compiled, snapshot))
         matches.extend(self._detect_promo(compiled, snapshot, repetitive_promo=repetitive_promo or RepetitionSignals(None, 0, False, False)))
-        matches.extend(self._detect_scam(compiled, snapshot))
+        matches.extend(self._detect_link_safety_domains(compiled, snapshot, active_link_assessments))
+        matches.extend(self._detect_scam(compiled, snapshot, active_link_assessments))
         matches.extend(self._detect_custom_patterns(compiled, snapshot))
         matches.sort(
             key=lambda item: (
@@ -1211,6 +1321,45 @@ class ShieldService:
             reverse=True,
         )
         return matches
+
+    def _detect_link_safety_domains(
+        self,
+        compiled: CompiledShieldConfig,
+        snapshot: ShieldSnapshot,
+        link_assessments: Sequence[ShieldLinkAssessment],
+    ) -> list[ShieldMatch]:
+        if not link_assessments:
+            return []
+        warning_context = _looks_like_scam_warning(snapshot.context_text)
+        matches: list[ShieldMatch] = []
+        for assessment in link_assessments:
+            if assessment.category == MALICIOUS_LINK_CATEGORY and compiled.scam.enabled:
+                if warning_context:
+                    continue
+                matches.append(
+                    self._make_pack_match(
+                        pack="scam",
+                        settings=compiled.scam,
+                        label="Known malicious domain",
+                        reason="A linked domain matched Shield's bundled malicious-domain intelligence.",
+                        confidence="high",
+                        heuristic=False,
+                        match_class="known_malicious_domain",
+                    )
+                )
+            if assessment.category == ADULT_LINK_CATEGORY and compiled.adult.enabled:
+                matches.append(
+                    self._make_pack_match(
+                        pack="adult",
+                        settings=compiled.adult,
+                        label="Adult / 18+ domain",
+                        reason="A linked domain matched Shield's bundled adult / 18+ domain intelligence.",
+                        confidence="high",
+                        heuristic=False,
+                        match_class="adult_domain",
+                    )
+                )
+        return self._dedupe_matches(matches)
 
     def _detect_privacy(self, compiled: CompiledShieldConfig, snapshot: ShieldSnapshot) -> list[ShieldMatch]:
         settings = compiled.privacy
@@ -1603,21 +1752,31 @@ class ShieldService:
             has_unallowlisted_links=has_unallowlisted_links,
         )
 
-    def _detect_scam(self, compiled: CompiledShieldConfig, snapshot: ShieldSnapshot) -> list[ShieldMatch]:
+    def _detect_scam(
+        self,
+        compiled: CompiledShieldConfig,
+        snapshot: ShieldSnapshot,
+        link_assessments: Sequence[ShieldLinkAssessment],
+    ) -> list[ShieldMatch]:
         settings = compiled.scam
         if not settings.enabled:
             return []
-        if _looks_like_scam_warning(snapshot.text):
+        if _looks_like_scam_warning(snapshot.context_text):
             return []
         matches: list[ShieldMatch] = []
-        unallowlisted_domains = [domain for domain in snapshot.domains if not self._domain_is_allowlisted(domain, compiled.allow_domains)]
-        shortener = any(_domain_in_set(domain, SHORTENER_DOMAINS) or "xn--" in domain for domain in unallowlisted_domains)
-        bait = bool(SCAM_BAIT_RE.search(snapshot.text) or SCAM_BAIT_RE.search(snapshot.squashed))
-        social_engineering = bool(SOCIAL_ENGINEERING_RE.search(snapshot.text))
-        brand_bait = bool(BRAND_BAIT_RE.search(snapshot.text))
+        risky_domains = [
+            assessment.normalized_domain
+            for assessment in link_assessments
+            if assessment.category in {MALICIOUS_LINK_CATEGORY, UNKNOWN_SUSPICIOUS_LINK_CATEGORY}
+        ]
+        shortener = any(_domain_in_set(domain, SHORTENER_DOMAINS) or "xn--" in domain for domain in risky_domains)
+        bait = bool(SCAM_BAIT_RE.search(snapshot.context_text) or SCAM_BAIT_RE.search(snapshot.context_squashed))
+        social_engineering = bool(SOCIAL_ENGINEERING_RE.search(snapshot.context_text))
+        brand_bait = bool(BRAND_BAIT_RE.search(snapshot.context_text))
         dangerous_link = any(SUSPICIOUS_FILE_RE.search(url) for url in snapshot.urls)
+        risky_link_present = bool(risky_domains)
 
-        if bait and (snapshot.has_links or snapshot.has_suspicious_attachment or dangerous_link):
+        if bait and ((snapshot.has_links and risky_link_present) or snapshot.has_suspicious_attachment or dangerous_link):
             matches.append(
                 ShieldMatch(
                     pack="scam",
@@ -1665,7 +1824,7 @@ class ShieldService:
                     match_class="scam_download",
                 )
             )
-        if brand_bait and social_engineering and unallowlisted_domains:
+        if brand_bait and social_engineering and risky_domains:
             matches.append(
                 ShieldMatch(
                     pack="scam",
@@ -1677,7 +1836,7 @@ class ShieldService:
                     match_class="scam_brand_lure",
                 )
             )
-        if settings.sensitivity == "high" and bait and (social_engineering or brand_bait):
+        if settings.sensitivity == "high" and bait and (social_engineering or brand_bait) and (risky_link_present or snapshot.has_suspicious_attachment):
             matches.append(
                 ShieldMatch(
                     pack="scam",
@@ -1743,6 +1902,7 @@ class ShieldService:
             for key, values in self._strike_windows.items()
             if any(now - value <= max_window_seconds for value in values)
         }
+        self.link_safety.prune(now)
 
     async def _delete_message(self, message: discord.Message) -> bool:
         me = self._guild_member(message.guild, getattr(self.bot, "user", None))
@@ -1817,6 +1977,15 @@ class ShieldService:
         embed.add_field(name="Preview", value=preview or "[no text content]", inline=False)
         if attachment_summary:
             embed.add_field(name="Attachments", value="\n".join(attachment_summary[:4]), inline=False)
+        if decision.link_assessments and top_reason is not None and top_reason.pack in {"scam", "adult"}:
+            embed.add_field(
+                name="Link Safety",
+                value="\n".join(
+                    f"`{item.normalized_domain}` | {_link_assessment_summary(item)}"
+                    for item in decision.link_assessments[:3]
+                ),
+                inline=False,
+            )
         if decision.ai_review is not None:
             ai_review = decision.ai_review
             ai_lines = [
@@ -1830,7 +1999,7 @@ class ShieldService:
             ai_lines.append(f"Model: `{ai_review.model}`")
             embed.add_field(name="AI Assist", value="\n".join(ai_lines), inline=False)
         embed.add_field(name="Jump", value=f"[Open message]({message.jump_url})", inline=True)
-        if top_reason is not None and top_reason.pack == "scam":
+        if top_reason is not None and top_reason.pack == "scam" and top_reason.heuristic:
             embed.add_field(name="Note", value="Scam detection is heuristic and experimental.", inline=True)
         if decision.action_note:
             embed.add_field(name="Operational Note", value=decision.action_note, inline=False)
@@ -1929,6 +2098,13 @@ class ShieldService:
                 medium_action=str(raw.get("scam_medium_action", "log")).strip().lower(),
                 high_action=str(raw.get("scam_high_action", "log")).strip().lower(),
                 sensitivity=str(raw.get("scam_sensitivity", "normal")).strip().lower(),
+            ),
+            adult=PackSettings(
+                enabled=bool(raw.get("adult_enabled")),
+                low_action=str(raw.get("adult_low_action", "log")).strip().lower(),
+                medium_action=str(raw.get("adult_medium_action", "log")).strip().lower(),
+                high_action=str(raw.get("adult_high_action", "log")).strip().lower(),
+                sensitivity=str(raw.get("adult_sensitivity", "normal")).strip().lower(),
             ),
             ai_enabled=bool(raw.get("ai_enabled")),
             ai_min_confidence=(

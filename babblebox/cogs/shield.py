@@ -22,7 +22,8 @@ from babblebox.shield_service import (
 PACK_CHOICES = [
     app_commands.Choice(name="Privacy Leak", value="privacy"),
     app_commands.Choice(name="Promo / Invite", value="promo"),
-    app_commands.Choice(name="Scam Heuristic", value="scam"),
+    app_commands.Choice(name="Scam / Malicious Links", value="scam"),
+    app_commands.Choice(name="Adult / 18+ Links", value="adult"),
 ]
 ACTION_CHOICES = [
     app_commands.Choice(name="Detect only", value="detect"),
@@ -288,6 +289,28 @@ class ShieldCog(commands.Cog):
             f"High action: `{high_action}`"
         )
 
+    def _link_safety_runtime_value(self) -> str:
+        status = self.service.get_link_safety_status()
+        return (
+            f"Bundled intel: `{status['intel_version']}` ({status['intel_source']})\n"
+            "External provider: inactive in phase 1\n"
+            f"Mode: {status['provider_status']}\n"
+            "Cache: bounded in-memory TTL cache"
+        )
+
+    def _link_assessment_label(self, assessment) -> str:
+        if assessment.category == "malicious":
+            return "malicious | matched local intel"
+        if assessment.category == "adult":
+            return "adult | matched local intel"
+        if assessment.category == "unknown_suspicious":
+            if assessment.provider_lookup_warranted:
+                return "unknown suspicious | lookup candidate only, no action"
+            return "unknown suspicious | local caution only, no action"
+        if assessment.category == "unknown":
+            return "unknown | no action"
+        return "safe | allowlisted or safe family"
+
     def _is_override_owner(self, user_id: int) -> bool:
         return user_id in SHIELD_AI_OVERRIDE_OWNER_IDS
 
@@ -364,12 +387,12 @@ class ShieldCog(commands.Cog):
         delete_actions_enabled = any(
             config.get(f"{pack}_enabled")
             and bool(set(self._pack_policy_actions(config, pack)).intersection({"delete_log", "delete_escalate"}))
-            for pack in ("privacy", "promo", "scam")
+            for pack in ("privacy", "promo", "scam", "adult")
         )
         timeout_actions_enabled = any(
             config.get(f"{pack}_enabled")
             and bool(set(self._pack_policy_actions(config, pack)).intersection({"timeout_log", "delete_escalate"}))
-            for pack in ("privacy", "promo", "scam")
+            for pack in ("privacy", "promo", "scam", "adult")
         )
 
         focus_channel = self._channel_from_guild(guild, channel_id)
@@ -412,7 +435,7 @@ class ShieldCog(commands.Cog):
         ai_status = self.service.get_ai_status(guild_id)
         embed = discord.Embed(
             title="Shield Control Panel",
-            description="Local detection stays authoritative. Lower-confidence heuristics can stay log-first while stronger matches can delete or escalate.",
+            description="Shield stays local-first. Bundled intel handles malicious/scam and optional adult / 18+ domains, safe mainstream families bypass suspicion, and unknown suspicious links stay non-enforcing in this phase.",
             color=ge.EMBED_THEME["warning"] if config["module_enabled"] else ge.EMBED_THEME["info"],
         )
         log_channel = f"<#{config['log_channel_id']}>" if config.get("log_channel_id") else "Not set"
@@ -427,14 +450,22 @@ class ShieldCog(commands.Cog):
             ),
             inline=False,
         )
-        pack_lines = []
-        for pack in ("privacy", "promo", "scam"):
-            pack_lines.append(
+        protection_lines = []
+        for pack in ("privacy", "promo"):
+            protection_lines.append(
                 f"**{PACK_LABELS[pack]}**\n"
                 f"Enabled: {'Yes' if config[f'{pack}_enabled'] else 'No'} | Sensitivity: {SENSITIVITY_LABELS[config[f'{pack}_sensitivity']]}\n"
                 f"{self._pack_policy_compact(config, pack)}"
             )
-        embed.add_field(name="Protection Packs", value="\n\n".join(pack_lines), inline=False)
+        embed.add_field(name="Protection Packs", value="\n\n".join(protection_lines), inline=False)
+        link_safety_lines = []
+        for pack in ("scam", "adult"):
+            link_safety_lines.append(
+                f"**{PACK_LABELS[pack]}**\n"
+                f"Enabled: {'Yes' if config[f'{pack}_enabled'] else 'No'} | Sensitivity: {SENSITIVITY_LABELS[config[f'{pack}_sensitivity']]}\n"
+                f"{self._pack_policy_compact(config, pack)}"
+            )
+        embed.add_field(name="Link Safety", value="\n\n".join(link_safety_lines), inline=False)
         embed.add_field(
             name="AI Assist",
             value=(
@@ -445,6 +476,7 @@ class ShieldCog(commands.Cog):
             ),
             inline=False,
         )
+        embed.add_field(name="Link Safety Runtime", value=self._link_safety_runtime_value(), inline=False)
         embed.add_field(
             name="Storage Discipline",
             value=(
@@ -459,16 +491,24 @@ class ShieldCog(commands.Cog):
         config = self.service.get_config(guild_id)
         embed = discord.Embed(
             title="Shield Rules",
-            description="Confidence-tier local policy. Uncertain detections can stay quiet while clean matches can act harder.",
+            description="Confidence-tier local policy. Local malicious and adult matches can act hard; unknown suspicious links remain advisory in phase 1.",
             color=ge.EMBED_THEME["info"],
         )
         pack_lines = []
-        for pack in ("privacy", "promo", "scam"):
+        for pack in ("privacy", "promo"):
             pack_lines.append(
                 f"**{PACK_LABELS[pack]}**\n"
                 f"{self._pack_policy_detail(config, pack)}"
             )
         embed.add_field(name="Low / Medium / High Action Policy", value="\n\n".join(pack_lines), inline=False)
+        link_safety_lines = []
+        for pack in ("scam", "adult"):
+            link_safety_lines.append(
+                f"**{PACK_LABELS[pack]}**\n"
+                f"{self._pack_policy_detail(config, pack)}"
+            )
+        embed.add_field(name="Link Safety Policy", value="\n\n".join(link_safety_lines), inline=False)
+        embed.add_field(name="Link Safety Runtime", value=self._link_safety_runtime_value(), inline=False)
         embed.add_field(
             name="Escalation",
             value=(
@@ -490,6 +530,7 @@ class ShieldCog(commands.Cog):
             name="Quick Use",
             value=(
                 "`/shield rules pack:promo enabled:true low_action:log medium_action:delete_log high_action:delete_escalate sensitivity:high`\n"
+                "`/shield rules pack:adult enabled:true low_action:log medium_action:delete_log high_action:delete_log`\n"
                 "`/shield rules module:true escalation_threshold:3 timeout_minutes:10`\n"
                 "`bb!shield advanced list` for safe custom patterns"
             ),
@@ -958,9 +999,11 @@ class ShieldCog(commands.Cog):
     async def shield_test_command(self, ctx: commands.Context, text: str):
         if not await self._guard(ctx):
             return
-        matches = self.service.test_message(ctx.guild.id, text)
+        result = self.service.test_message_details(ctx.guild.id, text)
         embed = discord.Embed(title="Shield Test", description="Dry-run results for the current configuration.", color=ge.EMBED_THEME["info"])
-        if not matches:
+        if result.bypass_reason:
+            embed.add_field(name="Bypass", value=result.bypass_reason, inline=False)
+        if not result.matches:
             embed.add_field(name="Result", value="No Shield pack matched that sample.", inline=False)
         else:
             embed.add_field(
@@ -969,7 +1012,17 @@ class ShieldCog(commands.Cog):
                     f"**{PACK_LABELS.get(item.pack, item.pack.title())}** | {item.label} | "
                     f"{MATCH_CLASS_LABELS.get(item.match_class, item.match_class.replace('_', ' ').title() if item.match_class else 'Match')} | "
                     f"`{item.action}` | {item.confidence}"
-                    for item in matches[:5]
+                    for item in result.matches[:5]
+                ),
+                inline=False,
+            )
+        if result.link_assessments:
+            embed.add_field(
+                name="Link Safety",
+                value="\n".join(
+                    f"`{item.normalized_domain}` | {self._link_assessment_label(item)} | "
+                    f"signals: {', '.join(item.matched_signals[:4]) if item.matched_signals else 'none'}"
+                    for item in result.link_assessments[:5]
                 ),
                 inline=False,
             )

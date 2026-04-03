@@ -97,7 +97,9 @@ Babblebox is intentionally compact:
   - admin-only configuration for administrators or Manage Server users
   - privacy leak pack
   - promo / invite pack
-  - scam / malicious-link heuristic pack
+  - scam / malicious-link pack
+  - separate adult / 18+ link pack
+  - bundled local link safety with safe-domain families, suspicious-domain gating, and no external provider requirement
   - optional AI-assisted second-pass review for moderator context only
   - AI stays off by default and is currently limited to guild `1322933864360050688`
   - log-first defaults
@@ -266,7 +268,7 @@ Slash is the best fit for multi-option admin setup here. Prefix stays positional
 | Slash | Prefix | Purpose |
 | --- | --- | --- |
 | `/shield panel` | `bb!shield panel` | Open the Shield admin panel |
-| `/shield rules` | `bb!shield rules true promo true log` | Configure module, packs, and escalation |
+| `/shield rules` | `bb!shield rules true promo true log` | Configure module, packs, link safety, and escalation |
 | `/shield logs` | `bb!shield logs #shield-log @Mods` | Set the mod-log channel and optional alert role |
 | `/shield filters` | `bb!shield filters` | Tune scope, includes, excludes, and trusted roles |
 | `/shield allowlist` | `bb!shield allowlist` | Manage domain, invite, and phrase allowlists |

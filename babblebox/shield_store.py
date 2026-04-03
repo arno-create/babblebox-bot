@@ -93,6 +93,12 @@ def default_guild_shield_config(guild_id: int | None = None) -> dict[str, Any]:
         "scam_medium_action": "log",
         "scam_high_action": "log",
         "scam_sensitivity": "normal",
+        "adult_enabled": False,
+        "adult_action": "log",
+        "adult_low_action": "log",
+        "adult_medium_action": "log",
+        "adult_high_action": "log",
+        "adult_sensitivity": "normal",
         "ai_enabled": False,
         "ai_min_confidence": "high",
         "ai_enabled_packs": list(SHIELD_AI_REVIEW_PACKS),
@@ -168,7 +174,7 @@ def normalize_guild_shield_config(guild_id: int, config: Any) -> dict[str, Any]:
     for field in ("allow_domains", "allow_invite_codes", "allow_phrases"):
         cleaned[field] = _clean_text_list(config.get(field))
 
-    for pack in ("privacy", "promo", "scam"):
+    for pack in ("privacy", "promo", "scam", "adult"):
         enabled_field = f"{pack}_enabled"
         action_field = f"{pack}_action"
         low_action_field = f"{pack}_low_action"
@@ -438,6 +444,12 @@ class _PostgresShieldStore(_BaseShieldStore):
                 "scam_medium_action TEXT NOT NULL DEFAULT 'log', "
                 "scam_high_action TEXT NOT NULL DEFAULT 'log', "
                 "scam_sensitivity TEXT NOT NULL DEFAULT 'normal', "
+                "adult_enabled BOOLEAN NOT NULL DEFAULT FALSE, "
+                "adult_action TEXT NOT NULL DEFAULT 'log', "
+                "adult_low_action TEXT NOT NULL DEFAULT 'log', "
+                "adult_medium_action TEXT NOT NULL DEFAULT 'log', "
+                "adult_high_action TEXT NOT NULL DEFAULT 'log', "
+                "adult_sensitivity TEXT NOT NULL DEFAULT 'normal', "
                 "ai_enabled BOOLEAN NOT NULL DEFAULT FALSE, "
                 "ai_min_confidence TEXT NOT NULL DEFAULT 'high', "
                 "ai_enabled_packs JSONB NOT NULL DEFAULT '[\"privacy\",\"promo\",\"scam\"]'::jsonb, "
@@ -466,6 +478,12 @@ class _PostgresShieldStore(_BaseShieldStore):
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS scam_low_action TEXT NOT NULL DEFAULT 'log'",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS scam_medium_action TEXT NOT NULL DEFAULT 'log'",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS scam_high_action TEXT NOT NULL DEFAULT 'log'",
+            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS adult_enabled BOOLEAN NOT NULL DEFAULT FALSE",
+            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS adult_action TEXT NOT NULL DEFAULT 'log'",
+            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS adult_low_action TEXT NOT NULL DEFAULT 'log'",
+            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS adult_medium_action TEXT NOT NULL DEFAULT 'log'",
+            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS adult_high_action TEXT NOT NULL DEFAULT 'log'",
+            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS adult_sensitivity TEXT NOT NULL DEFAULT 'normal'",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS ai_enabled BOOLEAN NOT NULL DEFAULT FALSE",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS ai_min_confidence TEXT NOT NULL DEFAULT 'high'",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS ai_enabled_packs JSONB NOT NULL DEFAULT '[\"privacy\",\"promo\",\"scam\"]'::jsonb",
@@ -559,6 +577,12 @@ class _PostgresShieldStore(_BaseShieldStore):
                 "scam_medium_action": row["scam_medium_action"],
                 "scam_high_action": row["scam_high_action"],
                 "scam_sensitivity": row["scam_sensitivity"],
+                "adult_enabled": bool(row["adult_enabled"]) if "adult_enabled" in row else False,
+                "adult_action": row["adult_action"] if "adult_action" in row else "log",
+                "adult_low_action": row["adult_low_action"] if "adult_low_action" in row else "log",
+                "adult_medium_action": row["adult_medium_action"] if "adult_medium_action" in row else "log",
+                "adult_high_action": row["adult_high_action"] if "adult_high_action" in row else "log",
+                "adult_sensitivity": row["adult_sensitivity"] if "adult_sensitivity" in row else "normal",
                 "ai_enabled": bool(row["ai_enabled"]),
                 "ai_min_confidence": row["ai_min_confidence"],
                 "ai_enabled_packs": decode_postgres_json_array(
@@ -646,6 +670,7 @@ class _PostgresShieldStore(_BaseShieldStore):
                 "privacy_enabled, privacy_action, privacy_low_action, privacy_medium_action, privacy_high_action, privacy_sensitivity, "
                 "promo_enabled, promo_action, promo_low_action, promo_medium_action, promo_high_action, promo_sensitivity, "
                 "scam_enabled, scam_action, scam_low_action, scam_medium_action, scam_high_action, scam_sensitivity, "
+                "adult_enabled, adult_action, adult_low_action, adult_medium_action, adult_high_action, adult_sensitivity, "
                 "ai_enabled, ai_min_confidence, ai_enabled_packs, "
                 "escalation_threshold, escalation_window_minutes, timeout_minutes, updated_at"
                 ") VALUES ("
@@ -655,7 +680,8 @@ class _PostgresShieldStore(_BaseShieldStore):
                 "$16, $17, $18, $19, $20, $21, "
                 "$22, $23, $24, $25, $26, $27, "
                 "$28, $29, $30, $31, $32, $33, "
-                "$34, $35, $36::jsonb, $37, $38, $39, timezone('utc', now())"
+                "$34, $35, $36, $37, $38, $39, "
+                "$40, $41, $42::jsonb, $43, $44, $45, timezone('utc', now())"
                 ") "
                 "ON CONFLICT (guild_id) DO UPDATE SET "
                 "module_enabled = EXCLUDED.module_enabled, "
@@ -690,6 +716,12 @@ class _PostgresShieldStore(_BaseShieldStore):
                 "scam_medium_action = EXCLUDED.scam_medium_action, "
                 "scam_high_action = EXCLUDED.scam_high_action, "
                 "scam_sensitivity = EXCLUDED.scam_sensitivity, "
+                "adult_enabled = EXCLUDED.adult_enabled, "
+                "adult_action = EXCLUDED.adult_action, "
+                "adult_low_action = EXCLUDED.adult_low_action, "
+                "adult_medium_action = EXCLUDED.adult_medium_action, "
+                "adult_high_action = EXCLUDED.adult_high_action, "
+                "adult_sensitivity = EXCLUDED.adult_sensitivity, "
                 "ai_enabled = EXCLUDED.ai_enabled, "
                 "ai_min_confidence = EXCLUDED.ai_min_confidence, "
                 "ai_enabled_packs = EXCLUDED.ai_enabled_packs, "
@@ -731,6 +763,12 @@ class _PostgresShieldStore(_BaseShieldStore):
             config["scam_medium_action"],
             config["scam_high_action"],
             config["scam_sensitivity"],
+            config["adult_enabled"],
+            config["adult_action"],
+            config["adult_low_action"],
+            config["adult_medium_action"],
+            config["adult_high_action"],
+            config["adult_sensitivity"],
             config["ai_enabled"],
             config["ai_min_confidence"],
             json.dumps(config["ai_enabled_packs"]),
