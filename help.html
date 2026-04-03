@@ -198,7 +198,7 @@
         <section class="section" id="shield-admin">
           <div class="kicker">Shield / Admin</div>
           <h2>Compact safety for moderators, with honest confidence.</h2>
-          <p>Shield is optional and starts from local rules. It can look for likely privacy leaks, invite or promo abuse, and scam-style bait, but it is designed to stay conservative when the signal is weak. Repeated harmless media links and noisy reposts are not supposed to masquerade as confident self-promo.</p>
+          <p>Shield is optional and starts from local rules. It can look for likely privacy leaks, invite or promo abuse, malicious or scam links, and optional adult or 18+ domains, but it is designed to stay conservative when the signal is weak. Safe mainstream domains are bypassed before link suspicion, and phase 1 does not depend on any outside reputation provider.</p>
           <div class="grid2">
             <article class="info"><strong>Main admin commands</strong><p><code>/shield panel</code>, <code>/shield rules</code>, <code>/shield allowlist</code>, <code>/shield ai</code>, and <code>/shield test</code>.</p></article>
             <article class="info"><strong>Graduated local policy</strong><p>Shield uses low, medium, and high confidence actions so broad heuristics can log while stronger matches can delete or escalate.</p></article>
@@ -207,7 +207,7 @@
           </div>
           <div class="command-list">
             <div class="command-row"><div><code>/shield panel</code></div><div><p>Open the compact Shield admin surface.</p><span>Use this first if you want the current state without memorizing command flags.</span></div></div>
-            <div class="command-row"><div><code>/shield rules</code></div><div><p>Set pack sensitivity, low/medium/high action policy, and escalation thresholds.</p><span>A safe starting point is log-first policy with deletes reserved for cleaner high-confidence matches.</span></div></div>
+            <div class="command-row"><div><code>/shield rules</code></div><div><p>Set pack sensitivity, low/medium/high action policy, adult filtering, and escalation thresholds.</p><span>A safe starting point is log-first policy with deletes reserved for cleaner high-confidence matches.</span></div></div>
             <div class="command-row"><div><code>/shield allowlist</code> and <code>/shield filters</code></div><div><p>Teach Shield where it should back off.</p><span>This is especially important before moving beyond logging in busy community servers.</span></div></div>
             <div class="command-row"><div><code>/shield ai</code></div><div><p>Turn on optional second-pass AI review.</p><span>AI enriches moderator alerts only. It does not auto-delete, auto-timeout, or see broad server history.</span></div></div>
           </div>

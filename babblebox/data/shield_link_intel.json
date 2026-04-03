@@ -1,0 +1,216 @@
+{
+  "intel_version": "2026.04-phase1",
+  "source": "bundled",
+  "social_promo_domains": [
+    "instagram.com",
+    "tiktok.com",
+    "youtube.com",
+    "youtu.be",
+    "twitch.tv",
+    "twitter.com",
+    "x.com",
+    "linktr.ee",
+    "beacons.ai",
+    "carrd.co"
+  ],
+  "storefront_domains": [
+    "patreon.com",
+    "ko-fi.com",
+    "gumroad.com",
+    "etsy.com",
+    "buymeacoffee.com",
+    "myshopify.com",
+    "shopify.com",
+    "sellfy.com"
+  ],
+  "media_embed_domains": [
+    "tenor.com",
+    "media.tenor.com",
+    "giphy.com",
+    "media.giphy.com",
+    "imgur.com",
+    "i.imgur.com",
+    "cdn.discordapp.com",
+    "media.discordapp.net"
+  ],
+  "shortener_domains": [
+    "bit.ly",
+    "tinyurl.com",
+    "t.co",
+    "cutt.ly",
+    "goo.su",
+    "rb.gy",
+    "is.gd"
+  ],
+  "safe_families": {
+    "social": [
+      "discord.com",
+      "discord.gg",
+      "instagram.com",
+      "tiktok.com",
+      "youtube.com",
+      "youtu.be",
+      "twitch.tv",
+      "twitter.com",
+      "x.com",
+      "linkedin.com",
+      "reddit.com",
+      "facebook.com"
+    ],
+    "media": [
+      "tenor.com",
+      "media.tenor.com",
+      "giphy.com",
+      "media.giphy.com",
+      "imgur.com",
+      "i.imgur.com",
+      "cdn.discordapp.com",
+      "media.discordapp.net",
+      "ytimg.com"
+    ],
+    "storefront": [
+      "patreon.com",
+      "ko-fi.com",
+      "gumroad.com",
+      "etsy.com",
+      "buymeacoffee.com",
+      "myshopify.com",
+      "shopify.com",
+      "sellfy.com",
+      "bandcamp.com"
+    ],
+    "docs": [
+      "docs.github.com",
+      "developer.mozilla.org",
+      "docs.python.org",
+      "readthedocs.io",
+      "support.google.com",
+      "help.github.com",
+      "developers.google.com",
+      "learn.microsoft.com"
+    ],
+    "dev": [
+      "github.com",
+      "gist.github.com",
+      "raw.githubusercontent.com",
+      "githubusercontent.com",
+      "gitlab.com",
+      "stackoverflow.com",
+      "pypi.org",
+      "npmjs.com"
+    ],
+    "wiki": [
+      "wikipedia.org",
+      "wikimedia.org",
+      "fandom.com"
+    ],
+    "cdn": [
+      "cdn.discordapp.com",
+      "media.discordapp.net",
+      "raw.githubusercontent.com",
+      "githubusercontent.com",
+      "ytimg.com"
+    ]
+  },
+  "malicious_domains": [
+    "claim-nitro-now.com",
+    "discord-bonus.net",
+    "discord-gifts.net",
+    "discordnitro-drop.com",
+    "dlscord-gift.com",
+    "epicgift-drop.com",
+    "steamgift-inventory.com",
+    "wallet-connect-auth.com",
+    "wallet-sync-airdrop.com",
+    "verify-discord-login.com"
+  ],
+  "adult_domains": [
+    "pornhub.com",
+    "xvideos.com",
+    "xnxx.com",
+    "xhamster.com",
+    "redtube.com",
+    "youporn.com",
+    "hentaifox.com",
+    "nhentai.net"
+  ],
+  "suspicious_tlds": [
+    "buzz",
+    "cam",
+    "click",
+    "cfd",
+    "gift",
+    "live",
+    "monster",
+    "rest",
+    "shop",
+    "top"
+  ],
+  "suspicious_host_tokens": [
+    "adult",
+    "airdrop",
+    "auth",
+    "bonus",
+    "claim",
+    "connect",
+    "drop",
+    "gift",
+    "login",
+    "nitro",
+    "promo",
+    "reward",
+    "sync",
+    "verify",
+    "wallet"
+  ],
+  "brand_tokens": [
+    "discord",
+    "epic",
+    "github",
+    "google",
+    "instagram",
+    "microsoft",
+    "paypal",
+    "steam",
+    "telegram",
+    "tiktok",
+    "wallet"
+  ],
+  "suspicious_path_tokens": [
+    "airdrop",
+    "apk",
+    "auth",
+    "bonus",
+    "claim",
+    "connect",
+    "download",
+    "gift",
+    "install",
+    "login",
+    "nitro",
+    "open",
+    "reward",
+    "setup",
+    "sync",
+    "update",
+    "verify",
+    "wallet"
+  ],
+  "suspicious_query_tokens": [
+    "auth",
+    "claim",
+    "download",
+    "file",
+    "key",
+    "redirect",
+    "seed",
+    "session",
+    "target",
+    "token",
+    "wallet"
+  ],
+  "thresholds": {
+    "suspicious": 2,
+    "provider_lookup": 3
+  }
+}

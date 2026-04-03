@@ -812,6 +812,8 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
 
             embed = cog.build_panel_embed(guild_id, "overview")
             protection_field = next(field for field in embed.fields if field.name == "Protection Packs")
+            link_safety_field = next(field for field in embed.fields if field.name == "Link Safety")
+            runtime_field = next(field for field in embed.fields if field.name == "Link Safety Runtime")
 
             self.assertIn("**Privacy Leak**", protection_field.value)
             self.assertIn("Enabled: Yes | Sensitivity: High", protection_field.value)
@@ -819,7 +821,10 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("**Promo / Invite**", protection_field.value)
             self.assertIn("Enabled: Yes | Sensitivity: Normal", protection_field.value)
             self.assertIn("Low / Medium / High: `log` / `log` / `log`", protection_field.value)
-            self.assertIn("**Scam Heuristic**", protection_field.value)
+            self.assertIn("**Scam / Malicious Links**", link_safety_field.value)
+            self.assertIn("**Adult / 18+ Links**", link_safety_field.value)
+            self.assertIn("Bundled intel", runtime_field.value)
+            self.assertIn("External provider", runtime_field.value)
         finally:
             await cog.service.close()
 
@@ -906,6 +911,82 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(ctx.send_calls), 1)
             field_names = [field.name for field in ctx.send_calls[0]["embed"].fields]
             self.assertNotIn("Operability", field_names)
+        finally:
+            await cog.service.close()
+
+    async def test_shield_rules_command_supports_adult_pack(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
+        cog = ShieldCog(bot)
+        try:
+            cog.service.storage_ready = True
+            ctx = FakeContext(
+                interaction=FakeInteraction(),
+                guild=FakeGuild(10),
+                channel=FakeChannel(),
+                author=FakeAuthor(manage_guild=True),
+            )
+
+            await ShieldCog.shield_rules_command.callback(
+                cog,
+                ctx,
+                module=None,
+                pack="adult",
+                enabled=True,
+                action="delete_log",
+                low_action=None,
+                medium_action=None,
+                high_action=None,
+                sensitivity="normal",
+                escalation_threshold=None,
+                escalation_window_minutes=None,
+                timeout_minutes=None,
+            )
+
+            self.assertEqual(len(ctx.send_calls), 1)
+            self.assertIn("Adult / 18+ Links", ctx.send_calls[0]["embed"].description)
+        finally:
+            await cog.service.close()
+
+    async def test_shield_test_command_includes_link_safety_assessments(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
+        cog = ShieldCog(bot)
+        try:
+            cog.service.storage_ready = True
+            ctx = FakeContext(
+                interaction=FakeInteraction(),
+                guild=FakeGuild(10),
+                channel=FakeChannel(),
+                author=FakeAuthor(manage_guild=True),
+            )
+
+            await ShieldCog.shield_test_command.callback(cog, ctx, text="Free nitro https://dlscord-gift.com/claim")
+
+            self.assertEqual(len(ctx.send_calls), 1)
+            field_names = [field.name for field in ctx.send_calls[0]["embed"].fields]
+            self.assertIn("Link Safety", field_names)
+            link_safety_field = next(field for field in ctx.send_calls[0]["embed"].fields if field.name == "Link Safety")
+            self.assertIn("dlscord-gift.com", link_safety_field.value)
+            self.assertIn("malicious", link_safety_field.value)
+        finally:
+            await cog.service.close()
+
+    async def test_shield_test_command_surfaces_allow_phrase_bypass(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
+        cog = ShieldCog(bot)
+        try:
+            cog.service.storage_ready = True
+            cog.service.store.state["guilds"]["10"] = {
+                "guild_id": 10,
+                "allow_phrases": ["scam example"],
+            }
+            ctx = FakeContext(guild=FakeGuild(10), channel=FakeChannel(), author=FakeAuthor(manage_guild=True))
+
+            await cog.shield_test_command.callback(cog, ctx, text="scam example https://dlscord-gift.com/claim")
+
+            field_names = [field.name for field in ctx.send_calls[0]["embed"].fields]
+            self.assertIn("Bypass", field_names)
+            bypass_field = next(field for field in ctx.send_calls[0]["embed"].fields if field.name == "Bypass")
+            self.assertIn("allow phrase", bypass_field.value.lower())
         finally:
             await cog.service.close()
 
