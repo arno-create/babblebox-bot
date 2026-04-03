@@ -1,5 +1,6 @@
 import types
 import unittest
+from dataclasses import replace
 from datetime import timedelta
 
 from babblebox.daily_challenges import build_daily_shuffle
@@ -81,6 +82,43 @@ class ProfileServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(puzzle.answer.upper(), private_open.description)
         self.assertNotIn(puzzle.answer.upper(), public_result.description)
         self.assertIn(puzzle.answer.upper(), private_result.description)
+        self.assertIn(f"Hint: ||{puzzle.hint}||", public_open.description)
+        self.assertIn(f"Hint: ||{puzzle.hint}||", private_open.description)
+        self.assertIn(f"Hint: ||{puzzle.hint}||", public_result.description)
+        self.assertIn(f"Hint: ||{puzzle.hint}||", private_result.description)
+
+    async def test_daily_embeds_preserve_spoilered_hint_and_skip_blank_hint(self):
+        status = await self.service.get_daily_status(81, mode="shuffle")
+        puzzle = status["puzzle"]
+        user = types.SimpleNamespace(display_name="User 81")
+        ok, payload = await self.service.submit_daily_guess(81, "wrong", mode="shuffle")
+        self.assertTrue(ok)
+
+        spoiler_status = {**status, "puzzle": replace(puzzle, hint="||already hidden||"), "result": payload["result"]}
+        spoiler_result_payload = {
+            **payload,
+            "puzzle": replace(puzzle, hint="||already hidden||"),
+        }
+
+        spoiler_open = self.service.build_daily_embed(user, spoiler_status, public=True)
+        spoiler_result = self.service.build_daily_result_embed(user, spoiler_result_payload, public=True)
+
+        self.assertIn("Hint: ||already hidden||", spoiler_open.description)
+        self.assertNotIn("Hint: ||||already hidden||||", spoiler_open.description)
+        self.assertIn("Hint: ||already hidden||", spoiler_result.description)
+        self.assertNotIn("Hint: ||||already hidden||||", spoiler_result.description)
+
+        blank_status = {**status, "puzzle": replace(puzzle, hint="   "), "result": payload["result"]}
+        blank_result_payload = {
+            **payload,
+            "puzzle": replace(puzzle, hint="   "),
+        }
+
+        blank_open = self.service.build_daily_embed(user, blank_status, public=True)
+        blank_result = self.service.build_daily_result_embed(user, blank_result_payload, public=True)
+
+        self.assertNotIn("Hint:", blank_open.description)
+        self.assertNotIn("Hint:", blank_result.description)
 
     async def test_buddy_defaults_and_style_change_work(self):
         profile = await self.service.get_profile(33)

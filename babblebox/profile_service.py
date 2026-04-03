@@ -472,6 +472,15 @@ def _daily_active_progress_line(
     return f"Progress: {attempts}/{DAILY_MAX_ATTEMPTS} used | {remaining} left"
 
 
+def _daily_hint_line(hint: str | None) -> str | None:
+    hint_text = str(hint or "").strip()
+    if not hint_text:
+        return None
+    if hint_text.startswith("||") and hint_text.endswith("||"):
+        return f"Hint: {hint_text}"
+    return f"Hint: ||{hint_text}||"
+
+
 class ProfileService:
     def __init__(self, bot: commands.Bot, store: ProfileStore | None = None):
         self.bot = bot
@@ -1253,6 +1262,7 @@ class ProfileService:
         active_mode = daily_status["active_mode"]
         puzzle = daily_status["puzzle"]
         result = daily_status["result"]
+        hint_line = _daily_hint_line(getattr(puzzle, "hint", None))
         description_lines = [
             *[
                 _daily_booth_line(mode, puzzles[mode], results.get(mode), active_mode=active_mode)
@@ -1260,10 +1270,11 @@ class ProfileService:
             ],
             "",
             f"{puzzle.prompt_label}: `{puzzle.scramble}`",
-            f"Hint: {puzzle.hint}",
             _daily_active_progress_line(puzzle, result, public=public),
             f"Today: **{daily_status['solved_today']} / {len(puzzles)}** cleared | streak **{profile['active_streak']}**",
         ]
+        if hint_line is not None:
+            description_lines.insert(-2, hint_line)
         if not public:
             description_lines.append(f"You: **{profile['total_daily_clears']}** clears | level **{profile['level']}**")
         embed = discord.Embed(
@@ -1299,13 +1310,15 @@ class ProfileService:
             title = f"{puzzle.label} Still Live"
             tone = "info"
             lead = "Not it yet."
+        hint_line = _daily_hint_line(getattr(puzzle, "hint", None))
         description_lines = [
             lead,
             _share_grid(result),
             f"{puzzle.prompt_label}: `{puzzle.scramble}`",
-            f"Hint: {puzzle.hint}",
             _daily_active_progress_line(puzzle, result, public=public),
         ]
+        if hint_line is not None:
+            description_lines.insert(-1, hint_line)
         if not public:
             description_lines.append(f"You: **{profile['total_daily_clears']}** clears | level **{profile['level']}**")
         if payload["status"] == "solved":
