@@ -291,13 +291,25 @@ class ShieldCog(commands.Cog):
 
     def _link_safety_runtime_value(self) -> str:
         status = self.service.get_link_safety_status()
-        provider_label = status["provider"] or "disabled"
         return (
             f"Bundled intel: `{status['intel_version']}` ({status['intel_source']})\n"
-            f"External provider: `{provider_label}`\n"
-            f"Provider status: {status['provider_status']}\n"
-            f"Cache: `{status['cache_mode']}` | {status['cache_entries']}/{status['cache_max_entries']} entries | TTL `{status['cache_ttl_seconds']}s`"
+            "External provider: inactive in phase 1\n"
+            f"Mode: {status['provider_status']}\n"
+            "Cache: bounded in-memory TTL cache"
         )
+
+    def _link_assessment_label(self, assessment) -> str:
+        if assessment.category == "malicious":
+            return "malicious | matched local intel"
+        if assessment.category == "adult":
+            return "adult | matched local intel"
+        if assessment.category == "unknown_suspicious":
+            if assessment.provider_lookup_warranted:
+                return "unknown suspicious | lookup candidate only, no action"
+            return "unknown suspicious | local caution only, no action"
+        if assessment.category == "unknown":
+            return "unknown | no action"
+        return "safe | allowlisted or safe family"
 
     def _is_override_owner(self, user_id: int) -> bool:
         return user_id in SHIELD_AI_OVERRIDE_OWNER_IDS
@@ -423,7 +435,7 @@ class ShieldCog(commands.Cog):
         ai_status = self.service.get_ai_status(guild_id)
         embed = discord.Embed(
             title="Shield Control Panel",
-            description="Shield stays local-first. Safe mainstream domains bypass link suspicion, stronger local matches can still delete or escalate, and no external reputation provider is used in this phase.",
+            description="Shield stays local-first. Bundled intel handles malicious/scam and optional adult / 18+ domains, safe mainstream families bypass suspicion, and unknown suspicious links stay non-enforcing in this phase.",
             color=ge.EMBED_THEME["warning"] if config["module_enabled"] else ge.EMBED_THEME["info"],
         )
         log_channel = f"<#{config['log_channel_id']}>" if config.get("log_channel_id") else "Not set"
@@ -479,7 +491,7 @@ class ShieldCog(commands.Cog):
         config = self.service.get_config(guild_id)
         embed = discord.Embed(
             title="Shield Rules",
-            description="Confidence-tier local policy. Uncertain detections can stay quiet while clean matches can act harder.",
+            description="Confidence-tier local policy. Local malicious and adult matches can act hard; unknown suspicious links remain advisory in phase 1.",
             color=ge.EMBED_THEME["info"],
         )
         pack_lines = []
@@ -1008,7 +1020,7 @@ class ShieldCog(commands.Cog):
             embed.add_field(
                 name="Link Safety",
                 value="\n".join(
-                    f"`{item.normalized_domain}` | `{item.category}` | lookup: {'yes' if item.provider_lookup_warranted else 'no'} | "
+                    f"`{item.normalized_domain}` | {self._link_assessment_label(item)} | "
                     f"signals: {', '.join(item.matched_signals[:4]) if item.matched_signals else 'none'}"
                     for item in result.link_assessments[:5]
                 ),

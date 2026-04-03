@@ -407,6 +407,16 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.link_assessments[0].category, "safe")
         self.assertIn("safe_family:social", result.link_assessments[0].matched_signals)
 
+    async def test_safe_family_includes_discord_status_and_google_docs(self):
+        result = self.service.test_message_details(
+            10,
+            "Status https://discordstatus.com and docs https://docs.google.com/document/d/abc123/edit",
+        )
+
+        categories = {item.normalized_domain: item.category for item in result.link_assessments}
+        self.assertEqual(categories["discordstatus.com"], "safe")
+        self.assertEqual(categories["docs.google.com"], "safe")
+
     async def test_known_malicious_domain_matches_scam_pack(self):
         ok, _ = await self.service.set_pack_config(10, "scam", enabled=True, action="delete_log", sensitivity="normal")
         self.assertTrue(ok)
@@ -443,6 +453,15 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         result = self.service.test_message_details(10, "Adult link https://xvideos.com/video123")
 
         self.assertFalse([match for match in result.matches if match.pack == "adult"])
+        self.assertEqual(result.link_assessments[0].category, "adult")
+
+    async def test_adult_warning_context_still_matches_when_enabled(self):
+        ok, _ = await self.service.set_pack_config(10, "adult", enabled=True, action="delete_log", sensitivity="normal")
+        self.assertTrue(ok)
+
+        result = self.service.test_message_details(10, "Warning: NSFW link ahead https://pornhub.com/view_video.php?viewkey=test")
+
+        self.assertTrue([match for match in result.matches if match.pack == "adult"])
         self.assertEqual(result.link_assessments[0].category, "adult")
 
     async def test_allowlisted_domain_overrides_local_malicious_intelligence(self):
@@ -507,10 +526,35 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.link_assessments[0].category, "unknown")
         self.assertFalse(result.link_assessments[0].provider_lookup_warranted)
 
+    async def test_unknown_login_and_docs_urls_stay_non_actionable_without_host_risk(self):
+        cases = (
+            "Normal page https://accounts.example.com/login",
+            "Reference https://example.com/reset?token=abc123&redirect=dashboard",
+            "Reference https://docs.example.com/guide?redirect=install",
+        )
+
+        for text in cases:
+            result = self.service.test_message_details(10, text)
+
+            self.assertFalse(result.matches)
+            self.assertEqual(result.link_assessments[0].category, "unknown")
+            self.assertFalse(result.link_assessments[0].provider_lookup_warranted)
+            self.assertNotIn("message_social_engineering", result.link_assessments[0].matched_signals)
+
     async def test_unknown_suspicious_domain_marks_provider_lookup_eligibility_without_matching_pack(self):
         ok, _ = await self.service.set_pack_config(10, "scam", enabled=True, action="delete_log", sensitivity="normal")
         self.assertTrue(ok)
 
+        result = self.service.test_message_details(
+            10,
+            "Visit https://wallet-bonus-drop.click/account?redirect=%2Flogin%2Fauth%2Ftoken%2Fseed to claim access.",
+        )
+
+        self.assertFalse([match for match in result.matches if match.pack == "scam"])
+        self.assertEqual(result.link_assessments[0].category, "unknown_suspicious")
+        self.assertTrue(result.link_assessments[0].provider_lookup_warranted)
+
+    async def test_unknown_suspicious_domain_in_report_context_stays_non_lookup(self):
         result = self.service.test_message_details(
             10,
             "Reference https://wallet-bonus-drop.click/account?redirect=%2Flogin%2Fauth%2Ftoken%2Fseed for triage.",
@@ -518,7 +562,7 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse([match for match in result.matches if match.pack == "scam"])
         self.assertEqual(result.link_assessments[0].category, "unknown_suspicious")
-        self.assertTrue(result.link_assessments[0].provider_lookup_warranted)
+        self.assertFalse(result.link_assessments[0].provider_lookup_warranted)
 
     async def test_provider_disabled_status_is_exposed_through_link_safety_runtime(self):
         status = self.service.get_link_safety_status()
@@ -535,6 +579,19 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse([match for match in result.matches if match.pack == "scam"])
         self.assertEqual(result.link_assessments[0].category, "malicious")
+
+    async def test_bare_malicious_domain_discussion_context_is_not_punished(self):
+        ok, _ = await self.service.set_pack_config(10, "scam", enabled=True, action="delete_log", sensitivity="normal")
+        self.assertTrue(ok)
+
+        for text in (
+            "dlscord-gift.com is malicious",
+            "We blocked dlscord-gift.com yesterday",
+        ):
+            result = self.service.test_message_details(10, text)
+
+            self.assertFalse([match for match in result.matches if match.pack == "scam"])
+            self.assertEqual(result.link_assessments[0].category, "malicious")
 
     async def test_punycode_lure_with_bait_still_hits_scam_pack(self):
         ok, _ = await self.service.set_pack_config(10, "scam", enabled=True, action="delete_log", sensitivity="normal")
@@ -574,6 +631,12 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.link_assessments[0].category, "unknown")
         self.assertFalse(result.link_assessments[0].provider_lookup_warranted)
+
+    async def test_malformed_host_is_ignored_in_link_assessment(self):
+        result = self.service.test_message_details(10, "Broken link https://www..example.com/login")
+
+        self.assertFalse(result.matches)
+        self.assertEqual(result.link_assessments, ())
 
     async def test_malicious_like_wording_without_risky_link_does_not_trigger_scam(self):
         ok, _ = await self.service.set_pack_config(10, "scam", enabled=True, action="delete_log", sensitivity="high")

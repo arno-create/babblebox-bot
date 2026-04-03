@@ -27,7 +27,9 @@ LINK_CATEGORY_STRENGTH = {
     MALICIOUS_LINK_CATEGORY: 4,
 }
 
-WARNING_DISCUSSION_RE = re.compile(r"(?i)\b(?:beware|warning|avoid|do not|don't|never|fake|phish(?:ing)?|report(?:ed)?|heads up|scam)\b")
+WARNING_DISCUSSION_RE = re.compile(
+    r"(?i)(?:\b(?:beware|warning|avoid|do not|don't|never|fake|malicious|phish(?:ing)?|report(?:ed|ing)?|blocked|blocklist(?:ed)?|heads up|scam|for review|for triage|triage)\b|\b(?:example|sample)\b.{0,24}\b(?:link|site|domain|url)\b|\b(?:scam|phish(?:ing)?|malicious)\b.{0,24}\b(?:example|sample)\b)"
+)
 SOCIAL_ENGINEERING_RE = re.compile(r"(?i)\b(?:download|run|install|open|verify|claim|login|log in|connect wallet|sync)\b")
 SCAM_BAIT_RE = re.compile(
     r"(?i)\b(?:free nitro|nitro gift|steam gift|claim reward|claim now|verify your account|wallet connect|seed phrase|airdrop|gift inventory|limited time claim)\b"
@@ -36,6 +38,10 @@ BRAND_BAIT_RE = re.compile(r"(?i)\b(?:discord|nitro|steam|epic|wallet|crypto|gif
 SUSPICIOUS_FILE_RE = re.compile(r"(?i)\.(?:exe|scr|bat|cmd|msi|zip|rar|7z|iso|apk)(?:$|[?#])")
 ENCODED_QUERY_RE = re.compile(r"(?i)(?:%[0-9a-f]{2}){3,}")
 TOKEN_RE = re.compile(r"[a-z0-9]+")
+HIGH_SEVERITY_CONTEXT_SIGNALS = frozenset({"suspicious_file_target", "message_scam_bait", "suspicious_attachment_link_combo"})
+LOOKUP_CONTEXT_SIGNALS = HIGH_SEVERITY_CONTEXT_SIGNALS | frozenset(
+    {"message_social_engineering", "message_brand_bait", "encoded_or_long_query"}
+)
 
 
 def domain_matches(domain: str, candidate: str) -> bool:
@@ -308,7 +314,6 @@ class ShieldLinkSafetyEngine:
             )
 
         context_signals, warning_context = self._context_signals(
-            domain,
             path=path,
             query=query,
             message_text=message_text,
@@ -316,20 +321,25 @@ class ShieldLinkSafetyEngine:
             has_suspicious_attachment=has_suspicious_attachment,
         )
         signals.extend(context_signals)
-        suspicion_score = cached.suspicious_base_score + self._score_context_signals(context_signals)
-        if warning_context:
-            suspicion_score = max(0, suspicion_score - 2)
-        if suspicion_score >= self.intel.provider_lookup_threshold and warning_context:
-            suspicion_score = self.intel.suspicious_threshold
-        if suspicion_score >= self.intel.provider_lookup_threshold:
-            category = UNKNOWN_SUSPICIOUS_LINK_CATEGORY
-            provider_lookup_warranted = True
-        elif suspicion_score >= self.intel.suspicious_threshold:
-            category = UNKNOWN_SUSPICIOUS_LINK_CATEGORY
-            provider_lookup_warranted = False
-        else:
-            category = UNKNOWN_LINK_CATEGORY
-            provider_lookup_warranted = False
+        context_score = self._score_context_signals(context_signals)
+        host_signal_set = set(cached.host_signals)
+        shortener_only = host_signal_set == {"shortener_domain"}
+        host_risk = bool(host_signal_set) and not shortener_only
+        high_severity_context_count = sum(signal in HIGH_SEVERITY_CONTEXT_SIGNALS for signal in context_signals)
+        lookup_context = any(signal in LOOKUP_CONTEXT_SIGNALS for signal in context_signals)
+        suspicious_context = high_severity_context_count > 0
+        suspicious_enough = host_risk or suspicious_context or (shortener_only and lookup_context)
+        if warning_context and not host_risk and high_severity_context_count == 0:
+            suspicious_enough = False
+        provider_lookup_warranted = (
+            not warning_context
+            and (
+                (host_risk and (lookup_context or context_score >= 2))
+                or (shortener_only and lookup_context)
+                or high_severity_context_count >= 2
+            )
+        )
+        category = UNKNOWN_SUSPICIOUS_LINK_CATEGORY if (provider_lookup_warranted or suspicious_enough) else UNKNOWN_LINK_CATEGORY
         return ShieldLinkAssessment(
             normalized_domain=domain,
             category=category,
@@ -406,7 +416,6 @@ class ShieldLinkSafetyEngine:
 
     def _context_signals(
         self,
-        domain: str,
         *,
         path: str,
         query: str,
@@ -416,7 +425,7 @@ class ShieldLinkSafetyEngine:
     ) -> tuple[tuple[str, ...], bool]:
         signals: list[str] = []
         combined_path = f"{path}?{query}" if query else path
-        path_tokens = set(TOKEN_RE.findall(combined_path))
+        path_tokens = set(TOKEN_RE.findall(path))
         for token in sorted(path_tokens):
             if token in self.intel.suspicious_path_tokens:
                 signals.append(f"path_token:{token}")

@@ -142,7 +142,10 @@ SCAM_BAIT_RE = re.compile(
 )
 BRAND_BAIT_RE = re.compile(r"(?i)\b(?:discord|nitro|steam|epic|wallet|crypto|gift)\b")
 SUSPICIOUS_FILE_RE = re.compile(r"(?i)\.(?:exe|scr|bat|cmd|msi|zip|rar|7z|iso)(?:$|[?#])")
-SCAM_WARNING_RE = re.compile(r"(?i)\b(?:beware|warning|avoid|do not|don't|never|fake|phish(?:ing)?|report(?:ed)?|heads up)\b")
+SCAM_WARNING_RE = re.compile(
+    r"(?i)(?:\b(?:beware|warning|avoid|do not|don't|never|fake|malicious|phish(?:ing)?|report(?:ed|ing)?|blocked|blocklist(?:ed)?|heads up|for review|for triage|triage)\b|\b(?:example|sample)\b.{0,24}\b(?:link|site|domain|url)\b|\b(?:scam|phish(?:ing)?|malicious)\b.{0,24}\b(?:example|sample)\b)"
+)
+LINK_HOST_LABEL_RE = re.compile(r"[a-z0-9-]+")
 GENERIC_DIGIT_RE = re.compile(r"\b\d{4,12}\b")
 @dataclass(frozen=True)
 class PackSettings:
@@ -240,6 +243,8 @@ class ShieldLink:
 class ShieldSnapshot:
     text: str
     squashed: str
+    context_text: str
+    context_squashed: str
     urls: tuple[str, ...]
     links: tuple[ShieldLink, ...]
     canonical_links: tuple[str, ...]
@@ -321,7 +326,7 @@ def _domain_in_set(domain: str, candidates: set[str]) -> bool:
     return link_domain_in_set(domain, candidates)
 
 
-def _extract_domain(raw_url: str) -> str | None:
+def _clean_url_candidate(raw_url: str) -> str | None:
     if not raw_url:
         return None
     candidate = raw_url.strip().strip("()[]{}<>,.!?\"'")
@@ -329,23 +334,67 @@ def _extract_domain(raw_url: str) -> str | None:
         return None
     if "://" not in candidate:
         candidate = f"https://{candidate}"
-    parsed = urlsplit(candidate)
-    domain = parsed.netloc.casefold().strip()
-    if not domain:
+    return candidate
+
+
+def _normalize_link_host(raw_host: str) -> str | None:
+    host = normalize_plain_text(raw_host).casefold().strip()
+    if not host:
         return None
-    if "@" in domain:
-        domain = domain.rsplit("@", 1)[1]
-    if ":" in domain:
-        domain = domain.split(":", 1)[0]
-    if domain.startswith("www."):
-        domain = domain[4:]
-    return domain or None
+    if "@" in host:
+        host = host.rsplit("@", 1)[1]
+    if host.startswith("[") or host.endswith("]"):
+        return None
+    if ":" in host:
+        host = host.split(":", 1)[0]
+    host = host.rstrip(".")
+    if host.startswith("www."):
+        host = host[4:]
+    if not host or host.startswith(".") or host.endswith(".") or ".." in host:
+        return None
+    try:
+        host = host.encode("idna").decode("ascii")
+    except UnicodeError:
+        return None
+    host = host.casefold().rstrip(".")
+    if host.startswith("www."):
+        host = host[4:]
+    if not host or host.startswith(".") or host.endswith(".") or ".." in host:
+        return None
+    labels = host.split(".")
+    if len(labels) < 2:
+        return None
+    for label in labels:
+        if not label or len(label) > 63:
+            return None
+        if label.startswith("-") or label.endswith("-"):
+            return None
+        if LINK_HOST_LABEL_RE.fullmatch(label) is None:
+            return None
+    return host
+
+
+def _extract_domain(raw_url: str) -> str | None:
+    candidate = _clean_url_candidate(raw_url)
+    if candidate is None:
+        return None
+    parsed = urlsplit(candidate)
+    return _normalize_link_host(parsed.netloc)
 
 
 def _extract_urls(text: str) -> tuple[str, ...]:
     if not text:
         return ()
     return tuple(match.group(0) for match in URL_RE.finditer(text))
+
+
+def _strip_urls_from_text(text: str, urls: Sequence[str]) -> str:
+    if not text:
+        return ""
+    stripped = text
+    for url in urls:
+        stripped = stripped.replace(url, " ")
+    return re.sub(r"\s+", " ", stripped).strip()
 
 
 def _extract_invite_codes(urls: Sequence[str]) -> frozenset[str]:
@@ -372,13 +421,13 @@ def _classify_link(domain: str, *, invite_code: str | None) -> str:
 
 
 def _build_link(raw_url: str) -> ShieldLink | None:
-    domain = _extract_domain(raw_url)
+    candidate = _clean_url_candidate(raw_url)
+    if candidate is None:
+        return None
+    parsed = urlsplit(candidate)
+    domain = _normalize_link_host(parsed.netloc)
     if domain is None:
         return None
-    candidate = raw_url.strip().strip("()[]{}<>,.!?\"'")
-    if "://" not in candidate:
-        candidate = f"https://{candidate}"
-    parsed = urlsplit(candidate)
     invite_match = INVITE_RE.search(candidate.casefold())
     invite_code = invite_match.group(1).casefold() if invite_match else None
     path = re.sub(r"/{2,}", "/", (parsed.path or "/").casefold()).rstrip("/")
@@ -425,6 +474,18 @@ def _match_class_label(match_class: str) -> str:
     return MATCH_CLASS_LABELS.get(match_class, match_class.replace("_", " ").title())
 
 
+def _link_assessment_summary(assessment: ShieldLinkAssessment) -> str:
+    if assessment.category == MALICIOUS_LINK_CATEGORY:
+        return "matched local malicious intel"
+    if assessment.category == ADULT_LINK_CATEGORY:
+        return "matched local adult intel"
+    if assessment.category == UNKNOWN_SUSPICIOUS_LINK_CATEGORY:
+        return "lookup candidate only, no action" if assessment.provider_lookup_warranted else "local caution only, no action"
+    if assessment.category == UNKNOWN_LINK_CATEGORY:
+        return "unknown, no action"
+    return "safe or allowlisted"
+
+
 def _legacy_action_policy(action: str) -> tuple[str, str, str]:
     cleaned = str(action).strip().lower()
     if cleaned == "detect":
@@ -445,6 +506,8 @@ def _build_snapshot(text: str | None, attachments: Sequence[Any] | None = None) 
     squashed = squash_for_evasion_checks(normalized.casefold())
     lowered = normalized.casefold()
     urls = _extract_urls(lowered)
+    context_text = _strip_urls_from_text(lowered, urls)
+    context_squashed = squash_for_evasion_checks(context_text)
     links = tuple(link for link in (_build_link(url) for url in urls) if link is not None)
     domains = frozenset(link.domain for link in links)
     invite_codes = frozenset(link.invite_code for link in links if link.invite_code)
@@ -456,6 +519,8 @@ def _build_snapshot(text: str | None, attachments: Sequence[Any] | None = None) 
     return ShieldSnapshot(
         text=lowered,
         squashed=squashed,
+        context_text=context_text,
+        context_squashed=context_squashed,
         urls=urls,
         links=links,
         canonical_links=tuple(link.canonical_url for link in links),
@@ -1183,8 +1248,8 @@ class ShieldService:
                 link.domain,
                 path=link.path,
                 query=link.query,
-                message_text=snapshot.text,
-                squashed_text=snapshot.squashed,
+                message_text=snapshot.context_text,
+                squashed_text=snapshot.context_squashed,
                 has_suspicious_attachment=snapshot.has_suspicious_attachment,
                 allowlisted=allowlisted,
                 now=now,
@@ -1265,7 +1330,7 @@ class ShieldService:
     ) -> list[ShieldMatch]:
         if not link_assessments:
             return []
-        warning_context = _looks_like_scam_warning(snapshot.text)
+        warning_context = _looks_like_scam_warning(snapshot.context_text)
         matches: list[ShieldMatch] = []
         for assessment in link_assessments:
             if assessment.category == MALICIOUS_LINK_CATEGORY and compiled.scam.enabled:
@@ -1283,8 +1348,6 @@ class ShieldService:
                     )
                 )
             if assessment.category == ADULT_LINK_CATEGORY and compiled.adult.enabled:
-                if warning_context:
-                    continue
                 matches.append(
                     self._make_pack_match(
                         pack="adult",
@@ -1698,7 +1761,7 @@ class ShieldService:
         settings = compiled.scam
         if not settings.enabled:
             return []
-        if _looks_like_scam_warning(snapshot.text):
+        if _looks_like_scam_warning(snapshot.context_text):
             return []
         matches: list[ShieldMatch] = []
         risky_domains = [
@@ -1707,9 +1770,9 @@ class ShieldService:
             if assessment.category in {MALICIOUS_LINK_CATEGORY, UNKNOWN_SUSPICIOUS_LINK_CATEGORY}
         ]
         shortener = any(_domain_in_set(domain, SHORTENER_DOMAINS) or "xn--" in domain for domain in risky_domains)
-        bait = bool(SCAM_BAIT_RE.search(snapshot.text) or SCAM_BAIT_RE.search(snapshot.squashed))
-        social_engineering = bool(SOCIAL_ENGINEERING_RE.search(snapshot.text))
-        brand_bait = bool(BRAND_BAIT_RE.search(snapshot.text))
+        bait = bool(SCAM_BAIT_RE.search(snapshot.context_text) or SCAM_BAIT_RE.search(snapshot.context_squashed))
+        social_engineering = bool(SOCIAL_ENGINEERING_RE.search(snapshot.context_text))
+        brand_bait = bool(BRAND_BAIT_RE.search(snapshot.context_text))
         dangerous_link = any(SUSPICIOUS_FILE_RE.search(url) for url in snapshot.urls)
         risky_link_present = bool(risky_domains)
 
@@ -1918,7 +1981,7 @@ class ShieldService:
             embed.add_field(
                 name="Link Safety",
                 value="\n".join(
-                    f"`{item.normalized_domain}` | {item.category.replace('_', ' ')} | provider lookup: {'yes' if item.provider_lookup_warranted else 'no'}"
+                    f"`{item.normalized_domain}` | {_link_assessment_summary(item)}"
                     for item in decision.link_assessments[:3]
                 ),
                 inline=False,

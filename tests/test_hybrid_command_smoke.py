@@ -825,6 +825,7 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("**Adult / 18+ Links**", link_safety_field.value)
             self.assertIn("Bundled intel", runtime_field.value)
             self.assertIn("External provider", runtime_field.value)
+            self.assertIn("bounded in-memory", runtime_field.value)
         finally:
             await cog.service.close()
 
@@ -966,7 +967,30 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Link Safety", field_names)
             link_safety_field = next(field for field in ctx.send_calls[0]["embed"].fields if field.name == "Link Safety")
             self.assertIn("dlscord-gift.com", link_safety_field.value)
-            self.assertIn("malicious", link_safety_field.value)
+            self.assertIn("matched local intel", link_safety_field.value)
+        finally:
+            await cog.service.close()
+
+    async def test_shield_test_command_marks_lookup_candidates_as_no_action(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
+        cog = ShieldCog(bot)
+        try:
+            cog.service.storage_ready = True
+            ctx = FakeContext(
+                interaction=FakeInteraction(),
+                guild=FakeGuild(10),
+                channel=FakeChannel(),
+                author=FakeAuthor(manage_guild=True),
+            )
+
+            await ShieldCog.shield_test_command.callback(
+                cog,
+                ctx,
+                text="Visit https://wallet-bonus-drop.click/account?redirect=%2Flogin%2Fauth%2Ftoken%2Fseed to claim access.",
+            )
+
+            link_safety_field = next(field for field in ctx.send_calls[0]["embed"].fields if field.name == "Link Safety")
+            self.assertIn("lookup candidate only, no action", link_safety_field.value)
         finally:
             await cog.service.close()
 
