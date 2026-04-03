@@ -240,6 +240,10 @@ class EventsCog(commands.Cog):
         if payload.guild_id is None:
             return
 
+        confessions_service = getattr(self.bot, "confessions_service", None)
+        if confessions_service is not None:
+            await confessions_service.handle_raw_message_delete(payload)
+
         question_drops_service = getattr(self.bot, "question_drops_service", None)
         if question_drops_service is not None:
             await question_drops_service.handle_raw_message_delete(payload)

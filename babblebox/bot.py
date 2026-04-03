@@ -22,6 +22,7 @@ COGS = (
     "babblebox.cogs.identity",
     "babblebox.cogs.shield",
     "babblebox.cogs.admin",
+    "babblebox.cogs.confessions",
     "babblebox.cogs.events",
 )
 
