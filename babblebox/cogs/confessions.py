@@ -74,16 +74,28 @@ class ConfessionComposerModal(discord.ui.Modal, title="Anonymous Confession"):
         if interaction.guild is None or interaction.user is None:
             await interaction.response.send_message("Anonymous confessions only work inside a server.", ephemeral=True)
             return
-        result = await self.cog.service.submit_confession(
-            interaction.guild,
-            author_id=interaction.user.id,
-            content=self.body_input.value,
-            link=self.link_input.value,
-            attachments=list(self.upload_input.values),
-        )
-        embed = self.cog.service.build_member_result_embed(result)
-        view = self.cog.service.build_member_result_view(result)
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        try:
+            result = await self.cog.service.submit_confession(
+                interaction.guild,
+                author_id=interaction.user.id,
+                content=self.body_input.value,
+                link=self.link_input.value,
+                attachments=list(self.upload_input.values),
+            )
+            embed = self.cog.service.build_member_result_embed(result)
+            view = self.cog.service.build_member_result_view(result)
+            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        except Exception:
+            embed = ge.make_status_embed(
+                "Confessions Unavailable",
+                "Babblebox could not process that confession safely right now. Please try again in a moment.",
+                tone="warning",
+                footer="Babblebox Confessions",
+            )
+            if interaction.response.is_done():
+                await interaction.followup.send(embed=embed, ephemeral=True)
+            else:
+                await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 class ConfessionMemberPanelView(discord.ui.View):
@@ -150,7 +162,19 @@ class ConfessionReviewView(discord.ui.View):
         )
 
         async def _callback(interaction: discord.Interaction):
-            await self._handle_action(interaction, action)
+            try:
+                await self._handle_action(interaction, action)
+            except Exception:
+                embed = ge.make_status_embed(
+                    "Review Action Failed",
+                    "Babblebox could not finish that review action safely. Refresh the queue and try again.",
+                    tone="warning",
+                    footer="Babblebox Confessions",
+                )
+                if interaction.response.is_done():
+                    await interaction.followup.send(embed=embed, ephemeral=True)
+                else:
+                    await interaction.response.send_message(embed=embed, ephemeral=True)
 
         button.callback = _callback
         return button

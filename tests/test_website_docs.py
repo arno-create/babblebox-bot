@@ -12,6 +12,7 @@ class WebsiteDocsTests(unittest.TestCase):
         for anchor in (
             'id="getting-started"',
             'id="visibility"',
+            'id="confessions"',
             'id="party-games"',
             'id="daily-arcade"',
             'id="buddy-profile-vault"',
@@ -20,7 +21,7 @@ class WebsiteDocsTests(unittest.TestCase):
             'id="faq"',
         ):
             self.assertIn(anchor, help_html)
-        for command in ("/daily", "/buddy", "/profile", "/vault", "/watch", "/later", "/capture", "/remind", "/afk", "/shield panel"):
+        for command in ("/daily", "/buddy", "/profile", "/vault", "/watch", "/later", "/capture", "/remind", "/afk", "/shield panel", "/confess", "/confessions moderate"):
             self.assertIn(command, help_html)
         self.assertIn("Strict = reply to the armed question only", help_html)
         self.assertIn("1-10 drops per day", help_html)
@@ -37,6 +38,8 @@ class WebsiteDocsTests(unittest.TestCase):
         self.assertIn("Coders need server DMs open before the room starts.", help_html)
         self.assertNotIn("shieldaiglobal", help_html.casefold())
         self.assertNotIn("dropscelebaiglobal", help_html.casefold())
+        self.assertIn("staff-blind", help_html)
+        self.assertIn("Image confessions always go through private review", help_html)
 
     def test_help_page_is_linked_from_site_shells(self):
         index_html = (ROOT / "index.html").read_text(encoding="utf-8")
@@ -70,6 +73,10 @@ class WebsiteDocsTests(unittest.TestCase):
             "{category.name}",
             "/hunt guess",
             "Pattern Hunt coder role DMs",
+            "Anonymous Confessions",
+            "/confess",
+            "/confessions moderate",
+            "PYTHONPATH=. pytest -q",
         ):
             self.assertIn(text, readme)
 
@@ -85,12 +92,29 @@ class WebsiteDocsTests(unittest.TestCase):
             "{user.mention}",
             "{category.name}",
             "Pattern Hunt coders need server DMs open before the round starts.",
+            "anonymous confessions",
         ):
             self.assertIn(text, index_html)
 
         self.assertNotIn("dropscelebaiglobal", readme.casefold())
         self.assertNotIn("dropscelebaiglobal", index_html.casefold())
         self.assertNotIn("/drops panel", readme)
+
+    def test_privacy_docs_cover_confessions_storage_and_staff_blind_behavior(self):
+        privacy_md = (ROOT / "PRIVACY.md").read_text(encoding="utf-8")
+        privacy_html = (ROOT / "privacy.html").read_text(encoding="utf-8")
+
+        for text in (
+            "anonymous confessions",
+            "staff-blind",
+            "bot-private author mapping",
+            "raw attachment filenames",
+            "raw Discord CDN URLs",
+            "Resolved anonymous confession rows scrub previews",
+        ):
+            self.assertIn(text, privacy_md if text != "Resolved anonymous confession rows scrub previews" else privacy_html)
+        self.assertIn("anonymous confession rows scrub previews", privacy_md.casefold())
+        self.assertIn("confession ID and case ID only", privacy_html)
 
     def test_homepage_and_readme_use_current_proof_assets(self):
         index_html = (ROOT / "index.html").read_text(encoding="utf-8")

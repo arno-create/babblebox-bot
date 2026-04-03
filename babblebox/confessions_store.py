@@ -134,6 +134,17 @@ def _clean_string_list(values: Any) -> list[str]:
     return sorted(cleaned)
 
 
+def _clean_url_list(values: Any) -> list[str]:
+    if not isinstance(values, list):
+        return []
+    cleaned = []
+    for value in values:
+        url = _clean_optional_text(value, max_length=500)
+        if url:
+            cleaned.append(url)
+    return cleaned[:3]
+
+
 def _parse_datetime(value: Any) -> datetime | None:
     if isinstance(value, datetime):
         return value.astimezone(timezone.utc) if value.tzinfo else value.replace(tzinfo=timezone.utc)
@@ -160,19 +171,15 @@ def _clean_attachment_meta(values: Any) -> list[dict[str, Any]]:
     for item in values:
         if not isinstance(item, dict):
             continue
-        url = _clean_optional_text(item.get("url"), max_length=500)
-        filename = _clean_optional_text(item.get("filename"), max_length=120)
-        if url is None and filename is None:
+        kind = _clean_optional_text(item.get("kind"), max_length=24)
+        if kind is None:
             continue
         size = item.get("size")
         width = item.get("width")
         height = item.get("height")
         cleaned.append(
             {
-                "url": url,
-                "filename": filename,
-                "content_type": _clean_optional_text(item.get("content_type"), max_length=120),
-                "kind": _clean_optional_text(item.get("kind"), max_length=24),
+                "kind": kind,
                 "size": size if isinstance(size, int) and size >= 0 else None,
                 "width": width if isinstance(width, int) and width >= 0 else None,
                 "height": height if isinstance(height, int) and height >= 0 else None,
@@ -266,6 +273,25 @@ def normalize_author_link(payload: Any) -> dict[str, Any] | None:
         "submission_id": submission_id,
         "author_user_id": author_user_id,
         "created_at": created_at,
+    }
+
+
+def normalize_private_media(payload: Any) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    guild_id = _clean_int(payload.get("guild_id"))
+    submission_id = _clean_optional_text(payload.get("submission_id"), max_length=64)
+    created_at = _serialize_datetime(payload.get("created_at"))
+    updated_at = _serialize_datetime(payload.get("updated_at"))
+    attachment_urls = _clean_url_list(payload.get("attachment_urls"))
+    if guild_id is None or submission_id is None or created_at is None or updated_at is None:
+        return None
+    return {
+        "guild_id": guild_id,
+        "submission_id": submission_id,
+        "attachment_urls": attachment_urls,
+        "created_at": created_at,
+        "updated_at": updated_at,
     }
 
 
@@ -476,6 +502,20 @@ def _review_queue_from_row(row: Any) -> dict[str, Any] | None:
     )
 
 
+def _private_media_from_row(row: Any) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    return normalize_private_media(
+        {
+            "guild_id": row["guild_id"],
+            "submission_id": row["submission_id"],
+            "attachment_urls": decode_postgres_json_array(row["attachment_urls"], label="confession_private_media.attachment_urls"),
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+        }
+    )
+
+
 class _BaseConfessionsStore:
     backend_name = "unknown"
 
@@ -524,6 +564,15 @@ class _BaseConfessionsStore:
     async def fetch_author_link(self, submission_id: str) -> dict[str, Any] | None:
         raise NotImplementedError
 
+    async def upsert_private_media(self, record: dict[str, Any]):
+        raise NotImplementedError
+
+    async def fetch_private_media(self, submission_id: str) -> dict[str, Any] | None:
+        raise NotImplementedError
+
+    async def delete_private_media(self, submission_id: str):
+        raise NotImplementedError
+
     async def fetch_enforcement_state(self, guild_id: int, user_id: int) -> dict[str, Any] | None:
         raise NotImplementedError
 
@@ -531,6 +580,9 @@ class _BaseConfessionsStore:
         raise NotImplementedError
 
     async def list_review_queues(self) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    async def list_review_surfaces(self, guild_id: int, *, limit: int = 25) -> list[dict[str, Any]]:
         raise NotImplementedError
 
     async def fetch_review_queue(self, guild_id: int) -> dict[str, Any] | None:
@@ -553,6 +605,7 @@ class _MemoryConfessionsStore(_BaseConfessionsStore):
         self.configs: dict[int, dict[str, Any]] = {}
         self.submissions: dict[str, dict[str, Any]] = {}
         self.author_links: dict[str, dict[str, Any]] = {}
+        self.private_media: dict[str, dict[str, Any]] = {}
         self.enforcement_states: dict[tuple[int, int], dict[str, Any]] = {}
         self.cases: dict[tuple[int, str], dict[str, Any]] = {}
         self.review_queues: dict[int, dict[str, Any]] = {}
@@ -561,6 +614,7 @@ class _MemoryConfessionsStore(_BaseConfessionsStore):
         self.configs = {}
         self.submissions = {}
         self.author_links = {}
+        self.private_media = {}
         self.enforcement_states = {}
         self.cases = {}
         self.review_queues = {}
@@ -639,6 +693,18 @@ class _MemoryConfessionsStore(_BaseConfessionsStore):
         record = self.author_links.get(submission_id)
         return deepcopy(record) if record is not None else None
 
+    async def upsert_private_media(self, record: dict[str, Any]):
+        normalized = normalize_private_media(record)
+        if normalized is not None:
+            self.private_media[normalized["submission_id"]] = normalized
+
+    async def fetch_private_media(self, submission_id: str) -> dict[str, Any] | None:
+        record = self.private_media.get(submission_id)
+        return deepcopy(record) if record is not None else None
+
+    async def delete_private_media(self, submission_id: str):
+        self.private_media.pop(submission_id, None)
+
     async def fetch_enforcement_state(self, guild_id: int, user_id: int) -> dict[str, Any] | None:
         record = self.enforcement_states.get((guild_id, user_id))
         return deepcopy(record) if record is not None else None
@@ -656,6 +722,31 @@ class _MemoryConfessionsStore(_BaseConfessionsStore):
     async def fetch_review_queue(self, guild_id: int) -> dict[str, Any] | None:
         record = self.review_queues.get(guild_id)
         return deepcopy(record) if record is not None else None
+
+    async def list_review_surfaces(self, guild_id: int, *, limit: int = 25) -> list[dict[str, Any]]:
+        rows = []
+        for record in self.cases.values():
+            if record["guild_id"] != guild_id or record.get("status") != "open" or record.get("case_kind") != "review":
+                continue
+            submission = self.submissions.get(record["submission_id"])
+            if submission is None or submission.get("status") != "queued":
+                continue
+            rows.append(
+                {
+                    "case_id": record["case_id"],
+                    "confession_id": submission["confession_id"],
+                    "case_kind": record["case_kind"],
+                    "status": record["status"],
+                    "review_version": int(record.get("review_version") or 0),
+                    "staff_preview": submission.get("staff_preview"),
+                    "flag_codes": list(submission.get("flag_codes") or ()),
+                    "attachment_meta": deepcopy(submission.get("attachment_meta") or []),
+                    "shared_link_url": submission.get("shared_link_url"),
+                    "created_at": submission.get("created_at"),
+                }
+            )
+        rows.sort(key=lambda item: item.get("created_at") or "")
+        return rows[:limit]
 
     async def upsert_review_queue(self, record: dict[str, Any]):
         normalized = normalize_review_queue(record)
@@ -774,6 +865,15 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                 "guild_id BIGINT NOT NULL, "
                 "author_user_id BIGINT NOT NULL, "
                 "created_at TIMESTAMPTZ NOT NULL"
+                ")"
+            ),
+            (
+                "CREATE TABLE IF NOT EXISTS confession_private_media ("
+                "submission_id TEXT PRIMARY KEY REFERENCES confession_submissions(submission_id) ON DELETE CASCADE, "
+                "guild_id BIGINT NOT NULL, "
+                "attachment_urls JSONB NOT NULL DEFAULT '[]'::jsonb, "
+                "created_at TIMESTAMPTZ NOT NULL, "
+                "updated_at TIMESTAMPTZ NOT NULL"
                 ")"
             ),
             (
@@ -1116,6 +1216,42 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
             )
         return _author_link_from_row(row)
 
+    async def upsert_private_media(self, record: dict[str, Any]):
+        normalized = normalize_private_media(record)
+        if normalized is None:
+            return
+        async with self._io_lock:
+            async with self._pool.acquire() as conn:
+                await conn.execute(
+                    (
+                        "INSERT INTO confession_private_media (submission_id, guild_id, attachment_urls, created_at, updated_at) "
+                        "VALUES ($1, $2, $3::jsonb, $4, $5) "
+                        "ON CONFLICT (submission_id) DO UPDATE SET "
+                        "guild_id = EXCLUDED.guild_id, "
+                        "attachment_urls = EXCLUDED.attachment_urls, "
+                        "created_at = EXCLUDED.created_at, "
+                        "updated_at = EXCLUDED.updated_at"
+                    ),
+                    normalized["submission_id"],
+                    normalized["guild_id"],
+                    json.dumps(normalized["attachment_urls"]),
+                    _parse_datetime(normalized["created_at"]),
+                    _parse_datetime(normalized["updated_at"]),
+                )
+
+    async def fetch_private_media(self, submission_id: str) -> dict[str, Any] | None:
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT submission_id, guild_id, attachment_urls, created_at, updated_at FROM confession_private_media WHERE submission_id = $1",
+                submission_id,
+            )
+        return _private_media_from_row(row)
+
+    async def delete_private_media(self, submission_id: str):
+        async with self._io_lock:
+            async with self._pool.acquire() as conn:
+                await conn.execute("DELETE FROM confession_private_media WHERE submission_id = $1", submission_id)
+
     async def fetch_enforcement_state(self, guild_id: int, user_id: int) -> dict[str, Any] | None:
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -1178,6 +1314,39 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                 guild_id,
             )
         return _review_queue_from_row(row)
+
+    async def list_review_surfaces(self, guild_id: int, *, limit: int = 25) -> list[dict[str, Any]]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                (
+                    "SELECT "
+                    "c.case_id, c.case_kind, c.status, c.review_version, "
+                    "s.confession_id, s.staff_preview, s.flag_codes, s.attachment_meta, s.shared_link_url, s.created_at "
+                    "FROM confession_cases c "
+                    "JOIN confession_submissions s ON s.submission_id = c.submission_id "
+                    "WHERE c.guild_id = $1 AND c.status = 'open' AND c.case_kind = 'review' AND s.status = 'queued' "
+                    "ORDER BY s.created_at ASC LIMIT $2"
+                ),
+                guild_id,
+                limit,
+            )
+        surfaces = []
+        for row in rows:
+            surfaces.append(
+                {
+                    "case_id": row["case_id"],
+                    "confession_id": row["confession_id"],
+                    "case_kind": row["case_kind"],
+                    "status": row["status"],
+                    "review_version": int(row["review_version"] or 0),
+                    "staff_preview": row["staff_preview"],
+                    "flag_codes": decode_postgres_json_array(row["flag_codes"], label="confession_submissions.flag_codes"),
+                    "attachment_meta": decode_postgres_json_array(row["attachment_meta"], label="confession_submissions.attachment_meta"),
+                    "shared_link_url": row["shared_link_url"],
+                    "created_at": _serialize_datetime(row["created_at"]),
+                }
+            )
+        return surfaces
 
     async def upsert_review_queue(self, record: dict[str, Any]):
         normalized = normalize_review_queue(record)
@@ -1301,6 +1470,15 @@ class ConfessionsStore:
     async def fetch_author_link(self, submission_id: str) -> dict[str, Any] | None:
         return await self._store.fetch_author_link(submission_id)
 
+    async def upsert_private_media(self, record: dict[str, Any]):
+        await self._store.upsert_private_media(record)
+
+    async def fetch_private_media(self, submission_id: str) -> dict[str, Any] | None:
+        return await self._store.fetch_private_media(submission_id)
+
+    async def delete_private_media(self, submission_id: str):
+        await self._store.delete_private_media(submission_id)
+
     async def fetch_enforcement_state(self, guild_id: int, user_id: int) -> dict[str, Any] | None:
         return await self._store.fetch_enforcement_state(guild_id, user_id)
 
@@ -1312,6 +1490,9 @@ class ConfessionsStore:
 
     async def fetch_review_queue(self, guild_id: int) -> dict[str, Any] | None:
         return await self._store.fetch_review_queue(guild_id)
+
+    async def list_review_surfaces(self, guild_id: int, *, limit: int = 25) -> list[dict[str, Any]]:
+        return await self._store.list_review_surfaces(guild_id, limit=limit)
 
     async def upsert_review_queue(self, record: dict[str, Any]):
         await self._store.upsert_review_queue(record)

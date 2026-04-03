@@ -2,10 +2,11 @@
 
 Babblebox is a modular Discord bot built with Python and `discord.py`.
 
-It is designed around six clear product lanes:
+It is designed around seven clear product lanes:
 
 - Party Games for active voice/text hangouts
 - Question Drops for scheduled guild knowledge play and mastery progression
+- Anonymous Confessions for staff-blind community submissions
 - Everyday Utilities for quiet server life
 - Daily Arcade for low-player-count return visits
 - Buddy / Profile / Vault for identity, streaks, and showable progress
@@ -90,6 +91,18 @@ Babblebox is intentionally compact:
   - duration parsing for `30m`, `2h`, `2d`, and compact combos like `1h30m`
   - elapsed and return-time messaging
 
+### Anonymous Confessions
+
+- private composer launched with `/confess`
+- staff-blind moderation by confession ID and case ID only
+- one trusted link total per confession
+- built-in safe families for mainstream social, docs, wiki, and developer links when trusted links are enabled
+- shorteners, link-in-bio hubs, storefronts, malicious domains, and adult domains blocked unless a guild explicitly allowlists them
+- image attachments are optional but always routed through private review
+- attachment filenames and Discord CDN URLs stay out of staff-visible surfaces
+- moderation supports approve, deny, delete, pause, clear, and false-positive flows without revealing the author
+- terminal confession records scrub body text, previews, links, fingerprints, and attachment metadata to keep storage bounded
+
 ### Shield / Safety
 
 - Babblebox Shield
@@ -158,6 +171,7 @@ Slash commands and the `bb!` prefix both work.
 | Slash | Prefix | Purpose |
 | --- | --- | --- |
 | `/help` | `bb!help` | Open the in-bot manual |
+| `/confess` | n/a | Open the anonymous confession composer |
 | `/ping` | `bb!ping` | Health check |
 | `/play` | `bb!play` | Open a game lobby |
 | `/stop` | `bb!stop` | Force stop the active lobby/game |
@@ -325,6 +339,22 @@ Daily visibility notes:
 | `/buddy stats` | `bb!buddy stats` | View Buddy progression |
 | `/profile` | `bb!profile` | View a public-friendly profile card |
 | `/vault` | `bb!vault` | Open your more personal vault view |
+
+### Anonymous Confessions
+
+| Slash | Prefix | Purpose |
+| --- | --- | --- |
+| `/confess` | n/a | Open the private confession composer |
+| `/confessions` | `bb!confessions` | Open the admin control panel for setup, review, and status |
+| `/confessions moderate` | `bb!confessions moderate` | Approve, deny, delete, pause, ban, clear, or mark a confession false positive by confession ID or case ID |
+
+Confession notes:
+
+- staff see confession IDs and case IDs, never the author
+- image confessions always enter the private review queue
+- trusted-link mode allows Babblebox's bundled safe families for mainstream social, docs, wiki, and developer domains
+- one trusted link total is allowed per confession
+- attachment filenames and raw Discord attachment URLs are kept out of staff-visible embeds
 
 ## Watch V2 Notes
 
@@ -642,6 +672,12 @@ Enable:
 
 ```bash
 python main.py
+```
+
+### Tests
+
+```bash
+PYTHONPATH=. pytest -q
 ```
 
 ## Recommended Permissions

@@ -10,7 +10,7 @@ Babblebox is intentionally compact and privacy-aware by design:
 - no media or attachment blob storage in Postgres
 - no durable quote-feed archive for Moment Cards
 - no always-on AI scanning by default
-- private-first handling for sensitive utility flows such as Watch, reminders, Later, Capture, and Shield configuration
+- private-first handling for sensitive utility flows such as Watch, reminders, Later, Capture, anonymous confessions, and Shield configuration
 
 ## Scope
 
@@ -29,6 +29,7 @@ Depending on the feature being used, Babblebox may process or store:
 - Discord identifiers such as user IDs, guild IDs, channel IDs, message IDs, role IDs, and timestamps
 - compact feature configuration and state, including Watch preferences, ignored channels or users, Later markers, reminders, AFK state, AFK schedules, Daily Arcade results, Buddy or profile state, and Shield or admin configuration
 - limited message or attachment context needed to respond to commands, build Moment Cards from visible messages, deliver Watch alerts, process Capture requests, or evaluate locally flagged Shield events
+- anonymous confession submission text, trusted-link fields, compact review metadata, and bot-private author mappings needed to run staff-blind moderation
 
 ## Information Babblebox Intentionally Avoids Storing Durably
 
@@ -36,6 +37,7 @@ Babblebox is designed not to keep certain high-churn or high-risk data as long-t
 
 - a general-purpose message-content archive
 - media or attachment blobs in Postgres
+- raw attachment filenames or raw Discord CDN URLs in staff-visible confession records
 - a durable quote-feed database for Moment Cards
 - a full deleted-message archive table
 - long-term archives of DM bodies or Capture transcript bodies
@@ -49,6 +51,7 @@ Babblebox uses information to operate the bot and its features, including:
 - delivering Watch alerts, reminders, Later markers, Capture output, AFK behavior, and similar utilities
 - maintaining Daily Arcade progress, compact identity state, and other restart-safe feature state
 - applying optional Shield and admin lifecycle workflows where server administrators enable them
+- accepting and moderating anonymous confessions without exposing the author to server staff
 - keeping the service reliable on constrained infrastructure through compact, purpose-bound persistence
 
 Babblebox is not designed as an ad network, data brokerage system, or marketing profile builder.
@@ -62,6 +65,7 @@ Babblebox intentionally uses different visibility defaults depending on the feat
 - Watch alerts are DM-only
 - Capture transcripts are delivered privately rather than kept as long-term database archives
 - Later markers, reminders, and sensitive setup flows are private-first
+- anonymous confessions are submitted privately; staff review by confession ID and case ID only, and image confessions always route through private review when enabled
 - Shield and admin configuration flows are intended for administrators or moderators rather than general public display
 
 Server administrators still influence visibility through Discord permissions, log channels, review channels, and command usage in their own server.
@@ -90,6 +94,7 @@ Examples:
 - Daily Arcade raw result rows are designed to prune after 180 days while streak and lifetime totals remain in profile-level storage
 - short-lived admin lifecycle rows remain only while they are operationally relevant
 - ban-return candidate records are intended to have a bounded purge window
+- terminal anonymous confession rows scrub previews, body text, trusted-link fields, fingerprints, similarity keys, and attachment metadata after resolution while the bot-private author mapping is retained only for moderation continuity
 - Watch settings, reminders, AFK settings, and Later markers remain until changed, cleared, expired, or removed
 
 Deletion timing may depend on the feature. Some state expires naturally, some is replaced by newer state, and some is removed when a user or administrator clears it.

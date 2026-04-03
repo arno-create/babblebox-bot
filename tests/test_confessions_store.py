@@ -6,6 +6,7 @@ from babblebox.confessions_store import (
     _submission_from_row,
     default_confession_config,
     normalize_confession_config,
+    normalize_private_media,
     normalize_submission,
 )
 
@@ -98,6 +99,7 @@ class ConfessionsStoreNormalizationTests(unittest.TestCase):
                         "filename": "image.png",
                         "url": "https://cdn.discordapp.com/image.png",
                         "content_type": "image/png",
+                        "kind": "image",
                         "size": 1234,
                         "bytes": b"raw-bytes-should-not-survive",
                     }
@@ -106,9 +108,21 @@ class ConfessionsStoreNormalizationTests(unittest.TestCase):
             }
         )
         self.assertIsNotNone(record)
-        self.assertEqual(record["attachment_meta"][0]["filename"], "image.png")
         self.assertEqual(record["shared_link_url"], "https://www.google.com/search?q=hello")
         self.assertNotIn("bytes", record["attachment_meta"][0])
+        self.assertEqual(set(record["attachment_meta"][0].keys()), {"kind", "size", "width", "height", "spoiler"})
+
+    def test_normalize_private_media_keeps_only_attachment_urls(self):
+        record = normalize_private_media(
+            {
+                "guild_id": 10,
+                "submission_id": "sub-1",
+                "attachment_urls": ["https://cdn.discordapp.com/image.png", " ", None],
+                "created_at": "2026-04-03T00:00:00+00:00",
+                "updated_at": "2026-04-03T00:01:00+00:00",
+            }
+        )
+        self.assertEqual(record["attachment_urls"], ["https://cdn.discordapp.com/image.png"])
 
 
 class ConfessionsPostgresStoreTests(unittest.IsolatedAsyncioTestCase):
@@ -126,7 +140,7 @@ class ConfessionsPostgresStoreTests(unittest.IsolatedAsyncioTestCase):
             "similarity_key": "abc",
             "flag_codes": json.dumps(["adult_language", "link_unsafe"]),
             "attachment_meta": json.dumps(
-                [{"filename": "image.png", "url": "https://cdn.discordapp.com/image.png", "content_type": "image/png"}]
+                [{"kind": "image", "size": 12, "width": 8, "height": 8, "spoiler": False}]
             ),
             "posted_channel_id": None,
             "posted_message_id": None,
@@ -138,7 +152,7 @@ class ConfessionsPostgresStoreTests(unittest.IsolatedAsyncioTestCase):
         record = _submission_from_row(row)
         self.assertEqual(record["shared_link_url"], "https://www.google.com/search?q=preview")
         self.assertEqual(record["flag_codes"], ["adult_language", "link_unsafe"])
-        self.assertEqual(record["attachment_meta"][0]["filename"], "image.png")
+        self.assertEqual(record["attachment_meta"][0]["kind"], "image")
 
     async def test_schema_bootstrap_creates_confession_tables_and_indexes(self):
         connection = _FakeConnection()
@@ -151,6 +165,7 @@ class ConfessionsPostgresStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("CREATE TABLE IF NOT EXISTS confession_guild_configs", executed)
         self.assertIn("CREATE TABLE IF NOT EXISTS confession_submissions", executed)
         self.assertIn("CREATE TABLE IF NOT EXISTS confession_author_links", executed)
+        self.assertIn("CREATE TABLE IF NOT EXISTS confession_private_media", executed)
         self.assertIn("CREATE TABLE IF NOT EXISTS confession_enforcement_states", executed)
         self.assertIn("CREATE TABLE IF NOT EXISTS confession_cases", executed)
         self.assertIn("CREATE TABLE IF NOT EXISTS confession_review_queues", executed)
