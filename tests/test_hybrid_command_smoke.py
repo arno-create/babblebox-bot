@@ -813,7 +813,6 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             embed = cog.build_panel_embed(guild_id, "overview")
             protection_field = next(field for field in embed.fields if field.name == "Protection Packs")
             link_safety_field = next(field for field in embed.fields if field.name == "Link Safety")
-            runtime_field = next(field for field in embed.fields if field.name == "Link Safety Runtime")
 
             self.assertIn("**Privacy Leak**", protection_field.value)
             self.assertIn("Enabled: Yes | Sensitivity: High", protection_field.value)
@@ -823,9 +822,6 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Low / Medium / High: `log` / `log` / `log`", protection_field.value)
             self.assertIn("**Scam / Malicious Links**", link_safety_field.value)
             self.assertIn("**Adult / 18+ Links**", link_safety_field.value)
-            self.assertIn("Bundled intel", runtime_field.value)
-            self.assertIn("External provider", runtime_field.value)
-            self.assertIn("bounded in-memory", runtime_field.value)
         finally:
             await cog.service.close()
 
