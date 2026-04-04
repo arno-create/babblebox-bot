@@ -42,6 +42,8 @@ def default_confession_config(guild_id: int | None = None) -> dict[str, Any]:
         "allow_trusted_mainstream_links": True,
         "custom_allow_domains": [],
         "custom_block_domains": [],
+        "allowed_role_ids": [],
+        "blocked_role_ids": [],
         "allow_images": False,
         "allow_anonymous_replies": False,
         "allow_self_edit": False,
@@ -142,6 +144,17 @@ def _clean_string_list(values: Any) -> list[str]:
     return sorted(cleaned)
 
 
+def _clean_int_list(values: Any) -> list[int]:
+    if not isinstance(values, (list, tuple, set)):
+        return []
+    cleaned = {
+        int(value)
+        for value in values
+        if isinstance(value, int) and value > 0
+    }
+    return sorted(cleaned)
+
+
 def _normalize_private_media_url(raw_value: Any) -> str | None:
     cleaned = _clean_optional_text(raw_value, max_length=500)
     if cleaned is None:
@@ -226,6 +239,8 @@ def normalize_confession_config(guild_id: int, payload: Any) -> dict[str, Any]:
     cleaned["allow_trusted_mainstream_links"] = bool(payload.get("allow_trusted_mainstream_links", True))
     cleaned["custom_allow_domains"] = _clean_domain_list(payload.get("custom_allow_domains"))
     cleaned["custom_block_domains"] = _clean_domain_list(payload.get("custom_block_domains"))
+    cleaned["allowed_role_ids"] = _clean_int_list(payload.get("allowed_role_ids"))
+    cleaned["blocked_role_ids"] = _clean_int_list(payload.get("blocked_role_ids"))
     cleaned["allow_images"] = bool(payload.get("allow_images", False))
     cleaned["allow_anonymous_replies"] = bool(payload.get("allow_anonymous_replies", False))
     cleaned["allow_self_edit"] = bool(payload.get("allow_self_edit", False))
@@ -485,6 +500,14 @@ def _config_from_row(row: Any) -> dict[str, Any] | None:
                 row["custom_block_domains"],
                 label="confession_guild_configs.custom_block_domains",
             ),
+            "allowed_role_ids": decode_postgres_json_array(
+                row.get("allowed_role_ids"),
+                label="confession_guild_configs.allowed_role_ids",
+            ),
+            "blocked_role_ids": decode_postgres_json_array(
+                row.get("blocked_role_ids"),
+                label="confession_guild_configs.blocked_role_ids",
+            ),
             "allow_images": row["allow_images"],
             "allow_anonymous_replies": row.get("allow_anonymous_replies"),
             "allow_self_edit": row.get("allow_self_edit"),
@@ -594,6 +617,9 @@ class _BaseConfessionsStore:
     async def fetch_submission_by_message_id(self, guild_id: int, message_id: int) -> dict[str, Any] | None:
         raise NotImplementedError
 
+    async def list_published_top_level_submissions(self, guild_id: int) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
     async def list_recent_submissions_for_author(self, guild_id: int, author_user_id: int, *, limit: int = 5) -> list[dict[str, Any]]:
         raise NotImplementedError
 
@@ -698,6 +724,19 @@ class _MemoryConfessionsStore(_BaseConfessionsStore):
             if record["guild_id"] == guild_id and int(record.get("posted_message_id") or 0) == message_id:
                 return deepcopy(record)
         return None
+
+    async def list_published_top_level_submissions(self, guild_id: int) -> list[dict[str, Any]]:
+        rows = []
+        for record in self.submissions.values():
+            if record["guild_id"] != guild_id:
+                continue
+            if record.get("status") != "published" or record.get("submission_kind") != "confession":
+                continue
+            if not isinstance(record.get("posted_channel_id"), int) or not isinstance(record.get("posted_message_id"), int):
+                continue
+            rows.append(deepcopy(record))
+        rows.sort(key=lambda item: item.get("published_at") or item.get("created_at") or "")
+        return rows
 
     async def list_recent_submissions_for_author(self, guild_id: int, author_user_id: int, *, limit: int = 5) -> list[dict[str, Any]]:
         rows = []
@@ -885,6 +924,8 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                 "allow_trusted_mainstream_links BOOLEAN NOT NULL DEFAULT TRUE, "
                 "custom_allow_domains JSONB NOT NULL DEFAULT '[]'::jsonb, "
                 "custom_block_domains JSONB NOT NULL DEFAULT '[]'::jsonb, "
+                "allowed_role_ids JSONB NOT NULL DEFAULT '[]'::jsonb, "
+                "blocked_role_ids JSONB NOT NULL DEFAULT '[]'::jsonb, "
                 "allow_images BOOLEAN NOT NULL DEFAULT FALSE, "
                 "allow_anonymous_replies BOOLEAN NOT NULL DEFAULT FALSE, "
                 "allow_self_edit BOOLEAN NOT NULL DEFAULT FALSE, "
@@ -995,6 +1036,8 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
             "ALTER TABLE confession_guild_configs ADD COLUMN IF NOT EXISTS allow_trusted_mainstream_links BOOLEAN NOT NULL DEFAULT TRUE",
             "ALTER TABLE confession_guild_configs ADD COLUMN IF NOT EXISTS custom_allow_domains JSONB NOT NULL DEFAULT '[]'::jsonb",
             "ALTER TABLE confession_guild_configs ADD COLUMN IF NOT EXISTS custom_block_domains JSONB NOT NULL DEFAULT '[]'::jsonb",
+            "ALTER TABLE confession_guild_configs ADD COLUMN IF NOT EXISTS allowed_role_ids JSONB NOT NULL DEFAULT '[]'::jsonb",
+            "ALTER TABLE confession_guild_configs ADD COLUMN IF NOT EXISTS blocked_role_ids JSONB NOT NULL DEFAULT '[]'::jsonb",
             "ALTER TABLE confession_guild_configs ADD COLUMN IF NOT EXISTS allow_images BOOLEAN NOT NULL DEFAULT FALSE",
             "ALTER TABLE confession_guild_configs ADD COLUMN IF NOT EXISTS max_images SMALLINT NOT NULL DEFAULT 3",
             "ALTER TABLE confession_guild_configs ADD COLUMN IF NOT EXISTS panel_channel_id BIGINT NULL",
@@ -1073,12 +1116,13 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                     (
                         "INSERT INTO confession_guild_configs ("
                         "guild_id, enabled, confession_channel_id, panel_channel_id, panel_message_id, review_channel_id, appeals_channel_id, review_mode, block_adult_language, "
-                        "allow_trusted_mainstream_links, custom_allow_domains, custom_block_domains, allow_images, allow_anonymous_replies, allow_self_edit, max_images, "
+                        "allow_trusted_mainstream_links, custom_allow_domains, custom_block_domains, allowed_role_ids, blocked_role_ids, "
+                        "allow_images, allow_anonymous_replies, allow_self_edit, max_images, "
                         "cooldown_seconds, burst_limit, burst_window_seconds, auto_suspend_hours, strike_temp_ban_threshold, temp_ban_days, strike_perm_ban_threshold, updated_at"
                         ") VALUES ("
                         "$1, $2, $3, $4, $5, $6, $7, $8, $9, "
-                        "$10, $11::jsonb, $12::jsonb, $13, $14, $15, $16, "
-                        "$17, $18, $19, $20, $21, $22, $23, timezone('utc', now())"
+                        "$10, $11::jsonb, $12::jsonb, $13::jsonb, $14::jsonb, $15, $16, $17, $18, "
+                        "$19, $20, $21, $22, $23, $24, $25, timezone('utc', now())"
                         ") "
                         "ON CONFLICT (guild_id) DO UPDATE SET "
                         "enabled = EXCLUDED.enabled, "
@@ -1092,6 +1136,8 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                         "allow_trusted_mainstream_links = EXCLUDED.allow_trusted_mainstream_links, "
                         "custom_allow_domains = EXCLUDED.custom_allow_domains, "
                         "custom_block_domains = EXCLUDED.custom_block_domains, "
+                        "allowed_role_ids = EXCLUDED.allowed_role_ids, "
+                        "blocked_role_ids = EXCLUDED.blocked_role_ids, "
                         "allow_images = EXCLUDED.allow_images, "
                         "allow_anonymous_replies = EXCLUDED.allow_anonymous_replies, "
                         "allow_self_edit = EXCLUDED.allow_self_edit, "
@@ -1117,6 +1163,8 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                     normalized["allow_trusted_mainstream_links"],
                     json.dumps(normalized["custom_allow_domains"]),
                     json.dumps(normalized["custom_block_domains"]),
+                    json.dumps(normalized["allowed_role_ids"]),
+                    json.dumps(normalized["blocked_role_ids"]),
                     normalized["allow_images"],
                     normalized["allow_anonymous_replies"],
                     normalized["allow_self_edit"],
@@ -1209,6 +1257,19 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                 message_id,
             )
         return _submission_from_row(row)
+
+    async def list_published_top_level_submissions(self, guild_id: int) -> list[dict[str, Any]]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                (
+                    "SELECT * FROM confession_submissions "
+                    "WHERE guild_id = $1 AND status = 'published' AND submission_kind = 'confession' "
+                    "AND posted_channel_id IS NOT NULL AND posted_message_id IS NOT NULL "
+                    "ORDER BY COALESCE(published_at, created_at) ASC"
+                ),
+                guild_id,
+            )
+        return [record for row in rows if (record := _submission_from_row(row)) is not None]
 
     async def list_recent_submissions_for_author(self, guild_id: int, author_user_id: int, *, limit: int = 5) -> list[dict[str, Any]]:
         async with self._pool.acquire() as conn:
@@ -1566,6 +1627,9 @@ class ConfessionsStore:
 
     async def fetch_submission_by_message_id(self, guild_id: int, message_id: int) -> dict[str, Any] | None:
         return await self._store.fetch_submission_by_message_id(guild_id, message_id)
+
+    async def list_published_top_level_submissions(self, guild_id: int) -> list[dict[str, Any]]:
+        return await self._store.list_published_top_level_submissions(guild_id)
 
     async def list_recent_submissions_for_author(self, guild_id: int, author_user_id: int, *, limit: int = 5) -> list[dict[str, Any]]:
         return await self._store.list_recent_submissions_for_author(guild_id, author_user_id, limit=limit)
