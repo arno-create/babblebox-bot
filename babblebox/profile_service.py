@@ -1270,6 +1270,7 @@ class ProfileService:
             ],
             "",
             f"{puzzle.prompt_label}: `{puzzle.scramble}`",
+            f"Difficulty: **{puzzle.difficulty_label}** | Length: **{puzzle.length}** | Profile: **{puzzle.profile.title()}**",
             _daily_active_progress_line(puzzle, result, public=public),
             f"Today: **{daily_status['solved_today']} / {len(puzzles)}** cleared | streak **{profile['active_streak']}**",
         ]
@@ -1315,6 +1316,7 @@ class ProfileService:
             lead,
             _share_grid(result),
             f"{puzzle.prompt_label}: `{puzzle.scramble}`",
+            f"Difficulty: **{puzzle.difficulty_label}** | Length: **{puzzle.length}** | Profile: **{puzzle.profile.title()}**",
             _daily_active_progress_line(puzzle, result, public=public),
         ]
         if hint_line is not None:

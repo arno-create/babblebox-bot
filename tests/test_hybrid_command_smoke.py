@@ -6,8 +6,10 @@ from typing import Optional
 from unittest.mock import AsyncMock, patch
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 
+from babblebox.app_command_hardening import harden_admin_root_group
 from babblebox import game_engine as ge
 from babblebox.cogs.admin import AdminCog
 from babblebox.cogs.confessions import ConfessionsCog
@@ -186,6 +188,20 @@ class FakeLobbyView:
 
 
 class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
+    async def _registered_root(self, cog_factory, *, root_name: str):
+        bot = commands.Bot(command_prefix="!", intents=discord.Intents.none())
+        try:
+            cog = cog_factory(bot)
+            await bot.add_cog(cog)
+            command = next(command for command in bot.tree.get_commands() if command.name == root_name)
+            return command, command.to_dict(bot.tree)
+        finally:
+            for loaded in list(bot.cogs.values()):
+                service = getattr(loaded, "service", None)
+                if service is not None:
+                    await service.close()
+            await bot.close()
+
     def test_help_pages_reflect_hardened_only16_and_pattern_hunt_copy(self):
         party_page = next(page for page in HELP_PAGES if page["title"] == "Party Games")
         self.assertIn("ask one clean number question, then wait for the first clear answer", party_page["body"])
@@ -198,9 +214,11 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         question_drops_page = next(page for page in HELP_PAGES if page["title"] == "Question Drops")
         self.assertIn("/drops status", question_drops_page["body"])
         self.assertIn("/drops roles status", question_drops_page["body"])
+        self.assertIn("/dropsadmin config", question_drops_page["body"])
         self.assertNotIn("/drops panel", question_drops_page["body"])
         self.assertIn("/dropsadmin mastery category", question_drops_page["body"])
         self.assertNotIn("/drops mastery category", question_drops_page["body"])
+        self.assertIn("difficulty profile", question_drops_page["body"])
         self.assertIn("template_action", question_drops_page["body"])
         self.assertIn("{user.mention}", question_drops_page["body"])
         self.assertIn("{category.name}", question_drops_page["body"])
@@ -208,6 +226,21 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("scholar ladder", question_drops_page["body"])
         daily_page = next(page for page in HELP_PAGES if page["title"] == "Daily Arcade")
         self.assertIn("Question Drops stay separate as the guild knowledge lane", daily_page["body"])
+
+    def test_dropsadmin_config_slash_choices_include_difficulty_profiles(self):
+        bot = commands.Bot(command_prefix="!", intents=discord.Intents.none())
+        payload = QuestionDropsCog.dropsadmin_config_command.app_command.to_dict(bot.tree)
+
+        difficulty_option = next(option for option in payload["options"] if option["name"] == "difficulty_profile")
+
+        self.assertEqual(
+            difficulty_option["choices"],
+            [
+                {"name": "Standard", "value": "standard"},
+                {"name": "Smart", "value": "smart"},
+                {"name": "Hard", "value": "hard"},
+            ],
+        )
 
     def test_question_drops_slash_tree_splits_public_and_admin_surfaces(self):
         cog = QuestionDropsCog(types.SimpleNamespace(loop=None))
@@ -223,18 +256,17 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(prefix_mastery_names, {"category", "recalc", "scholar"})
         self.assertEqual(admin_slash_mastery_names, {"category", "recalc", "scholar"})
 
-    def test_admin_only_roots_emit_hidden_guild_only_metadata(self):
-        bot = commands.Bot(command_prefix="!", intents=discord.Intents.none())
+    async def test_admin_only_roots_emit_hidden_guild_only_metadata(self):
         expected = {
-            "admin": AdminCog.admin_group.app_command,
-            "shield": ShieldCog.shield_group.app_command,
-            "confessions": ConfessionsCog.confessions_group.app_command,
-            "dropsadmin": QuestionDropsCog.dropsadmin_group.app_command,
+            "admin": AdminCog,
+            "shield": ShieldCog,
+            "confessions": ConfessionsCog,
+            "dropsadmin": QuestionDropsCog,
         }
 
-        for name, command in expected.items():
+        for name, cog_cls in expected.items():
             with self.subTest(command=name):
-                payload = command.to_dict(bot.tree)
+                command, payload = await self._registered_root(cog_cls, root_name=name)
 
                 self.assertEqual(payload["default_member_permissions"], 32)
                 self.assertEqual(payload["contexts"], [0])
@@ -247,12 +279,50 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue(command.allowed_installs.guild)
                 self.assertFalse(command.allowed_installs.user)
 
-    def test_public_member_roots_remain_visible(self):
-        drops_names = {command.name for command in QuestionDropsCog.drops_group.app_command.commands}
-        confess_names = {command.name for command in ConfessionsCog.confess_group.app_command.commands}
+    async def test_public_member_roots_remain_visible(self):
+        _, drops_payload = await self._registered_root(QuestionDropsCog, root_name="drops")
+        _, confess_payload = await self._registered_root(ConfessionsCog, root_name="confess")
 
-        self.assertEqual(drops_names, {"leaderboard", "roles", "stats", "status"})
-        self.assertEqual(confess_names, {"about", "appeal", "manage", "report"})
+        self.assertIsNone(drops_payload["default_member_permissions"])
+        self.assertIsNone(confess_payload["default_member_permissions"])
+        self.assertEqual({option["name"] for option in drops_payload["options"]}, {"leaderboard", "roles", "stats", "status"})
+        self.assertEqual(
+            {option["name"] for option in confess_payload["options"]},
+            {"about", "appeal", "create", "manage", "report"},
+        )
+
+    async def test_registered_tree_requires_instance_hardening_for_hybrid_root_visibility(self):
+        class UnhardenedHybridRoot(commands.Cog):
+            def __init__(self, bot: commands.Bot):
+                self.bot = bot
+
+            @app_commands.allowed_installs(guilds=True, users=False)
+            @app_commands.guild_only()
+            @app_commands.default_permissions(manage_guild=True)
+            @commands.hybrid_group(name="opsbare", with_app_command=True, invoke_without_command=True)
+            async def ops_group(self, ctx: commands.Context):
+                return
+
+        class HardenedHybridRoot(commands.Cog):
+            def __init__(self, bot: commands.Bot):
+                self.bot = bot
+                harden_admin_root_group(self.ops_group)
+
+            @app_commands.allowed_installs(guilds=True, users=False)
+            @app_commands.guild_only()
+            @app_commands.default_permissions(manage_guild=True)
+            @commands.hybrid_group(name="opshardened", with_app_command=True, invoke_without_command=True)
+            async def ops_group(self, ctx: commands.Context):
+                return
+
+        _, bare_payload = await self._registered_root(UnhardenedHybridRoot, root_name="opsbare")
+        hardened_command, hardened_payload = await self._registered_root(HardenedHybridRoot, root_name="opshardened")
+
+        self.assertIsNone(bare_payload["default_member_permissions"])
+        self.assertEqual(hardened_payload["default_member_permissions"], 32)
+        self.assertEqual(hardened_payload["contexts"], [0])
+        self.assertEqual(hardened_payload["integration_types"], [0])
+        self.assertTrue(hardened_command.guild_only)
 
     def test_only16_lobby_copy_stays_aligned_with_manual(self):
         saved_games = ge.games

@@ -54,6 +54,7 @@ HELP_PAGES: list[dict[str, str]] = [
             "`/drops stats` and `/drops leaderboard` stay guild-first, while Buddy and Profile surfaces fold the knowledge lane into identity cleanly.\n"
             "`/drops roles status`, `/drops roles remove`, and `/drops roles preference` give members a private way to remove current Babblebox roles or stop future grants without touching achievement history.\n"
             "`/dropsadmin mastery category ...` and `/dropsadmin mastery scholar ...` configure category mastery roles, the guild scholar ladder, and custom mastery announcement copy in one place.\n"
+            "`/dropsadmin config` also controls the difficulty profile: Standard stays welcoming, Smart leans medium/hard, and Hard makes the lane noticeably tougher without changing point values.\n"
             "Template editing stays inside those mastery commands with `template_action`, supports a default template plus optional tier overrides, and falls back as: tier override -> scope default -> Babblebox default.\n"
             "Category tokens: `{user.mention}` `{user.name}` `{user.display_name}` `{role.name}` `{tier.label}` `{threshold}` `{category.name}`. Scholar tokens: `{user.mention}` `{user.name}` `{user.display_name}` `{role.name}` `{tier.label}` `{threshold}`.\n"
             "Admins can use `/dropsadmin` to run 1-10 drops a day, pick channels and categories, and opt into rare AI celebration copy without turning the lane into spam."
@@ -78,6 +79,8 @@ HELP_PAGES: list[dict[str, str]] = [
         "body": (
             "`/daily` opens Shuffle, Emoji, and Signal.\n"
             "`/daily play <guess>` still defaults to Shuffle Booth.\n"
+            "Shuffle now leans on stronger word shapes, Emoji uses layered clueing, and Signal rotates across Caesar shift, mirror alphabet, and adjacent-pair swap.\n"
+            "Open and result cards show difficulty, answer length, and the booth profile without spoiling failed answers.\n"
             "Daily stays arcade-only, so clears and streaks here do not feed Question Drops mastery roles or scholar ranks.\n"
             "Question Drops stay separate as the guild knowledge lane, so the arcade never blurs into mastery progression.\n"
             "Numeric or multiple-choice drops still accept the correct option letter or option text, and quiet channels can skip a slot.\n"

@@ -20,6 +20,7 @@ QUESTION_DROP_CATEGORIES = (
 
 QUESTION_DROP_TONES = ("clean", "playful", "roast-light")
 QUESTION_DROP_ACTIVITY_GATES = ("off", "light")
+QUESTION_DROP_DIFFICULTY_PROFILES = ("standard", "smart", "hard")
 QUESTION_DROP_CATEGORY_LABELS = {
     "science": "Science",
     "history": "History",
@@ -30,6 +31,11 @@ QUESTION_DROP_CATEGORY_LABELS = {
     "culture": "Culture",
 }
 QUESTION_DROP_DIFFICULTY_LABELS = {1: "Easy", 2: "Medium", 3: "Hard"}
+QUESTION_DROP_DIFFICULTY_PROFILE_LABELS = {
+    "standard": "Welcoming mix, occasional spikes",
+    "smart": "More medium and hard, less farmable",
+    "hard": "Noticeably tougher lane",
+}
 
 TRUE_ALIASES = {"true", "t", "yes", "y", "correct"}
 FALSE_ALIASES = {"false", "f", "no", "n", "incorrect"}
@@ -155,14 +161,15 @@ class QuestionDropVariant:
     prompt: str
     answer_spec: dict[str, Any]
     variant_hash: str
+    family_id: str = ""
     tags: tuple[str, ...] = ()
     attribution: str | None = None
 
 
 def normalize_answer_text(raw: str | None) -> str:
     text = str(raw or "").casefold().strip()
-    text = text.replace("’", "'")
-    text = text.replace("“", '"').replace("”", '"')
+    text = text.replace("ƒ?T", "'")
+    text = text.replace("ƒ?o", '"').replace("ƒ??", '"')
     text = _PUNCT_RE.sub(" ", text)
     text = _SPACE_RE.sub(" ", text)
     return text.strip()
@@ -494,6 +501,7 @@ def answer_points_for_difficulty(difficulty: int) -> int:
 def content_seed_signature(seed: dict[str, Any]) -> str:
     parts = [
         str(seed.get("concept_id") or ""),
+        str(seed.get("family_id") or ""),
         str(seed.get("category") or ""),
         str(seed.get("difficulty") or ""),
         str(seed.get("source_type") or ""),
@@ -512,15 +520,94 @@ def _make_rng(seed_material: str) -> random.Random:
     return random.Random(int(digest[:16], 16))
 
 
+def _text_spec(*accepted: str) -> dict[str, Any]:
+    return {"type": "text", "accepted": list(accepted)}
+
+
+def _numeric_spec(value: int | float) -> dict[str, Any]:
+    return {"type": "numeric", "value": value}
+
+
+def _boolean_spec(value: bool) -> dict[str, Any]:
+    return {"type": "boolean", "value": value}
+
+
+def _multiple_choice_spec(*choices: str, answer: str) -> dict[str, Any]:
+    return {"type": "multiple_choice", "choices": list(choices), "answer": answer}
+
+
+def _ordered_spec(*tokens: str) -> dict[str, Any]:
+    return {"type": "ordered_tokens", "tokens": list(tokens)}
+
+
+def _variant(prompt: str, answer_spec: dict[str, Any]) -> dict[str, Any]:
+    return {"prompt": prompt, "answer_spec": answer_spec}
+
+
+def _static_seed(
+    concept_id: str,
+    category: str,
+    difficulty: int,
+    family_id: str,
+    *variants: dict[str, Any],
+    tags: tuple[str, ...] = (),
+    attribution: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "concept_id": concept_id,
+        "family_id": family_id,
+        "category": category,
+        "difficulty": difficulty,
+        "source_type": "curated",
+        "generator_type": "static_pack",
+        "variants": tuple(variants),
+        "tags": tuple(tags),
+        "attribution": attribution,
+    }
+
+
+def _generated_seed(
+    concept_id: str,
+    category: str,
+    difficulty: int,
+    generator_type: str,
+    family_id: str,
+    *,
+    tags: tuple[str, ...] = (),
+) -> dict[str, Any]:
+    return {
+        "concept_id": concept_id,
+        "family_id": family_id,
+        "category": category,
+        "difficulty": difficulty,
+        "source_type": "generated",
+        "generator_type": generator_type,
+        "variants": (),
+        "tags": tuple(tags),
+    }
+
+
+def _seed_family_id(seed: dict[str, Any]) -> str:
+    family_id = str(seed.get("family_id") or "").strip()
+    if family_id:
+        return family_id
+    generator_type = str(seed.get("generator_type") or "").strip()
+    if generator_type:
+        return generator_type
+    return str(seed.get("concept_id") or "question-drop")
+
+
 def _static_variant(seed: dict[str, Any], *, seed_material: str, variant_index: int) -> QuestionDropVariant:
     variants = list(seed["variants"])
     rotation_rng = _make_rng(f"{seed_material}:{seed['concept_id']}:rotation")
     rotation = rotation_rng.randrange(len(variants)) if variants else 0
     payload_index = (rotation + variant_index) % len(variants)
     payload = variants[payload_index]
-    variant_hash = build_variant_hash(seed["concept_id"], payload["prompt"], str(payload_index))
+    family_id = _seed_family_id(seed)
+    variant_hash = build_variant_hash(seed["concept_id"], family_id, payload["prompt"], str(payload_index))
     return QuestionDropVariant(
         concept_id=seed["concept_id"],
+        family_id=family_id,
         category=seed["category"],
         difficulty=seed["difficulty"],
         source_type=seed["source_type"],
@@ -533,360 +620,916 @@ def _static_variant(seed: dict[str, Any], *, seed_material: str, variant_index: 
     )
 
 
-def _math_addition(seed: dict[str, Any], *, seed_material: str, variant_index: int) -> QuestionDropVariant:
-    rng = _make_rng(f"{seed_material}:{seed['concept_id']}:{variant_index}")
-    left = rng.randint(12, 68)
-    right = rng.randint(11, 59)
-    prompt = f"What is {left} + {right}?"
-    answer = left + right
+def _build_numeric_variant(seed: dict[str, Any], *, prompt: str, answer: int | float) -> QuestionDropVariant:
+    family_id = _seed_family_id(seed)
     return QuestionDropVariant(
         concept_id=seed["concept_id"],
+        family_id=family_id,
         category=seed["category"],
         difficulty=seed["difficulty"],
         source_type=seed["source_type"],
         generator_type=seed["generator_type"],
         prompt=prompt,
-        answer_spec={"type": "numeric", "value": answer},
-        variant_hash=build_variant_hash(seed["concept_id"], prompt, str(answer)),
+        answer_spec=_numeric_spec(answer),
+        variant_hash=build_variant_hash(seed["concept_id"], family_id, prompt, str(answer)),
         tags=tuple(seed.get("tags", ())),
     )
+
+
+def _build_text_variant(seed: dict[str, Any], *, prompt: str, accepted: list[str]) -> QuestionDropVariant:
+    family_id = _seed_family_id(seed)
+    return QuestionDropVariant(
+        concept_id=seed["concept_id"],
+        family_id=family_id,
+        category=seed["category"],
+        difficulty=seed["difficulty"],
+        source_type=seed["source_type"],
+        generator_type=seed["generator_type"],
+        prompt=prompt,
+        answer_spec={"type": "text", "accepted": accepted},
+        variant_hash=build_variant_hash(seed["concept_id"], family_id, prompt, accepted[0]),
+        tags=tuple(seed.get("tags", ())),
+    )
+
+
+def _build_boolean_variant(seed: dict[str, Any], *, prompt: str, value: bool) -> QuestionDropVariant:
+    family_id = _seed_family_id(seed)
+    return QuestionDropVariant(
+        concept_id=seed["concept_id"],
+        family_id=family_id,
+        category=seed["category"],
+        difficulty=seed["difficulty"],
+        source_type=seed["source_type"],
+        generator_type=seed["generator_type"],
+        prompt=prompt,
+        answer_spec=_boolean_spec(value),
+        variant_hash=build_variant_hash(seed["concept_id"], family_id, prompt, str(value)),
+        tags=tuple(seed.get("tags", ())),
+    )
+
+
+def _build_choice_variant(seed: dict[str, Any], *, prompt: str, choices: list[str], answer: str) -> QuestionDropVariant:
+    family_id = _seed_family_id(seed)
+    return QuestionDropVariant(
+        concept_id=seed["concept_id"],
+        family_id=family_id,
+        category=seed["category"],
+        difficulty=seed["difficulty"],
+        source_type=seed["source_type"],
+        generator_type=seed["generator_type"],
+        prompt=prompt,
+        answer_spec={"type": "multiple_choice", "choices": choices, "answer": answer},
+        variant_hash=build_variant_hash(seed["concept_id"], family_id, prompt, answer),
+        tags=tuple(seed.get("tags", ())),
+    )
+
+
+def _math_addition(seed: dict[str, Any], *, seed_material: str, variant_index: int) -> QuestionDropVariant:
+    rng = _make_rng(f"{seed_material}:{seed['concept_id']}:{variant_index}")
+    left = rng.randint(14, 68)
+    right = rng.randint(12, 57)
+    return _build_numeric_variant(seed, prompt=f"What is {left} + {right}?", answer=left + right)
 
 
 def _math_multiplication(seed: dict[str, Any], *, seed_material: str, variant_index: int) -> QuestionDropVariant:
     rng = _make_rng(f"{seed_material}:{seed['concept_id']}:{variant_index}")
     left = rng.randint(6, 12)
-    right = rng.randint(4, 9)
-    prompt = f"What is {left} * {right}?"
-    answer = left * right
-    return QuestionDropVariant(
-        concept_id=seed["concept_id"],
-        category=seed["category"],
-        difficulty=seed["difficulty"],
-        source_type=seed["source_type"],
-        generator_type=seed["generator_type"],
-        prompt=prompt,
-        answer_spec={"type": "numeric", "value": answer},
-        variant_hash=build_variant_hash(seed["concept_id"], prompt, str(answer)),
-        tags=tuple(seed.get("tags", ())),
-    )
+    right = rng.randint(4, 11)
+    return _build_numeric_variant(seed, prompt=f"What is {left} * {right}?", answer=left * right)
+
+
+def _math_order_operations(seed: dict[str, Any], *, seed_material: str, variant_index: int) -> QuestionDropVariant:
+    rng = _make_rng(f"{seed_material}:{seed['concept_id']}:{variant_index}")
+    if int(seed["difficulty"]) >= 3:
+        left = rng.randint(3, 9)
+        middle = rng.randint(2, 6)
+        right = rng.randint(2, 5)
+        tail = rng.randint(3, 11)
+        prompt = f"Use standard order of operations: ({left} + {middle}) * {right} - {tail}"
+        answer = ((left + middle) * right) - tail
+    else:
+        left = rng.randint(4, 14)
+        middle = rng.randint(2, 8)
+        right = rng.randint(2, 6)
+        prompt = f"Use standard order of operations: {left} + {middle} * {right}"
+        answer = left + (middle * right)
+    return _build_numeric_variant(seed, prompt=prompt, answer=answer)
+
+
+def _math_missing_value(seed: dict[str, Any], *, seed_material: str, variant_index: int) -> QuestionDropVariant:
+    rng = _make_rng(f"{seed_material}:{seed['concept_id']}:{variant_index}")
+    kind = rng.choice(("addition", "subtraction", "multiplication"))
+    if kind == "addition":
+        missing = rng.randint(7, 28)
+        other = rng.randint(12, 35)
+        total = missing + other
+        prompt = f"What number makes this true? ? + {other} = {total}"
+    elif kind == "subtraction":
+        missing = rng.randint(10, 36)
+        other = rng.randint(4, 14)
+        total = missing - other
+        prompt = f"What number makes this true? ? - {other} = {total}"
+    else:
+        missing = rng.randint(4, 11)
+        other = rng.randint(3, 9)
+        total = missing * other
+        prompt = f"What number makes this true? ? * {other} = {total}"
+    return _build_numeric_variant(seed, prompt=prompt, answer=missing)
+
+
+def _math_compare_expressions(seed: dict[str, Any], *, seed_material: str, variant_index: int) -> QuestionDropVariant:
+    rng = _make_rng(f"{seed_material}:{seed['concept_id']}:{variant_index}")
+    if rng.choice((True, False)):
+        left_a = rng.randint(3, 12)
+        left_b = rng.randint(2, 8)
+        left_c = rng.randint(1, 9)
+        right_a = rng.randint(4, 13)
+        right_b = rng.randint(2, 7)
+        right_c = rng.randint(1, 9)
+        left = left_a * left_b + left_c
+        right = right_a * right_b + right_c
+        left_prompt = f"{left_a} * {left_b} + {left_c}"
+        right_prompt = f"{right_a} * {right_b} + {right_c}"
+    else:
+        left_a = rng.randint(3, 11)
+        left_b = rng.randint(2, 7)
+        left_mul = rng.randint(2, 4)
+        right_a = rng.randint(4, 10)
+        right_b = rng.randint(2, 8)
+        right_mul = rng.randint(2, 4)
+        left = (left_a + left_b) * left_mul
+        right = (right_a + right_b) * right_mul
+        left_prompt = f"({left_a} + {left_b}) * {left_mul}"
+        right_prompt = f"({right_a} + {right_b}) * {right_mul}"
+    relation = "equal"
+    if left > right:
+        relation = "left"
+    elif right > left:
+        relation = "right"
+    prompt = f"Which is larger? A) {left_prompt} B) {right_prompt} C) equal"
+    return _build_choice_variant(seed, prompt=prompt, choices=["left", "right", "equal"], answer=relation)
+
+
+def _math_multi_step(seed: dict[str, Any], *, seed_material: str, variant_index: int) -> QuestionDropVariant:
+    rng = _make_rng(f"{seed_material}:{seed['concept_id']}:{variant_index}")
+    start = rng.randint(14, 36)
+    subtract = rng.randint(3, 9)
+    multiplier = rng.randint(2, 4)
+    bonus = rng.randint(4, 12)
+    answer = (start - subtract) * multiplier + bonus
+    prompt = f"Start with {start}. Subtract {subtract}, multiply by {multiplier}, then add {bonus}. What do you get?"
+    return _build_numeric_variant(seed, prompt=prompt, answer=answer)
+
+
+def _math_divisibility(seed: dict[str, Any], *, seed_material: str, variant_index: int) -> QuestionDropVariant:
+    rng = _make_rng(f"{seed_material}:{seed['concept_id']}:{variant_index}")
+    divisor = rng.choice((3, 4, 5, 6, 8, 9))
+    correct = divisor * rng.randint(6, 14)
+    wrong_a = correct + rng.choice((1, 2, 4, 5, 7))
+    wrong_b = correct + rng.choice((3, 5, 6, 8))
+    options = [str(correct), str(wrong_a), str(wrong_b)]
+    rng.shuffle(options)
+    prompt = f"Which number is divisible by {divisor}? A) {options[0]} B) {options[1]} C) {options[2]}"
+    return _build_choice_variant(seed, prompt=prompt, choices=options, answer=str(correct))
+
+
+def _math_remainder(seed: dict[str, Any], *, seed_material: str, variant_index: int) -> QuestionDropVariant:
+    rng = _make_rng(f"{seed_material}:{seed['concept_id']}:{variant_index}")
+    divisor = rng.randint(4, 9)
+    quotient = rng.randint(5, 13)
+    remainder = rng.randint(1, divisor - 1)
+    dividend = (divisor * quotient) + remainder
+    prompt = f"What is the remainder when {dividend} is divided by {divisor}?"
+    return _build_numeric_variant(seed, prompt=prompt, answer=remainder)
+
+
+def _math_percent_change(seed: dict[str, Any], *, seed_material: str, variant_index: int) -> QuestionDropVariant:
+    rng = _make_rng(f"{seed_material}:{seed['concept_id']}:{variant_index}")
+    base_price = rng.choice((20, 24, 30, 32, 36, 40, 48, 60, 72))
+    percent = rng.choice((10, 15, 20, 25, 30, 40))
+    discount = int(base_price * (percent / 100.0))
+    sale_price = base_price - discount
+    prompt = f"A ${base_price} item is discounted by {percent}%. What is the sale price?"
+    return _build_numeric_variant(seed, prompt=prompt, answer=sale_price)
+
+
+def _math_average_or_median(seed: dict[str, Any], *, seed_material: str, variant_index: int) -> QuestionDropVariant:
+    rng = _make_rng(f"{seed_material}:{seed['concept_id']}:{variant_index}")
+    values = [rng.randint(3, 18) for _ in range(5)]
+    if rng.choice((True, False)):
+        prompt = f"Find the median: {', '.join(str(value) for value in values)}"
+        answer = sorted(values)[len(values) // 2]
+    else:
+        start = rng.randint(4, 18)
+        step = rng.randint(2, 6)
+        values = [start + (step * index) for index in range(4)]
+        prompt = f"Find the average: {', '.join(str(value) for value in values)}"
+        answer = sum(values) // len(values)
+    return _build_numeric_variant(seed, prompt=prompt, answer=answer)
+
+
+def _math_algebra_lite(seed: dict[str, Any], *, seed_material: str, variant_index: int) -> QuestionDropVariant:
+    rng = _make_rng(f"{seed_material}:{seed['concept_id']}:{variant_index}")
+    solution = rng.randint(3, 14)
+    multiplier = rng.randint(2, 6)
+    offset = rng.randint(4, 18)
+    total = (solution * multiplier) + offset
+    prompt = f"Solve for x: {multiplier}x + {offset} = {total}"
+    return _build_numeric_variant(seed, prompt=prompt, answer=solution)
+
+
+def _math_number_pattern(seed: dict[str, Any], *, seed_material: str, variant_index: int) -> QuestionDropVariant:
+    rng = _make_rng(f"{seed_material}:{seed['concept_id']}:{variant_index}")
+    kind = rng.choice(("squares_plus_one", "triangular", "alternating"))
+    if kind == "squares_plus_one":
+        start = rng.randint(2, 4)
+        values = [(index * index) + 1 for index in range(start, start + 4)]
+        answer = ((start + 4) * (start + 4)) + 1
+    elif kind == "triangular":
+        start = rng.randint(2, 5)
+        values = [int((n * (n + 1)) / 2) for n in range(start, start + 4)]
+        next_n = start + 4
+        answer = int((next_n * (next_n + 1)) / 2)
+    else:
+        start = rng.randint(5, 11)
+        values = [start]
+        deltas = [2, 4, 2, 4]
+        for delta in deltas[:3]:
+            values.append(values[-1] + delta)
+        answer = values[-1] + deltas[3]
+    prompt = "What number comes next? " + ", ".join(str(value) for value in values)
+    return _build_numeric_variant(seed, prompt=prompt, answer=answer)
 
 
 def _logic_sequence(seed: dict[str, Any], *, seed_material: str, variant_index: int) -> QuestionDropVariant:
     rng = _make_rng(f"{seed_material}:{seed['concept_id']}:{variant_index}")
-    kind = rng.choice(("arithmetic", "squares"))
-    if kind == "arithmetic":
-        start = rng.randint(2, 10)
-        step = rng.randint(2, 6)
-        values = [start + step * index for index in range(4)]
-        answer = values[-1] + step
-    else:
+    kind = rng.choice(("alternating_gap", "double_plus_one", "position_square"))
+    if kind == "alternating_gap":
+        start = rng.randint(4, 12)
+        values = [start]
+        gaps = [2, 4, 2, 4]
+        for gap in gaps[:3]:
+            values.append(values[-1] + gap)
+        answer = values[-1] + gaps[3]
+    elif kind == "double_plus_one":
         start = rng.randint(2, 5)
-        values = [value * value for value in range(start, start + 4)]
-        answer = (start + 4) * (start + 4)
+        values = [start]
+        for _ in range(3):
+            values.append((values[-1] * 2) + 1)
+        answer = (values[-1] * 2) + 1
+    else:
+        start = rng.randint(1, 4)
+        values = [index * index + index for index in range(start, start + 4)]
+        next_index = start + 4
+        answer = next_index * next_index + next_index
     prompt = "What number comes next? " + ", ".join(str(value) for value in values)
-    return QuestionDropVariant(
-        concept_id=seed["concept_id"],
-        category=seed["category"],
-        difficulty=seed["difficulty"],
-        source_type=seed["source_type"],
-        generator_type=seed["generator_type"],
-        prompt=prompt,
-        answer_spec={"type": "numeric", "value": answer},
-        variant_hash=build_variant_hash(seed["concept_id"], prompt, str(answer)),
-        tags=tuple(seed.get("tags", ())),
+    return _build_numeric_variant(seed, prompt=prompt, answer=answer)
+
+
+def _logic_analogy(seed: dict[str, Any], *, seed_material: str, variant_index: int) -> QuestionDropVariant:
+    rng = _make_rng(f"{seed_material}:{seed['concept_id']}:{variant_index}")
+    prompts = (
+        ("Bird is to nest as bee is to ?", ["hive", "the hive"]),
+        ("Painter is to brush as writer is to ?", ["pen", "a pen"]),
+        ("Book is to read as song is to ?", ["listen", "listen to", "listening"]),
+        ("Chef is to kitchen as pilot is to ?", ["cockpit", "the cockpit"]),
+        ("Clock is to time as thermometer is to ?", ["temperature"]),
     )
+    prompt, accepted = prompts[rng.randrange(len(prompts))]
+    return _build_text_variant(seed, prompt=prompt, accepted=accepted)
+
+
+def _logic_odd_one_out(seed: dict[str, Any], *, seed_material: str, variant_index: int) -> QuestionDropVariant:
+    rng = _make_rng(f"{seed_material}:{seed['concept_id']}:{variant_index}")
+    sets = (
+        (["violin", "flute", "clarinet"], "violin", "Which is the odd one out? A) violin B) flute C) clarinet"),
+        (["triangle", "square", "circle"], "circle", "Which is the odd one out? A) triangle B) square C) circle"),
+        (["january", "march", "may"], "march", "Which is the odd one out? A) january B) march C) may"),
+        (["gold", "silver", "birch"], "birch", "Which is the odd one out? A) gold B) silver C) birch"),
+    )
+    choices, answer, prompt = sets[rng.randrange(len(sets))]
+    return _build_choice_variant(seed, prompt=prompt, choices=choices, answer=answer)
+
+
+def _logic_elimination(seed: dict[str, Any], *, seed_material: str, variant_index: int) -> QuestionDropVariant:
+    rng = _make_rng(f"{seed_material}:{seed['concept_id']}:{variant_index}")
+    names = rng.choice(
+        (
+            ("Mina", "Sol", "Theo"),
+            ("Ava", "Ben", "Cole"),
+            ("Lena", "Rui", "Tess"),
+        )
+    )
+    items = rng.choice(
+        (
+            ("tea", "juice", "cocoa"),
+            ("red", "blue", "green"),
+            ("cake", "fruit", "soup"),
+        )
+    )
+    answer_name = names[2]
+    prompt = (
+        f"{names[0]}, {names[1]}, and {names[2]} each picked one of these: {items[0]}, {items[1]}, {items[2]}. "
+        f"{names[0]} did not pick {items[0]}. {names[2]} picked neither {items[0]} nor {items[1]}. "
+        f"Who picked {items[2]}?"
+    )
+    return _build_text_variant(seed, prompt=prompt, accepted=[answer_name.casefold()])
+
+
+def _logic_conditional(seed: dict[str, Any], *, seed_material: str, variant_index: int) -> QuestionDropVariant:
+    rng = _make_rng(f"{seed_material}:{seed['concept_id']}:{variant_index}")
+    stems = (
+        ("Every glorp is a blip, and no blip is silent.", "Can a glorp be silent?", False),
+        ("Every rune is marked, and every marked object glows.", "Must every rune glow?", True),
+        ("No silver key opens the vault, and every vault key is silver.", "Can a vault key open the vault?", False),
+        ("Every comet trail is bright, and some bright things fade fast.", "Does the rule prove that every comet trail fades fast?", False),
+    )
+    stem, question, value = stems[rng.randrange(len(stems))]
+    return _build_boolean_variant(seed, prompt=f"True or false: {stem} {question}", value=value)
+
+
+def _logic_parity_grouping(seed: dict[str, Any], *, seed_material: str, variant_index: int) -> QuestionDropVariant:
+    rng = _make_rng(f"{seed_material}:{seed['concept_id']}:{variant_index}")
+    offset = rng.randint(0, 5) * 2
+    set_a = [offset + 1, offset + 3, offset + 6]
+    set_b = [offset + 1, offset + 2, offset + 4]
+    set_c = [offset + 2, offset + 4, offset + 5]
+    even_set = "set a"
+    prompt = (
+        f"Which set has an even total? A) {set_a[0]}, {set_a[1]}, {set_a[2]} "
+        f"B) {set_b[0]}, {set_b[1]}, {set_b[2]} C) {set_c[0]}, {set_c[1]}, {set_c[2]}"
+    )
+    return _build_choice_variant(seed, prompt=prompt, choices=["set a", "set b", "set c"], answer=even_set)
+
+
+def _logic_true_false(seed: dict[str, Any], *, seed_material: str, variant_index: int) -> QuestionDropVariant:
+    rng = _make_rng(f"{seed_material}:{seed['concept_id']}:{variant_index}")
+    sets = (
+        ("Ana finished before Ben, and Ben finished before Cam. Therefore Cam finished before Ana.", False),
+        ("Jules scored more than Micah, and Micah scored more than Priya. Therefore Jules scored more than Priya.", True),
+        ("North of Oak Street means farther north than Oak Street. Mira lives north of Oak Street, so Mira lives south of Oak Street.", False),
+    )
+    statement, value = sets[rng.randrange(len(sets))]
+    return _build_boolean_variant(seed, prompt=f"True or false: {statement}", value=value)
+
+
+def _logic_classification(seed: dict[str, Any], *, seed_material: str, variant_index: int) -> QuestionDropVariant:
+    rng = _make_rng(f"{seed_material}:{seed['concept_id']}:{variant_index}")
+    sets = (
+        ("Which word fits with level, radar, and civic? A) river B) candle C) rotor", ["river", "candle", "rotor"], "rotor"),
+        ("Which item belongs with ruby, sapphire, and emerald? A) cedar B) diamond C) copper", ["cedar", "diamond", "copper"], "diamond"),
+        ("Which item belongs with piano, violin, and flute? A) trumpet B) bookshelf C) cello", ["trumpet", "bookshelf", "cello"], "cello"),
+    )
+    prompt, choices, answer = sets[rng.randrange(len(sets))]
+    return _build_choice_variant(seed, prompt=prompt, choices=choices, answer=answer)
+
+
+def _logic_mini_deduction(seed: dict[str, Any], *, seed_material: str, variant_index: int) -> QuestionDropVariant:
+    rng = _make_rng(f"{seed_material}:{seed['concept_id']}:{variant_index}")
+    sets = (
+        (
+            "Three lockers are labeled A, B, and C. Exactly one label is true. "
+            "Locker A says 'The prize is in locker B.' Locker B says 'The prize is not in locker B.' "
+            "Locker C says 'The prize is in locker C.' Where is the prize? "
+            "A) locker a B) locker b C) locker c",
+            ["locker a", "locker b", "locker c"],
+            "locker b",
+        ),
+        (
+            "Exactly one statement is true. Nia says 'The code is blue.' Omar says 'The code is red.' "
+            "Paz says 'The code is not blue.' What color is the code? A) blue B) red C) green",
+            ["blue", "red", "green"],
+            "red",
+        ),
+    )
+    prompt, choices, answer = sets[rng.randrange(len(sets))]
+    return _build_choice_variant(seed, prompt=prompt, choices=choices, answer=answer)
+
+
+def _logic_rotation(seed: dict[str, Any], *, seed_material: str, variant_index: int) -> QuestionDropVariant:
+    rng = _make_rng(f"{seed_material}:{seed['concept_id']}:{variant_index}")
+    patterns = (
+        (["up", "right", "down", "right", "up"], "right", "Which direction comes next? A) left B) right C) down", ["left", "right", "down"]),
+        (["north", "east", "south", "east", "north"], "east", "Which direction comes next? A) east B) west C) south", ["east", "west", "south"]),
+        (["left", "up", "right", "up", "left"], "up", "Which direction comes next? A) down B) up C) right", ["down", "up", "right"]),
+    )
+    values, answer, prompt, choices = patterns[rng.randrange(len(patterns))]
+    prompt = f"{prompt} Sequence: {', '.join(values)}"
+    return _build_choice_variant(seed, prompt=prompt, choices=choices, answer=answer)
 
 
 def _language_anagram(seed: dict[str, Any], *, seed_material: str, variant_index: int) -> QuestionDropVariant:
     rng = _make_rng(f"{seed_material}:{seed['concept_id']}:{variant_index}")
     payload = rng.choice(
         (
-            ("listen", "silent"),
-            ("rescue", "secure"),
-            ("alter", "later"),
-            ("earth", "heart"),
-            ("stare", "tears"),
-            ("thing", "night"),
+            ("silent", "listen"),
+            ("secure", "rescue"),
+            ("later", "alter"),
+            ("heart", "earth"),
+            ("tears", "stare"),
+            ("night", "thing"),
             ("save", "vase"),
+            ("stone", "tones"),
+            ("spear", "spare"),
+            ("angel", "glean"),
+            ("friend", "finder"),
         )
     )
-    prompt = f"Unscramble this word: **{payload[0]}**"
-    return QuestionDropVariant(
-        concept_id=seed["concept_id"],
-        category=seed["category"],
-        difficulty=seed["difficulty"],
-        source_type=seed["source_type"],
-        generator_type=seed["generator_type"],
-        prompt=prompt,
-        answer_spec={"type": "text", "accepted": [payload[1]]},
-        variant_hash=build_variant_hash(seed["concept_id"], prompt, payload[1]),
-        tags=tuple(seed.get("tags", ())),
-    )
+    prompt = f"Unscramble this word into a real English word: **{payload[1]}**"
+    return _build_text_variant(seed, prompt=prompt, accepted=[payload[0]])
 
 
-GENERATOR_HANDLERS: dict[str, Callable[[dict[str, Any]], QuestionDropVariant] | Callable[..., QuestionDropVariant]] = {
+GENERATOR_HANDLERS: dict[str, Callable[..., QuestionDropVariant]] = {
     "static_pack": _static_variant,
     "math_addition": _math_addition,
     "math_multiplication": _math_multiplication,
+    "math_order_operations": _math_order_operations,
+    "math_missing_value": _math_missing_value,
+    "math_compare_expressions": _math_compare_expressions,
+    "math_multi_step": _math_multi_step,
+    "math_divisibility": _math_divisibility,
+    "math_remainder": _math_remainder,
+    "math_percent_change": _math_percent_change,
+    "math_average_or_median": _math_average_or_median,
+    "math_algebra_lite": _math_algebra_lite,
+    "math_number_pattern": _math_number_pattern,
     "logic_sequence": _logic_sequence,
+    "logic_analogy": _logic_analogy,
+    "logic_odd_one_out": _logic_odd_one_out,
+    "logic_elimination": _logic_elimination,
+    "logic_conditional": _logic_conditional,
+    "logic_parity_grouping": _logic_parity_grouping,
+    "logic_true_false": _logic_true_false,
+    "logic_classification": _logic_classification,
+    "logic_mini_deduction": _logic_mini_deduction,
+    "logic_rotation": _logic_rotation,
     "language_anagram": _language_anagram,
 }
 
 
 QUESTION_DROP_SEEDS: tuple[dict[str, Any], ...] = (
-    {
-        "concept_id": "science:planet-red",
-        "category": "science",
-        "difficulty": 1,
-        "source_type": "curated",
-        "generator_type": "static_pack",
-        "variants": (
-            {"prompt": "Which planet is known as the Red Planet?", "answer_spec": {"type": "text", "accepted": ["mars"]}},
-            {"prompt": "Name the planet nicknamed the Red Planet.", "answer_spec": {"type": "text", "accepted": ["mars"]}},
+    _static_seed(
+        "science:planet-red",
+        "science",
+        1,
+        "science.astronomy-basics",
+        _variant("Which planet is known as the Red Planet?", _text_spec("mars")),
+        _variant("Name the planet nicknamed the Red Planet.", _text_spec("mars")),
+    ),
+    _static_seed(
+        "science:water-chemical",
+        "science",
+        1,
+        "science.molecules",
+        _variant("What is the chemical formula for water?", _text_spec("h2o")),
+        _variant("Write the chemical formula for water.", _text_spec("h2o")),
+    ),
+    _static_seed(
+        "science:earth-satellite",
+        "science",
+        1,
+        "science.astronomy-basics",
+        _variant("What is Earth's natural satellite?", _text_spec("moon", "the moon")),
+        _variant("Name the natural satellite that orbits Earth.", _text_spec("moon", "the moon")),
+    ),
+    _static_seed(
+        "science:plants-gas",
+        "science",
+        2,
+        "science.photosynthesis",
+        _variant("Which gas do plants absorb during photosynthesis?", _text_spec("carbon dioxide", "co2")),
+        _variant("Plants pull in which gas during photosynthesis?", _text_spec("carbon dioxide", "co2")),
+    ),
+    _static_seed(
+        "science:chemical-change",
+        "science",
+        2,
+        "science.changes-of-matter",
+        _variant(
+            "Which is a chemical change? A) melting ice B) rusting iron C) cutting paper",
+            _multiple_choice_spec("melting ice", "rusting iron", "cutting paper", answer="rusting iron"),
         ),
-    },
-    {
-        "concept_id": "science:water-chemical",
-        "category": "science",
-        "difficulty": 1,
-        "source_type": "curated",
-        "generator_type": "static_pack",
-        "variants": (
-            {"prompt": "What is the chemical formula for water?", "answer_spec": {"type": "text", "accepted": ["h2o"]}},
-            {"prompt": "Write the chemical formula for water.", "answer_spec": {"type": "text", "accepted": ["h2o"]}},
+        _variant(
+            "Pick the chemical change. A) freezing water B) rusting iron C) breaking glass",
+            _multiple_choice_spec("freezing water", "rusting iron", "breaking glass", answer="rusting iron"),
         ),
-    },
-    {
-        "concept_id": "science:plants-gas",
-        "category": "science",
-        "difficulty": 2,
-        "source_type": "curated",
-        "generator_type": "static_pack",
-        "variants": (
-            {"prompt": "Which gas do plants absorb during photosynthesis?", "answer_spec": {"type": "text", "accepted": ["carbon dioxide", "co2"]}},
-            {"prompt": "Plants pull in which gas during photosynthesis?", "answer_spec": {"type": "text", "accepted": ["carbon dioxide", "co2"]}},
+    ),
+    _static_seed(
+        "science:food-chain",
+        "science",
+        2,
+        "science.ecology",
+        _variant("In a simple food chain, what comes right after a producer?", _text_spec("primary consumer", "consumer", "herbivore")),
+        _variant("A producer is eaten by what kind of consumer first?", _text_spec("primary consumer", "consumer", "herbivore")),
+    ),
+    _static_seed(
+        "science:experiment-control",
+        "science",
+        3,
+        "science.experimental-design",
+        _variant(
+            "You are testing which paper towel absorbs the most water. What should stay the same in every trial? "
+            "A) the amount of water B) which towel wins C) the final score",
+            _multiple_choice_spec("the amount of water", "which towel wins", "the final score", answer="the amount of water"),
         ),
-    },
-    {
-        "concept_id": "science:earth-satellite",
-        "category": "science",
-        "difficulty": 1,
-        "source_type": "curated",
-        "generator_type": "static_pack",
-        "variants": (
-            {"prompt": "What is Earth's natural satellite?", "answer_spec": {"type": "text", "accepted": ["moon", "the moon"]}},
-            {"prompt": "Name the natural satellite that orbits Earth.", "answer_spec": {"type": "text", "accepted": ["moon", "the moon"]}},
+        _variant(
+            "To compare seed growth in sun versus shade fairly, what should stay the same? "
+            "A) soil and water B) the result you want C) the plant height after the test",
+            _multiple_choice_spec("soil and water", "the result you want", "the plant height after the test", answer="soil and water"),
         ),
-    },
-    {
-        "concept_id": "history:moon-landing-year",
-        "category": "history",
-        "difficulty": 2,
-        "source_type": "curated",
-        "generator_type": "static_pack",
-        "variants": (
-            {"prompt": "In what year did humans first land on the Moon?", "answer_spec": {"type": "numeric", "value": 1969}},
-            {"prompt": "Apollo 11 landed on the Moon in which year?", "answer_spec": {"type": "numeric", "value": 1969}},
+    ),
+    _static_seed(
+        "science:chlorophyll",
+        "science",
+        3,
+        "science.plant-processes",
+        _variant("A plant kept away from sunlight may turn pale because it cannot make enough what green pigment?", _text_spec("chlorophyll")),
+        _variant("What green pigment helps plants capture light for photosynthesis?", _text_spec("chlorophyll")),
+    ),
+    _static_seed(
+        "science:insulator-choice",
+        "science",
+        3,
+        "science.materials",
+        _variant(
+            "Which material is the best electrical insulator? A) copper B) rubber C) aluminum",
+            _multiple_choice_spec("copper", "rubber", "aluminum", answer="rubber"),
         ),
-    },
-    {
-        "concept_id": "history:berlin-wall-fall",
-        "category": "history",
-        "difficulty": 2,
-        "source_type": "curated",
-        "generator_type": "static_pack",
-        "variants": (
-            {"prompt": "What year did the Berlin Wall fall?", "answer_spec": {"type": "numeric", "value": 1989}},
-            {"prompt": "In which year was the Berlin Wall opened and effectively brought down?", "answer_spec": {"type": "numeric", "value": 1989}},
+        _variant(
+            "Pick the best insulator. A) steel B) rubber C) silver",
+            _multiple_choice_spec("steel", "rubber", "silver", answer="rubber"),
         ),
-    },
-    {
-        "concept_id": "history:first-us-president",
-        "category": "history",
-        "difficulty": 1,
-        "source_type": "curated",
-        "generator_type": "static_pack",
-        "variants": (
-            {"prompt": "Who was the first president of the United States?", "answer_spec": {"type": "text", "accepted": ["george washington", "washington"]}},
-            {"prompt": "Name the first U.S. president.", "answer_spec": {"type": "text", "accepted": ["george washington", "washington"]}},
+    ),
+    _static_seed(
+        "history:first-us-president",
+        "history",
+        1,
+        "history.foundations",
+        _variant("Who was the first president of the United States?", _text_spec("george washington", "washington")),
+        _variant("Name the first U.S. president.", _text_spec("george washington", "washington")),
+    ),
+    _static_seed(
+        "history:titanic",
+        "history",
+        1,
+        "history.iconic-events",
+        _variant("What was the name of the ship that hit an iceberg and sank in 1912?", _text_spec("titanic", "the titanic")),
+        _variant("Name the famous ocean liner that sank after striking an iceberg in 1912.", _text_spec("titanic", "the titanic")),
+    ),
+    _static_seed(
+        "history:moon-landing-year",
+        "history",
+        2,
+        "history.space-race",
+        _variant("In what year did humans first land on the Moon?", _numeric_spec(1969)),
+        _variant("Apollo 11 landed on the Moon in which year?", _numeric_spec(1969)),
+    ),
+    _static_seed(
+        "history:berlin-wall-fall",
+        "history",
+        2,
+        "history.twentieth-century",
+        _variant("What year did the Berlin Wall fall?", _numeric_spec(1989)),
+        _variant("In which year was the Berlin Wall opened and effectively brought down?", _numeric_spec(1989)),
+    ),
+    _static_seed(
+        "history:printing-telephone-internet",
+        "history",
+        2,
+        "history.chronology-order",
+        _variant(
+            "Order these from earliest to latest: printing press, telephone, internet",
+            _ordered_spec("printing press", "telephone", "internet"),
         ),
-    },
-    {
-        "concept_id": "history:titanic",
-        "category": "history",
-        "difficulty": 1,
-        "source_type": "curated",
-        "generator_type": "static_pack",
-        "variants": (
-            {"prompt": "What was the name of the ship that hit an iceberg and sank in 1912?", "answer_spec": {"type": "text", "accepted": ["titanic", "the titanic"]}},
-            {"prompt": "Name the famous ocean liner that sank after striking an iceberg in 1912.", "answer_spec": {"type": "text", "accepted": ["titanic", "the titanic"]}},
+        _variant(
+            "Put these in time order: printing press, internet, telephone",
+            _ordered_spec("printing press", "telephone", "internet"),
         ),
-    },
-    {
-        "concept_id": "geography:nile-continent",
-        "category": "geography",
-        "difficulty": 1,
-        "source_type": "curated",
-        "generator_type": "static_pack",
-        "variants": (
-            {"prompt": "The Nile River is on which continent?", "answer_spec": {"type": "text", "accepted": ["africa"]}},
-            {"prompt": "Which continent is home to the Nile?", "answer_spec": {"type": "text", "accepted": ["africa"]}},
+    ),
+    _static_seed(
+        "history:declaration-constitution",
+        "history",
+        2,
+        "history.foundations",
+        _variant("True or false: the U.S. Declaration of Independence came before the U.S. Constitution.", _boolean_spec(True)),
+        _variant("True or false: the U.S. Constitution was written before the Declaration of Independence.", _boolean_spec(False)),
+    ),
+    _static_seed(
+        "history:magnacarta-frenchrevolution-moonlanding",
+        "history",
+        3,
+        "history.big-timeline",
+        _variant(
+            "Order these from earliest to latest: Magna Carta, French Revolution, Moon landing",
+            _ordered_spec("magna carta", "french revolution", "moon landing"),
         ),
-    },
-    {
-        "concept_id": "geography:japan-capital",
-        "category": "geography",
-        "difficulty": 1,
-        "source_type": "curated",
-        "generator_type": "static_pack",
-        "variants": (
-            {"prompt": "What is the capital city of Japan?", "answer_spec": {"type": "text", "accepted": ["tokyo"]}},
-            {"prompt": "Name Japan's capital.", "answer_spec": {"type": "text", "accepted": ["tokyo"]}},
+        _variant(
+            "Put these in time order: Moon landing, Magna Carta, French Revolution",
+            _ordered_spec("magna carta", "french revolution", "moon landing"),
         ),
-    },
-    {
-        "concept_id": "geography:largest-ocean",
-        "category": "geography",
-        "difficulty": 2,
-        "source_type": "curated",
-        "generator_type": "static_pack",
-        "variants": (
-            {"prompt": "What is the largest ocean on Earth?", "answer_spec": {"type": "text", "accepted": ["pacific", "pacific ocean"]}},
-            {"prompt": "Name Earth's largest ocean.", "answer_spec": {"type": "text", "accepted": ["pacific", "pacific ocean"]}},
+    ),
+    _static_seed(
+        "history:constantinople-columbus-luther",
+        "history",
+        3,
+        "history.big-timeline",
+        _variant(
+            "Order these from earliest to latest: fall of Constantinople, Columbus reaches the Caribbean, Martin Luther posts the 95 Theses",
+            _ordered_spec("fall of constantinople", "columbus reaches the caribbean", "martin luther posts the 95 theses"),
         ),
-    },
-    {
-        "concept_id": "geography:sahara",
-        "category": "geography",
-        "difficulty": 1,
-        "source_type": "curated",
-        "generator_type": "static_pack",
-        "variants": (
-            {"prompt": "What is the largest hot desert on Earth?", "answer_spec": {"type": "text", "accepted": ["sahara", "sahara desert", "the sahara"]}},
-            {"prompt": "Name Earth's largest hot desert.", "answer_spec": {"type": "text", "accepted": ["sahara", "sahara desert", "the sahara"]}},
+        _variant(
+            "Put these in time order: Martin Luther posts the 95 Theses, fall of Constantinople, Columbus reaches the Caribbean",
+            _ordered_spec("fall of constantinople", "columbus reaches the caribbean", "martin luther posts the 95 theses"),
         ),
-    },
-    {
-        "concept_id": "language:oxford-comma-boolean",
-        "category": "language",
-        "difficulty": 2,
-        "source_type": "curated",
-        "generator_type": "static_pack",
-        "variants": (
-            {"prompt": "True or false: an Oxford comma appears before the final item in a list.", "answer_spec": {"type": "boolean", "value": True}},
-            {"prompt": "True or false: the Oxford comma is the comma placed before the last item in a list of three or more.", "answer_spec": {"type": "boolean", "value": True}},
+    ),
+    _static_seed(
+        "history:renaissance-enlightenment-industrial",
+        "history",
+        3,
+        "history.movements",
+        _variant(
+            "Which came last? A) Renaissance B) Enlightenment C) Industrial Revolution",
+            _multiple_choice_spec("renaissance", "enlightenment", "industrial revolution", answer="industrial revolution"),
         ),
-    },
-    {
-        "concept_id": "language:plural-cactus",
-        "category": "language",
-        "difficulty": 2,
-        "source_type": "curated",
-        "generator_type": "static_pack",
-        "variants": (
-            {"prompt": "What is the plural of 'cactus' in common English usage?", "answer_spec": {"type": "text", "accepted": ["cacti", "cactuses"]}},
-            {"prompt": "Give a common English plural for 'cactus'.", "answer_spec": {"type": "text", "accepted": ["cacti", "cactuses"]}},
+        _variant(
+            "Pick the latest movement here. A) Industrial Revolution B) Renaissance C) Enlightenment",
+            _multiple_choice_spec("industrial revolution", "renaissance", "enlightenment", answer="industrial revolution"),
         ),
-    },
-    {
-        "concept_id": "logic:sequence",
-        "category": "logic",
-        "difficulty": 2,
-        "source_type": "generated",
-        "generator_type": "logic_sequence",
-        "variants": (),
-    },
-    {
-        "concept_id": "logic:traffic-light",
-        "category": "logic",
-        "difficulty": 1,
-        "source_type": "curated",
-        "generator_type": "static_pack",
-        "variants": (
-            {
-                "prompt": "Multiple choice: which color usually means 'go' on a traffic light? A) red B) yellow C) green",
-                "answer_spec": {"type": "multiple_choice", "choices": ["red", "yellow", "green"], "answer": "green"},
-            },
-            {
-                "prompt": "Which traffic-light option usually means 'go'? A) red B) yellow C) green",
-                "answer_spec": {"type": "multiple_choice", "choices": ["red", "yellow", "green"], "answer": "green"},
-            },
+    ),
+    _static_seed(
+        "geography:nile-continent",
+        "geography",
+        1,
+        "geography.continents",
+        _variant("The Nile River is on which continent?", _text_spec("africa")),
+        _variant("Which continent is home to the Nile?", _text_spec("africa")),
+    ),
+    _static_seed(
+        "geography:japan-capital",
+        "geography",
+        1,
+        "geography.capitals",
+        _variant("What is the capital city of Japan?", _text_spec("tokyo")),
+        _variant("Name Japan's capital.", _text_spec("tokyo")),
+    ),
+    _static_seed(
+        "geography:largest-ocean",
+        "geography",
+        2,
+        "geography.oceans",
+        _variant("What is the largest ocean on Earth?", _text_spec("pacific", "pacific ocean")),
+        _variant("Name Earth's largest ocean.", _text_spec("pacific", "pacific ocean")),
+    ),
+    _static_seed(
+        "geography:sahara",
+        "geography",
+        1,
+        "geography.landforms",
+        _variant("What is the largest hot desert on Earth?", _text_spec("sahara", "sahara desert", "the sahara")),
+        _variant("Name Earth's largest hot desert.", _text_spec("sahara", "sahara desert", "the sahara")),
+    ),
+    _static_seed(
+        "geography:indian-ocean",
+        "geography",
+        2,
+        "geography.oceans",
+        _variant("Which ocean lies east of Africa and west of Australia?", _text_spec("indian", "indian ocean")),
+        _variant("Name the ocean between Africa and Australia.", _text_spec("indian", "indian ocean")),
+    ),
+    _static_seed(
+        "geography:landlocked-country",
+        "geography",
+        2,
+        "geography.country-traits",
+        _variant(
+            "Which country here has no coastline? A) Nepal B) Portugal C) Japan",
+            _multiple_choice_spec("nepal", "portugal", "japan", answer="nepal"),
         ),
-    },
-    {
-        "concept_id": "math:addition",
-        "category": "math",
-        "difficulty": 1,
-        "source_type": "generated",
-        "generator_type": "math_addition",
-        "variants": (),
-    },
-    {
-        "concept_id": "math:multiplication",
-        "category": "math",
-        "difficulty": 2,
-        "source_type": "generated",
-        "generator_type": "math_multiplication",
-        "variants": (),
-    },
-    {
-        "concept_id": "culture:chess-piece",
-        "category": "culture",
-        "difficulty": 1,
-        "source_type": "curated",
-        "generator_type": "static_pack",
-        "variants": (
-            {"prompt": "Which chess piece can move in an L shape?", "answer_spec": {"type": "text", "accepted": ["knight", "the knight"]}},
-            {"prompt": "Name the chess piece that moves in an L shape.", "answer_spec": {"type": "text", "accepted": ["knight", "the knight"]}},
+        _variant(
+            "Pick the landlocked country. A) Chile B) Nepal C) Iceland",
+            _multiple_choice_spec("chile", "nepal", "iceland", answer="nepal"),
         ),
-    },
-    {
-        "concept_id": "culture:primary-colors",
-        "category": "culture",
-        "difficulty": 2,
-        "source_type": "curated",
-        "generator_type": "static_pack",
-        "variants": (
-            {
-                "prompt": "Put these additive primary colors in order from shortest answer length to longest: blue, red, green",
-                "answer_spec": {"type": "ordered_tokens", "tokens": ["red", "blue", "green"]},
-            },
-            {
-                "prompt": "Order these additive primary colors from the shortest word to the longest: blue, red, green",
-                "answer_spec": {"type": "ordered_tokens", "tokens": ["red", "blue", "green"]},
-            },
+    ),
+    _static_seed(
+        "geography:paris-rome-latitude",
+        "geography",
+        3,
+        "geography.relative-position",
+        _variant(
+            "Which city sits farther north? A) Rome B) Paris C) Madrid",
+            _multiple_choice_spec("rome", "paris", "madrid", answer="paris"),
         ),
-    },
-    {
-        "concept_id": "culture:piano-keys",
-        "category": "culture",
-        "difficulty": 1,
-        "source_type": "curated",
-        "generator_type": "static_pack",
-        "variants": (
-            {"prompt": "How many keys does a standard piano have?", "answer_spec": {"type": "numeric", "value": 88}},
-            {"prompt": "A standard piano has how many keys?", "answer_spec": {"type": "numeric", "value": 88}},
+        _variant(
+            "Pick the northernmost city. A) Paris B) Rome C) Athens",
+            _multiple_choice_spec("paris", "rome", "athens", answer="paris"),
         ),
-    },
-    {
-        "concept_id": "culture:monopoly",
-        "category": "culture",
-        "difficulty": 1,
-        "source_type": "curated",
-        "generator_type": "static_pack",
-        "variants": (
-            {"prompt": "Which board game is built around properties, railroads, and hotels?", "answer_spec": {"type": "text", "accepted": ["monopoly"]}},
-            {"prompt": "Name the board game where players buy properties and build hotels.", "answer_spec": {"type": "text", "accepted": ["monopoly"]}},
+    ),
+    _static_seed(
+        "geography:transcontinental-country",
+        "geography",
+        3,
+        "geography.country-traits",
+        _variant(
+            "Which country spans both Europe and Asia in common geographic usage? A) Turkey B) Peru C) Kenya",
+            _multiple_choice_spec("turkey", "peru", "kenya", answer="turkey"),
         ),
-    },
-    {
-        "concept_id": "language:anagram",
-        "category": "language",
-        "difficulty": 2,
-        "source_type": "generated",
-        "generator_type": "language_anagram",
-        "variants": (),
-    },
+        _variant(
+            "Pick the transcontinental country here. A) Morocco B) Turkey C) Vietnam",
+            _multiple_choice_spec("morocco", "turkey", "vietnam", answer="turkey"),
+        ),
+    ),
+    _static_seed(
+        "geography:cairo-nairobi-capetown",
+        "geography",
+        3,
+        "geography.relative-position",
+        _variant(
+            "Order these from north to south: Cairo, Nairobi, Cape Town",
+            _ordered_spec("cairo", "nairobi", "cape town"),
+        ),
+        _variant(
+            "Put these in north-to-south order: Cape Town, Cairo, Nairobi",
+            _ordered_spec("cairo", "nairobi", "cape town"),
+        ),
+    ),
+    _static_seed(
+        "language:oxford-comma-boolean",
+        "language",
+        2,
+        "language.grammar",
+        _variant("True or false: an Oxford comma appears before the final item in a list.", _boolean_spec(True)),
+        _variant("True or false: the Oxford comma is the comma placed before the last item in a list of three or more.", _boolean_spec(True)),
+    ),
+    _static_seed(
+        "language:plural-cactus",
+        "language",
+        2,
+        "language.word-forms",
+        _variant("What is the plural of 'cactus' in common English usage?", _text_spec("cacti", "cactuses")),
+        _variant("Give a common English plural for 'cactus'.", _text_spec("cacti", "cactuses")),
+    ),
+    _generated_seed("language:anagram", "language", 2, "language_anagram", "language.anagrams"),
+    _static_seed(
+        "language:prefix-pre",
+        "language",
+        1,
+        "language.word-parts",
+        _variant("Which prefix means 'before'? A) pre B) post C) anti", _multiple_choice_spec("pre", "post", "anti", answer="pre")),
+        _variant("Pick the prefix that means 'before'. A) re B) pre C) mis", _multiple_choice_spec("re", "pre", "mis", answer="pre")),
+    ),
+    _static_seed(
+        "language:homophone-their",
+        "language",
+        2,
+        "language.usage",
+        _variant(
+            "Which word correctly completes this sentence? 'The players carried ___ jerseys into the tunnel.' "
+            "A) there B) their C) theyre",
+            _multiple_choice_spec("there", "their", "theyre", answer="their"),
+        ),
+        _variant(
+            "Pick the correct word: 'I left the books over ___. A) their B) there C) theyre'",
+            _multiple_choice_spec("their", "there", "theyre", answer="there"),
+        ),
+    ),
+    _static_seed(
+        "language:book-song-analogy",
+        "language",
+        2,
+        "language.analogy",
+        _variant("Book is to read as song is to ___", _text_spec("listen", "listening", "hear")),
+        _variant("Page is to book as note is to ___", _text_spec("song", "music")),
+    ),
+    _static_seed(
+        "language:alphabet-order",
+        "language",
+        3,
+        "language.ordering",
+        _variant("Put these in alphabetical order: cedar, birch, maple", _ordered_spec("birch", "cedar", "maple")),
+        _variant("Alphabetize these: maple, cedar, birch", _ordered_spec("birch", "cedar", "maple")),
+    ),
+    _static_seed(
+        "language:its-its-usage",
+        "language",
+        3,
+        "language.usage",
+        _variant(
+            "Which sentence is correct? A) The robot lost its balance. B) The robot lost its balances. C) The robot lost itss balance.",
+            _multiple_choice_spec("the robot lost its balance", "the robot lost its balances", "the robot lost itss balance", answer="the robot lost its balance"),
+        ),
+        _variant(
+            "Pick the correct sentence. A) Its going to rain. B) Its a bright day. C) The team forgot its plan.",
+            _multiple_choice_spec("its going to rain", "its a bright day", "the team forgot its plan", answer="the team forgot its plan"),
+        ),
+    ),
+    _static_seed(
+        "language:palindrome-classification",
+        "language",
+        3,
+        "language.patterns",
+        _variant(
+            "Which word belongs with level, civic, and radar? A) river B) rotor C) lantern",
+            _multiple_choice_spec("river", "rotor", "lantern", answer="rotor"),
+        ),
+        _variant(
+            "Pick the palindrome. A) garden B) mirror C) refer",
+            _multiple_choice_spec("garden", "mirror", "refer", answer="refer"),
+        ),
+    ),
+    _generated_seed("logic:sequence", "logic", 2, "logic_sequence", "logic.sequence"),
+    _generated_seed("logic:analogy", "logic", 2, "logic_analogy", "logic.analogy"),
+    _generated_seed("logic:odd-one-out", "logic", 2, "logic_odd_one_out", "logic.odd-one-out"),
+    _generated_seed("logic:elimination", "logic", 3, "logic_elimination", "logic.elimination"),
+    _generated_seed("logic:conditional", "logic", 2, "logic_conditional", "logic.conditional"),
+    _generated_seed("logic:parity-grouping", "logic", 2, "logic_parity_grouping", "logic.parity"),
+    _generated_seed("logic:true-false", "logic", 2, "logic_true_false", "logic.inference"),
+    _generated_seed("logic:classification", "logic", 3, "logic_classification", "logic.classification"),
+    _generated_seed("logic:mini-deduction", "logic", 3, "logic_mini_deduction", "logic.mini-deduction"),
+    _generated_seed("logic:rotation", "logic", 3, "logic_rotation", "logic.rotation"),
+    _generated_seed("math:addition", "math", 1, "math_addition", "math.arithmetic-addition"),
+    _generated_seed("math:multiplication", "math", 2, "math_multiplication", "math.arithmetic-multiplication"),
+    _generated_seed("math:order-operations", "math", 2, "math_order_operations", "math.order-operations"),
+    _generated_seed("math:missing-value", "math", 2, "math_missing_value", "math.missing-value"),
+    _generated_seed("math:compare-expressions", "math", 2, "math_compare_expressions", "math.compare-expressions"),
+    _generated_seed("math:multi-step", "math", 2, "math_multi_step", "math.multi-step"),
+    _generated_seed("math:divisibility", "math", 2, "math_divisibility", "math.divisibility"),
+    _generated_seed("math:remainder", "math", 3, "math_remainder", "math.remainder"),
+    _generated_seed("math:percent-change", "math", 3, "math_percent_change", "math.percent-change"),
+    _generated_seed("math:average-or-median", "math", 3, "math_average_or_median", "math.average-median"),
+    _generated_seed("math:algebra-lite", "math", 3, "math_algebra_lite", "math.algebra-lite"),
+    _generated_seed("math:number-pattern", "math", 3, "math_number_pattern", "math.number-pattern"),
+    _static_seed(
+        "culture:chess-piece",
+        "culture",
+        1,
+        "culture.games-classic",
+        _variant("Which chess piece can move in an L shape?", _text_spec("knight", "the knight")),
+        _variant("Name the chess piece that moves in an L shape.", _text_spec("knight", "the knight")),
+    ),
+    _static_seed(
+        "culture:primary-colors",
+        "culture",
+        2,
+        "culture.art-basics",
+        _variant("Put these additive primary colors in order from shortest answer length to longest: blue, red, green", _ordered_spec("red", "blue", "green")),
+        _variant("Order these additive primary colors from shortest word to longest: blue, red, green", _ordered_spec("red", "blue", "green")),
+    ),
+    _static_seed(
+        "culture:piano-keys",
+        "culture",
+        1,
+        "culture.music-basics",
+        _variant("How many keys does a standard piano have?", _numeric_spec(88)),
+        _variant("A standard piano has how many keys?", _numeric_spec(88)),
+    ),
+    _static_seed(
+        "culture:monopoly",
+        "culture",
+        1,
+        "culture.games-classic",
+        _variant("Which board game is built around properties, railroads, and hotels?", _text_spec("monopoly")),
+        _variant("Name the board game where players buy properties and build hotels.", _text_spec("monopoly")),
+    ),
+    _static_seed(
+        "culture:baseball-innings",
+        "culture",
+        2,
+        "culture.sports",
+        _variant("Which sport is played in innings? A) baseball B) soccer C) tennis", _multiple_choice_spec("baseball", "soccer", "tennis", answer="baseball")),
+        _variant("Pick the sport with innings. A) hockey B) baseball C) rugby", _multiple_choice_spec("hockey", "baseball", "rugby", answer="baseball")),
+    ),
+    _static_seed(
+        "culture:percussion-choice",
+        "culture",
+        2,
+        "culture.music-basics",
+        _variant("Which instrument is percussion? A) cello B) tambourine C) oboe", _multiple_choice_spec("cello", "tambourine", "oboe", answer="tambourine")),
+        _variant("Pick the percussion instrument. A) tambourine B) trumpet C) violin", _multiple_choice_spec("tambourine", "trumpet", "violin", answer="tambourine")),
+    ),
+    _static_seed(
+        "culture:impressionism-cubism",
+        "culture",
+        3,
+        "culture.art-history",
+        _variant("True or false: Impressionism came before Cubism.", _boolean_spec(True)),
+        _variant("True or false: Cubism came before Impressionism.", _boolean_spec(False)),
+    ),
+    _static_seed(
+        "culture:stanley-cup",
+        "culture",
+        3,
+        "culture.sports",
+        _variant("What trophy is awarded to the NHL champion?", _text_spec("stanley cup", "the stanley cup")),
+        _variant("Name the trophy won by the NHL champion.", _text_spec("stanley cup", "the stanley cup")),
+    ),
+    _static_seed(
+        "culture:tempo-order",
+        "culture",
+        3,
+        "culture.music-terms",
+        _variant("Order these from slowest to fastest: largo, andante, presto", _ordered_spec("largo", "andante", "presto")),
+        _variant("Put these tempos in order from slowest to fastest: presto, largo, andante", _ordered_spec("largo", "andante", "presto")),
+    ),
 )
 
 QUESTION_DROP_SEED_BY_CONCEPT_ID = {seed["concept_id"]: seed for seed in QUESTION_DROP_SEEDS}
@@ -906,6 +1549,9 @@ def validate_content_pack(seeds: tuple[dict[str, Any], ...] | None = None) -> tu
         if concept_id in seen_ids:
             return False, f"Duplicate concept_id '{concept_id}'."
         seen_ids.add(concept_id)
+        family_id = str(seed.get("family_id") or "").strip()
+        if not family_id:
+            return False, f"Seed '{concept_id}' needs a family_id."
         category = seed.get("category")
         if category not in QUESTION_DROP_CATEGORIES:
             return False, f"Seed '{concept_id}' uses unknown category '{category}'."

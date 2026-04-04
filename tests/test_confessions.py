@@ -13,6 +13,8 @@ from babblebox.cogs.confessions import (
     EditConfessionModal,
     ReplyComposerModal,
     ReportModal,
+    StatelessConfessionMemberPanelView,
+    StatelessPublishedConfessionReplyView,
 )
 from babblebox.confessions_service import CASE_ID_PREFIX, CONFESSION_ID_PREFIX, ConfessionSubmissionResult, ConfessionsService
 from babblebox.confessions_store import ConfessionsStore
@@ -224,10 +226,11 @@ class FakeResponse:
 
 
 class FakeInteraction:
-    def __init__(self, *, guild=None, user=None, message=None):
+    def __init__(self, *, guild=None, user=None, message=None, client=None):
         self.guild = guild
         self.user = user
         self.message = message
+        self.client = client
         self.response = FakeResponse()
         self.followup = types.SimpleNamespace(send=self._followup_send)
         self.followup_calls = []
@@ -273,6 +276,7 @@ class FakeBot:
         self._guilds = {guild.id: guild for guild in guilds}
         self._cog = None
         self.views = []
+        self._ready = False
 
     def get_channel(self, channel_id: int):
         for guild in self._guilds.values():
@@ -291,6 +295,9 @@ class FakeBot:
         if name == "ConfessionsCog":
             return self._cog
         return None
+
+    def is_ready(self):
+        return self._ready
 
 
 class ServiceCogStub:
@@ -1285,6 +1292,26 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(ctx.interaction.response.modal_calls), 1)
         self.assertEqual(ctx.interaction.response.modal_calls[0].title, "Anonymous Confession")
 
+    def test_confess_create_slash_fallback_is_registered(self):
+        command_names = {command.name for command in self.cog.confess_group.app_command.commands}
+
+        self.assertEqual(command_names, {"about", "appeal", "create", "manage", "report"})
+
+    async def test_cog_load_registers_global_fallback_views(self):
+        self.bot.views.clear()
+        self.bot._ready = False
+
+        with mock.patch.object(self.cog.service, "start", new=mock.AsyncMock(return_value=True)):
+            await self.cog.cog_load()
+
+        self.assertIs(self.bot.confessions_service, self.cog.service)
+        self.assertEqual(len(self.bot.views), 2)
+        self.assertEqual([message_id for _, message_id in self.bot.views], [None, None])
+        self.assertCountEqual(
+            [type(view) for view, _ in self.bot.views],
+            [StatelessConfessionMemberPanelView, StatelessPublishedConfessionReplyView],
+        )
+
     async def test_member_panel_button_opens_modal(self):
         await self.cog.service.configure_guild(self.guild.id, enabled=True, confession_channel_id=20, review_mode=False)
         interaction = FakeInteraction(guild=self.guild, user=self._member(12))
@@ -1295,6 +1322,27 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(interaction.response.modal_calls), 1)
         self.assertEqual(interaction.response.modal_calls[0].title, "Anonymous Confession")
         self.assertIsNone(interaction.response.modal_calls[0].upload_input)
+
+    async def test_stateless_member_panel_fallback_opens_modal(self):
+        await self.cog.service.configure_guild(self.guild.id, enabled=True, confession_channel_id=20, review_mode=False)
+        interaction = FakeInteraction(guild=self.guild, user=self._member(112), client=self.bot)
+
+        await StatelessConfessionMemberPanelView().send_button.callback(interaction)
+
+        self.assertEqual(len(interaction.response.modal_calls), 1)
+        self.assertEqual(interaction.response.modal_calls[0].title, "Anonymous Confession")
+
+    async def test_stateless_member_panel_fallback_fails_closed_privately_when_cog_is_missing(self):
+        interaction = FakeInteraction(
+            guild=self.guild,
+            user=self._member(113),
+            client=types.SimpleNamespace(get_cog=lambda name: None),
+        )
+
+        await StatelessConfessionMemberPanelView().send_button.callback(interaction)
+
+        self.assertEqual(len(interaction.response.sent), 1)
+        self.assertEqual(interaction.response.sent[0]["kwargs"]["embed"].title, "Confessions Unavailable")
 
     async def test_member_panel_manage_and_support_buttons_open_private_flows(self):
         await self.cog.service.configure_guild(self.guild.id, enabled=True, confession_channel_id=20, appeals_channel_id=50, review_mode=False)
@@ -1873,6 +1921,25 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(interaction.response.sent[0]["kwargs"]["embed"].title, "Replies Are Off")
 
+    async def test_stateless_public_reply_view_uses_live_message_lookup(self):
+        await self.cog.service.configure_guild(
+            self.guild.id,
+            enabled=True,
+            confession_channel_id=20,
+            review_channel_id=30,
+            review_mode=False,
+            allow_anonymous_replies=True,
+        )
+        published = await self.cog.service.submit_confession(self.guild, author_id=33, content="reply fallback", attachments=[])
+        self.assertEqual(published.state, "published")
+        live_message = self.guild.get_channel(20).sent[0]
+        interaction = FakeInteraction(guild=self.guild, user=self._member(129), message=live_message, client=self.bot)
+
+        await StatelessPublishedConfessionReplyView().reply_button.callback(interaction)
+
+        self.assertEqual(len(interaction.response.modal_calls), 1)
+        self.assertEqual(interaction.response.modal_calls[0].title, "Anonymous Reply")
+
     async def test_review_view_custom_ids_are_case_only(self):
         view = self.cog.build_review_view(case_id="CS-AAAA1111", version=7)
         custom_ids = [child.custom_id for child in view.children if getattr(child, "custom_id", None)]
@@ -1907,6 +1974,83 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
             custom_ids.extend([child.custom_id for child in view.children if getattr(child, "custom_id", None)])
         self.assertTrue(any("bb-confession-panel:compose" == value for value in custom_ids))
         self.assertTrue(any(queued.case_id in value for value in custom_ids))
+
+    async def test_resume_member_panels_repairs_missing_stored_message_id(self):
+        ok, message = await self.cog.service.configure_guild(
+            self.guild.id,
+            enabled=True,
+            confession_channel_id=20,
+            panel_channel_id=40,
+            review_mode=False,
+        )
+        self.assertTrue(ok, message)
+        self.assertIsNone(self.cog.service.get_config(self.guild.id)["panel_message_id"])
+        self.bot.views.clear()
+
+        await self.cog.service.resume_member_panels()
+
+        self.assertEqual(len(self.guild.get_channel(40).sent), 1)
+        stored_message_id = self.cog.service.get_config(self.guild.id)["panel_message_id"]
+        self.assertEqual(len(self.bot.views), 1)
+        self.assertEqual(self.bot.views[0][1], stored_message_id)
+        self.assertEqual(stored_message_id, self.guild.get_channel(40).sent[0].id)
+
+    async def test_resume_member_panels_repairs_stale_tracked_message(self):
+        ok, message = await self.cog.service.configure_guild(
+            self.guild.id,
+            enabled=True,
+            confession_channel_id=20,
+            panel_channel_id=40,
+            panel_message_id=999999,
+            review_mode=False,
+        )
+        self.assertTrue(ok, message)
+        self.bot.views.clear()
+
+        await self.cog.service.resume_member_panels()
+
+        self.assertEqual(len(self.guild.get_channel(40).sent), 1)
+        self.assertNotEqual(self.cog.service.get_config(self.guild.id)["panel_message_id"], 999999)
+
+    async def test_on_ready_restores_runtime_surfaces_once_after_guild_cache_is_available(self):
+        ok, message = await self.cog.service.configure_guild(
+            self.guild.id,
+            enabled=True,
+            confession_channel_id=20,
+            panel_channel_id=40,
+            review_channel_id=30,
+            review_mode=False,
+            allow_anonymous_replies=True,
+        )
+        self.assertTrue(ok, message)
+        panel_ok, panel_message = await self.cog.service.sync_member_panel(self.guild)
+        self.assertTrue(panel_ok, panel_message)
+        published = await self.cog.service.submit_confession(self.guild, author_id=44, content="restore published", attachments=[])
+        self.assertEqual(published.state, "published")
+        ok, message = await self.cog.service.configure_guild(self.guild.id, review_mode=True)
+        self.assertTrue(ok, message)
+        queued = await self.cog.service.submit_confession(self.guild, author_id=45, content="restore review queue", attachments=[])
+        self.assertEqual(queued.state, "queued")
+        self.bot.views.clear()
+        self.bot._ready = True
+        self.cog._persistent_views_restored = False
+
+        await self.cog.on_ready()
+
+        self.assertEqual(len(self.bot.views), 3)
+        restored_ids = {message_id for _, message_id in self.bot.views}
+        self.assertEqual(
+            restored_ids,
+            {
+                self.guild.get_channel(40).sent[0].id,
+                self.guild.get_channel(20).sent[0].id,
+                self.guild.get_channel(30).sent[0].id,
+            },
+        )
+
+        await self.cog.on_ready()
+
+        self.assertEqual(len(self.bot.views), 3)
 
     async def test_resume_public_confession_views_restores_persistent_reply_buttons(self):
         ok, message = await self.cog.service.configure_guild(

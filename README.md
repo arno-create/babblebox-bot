@@ -57,7 +57,7 @@ Babblebox is intentionally compact:
 - configurable channels, categories, timing, activity gating, and tone
 - category mastery roles
 - guild scholar ladder
-- custom mastery announcement templates managed inside `/drops mastery category` and `/drops mastery scholar`
+- custom mastery announcement templates managed inside `/dropsadmin mastery category` and `/dropsadmin mastery scholar`
 - profile / buddy / vault knowledge tie-ins
 - rare AI celebration copy as a public-facing optional layer
 - numeric, number-word, safe multiple-choice, and spoiler-aware answer judging
@@ -149,15 +149,18 @@ Babblebox Daily is now a small arcade instead of one booth.
 Current daily modes:
 
 - Shuffle Booth
-  - unscramble the word
+  - stronger word shapes, longer answers, and cleaner morphology variety
 - Emoji Booth
-  - decode the emoji clue
+  - layered clue trails that stay readable in Discord
 - Signal Booth
-  - decode a shifted word
+  - compact decode variants across Caesar shift, mirror alphabet, and adjacent-pair swap
 
 Daily Arcade design rules:
 
 - deterministic generation from the UTC date
+- three booths are selected together so same-day answers stay unique
+- internal `standard` / `smart` / `hard` profiles shift booth difficulty without fragmenting the shared daily
+- open and result cards show Difficulty, Length, and Profile while public failed answers stay spoiler-safe
 - one compact result row per `user + date + mode`
 - small attempt limits
 - shareable output
@@ -223,23 +226,25 @@ Slash is recommended for multi-option setup here. Prefix stays positional, so th
 | Slash | Prefix | Purpose |
 | --- | --- | --- |
 | `/drops status` | `bb!drops status` | View schedule, channels, categories, and operability |
-| `/drops config` | `bb!drops config true 4` | Configure cadence, timing, tone, and AI opt-in |
-| `/drops channels` | `bb!drops channels add #trivia` | Add or remove Question Drops channels |
-| `/drops categories` | `bb!drops categories disable math` | Enable, disable, or reset knowledge categories |
+| `/dropsadmin config` | `bb!drops config true 4` | Configure cadence, timing, tone, difficulty profile, and AI opt-in |
+| `/dropsadmin channels` | `bb!drops channels add #trivia` | Add or remove Question Drops channels |
+| `/dropsadmin categories` | `bb!drops categories disable math` | Enable, disable, or reset knowledge categories |
 | `/drops stats` | `bb!drops stats @name` | View guild-first Question Drops progress |
 | `/drops leaderboard` | `bb!drops leaderboard science` | View the guild knowledge board |
 | `/drops roles status` | `bb!drops roles status` | View your current Babblebox-managed Question Drops roles and future-grant state |
 | `/drops roles remove` | `bb!drops roles remove @Role` | Remove one current Babblebox-managed role or all current Babblebox Question Drops roles |
 | `/drops roles preference` | `bb!drops roles preference stop true` | Stop future Babblebox role grants or receive them again with optional restore |
-| `/drops mastery category` | `bb!drops mastery category science true 1 @Role 25` | Configure category mastery roles, or manage default and per-tier announcement templates with `template_action` |
-| `/drops mastery scholar` | `bb!drops mastery scholar true 1 @Role 100` | Configure the guild scholar ladder, or manage default and per-tier announcement templates with `template_action` |
-| `/drops mastery recalc` | `bb!drops mastery recalc` | Preview or execute a grant-only role recalculation |
+| `/dropsadmin mastery category` | `bb!drops mastery category science true 1 @Role 25` | Configure category mastery roles, or manage default and per-tier announcement templates with `template_action` |
+| `/dropsadmin mastery scholar` | `bb!drops mastery scholar true 1 @Role 100` | Configure the guild scholar ladder, or manage default and per-tier announcement templates with `template_action` |
+| `/dropsadmin mastery recalc` | `bb!drops mastery recalc` | Preview or execute a grant-only role recalculation |
 
 Question Drops notes:
 
 - 1-10 drops per day
+- `/dropsadmin config` now carries a compact difficulty profile: Standard stays welcoming, Smart leans medium and hard, Hard is noticeably tougher without changing point values
 - live drops stay compact and block `/play` only in the same channel while unresolved
 - numeric answers accept clean digits, simple number words, and safe judged formats
+- category and family repeat protection now keep higher-volume lanes from turning into a trivial farm
 - removing current Babblebox roles does not erase earned mastery history, and opt-out is the durable "do not re-grant" switch
 - mastery announcements can use Babblebox's default copy, a scope default template, or a tier override with fallback order: tier override -> scope default -> Babblebox default
 - category template tokens: `{user.mention}` `{user.name}` `{user.display_name}` `{role.name}` `{tier.label}` `{threshold}` `{category.name}`
@@ -339,6 +344,8 @@ Daily visibility notes:
 - `/daily`, `/daily play`, and `/daily stats` now default to public showable cards
 - choose `visibility: private` whenever you want the old only-you flow
 - cooldowns only apply to real public cards; storage errors, validation issues, state mismatches, and cooldown warnings stay private
+- Shuffle leans on stronger letter shapes, Emoji on layered clueing, and Signal on named codec variants so the booths feel distinct
+- cards show Difficulty, Length, and Profile on open and result views without leaking failed public answers
 - public Daily cards stay spoiler-safe and do not reveal failed answers in-channel
 
 ### Buddy / Profile / Vault

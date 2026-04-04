@@ -2085,7 +2085,7 @@ class ConfessionsService:
         role_access = self._member_role_access_label(guild)
         support_snapshot = self.support_channel_snapshot(guild)
         description = (
-            "Share something quietly through a private composer. When admins enable Confessions, Babblebox keeps the author hidden from members and staff while still enforcing safety internally."
+            "Share something quietly through a private composer. Use `/confess create` or the panel button below. When admins enable Confessions, Babblebox keeps the author hidden from members and staff while still enforcing safety internally."
             if ready
             else "Anonymous confessions are optional in Babblebox and are not ready in this server yet. The panel stays here so admins can finish setup without reposting it."
         )
@@ -2097,7 +2097,7 @@ class ConfessionsService:
         embed.add_field(
             name="How It Works",
             value=(
-                "Tap **Send Confession**.\n"
+                "Run `/confess create` or tap **Send Confession**.\n"
                 "Add text and at most one trusted link.\n"
                 "Reply from a live confession post when replies are enabled.\n"
                 "Use **Manage My Confession** to delete your own submission privately.\n"
@@ -2163,7 +2163,7 @@ class ConfessionsService:
         )
         embed = discord.Embed(
             title="How Anonymous Confessions Work",
-            description="Confessions are submitted privately and published by Babblebox, not by you.",
+            description="Confessions are submitted privately and published by Babblebox, not by you. `/confess create` is the direct fallback entry point if the public panel is unavailable.",
             color=ge.EMBED_THEME["info"],
         )
         embed.add_field(
@@ -2179,6 +2179,7 @@ class ConfessionsService:
         embed.add_field(
             name="Owner Controls",
             value=(
+                "Use `/confess create` whenever you want the direct private composer.\n"
                 "You can privately delete your own confession or reply.\n"
                 "Self-edit is only available if this server enables it and the submission is still pending review."
             ),
@@ -2564,7 +2565,7 @@ class ConfessionsService:
 
     async def resume_member_panels(self):
         for guild_id, config in sorted(self._compiled_configs.items()):
-            if not config.get("panel_channel_id") or not config.get("panel_message_id"):
+            if not config.get("panel_channel_id"):
                 continue
             guild = self.bot.get_guild(guild_id)
             if guild is None:

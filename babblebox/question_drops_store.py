@@ -9,6 +9,7 @@ from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
+from babblebox.question_drops_content import QUESTION_DROP_DIFFICULTY_PROFILES
 from babblebox.postgres_json import decode_postgres_json_array, decode_postgres_json_object
 from babblebox.text_safety import normalize_plain_text
 
@@ -44,6 +45,7 @@ def default_question_drops_config(guild_id: int | None = None) -> dict[str, Any]
         "timezone": "UTC",
         "answer_window_seconds": 60,
         "tone_mode": "clean",
+        "difficulty_profile": "standard",
         "activity_gate": "light",
         "active_start_hour": 10,
         "active_end_hour": 22,
@@ -217,6 +219,8 @@ def normalize_question_drops_config(guild_id: int, payload: Any) -> dict[str, An
     cleaned["answer_window_seconds"] = answer_window if isinstance(answer_window, int) and 15 <= answer_window <= 180 else 60
     tone_mode = str(payload.get("tone_mode", "clean")).strip().casefold()
     cleaned["tone_mode"] = tone_mode if tone_mode in {"clean", "playful", "roast-light"} else "clean"
+    difficulty_profile = str(payload.get("difficulty_profile", "standard")).strip().casefold()
+    cleaned["difficulty_profile"] = difficulty_profile if difficulty_profile in QUESTION_DROP_DIFFICULTY_PROFILES else "standard"
     activity_gate = str(payload.get("activity_gate", "light")).strip().casefold()
     cleaned["activity_gate"] = activity_gate if activity_gate in {"off", "light"} else "light"
     for field, default_value in (("active_start_hour", 10), ("active_end_hour", 22)):
@@ -859,6 +863,7 @@ def _config_from_row(row) -> dict[str, Any]:
             "timezone": row["timezone"],
             "answer_window_seconds": row["answer_window_seconds"],
             "tone_mode": row["tone_mode"],
+            "difficulty_profile": row.get("difficulty_profile", "standard"),
             "activity_gate": row["activity_gate"],
             "active_start_hour": row["active_start_hour"],
             "active_end_hour": row["active_end_hour"],
@@ -1047,6 +1052,7 @@ class _PostgresQuestionDropsStore(_BaseQuestionDropsStore):
                 "timezone TEXT NOT NULL DEFAULT 'UTC', "
                 "answer_window_seconds INTEGER NOT NULL DEFAULT 60, "
                 "tone_mode TEXT NOT NULL DEFAULT 'clean', "
+                "difficulty_profile TEXT NOT NULL DEFAULT 'standard', "
                 "activity_gate TEXT NOT NULL DEFAULT 'light', "
                 "active_start_hour INTEGER NOT NULL DEFAULT 10, "
                 "active_end_hour INTEGER NOT NULL DEFAULT 22, "
@@ -1085,6 +1091,7 @@ class _PostgresQuestionDropsStore(_BaseQuestionDropsStore):
             "ALTER TABLE question_drop_configs ADD COLUMN IF NOT EXISTS scholar_ladder JSONB NOT NULL DEFAULT '{}'::jsonb",
             "ALTER TABLE question_drop_configs ADD COLUMN IF NOT EXISTS digest_settings JSONB NOT NULL DEFAULT '{}'::jsonb",
             "ALTER TABLE question_drop_configs ADD COLUMN IF NOT EXISTS ai_celebrations_enabled BOOLEAN NOT NULL DEFAULT FALSE",
+            "ALTER TABLE question_drop_configs ADD COLUMN IF NOT EXISTS difficulty_profile TEXT NOT NULL DEFAULT 'standard'",
             "CREATE INDEX IF NOT EXISTS ix_question_drop_exposures_guild_asked ON question_drop_exposures (guild_id, asked_at DESC)",
             "CREATE INDEX IF NOT EXISTS ix_question_drop_exposures_guild_concept ON question_drop_exposures (guild_id, concept_id, asked_at DESC)",
             "CREATE INDEX IF NOT EXISTS ix_question_drop_exposures_guild_variant ON question_drop_exposures (guild_id, variant_hash, asked_at DESC)",
@@ -1175,7 +1182,7 @@ class _PostgresQuestionDropsStore(_BaseQuestionDropsStore):
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 (
-                    "SELECT guild_id, enabled, drops_per_day, timezone, answer_window_seconds, tone_mode, activity_gate, "
+                    "SELECT guild_id, enabled, drops_per_day, timezone, answer_window_seconds, tone_mode, difficulty_profile, activity_gate, "
                     "active_start_hour, active_end_hour, enabled_channel_ids, enabled_categories, "
                     "category_mastery, scholar_ladder, digest_settings, ai_celebrations_enabled "
                     "FROM question_drop_configs"
@@ -1187,7 +1194,7 @@ class _PostgresQuestionDropsStore(_BaseQuestionDropsStore):
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 (
-                    "SELECT guild_id, enabled, drops_per_day, timezone, answer_window_seconds, tone_mode, activity_gate, "
+                    "SELECT guild_id, enabled, drops_per_day, timezone, answer_window_seconds, tone_mode, difficulty_profile, activity_gate, "
                     "active_start_hour, active_end_hour, enabled_channel_ids, enabled_categories, "
                     "category_mastery, scholar_ladder, digest_settings, ai_celebrations_enabled "
                     "FROM question_drop_configs WHERE guild_id = $1"
@@ -1210,17 +1217,18 @@ class _PostgresQuestionDropsStore(_BaseQuestionDropsStore):
                 await conn.execute(
                     (
                         "INSERT INTO question_drop_configs ("
-                        "guild_id, enabled, drops_per_day, timezone, answer_window_seconds, tone_mode, activity_gate, "
+                        "guild_id, enabled, drops_per_day, timezone, answer_window_seconds, tone_mode, difficulty_profile, activity_gate, "
                         "active_start_hour, active_end_hour, enabled_channel_ids, enabled_categories, "
                         "category_mastery, scholar_ladder, digest_settings, ai_celebrations_enabled, updated_at"
                         ") VALUES ("
-                        "$1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11::jsonb, $12::jsonb, $13::jsonb, $14::jsonb, $15, timezone('utc', now())"
+                        "$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12::jsonb, $13::jsonb, $14::jsonb, $15::jsonb, $16, timezone('utc', now())"
                         ") ON CONFLICT (guild_id) DO UPDATE SET "
                         "enabled = EXCLUDED.enabled, "
                         "drops_per_day = EXCLUDED.drops_per_day, "
                         "timezone = EXCLUDED.timezone, "
                         "answer_window_seconds = EXCLUDED.answer_window_seconds, "
                         "tone_mode = EXCLUDED.tone_mode, "
+                        "difficulty_profile = EXCLUDED.difficulty_profile, "
                         "activity_gate = EXCLUDED.activity_gate, "
                         "active_start_hour = EXCLUDED.active_start_hour, "
                         "active_end_hour = EXCLUDED.active_end_hour, "
@@ -1238,6 +1246,7 @@ class _PostgresQuestionDropsStore(_BaseQuestionDropsStore):
                     normalized["timezone"],
                     normalized["answer_window_seconds"],
                     normalized["tone_mode"],
+                    normalized["difficulty_profile"],
                     normalized["activity_gate"],
                     normalized["active_start_hour"],
                     normalized["active_end_hour"],
