@@ -1266,6 +1266,15 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ctx.send_calls[0]["embed"].title, "Confessions Control Panel")
         self.assertIsNotNone(ctx.send_calls[0]["view"])
 
+    async def test_status_command_denies_members_privately(self):
+        ctx = FakeContext(guild=self.guild, author=self._member(2))
+
+        await ConfessionsCog.confessions_status_command.callback(self.cog, ctx, None)
+
+        self.assertEqual(len(ctx.send_calls), 1)
+        self.assertTrue(ctx.send_calls[0]["ephemeral"])
+        self.assertIn("Manage Server", ctx.send_calls[0]["embed"].description)
+
     async def test_slash_confess_opens_modal_with_no_arguments(self):
         await self.cog.service.configure_guild(self.guild.id, enabled=True, confession_channel_id=20, review_mode=False)
         member = self._member(11)

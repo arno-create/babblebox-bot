@@ -1575,8 +1575,10 @@ class ConfessionsCog(commands.Cog):
             return
         await self._send_confession_about(interaction)
 
-    @commands.hybrid_group(name="confessions", with_app_command=True, description="Admin controls for the optional Confessions feature", invoke_without_command=True)
+    @app_commands.allowed_installs(guilds=True, users=False)
+    @app_commands.guild_only()
     @app_commands.default_permissions(manage_guild=True)
+    @commands.hybrid_group(name="confessions", with_app_command=True, description="Admin controls for the optional Confessions feature", invoke_without_command=True)
     async def confessions_group(self, ctx: commands.Context):
         if not await self._require_admin(ctx):
             return

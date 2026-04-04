@@ -323,59 +323,50 @@ class QuestionDropsCog(commands.Cog):
             )
         return None
 
-    @commands.hybrid_group(
-        name="drops",
-        with_app_command=True,
-        description="Knowledge mastery lane for scheduled Question Drops",
-        invoke_without_command=True,
-    )
-    async def drops_group(self, ctx: commands.Context):
+    async def _send_server_only_notice(self, ctx: commands.Context, *, message: str = "This command only works inside a server."):
+        await send_hybrid_response(
+            ctx,
+            embed=ge.make_status_embed(
+                "Server Only",
+                message,
+                tone="warning",
+                footer="Babblebox Question Drops",
+            ),
+            ephemeral=True,
+        )
+
+    async def _send_drops_status_overview(self, ctx: commands.Context):
         if ctx.guild is None:
-            await send_hybrid_response(
-                ctx,
-                embed=ge.make_status_embed(
-                    "Server Only",
-                    "Question Drops only work inside a server.",
-                    tone="warning",
-                    footer="Babblebox Question Drops",
-                ),
-                ephemeral=True,
-            )
+            await self._send_server_only_notice(ctx, message="Question Drops only work inside a server.")
             return
         if not await self._require_storage(ctx, "Question Drops", defer_response=False):
             return
         snapshot = await self.service.get_status_snapshot(ctx.guild)
         await send_hybrid_response(ctx, embed=self.service.build_status_embed(ctx.guild, snapshot), ephemeral=True)
 
-    @drops_group.command(name="status", with_app_command=True, description="Show Question Drops mastery status for this server")
-    async def drops_status_command(self, ctx: commands.Context):
+    async def _send_drops_admin_overview(self, ctx: commands.Context):
         if ctx.guild is None:
-            await send_hybrid_response(
-                ctx,
-                embed=ge.make_status_embed("Server Only", "This command only works inside a server.", tone="warning", footer="Babblebox Question Drops"),
-                ephemeral=True,
-            )
+            await self._send_server_only_notice(ctx)
             return
         if not await self._require_storage(ctx, "Question Drops", defer_response=False):
+            return
+        if not await self._require_admin(ctx):
             return
         snapshot = await self.service.get_status_snapshot(ctx.guild)
         await send_hybrid_response(ctx, embed=self.service.build_status_embed(ctx.guild, snapshot), ephemeral=True)
 
-    @drops_group.command(name="config", with_app_command=True, description="Update Question Drops schedule, tone, and AI opt-in")
-    @app_commands.default_permissions(manage_guild=True)
-    @app_commands.describe(
-        enabled="Turn scheduled drops on or off",
-        drops_per_day="How many drops per day to schedule (1-10)",
-        timezone_name="Server timezone like Asia/Yerevan or UTC+04:00",
-        answer_window_seconds="How many seconds answers stay open",
-        tone_mode="Wrong-answer tone",
-        activity_gate="Require recent chat activity before a drop can post",
-        active_start_hour="Local hour when drops may start",
-        active_end_hour="Local hour when drops stop",
-        ai_celebrations="Let this guild opt into rare AI celebration copy",
-    )
-    @app_commands.choices(enabled=STATE_CHOICES, tone_mode=TONE_CHOICES, activity_gate=ACTIVITY_GATE_CHOICES, ai_celebrations=STATE_CHOICES)
-    async def drops_config_command(
+    async def _send_drops_digest_status(self, ctx: commands.Context):
+        if ctx.guild is None:
+            await self._send_server_only_notice(ctx)
+            return
+        if not await self._require_storage(ctx, "Question Drops", defer_response=False):
+            return
+        if not await self._require_admin(ctx):
+            return
+        snapshot = await self.service.get_status_snapshot(ctx.guild)
+        await send_hybrid_response(ctx, embed=self.service.build_digest_status_embed(ctx.guild, snapshot), ephemeral=True)
+
+    async def _handle_drops_config(
         self,
         ctx: commands.Context,
         *,
@@ -390,11 +381,7 @@ class QuestionDropsCog(commands.Cog):
         ai_celebrations: Optional[str] = None,
     ):
         if ctx.guild is None:
-            await send_hybrid_response(
-                ctx,
-                embed=ge.make_status_embed("Server Only", "This command only works inside a server.", tone="warning", footer="Babblebox Question Drops"),
-                ephemeral=True,
-            )
+            await self._send_server_only_notice(ctx)
             return
         if not await self._require_storage(ctx, "Question Drops"):
             return
@@ -423,17 +410,9 @@ class QuestionDropsCog(commands.Cog):
             ephemeral=True,
         )
 
-    @drops_group.command(name="channels", with_app_command=True, description="Add or remove Question Drops channels")
-    @app_commands.default_permissions(manage_guild=True)
-    @app_commands.describe(action="Add, remove, or clear channels", channel="Channel to update")
-    @app_commands.choices(action=CHANNEL_ACTION_CHOICES)
-    async def drops_channels_command(self, ctx: commands.Context, action: str, channel: Optional[discord.TextChannel] = None):
+    async def _handle_drops_channels(self, ctx: commands.Context, action: str, channel: Optional[discord.TextChannel] = None):
         if ctx.guild is None:
-            await send_hybrid_response(
-                ctx,
-                embed=ge.make_status_embed("Server Only", "This command only works inside a server.", tone="warning", footer="Babblebox Question Drops"),
-                ephemeral=True,
-            )
+            await self._send_server_only_notice(ctx)
             return
         if not await self._require_storage(ctx, "Question Drops"):
             return
@@ -451,17 +430,9 @@ class QuestionDropsCog(commands.Cog):
             ephemeral=True,
         )
 
-    @drops_group.command(name="categories", with_app_command=True, description="Enable or disable Question Drops categories")
-    @app_commands.default_permissions(manage_guild=True)
-    @app_commands.describe(action="Enable, disable, or reset categories", category="Category to update")
-    @app_commands.choices(action=CATEGORY_ACTION_CHOICES, category=CATEGORY_CHOICES)
-    async def drops_categories_command(self, ctx: commands.Context, action: str, category: Optional[str] = None):
+    async def _handle_drops_categories(self, ctx: commands.Context, action: str, category: Optional[str] = None):
         if ctx.guild is None:
-            await send_hybrid_response(
-                ctx,
-                embed=ge.make_status_embed("Server Only", "This command only works inside a server.", tone="warning", footer="Babblebox Question Drops"),
-                ephemeral=True,
-            )
+            await self._send_server_only_notice(ctx)
             return
         if not await self._require_storage(ctx, "Question Drops"):
             return
@@ -478,6 +449,367 @@ class QuestionDropsCog(commands.Cog):
             ),
             ephemeral=True,
         )
+
+    async def _handle_drops_digest_config(
+        self,
+        ctx: commands.Context,
+        *,
+        weekly: Optional[str] = None,
+        monthly: Optional[str] = None,
+        timezone_name: Optional[str] = None,
+        shared_channel: Optional[discord.TextChannel] = None,
+        weekly_channel: Optional[discord.TextChannel] = None,
+        monthly_channel: Optional[discord.TextChannel] = None,
+        skip_low_activity: Optional[str] = None,
+        mention_mode: Optional[str] = None,
+    ):
+        if ctx.guild is None:
+            await self._send_server_only_notice(ctx)
+            return
+        if not await self._require_storage(ctx, "Question Drops"):
+            return
+        if not await self._require_admin(ctx):
+            return
+        ok, message = await self.service.update_digest_config(
+            ctx.guild,
+            weekly_enabled={"on": True, "off": False}.get(weekly) if weekly is not None else None,
+            monthly_enabled={"on": True, "off": False}.get(monthly) if monthly is not None else None,
+            timezone_name=timezone_name,
+            shared_channel_id=shared_channel.id if shared_channel is not None else None,
+            weekly_channel_id=weekly_channel.id if weekly_channel is not None else None,
+            monthly_channel_id=monthly_channel.id if monthly_channel is not None else None,
+            skip_low_activity={"on": True, "off": False}.get(skip_low_activity) if skip_low_activity is not None else None,
+            mention_mode=mention_mode,
+        )
+        await send_hybrid_response(
+            ctx,
+            embed=ge.make_status_embed(
+                "Knowledge Digests",
+                message,
+                tone="success" if ok else "warning",
+                footer="Babblebox Question Drops",
+            ),
+            ephemeral=True,
+        )
+
+    async def _handle_drops_mastery_category(
+        self,
+        ctx: commands.Context,
+        *,
+        category: str,
+        enabled: Optional[str] = None,
+        tier: Optional[int] = None,
+        role: Optional[discord.Role] = None,
+        threshold: Optional[int] = None,
+        announcement_channel: Optional[discord.TextChannel] = None,
+        clear_announcement: bool = False,
+        silent_grant: Optional[str] = None,
+        template_action: Optional[str] = None,
+    ):
+        if ctx.guild is None:
+            await self._send_server_only_notice(ctx)
+            return
+        normalized_template_action, enabled = self._normalize_template_action(template_action=template_action, enabled=enabled)
+        if not await self._require_storage(ctx, "Question Drops", defer_response=normalized_template_action != "edit"):
+            return
+        if not await self._require_admin(ctx):
+            return
+        template_conflict = self._template_mode_conflict_message(
+            template_action=normalized_template_action,
+            enabled=enabled,
+            role=role,
+            threshold=threshold,
+            announcement_channel=announcement_channel,
+            clear_announcement=clear_announcement,
+            silent_grant=silent_grant,
+        )
+        if template_conflict is not None:
+            await send_hybrid_response(
+                ctx,
+                embed=ge.make_status_embed(
+                    self.service._announcement_title(scope_type="category", scope_key=category, tier=tier),
+                    template_conflict,
+                    tone="warning",
+                    footer="Babblebox Question Drops",
+                ),
+                ephemeral=True,
+            )
+            return
+        if normalized_template_action is not None:
+            if normalized_template_action == "edit":
+                interaction = getattr(ctx, "interaction", None)
+                if interaction is None:
+                    await self._send_modal_only_notice(
+                        ctx,
+                        title=self.service._announcement_title(scope_type="category", scope_key=category, tier=tier),
+                    )
+                    return
+                payload = await self.service.get_category_mastery_announcement_status(ctx.guild, category=category, tier=tier)
+                if payload.get("status") != "ok":
+                    await send_hybrid_response(
+                        ctx,
+                        embed=self.service.build_mastery_announcement_status_embed(payload),
+                        ephemeral=True,
+                    )
+                    return
+                await interaction.response.send_modal(
+                    CategoryAnnouncementTemplateModal(
+                        cog=self,
+                        category=category,
+                        tier=tier,
+                        current_template=payload.get("announcement_template"),
+                        placeholder_tokens=tuple(payload.get("placeholder_tokens", ())),
+                    )
+                )
+                return
+            if normalized_template_action == "clear":
+                ok, message = await self.service.clear_category_mastery_announcement_template(
+                    ctx.guild.id,
+                    category=category,
+                    tier=tier,
+                )
+                if not ok:
+                    await send_hybrid_response(
+                        ctx,
+                        embed=ge.make_status_embed(
+                            self.service._announcement_title(scope_type="category", scope_key=category, tier=tier),
+                            message,
+                            tone="warning",
+                            footer="Babblebox Question Drops",
+                        ),
+                        ephemeral=True,
+                    )
+                    return
+                payload = await self.service.get_category_mastery_announcement_status(ctx.guild, category=category, tier=tier)
+                await send_hybrid_response(
+                    ctx,
+                    embed=self.service.build_mastery_announcement_status_embed(payload, note=message),
+                    ephemeral=True,
+                )
+                return
+            payload = await self.service.get_category_mastery_announcement_status(ctx.guild, category=category, tier=tier)
+            await send_hybrid_response(
+                ctx,
+                embed=self.service.build_mastery_announcement_status_embed(payload),
+                ephemeral=True,
+            )
+            return
+        ok, message = await self.service.update_category_mastery(
+            ctx.guild.id,
+            category=category,
+            enabled={"on": True, "off": False}.get(enabled) if enabled is not None else None,
+            tier=tier,
+            role_id=role.id if role is not None else None,
+            threshold=threshold,
+            announcement_channel_id=announcement_channel.id if announcement_channel is not None else None,
+            clear_announcement_channel=clear_announcement,
+            silent_grant={"on": True, "off": False}.get(silent_grant) if silent_grant is not None else None,
+        )
+        await send_hybrid_response(
+            ctx,
+            embed=ge.make_status_embed("Category Mastery", message, tone="success" if ok else "warning", footer="Babblebox Question Drops"),
+            ephemeral=True,
+        )
+
+    async def _handle_drops_mastery_scholar(
+        self,
+        ctx: commands.Context,
+        *,
+        enabled: Optional[str] = None,
+        tier: Optional[int] = None,
+        role: Optional[discord.Role] = None,
+        threshold: Optional[int] = None,
+        announcement_channel: Optional[discord.TextChannel] = None,
+        clear_announcement: bool = False,
+        silent_grant: Optional[str] = None,
+        template_action: Optional[str] = None,
+    ):
+        if ctx.guild is None:
+            await self._send_server_only_notice(ctx)
+            return
+        normalized_template_action, enabled = self._normalize_template_action(template_action=template_action, enabled=enabled)
+        if not await self._require_storage(ctx, "Question Drops", defer_response=normalized_template_action != "edit"):
+            return
+        if not await self._require_admin(ctx):
+            return
+        template_conflict = self._template_mode_conflict_message(
+            template_action=normalized_template_action,
+            enabled=enabled,
+            role=role,
+            threshold=threshold,
+            announcement_channel=announcement_channel,
+            clear_announcement=clear_announcement,
+            silent_grant=silent_grant,
+        )
+        if template_conflict is not None:
+            await send_hybrid_response(
+                ctx,
+                embed=ge.make_status_embed(
+                    self.service._announcement_title(scope_type="scholar", scope_key="global", tier=tier),
+                    template_conflict,
+                    tone="warning",
+                    footer="Babblebox Question Drops",
+                ),
+                ephemeral=True,
+            )
+            return
+        if normalized_template_action is not None:
+            if normalized_template_action == "edit":
+                interaction = getattr(ctx, "interaction", None)
+                if interaction is None:
+                    await self._send_modal_only_notice(
+                        ctx,
+                        title=self.service._announcement_title(scope_type="scholar", scope_key="global", tier=tier),
+                    )
+                    return
+                payload = await self.service.get_scholar_announcement_status(ctx.guild, tier=tier)
+                if payload.get("status") != "ok":
+                    await send_hybrid_response(
+                        ctx,
+                        embed=self.service.build_mastery_announcement_status_embed(payload),
+                        ephemeral=True,
+                    )
+                    return
+                await interaction.response.send_modal(
+                    ScholarAnnouncementTemplateModal(
+                        cog=self,
+                        tier=tier,
+                        current_template=payload.get("announcement_template"),
+                        placeholder_tokens=tuple(payload.get("placeholder_tokens", ())),
+                    )
+                )
+                return
+            if normalized_template_action == "clear":
+                ok, message = await self.service.clear_scholar_announcement_template(ctx.guild.id, tier=tier)
+                if not ok:
+                    await send_hybrid_response(
+                        ctx,
+                        embed=ge.make_status_embed(
+                            self.service._announcement_title(scope_type="scholar", scope_key="global", tier=tier),
+                            message,
+                            tone="warning",
+                            footer="Babblebox Question Drops",
+                        ),
+                        ephemeral=True,
+                    )
+                    return
+                payload = await self.service.get_scholar_announcement_status(ctx.guild, tier=tier)
+                await send_hybrid_response(
+                    ctx,
+                    embed=self.service.build_mastery_announcement_status_embed(payload, note=message),
+                    ephemeral=True,
+                )
+                return
+            payload = await self.service.get_scholar_announcement_status(ctx.guild, tier=tier)
+            await send_hybrid_response(
+                ctx,
+                embed=self.service.build_mastery_announcement_status_embed(payload),
+                ephemeral=True,
+            )
+            return
+        ok, message = await self.service.update_scholar_ladder(
+            ctx.guild.id,
+            enabled={"on": True, "off": False}.get(enabled) if enabled is not None else None,
+            tier=tier,
+            role_id=role.id if role is not None else None,
+            threshold=threshold,
+            announcement_channel_id=announcement_channel.id if announcement_channel is not None else None,
+            clear_announcement_channel=clear_announcement,
+            silent_grant={"on": True, "off": False}.get(silent_grant) if silent_grant is not None else None,
+        )
+        await send_hybrid_response(
+            ctx,
+            embed=ge.make_status_embed("Scholar Ladder", message, tone="success" if ok else "warning", footer="Babblebox Question Drops"),
+            ephemeral=True,
+        )
+
+    async def _handle_drops_mastery_recalc(self, ctx: commands.Context, member: Optional[discord.Member] = None, mode: str = "preview"):
+        if ctx.guild is None:
+            await self._send_server_only_notice(ctx)
+            return
+        if not await self._require_storage(ctx, "Question Drops"):
+            return
+        if not await self._require_admin(ctx):
+            return
+        preview = mode != "execute"
+        summary = await self.service.recalculate_mastery_roles(ctx.guild, member=member, preview=preview)
+        skipped_line = f" Skipped opted-out members: **{summary['skipped_opted_out']}**."
+        if preview:
+            body = f"Scanned **{summary['scanned']}** member(s). Pending role grants: **{summary['pending']}**.{skipped_line}"
+            title = "Mastery Recalc Preview"
+        else:
+            body = f"Scanned **{summary['scanned']}** member(s). Granted **{summary['granted']}** missing role(s).{skipped_line}"
+            title = "Mastery Recalc"
+        await send_hybrid_response(
+            ctx,
+            embed=ge.make_status_embed(title, body, tone="success", footer="Babblebox Question Drops"),
+            ephemeral=True,
+        )
+
+    @commands.hybrid_group(
+        name="drops",
+        with_app_command=True,
+        description="Knowledge mastery lane for scheduled Question Drops",
+        invoke_without_command=True,
+    )
+    async def drops_group(self, ctx: commands.Context):
+        await self._send_drops_status_overview(ctx)
+
+    @drops_group.command(name="status", with_app_command=True, description="Show Question Drops mastery status for this server")
+    async def drops_status_command(self, ctx: commands.Context):
+        await self._send_drops_status_overview(ctx)
+
+    @drops_group.command(name="config", with_app_command=False, description="Update Question Drops schedule, tone, and AI opt-in")
+    @app_commands.describe(
+        enabled="Turn scheduled drops on or off",
+        drops_per_day="How many drops per day to schedule (1-10)",
+        timezone_name="Server timezone like Asia/Yerevan or UTC+04:00",
+        answer_window_seconds="How many seconds answers stay open",
+        tone_mode="Wrong-answer tone",
+        activity_gate="Require recent chat activity before a drop can post",
+        active_start_hour="Local hour when drops may start",
+        active_end_hour="Local hour when drops stop",
+        ai_celebrations="Let this guild opt into rare AI celebration copy",
+    )
+    @app_commands.choices(enabled=STATE_CHOICES, tone_mode=TONE_CHOICES, activity_gate=ACTIVITY_GATE_CHOICES, ai_celebrations=STATE_CHOICES)
+    async def drops_config_command(
+        self,
+        ctx: commands.Context,
+        *,
+        enabled: Optional[str] = None,
+        drops_per_day: Optional[int] = None,
+        timezone_name: Optional[str] = None,
+        answer_window_seconds: Optional[int] = None,
+        tone_mode: Optional[str] = None,
+        activity_gate: Optional[str] = None,
+        active_start_hour: Optional[int] = None,
+        active_end_hour: Optional[int] = None,
+        ai_celebrations: Optional[str] = None,
+    ):
+        await self._handle_drops_config(
+            ctx,
+            enabled=enabled,
+            drops_per_day=drops_per_day,
+            timezone_name=timezone_name,
+            answer_window_seconds=answer_window_seconds,
+            tone_mode=tone_mode,
+            activity_gate=activity_gate,
+            active_start_hour=active_start_hour,
+            active_end_hour=active_end_hour,
+            ai_celebrations=ai_celebrations,
+        )
+
+    @drops_group.command(name="channels", with_app_command=False, description="Add or remove Question Drops channels")
+    @app_commands.describe(action="Add, remove, or clear channels", channel="Channel to update")
+    @app_commands.choices(action=CHANNEL_ACTION_CHOICES)
+    async def drops_channels_command(self, ctx: commands.Context, action: str, channel: Optional[discord.TextChannel] = None):
+        await self._handle_drops_channels(ctx, action, channel)
+
+    @drops_group.command(name="categories", with_app_command=False, description="Enable or disable Question Drops categories")
+    @app_commands.describe(action="Enable, disable, or reset categories", category="Category to update")
+    @app_commands.choices(action=CATEGORY_ACTION_CHOICES, category=CATEGORY_CHOICES)
+    async def drops_categories_command(self, ctx: commands.Context, action: str, category: Optional[str] = None):
+        await self._handle_drops_categories(ctx, action, category)
 
     @drops_group.command(name="stats", with_app_command=True, description="View guild-first Question Drops mastery progress")
     @app_commands.describe(user="Whose Question Drops stats to view", visibility="Show the card publicly or only to you")
@@ -615,24 +947,11 @@ class QuestionDropsCog(commands.Cog):
         entries = await profile_service.get_question_drop_leaderboard(guild_id=ctx.guild.id, category=category)
         await send_hybrid_response(ctx, embed=self.service.build_leaderboard_embed(ctx.guild, entries, category=category), ephemeral=False)
 
-    @drops_group.group(name="digest", with_app_command=True, invoke_without_command=True, description="Configure weekly and monthly knowledge digests")
+    @drops_group.group(name="digest", with_app_command=False, invoke_without_command=True, description="Configure weekly and monthly knowledge digests")
     async def drops_digest_group(self, ctx: commands.Context):
-        if ctx.guild is None:
-            await send_hybrid_response(
-                ctx,
-                embed=ge.make_status_embed("Server Only", "This command only works inside a server.", tone="warning", footer="Babblebox Question Drops"),
-                ephemeral=True,
-            )
-            return
-        if not await self._require_storage(ctx, "Question Drops", defer_response=False):
-            return
-        if not await self._require_admin(ctx):
-            return
-        snapshot = await self.service.get_status_snapshot(ctx.guild)
-        await send_hybrid_response(ctx, embed=self.service.build_digest_status_embed(ctx.guild, snapshot), ephemeral=True)
+        await self._send_drops_digest_status(ctx)
 
-    @drops_digest_group.command(name="config", with_app_command=True, description="Update digest cadence, channels, timezone, and ping behavior")
-    @app_commands.default_permissions(manage_guild=True)
+    @drops_digest_group.command(name="config", with_app_command=False, description="Update digest cadence, channels, timezone, and ping behavior")
     @app_commands.describe(
         weekly="Turn the weekly digest on or off",
         monthly="Turn the monthly digest on or off",
@@ -657,57 +976,23 @@ class QuestionDropsCog(commands.Cog):
         skip_low_activity: Optional[str] = None,
         mention_mode: Optional[str] = None,
     ):
-        if ctx.guild is None:
-            await send_hybrid_response(
-                ctx,
-                embed=ge.make_status_embed("Server Only", "This command only works inside a server.", tone="warning", footer="Babblebox Question Drops"),
-                ephemeral=True,
-            )
-            return
-        if not await self._require_storage(ctx, "Question Drops"):
-            return
-        if not await self._require_admin(ctx):
-            return
-        ok, message = await self.service.update_digest_config(
-            ctx.guild,
-            weekly_enabled={"on": True, "off": False}.get(weekly) if weekly is not None else None,
-            monthly_enabled={"on": True, "off": False}.get(monthly) if monthly is not None else None,
+        await self._handle_drops_digest_config(
+            ctx,
+            weekly=weekly,
+            monthly=monthly,
             timezone_name=timezone_name,
-            shared_channel_id=shared_channel.id if shared_channel is not None else None,
-            weekly_channel_id=weekly_channel.id if weekly_channel is not None else None,
-            monthly_channel_id=monthly_channel.id if monthly_channel is not None else None,
-            skip_low_activity={"on": True, "off": False}.get(skip_low_activity) if skip_low_activity is not None else None,
+            shared_channel=shared_channel,
+            weekly_channel=weekly_channel,
+            monthly_channel=monthly_channel,
+            skip_low_activity=skip_low_activity,
             mention_mode=mention_mode,
         )
-        await send_hybrid_response(
-            ctx,
-            embed=ge.make_status_embed(
-                "Knowledge Digests",
-                message,
-                tone="success" if ok else "warning",
-                footer="Babblebox Question Drops",
-            ),
-            ephemeral=True,
-        )
 
-    @drops_group.group(name="mastery", with_app_command=True, invoke_without_command=True, description="Configure mastery roles, scholar ranks, and recalculation")
+    @drops_group.group(name="mastery", with_app_command=False, invoke_without_command=True, description="Configure mastery roles, scholar ranks, and recalculation")
     async def drops_mastery_group(self, ctx: commands.Context):
-        if ctx.guild is None:
-            await send_hybrid_response(
-                ctx,
-                embed=ge.make_status_embed("Server Only", "This command only works inside a server.", tone="warning", footer="Babblebox Question Drops"),
-                ephemeral=True,
-            )
-            return
-        if not await self._require_storage(ctx, "Question Drops", defer_response=False):
-            return
-        if not await self._require_admin(ctx):
-            return
-        snapshot = await self.service.get_status_snapshot(ctx.guild)
-        await send_hybrid_response(ctx, embed=self.service.build_status_embed(ctx.guild, snapshot), ephemeral=True)
+        await self._send_drops_admin_overview(ctx)
 
-    @drops_mastery_group.command(name="category", with_app_command=True, description="Configure category mastery roles")
-    @app_commands.default_permissions(manage_guild=True)
+    @drops_mastery_group.command(name="category", with_app_command=False, description="Configure category mastery roles")
     @app_commands.describe(
         category="Which knowledge category to configure",
         enabled="Turn category mastery on or off",
@@ -740,117 +1025,20 @@ class QuestionDropsCog(commands.Cog):
         silent_grant: Optional[str] = None,
         template_action: Optional[str] = None,
     ):
-        if ctx.guild is None:
-            await send_hybrid_response(
-                ctx,
-                embed=ge.make_status_embed("Server Only", "This command only works inside a server.", tone="warning", footer="Babblebox Question Drops"),
-                ephemeral=True,
-            )
-            return
-        normalized_template_action, enabled = self._normalize_template_action(template_action=template_action, enabled=enabled)
-        if not await self._require_storage(ctx, "Question Drops", defer_response=normalized_template_action != "edit"):
-            return
-        if not await self._require_admin(ctx):
-            return
-        template_conflict = self._template_mode_conflict_message(
-            template_action=normalized_template_action,
+        await self._handle_drops_mastery_category(
+            ctx,
+            category=category,
             enabled=enabled,
+            tier=tier,
             role=role,
             threshold=threshold,
             announcement_channel=announcement_channel,
             clear_announcement=clear_announcement,
             silent_grant=silent_grant,
-        )
-        if template_conflict is not None:
-            await send_hybrid_response(
-                ctx,
-                embed=ge.make_status_embed(
-                    self.service._announcement_title(scope_type="category", scope_key=category, tier=tier),
-                    template_conflict,
-                    tone="warning",
-                    footer="Babblebox Question Drops",
-                ),
-                ephemeral=True,
-            )
-            return
-        if normalized_template_action is not None:
-            if normalized_template_action == "edit":
-                interaction = getattr(ctx, "interaction", None)
-                if interaction is None:
-                    await self._send_modal_only_notice(
-                        ctx,
-                        title=self.service._announcement_title(scope_type="category", scope_key=category, tier=tier),
-                    )
-                    return
-                payload = await self.service.get_category_mastery_announcement_status(ctx.guild, category=category, tier=tier)
-                if payload.get("status") != "ok":
-                    await send_hybrid_response(
-                        ctx,
-                        embed=self.service.build_mastery_announcement_status_embed(payload),
-                        ephemeral=True,
-                    )
-                    return
-                await interaction.response.send_modal(
-                    CategoryAnnouncementTemplateModal(
-                        cog=self,
-                        category=category,
-                        tier=tier,
-                        current_template=payload.get("announcement_template"),
-                        placeholder_tokens=tuple(payload.get("placeholder_tokens", ())),
-                    )
-                )
-                return
-            if normalized_template_action == "clear":
-                ok, message = await self.service.clear_category_mastery_announcement_template(
-                    ctx.guild.id,
-                    category=category,
-                    tier=tier,
-                )
-                if not ok:
-                    await send_hybrid_response(
-                        ctx,
-                        embed=ge.make_status_embed(
-                            self.service._announcement_title(scope_type="category", scope_key=category, tier=tier),
-                            message,
-                            tone="warning",
-                            footer="Babblebox Question Drops",
-                        ),
-                        ephemeral=True,
-                    )
-                    return
-                payload = await self.service.get_category_mastery_announcement_status(ctx.guild, category=category, tier=tier)
-                await send_hybrid_response(
-                    ctx,
-                    embed=self.service.build_mastery_announcement_status_embed(payload, note=message),
-                    ephemeral=True,
-                )
-                return
-            payload = await self.service.get_category_mastery_announcement_status(ctx.guild, category=category, tier=tier)
-            await send_hybrid_response(
-                ctx,
-                embed=self.service.build_mastery_announcement_status_embed(payload),
-                ephemeral=True,
-            )
-            return
-        ok, message = await self.service.update_category_mastery(
-            ctx.guild.id,
-            category=category,
-            enabled={"on": True, "off": False}.get(enabled) if enabled is not None else None,
-            tier=tier,
-            role_id=role.id if role is not None else None,
-            threshold=threshold,
-            announcement_channel_id=announcement_channel.id if announcement_channel is not None else None,
-            clear_announcement_channel=clear_announcement,
-            silent_grant={"on": True, "off": False}.get(silent_grant) if silent_grant is not None else None,
-        )
-        await send_hybrid_response(
-            ctx,
-            embed=ge.make_status_embed("Category Mastery", message, tone="success" if ok else "warning", footer="Babblebox Question Drops"),
-            ephemeral=True,
+            template_action=template_action,
         )
 
-    @drops_mastery_group.command(name="scholar", with_app_command=True, description="Configure the guild scholar ladder")
-    @app_commands.default_permissions(manage_guild=True)
+    @drops_mastery_group.command(name="scholar", with_app_command=False, description="Configure the guild scholar ladder")
     @app_commands.describe(
         enabled="Turn the scholar ladder on or off",
         tier="Scholar tier to configure. Also selects a tier override when template_action is used",
@@ -875,139 +1063,221 @@ class QuestionDropsCog(commands.Cog):
         silent_grant: Optional[str] = None,
         template_action: Optional[str] = None,
     ):
-        if ctx.guild is None:
-            await send_hybrid_response(
-                ctx,
-                embed=ge.make_status_embed("Server Only", "This command only works inside a server.", tone="warning", footer="Babblebox Question Drops"),
-                ephemeral=True,
-            )
-            return
-        normalized_template_action, enabled = self._normalize_template_action(template_action=template_action, enabled=enabled)
-        if not await self._require_storage(ctx, "Question Drops", defer_response=normalized_template_action != "edit"):
-            return
-        if not await self._require_admin(ctx):
-            return
-        template_conflict = self._template_mode_conflict_message(
-            template_action=normalized_template_action,
+        await self._handle_drops_mastery_scholar(
+            ctx,
             enabled=enabled,
+            tier=tier,
             role=role,
             threshold=threshold,
             announcement_channel=announcement_channel,
             clear_announcement=clear_announcement,
             silent_grant=silent_grant,
-        )
-        if template_conflict is not None:
-            await send_hybrid_response(
-                ctx,
-                embed=ge.make_status_embed(
-                    self.service._announcement_title(scope_type="scholar", scope_key="global", tier=tier),
-                    template_conflict,
-                    tone="warning",
-                    footer="Babblebox Question Drops",
-                ),
-                ephemeral=True,
-            )
-            return
-        if normalized_template_action is not None:
-            if normalized_template_action == "edit":
-                interaction = getattr(ctx, "interaction", None)
-                if interaction is None:
-                    await self._send_modal_only_notice(
-                        ctx,
-                        title=self.service._announcement_title(scope_type="scholar", scope_key="global", tier=tier),
-                    )
-                    return
-                payload = await self.service.get_scholar_announcement_status(ctx.guild, tier=tier)
-                if payload.get("status") != "ok":
-                    await send_hybrid_response(
-                        ctx,
-                        embed=self.service.build_mastery_announcement_status_embed(payload),
-                        ephemeral=True,
-                    )
-                    return
-                await interaction.response.send_modal(
-                    ScholarAnnouncementTemplateModal(
-                        cog=self,
-                        tier=tier,
-                        current_template=payload.get("announcement_template"),
-                        placeholder_tokens=tuple(payload.get("placeholder_tokens", ())),
-                    )
-                )
-                return
-            if normalized_template_action == "clear":
-                ok, message = await self.service.clear_scholar_announcement_template(ctx.guild.id, tier=tier)
-                if not ok:
-                    await send_hybrid_response(
-                        ctx,
-                        embed=ge.make_status_embed(
-                            self.service._announcement_title(scope_type="scholar", scope_key="global", tier=tier),
-                            message,
-                            tone="warning",
-                            footer="Babblebox Question Drops",
-                        ),
-                        ephemeral=True,
-                    )
-                    return
-                payload = await self.service.get_scholar_announcement_status(ctx.guild, tier=tier)
-                await send_hybrid_response(
-                    ctx,
-                    embed=self.service.build_mastery_announcement_status_embed(payload, note=message),
-                    ephemeral=True,
-                )
-                return
-            payload = await self.service.get_scholar_announcement_status(ctx.guild, tier=tier)
-            await send_hybrid_response(
-                ctx,
-                embed=self.service.build_mastery_announcement_status_embed(payload),
-                ephemeral=True,
-            )
-            return
-        ok, message = await self.service.update_scholar_ladder(
-            ctx.guild.id,
-            enabled={"on": True, "off": False}.get(enabled) if enabled is not None else None,
-            tier=tier,
-            role_id=role.id if role is not None else None,
-            threshold=threshold,
-            announcement_channel_id=announcement_channel.id if announcement_channel is not None else None,
-            clear_announcement_channel=clear_announcement,
-            silent_grant={"on": True, "off": False}.get(silent_grant) if silent_grant is not None else None,
-        )
-        await send_hybrid_response(
-            ctx,
-            embed=ge.make_status_embed("Scholar Ladder", message, tone="success" if ok else "warning", footer="Babblebox Question Drops"),
-            ephemeral=True,
+            template_action=template_action,
         )
 
-    @drops_mastery_group.command(name="recalc", with_app_command=True, description="Preview or execute a grant-only mastery role recalculation")
-    @app_commands.default_permissions(manage_guild=True)
+    @drops_mastery_group.command(name="recalc", with_app_command=False, description="Preview or execute a grant-only mastery role recalculation")
     @app_commands.describe(member="Optional single member to recalculate", mode="Preview first, then execute when ready")
     @app_commands.choices(mode=RECALC_MODE_CHOICES)
     async def drops_mastery_recalc_command(self, ctx: commands.Context, member: Optional[discord.Member] = None, mode: str = "preview"):
-        if ctx.guild is None:
-            await send_hybrid_response(
-                ctx,
-                embed=ge.make_status_embed("Server Only", "This command only works inside a server.", tone="warning", footer="Babblebox Question Drops"),
-                ephemeral=True,
-            )
-            return
-        if not await self._require_storage(ctx, "Question Drops"):
-            return
-        if not await self._require_admin(ctx):
-            return
-        preview = mode != "execute"
-        summary = await self.service.recalculate_mastery_roles(ctx.guild, member=member, preview=preview)
-        skipped_line = f" Skipped opted-out members: **{summary['skipped_opted_out']}**."
-        if preview:
-            body = f"Scanned **{summary['scanned']}** member(s). Pending role grants: **{summary['pending']}**.{skipped_line}"
-            title = "Mastery Recalc Preview"
-        else:
-            body = f"Scanned **{summary['scanned']}** member(s). Granted **{summary['granted']}** missing role(s).{skipped_line}"
-            title = "Mastery Recalc"
-        await send_hybrid_response(
+        await self._handle_drops_mastery_recalc(ctx, member=member, mode=mode)
+
+    @app_commands.allowed_installs(guilds=True, users=False)
+    @app_commands.guild_only()
+    @app_commands.default_permissions(manage_guild=True)
+    @commands.hybrid_group(
+        name="dropsadmin",
+        with_app_command=True,
+        description="Configure Question Drops schedules, digests, and mastery",
+        invoke_without_command=True,
+    )
+    async def dropsadmin_group(self, ctx: commands.Context):
+        await self._send_drops_admin_overview(ctx)
+
+    @dropsadmin_group.command(name="config", with_app_command=True, description="Update Question Drops schedule, tone, and AI opt-in")
+    @app_commands.describe(
+        enabled="Turn scheduled drops on or off",
+        drops_per_day="How many drops per day to schedule (1-10)",
+        timezone_name="Server timezone like Asia/Yerevan or UTC+04:00",
+        answer_window_seconds="How many seconds answers stay open",
+        tone_mode="Wrong-answer tone",
+        activity_gate="Require recent chat activity before a drop can post",
+        active_start_hour="Local hour when drops may start",
+        active_end_hour="Local hour when drops stop",
+        ai_celebrations="Let this guild opt into rare AI celebration copy",
+    )
+    @app_commands.choices(enabled=STATE_CHOICES, tone_mode=TONE_CHOICES, activity_gate=ACTIVITY_GATE_CHOICES, ai_celebrations=STATE_CHOICES)
+    async def dropsadmin_config_command(
+        self,
+        ctx: commands.Context,
+        *,
+        enabled: Optional[str] = None,
+        drops_per_day: Optional[int] = None,
+        timezone_name: Optional[str] = None,
+        answer_window_seconds: Optional[int] = None,
+        tone_mode: Optional[str] = None,
+        activity_gate: Optional[str] = None,
+        active_start_hour: Optional[int] = None,
+        active_end_hour: Optional[int] = None,
+        ai_celebrations: Optional[str] = None,
+    ):
+        await self._handle_drops_config(
             ctx,
-            embed=ge.make_status_embed(title, body, tone="success", footer="Babblebox Question Drops"),
-            ephemeral=True,
+            enabled=enabled,
+            drops_per_day=drops_per_day,
+            timezone_name=timezone_name,
+            answer_window_seconds=answer_window_seconds,
+            tone_mode=tone_mode,
+            activity_gate=activity_gate,
+            active_start_hour=active_start_hour,
+            active_end_hour=active_end_hour,
+            ai_celebrations=ai_celebrations,
         )
+
+    @dropsadmin_group.command(name="channels", with_app_command=True, description="Add or remove Question Drops channels")
+    @app_commands.describe(action="Add, remove, or clear channels", channel="Channel to update")
+    @app_commands.choices(action=CHANNEL_ACTION_CHOICES)
+    async def dropsadmin_channels_command(self, ctx: commands.Context, action: str, channel: Optional[discord.TextChannel] = None):
+        await self._handle_drops_channels(ctx, action, channel)
+
+    @dropsadmin_group.command(name="categories", with_app_command=True, description="Enable or disable Question Drops categories")
+    @app_commands.describe(action="Enable, disable, or reset categories", category="Category to update")
+    @app_commands.choices(action=CATEGORY_ACTION_CHOICES, category=CATEGORY_CHOICES)
+    async def dropsadmin_categories_command(self, ctx: commands.Context, action: str, category: Optional[str] = None):
+        await self._handle_drops_categories(ctx, action, category)
+
+    @dropsadmin_group.group(name="digest", with_app_command=True, invoke_without_command=True, description="Configure weekly and monthly knowledge digests")
+    async def dropsadmin_digest_group(self, ctx: commands.Context):
+        await self._send_drops_digest_status(ctx)
+
+    @dropsadmin_digest_group.command(name="config", with_app_command=True, description="Update digest cadence, channels, timezone, and ping behavior")
+    @app_commands.describe(
+        weekly="Turn the weekly digest on or off",
+        monthly="Turn the monthly digest on or off",
+        timezone_name="Digest timezone like Asia/Yerevan or UTC+04:00",
+        shared_channel="Use one channel for both weekly and monthly digests",
+        weekly_channel="Weekly digest channel when you want it separate",
+        monthly_channel="Monthly digest channel when you want it separate",
+        skip_low_activity="Skip quiet periods instead of posting thin digests",
+        mention_mode="Digest ping behavior",
+    )
+    @app_commands.choices(weekly=STATE_CHOICES, monthly=STATE_CHOICES, skip_low_activity=STATE_CHOICES, mention_mode=DIGEST_MENTION_CHOICES)
+    async def dropsadmin_digest_config_command(
+        self,
+        ctx: commands.Context,
+        *,
+        weekly: Optional[str] = None,
+        monthly: Optional[str] = None,
+        timezone_name: Optional[str] = None,
+        shared_channel: Optional[discord.TextChannel] = None,
+        weekly_channel: Optional[discord.TextChannel] = None,
+        monthly_channel: Optional[discord.TextChannel] = None,
+        skip_low_activity: Optional[str] = None,
+        mention_mode: Optional[str] = None,
+    ):
+        await self._handle_drops_digest_config(
+            ctx,
+            weekly=weekly,
+            monthly=monthly,
+            timezone_name=timezone_name,
+            shared_channel=shared_channel,
+            weekly_channel=weekly_channel,
+            monthly_channel=monthly_channel,
+            skip_low_activity=skip_low_activity,
+            mention_mode=mention_mode,
+        )
+
+    @dropsadmin_group.group(name="mastery", with_app_command=True, invoke_without_command=True, description="Configure mastery roles, scholar ranks, and recalculation")
+    async def dropsadmin_mastery_group(self, ctx: commands.Context):
+        await self._send_drops_admin_overview(ctx)
+
+    @dropsadmin_mastery_group.command(name="category", with_app_command=True, description="Configure category mastery roles")
+    @app_commands.describe(
+        category="Which knowledge category to configure",
+        enabled="Turn category mastery on or off",
+        tier="Tier I, II, or III. Also selects a tier override when template_action is used",
+        role="Discord role to grant at that tier",
+        threshold="Knowledge points required for that tier",
+        announcement_channel="Optional channel for role milestone notices",
+        clear_announcement="Clear the category announcement channel",
+        silent_grant="Grant the role quietly without posting a notice",
+        template_action="Preview, edit, or clear the default or selected tier announcement template",
+    )
+    @app_commands.choices(
+        category=CATEGORY_CHOICES,
+        enabled=STATE_CHOICES,
+        tier=TIER_CHOICES,
+        silent_grant=STATE_CHOICES,
+        template_action=TEMPLATE_ACTION_CHOICES,
+    )
+    async def dropsadmin_mastery_category_command(
+        self,
+        ctx: commands.Context,
+        *,
+        category: str,
+        enabled: Optional[str] = None,
+        tier: Optional[int] = None,
+        role: Optional[discord.Role] = None,
+        threshold: Optional[int] = None,
+        announcement_channel: Optional[discord.TextChannel] = None,
+        clear_announcement: bool = False,
+        silent_grant: Optional[str] = None,
+        template_action: Optional[str] = None,
+    ):
+        await self._handle_drops_mastery_category(
+            ctx,
+            category=category,
+            enabled=enabled,
+            tier=tier,
+            role=role,
+            threshold=threshold,
+            announcement_channel=announcement_channel,
+            clear_announcement=clear_announcement,
+            silent_grant=silent_grant,
+            template_action=template_action,
+        )
+
+    @dropsadmin_mastery_group.command(name="scholar", with_app_command=True, description="Configure the guild scholar ladder")
+    @app_commands.describe(
+        enabled="Turn the scholar ladder on or off",
+        tier="Scholar tier to configure. Also selects a tier override when template_action is used",
+        role="Discord role to grant at that tier",
+        threshold="Guild knowledge points required for that tier",
+        announcement_channel="Optional channel for scholar notices",
+        clear_announcement="Clear the scholar announcement channel",
+        silent_grant="Grant scholar roles quietly without posting a notice",
+        template_action="Preview, edit, or clear the default or selected tier announcement template",
+    )
+    @app_commands.choices(enabled=STATE_CHOICES, tier=TIER_CHOICES, silent_grant=STATE_CHOICES, template_action=TEMPLATE_ACTION_CHOICES)
+    async def dropsadmin_mastery_scholar_command(
+        self,
+        ctx: commands.Context,
+        *,
+        enabled: Optional[str] = None,
+        tier: Optional[int] = None,
+        role: Optional[discord.Role] = None,
+        threshold: Optional[int] = None,
+        announcement_channel: Optional[discord.TextChannel] = None,
+        clear_announcement: bool = False,
+        silent_grant: Optional[str] = None,
+        template_action: Optional[str] = None,
+    ):
+        await self._handle_drops_mastery_scholar(
+            ctx,
+            enabled=enabled,
+            tier=tier,
+            role=role,
+            threshold=threshold,
+            announcement_channel=announcement_channel,
+            clear_announcement=clear_announcement,
+            silent_grant=silent_grant,
+            template_action=template_action,
+        )
+
+    @dropsadmin_mastery_group.command(name="recalc", with_app_command=True, description="Preview or execute a grant-only mastery role recalculation")
+    @app_commands.describe(member="Optional single member to recalculate", mode="Preview first, then execute when ready")
+    @app_commands.choices(mode=RECALC_MODE_CHOICES)
+    async def dropsadmin_mastery_recalc_command(self, ctx: commands.Context, member: Optional[discord.Member] = None, mode: str = "preview"):
+        await self._handle_drops_mastery_recalc(ctx, member=member, mode=mode)
 
     @commands.command(name="dropscelebaiglobal", hidden=True)
     async def drops_celebration_ai_global_override_command(self, ctx: commands.Context, mode: str = "status"):
