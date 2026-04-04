@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import secrets
 from typing import Any
@@ -9,6 +10,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from babblebox.app_command_hardening import harden_admin_root_group
 from babblebox import game_engine as ge
 from babblebox.command_utils import defer_hybrid_response, send_hybrid_response
 from babblebox.confessions_service import ConfessionSubmissionResult, ConfessionsService
@@ -62,6 +64,29 @@ RISKY_POLICY_WARNINGS: dict[str, str] = {
     "allow_replies": "Anonymous replies can increase abuse, drama, and moderation complexity. Babblebox keeps them text-only, depth-1, and always reviewed.",
     "allow_self_edit": "Editing can create bait-and-switch moderation problems. Babblebox limits it to pending submissions only.",
 }
+
+
+def _resolve_live_confessions_cog(interaction: discord.Interaction, fallback: object | None = None):
+    client = getattr(interaction, "client", None)
+    get_cog = getattr(client, "get_cog", None)
+    if callable(get_cog):
+        current = get_cog("ConfessionsCog")
+        if current is not None:
+            return current
+    return fallback
+
+
+async def _send_confessions_runtime_unavailable(interaction: discord.Interaction):
+    embed = ge.make_status_embed(
+        "Confessions Unavailable",
+        "Babblebox could not continue that Confessions interaction right now. Try `/confess create` again in a moment.",
+        tone="warning",
+        footer="Babblebox Confessions",
+    )
+    if interaction.response.is_done():
+        await interaction.followup.send(embed=embed, ephemeral=True)
+    else:
+        await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
 class ConfessionComposerModal(discord.ui.Modal, title="Anonymous Confession"):
@@ -811,6 +836,13 @@ class ConfessionMemberPanelView(discord.ui.View):
         self.send_button.disabled = not ready
         self.support_button.disabled = not self.cog._support_channel_ready_for_guild_id(guild_id)
 
+    async def _resolve_cog(self, interaction: discord.Interaction):
+        cog = _resolve_live_confessions_cog(interaction, self.cog)
+        if cog is None:
+            await _send_confessions_runtime_unavailable(interaction)
+            return None
+        return cog
+
     @discord.ui.button(
         label="Send Confession",
         style=discord.ButtonStyle.primary,
@@ -818,7 +850,10 @@ class ConfessionMemberPanelView(discord.ui.View):
         row=0,
     )
     async def send_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog._open_confession_modal(interaction)
+        cog = await self._resolve_cog(interaction)
+        if cog is None:
+            return
+        await cog._open_confession_modal(interaction)
 
     @discord.ui.button(
         label="Manage My Confession",
@@ -827,7 +862,10 @@ class ConfessionMemberPanelView(discord.ui.View):
         row=0,
     )
     async def manage_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog._open_manage_modal(interaction)
+        cog = await self._resolve_cog(interaction)
+        if cog is None:
+            return
+        await cog._open_manage_modal(interaction)
 
     @discord.ui.button(
         label="Appeal / Report",
@@ -836,7 +874,10 @@ class ConfessionMemberPanelView(discord.ui.View):
         row=1,
     )
     async def support_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog._send_support_entry(interaction)
+        cog = await self._resolve_cog(interaction)
+        if cog is None:
+            return
+        await cog._send_support_entry(interaction)
 
     @discord.ui.button(
         label="How It Works",
@@ -845,7 +886,10 @@ class ConfessionMemberPanelView(discord.ui.View):
         row=1,
     )
     async def help_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog._send_confession_about(interaction)
+        cog = await self._resolve_cog(interaction)
+        if cog is None:
+            return
+        await cog._send_confession_about(interaction)
 
 
 class PublishedConfessionReplyView(discord.ui.View):
@@ -854,6 +898,13 @@ class PublishedConfessionReplyView(discord.ui.View):
         self.cog = cog
         self.guild_id = guild_id
 
+    async def _resolve_cog(self, interaction: discord.Interaction):
+        cog = _resolve_live_confessions_cog(interaction, self.cog)
+        if cog is None:
+            await _send_confessions_runtime_unavailable(interaction)
+            return None
+        return cog
+
     @discord.ui.button(
         label="Reply",
         style=discord.ButtonStyle.primary,
@@ -861,19 +912,88 @@ class PublishedConfessionReplyView(discord.ui.View):
         row=0,
     )
     async def reply_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.guild is None:
-            await interaction.response.send_message("Anonymous replies only work inside a server.", ephemeral=True)
+        cog = await self._resolve_cog(interaction)
+        if cog is None:
             return
-        message = getattr(interaction, "message", None)
-        message_id = getattr(message, "id", None)
-        if not isinstance(message_id, int):
-            await interaction.response.send_message("That confession is not available for anonymous replies.", ephemeral=True)
+        await cog._handle_published_reply_button(interaction)
+
+
+class StatelessConfessionMemberPanelView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    async def _resolve_cog(self, interaction: discord.Interaction):
+        cog = _resolve_live_confessions_cog(interaction)
+        if cog is None:
+            await _send_confessions_runtime_unavailable(interaction)
+            return None
+        return cog
+
+    @discord.ui.button(
+        label="Send Confession",
+        style=discord.ButtonStyle.primary,
+        custom_id="bb-confession-panel:compose",
+        row=0,
+    )
+    async def send_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cog = await self._resolve_cog(interaction)
+        if cog is None:
             return
-        submission = await self.cog.service.store.fetch_submission_by_message_id(interaction.guild.id, message_id)
-        if submission is None or submission.get("status") != "published" or submission.get("submission_kind") != "confession":
-            await interaction.response.send_message("That confession is not available for anonymous replies.", ephemeral=True)
+        await cog._open_confession_modal(interaction)
+
+    @discord.ui.button(
+        label="Manage My Confession",
+        style=discord.ButtonStyle.secondary,
+        custom_id="bb-confession-panel:manage",
+        row=0,
+    )
+    async def manage_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cog = await self._resolve_cog(interaction)
+        if cog is None:
             return
-        await self.cog._open_reply_modal(interaction, default_target=submission["confession_id"])
+        await cog._open_manage_modal(interaction)
+
+    @discord.ui.button(
+        label="Appeal / Report",
+        style=discord.ButtonStyle.secondary,
+        custom_id="bb-confession-panel:support",
+        row=1,
+    )
+    async def support_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cog = await self._resolve_cog(interaction)
+        if cog is None:
+            return
+        await cog._send_support_entry(interaction)
+
+    @discord.ui.button(
+        label="How It Works",
+        style=discord.ButtonStyle.secondary,
+        custom_id="bb-confession-panel:help",
+        row=1,
+    )
+    async def help_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cog = await self._resolve_cog(interaction)
+        if cog is None:
+            return
+        await cog._send_confession_about(interaction)
+
+
+class StatelessPublishedConfessionReplyView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="Reply",
+        style=discord.ButtonStyle.primary,
+        custom_id="bb-confession-post:reply",
+        row=0,
+    )
+    async def reply_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cog = _resolve_live_confessions_cog(interaction)
+        if cog is None:
+            await _send_confessions_runtime_unavailable(interaction)
+            return
+        await cog._handle_published_reply_button(interaction)
 
 
 class ConfessionReviewView(discord.ui.View):
@@ -1102,19 +1222,46 @@ class ConfessionsCog(commands.Cog):
         self.bot = bot
         self.service = ConfessionsService(bot)
         self._pending_policy_updates: dict[str, dict[str, Any]] = {}
+        self._persistent_restore_lock = asyncio.Lock()
+        self._persistent_views_restored = False
+        harden_admin_root_group(self.confessions_group)
 
     async def cog_load(self):
         await self.service.start()
         setattr(self.bot, "confessions_service", self.service)
-        if self.service.storage_ready:
-            await self.service.resume_member_panels()
-            await self.service.resume_public_confession_views()
-            await self.service.resume_review_queues()
+        self._register_global_persistent_views()
+        if self.service.storage_ready and self._bot_is_ready():
+            await self._restore_runtime_surfaces_once()
 
     def cog_unload(self):
         if getattr(self.bot, "confessions_service", None) is self.service:
             delattr(self.bot, "confessions_service")
         self.bot.loop.create_task(self.service.close())
+
+    def _bot_is_ready(self) -> bool:
+        is_ready = getattr(self.bot, "is_ready", None)
+        return bool(callable(is_ready) and is_ready())
+
+    def _register_global_persistent_views(self):
+        with contextlib.suppress(Exception):
+            self.bot.add_view(StatelessConfessionMemberPanelView())
+        with contextlib.suppress(Exception):
+            self.bot.add_view(StatelessPublishedConfessionReplyView())
+
+    async def _restore_runtime_surfaces_once(self):
+        if not self.service.storage_ready:
+            return
+        async with self._persistent_restore_lock:
+            if self._persistent_views_restored:
+                return
+            await self.service.resume_member_panels()
+            await self.service.resume_public_confession_views()
+            await self.service.resume_review_queues()
+            self._persistent_views_restored = True
+
+    @commands.Cog.listener()
+    async def on_ready(self):
+        await self._restore_runtime_surfaces_once()
 
     def _is_admin(self, member: object) -> bool:
         perms = getattr(member, "guild_permissions", None)
@@ -1228,6 +1375,21 @@ class ConfessionsCog(commands.Cog):
             )
             return
         await interaction.response.send_modal(ReplyComposerModal(self, guild_id=interaction.guild.id, default_target=default_target))
+
+    async def _handle_published_reply_button(self, interaction: discord.Interaction):
+        if interaction.guild is None:
+            await interaction.response.send_message("Anonymous replies only work inside a server.", ephemeral=True)
+            return
+        message = getattr(interaction, "message", None)
+        message_id = getattr(message, "id", None)
+        if not isinstance(message_id, int):
+            await interaction.response.send_message("That confession is not available for anonymous replies.", ephemeral=True)
+            return
+        submission = await self.service.store.fetch_submission_by_message_id(interaction.guild.id, message_id)
+        if submission is None or submission.get("status") != "published" or submission.get("submission_kind") != "confession":
+            await interaction.response.send_message("That confession is not available for anonymous replies.", ephemeral=True)
+            return
+        await self._open_reply_modal(interaction, default_target=submission["confession_id"])
 
     async def _open_manage_modal(self, interaction: discord.Interaction, *, default_target: str | None = None):
         if interaction.guild is None:
@@ -1531,12 +1693,13 @@ class ConfessionsCog(commands.Cog):
         name="confess",
         with_app_command=True,
         description="Private anonymous confession and support flows",
+        fallback="create",
         invoke_without_command=True,
     )
     async def confess_group(self, ctx: commands.Context):
         interaction = getattr(ctx, "interaction", None)
         if interaction is None:
-            await self._send_slash_only_notice(ctx, "Use `/confess` in a server to open the private confession composer.")
+            await self._send_slash_only_notice(ctx, "Use `/confess create` in a server to open the private confession composer.")
             return
         await self._open_confession_modal(interaction)
 

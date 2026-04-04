@@ -6,6 +6,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from babblebox.app_command_hardening import harden_admin_root_group
 from babblebox import game_engine as ge
 from babblebox.command_utils import defer_hybrid_response, send_hybrid_response
 from babblebox.question_drops_content import QUESTION_DROP_CATEGORIES, QUESTION_DROP_DIFFICULTY_PROFILES, QUESTION_DROP_TONES
@@ -200,6 +201,7 @@ class QuestionDropsCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.service = QuestionDropsService(bot)
+        harden_admin_root_group(self.dropsadmin_group)
 
     async def cog_load(self):
         await self.service.start()

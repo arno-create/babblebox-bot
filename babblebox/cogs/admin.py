@@ -9,6 +9,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from babblebox.app_command_hardening import harden_admin_root_group
 from babblebox import game_engine as ge
 from babblebox.admin_service import (
     FOLLOWUP_MODE_LABELS,
@@ -458,6 +459,7 @@ class AdminCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.service = AdminService(bot)
+        harden_admin_root_group(self.admin_group)
 
     async def cog_load(self):
         await self.service.start()

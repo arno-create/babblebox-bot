@@ -7,6 +7,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from babblebox.app_command_hardening import harden_admin_root_group
 from babblebox import game_engine as ge
 from babblebox.command_utils import defer_hybrid_response, send_hybrid_response
 from babblebox.shield_service import (
@@ -203,6 +204,7 @@ class ShieldCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.service = ShieldService(bot)
+        harden_admin_root_group(self.shield_group)
 
     async def cog_load(self):
         await self.service.start()
