@@ -86,6 +86,10 @@ class ProfileServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn(f"Hint: ||{puzzle.hint}||", private_open.description)
         self.assertIn(f"Hint: ||{puzzle.hint}||", public_result.description)
         self.assertIn(f"Hint: ||{puzzle.hint}||", private_result.description)
+        for embed in (public_open, private_open, public_result, private_result):
+            self.assertIn(f"Difficulty: **{puzzle.difficulty_label}**", embed.description)
+            self.assertIn(f"Length: **{puzzle.length}**", embed.description)
+            self.assertIn(f"Profile: **{puzzle.profile.title()}**", embed.description)
 
     async def test_daily_embeds_preserve_spoilered_hint_and_skip_blank_hint(self):
         status = await self.service.get_daily_status(81, mode="shuffle")

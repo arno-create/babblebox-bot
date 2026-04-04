@@ -18,6 +18,8 @@ from babblebox.question_drops_content import (
     QUESTION_DROP_CATEGORIES,
     QUESTION_DROP_CATEGORY_LABELS,
     QUESTION_DROP_DIFFICULTY_LABELS,
+    QUESTION_DROP_DIFFICULTY_PROFILE_LABELS,
+    QUESTION_DROP_DIFFICULTY_PROFILES,
     QUESTION_DROP_TONES,
     QuestionDropVariant,
     answer_points_for_difficulty,
@@ -90,6 +92,11 @@ QUESTION_DROP_SHARED_ANNOUNCEMENT_PLACEHOLDERS = (
     "{threshold}",
 )
 QUESTION_DROP_CATEGORY_ANNOUNCEMENT_PLACEHOLDERS = QUESTION_DROP_SHARED_ANNOUNCEMENT_PLACEHOLDERS + ("{category.name}",)
+QUESTION_DROP_DIFFICULTY_MIX = {
+    "standard": {"low": {1: 50, 2: 40, 3: 10}, "medium": {1: 35, 2: 45, 3: 20}, "high": {1: 25, 2: 45, 3: 30}},
+    "smart": {"low": {1: 35, 2: 45, 3: 20}, "medium": {1: 25, 2: 45, 3: 30}, "high": {1: 15, 2: 45, 3: 40}},
+    "hard": {"low": {1: 20, 2: 45, 3: 35}, "medium": {1: 15, 2: 40, 3: 45}, "high": {1: 10, 2: 35, 3: 55}},
+}
 
 
 def _config_signature(config: dict[str, Any]) -> str:
@@ -98,6 +105,7 @@ def _config_signature(config: dict[str, Any]) -> str:
         str(config.get("timezone")),
         str(config.get("answer_window_seconds")),
         str(config.get("tone_mode")),
+        str(config.get("difficulty_profile")),
         str(config.get("activity_gate")),
         str(config.get("active_start_hour")),
         str(config.get("active_end_hour")),
@@ -134,6 +142,22 @@ def _daily_slot_datetimes(guild_id: int, local_day: date, config: dict[str, Any]
     rng = random.Random(int(hashlib.sha256(_guild_day_seed(guild_id, local_day, config).encode("utf-8")).hexdigest()[:16], 16))
     chosen_offsets = sorted(rng.sample(range(total_minutes), drops_per_day))
     return [start_of_window + timedelta(minutes=offset) for offset in chosen_offsets]
+
+
+def _difficulty_bucket(drops_per_day: int) -> str:
+    if drops_per_day <= 3:
+        return "low"
+    if drops_per_day <= 6:
+        return "medium"
+    return "high"
+
+
+def _difficulty_mix_for(config: dict[str, Any]) -> dict[int, int]:
+    profile = str(config.get("difficulty_profile", "standard")).strip().casefold()
+    if profile not in QUESTION_DROP_DIFFICULTY_PROFILES:
+        profile = "standard"
+    bucket = _difficulty_bucket(int(config.get("drops_per_day", 2) or 2))
+    return dict(QUESTION_DROP_DIFFICULTY_MIX[profile][bucket])
 
 
 def _tone_failure_line(tone_mode: str) -> str | None:
@@ -516,6 +540,7 @@ class QuestionDropsService:
         timezone_name: str | None = None,
         answer_window_seconds: int | None = None,
         tone_mode: str | None = None,
+        difficulty_profile: str | None = None,
         activity_gate: str | None = None,
         active_start_hour: int | None = None,
         active_end_hour: int | None = None,
@@ -549,6 +574,8 @@ class QuestionDropsService:
                 current["answer_window_seconds"] = answer_window_seconds
             if tone_mode is not None:
                 current["tone_mode"] = str(tone_mode).strip().casefold()
+            if difficulty_profile is not None:
+                current["difficulty_profile"] = str(difficulty_profile).strip().casefold()
             if activity_gate is not None:
                 current["activity_gate"] = str(activity_gate).strip().casefold()
             if active_start_hour is not None:
@@ -1827,7 +1854,8 @@ class QuestionDropsService:
             value=(
                 f"Timezone: **{config.get('timezone', 'UTC')}**\n"
                 f"Answer window: **{config.get('answer_window_seconds', 60)}s**\n"
-                f"Activity gate: **{str(config.get('activity_gate', 'light')).title()}**"
+                f"Activity gate: **{str(config.get('activity_gate', 'light')).title()}**\n"
+                f"Profile: **{str(config.get('difficulty_profile', 'standard')).title()}**"
             ),
             inline=True,
         )
@@ -1836,7 +1864,8 @@ class QuestionDropsService:
             value=(
                 f"Tone: **{str(config.get('tone_mode', 'clean')).title()}**\n"
                 f"Channels: **{len(snapshot.enabled_channel_mentions)}**\n"
-                f"Live now: **{snapshot.active_drop_count}**"
+                f"Live now: **{snapshot.active_drop_count}**\n"
+                f"Mix: **{QUESTION_DROP_DIFFICULTY_PROFILE_LABELS.get(str(config.get('difficulty_profile', 'standard')).casefold(), QUESTION_DROP_DIFFICULTY_PROFILE_LABELS['standard'])}**"
             ),
             inline=True,
         )
@@ -4015,15 +4044,16 @@ class QuestionDropsService:
         recent_by_variant: dict[str, datetime] = {}
         category_counts = Counter()
         difficulty_counts = Counter()
+        family_counts = Counter()
         source_counts = Counter()
         category_concept_counts = Counter()
         category_variant_capacity = Counter()
         candidate_categories = {candidate.category for candidate in candidates}
-        candidate_difficulties = {int(candidate.difficulty) for candidate in candidates}
         same_day_concepts: set[str] = set()
         seen_category_concepts: set[tuple[str, str]] = set()
         now = ge.now_utc()
         slot_day_key = str(slot_key).split(":", 1)[0]
+        recent_records: list[tuple[datetime, dict[str, Any]]] = []
         for candidate in candidates:
             category_variant_capacity[candidate.category] += 1
             concept_key = (candidate.category, candidate.concept_id)
@@ -4034,6 +4064,7 @@ class QuestionDropsService:
             asked_at = datetime.fromisoformat(record["asked_at"])
             if asked_at.tzinfo is None:
                 asked_at = asked_at.replace(tzinfo=timezone.utc)
+            recent_records.append((asked_at, record))
             recent_by_concept.setdefault(record["concept_id"], asked_at)
             recent_by_variant.setdefault(record["variant_hash"], asked_at)
             if str(record.get("slot_key") or "").split(":", 1)[0] == slot_day_key:
@@ -4042,13 +4073,23 @@ class QuestionDropsService:
                 category_counts[record["category"]] += 1
                 difficulty_counts[int(record["difficulty"])] += 1
                 seed = question_drop_seed_for_concept(record["concept_id"]) or {}
+                family_id = str(seed.get("family_id") or "").strip()
+                if family_id:
+                    family_counts[family_id] += 1
                 source_counts[str(seed.get("source_type", "curated"))] += 1
+        recent_records.sort(key=lambda item: item[0], reverse=True)
+        recent_family_window = [
+            str((question_drop_seed_for_concept(record["concept_id"]) or {}).get("family_id") or "").strip()
+            for _, record in recent_records[:4]
+        ]
+        recent_difficulty_window = [int(record["difficulty"]) for _, record in recent_records[:4]]
         scored: list[tuple[float, QuestionDropVariant]] = []
         same_day_scored: list[tuple[float, QuestionDropVariant]] = []
         generated_gap = max(0, source_counts["curated"] - source_counts["generated"])
         drop_pressure = max(0, int(config.get("drops_per_day", 2) or 2) - 2)
         category_floor = min((category_counts[category] for category in candidate_categories), default=0)
-        difficulty_floor = min((difficulty_counts[difficulty] for difficulty in candidate_difficulties), default=0)
+        target_mix = _difficulty_mix_for(config)
+        recent_total = sum(difficulty_counts.values())
         for variant in candidates:
             concept_cooldown_days, variant_cooldown_days, preferred_concept_days, preferred_variant_days = self._repeat_windows_for_variant(
                 variant,
@@ -4084,10 +4125,19 @@ class QuestionDropsService:
                 category_balance -= spread_penalty * (0.9 + min(drop_pressure * 0.2, 1.6))
                 if variant.source_type == "generated":
                     category_balance -= spread_penalty * min(drop_pressure * 0.18, 1.2)
-            difficulty_balance = 5.0 - difficulty_counts[int(variant.difficulty)]
-            difficulty_gap = max(0, difficulty_counts[int(variant.difficulty)] - difficulty_floor - 1)
-            if difficulty_gap:
-                difficulty_balance -= difficulty_gap * (0.35 + min(drop_pressure * 0.08, 0.6))
+            target_share = float(target_mix.get(int(variant.difficulty), 0)) / 100.0
+            expected_count = recent_total * target_share
+            difficulty_balance = 4.5 + ((expected_count - difficulty_counts[int(variant.difficulty)]) * 1.15)
+            if recent_total < 6:
+                difficulty_balance += target_share * 1.5
+            if int(variant.difficulty) == 3 and recent_difficulty_window[:2] == [3, 3]:
+                difficulty_balance -= 9.0
+            elif int(variant.difficulty) == 3 and recent_difficulty_window[:1] == [3]:
+                difficulty_balance -= 2.5
+            family_balance = 2.5 - min(family_counts[variant.family_id], 4) * 0.9
+            for index, family_id in enumerate(recent_family_window):
+                if family_id and family_id == variant.family_id:
+                    family_balance -= max(2.0, 5.5 - index)
             if variant.source_type == "generated":
                 source_balance = 2.5 + min(generated_gap * 0.75, 4.0) + min(drop_pressure * 0.5, 3.0)
                 pool_depth_bonus = (min(category_variant_capacity[variant.category], 12) * 0.16) + min(drop_pressure * 0.2, 1.2)
@@ -4095,7 +4145,7 @@ class QuestionDropsService:
                 source_balance = 1.5 - min(generated_gap * 0.25, 2.0) - min(drop_pressure * 0.35, 2.0)
                 pool_depth_bonus = min(category_variant_capacity[variant.category], 12) * 0.06
             jitter = (int(build_variant_hash(slot_key, variant.variant_hash), 16) % 1000) / 1000.0
-            score = freshness + variant_freshness + category_balance + difficulty_balance + source_balance + pool_depth_bonus + jitter
+            score = freshness + variant_freshness + category_balance + difficulty_balance + family_balance + source_balance + pool_depth_bonus + jitter
             if variant.concept_id in same_day_concepts:
                 same_day_scored.append((score - 12.0, variant))
             else:

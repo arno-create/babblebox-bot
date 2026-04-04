@@ -8,7 +8,7 @@ from discord.ext import commands
 
 from babblebox import game_engine as ge
 from babblebox.command_utils import defer_hybrid_response, send_hybrid_response
-from babblebox.question_drops_content import QUESTION_DROP_CATEGORIES, QUESTION_DROP_TONES
+from babblebox.question_drops_content import QUESTION_DROP_CATEGORIES, QUESTION_DROP_DIFFICULTY_PROFILES, QUESTION_DROP_TONES
 from babblebox.question_drops_service import QuestionDropsService
 
 
@@ -19,6 +19,7 @@ STATE_CHOICES = [
     app_commands.Choice(name="Off", value="off"),
 ]
 TONE_CHOICES = [app_commands.Choice(name=value.title(), value=value) for value in QUESTION_DROP_TONES]
+DIFFICULTY_PROFILE_CHOICES = [app_commands.Choice(name=value.title(), value=value) for value in QUESTION_DROP_DIFFICULTY_PROFILES]
 ACTIVITY_GATE_CHOICES = [
     app_commands.Choice(name="Light", value="light"),
     app_commands.Choice(name="Off", value="off"),
@@ -375,6 +376,7 @@ class QuestionDropsCog(commands.Cog):
         timezone_name: Optional[str] = None,
         answer_window_seconds: Optional[int] = None,
         tone_mode: Optional[str] = None,
+        difficulty_profile: Optional[str] = None,
         activity_gate: Optional[str] = None,
         active_start_hour: Optional[int] = None,
         active_end_hour: Optional[int] = None,
@@ -394,6 +396,7 @@ class QuestionDropsCog(commands.Cog):
             timezone_name=timezone_name,
             answer_window_seconds=answer_window_seconds,
             tone_mode=tone_mode,
+            difficulty_profile=difficulty_profile,
             activity_gate=activity_gate,
             active_start_hour=active_start_hour,
             active_end_hour=active_end_hour,
@@ -1100,12 +1103,19 @@ class QuestionDropsCog(commands.Cog):
         timezone_name="Server timezone like Asia/Yerevan or UTC+04:00",
         answer_window_seconds="How many seconds answers stay open",
         tone_mode="Wrong-answer tone",
+        difficulty_profile="Welcoming, smart, or hard difficulty mix",
         activity_gate="Require recent chat activity before a drop can post",
         active_start_hour="Local hour when drops may start",
         active_end_hour="Local hour when drops stop",
         ai_celebrations="Let this guild opt into rare AI celebration copy",
     )
-    @app_commands.choices(enabled=STATE_CHOICES, tone_mode=TONE_CHOICES, activity_gate=ACTIVITY_GATE_CHOICES, ai_celebrations=STATE_CHOICES)
+    @app_commands.choices(
+        enabled=STATE_CHOICES,
+        tone_mode=TONE_CHOICES,
+        difficulty_profile=DIFFICULTY_PROFILE_CHOICES,
+        activity_gate=ACTIVITY_GATE_CHOICES,
+        ai_celebrations=STATE_CHOICES,
+    )
     async def dropsadmin_config_command(
         self,
         ctx: commands.Context,
@@ -1115,6 +1125,7 @@ class QuestionDropsCog(commands.Cog):
         timezone_name: Optional[str] = None,
         answer_window_seconds: Optional[int] = None,
         tone_mode: Optional[str] = None,
+        difficulty_profile: Optional[str] = None,
         activity_gate: Optional[str] = None,
         active_start_hour: Optional[int] = None,
         active_end_hour: Optional[int] = None,
@@ -1127,6 +1138,7 @@ class QuestionDropsCog(commands.Cog):
             timezone_name=timezone_name,
             answer_window_seconds=answer_window_seconds,
             tone_mode=tone_mode,
+            difficulty_profile=difficulty_profile,
             activity_gate=activity_gate,
             active_start_hour=active_start_hour,
             active_end_hour=active_end_hour,

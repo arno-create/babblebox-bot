@@ -27,7 +27,10 @@ class WebsiteDocsTests(unittest.TestCase):
         self.assertIn("1-10 drops per day", help_html)
         self.assertIn("/drops leaderboard", help_html)
         self.assertIn("/drops roles status", help_html)
-        self.assertIn("/drops mastery category", help_html)
+        self.assertIn("/dropsadmin config", help_html)
+        self.assertIn("/dropsadmin mastery category", help_html)
+        self.assertIn("difficulty profile", help_html)
+        self.assertIn("Difficulty, Length, and the booth Profile", help_html)
         self.assertIn("template_action", help_html)
         self.assertIn("{user.mention}", help_html)
         self.assertIn("{category.name}", help_html)
@@ -72,7 +75,10 @@ class WebsiteDocsTests(unittest.TestCase):
             "guild scholar ladder",
             "/drops leaderboard",
             "/drops roles status",
-            "/drops mastery category",
+            "/dropsadmin config",
+            "/dropsadmin mastery category",
+            "difficulty profile",
+            "Difficulty, Length, and Profile",
             "template_action",
             "{user.mention}",
             "{category.name}",
@@ -98,7 +104,8 @@ class WebsiteDocsTests(unittest.TestCase):
             "scholar",
             "/drops status",
             "/drops roles status",
-            "/drops mastery category",
+            "/dropsadmin config",
+            "/dropsadmin mastery category",
             "{user.mention}",
             "{category.name}",
             "Pattern Hunt coders need server DMs open before the round starts.",
@@ -154,6 +161,8 @@ class WebsiteDocsTests(unittest.TestCase):
 
         self.assertIn("/drops status", readme)
         self.assertIn("/drops status", help_html)
+        self.assertIn("/dropsadmin config", readme)
+        self.assertIn("/dropsadmin config", help_html)
         self.assertNotIn("/drops panel", readme)
         self.assertNotIn("/drops panel", help_html)
         self.assertNotIn("category-template", readme)

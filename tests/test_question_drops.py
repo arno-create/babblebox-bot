@@ -14,10 +14,13 @@ import discord
 from babblebox import game_engine as ge
 from babblebox.question_drops_content import (
     QUESTION_DROP_CATEGORIES,
+    QUESTION_DROP_DIFFICULTY_PROFILES,
+    QUESTION_DROP_SEEDS,
     QuestionDropVariant,
     answer_points_for_difficulty,
     build_variant,
     is_answer_attempt,
+    iter_candidate_variants,
     judge_answer,
     normalize_answer_text,
     render_answer_instruction,
@@ -158,10 +161,47 @@ class DummyDeletePayload:
 
 
 class QuestionDropsContentTests(unittest.TestCase):
+    def _correct_answer_text(self, answer_spec: dict[str, object]) -> str:
+        answer_type = str(answer_spec.get("type"))
+        if answer_type == "text":
+            return str(answer_spec.get("accepted", [""])[0])
+        if answer_type == "numeric":
+            value = answer_spec.get("value", 0)
+            if isinstance(value, float) and value.is_integer():
+                value = int(value)
+            return str(value)
+        if answer_type == "boolean":
+            return "true" if bool(answer_spec.get("value")) else "false"
+        if answer_type == "multiple_choice":
+            return str(answer_spec.get("answer", ""))
+        if answer_type == "ordered_tokens":
+            return ", ".join(str(token) for token in answer_spec.get("tokens", []))
+        raise AssertionError(f"Unsupported answer spec for test helper: {answer_spec}")
+
     def test_content_pack_validates(self):
         ok, message = validate_content_pack()
         self.assertTrue(ok)
         self.assertIsNone(message)
+
+    def test_content_pack_has_family_depth_and_real_hard_inventory(self):
+        self.assertGreaterEqual(len(QUESTION_DROP_SEEDS), 60)
+        hard_seeds = [seed for seed in QUESTION_DROP_SEEDS if int(seed["difficulty"]) == 3]
+        self.assertGreaterEqual(len(hard_seeds), 20)
+        self.assertTrue(all(str(seed.get("family_id") or "").strip() for seed in QUESTION_DROP_SEEDS))
+        for category in QUESTION_DROP_CATEGORIES:
+            with self.subTest(category=category):
+                self.assertGreaterEqual(
+                    sum(1 for seed in hard_seeds if seed["category"] == category),
+                    1,
+                )
+        self.assertGreaterEqual(
+            len({seed["family_id"] for seed in QUESTION_DROP_SEEDS if seed["category"] == "math"}),
+            10,
+        )
+        self.assertGreaterEqual(
+            len({seed["family_id"] for seed in QUESTION_DROP_SEEDS if seed["category"] == "logic"}),
+            10,
+        )
 
     def test_generator_variants_are_deterministic(self):
         seed = {
@@ -178,6 +218,57 @@ class QuestionDropsContentTests(unittest.TestCase):
         self.assertEqual(first.prompt, second.prompt)
         self.assertEqual(first.answer_spec, second.answer_spec)
         self.assertNotEqual(first.prompt, third.prompt)
+
+    def test_generated_families_are_deterministic_and_judgeable(self):
+        generated_seeds = [seed for seed in QUESTION_DROP_SEEDS if seed["source_type"] == "generated"]
+        self.assertGreaterEqual(len(generated_seeds), 20)
+
+        seen_generators: set[str] = set()
+        for seed in generated_seeds:
+            with self.subTest(concept_id=seed["concept_id"]):
+                first = build_variant(seed, seed_material=f"{seed['concept_id']}:slot", variant_index=1)
+                second = build_variant(seed, seed_material=f"{seed['concept_id']}:slot", variant_index=1)
+                self.assertEqual(first.prompt, second.prompt)
+                self.assertEqual(first.answer_spec, second.answer_spec)
+                self.assertEqual(first.family_id, seed["family_id"])
+                self.assertTrue(judge_answer(first.answer_spec, self._correct_answer_text(first.answer_spec)))
+                seen_generators.add(str(seed["generator_type"]))
+
+        expected_math_generators = {
+            "math_addition",
+            "math_multiplication",
+            "math_order_operations",
+            "math_missing_value",
+            "math_compare_expressions",
+            "math_multi_step",
+            "math_divisibility",
+            "math_remainder",
+            "math_percent_change",
+            "math_average_or_median",
+            "math_algebra_lite",
+            "math_number_pattern",
+        }
+        expected_logic_generators = {
+            "logic_sequence",
+            "logic_analogy",
+            "logic_odd_one_out",
+            "logic_elimination",
+            "logic_conditional",
+            "logic_parity_grouping",
+            "logic_true_false",
+            "logic_classification",
+            "logic_mini_deduction",
+            "logic_rotation",
+        }
+        self.assertTrue(expected_math_generators.issubset(seen_generators))
+        self.assertTrue(expected_logic_generators.issubset(seen_generators))
+
+    def test_candidate_iteration_preserves_family_ids_for_generated_depth(self):
+        variants = iter_candidate_variants(categories={"math", "logic"}, seed_material="coverage", variants_per_seed=3)
+        self.assertTrue(variants)
+        self.assertTrue(all(variant.family_id for variant in variants))
+        self.assertGreaterEqual(len({variant.family_id for variant in variants if variant.category == "math"}), 10)
+        self.assertGreaterEqual(len({variant.family_id for variant in variants if variant.category == "logic"}), 10)
 
     def test_answer_judging_is_strict_for_numeric_and_natural_for_multiple_choice(self):
         self.assertTrue(judge_answer({"type": "text", "accepted": ["Mars"]}, " mars!! "))
@@ -240,6 +331,7 @@ class QuestionDropsPostgresDecodeTests(unittest.TestCase):
             "guild_id": 10,
             "enabled": True,
             "drops_per_day": 3,
+            "difficulty_profile": "hard",
             "timezone": "UTC",
             "answer_window_seconds": 75,
             "tone_mode": "clean",
@@ -285,6 +377,7 @@ class QuestionDropsPostgresDecodeTests(unittest.TestCase):
 
         self.assertEqual(config["enabled_channel_ids"], [20, 30])
         self.assertEqual(config["enabled_categories"], ["math", "science"])
+        self.assertEqual(config["difficulty_profile"], "hard")
         self.assertTrue(config["category_mastery"]["science"]["enabled"])
         self.assertEqual(config["category_mastery"]["science"]["announcement_channel_id"], 88)
         self.assertEqual(config["category_mastery"]["science"]["announcement_template"], "{user.mention} reached {category.name}.")
@@ -302,6 +395,7 @@ class QuestionDropsPostgresDecodeTests(unittest.TestCase):
             "guild_id": 10,
             "enabled": True,
             "drops_per_day": 2,
+            "difficulty_profile": "wild",
             "timezone": "UTC",
             "answer_window_seconds": 60,
             "tone_mode": "clean",
@@ -320,6 +414,7 @@ class QuestionDropsPostgresDecodeTests(unittest.TestCase):
 
         self.assertEqual(config["enabled_channel_ids"], [])
         self.assertEqual(config["enabled_categories"], [])
+        self.assertEqual(config["difficulty_profile"], "standard")
         self.assertFalse(config["category_mastery"]["science"]["enabled"])
         self.assertFalse(config["scholar_ladder"]["enabled"])
         self.assertFalse(config["digest_settings"]["weekly_enabled"])
@@ -490,6 +585,71 @@ class QuestionDropsServiceTests(unittest.IsolatedAsyncioTestCase):
 
     def _last_batch_results(self):
         return self.bot.profile_service.record_question_drop_results_batch.await_args.args[0]
+
+    async def _simulate_selector_mix(self, *, profile: str, drops_per_day: int, days: int = 30) -> dict[str, object]:
+        self.assertIn(profile, QUESTION_DROP_DIFFICULTY_PROFILES)
+        ok, message = await self.service.update_config(
+            self.guild.id,
+            drops_per_day=drops_per_day,
+            difficulty_profile=profile,
+        )
+        self.assertTrue(ok, message)
+
+        exposures: list[dict[str, object]] = []
+        counts: Counter[int] = Counter()
+        family_repeats = 0
+        max_hard_run = 0
+        current_hard_run = 0
+        previous_family: str | None = None
+        base = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+
+        for day in range(days):
+            current_time = base + timedelta(days=day)
+            slot_day = current_time.date().isoformat()
+            with patch("babblebox.question_drops_service.ge.now_utc", return_value=current_time):
+                for slot in range(drops_per_day):
+                    slot_key = f"{slot_day}:{slot}"
+                    variant = self.service._select_variant(
+                        self.guild.id,
+                        self.channel.id,
+                        exposures=exposures,
+                        slot_key=slot_key,
+                        config=self.service.get_config(self.guild.id),
+                    )
+                    self.assertIsNotNone(variant)
+                    counts[int(variant.difficulty)] += 1
+                    if int(variant.difficulty) == 3:
+                        current_hard_run += 1
+                        max_hard_run = max(max_hard_run, current_hard_run)
+                    else:
+                        current_hard_run = 0
+                    if previous_family == variant.family_id:
+                        family_repeats += 1
+                    previous_family = variant.family_id
+                    exposures.insert(
+                        0,
+                        {
+                            "guild_id": self.guild.id,
+                            "channel_id": self.channel.id,
+                            "concept_id": variant.concept_id,
+                            "variant_hash": variant.variant_hash,
+                            "category": variant.category,
+                            "difficulty": variant.difficulty,
+                            "asked_at": (current_time - timedelta(minutes=(drops_per_day - slot))).isoformat(),
+                            "resolved_at": None,
+                            "winner_user_id": None,
+                            "slot_key": slot_key,
+                        },
+                    )
+
+        total = sum(counts.values()) or 1
+        shares = {difficulty: counts[difficulty] / total for difficulty in (1, 2, 3)}
+        return {
+            "counts": counts,
+            "shares": shares,
+            "family_repeats": family_repeats,
+            "max_hard_run": max_hard_run,
+        }
 
     async def test_selector_avoids_recent_concept_repeats(self):
         old_variant = self.service._select_variant(
@@ -666,6 +826,49 @@ class QuestionDropsServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(ok, message)
         self.assertEqual(self.service.get_config(self.guild.id)["drops_per_day"], 10)
+
+    async def test_update_config_accepts_difficulty_profile_and_status_embed_surfaces_it(self):
+        ok, message = await self.service.update_config(self.guild.id, difficulty_profile="SMART")
+
+        self.assertTrue(ok, message)
+        self.assertEqual(self.service.get_config(self.guild.id)["difficulty_profile"], "smart")
+
+        embed = self.service.build_status_embed(self.guild, await self.service.get_status_snapshot(self.guild))
+        rules_field = next(field.value for field in embed.fields if field.name == "Rules")
+        delivery_field = next(field.value for field in embed.fields if field.name == "Delivery")
+
+        self.assertIn("Profile", rules_field)
+        self.assertIn("**Smart**", rules_field)
+        self.assertIn("More medium and hard, less farmable", delivery_field)
+
+    async def test_selector_profiles_shift_mix_and_avoid_family_spam_over_time(self):
+        results: dict[tuple[str, int], dict[str, object]] = {}
+        for profile in QUESTION_DROP_DIFFICULTY_PROFILES:
+            for drops_per_day in (2, 5, 9):
+                with self.subTest(profile=profile, drops_per_day=drops_per_day):
+                    result = await self._simulate_selector_mix(profile=profile, drops_per_day=drops_per_day)
+                    self.assertEqual(result["family_repeats"], 0)
+                    self.assertLessEqual(result["max_hard_run"], 2)
+                    self.assertGreater(result["shares"][2], 0.34)
+                    results[(profile, drops_per_day)] = result
+
+        for drops_per_day in (2, 5, 9):
+            standard = results[("standard", drops_per_day)]["shares"]
+            smart = results[("smart", drops_per_day)]["shares"]
+            hard = results[("hard", drops_per_day)]["shares"]
+            self.assertGreater(standard[1], smart[1])
+            self.assertGreater(smart[1], hard[1])
+            self.assertLess(standard[3], smart[3])
+            self.assertLess(smart[3], hard[3])
+
+        for profile in QUESTION_DROP_DIFFICULTY_PROFILES:
+            low = results[(profile, 2)]["shares"]
+            medium = results[(profile, 5)]["shares"]
+            high = results[(profile, 9)]["shares"]
+            self.assertGreater(low[1], medium[1])
+            self.assertGreater(medium[1], high[1])
+            self.assertLess(low[3], medium[3])
+            self.assertLess(medium[3], high[3])
 
     async def test_update_config_rejects_out_of_range_drop_counts(self):
         for invalid in (0, 11):

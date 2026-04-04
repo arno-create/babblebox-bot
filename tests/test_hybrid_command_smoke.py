@@ -198,9 +198,11 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         question_drops_page = next(page for page in HELP_PAGES if page["title"] == "Question Drops")
         self.assertIn("/drops status", question_drops_page["body"])
         self.assertIn("/drops roles status", question_drops_page["body"])
+        self.assertIn("/dropsadmin config", question_drops_page["body"])
         self.assertNotIn("/drops panel", question_drops_page["body"])
         self.assertIn("/dropsadmin mastery category", question_drops_page["body"])
         self.assertNotIn("/drops mastery category", question_drops_page["body"])
+        self.assertIn("difficulty profile", question_drops_page["body"])
         self.assertIn("template_action", question_drops_page["body"])
         self.assertIn("{user.mention}", question_drops_page["body"])
         self.assertIn("{category.name}", question_drops_page["body"])
@@ -208,6 +210,21 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("scholar ladder", question_drops_page["body"])
         daily_page = next(page for page in HELP_PAGES if page["title"] == "Daily Arcade")
         self.assertIn("Question Drops stay separate as the guild knowledge lane", daily_page["body"])
+
+    def test_dropsadmin_config_slash_choices_include_difficulty_profiles(self):
+        bot = commands.Bot(command_prefix="!", intents=discord.Intents.none())
+        payload = QuestionDropsCog.dropsadmin_config_command.app_command.to_dict(bot.tree)
+
+        difficulty_option = next(option for option in payload["options"] if option["name"] == "difficulty_profile")
+
+        self.assertEqual(
+            difficulty_option["choices"],
+            [
+                {"name": "Standard", "value": "standard"},
+                {"name": "Smart", "value": "smart"},
+                {"name": "Hard", "value": "hard"},
+            ],
+        )
 
     def test_question_drops_slash_tree_splits_public_and_admin_surfaces(self):
         cog = QuestionDropsCog(types.SimpleNamespace(loop=None))
