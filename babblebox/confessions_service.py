@@ -64,6 +64,7 @@ MAX_CONFESSION_LENGTH = 1800
 MAX_STAFF_PREVIEW = 220
 MAX_ATTACHMENT_SIZE = 10 * 1024 * 1024
 REVIEW_PREVIEW_LIMIT = 5
+ROLE_PREVIEW_LIMIT = 10
 EXACT_DUPLICATE_WINDOW_SECONDS = 24 * 3600
 NEAR_DUPLICATE_RATIO = 0.92
 FUZZY_DUPLICATE_RATIO = 0.90
@@ -518,6 +519,8 @@ class ConfessionsService:
         compiled = dict(config)
         compiled["custom_allow_domain_set"] = frozenset(config["custom_allow_domains"])
         compiled["custom_block_domain_set"] = frozenset(config["custom_block_domains"])
+        compiled["allowed_role_id_set"] = frozenset(config["allowed_role_ids"])
+        compiled["blocked_role_id_set"] = frozenset(config["blocked_role_ids"])
         return compiled
 
     def get_config(self, guild_id: int) -> dict[str, Any]:
@@ -526,6 +529,8 @@ class ConfessionsService:
             config = dict(compiled)
             config.pop("custom_allow_domain_set", None)
             config.pop("custom_block_domain_set", None)
+            config.pop("allowed_role_id_set", None)
+            config.pop("blocked_role_id_set", None)
             return config
         return default_confession_config(guild_id)
 
@@ -584,6 +589,8 @@ class ConfessionsService:
         review_mode: bool | None = None,
         block_adult_language: bool | None = None,
         allow_trusted_mainstream_links: bool | None = None,
+        allowed_role_ids: list[int] | None = None,
+        blocked_role_ids: list[int] | None = None,
         allow_images: bool | None = None,
         allow_anonymous_replies: bool | None = None,
         allow_self_edit: bool | None = None,
@@ -629,6 +636,10 @@ class ConfessionsService:
                 config["block_adult_language"] = bool(block_adult_language)
             if allow_trusted_mainstream_links is not None:
                 config["allow_trusted_mainstream_links"] = bool(allow_trusted_mainstream_links)
+            if allowed_role_ids is not None:
+                config["allowed_role_ids"] = list(allowed_role_ids)
+            if blocked_role_ids is not None:
+                config["blocked_role_ids"] = list(blocked_role_ids)
             if allow_images is not None:
                 config["allow_images"] = bool(allow_images)
             if allow_anonymous_replies is not None:
@@ -699,6 +710,167 @@ class ConfessionsService:
         if not ok:
             return False, message
         return True, f"Confessions {bucket}list updated for `{cleaned}`."
+
+    async def update_role_policy(self, guild_id: int, *, bucket: str, role_id: int, enabled: bool) -> tuple[bool, str]:
+        if bucket not in {"allow", "block"}:
+            return False, "Use the allowlist or blacklist role bucket."
+
+        def mutate(config: dict[str, Any]):
+            field = "allowed_role_ids" if bucket == "allow" else "blocked_role_ids"
+            values = {int(value) for value in config.get(field, []) if isinstance(value, int) and value > 0}
+            if enabled:
+                values.add(int(role_id))
+            else:
+                values.discard(int(role_id))
+            config[field] = sorted(values)
+
+        ok, message = await self._update_config(guild_id, mutate)
+        if not ok:
+            return False, message
+        action = "added to" if enabled else "removed from"
+        return True, f"<@&{role_id}> was {action} the Confessions role {bucket}list."
+
+    async def reset_role_policy(self, guild_id: int, *, target: str) -> tuple[bool, str]:
+        if target not in {"allowlist", "blacklist", "all"}:
+            return False, "Choose allowlist, blacklist, or all."
+
+        def mutate(config: dict[str, Any]):
+            if target in {"allowlist", "all"}:
+                config["allowed_role_ids"] = []
+            if target in {"blacklist", "all"}:
+                config["blocked_role_ids"] = []
+
+        ok, message = await self._update_config(guild_id, mutate)
+        if not ok:
+            return False, message
+        label = "allowlist and blacklist" if target == "all" else target
+        return True, f"Confessions role {label} reset."
+
+    def _resolve_submission_member(
+        self,
+        guild: discord.Guild,
+        *,
+        author_id: int | None = None,
+        member: object | None = None,
+    ) -> object | None:
+        if member is not None:
+            return member
+        get_member = getattr(guild, "get_member", None)
+        if callable(get_member) and isinstance(author_id, int):
+            return get_member(author_id)
+        return None
+
+    def _member_role_ids(self, member: object | None) -> set[int]:
+        role_ids: set[int] = set()
+        for role in getattr(member, "roles", ()) or ():
+            role_id = getattr(role, "id", None)
+            if isinstance(role_id, int) and role_id > 0:
+                role_ids.add(role_id)
+        return role_ids
+
+    def _resolve_role_labels(self, guild: discord.Guild, role_ids: Sequence[int]) -> tuple[set[int], list[str], int]:
+        active_ids: set[int] = set()
+        labels: list[str] = []
+        stale_count = 0
+        get_role = getattr(guild, "get_role", None)
+        for role_id in role_ids:
+            if not isinstance(role_id, int) or role_id <= 0:
+                continue
+            if callable(get_role):
+                role = get_role(role_id)
+                if role is None:
+                    stale_count += 1
+                    continue
+                label = getattr(role, "mention", None) or f"<@&{role_id}>"
+            else:
+                label = f"<@&{role_id}>"
+            active_ids.add(role_id)
+            labels.append(str(label))
+        return active_ids, labels, stale_count
+
+    def _role_policy_snapshot(self, guild: discord.Guild) -> dict[str, Any]:
+        config = self.get_config(guild.id)
+        active_allowed_ids, allow_labels, stale_allowed = self._resolve_role_labels(guild, list(config["allowed_role_ids"]))
+        active_blocked_ids, block_labels, stale_blocked = self._resolve_role_labels(guild, list(config["blocked_role_ids"]))
+        return {
+            "active_allowed_ids": active_allowed_ids,
+            "active_blocked_ids": active_blocked_ids,
+            "allow_labels": allow_labels,
+            "block_labels": block_labels,
+            "stale_allowed": stale_allowed,
+            "stale_blocked": stale_blocked,
+        }
+
+    def _format_role_labels(self, labels: Sequence[str]) -> str:
+        if not labels:
+            return "None"
+        visible = list(labels[:ROLE_PREVIEW_LIMIT])
+        overflow = max(0, len(labels) - ROLE_PREVIEW_LIMIT)
+        if overflow:
+            visible.append(f"(+{overflow} more)")
+        return " ".join(visible)
+
+    def _role_policy_rule_text(self) -> str:
+        return "Blacklist wins. Non-empty allowlist means allowed roles only. Empty allowlist means everyone except blocked roles."
+
+    def _member_role_access_label(self, guild: discord.Guild) -> str:
+        snapshot = self._role_policy_snapshot(guild)
+        allowed_count = len(snapshot["active_allowed_ids"])
+        blocked_count = len(snapshot["active_blocked_ids"])
+        if allowed_count and blocked_count:
+            return f"Selected roles only ({allowed_count} active); {blocked_count} blocked role(s) still denied first"
+        if allowed_count:
+            return f"Selected roles only ({allowed_count} active)"
+        if blocked_count:
+            return f"Open to everyone except {blocked_count} blocked role(s)"
+        return "Open to everyone"
+
+    def member_submission_gate_message(
+        self,
+        guild: discord.Guild,
+        *,
+        submission_kind: str = "confession",
+        author_id: int | None = None,
+        member: object | None = None,
+    ) -> str | None:
+        snapshot = self._role_policy_snapshot(guild)
+        resolved_member = self._resolve_submission_member(guild, author_id=author_id, member=member)
+        member_role_ids = self._member_role_ids(resolved_member)
+        noun = "anonymous replies" if submission_kind == "reply" else "anonymous confessions"
+        if snapshot["active_blocked_ids"] & member_role_ids:
+            return f"{noun.capitalize()} are not available for your current role setup in this server."
+        if snapshot["active_allowed_ids"] and not (snapshot["active_allowed_ids"] & member_role_ids):
+            return f"This server only allows {noun} from selected roles."
+        return None
+
+    def build_role_policy_embed(self, guild: discord.Guild) -> discord.Embed:
+        snapshot = self._role_policy_snapshot(guild)
+        embed = discord.Embed(
+            title="Confessions Role Eligibility",
+            description="Guild-scoped role controls for who can submit anonymous confessions and replies.",
+            color=ge.EMBED_THEME["info"],
+        )
+        current_lines = [
+            f"Allowlist: **{len(snapshot['active_allowed_ids'])}** active",
+            self._format_role_labels(snapshot["allow_labels"]),
+            f"Blacklist: **{len(snapshot['active_blocked_ids'])}** active",
+            self._format_role_labels(snapshot["block_labels"]),
+        ]
+        if snapshot["stale_allowed"] or snapshot["stale_blocked"]:
+            current_lines.append(
+                f"Stale configured roles: allowlist **{snapshot['stale_allowed']}**, blacklist **{snapshot['stale_blocked']}**"
+            )
+        embed.add_field(name="Current", value=ge.safe_field_text("\n".join(current_lines), limit=1024), inline=False)
+        embed.add_field(name="Rule", value=self._role_policy_rule_text(), inline=False)
+        embed.add_field(
+            name="Commands",
+            value=(
+                "Use `/confessions role allowlist` or `/confessions role blacklist` with `state:on|off`.\n"
+                "Use `/confessions role reset` to clear allowlist, blacklist, or both."
+            ),
+            inline=False,
+        )
+        return ge.style_embed(embed, footer="Babblebox Confessions | Role eligibility")
 
     def operability_message(self, guild_id: int) -> str:
         config = self.get_config(guild_id)
@@ -1114,6 +1286,7 @@ class ConfessionsService:
         guild: discord.Guild,
         *,
         author_id: int,
+        member: object | None = None,
         content: str | None,
         link: str | None = None,
         attachments: Sequence[Any] | None = None,
@@ -1130,6 +1303,20 @@ class ConfessionsService:
         if submission_kind not in {"confession", "reply"}:
             return ConfessionSubmissionResult(False, "blocked", "That anonymous submission type is not supported.")
         normalized_parent_confession_id = normalize_plain_text(parent_confession_id).upper() if parent_confession_id else None
+        role_gate_message = self.member_submission_gate_message(
+            guild,
+            submission_kind=submission_kind,
+            author_id=author_id,
+            member=member,
+        )
+        if role_gate_message is not None:
+            return ConfessionSubmissionResult(
+                False,
+                "blocked",
+                role_gate_message,
+                submission_kind=submission_kind,
+                parent_confession_id=normalized_parent_confession_id,
+            )
 
         state = self._normalize_restriction_state(await self._enforcement_state(guild.id, author_id))
         restriction_message = self._restriction_message(state)
@@ -1815,6 +2002,7 @@ class ConfessionsService:
         )
         reply_policy = "Enabled with warning" if config["allow_anonymous_replies"] else "Off by default"
         edit_policy = "Enabled with warning" if config["allow_self_edit"] else "Off by default"
+        role_access = self._member_role_access_label(guild)
         description = (
             "Share something quietly through a private composer. When admins enable Confessions, Babblebox keeps the author hidden from members and staff while still enforcing safety internally."
             if ready
@@ -1830,6 +2018,7 @@ class ConfessionsService:
             value=(
                 "Tap **Send Confession**.\n"
                 "Add text and at most one trusted link.\n"
+                "Reply from a live confession post when replies are enabled.\n"
                 "Use **Manage My Confession** to delete your own submission privately.\n"
                 "Use **Appeal / Report** for false positives, restrictions, or problem reports.\n"
                 "Images and anonymous replies stay off by default unless admins explicitly enable them."
@@ -1844,7 +2033,8 @@ class ConfessionsService:
                 f"Trusted links: **{'Allowed' if config['allow_trusted_mainstream_links'] else 'Blocked'}**\n"
                 f"Images: **{image_policy}**\n"
                 f"Replies: **{reply_policy}**\n"
-                f"Self-edit: **{edit_policy}**"
+                f"Self-edit: **{edit_policy}**\n"
+                f"Role access: **{role_access}**"
             ),
             inline=False,
         )
@@ -1867,15 +2057,21 @@ class ConfessionsService:
 
     def build_member_panel_help_embed(self, guild: discord.Guild) -> discord.Embed:
         config = self.get_config(guild.id)
+        role_snapshot = self._role_policy_snapshot(guild)
         image_line = (
             f"Text, one trusted link total, and up to {config['max_images']} images only if admins explicitly enable them. Enabled images always enter private review."
             if config["allow_images"]
             else "Text and one trusted link total. Images are off by default unless admins explicitly enable them."
         )
         reply_line = (
-            "Anonymous replies are enabled with extra moderation burden, so every reply stays text-only and goes through private review."
+            "Anonymous replies are enabled with extra moderation burden, so every reply stays text-only, launches from a live confession post, and goes through private review."
             if config["allow_anonymous_replies"]
             else "Anonymous replies are off by default unless admins explicitly enable them."
+        )
+        role_line = (
+            "This server limits who can submit based on role settings. Selected blocked roles are always denied first."
+            if role_snapshot["active_allowed_ids"] or role_snapshot["active_blocked_ids"]
+            else "This server currently leaves confession access open to everyone."
         )
         embed = discord.Embed(
             title="How Anonymous Confessions Work",
@@ -1889,7 +2085,7 @@ class ConfessionsService:
         )
         embed.add_field(
             name="What You Can Add",
-            value=f"{image_line}\n{reply_line}",
+            value=f"{image_line}\n{reply_line}\n{role_line}",
             inline=False,
         )
         embed.add_field(
@@ -1914,6 +2110,19 @@ class ConfessionsService:
 
     async def build_dashboard_embed(self, guild: discord.Guild, *, section: str = "overview") -> discord.Embed:
         config = self.get_config(guild.id)
+        role_snapshot = self._role_policy_snapshot(guild)
+        role_value = (
+            f"Allowlist: **{len(role_snapshot['active_allowed_ids'])}** active\n"
+            f"{self._format_role_labels(role_snapshot['allow_labels'])}\n"
+            f"Blacklist: **{len(role_snapshot['active_blocked_ids'])}** active\n"
+            f"{self._format_role_labels(role_snapshot['block_labels'])}\n"
+            f"Rule: **{self._role_policy_rule_text()}**"
+        )
+        if role_snapshot["stale_allowed"] or role_snapshot["stale_blocked"]:
+            role_value += (
+                f"\nStale configured roles: allowlist **{role_snapshot['stale_allowed']}**, "
+                f"blacklist **{role_snapshot['stale_blocked']}**"
+            )
         counts = await self.store.fetch_guild_counts(guild.id) if self.storage_ready else {
             "queued_submissions": 0,
             "published_submissions": 0,
@@ -1958,6 +2167,7 @@ class ConfessionsService:
                 ),
                 inline=False,
             )
+            embed.add_field(name="Role Eligibility", value=ge.safe_field_text(role_value, limit=1024), inline=False)
             embed.add_field(
                 name="Restrictions",
                 value=(
@@ -2030,6 +2240,7 @@ class ConfessionsService:
                 ),
                 inline=False,
             )
+            embed.add_field(name="Role Eligibility", value=ge.safe_field_text(role_value, limit=1024), inline=False)
             embed.add_field(name="Operability", value=self.operability_message(guild.id), inline=False)
         return ge.style_embed(embed, footer="Babblebox Confessions | Staff-blind moderation")
 
@@ -2071,6 +2282,19 @@ class ConfessionsService:
             embeds.append(ge.style_embed(image_embed, footer="Babblebox Confessions | Anonymous post"))
         return embeds
 
+    def _build_public_confession_view(self, guild_id: int, submission: dict[str, Any]) -> discord.ui.View | None:
+        if submission.get("status") != "published" or submission.get("submission_kind") != "confession":
+            return None
+        if not self.get_config(guild_id)["allow_anonymous_replies"]:
+            return None
+        cog = self.bot.get_cog("ConfessionsCog")
+        if cog is None:
+            return None
+        build_view = getattr(cog, "build_public_confession_view", None)
+        if not callable(build_view):
+            return None
+        return build_view(guild_id=guild_id)
+
     async def _publish_submission(self, guild: discord.Guild, submission: dict[str, Any]) -> tuple[bool, int | None, int | None, str | None]:
         channel_id = submission.get("posted_channel_id") or self.get_config(guild.id).get("confession_channel_id")
         channel = guild.get_channel(int(channel_id)) if isinstance(channel_id, int) else None
@@ -2080,8 +2304,12 @@ class ConfessionsService:
             return False, None, None, "The confession channel is unavailable."
 
         embeds = await self._build_public_confession_embeds(submission)
+        view = self._build_public_confession_view(guild.id, {**submission, "status": "published"})
         with contextlib.suppress(discord.Forbidden, discord.HTTPException):
-            message = await channel.send(embeds=embeds, allowed_mentions=discord.AllowedMentions.none())
+            message = await channel.send(embeds=embeds, view=view, allowed_mentions=discord.AllowedMentions.none())
+            if view is not None:
+                with contextlib.suppress(Exception):
+                    self.bot.add_view(view, message_id=message.id)
             return True, getattr(message, "id", None), getattr(channel, "id", None), None
         return False, None, None, "Babblebox could not send to the confession channel."
 
@@ -2162,6 +2390,34 @@ class ConfessionsService:
         with contextlib.suppress(discord.NotFound, discord.Forbidden, discord.HTTPException, Exception):
             return await fetch_message(message_id)
         return None
+
+    async def _sync_published_confession_views(self, guild: discord.Guild):
+        submissions = await self.store.list_published_top_level_submissions(guild.id)
+        for submission in submissions:
+            channel_id = submission.get("posted_channel_id")
+            message_id = submission.get("posted_message_id")
+            channel = guild.get_channel(channel_id) or self.bot.get_channel(channel_id)
+            if channel is None:
+                continue
+            message = await self._queue_message(channel, message_id=message_id)
+            if message is None:
+                continue
+            view = self._build_public_confession_view(guild.id, submission)
+            with contextlib.suppress(discord.Forbidden, discord.HTTPException):
+                await message.edit(view=view)
+            if view is not None:
+                with contextlib.suppress(Exception):
+                    self.bot.add_view(view, message_id=message.id)
+
+    async def resume_public_confession_views(self):
+        for guild_id in sorted(self._compiled_configs):
+            guild = self.bot.get_guild(guild_id)
+            if guild is None:
+                continue
+            await self._sync_published_confession_views(guild)
+
+    async def sync_published_confession_views(self, guild: discord.Guild):
+        await self._sync_published_confession_views(guild)
 
     async def _sync_member_panel(self, guild: discord.Guild, *, channel_id: int | None = None) -> tuple[bool, str]:
         config = self.get_config(guild.id)

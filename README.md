@@ -94,7 +94,7 @@ Babblebox is intentionally compact:
 ### Anonymous Confessions
 
 - optional feature that only works after admins enable and configure it
-- private composer launched with `/confess`
+- private composer and private member utilities launched with `/confess`, `/confess manage`, `/confess appeal`, `/confess report`, and `/confess about`
 - Babblebox keeps the author hidden from members and server staff
 - staff-blind moderation by confession ID and case ID only while the bot still enforces safety internally
 - one trusted link total per confession
@@ -102,11 +102,12 @@ Babblebox is intentionally compact:
 - offensive, vulgar, derogatory, spammy, and private-info patterns are filtered before anything posts
 - adult / 18+ language is blocked by default unless an admin changes that policy
 - shorteners, link-in-bio hubs, storefronts, malicious domains, and adult domains blocked unless a guild explicitly allowlists them
+- admins can role-allowlist or blacklist who may submit; blacklist wins, and a non-empty allowlist means only those roles may submit
 - images are off by default and must be explicitly enabled by admins
 - anonymous replies are off by default and must be explicitly enabled by admins
 - self-edit is off by default and only applies to still-pending submissions when enabled
 - enabled image support stays bounded and always routes through private review, which requires a separate private review channel
-- enabled replies stay text-only, depth-1, and always route through private review
+- enabled replies stay text-only, depth-1, always route through private review, and appear on published confession posts instead of the launch panel
 - private owner tools let a member delete their own confession or reply without exposing identity
 - admins can configure a dedicated appeals / reports channel so members can privately appeal restrictions or report confession problems
 - attachment filenames and Discord CDN URLs stay out of staff-visible surfaces
@@ -357,7 +358,12 @@ Daily visibility notes:
 | Slash | Prefix | Purpose |
 | --- | --- | --- |
 | `/confess` | n/a | Open the private confession composer |
+| `/confess manage` | n/a | Open the private manage-my-confession flow |
+| `/confess appeal` | n/a | Open the private anonymous appeal flow |
+| `/confess report` | n/a | Open the private anonymous report flow |
+| `/confess about` | n/a | Show the private How It Works explanation |
 | `/confessions` | `bb!confessions` | Open the admin control panel for setup, review, and status |
+| `/confessions role` | `bb!confessions role` | View or change Confessions role allowlist / blacklist state |
 | `/confessions moderate` | `bb!confessions moderate` | Approve, deny, delete, pause, restrict images, ban, clear, or mark a confession false positive by confession ID or case ID |
 
 Confession notes:
@@ -368,11 +374,13 @@ Confession notes:
 - adult / 18+ language is blocked by default unless admins change that policy
 - trusted-link mode allows Babblebox's bundled safe families for mainstream social, docs, wiki, and developer domains
 - one trusted link total is allowed per confession
+- `/confess manage`, `/confess appeal`, `/confess report`, and `/confess about` mirror the private member flows from the panel buttons
+- admins can use `/confessions role` to manage role allowlist / blacklist controls; blacklist wins, and a non-empty allowlist means only those roles may submit
 - images are off by default and only work after admins explicitly enable them
 - anonymous replies are off by default and only work after admins explicitly enable them
 - self-edit is off by default and only applies to pending submissions when enabled
 - enabled image confessions always enter the private review queue and require a separate private review channel
-- enabled anonymous replies stay text-only, depth-1, and always enter the private review queue
+- enabled anonymous replies stay text-only, depth-1, always enter the private review queue, and launch from published confession posts instead of the public panel
 - members can privately delete their own confessions and use a dedicated appeals / reports channel when admins configure one
 - Babblebox hides the sender's account identity, but a personal link or identifiable image can still reveal them if they include it
 - attachment filenames and raw Discord attachment URLs are kept out of staff-visible embeds

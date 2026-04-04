@@ -22,6 +22,15 @@ DOMAIN_MODE_CHOICES = [
     app_commands.Choice(name="Add", value="add"),
     app_commands.Choice(name="Remove", value="remove"),
 ]
+ROLE_STATE_CHOICES = [
+    app_commands.Choice(name="On", value="on"),
+    app_commands.Choice(name="Off", value="off"),
+]
+ROLE_RESET_CHOICES = [
+    app_commands.Choice(name="Allowlist", value="allowlist"),
+    app_commands.Choice(name="Blacklist", value="blacklist"),
+    app_commands.Choice(name="All", value="all"),
+]
 STAFF_ACTION_CHOICES = [
     app_commands.Choice(name="Approve", value="approve"),
     app_commands.Choice(name="Deny", value="deny"),
@@ -181,6 +190,7 @@ class ConfessionComposerModal(discord.ui.Modal, title="Anonymous Confession"):
             result = await self.cog.service.submit_confession(
                 interaction.guild,
                 author_id=interaction.user.id,
+                member=interaction.user,
                 content=self.body_input.value,
                 link=self.link_input.value,
                 attachments=attachments,
@@ -268,6 +278,7 @@ class ReplyComposerModal(discord.ui.Modal, title="Anonymous Reply"):
             result = await self.cog.service.submit_confession(
                 interaction.guild,
                 author_id=interaction.user.id,
+                member=interaction.user,
                 content=self.body_input.value,
                 submission_kind="reply",
                 parent_confession_id=self.target_input.value,
@@ -716,16 +727,7 @@ class MemberManageActionView(discord.ui.View):
 
     @discord.ui.button(label="Appeal / Report", style=discord.ButtonStyle.secondary, row=1)
     async def support_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message(
-            embed=ge.make_status_embed(
-                "Private Support",
-                "Choose whether you want to appeal a restriction or report a problem without exposing your account to staff.",
-                tone="info",
-                footer="Babblebox Confessions",
-            ),
-            view=MemberSupportView(self.cog, default_target=self.target_id),
-            ephemeral=True,
-        )
+        await self.cog._send_support_entry(interaction, default_target=self.target_id)
 
 
 class MemberResultActionView(discord.ui.View):
@@ -740,41 +742,17 @@ class MemberResultActionView(discord.ui.View):
     @discord.ui.button(label="Manage My Confession", style=discord.ButtonStyle.secondary, row=0)
     async def manage_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         default_target = self.result.confession_id or self.result.case_id
-        await interaction.response.send_modal(ManageConfessionModal(self.cog, default_target=default_target))
+        await self.cog._open_manage_modal(interaction, default_target=default_target)
 
     @discord.ui.button(label="Reply", style=discord.ButtonStyle.primary, row=0)
     async def reply_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.guild is None:
-            await interaction.response.send_message("Anonymous replies only work inside a server.", ephemeral=True)
-            return
-        config = self.cog.service.get_config(interaction.guild.id)
-        if not config["allow_anonymous_replies"]:
-            await interaction.response.send_message(
-                embed=ge.make_status_embed(
-                    "Replies Are Off",
-                    "Anonymous replies are off by default in this server unless admins explicitly enable them.",
-                    tone="info",
-                    footer="Babblebox Confessions",
-                ),
-                ephemeral=True,
-            )
-            return
         default_target = self.result.confession_id if self.result.submission_kind == "confession" else self.result.parent_confession_id
-        await interaction.response.send_modal(ReplyComposerModal(self.cog, guild_id=self.guild_id, default_target=default_target))
+        await self.cog._open_reply_modal(interaction, default_target=default_target)
 
     @discord.ui.button(label="Appeal / Report", style=discord.ButtonStyle.secondary, row=1)
     async def support_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         default_target = self.result.case_id or self.result.confession_id
-        await interaction.response.send_message(
-            embed=ge.make_status_embed(
-                "Private Support",
-                "Choose whether you want to appeal a restriction or report a problem without exposing your account to staff.",
-                tone="info",
-                footer="Babblebox Confessions",
-            ),
-            view=MemberSupportView(self.cog, default_target=default_target),
-            ephemeral=True,
-        )
+        await self.cog._send_support_entry(interaction, default_target=default_target)
 
 
 class RiskyConfigConfirmView(discord.ui.View):
@@ -833,17 +811,7 @@ class ConfessionMemberPanelView(discord.ui.View):
         row=0,
     )
     async def send_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.guild is None or interaction.user is None:
-            await interaction.response.send_message("Anonymous confessions only work inside a server.", ephemeral=True)
-            return
-        ready_message = self.cog.service.operability_message(interaction.guild.id)
-        if ready_message != "Confessions are ready.":
-            await interaction.response.send_message(
-                embed=ge.make_status_embed("Confessions Unavailable", ready_message, tone="warning", footer="Babblebox Confessions"),
-                ephemeral=True,
-            )
-            return
-        await interaction.response.send_modal(ConfessionComposerModal(self.cog, guild_id=interaction.guild.id))
+        await self.cog._open_confession_modal(interaction)
 
     @discord.ui.button(
         label="Manage My Confession",
@@ -852,31 +820,7 @@ class ConfessionMemberPanelView(discord.ui.View):
         row=0,
     )
     async def manage_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(ManageConfessionModal(self.cog))
-
-    @discord.ui.button(
-        label="Reply to Confession",
-        style=discord.ButtonStyle.secondary,
-        custom_id="bb-confession-panel:reply",
-        row=1,
-    )
-    async def reply_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.guild is None:
-            await interaction.response.send_message("Anonymous replies only work inside a server.", ephemeral=True)
-            return
-        config = self.cog.service.get_config(interaction.guild.id)
-        if not config["allow_anonymous_replies"]:
-            await interaction.response.send_message(
-                embed=ge.make_status_embed(
-                    "Replies Are Off",
-                    "Anonymous replies are off by default in this server unless admins explicitly enable them.",
-                    tone="info",
-                    footer="Babblebox Confessions",
-                ),
-                ephemeral=True,
-            )
-            return
-        await interaction.response.send_modal(ReplyComposerModal(self.cog, guild_id=interaction.guild.id))
+        await self.cog._open_manage_modal(interaction)
 
     @discord.ui.button(
         label="Appeal / Report",
@@ -885,16 +829,7 @@ class ConfessionMemberPanelView(discord.ui.View):
         row=1,
     )
     async def support_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message(
-            embed=ge.make_status_embed(
-                "Private Support",
-                "Choose whether you want to appeal a restriction or report a problem without exposing your account to staff.",
-                tone="info",
-                footer="Babblebox Confessions",
-            ),
-            view=MemberSupportView(self.cog),
-            ephemeral=True,
-        )
+        await self.cog._send_support_entry(interaction)
 
     @discord.ui.button(
         label="How It Works",
@@ -903,10 +838,35 @@ class ConfessionMemberPanelView(discord.ui.View):
         row=1,
     )
     async def help_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self.cog._send_confession_about(interaction)
+
+
+class PublishedConfessionReplyView(discord.ui.View):
+    def __init__(self, cog: "ConfessionsCog", *, guild_id: int):
+        super().__init__(timeout=None)
+        self.cog = cog
+        self.guild_id = guild_id
+
+    @discord.ui.button(
+        label="Reply",
+        style=discord.ButtonStyle.primary,
+        custom_id="bb-confession-post:reply",
+        row=0,
+    )
+    async def reply_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.guild is None:
-            await interaction.response.send_message("Anonymous confessions only work inside a server.", ephemeral=True)
+            await interaction.response.send_message("Anonymous replies only work inside a server.", ephemeral=True)
             return
-        await interaction.response.send_message(embed=self.cog.service.build_member_panel_help_embed(interaction.guild), ephemeral=True)
+        message = getattr(interaction, "message", None)
+        message_id = getattr(message, "id", None)
+        if not isinstance(message_id, int):
+            await interaction.response.send_message("That confession is not available for anonymous replies.", ephemeral=True)
+            return
+        submission = await self.cog.service.store.fetch_submission_by_message_id(interaction.guild.id, message_id)
+        if submission is None or submission.get("status") != "published" or submission.get("submission_kind") != "confession":
+            await interaction.response.send_message("That confession is not available for anonymous replies.", ephemeral=True)
+            return
+        await self.cog._open_reply_modal(interaction, default_target=submission["confession_id"])
 
 
 class ConfessionReviewView(discord.ui.View):
@@ -1141,6 +1101,7 @@ class ConfessionsCog(commands.Cog):
         setattr(self.bot, "confessions_service", self.service)
         if self.service.storage_ready:
             await self.service.resume_member_panels()
+            await self.service.resume_public_confession_views()
             await self.service.resume_review_queues()
 
     def cog_unload(self):
@@ -1163,9 +1124,120 @@ class ConfessionsCog(commands.Cog):
             return self.service.build_member_result_view(result)
         return MemberResultActionView(self, guild_id=guild_id, result=result)
 
+    def build_public_confession_view(self, *, guild_id: int) -> PublishedConfessionReplyView:
+        return PublishedConfessionReplyView(self, guild_id=guild_id)
+
     def modal_file_upload_available(self) -> bool:
         file_upload = getattr(discord.ui, "FileUpload", None)
         return file_upload is not None and callable(getattr(file_upload, "to_component_dict", None))
+
+    def _is_default_role(self, role: discord.Role) -> bool:
+        is_default = getattr(role, "is_default", None)
+        if callable(is_default):
+            with contextlib.suppress(Exception):
+                return bool(is_default())
+        guild = getattr(role, "guild", None)
+        return getattr(role, "id", None) == getattr(guild, "id", None)
+
+    async def _send_slash_only_notice(self, ctx: commands.Context, message: str):
+        await ctx.send(content=message, delete_after=15)
+
+    async def _open_confession_modal(self, interaction: discord.Interaction):
+        if interaction.guild is None or interaction.user is None:
+            await interaction.response.send_message("Anonymous confessions only work inside a server.", ephemeral=True)
+            return
+        ready_message = self.service.operability_message(interaction.guild.id)
+        if ready_message != "Confessions are ready.":
+            unavailable = ConfessionSubmissionResult(False, "unavailable", ready_message)
+            await interaction.response.send_message(embed=self.service.build_member_result_embed(unavailable), ephemeral=True)
+            return
+        gate_message = self.service.member_submission_gate_message(
+            interaction.guild,
+            submission_kind="confession",
+            author_id=interaction.user.id,
+            member=interaction.user,
+        )
+        if gate_message is not None:
+            await interaction.response.send_message(
+                embed=ge.make_status_embed("Confession Access", gate_message, tone="warning", footer="Babblebox Confessions"),
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_modal(ConfessionComposerModal(self, guild_id=interaction.guild.id))
+
+    async def _open_reply_modal(self, interaction: discord.Interaction, *, default_target: str | None = None):
+        if interaction.guild is None or interaction.user is None:
+            await interaction.response.send_message("Anonymous replies only work inside a server.", ephemeral=True)
+            return
+        ready_message = self.service.operability_message(interaction.guild.id)
+        if ready_message != "Confessions are ready.":
+            unavailable = ConfessionSubmissionResult(False, "unavailable", ready_message, submission_kind="reply")
+            await interaction.response.send_message(embed=self.service.build_member_result_embed(unavailable), ephemeral=True)
+            return
+        config = self.service.get_config(interaction.guild.id)
+        if not config["allow_anonymous_replies"]:
+            await interaction.response.send_message(
+                embed=ge.make_status_embed(
+                    "Replies Are Off",
+                    "Anonymous replies are off by default in this server unless admins explicitly enable them.",
+                    tone="info",
+                    footer="Babblebox Confessions",
+                ),
+                ephemeral=True,
+            )
+            return
+        gate_message = self.service.member_submission_gate_message(
+            interaction.guild,
+            submission_kind="reply",
+            author_id=interaction.user.id,
+            member=interaction.user,
+        )
+        if gate_message is not None:
+            await interaction.response.send_message(
+                embed=ge.make_status_embed("Reply Access", gate_message, tone="warning", footer="Babblebox Confessions"),
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_modal(ReplyComposerModal(self, guild_id=interaction.guild.id, default_target=default_target))
+
+    async def _open_manage_modal(self, interaction: discord.Interaction, *, default_target: str | None = None):
+        if interaction.guild is None:
+            await interaction.response.send_message("Private owner tools only work inside a server.", ephemeral=True)
+            return
+        await interaction.response.send_modal(ManageConfessionModal(self, default_target=default_target))
+
+    async def _send_support_entry(self, interaction: discord.Interaction, *, default_target: str | None = None):
+        if interaction.guild is None:
+            await interaction.response.send_message("Private support only works inside a server.", ephemeral=True)
+            return
+        await interaction.response.send_message(
+            embed=ge.make_status_embed(
+                "Private Support",
+                "Choose whether you want to appeal a restriction or report a problem without exposing your account to staff.",
+                tone="info",
+                footer="Babblebox Confessions",
+            ),
+            view=MemberSupportView(self, default_target=default_target),
+            ephemeral=True,
+        )
+
+    async def _open_appeal_modal(self, interaction: discord.Interaction, *, default_target: str | None = None):
+        if interaction.guild is None:
+            await interaction.response.send_message("Private support only works inside a server.", ephemeral=True)
+            return
+        await interaction.response.send_modal(AppealModal(self, default_target=default_target))
+
+    async def _open_report_modal(self, interaction: discord.Interaction, *, default_target: str | None = None):
+        if interaction.guild is None:
+            await interaction.response.send_message("Private support only works inside a server.", ephemeral=True)
+            return
+        await interaction.response.send_modal(ReportModal(self, default_target=default_target))
+
+    async def _send_confession_about(self, interaction: discord.Interaction):
+        if interaction.guild is None:
+            await interaction.response.send_message("Anonymous confessions only work inside a server.", ephemeral=True)
+            return
+        await interaction.response.send_message(embed=self.service.build_member_panel_help_embed(interaction.guild), ephemeral=True)
 
     def _modal_unavailable_embed(self, message: str) -> discord.Embed:
         return ge.make_status_embed("Confessions Unavailable", message, tone="warning", footer="Babblebox Confessions")
@@ -1423,19 +1495,56 @@ class ConfessionsCog(commands.Cog):
         config = self.service.get_config(guild.id)
         if config.get("panel_channel_id") or config.get("panel_message_id"):
             await self.service.sync_member_panel(guild)
+        await self.service.sync_published_confession_views(guild)
         await self.service._sync_review_queue(guild)
 
-    @app_commands.command(name="confess", description="Open the private confession composer when a server has Confessions enabled")
-    async def confess_command(self, interaction: discord.Interaction):
-        if interaction.guild is None or interaction.user is None:
-            await interaction.response.send_message("Anonymous confessions only work inside a server.", ephemeral=True)
+    @commands.hybrid_group(
+        name="confess",
+        with_app_command=True,
+        description="Private anonymous confession and support flows",
+        invoke_without_command=True,
+    )
+    async def confess_group(self, ctx: commands.Context):
+        interaction = getattr(ctx, "interaction", None)
+        if interaction is None:
+            await self._send_slash_only_notice(ctx, "Use `/confess` in a server to open the private confession composer.")
             return
-        ready_message = self.service.operability_message(interaction.guild.id)
-        if ready_message != "Confessions are ready.":
-            unavailable = ConfessionSubmissionResult(False, "unavailable", ready_message)
-            await interaction.response.send_message(embed=self.service.build_member_result_embed(unavailable), ephemeral=True)
+        await self._open_confession_modal(interaction)
+
+    @confess_group.command(name="manage", description="Open the private manage-my-confession flow")
+    async def confess_manage_command(self, ctx: commands.Context):
+        interaction = getattr(ctx, "interaction", None)
+        if interaction is None:
+            await self._send_slash_only_notice(ctx, "Use `/confess manage` in a server to open the private manage flow.")
             return
-        await interaction.response.send_modal(ConfessionComposerModal(self, guild_id=interaction.guild.id))
+        await self._open_manage_modal(interaction)
+
+    @confess_group.command(name="appeal", description="Open the private anonymous appeal flow")
+    async def confess_appeal_command(self, ctx: commands.Context):
+        interaction = getattr(ctx, "interaction", None)
+        if interaction is None:
+            await self._send_slash_only_notice(ctx, "Use `/confess appeal` in a server to open the private appeal flow.")
+            return
+        await self._open_appeal_modal(interaction)
+
+    @confess_group.command(name="report", description="Open the private anonymous report flow")
+    async def confess_report_command(self, ctx: commands.Context):
+        interaction = getattr(ctx, "interaction", None)
+        if interaction is None:
+            await self._send_slash_only_notice(ctx, "Use `/confess report` in a server to open the private report flow.")
+            return
+        await self._open_report_modal(interaction)
+
+    @confess_group.command(name="about", description="Learn how anonymous confessions work in this server")
+    async def confess_about_command(self, ctx: commands.Context):
+        interaction = getattr(ctx, "interaction", None)
+        if interaction is None:
+            if ctx.guild is None:
+                await ctx.send(content="Anonymous confessions only work inside a server.", delete_after=15)
+                return
+            await ctx.send(embed=self.service.build_member_panel_help_embed(ctx.guild))
+            return
+        await self._send_confession_about(interaction)
 
     @commands.hybrid_group(name="confessions", with_app_command=True, description="Admin controls for the optional Confessions feature", invoke_without_command=True)
     @app_commands.default_permissions(manage_guild=True)
@@ -1585,6 +1694,86 @@ class ConfessionsCog(commands.Cog):
         await send_hybrid_response(
             ctx,
             embed=ge.make_status_embed("Confessions Domains", message, tone="success" if ok else "warning", footer="Babblebox Confessions"),
+            ephemeral=True,
+        )
+
+    @confessions_group.group(
+        name="role",
+        with_app_command=True,
+        invoke_without_command=True,
+        description="Manage which roles can submit anonymous confessions",
+    )
+    async def confessions_role_group(self, ctx: commands.Context):
+        if not await self._require_admin(ctx):
+            return
+        await send_hybrid_response(ctx, embed=self.service.build_role_policy_embed(ctx.guild), ephemeral=True)
+
+    @app_commands.describe(role="Role to add or remove from the Confessions allowlist", state="Turn this allowlist entry on or off")
+    @app_commands.choices(state=ROLE_STATE_CHOICES)
+    @confessions_role_group.command(name="allowlist", description="Add or remove a role from the Confessions allowlist")
+    async def confessions_role_allowlist_command(self, ctx: commands.Context, role: discord.Role, state: str = "on"):
+        if not await self._require_admin(ctx):
+            return
+        if self._is_default_role(role):
+            await send_hybrid_response(
+                ctx,
+                embed=ge.make_status_embed(
+                    "Confessions Role Eligibility",
+                    "Babblebox does not allow `@everyone` in the Confessions role allowlist.",
+                    tone="warning",
+                    footer="Babblebox Confessions",
+                ),
+                ephemeral=True,
+            )
+            return
+        ok, message = await self.service.update_role_policy(ctx.guild.id, bucket="allow", role_id=role.id, enabled=state == "on")
+        if ok:
+            await self._sync_runtime_surfaces(ctx.guild)
+        await send_hybrid_response(
+            ctx,
+            embed=ge.make_status_embed("Confessions Role Eligibility", message, tone="success" if ok else "warning", footer="Babblebox Confessions"),
+            ephemeral=True,
+        )
+
+    @app_commands.describe(role="Role to add or remove from the Confessions blacklist", state="Turn this blacklist entry on or off")
+    @app_commands.choices(state=ROLE_STATE_CHOICES)
+    @confessions_role_group.command(name="blacklist", description="Add or remove a role from the Confessions blacklist")
+    async def confessions_role_blacklist_command(self, ctx: commands.Context, role: discord.Role, state: str = "on"):
+        if not await self._require_admin(ctx):
+            return
+        if self._is_default_role(role):
+            await send_hybrid_response(
+                ctx,
+                embed=ge.make_status_embed(
+                    "Confessions Role Eligibility",
+                    "Babblebox does not allow `@everyone` in the Confessions role blacklist.",
+                    tone="warning",
+                    footer="Babblebox Confessions",
+                ),
+                ephemeral=True,
+            )
+            return
+        ok, message = await self.service.update_role_policy(ctx.guild.id, bucket="block", role_id=role.id, enabled=state == "on")
+        if ok:
+            await self._sync_runtime_surfaces(ctx.guild)
+        await send_hybrid_response(
+            ctx,
+            embed=ge.make_status_embed("Confessions Role Eligibility", message, tone="success" if ok else "warning", footer="Babblebox Confessions"),
+            ephemeral=True,
+        )
+
+    @app_commands.describe(target="Reset the allowlist, blacklist, or both")
+    @app_commands.choices(target=ROLE_RESET_CHOICES)
+    @confessions_role_group.command(name="reset", description="Reset Confessions role allowlist or blacklist state")
+    async def confessions_role_reset_command(self, ctx: commands.Context, target: str):
+        if not await self._require_admin(ctx):
+            return
+        ok, message = await self.service.reset_role_policy(ctx.guild.id, target=target)
+        if ok:
+            await self._sync_runtime_surfaces(ctx.guild)
+        await send_hybrid_response(
+            ctx,
+            embed=ge.make_status_embed("Confessions Role Eligibility", message, tone="success" if ok else "warning", footer="Babblebox Confessions"),
             ephemeral=True,
         )
 
