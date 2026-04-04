@@ -46,6 +46,9 @@ class ConfessionsStoreNormalizationTests(unittest.TestCase):
         self.assertTrue(config["block_adult_language"])
         self.assertTrue(config["allow_trusted_mainstream_links"])
         self.assertFalse(config["allow_images"])
+        self.assertFalse(config["allow_anonymous_replies"])
+        self.assertFalse(config["allow_self_edit"])
+        self.assertIsNone(config["appeals_channel_id"])
         self.assertIsNone(config["panel_channel_id"])
         self.assertIsNone(config["panel_message_id"])
         self.assertEqual(config["max_images"], 3)
@@ -60,9 +63,12 @@ class ConfessionsStoreNormalizationTests(unittest.TestCase):
                 "review_mode": False,
                 "panel_channel_id": 444,
                 "panel_message_id": 555,
+                "appeals_channel_id": 666,
                 "custom_allow_domains": ["YouTube.com", "youtube.com", "google.com"],
                 "custom_block_domains": ["bad.example", "Bad.Example"],
                 "allow_images": True,
+                "allow_anonymous_replies": True,
+                "allow_self_edit": True,
                 "max_images": 99,
                 "cooldown_seconds": 1,
                 "burst_limit": 20,
@@ -74,9 +80,12 @@ class ConfessionsStoreNormalizationTests(unittest.TestCase):
         )
         self.assertEqual(config["panel_channel_id"], 444)
         self.assertEqual(config["panel_message_id"], 555)
+        self.assertEqual(config["appeals_channel_id"], 666)
         self.assertEqual(config["custom_allow_domains"], ["google.com", "youtube.com"])
         self.assertEqual(config["custom_block_domains"], ["bad.example"])
         self.assertFalse(config["allow_images"])
+        self.assertFalse(config["allow_anonymous_replies"])
+        self.assertTrue(config["allow_self_edit"])
         self.assertEqual(config["max_images"], 3)
         self.assertEqual(config["cooldown_seconds"], 300)
         self.assertEqual(config["burst_limit"], 3)
@@ -105,11 +114,14 @@ class ConfessionsStoreNormalizationTests(unittest.TestCase):
                 "submission_id": "sub-1",
                 "guild_id": 10,
                 "confession_id": "CF-AAAA1111",
+                "submission_kind": "reply",
+                "parent_confession_id": "CF-ZZZZ9999",
                 "status": "queued",
                 "review_status": "pending",
                 "staff_preview": "hello",
                 "content_body": "hello",
                 "shared_link_url": "https://www.google.com/search?q=hello",
+                "fuzzy_signature": "abc123",
                 "attachment_meta": [
                     {
                         "filename": "image.png",
@@ -124,7 +136,10 @@ class ConfessionsStoreNormalizationTests(unittest.TestCase):
             }
         )
         self.assertIsNotNone(record)
+        self.assertEqual(record["submission_kind"], "reply")
+        self.assertEqual(record["parent_confession_id"], "CF-ZZZZ9999")
         self.assertEqual(record["shared_link_url"], "https://www.google.com/search?q=hello")
+        self.assertEqual(record["fuzzy_signature"], "abc123")
         self.assertNotIn("bytes", record["attachment_meta"][0])
         self.assertEqual(set(record["attachment_meta"][0].keys()), {"kind", "size", "width", "height", "spoiler"})
 
@@ -152,6 +167,8 @@ class ConfessionsPostgresStoreTests(unittest.IsolatedAsyncioTestCase):
             "submission_id": "sub-1",
             "guild_id": 10,
             "confession_id": "CF-AAAA1111",
+            "submission_kind": "reply",
+            "parent_confession_id": "CF-ZZZZ9999",
             "status": "queued",
             "review_status": "pending",
             "staff_preview": "queued preview",
@@ -159,6 +176,7 @@ class ConfessionsPostgresStoreTests(unittest.IsolatedAsyncioTestCase):
             "shared_link_url": "https://www.google.com/search?q=preview",
             "content_fingerprint": "abc",
             "similarity_key": "abc",
+            "fuzzy_signature": "def",
             "flag_codes": json.dumps(["adult_language", "link_unsafe"]),
             "attachment_meta": json.dumps(
                 [{"kind": "image", "size": 12, "width": 8, "height": 8, "spoiler": False}]
@@ -171,7 +189,10 @@ class ConfessionsPostgresStoreTests(unittest.IsolatedAsyncioTestCase):
             "resolved_at": None,
         }
         record = _submission_from_row(row)
+        self.assertEqual(record["submission_kind"], "reply")
+        self.assertEqual(record["parent_confession_id"], "CF-ZZZZ9999")
         self.assertEqual(record["shared_link_url"], "https://www.google.com/search?q=preview")
+        self.assertEqual(record["fuzzy_signature"], "def")
         self.assertEqual(record["flag_codes"], ["adult_language", "link_unsafe"])
         self.assertEqual(record["attachment_meta"][0]["kind"], "image")
 
@@ -185,10 +206,13 @@ class ConfessionsPostgresStoreTests(unittest.IsolatedAsyncioTestCase):
         executed = "\n".join(connection.executed)
         self.assertIn("CREATE TABLE IF NOT EXISTS confession_guild_configs", executed)
         self.assertIn("allow_images BOOLEAN NOT NULL DEFAULT FALSE", executed)
+        self.assertIn("allow_anonymous_replies BOOLEAN NOT NULL DEFAULT FALSE", executed)
         self.assertIn("CREATE TABLE IF NOT EXISTS confession_submissions", executed)
+        self.assertIn("fuzzy_signature TEXT NULL", executed)
         self.assertIn("CREATE TABLE IF NOT EXISTS confession_author_links", executed)
         self.assertIn("CREATE TABLE IF NOT EXISTS confession_private_media", executed)
         self.assertIn("CREATE TABLE IF NOT EXISTS confession_enforcement_states", executed)
+        self.assertIn("image_restriction_active BOOLEAN NOT NULL DEFAULT FALSE", executed)
         self.assertIn("CREATE TABLE IF NOT EXISTS confession_cases", executed)
         self.assertIn("CREATE TABLE IF NOT EXISTS confession_review_queues", executed)
         self.assertIn("ALTER TABLE confession_guild_configs ALTER COLUMN allow_images SET DEFAULT FALSE", executed)

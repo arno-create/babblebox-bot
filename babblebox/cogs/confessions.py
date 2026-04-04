@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import contextlib
+import secrets
+from typing import Any
 from typing import Optional
 
 import discord
@@ -24,6 +26,7 @@ STAFF_ACTION_CHOICES = [
     app_commands.Choice(name="Approve", value="approve"),
     app_commands.Choice(name="Deny", value="deny"),
     app_commands.Choice(name="Delete", value="delete"),
+    app_commands.Choice(name="Restrict Images", value="restrict_images"),
     app_commands.Choice(name="Pause 24h", value="pause_24h"),
     app_commands.Choice(name="Pause 7d", value="pause_7d"),
     app_commands.Choice(name="Pause 30d", value="pause_30d"),
@@ -43,6 +46,13 @@ def _moderation_action_payload(action: str) -> tuple[str, int | None, bool]:
     if action == "override":
         return "approve", None, True
     return action, None, False
+
+
+RISKY_POLICY_WARNINGS: dict[str, str] = {
+    "allow_images": "Images increase moderation burden and can reveal someone through faces, screenshots, or files. Enabled images always stay bounded and reviewed.",
+    "allow_replies": "Anonymous replies can increase abuse, drama, and moderation complexity. Babblebox keeps them text-only, depth-1, and always reviewed.",
+    "allow_self_edit": "Editing can create bait-and-switch moderation problems. Babblebox limits it to pending submissions only.",
+}
 
 
 class ConfessionComposerModal(discord.ui.Modal, title="Anonymous Confession"):
@@ -89,7 +99,7 @@ class ConfessionComposerModal(discord.ui.Modal, title="Anonymous Confession"):
                 attachments=list(self.upload_input.values) if self.upload_input is not None else [],
             )
             embed = self.cog.service.build_member_result_embed(result)
-            view = self.cog.service.build_member_result_view(result)
+            view = self.cog.build_member_result_view(result=result, guild_id=interaction.guild.id)
             await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
         except Exception:
             embed = ge.make_status_embed(
@@ -102,6 +112,372 @@ class ConfessionComposerModal(discord.ui.Modal, title="Anonymous Confession"):
                 await interaction.followup.send(embed=embed, ephemeral=True)
             else:
                 await interaction.response.send_message(embed=embed, ephemeral=True)
+
+
+class ReplyComposerModal(discord.ui.Modal, title="Anonymous Reply"):
+    def __init__(self, cog: "ConfessionsCog", *, guild_id: int, default_target: str | None = None):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.target_input = discord.ui.TextInput(
+            label="Confession ID",
+            style=discord.TextStyle.short,
+            placeholder="Reply to a published confession like CF-XXXXXX",
+            required=True,
+            max_length=32,
+            default=default_target or None,
+        )
+        self.body_input = discord.ui.TextInput(
+            label="Reply",
+            style=discord.TextStyle.paragraph,
+            placeholder="Replies are text-only and always reviewed before posting.",
+            required=True,
+            max_length=1800,
+        )
+        self.add_item(self.target_input)
+        self.add_item(self.body_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if interaction.guild is None or interaction.user is None:
+            await interaction.response.send_message("Anonymous replies only work inside a server.", ephemeral=True)
+            return
+        result = await self.cog.service.submit_confession(
+            interaction.guild,
+            author_id=interaction.user.id,
+            content=self.body_input.value,
+            submission_kind="reply",
+            parent_confession_id=self.target_input.value,
+        )
+        await interaction.response.send_message(
+            embed=self.cog.service.build_member_result_embed(result),
+            view=self.cog.build_member_result_view(result=result, guild_id=interaction.guild.id),
+            ephemeral=True,
+        )
+
+
+class ManageConfessionModal(discord.ui.Modal, title="Manage My Confession"):
+    def __init__(self, cog: "ConfessionsCog", *, default_target: str | None = None):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.target_input = discord.ui.TextInput(
+            label="Confession or Case ID",
+            style=discord.TextStyle.short,
+            placeholder="Use a confession ID like CF-XXXXXX or a case ID like CS-XXXXXX",
+            required=True,
+            max_length=32,
+            default=default_target or None,
+        )
+        self.add_item(self.target_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if interaction.guild is None or interaction.user is None:
+            await interaction.response.send_message("Private owner tools only work inside a server.", ephemeral=True)
+            return
+        context, error = await self.cog.service.get_owned_submission_context(
+            interaction.guild.id,
+            author_id=interaction.user.id,
+            target_id=self.target_input.value,
+        )
+        if context is None:
+            await interaction.response.send_message(
+                embed=ge.make_status_embed("Cannot Open Owner Tools", error or "That confession could not be verified.", tone="warning", footer="Babblebox Confessions"),
+                ephemeral=True,
+            )
+            return
+        submission = context["submission"]
+        await interaction.response.send_message(
+            embed=self.cog.service.build_member_manage_embed(context),
+            view=MemberManageActionView(
+                self.cog,
+                guild_id=interaction.guild.id,
+                target_id=submission["confession_id"],
+                can_delete=context["can_delete"],
+                can_edit=context["can_edit"],
+            ),
+            ephemeral=True,
+        )
+
+
+class EditConfessionModal(discord.ui.Modal):
+    def __init__(self, cog: "ConfessionsCog", *, guild_id: int, target_id: str, submission: dict[str, Any]):
+        title = "Edit Anonymous Reply" if submission.get("submission_kind") == "reply" else "Edit Anonymous Confession"
+        super().__init__(title=title, timeout=300)
+        self.cog = cog
+        self.guild_id = guild_id
+        self.target_id = target_id
+        self.body_input = discord.ui.TextInput(
+            label="Updated Text",
+            style=discord.TextStyle.paragraph,
+            placeholder="Keep it clear. Babblebox re-checks safety before saving.",
+            required=False,
+            max_length=1800,
+            default=submission.get("content_body") or None,
+        )
+        self.add_item(self.body_input)
+        self.link_input: discord.ui.TextInput | None = None
+        if submission.get("submission_kind") != "reply":
+            self.link_input = discord.ui.TextInput(
+                label="Trusted link (optional)",
+                style=discord.TextStyle.short,
+                placeholder="One trusted link only.",
+                required=False,
+                max_length=500,
+                default=submission.get("shared_link_url") or None,
+            )
+            self.add_item(self.link_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if interaction.guild is None or interaction.user is None:
+            await interaction.response.send_message("Private owner tools only work inside a server.", ephemeral=True)
+            return
+        result = await self.cog.service.self_edit_confession(
+            interaction.guild,
+            author_id=interaction.user.id,
+            target_id=self.target_id,
+            content=self.body_input.value,
+            link=self.link_input.value if self.link_input is not None else None,
+        )
+        await interaction.response.send_message(
+            embed=self.cog.service.build_member_result_embed(result),
+            view=self.cog.build_member_result_view(result=result, guild_id=interaction.guild.id),
+            ephemeral=True,
+        )
+
+
+class AppealModal(discord.ui.Modal, title="Anonymous Appeal"):
+    def __init__(self, cog: "ConfessionsCog", *, default_target: str | None = None):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.target_input = discord.ui.TextInput(
+            label="Confession or Case ID (optional)",
+            style=discord.TextStyle.short,
+            placeholder="Use your own confession or case ID if you have one",
+            required=False,
+            max_length=32,
+            default=default_target or None,
+        )
+        self.details_input = discord.ui.TextInput(
+            label="What should staff know?",
+            style=discord.TextStyle.paragraph,
+            placeholder="Explain the false positive, restriction, or moderation issue.",
+            required=True,
+            max_length=1800,
+        )
+        self.add_item(self.target_input)
+        self.add_item(self.details_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if interaction.guild is None or interaction.user is None:
+            await interaction.response.send_message("Private support only works inside a server.", ephemeral=True)
+            return
+        ok, message = await self.cog.service.submit_support_request(
+            interaction.guild,
+            author_id=interaction.user.id,
+            kind="appeal",
+            target_id=self.target_input.value,
+            details=self.details_input.value,
+        )
+        await interaction.response.send_message(
+            embed=ge.make_status_embed("Anonymous Appeal", message, tone="success" if ok else "warning", footer="Babblebox Confessions"),
+            ephemeral=True,
+        )
+
+
+class ReportModal(discord.ui.Modal, title="Anonymous Report"):
+    def __init__(self, cog: "ConfessionsCog", *, default_target: str | None = None):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.target_input = discord.ui.TextInput(
+            label="Confession or Case ID",
+            style=discord.TextStyle.short,
+            placeholder="Report a confession ID like CF-XXXXXX or case ID like CS-XXXXXX",
+            required=True,
+            max_length=32,
+            default=default_target or None,
+        )
+        self.details_input = discord.ui.TextInput(
+            label="What is the problem?",
+            style=discord.TextStyle.paragraph,
+            placeholder="Explain the issue clearly without mentioning users directly.",
+            required=True,
+            max_length=1800,
+        )
+        self.add_item(self.target_input)
+        self.add_item(self.details_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        if interaction.guild is None or interaction.user is None:
+            await interaction.response.send_message("Private support only works inside a server.", ephemeral=True)
+            return
+        ok, message = await self.cog.service.submit_support_request(
+            interaction.guild,
+            author_id=interaction.user.id,
+            kind="report",
+            target_id=self.target_input.value,
+            details=self.details_input.value,
+        )
+        await interaction.response.send_message(
+            embed=ge.make_status_embed("Anonymous Report", message, tone="success" if ok else "warning", footer="Babblebox Confessions"),
+            ephemeral=True,
+        )
+
+
+class MemberSupportView(discord.ui.View):
+    def __init__(self, cog: "ConfessionsCog", *, default_target: str | None = None):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.default_target = default_target
+
+    @discord.ui.button(label="Appeal Restriction", style=discord.ButtonStyle.secondary, row=0)
+    async def appeal_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(AppealModal(self.cog, default_target=self.default_target))
+
+    @discord.ui.button(label="Report Problem", style=discord.ButtonStyle.secondary, row=0)
+    async def report_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(ReportModal(self.cog, default_target=self.default_target))
+
+
+class MemberManageActionView(discord.ui.View):
+    def __init__(self, cog: "ConfessionsCog", *, guild_id: int, target_id: str, can_delete: bool, can_edit: bool):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.guild_id = guild_id
+        self.target_id = target_id
+        self.delete_button.disabled = not can_delete
+        self.edit_button.disabled = not can_edit
+
+    @discord.ui.button(label="Delete Privately", style=discord.ButtonStyle.danger, row=0)
+    async def delete_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.guild is None or interaction.user is None:
+            await interaction.response.send_message("Private owner tools only work inside a server.", ephemeral=True)
+            return
+        ok, message = await self.cog.service.self_delete_confession(interaction.guild, author_id=interaction.user.id, target_id=self.target_id)
+        await interaction.response.send_message(
+            embed=ge.make_status_embed("Private Delete", message, tone="success" if ok else "warning", footer="Babblebox Confessions"),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(label="Edit Pending Submission", style=discord.ButtonStyle.primary, row=0)
+    async def edit_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.guild is None or interaction.user is None:
+            await interaction.response.send_message("Private owner tools only work inside a server.", ephemeral=True)
+            return
+        context, error = await self.cog.service.get_owned_submission_context(
+            interaction.guild.id,
+            author_id=interaction.user.id,
+            target_id=self.target_id,
+        )
+        if context is None:
+            await interaction.response.send_message(
+                embed=ge.make_status_embed("Cannot Edit", error or "That confession could not be verified.", tone="warning", footer="Babblebox Confessions"),
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_modal(
+            EditConfessionModal(self.cog, guild_id=interaction.guild.id, target_id=self.target_id, submission=context["submission"])
+        )
+
+    @discord.ui.button(label="Appeal / Report", style=discord.ButtonStyle.secondary, row=1)
+    async def support_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            embed=ge.make_status_embed(
+                "Private Support",
+                "Choose whether you want to appeal a restriction or report a problem without exposing your account to staff.",
+                tone="info",
+                footer="Babblebox Confessions",
+            ),
+            view=MemberSupportView(self.cog, default_target=self.target_id),
+            ephemeral=True,
+        )
+
+
+class MemberResultActionView(discord.ui.View):
+    def __init__(self, cog: "ConfessionsCog", *, guild_id: int, result: ConfessionSubmissionResult):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.guild_id = guild_id
+        self.result = result
+        if result.jump_url:
+            self.add_item(discord.ui.Button(label="Open Post", style=discord.ButtonStyle.link, url=result.jump_url))
+
+    @discord.ui.button(label="Manage My Confession", style=discord.ButtonStyle.secondary, row=0)
+    async def manage_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        default_target = self.result.confession_id or self.result.case_id
+        await interaction.response.send_modal(ManageConfessionModal(self.cog, default_target=default_target))
+
+    @discord.ui.button(label="Reply", style=discord.ButtonStyle.primary, row=0)
+    async def reply_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.guild is None:
+            await interaction.response.send_message("Anonymous replies only work inside a server.", ephemeral=True)
+            return
+        config = self.cog.service.get_config(interaction.guild.id)
+        if not config["allow_anonymous_replies"]:
+            await interaction.response.send_message(
+                embed=ge.make_status_embed(
+                    "Replies Are Off",
+                    "Anonymous replies are off by default in this server unless admins explicitly enable them.",
+                    tone="info",
+                    footer="Babblebox Confessions",
+                ),
+                ephemeral=True,
+            )
+            return
+        default_target = self.result.confession_id if self.result.submission_kind == "confession" else self.result.parent_confession_id
+        await interaction.response.send_modal(ReplyComposerModal(self.cog, guild_id=self.guild_id, default_target=default_target))
+
+    @discord.ui.button(label="Appeal / Report", style=discord.ButtonStyle.secondary, row=1)
+    async def support_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        default_target = self.result.case_id or self.result.confession_id
+        await interaction.response.send_message(
+            embed=ge.make_status_embed(
+                "Private Support",
+                "Choose whether you want to appeal a restriction or report a problem without exposing your account to staff.",
+                tone="info",
+                footer="Babblebox Confessions",
+            ),
+            view=MemberSupportView(self.cog, default_target=default_target),
+            ephemeral=True,
+        )
+
+
+class RiskyConfigConfirmView(discord.ui.View):
+    def __init__(self, cog: "ConfessionsCog", *, token: str):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.token = token
+
+    def _claim(self) -> dict[str, Any] | None:
+        return self.cog._pending_policy_updates.get(self.token)
+
+    @discord.ui.button(label="Enable With Warning", style=discord.ButtonStyle.danger, row=0)
+    async def confirm_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        payload = self._claim()
+        if payload is None:
+            await interaction.response.send_message("That pending confirmation expired. Run the command again.", ephemeral=True)
+            return
+        if interaction.user.id != payload["author_id"]:
+            await interaction.response.send_message("Run the command yourself to confirm that policy change.", ephemeral=True)
+            return
+        ok, message = await self.cog.service.configure_guild(payload["guild_id"], **payload["updates"])
+        if ok and interaction.guild is not None:
+            await self.cog._sync_runtime_surfaces(interaction.guild)
+        self.cog._pending_policy_updates.pop(self.token, None)
+        await interaction.response.edit_message(
+            embed=ge.make_status_embed("Confessions Policy", message, tone="success" if ok else "warning", footer="Babblebox Confessions"),
+            view=None,
+        )
+
+    @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, row=0)
+    async def cancel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.cog._pending_policy_updates.pop(self.token, None)
+        await interaction.response.edit_message(
+            embed=ge.make_status_embed(
+                "Confessions Policy",
+                "That risky policy change was cancelled. Babblebox left the current safety settings in place.",
+                tone="info",
+                footer="Babblebox Confessions",
+            ),
+            view=None,
+        )
 
 
 class ConfessionMemberPanelView(discord.ui.View):
@@ -132,10 +508,61 @@ class ConfessionMemberPanelView(discord.ui.View):
         await interaction.response.send_modal(ConfessionComposerModal(self.cog, guild_id=interaction.guild.id))
 
     @discord.ui.button(
+        label="Manage My Confession",
+        style=discord.ButtonStyle.secondary,
+        custom_id="bb-confession-panel:manage",
+        row=0,
+    )
+    async def manage_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_modal(ManageConfessionModal(self.cog))
+
+    @discord.ui.button(
+        label="Reply to Confession",
+        style=discord.ButtonStyle.secondary,
+        custom_id="bb-confession-panel:reply",
+        row=1,
+    )
+    async def reply_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.guild is None:
+            await interaction.response.send_message("Anonymous replies only work inside a server.", ephemeral=True)
+            return
+        config = self.cog.service.get_config(interaction.guild.id)
+        if not config["allow_anonymous_replies"]:
+            await interaction.response.send_message(
+                embed=ge.make_status_embed(
+                    "Replies Are Off",
+                    "Anonymous replies are off by default in this server unless admins explicitly enable them.",
+                    tone="info",
+                    footer="Babblebox Confessions",
+                ),
+                ephemeral=True,
+            )
+            return
+        await interaction.response.send_modal(ReplyComposerModal(self.cog, guild_id=interaction.guild.id))
+
+    @discord.ui.button(
+        label="Appeal / Report",
+        style=discord.ButtonStyle.secondary,
+        custom_id="bb-confession-panel:support",
+        row=1,
+    )
+    async def support_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await interaction.response.send_message(
+            embed=ge.make_status_embed(
+                "Private Support",
+                "Choose whether you want to appeal a restriction or report a problem without exposing your account to staff.",
+                tone="info",
+                footer="Babblebox Confessions",
+            ),
+            view=MemberSupportView(self.cog),
+            ephemeral=True,
+        )
+
+    @discord.ui.button(
         label="How It Works",
         style=discord.ButtonStyle.secondary,
         custom_id="bb-confession-panel:help",
-        row=0,
+        row=1,
     )
     async def help_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         if interaction.guild is None:
@@ -369,6 +796,7 @@ class ConfessionsCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.service = ConfessionsService(bot)
+        self._pending_policy_updates: dict[str, dict[str, Any]] = {}
 
     async def cog_load(self):
         await self.service.start()
@@ -391,6 +819,34 @@ class ConfessionsCog(commands.Cog):
 
     def build_member_panel_view(self, *, guild_id: int) -> ConfessionMemberPanelView:
         return ConfessionMemberPanelView(self, guild_id=guild_id)
+
+    def build_member_result_view(self, *, result: ConfessionSubmissionResult, guild_id: int) -> discord.ui.View | None:
+        if result.state not in {"published", "queued", "blocked", "restricted"}:
+            return self.service.build_member_result_view(result)
+        return MemberResultActionView(self, guild_id=guild_id, result=result)
+
+    async def _send_policy_warning(
+        self,
+        ctx: commands.Context,
+        *,
+        updates: dict[str, Any],
+        warning_fields: list[tuple[str, str]],
+    ):
+        token = secrets.token_urlsafe(12)
+        self._pending_policy_updates[token] = {
+            "guild_id": ctx.guild.id,
+            "author_id": ctx.author.id,
+            "updates": updates,
+        }
+        embed = discord.Embed(
+            title="Confirm Risky Policy Change",
+            description="These features stay off by default because they expand abuse surface or moderation complexity. Review the impact before enabling them.",
+            color=ge.EMBED_THEME["warning"],
+        )
+        for name, value in warning_fields:
+            embed.add_field(name=name, value=value, inline=False)
+        embed = ge.style_embed(embed, footer="Babblebox Confessions | Admin warning")
+        await send_hybrid_response(ctx, embed=embed, view=RiskyConfigConfirmView(self, token=token), ephemeral=True)
 
     async def _delete_stored_panel_message(self, guild: discord.Guild, config: dict[str, object]):
         channel_id = config.get("panel_channel_id")
@@ -480,10 +936,12 @@ class ConfessionsCog(commands.Cog):
         confession_channel="Public channel for approved confessions",
         panel_channel="Channel where the public confession panel should live",
         review_channel="Private review queue channel",
+        appeals_channel="Private channel for anonymous appeals and reports",
         review_mode="Queue even safe confessions for review before posting",
         clear_confession_channel="Clear the public confession channel",
         clear_panel="Clear the stored public panel location",
         clear_review_channel="Clear the private review channel",
+        clear_appeals_channel="Clear the appeals/report channel",
     )
     @confessions_group.command(name="setup", description="Enable or configure the optional Confessions feature")
     async def confessions_setup_command(
@@ -493,10 +951,12 @@ class ConfessionsCog(commands.Cog):
         confession_channel: Optional[discord.TextChannel] = None,
         panel_channel: Optional[discord.TextChannel] = None,
         review_channel: Optional[discord.TextChannel] = None,
+        appeals_channel: Optional[discord.TextChannel] = None,
         review_mode: Optional[bool] = None,
         clear_confession_channel: bool = False,
         clear_panel: bool = False,
         clear_review_channel: bool = False,
+        clear_appeals_channel: bool = False,
     ):
         if not await self._require_admin(ctx):
             return
@@ -507,10 +967,12 @@ class ConfessionsCog(commands.Cog):
             confession_channel_id=getattr(confession_channel, "id", None),
             panel_channel_id=getattr(panel_channel, "id", None),
             review_channel_id=getattr(review_channel, "id", None),
+            appeals_channel_id=getattr(appeals_channel, "id", None),
             review_mode=review_mode,
             clear_confession_channel=clear_confession_channel,
             clear_panel=clear_panel,
             clear_review_channel=clear_review_channel,
+            clear_appeals_channel=clear_appeals_channel,
         )
         if ok:
             if clear_panel:
@@ -526,6 +988,8 @@ class ConfessionsCog(commands.Cog):
         block_adult_language="Block adult or 18+ language",
         allow_trusted_links="Allow Babblebox's trusted link families",
         allow_images="Enable image attachments for confessions",
+        allow_replies="Enable anonymous replies",
+        allow_self_edit="Enable member self-edit for pending submissions",
         max_images="Maximum images per confession",
         cooldown_seconds="Minimum gap between submissions",
         burst_limit="Max submissions before auto-suspend",
@@ -542,6 +1006,8 @@ class ConfessionsCog(commands.Cog):
         block_adult_language: Optional[bool] = None,
         allow_trusted_links: Optional[bool] = None,
         allow_images: Optional[bool] = None,
+        allow_replies: Optional[bool] = None,
+        allow_self_edit: Optional[bool] = None,
         max_images: Optional[int] = None,
         cooldown_seconds: Optional[int] = None,
         burst_limit: Optional[int] = None,
@@ -553,20 +1019,33 @@ class ConfessionsCog(commands.Cog):
     ):
         if not await self._require_admin(ctx):
             return
-        ok, message = await self.service.configure_guild(
-            ctx.guild.id,
-            block_adult_language=block_adult_language,
-            allow_trusted_mainstream_links=allow_trusted_links,
-            allow_images=allow_images,
-            max_images=max_images,
-            cooldown_seconds=cooldown_seconds,
-            burst_limit=burst_limit,
-            burst_window_seconds=burst_window_seconds,
-            auto_suspend_hours=auto_suspend_hours,
-            strike_temp_ban_threshold=strike_temp_ban_threshold,
-            temp_ban_days=temp_ban_days,
-            strike_perm_ban_threshold=strike_perm_ban_threshold,
-        )
+        current = self.service.get_config(ctx.guild.id)
+        updates = {
+            "block_adult_language": block_adult_language,
+            "allow_trusted_mainstream_links": allow_trusted_links,
+            "allow_images": allow_images,
+            "allow_anonymous_replies": allow_replies,
+            "allow_self_edit": allow_self_edit,
+            "max_images": max_images,
+            "cooldown_seconds": cooldown_seconds,
+            "burst_limit": burst_limit,
+            "burst_window_seconds": burst_window_seconds,
+            "auto_suspend_hours": auto_suspend_hours,
+            "strike_temp_ban_threshold": strike_temp_ban_threshold,
+            "temp_ban_days": temp_ban_days,
+            "strike_perm_ban_threshold": strike_perm_ban_threshold,
+        }
+        warning_fields: list[tuple[str, str]] = []
+        if allow_images and not current["allow_images"]:
+            warning_fields.append(("Images", RISKY_POLICY_WARNINGS["allow_images"]))
+        if allow_replies and not current["allow_anonymous_replies"]:
+            warning_fields.append(("Anonymous Replies", RISKY_POLICY_WARNINGS["allow_replies"]))
+        if allow_self_edit and not current["allow_self_edit"]:
+            warning_fields.append(("Self-Edit", RISKY_POLICY_WARNINGS["allow_self_edit"]))
+        if warning_fields:
+            await self._send_policy_warning(ctx, updates=updates, warning_fields=warning_fields)
+            return
+        ok, message = await self.service.configure_guild(ctx.guild.id, **updates)
         if ok:
             await self._sync_runtime_surfaces(ctx.guild)
         await send_hybrid_response(

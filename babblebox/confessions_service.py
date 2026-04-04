@@ -58,6 +58,7 @@ from babblebox.utility_helpers import (
 PUBLIC_ID_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
 CONFESSION_ID_PREFIX = "CF"
 CASE_ID_PREFIX = "CS"
+SUPPORT_TICKET_ID_PREFIX = "CT"
 MAX_ID_BODY = 8
 MAX_CONFESSION_LENGTH = 1800
 MAX_STAFF_PREVIEW = 220
@@ -65,9 +66,11 @@ MAX_ATTACHMENT_SIZE = 10 * 1024 * 1024
 REVIEW_PREVIEW_LIMIT = 5
 EXACT_DUPLICATE_WINDOW_SECONDS = 24 * 3600
 NEAR_DUPLICATE_RATIO = 0.92
+FUZZY_DUPLICATE_RATIO = 0.90
 STRIKE_SUSPEND_HOURS = 24
 QUEUE_AGE_NEW_SECONDS = 15 * 60
 QUEUE_AGE_RECENT_SECONDS = 2 * 3600
+SUPPORT_RATE_LIMIT_SECONDS = 5 * 60
 LINK_IN_BIO_DOMAINS = frozenset({"linktr.ee", "beacons.ai", "carrd.co"})
 SPAM_RATE_LIMIT_FLAGS = frozenset(
     {"duplicate_spam", "empty_content", "low_signal_spam", "near_duplicate_spam", "repetitive_spam"}
@@ -192,7 +195,7 @@ STAFF_REASON_LABELS = {
     "vulgar_language": "Borderline language",
     "vulgar_language_context": "Quoted harsh language",
 }
-MANUAL_CASE_ACTIONS = {"delete", "clear", "false_positive", "perm_ban", "suspend", "temp_ban"}
+MANUAL_CASE_ACTIONS = {"delete", "clear", "false_positive", "perm_ban", "suspend", "temp_ban", "restrict_images"}
 
 
 @dataclass(frozen=True)
@@ -204,6 +207,8 @@ class ConfessionSubmissionResult:
     case_id: str | None = None
     flag_codes: tuple[str, ...] = ()
     jump_url: str | None = None
+    submission_kind: str = "confession"
+    parent_confession_id: str | None = None
 
 
 @dataclass(frozen=True)
@@ -292,13 +297,38 @@ def _fingerprint_text(
     text: str,
     attachment_meta: Sequence[dict[str, Any]],
     shared_link_url: str | None = None,
-) -> tuple[str | None, str | None]:
+) -> tuple[str | None, str | None, str | None]:
     canonical = _canonical_duplicate_text(text, attachment_meta, shared_link_url)
     if not canonical:
-        return None, None
+        return None, None, None
     fingerprint = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:32]
     similarity = " ".join(_tokens(canonical)[:24])[:160] or canonical[:160]
-    return fingerprint, similarity
+    signature_tokens = _tokens(canonical)
+    if len(signature_tokens) > 1:
+        signature_tokens.extend(f"{left}|{right}" for left, right in zip(signature_tokens, signature_tokens[1:]))
+    signature_tokens = signature_tokens[:64]
+    vector = [0] * 64
+    for token in signature_tokens:
+        bits = int.from_bytes(hashlib.sha256(token.encode("utf-8")).digest()[:8], "big")
+        for index in range(64):
+            weight = 1 if bits & (1 << index) else -1
+            vector[index] += weight
+    fuzzy_value = 0
+    for index, score in enumerate(vector):
+        if score >= 0:
+            fuzzy_value |= 1 << index
+    fuzzy_signature = f"{fuzzy_value:016x}" if signature_tokens else None
+    return fingerprint, similarity, fuzzy_signature
+
+
+def _fuzzy_signature_ratio(left: str, right: str) -> float:
+    try:
+        left_bits = int(left, 16)
+        right_bits = int(right, 16)
+    except ValueError:
+        return 0.0
+    distance = bin(left_bits ^ right_bits).count("1")
+    return 1.0 - (distance / 64.0)
 
 
 def _public_id(prefix: str) -> str:
@@ -451,6 +481,7 @@ class ConfessionsService:
         self._lock = asyncio.Lock()
         self.link_safety = ShieldLinkSafetyEngine()
         self._compiled_configs: dict[int, dict[str, Any]] = {}
+        self._support_rate_limits: dict[tuple[int, int, str], float] = {}
 
     async def start(self) -> bool:
         if self._startup_storage_error is not None:
@@ -516,12 +547,17 @@ class ConfessionsService:
             except ValueError as exc:
                 return False, str(exc)
             requested_allow_images = bool(config.get("allow_images"))
+            requested_allow_replies = bool(config.get("allow_anonymous_replies"))
             requested_review_channel_id = config.get("review_channel_id")
             requested_confession_channel_id = config.get("confession_channel_id")
             if requested_allow_images and requested_review_channel_id is None:
                 return False, "Image confessions require a separate private review channel before admins can enable them."
             if requested_allow_images and requested_review_channel_id == requested_confession_channel_id:
                 return False, "Image confessions require a review channel that is separate from the public confession channel."
+            if requested_allow_replies and requested_review_channel_id is None:
+                return False, "Anonymous replies require a separate private review channel before admins can enable them."
+            if requested_allow_replies and requested_review_channel_id == requested_confession_channel_id:
+                return False, "Anonymous replies require a review channel that is separate from the public confession channel."
             normalized = normalize_confession_config(guild_id, config)
             if (
                 normalized["enabled"]
@@ -544,10 +580,13 @@ class ConfessionsService:
         panel_channel_id: int | None = None,
         panel_message_id: int | None = None,
         review_channel_id: int | None = None,
+        appeals_channel_id: int | None = None,
         review_mode: bool | None = None,
         block_adult_language: bool | None = None,
         allow_trusted_mainstream_links: bool | None = None,
         allow_images: bool | None = None,
+        allow_anonymous_replies: bool | None = None,
+        allow_self_edit: bool | None = None,
         max_images: int | None = None,
         cooldown_seconds: int | None = None,
         burst_limit: int | None = None,
@@ -559,6 +598,7 @@ class ConfessionsService:
         clear_confession_channel: bool = False,
         clear_panel: bool = False,
         clear_review_channel: bool = False,
+        clear_appeals_channel: bool = False,
     ) -> tuple[bool, str]:
         def mutate(config: dict[str, Any]):
             if enabled is not None:
@@ -579,6 +619,10 @@ class ConfessionsService:
                 config["review_channel_id"] = None
             elif review_channel_id is not None:
                 config["review_channel_id"] = review_channel_id
+            if clear_appeals_channel:
+                config["appeals_channel_id"] = None
+            elif appeals_channel_id is not None:
+                config["appeals_channel_id"] = appeals_channel_id
             if review_mode is not None:
                 config["review_mode"] = bool(review_mode)
             if block_adult_language is not None:
@@ -587,6 +631,10 @@ class ConfessionsService:
                 config["allow_trusted_mainstream_links"] = bool(allow_trusted_mainstream_links)
             if allow_images is not None:
                 config["allow_images"] = bool(allow_images)
+            if allow_anonymous_replies is not None:
+                config["allow_anonymous_replies"] = bool(allow_anonymous_replies)
+            if allow_self_edit is not None:
+                config["allow_self_edit"] = bool(allow_self_edit)
             if max_images is not None:
                 config["max_images"] = max_images
             if cooldown_seconds is not None:
@@ -700,6 +748,11 @@ class ConfessionsService:
         if burst_start is not None and (now - burst_start).total_seconds() > 24 * 3600:
             updated["burst_count"] = 0
             updated["burst_window_started_at"] = None
+        image_restricted_until = deserialize_datetime(updated.get("image_restricted_until"))
+        if image_restricted_until is not None and image_restricted_until <= now:
+            updated["image_restriction_active"] = False
+            updated["image_restricted_until"] = None
+            updated["image_restriction_case_id"] = None
         updated["updated_at"] = now.isoformat()
         return updated
 
@@ -714,6 +767,15 @@ class ConfessionsService:
             remaining = int(max(0, (until - ge.now_utc()).total_seconds()))
             return f"Babblebox confessions are temporarily restricted for you for about {format_duration_brief(remaining)}."
         return "Babblebox confessions are temporarily restricted for you."
+
+    def _image_restriction_message(self, state: dict[str, Any]) -> str | None:
+        if not state.get("image_restriction_active"):
+            return None
+        until = deserialize_datetime(state.get("image_restricted_until"))
+        if until is not None:
+            remaining = int(max(0, (until - ge.now_utc()).total_seconds()))
+            return f"Image attachments are paused for you for about {format_duration_brief(remaining)}."
+        return "Image attachments are currently disabled for you in this server."
 
     def _needs_review(
         self,
@@ -751,7 +813,6 @@ class ConfessionsService:
         submission["staff_preview"] = None
         submission["content_body"] = None
         submission["shared_link_url"] = None
-        submission["content_fingerprint"] = None
         submission["similarity_key"] = None
         submission["attachment_meta"] = []
         await self.store.upsert_submission(submission)
@@ -1009,7 +1070,7 @@ class ConfessionsService:
         if has_links and not assessments and not compiled["allow_trusted_mainstream_links"] and not compiled["custom_allow_domains"]:
             return SafetyResult("blocked", ("link_unsafe",), True, "Links are disabled for confessions in this server.")
 
-        fingerprint, similarity_key = _fingerprint_text(text, attachment_meta, shared_link_url)
+        fingerprint, similarity_key, fuzzy_signature = _fingerprint_text(text, attachment_meta, shared_link_url)
         now = ge.now_utc()
         for row in recent_rows:
             created_at = deserialize_datetime(row.get("created_at"))
@@ -1018,8 +1079,13 @@ class ConfessionsService:
             age = (now - created_at).total_seconds()
             if fingerprint and row.get("content_fingerprint") == fingerprint and age <= EXACT_DUPLICATE_WINDOW_SECONDS:
                 return SafetyResult("blocked", ("duplicate_spam",), False, "That looks like a duplicate confession.")
+            previous_fuzzy_signature = str(row.get("fuzzy_signature") or "")
             previous_similarity = str(row.get("similarity_key") or "")
-            if similarity_key and previous_similarity:
+            if fuzzy_signature and previous_fuzzy_signature:
+                ratio = _fuzzy_signature_ratio(fuzzy_signature, previous_fuzzy_signature)
+                if ratio >= FUZZY_DUPLICATE_RATIO and age <= EXACT_DUPLICATE_WINDOW_SECONDS:
+                    return SafetyResult("blocked", ("near_duplicate_spam",), False, "That looks too close to a recent confession.")
+            elif similarity_key and previous_similarity:
                 ratio = SequenceMatcher(None, similarity_key, previous_similarity).ratio()
                 if ratio >= NEAR_DUPLICATE_RATIO and age <= EXACT_DUPLICATE_WINDOW_SECONDS:
                     return SafetyResult("blocked", ("near_duplicate_spam",), False, "That looks too close to a recent confession.")
@@ -1051,6 +1117,8 @@ class ConfessionsService:
         content: str | None,
         link: str | None = None,
         attachments: Sequence[Any] | None = None,
+        submission_kind: str = "confession",
+        parent_confession_id: str | None = None,
     ) -> ConfessionSubmissionResult:
         if not self.storage_ready:
             return ConfessionSubmissionResult(False, "unavailable", self.storage_message("Confessions"))
@@ -1058,6 +1126,10 @@ class ConfessionsService:
         ready_message = self.operability_message(guild.id)
         if ready_message != "Confessions are ready.":
             return ConfessionSubmissionResult(False, "unavailable", ready_message)
+        submission_kind = normalize_plain_text(submission_kind).casefold() or "confession"
+        if submission_kind not in {"confession", "reply"}:
+            return ConfessionSubmissionResult(False, "blocked", "That anonymous submission type is not supported.")
+        normalized_parent_confession_id = normalize_plain_text(parent_confession_id).upper() if parent_confession_id else None
 
         state = self._normalize_restriction_state(await self._enforcement_state(guild.id, author_id))
         restriction_message = self._restriction_message(state)
@@ -1066,15 +1138,45 @@ class ConfessionsService:
             return ConfessionSubmissionResult(False, "restricted", restriction_message)
 
         attachment_list = list(attachments or [])
+        image_restriction_message = self._image_restriction_message(state)
+        if attachment_list and image_restriction_message is not None:
+            await self.store.upsert_enforcement_state(state)
+            return ConfessionSubmissionResult(False, "blocked", image_restriction_message, submission_kind=submission_kind)
+
+        if submission_kind == "reply":
+            if not compiled["allow_anonymous_replies"]:
+                return ConfessionSubmissionResult(
+                    False,
+                    "blocked",
+                    "Anonymous replies are off by default in this server unless admins explicitly enable them.",
+                    submission_kind=submission_kind,
+                )
+            if not self._has_review_channel(guild.id):
+                return ConfessionSubmissionResult(False, "blocked", self._review_channel_requirement_message(), submission_kind=submission_kind)
+            if attachment_list:
+                return ConfessionSubmissionResult(False, "blocked", "Anonymous replies are text-only right now.", submission_kind=submission_kind)
+            if normalize_plain_text(link):
+                return ConfessionSubmissionResult(False, "blocked", "Anonymous replies do not allow links right now.", submission_kind=submission_kind)
+            if not normalized_parent_confession_id or not normalized_parent_confession_id.startswith(f"{CONFESSION_ID_PREFIX}-"):
+                return ConfessionSubmissionResult(False, "blocked", "Reply to a published confession ID like `CF-XXXXXX`.", submission_kind=submission_kind)
+            parent_submission = await self.store.fetch_submission_by_confession_id(guild.id, normalized_parent_confession_id)
+            if parent_submission is None or parent_submission.get("status") != "published":
+                return ConfessionSubmissionResult(False, "blocked", "That confession is not available for anonymous replies.", submission_kind=submission_kind)
+            if parent_submission.get("submission_kind") != "confession":
+                return ConfessionSubmissionResult(False, "blocked", "Anonymous replies only support one level of depth right now.", submission_kind=submission_kind)
+
         ok, attachment_message = self._validate_attachments(compiled, attachment_list)
         if not ok:
-            return ConfessionSubmissionResult(False, "blocked", attachment_message)
+            return ConfessionSubmissionResult(False, "blocked", attachment_message, submission_kind=submission_kind)
 
         normalized = normalize_plain_text(content)
         squashed = squash_for_evasion_checks(normalized.casefold())
-        link_ok, shared_link_url = _normalize_shared_link_input(link)
+        if submission_kind == "reply":
+            link_ok, shared_link_url = True, None
+        else:
+            link_ok, shared_link_url = _normalize_shared_link_input(link)
         if not link_ok:
-            return ConfessionSubmissionResult(False, "blocked", str(shared_link_url or "That link is not valid."))
+            return ConfessionSubmissionResult(False, "blocked", str(shared_link_url or "That link is not valid."), submission_kind=submission_kind)
         attachment_meta = self._attachment_metadata(attachment_list)
         recent_rows = await self.store.list_recent_submissions_for_author(guild.id, author_id, limit=5)
         safety = await self._evaluate_safety(
@@ -1089,15 +1191,17 @@ class ConfessionsService:
         confession_id = await self._generate_confession_id(guild.id)
         submission_id = secrets.token_hex(16)
         preview = _staff_preview_text(normalized, attachment_meta)
-        fingerprint, similarity_key = _fingerprint_text(normalized, attachment_meta, shared_link_url)
+        fingerprint, similarity_key, fuzzy_signature = _fingerprint_text(normalized, attachment_meta, shared_link_url)
         now = ge.now_utc()
         now_iso = now.isoformat()
-        requires_review = self._needs_review(compiled, safety=safety, attachment_meta=attachment_meta)
+        requires_review = submission_kind == "reply" or self._needs_review(compiled, safety=safety, attachment_meta=attachment_meta)
 
         submission = {
             "submission_id": submission_id,
             "guild_id": guild.id,
             "confession_id": confession_id,
+            "submission_kind": submission_kind,
+            "parent_confession_id": normalized_parent_confession_id,
             "status": "queued" if requires_review else "published",
             "review_status": "pending" if requires_review else "none",
             "staff_preview": preview,
@@ -1105,6 +1209,7 @@ class ConfessionsService:
             "shared_link_url": shared_link_url,
             "content_fingerprint": fingerprint,
             "similarity_key": similarity_key,
+            "fuzzy_signature": fuzzy_signature,
             "flag_codes": list(safety.flag_codes),
             "attachment_meta": attachment_meta,
             "posted_channel_id": None,
@@ -1161,18 +1266,47 @@ class ConfessionsService:
                         confession_id=confession_id,
                         case_id=case_id,
                         flag_codes=safety.flag_codes,
+                        submission_kind=submission_kind,
+                        parent_confession_id=normalized_parent_confession_id,
                     )
-            return ConfessionSubmissionResult(False, "blocked", safety.reason, confession_id=confession_id, case_id=case_id, flag_codes=safety.flag_codes)
+            return ConfessionSubmissionResult(
+                False,
+                "blocked",
+                safety.reason,
+                confession_id=confession_id,
+                case_id=case_id,
+                flag_codes=safety.flag_codes,
+                submission_kind=submission_kind,
+                parent_confession_id=normalized_parent_confession_id,
+            )
 
         if attachment_meta and not self._has_review_channel(guild.id):
-            return ConfessionSubmissionResult(False, "blocked", self._review_channel_requirement_message(for_images=True))
+            return ConfessionSubmissionResult(
+                False,
+                "blocked",
+                self._review_channel_requirement_message(for_images=True),
+                submission_kind=submission_kind,
+                parent_confession_id=normalized_parent_confession_id,
+            )
 
         if requires_review and not self._has_review_channel(guild.id):
-            return ConfessionSubmissionResult(False, "blocked", self._review_channel_requirement_message())
+            return ConfessionSubmissionResult(
+                False,
+                "blocked",
+                self._review_channel_requirement_message(),
+                submission_kind=submission_kind,
+                parent_confession_id=normalized_parent_confession_id,
+            )
 
         rate_ok, updated_state, rate_message = await self._update_rate_limits(compiled, state)
         if not rate_ok:
-            return ConfessionSubmissionResult(False, "restricted", rate_message or "Confessions are temporarily limited.")
+            return ConfessionSubmissionResult(
+                False,
+                "restricted",
+                rate_message or "Confessions are temporarily limited.",
+                submission_kind=submission_kind,
+                parent_confession_id=normalized_parent_confession_id,
+            )
 
         if requires_review:
             case_id = await self._generate_case_id(guild.id)
@@ -1211,15 +1345,25 @@ class ConfessionsService:
             return ConfessionSubmissionResult(
                 True,
                 "queued",
-                "Your confession was received and queued for anonymous review.",
+                "Your anonymous reply was received and queued for private review."
+                if submission_kind == "reply"
+                else "Your confession was received and queued for anonymous review.",
                 confession_id=confession_id,
                 case_id=case_id,
                 flag_codes=safety.flag_codes,
+                submission_kind=submission_kind,
+                parent_confession_id=normalized_parent_confession_id,
             )
 
         publish_ok, publish_message_id, channel_id, publish_message = await self._publish_submission(guild, submission)
         if not publish_ok:
-            return ConfessionSubmissionResult(False, "unavailable", publish_message or "Babblebox could not post that confession right now.")
+            return ConfessionSubmissionResult(
+                False,
+                "unavailable",
+                publish_message or "Babblebox could not post that confession right now.",
+                submission_kind=submission_kind,
+                parent_confession_id=normalized_parent_confession_id,
+            )
         submission["status"] = "published"
         submission["review_status"] = "none"
         submission["posted_channel_id"] = channel_id
@@ -1238,9 +1382,11 @@ class ConfessionsService:
         return ConfessionSubmissionResult(
             True,
             "published",
-            "Your anonymous confession was posted.",
+            "Your anonymous reply was posted." if submission_kind == "reply" else "Your anonymous confession was posted.",
             confession_id=confession_id,
             jump_url=self._message_jump_url(guild.id, channel_id, publish_message_id),
+            submission_kind=submission_kind,
+            parent_confession_id=normalized_parent_confession_id,
         )
 
     def _message_jump_url(self, guild_id: int, channel_id: int | None, message_id: int | None) -> str | None:
@@ -1278,11 +1424,329 @@ class ConfessionsService:
             return source, f"Last action: {resolution_action.replace('_', ' ').title()}."
         return source, "No clear or override is recorded."
 
+    def _submission_kind_label(self, submission: dict[str, Any] | None) -> str:
+        return "Reply" if (submission or {}).get("submission_kind") == "reply" else "Confession"
+
+    async def get_owned_submission_context(
+        self,
+        guild_id: int,
+        *,
+        author_id: int,
+        target_id: str,
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        cleaned_target = normalize_plain_text(target_id).upper()
+        if not cleaned_target:
+            return None, "Use a confession ID like `CF-XXXXXX` or a case ID like `CS-XXXXXX`."
+        submission = None
+        case = None
+        if cleaned_target.startswith(f"{CASE_ID_PREFIX}-"):
+            case = await self.store.fetch_case(guild_id, cleaned_target)
+            if case is None:
+                return None, "That case ID was not found."
+            submission = await self.store.fetch_submission(case["submission_id"])
+        elif cleaned_target.startswith(f"{CONFESSION_ID_PREFIX}-"):
+            submission = await self.store.fetch_submission_by_confession_id(guild_id, cleaned_target)
+        else:
+            return None, "Use a confession ID like `CF-XXXXXX` or a case ID like `CS-XXXXXX`."
+        if submission is None:
+            return None, "That confession ID was not found."
+        author_link = await self.store.fetch_author_link(submission["submission_id"])
+        if author_link is None or int(author_link.get("author_user_id") or 0) != int(author_id):
+            return None, "That confession ID does not belong to you."
+        if case is None and submission.get("current_case_id"):
+            case = await self.store.fetch_case(guild_id, str(submission["current_case_id"]))
+        config = self.get_config(guild_id)
+        can_edit = bool(config["allow_self_edit"] and submission.get("status") == "queued" and submission.get("review_status") == "pending")
+        can_delete = submission.get("status") in {"published", "queued", "blocked"}
+        return {
+            "target_id": cleaned_target,
+            "submission": submission,
+            "case": case,
+            "can_edit": can_edit,
+            "can_delete": can_delete,
+        }, None
+
+    def build_member_manage_embed(self, context: dict[str, Any]) -> discord.Embed:
+        submission = context["submission"]
+        case = context.get("case")
+        kind_label = self._submission_kind_label(submission)
+        embed = discord.Embed(
+            title=f"My Anonymous {kind_label}",
+            description="Babblebox verified ownership privately. Staff still do not see your account through this flow.",
+            color=ge.EMBED_THEME["info"],
+        )
+        embed.add_field(
+            name="Status",
+            value=(
+                f"Type: **{kind_label}**\n"
+                f"Public ID: **`{submission['confession_id']}`**\n"
+                f"State: **{str(submission.get('status') or 'unknown').replace('_', ' ').title()}**\n"
+                f"Review: **{str(submission.get('review_status') or 'none').replace('_', ' ').title()}**"
+            ),
+            inline=False,
+        )
+        if submission.get("parent_confession_id"):
+            embed.add_field(name="Replying To", value=f"`{submission['parent_confession_id']}`", inline=False)
+        if case is not None:
+            embed.add_field(name="Case", value=f"`{case['case_id']}`", inline=True)
+        actions = []
+        actions.append("Delete is available." if context["can_delete"] else "Delete is no longer available for this item.")
+        if context["can_edit"]:
+            actions.append("Edit is available while the submission is still pending review.")
+        else:
+            actions.append("Edit is only available when admins enable it and the submission is still pending review.")
+        embed.add_field(name="Available Actions", value="\n".join(actions), inline=False)
+        return ge.style_embed(embed, footer="Babblebox Confessions | Private owner tools")
+
+    async def self_delete_confession(
+        self,
+        guild: discord.Guild,
+        *,
+        author_id: int,
+        target_id: str,
+    ) -> tuple[bool, str]:
+        context, error = await self.get_owned_submission_context(guild.id, author_id=author_id, target_id=target_id)
+        if context is None:
+            return False, error or "That confession could not be verified."
+        submission = context["submission"]
+        case = context.get("case")
+        if submission.get("status") not in {"published", "queued", "blocked"}:
+            kind_label = self._submission_kind_label(submission).casefold()
+            return False, f"That {kind_label} is already closed and cannot be deleted from this flow."
+        now_iso = ge.now_utc().isoformat()
+        previous_status = str(submission.get("status") or "")
+        previous_review_status = str(submission.get("review_status") or "")
+        if submission.get("posted_channel_id"):
+            channel = guild.get_channel(submission.get("posted_channel_id")) or self.bot.get_channel(submission.get("posted_channel_id"))
+            if channel is not None:
+                message = await self._queue_message(channel, message_id=submission.get("posted_message_id"))
+                if message is not None:
+                    with contextlib.suppress(discord.Forbidden, discord.HTTPException, Exception):
+                        await message.delete()
+        submission["status"] = "deleted"
+        submission["review_status"] = "withdrawn" if previous_status in {"queued", "blocked"} or previous_review_status == "pending" else previous_review_status
+        submission["posted_channel_id"] = None
+        submission["posted_message_id"] = None
+        submission["resolved_at"] = now_iso
+        await self._scrub_submission_for_terminal_state(submission)
+        if case is not None and case.get("status") == "open":
+            case["status"] = "resolved"
+            case["resolution_action"] = "self_delete"
+            case["resolution_note"] = "Deleted privately by the owner."
+            case["resolved_at"] = now_iso
+            await self.store.upsert_case(case)
+        await self._sync_review_queue(guild, note=f"{self._submission_kind_label(submission)} `{submission['confession_id']}` was withdrawn by its owner.")
+        return True, f"{self._submission_kind_label(submission)} `{submission['confession_id']}` was deleted privately."
+
+    async def self_edit_confession(
+        self,
+        guild: discord.Guild,
+        *,
+        author_id: int,
+        target_id: str,
+        content: str | None,
+        link: str | None = None,
+    ) -> ConfessionSubmissionResult:
+        context, error = await self.get_owned_submission_context(guild.id, author_id=author_id, target_id=target_id)
+        if context is None:
+            return ConfessionSubmissionResult(False, "blocked", error or "That confession could not be verified.")
+        submission = context["submission"]
+        case = context.get("case")
+        if not context["can_edit"]:
+            return ConfessionSubmissionResult(
+                False,
+                "blocked",
+                "Editing is only available when admins enable it and the submission is still pending review.",
+                confession_id=submission["confession_id"],
+                case_id=case["case_id"] if case else None,
+                submission_kind=str(submission.get("submission_kind") or "confession"),
+                parent_confession_id=submission.get("parent_confession_id"),
+            )
+        compiled = self.get_compiled_config(guild.id)
+        normalized = normalize_plain_text(content)
+        squashed = squash_for_evasion_checks(normalized.casefold())
+        if submission.get("submission_kind") == "reply":
+            link_ok, shared_link_url = True, None
+        else:
+            link_ok, shared_link_url = _normalize_shared_link_input(link)
+        if not link_ok:
+            return ConfessionSubmissionResult(False, "blocked", str(shared_link_url or "That link is not valid."), confession_id=submission["confession_id"])
+        recent_rows = [
+            row
+            for row in await self.store.list_recent_submissions_for_author(guild.id, author_id, limit=6)
+            if row.get("submission_id") != submission["submission_id"]
+        ]
+        safety = await self._evaluate_safety(
+            compiled,
+            text=normalized,
+            squashed=squashed,
+            shared_link_url=shared_link_url,
+            attachment_meta=list(submission.get("attachment_meta") or []),
+            recent_rows=recent_rows,
+        )
+        if safety.outcome == "blocked":
+            return ConfessionSubmissionResult(
+                False,
+                "blocked",
+                safety.reason,
+                confession_id=submission["confession_id"],
+                case_id=case["case_id"] if case else None,
+                flag_codes=safety.flag_codes,
+                submission_kind=str(submission.get("submission_kind") or "confession"),
+                parent_confession_id=submission.get("parent_confession_id"),
+            )
+        fingerprint, similarity_key, fuzzy_signature = _fingerprint_text(normalized, list(submission.get("attachment_meta") or []), shared_link_url)
+        submission["content_body"] = normalized or None
+        submission["shared_link_url"] = shared_link_url
+        submission["staff_preview"] = _staff_preview_text(normalized, list(submission.get("attachment_meta") or []))
+        submission["content_fingerprint"] = fingerprint
+        submission["similarity_key"] = similarity_key
+        submission["fuzzy_signature"] = fuzzy_signature
+        submission["flag_codes"] = list(safety.flag_codes)
+        await self.store.upsert_submission(submission)
+        if case is not None:
+            case["reason_codes"] = list(safety.flag_codes)
+            case["review_version"] = int(case.get("review_version") or 0) + 1
+            case["resolution_note"] = "Updated privately by the owner while pending review."
+            await self.store.upsert_case(case)
+        await self._sync_review_queue(guild, note=f"{self._submission_kind_label(submission)} `{submission['confession_id']}` was updated by its owner.")
+        return ConfessionSubmissionResult(
+            True,
+            "queued",
+            "Your update was saved and remains in private review.",
+            confession_id=submission["confession_id"],
+            case_id=case["case_id"] if case else None,
+            flag_codes=tuple(safety.flag_codes),
+            submission_kind=str(submission.get("submission_kind") or "confession"),
+            parent_confession_id=submission.get("parent_confession_id"),
+        )
+
+    def _support_rate_limit_message(self, guild_id: int, author_id: int, kind: str) -> str | None:
+        now = time.monotonic()
+        key = (guild_id, author_id, kind)
+        expires_at = self._support_rate_limits.get(key)
+        if expires_at is not None and expires_at > now:
+            return f"Please wait about {format_duration_brief(int(expires_at - now))} before sending another {kind}."
+        return None
+
+    def _mark_support_rate_limit(self, guild_id: int, author_id: int, kind: str):
+        self._support_rate_limits[(guild_id, author_id, kind)] = time.monotonic() + SUPPORT_RATE_LIMIT_SECONDS
+
+    async def _post_support_ticket(
+        self,
+        guild: discord.Guild,
+        *,
+        title: str,
+        description: str,
+        fields: Sequence[tuple[str, str]],
+    ) -> tuple[bool, str]:
+        config = self.get_config(guild.id)
+        channel_id = config.get("appeals_channel_id")
+        if not isinstance(channel_id, int):
+            return False, "Admins still need to configure a private appeals/report channel for this server."
+        channel = guild.get_channel(channel_id) or self.bot.get_channel(channel_id)
+        if channel is None:
+            return False, "The configured appeals/report channel is unavailable."
+        ticket_id = _public_id(SUPPORT_TICKET_ID_PREFIX)
+        embed = discord.Embed(title=f"{title} `{ticket_id}`", description=description, color=ge.EMBED_THEME["info"])
+        for name, value in fields:
+            embed.add_field(name=name, value=ge.safe_field_text(value, limit=1024), inline=False)
+        embed = ge.style_embed(embed, footer="Babblebox Confessions | Staff-blind support")
+        with contextlib.suppress(discord.Forbidden, discord.HTTPException):
+            await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
+            return True, ticket_id
+        return False, "Babblebox could not deliver that support request right now."
+
+    def _sanitize_support_body(self, raw_text: str | None) -> tuple[bool, str]:
+        normalized = normalize_plain_text(raw_text)
+        squashed = squash_for_evasion_checks(normalized.casefold())
+        if not normalized:
+            return False, "Please add a short explanation."
+        if MENTION_RE.search(normalized) or RAW_MENTION_RE.search(normalized) or RAW_MENTION_RE.search(squashed):
+            return False, "Support requests cannot include user, role, channel, or mass mentions."
+        private_pattern = _find_private_leak(normalized, squashed)
+        if private_pattern is not None:
+            return False, f"Support requests cannot include {private_pattern}."
+        return True, normalized[:1800]
+
+    async def submit_support_request(
+        self,
+        guild: discord.Guild,
+        *,
+        author_id: int,
+        kind: str,
+        details: str,
+        target_id: str | None = None,
+    ) -> tuple[bool, str]:
+        kind = normalize_plain_text(kind).casefold()
+        if kind not in {"appeal", "report"}:
+            return False, "That support flow is not available."
+        valid_details, cleaned_details = self._sanitize_support_body(details)
+        if not valid_details:
+            return False, cleaned_details
+        cleaned_target = normalize_plain_text(target_id).upper() if target_id else None
+        fields: list[tuple[str, str]] = []
+        if kind == "appeal":
+            state = self._normalize_restriction_state(await self._enforcement_state(guild.id, author_id))
+            restriction_label = self._restriction_label(state)
+            if cleaned_target:
+                context, error = await self.get_owned_submission_context(guild.id, author_id=author_id, target_id=cleaned_target)
+                if context is None:
+                    return False, error or "That confession or case could not be verified for appeal."
+                submission = context["submission"]
+                case = context.get("case")
+                fields.append(("Reference", f"{submission['confession_id']}" if case is None else f"{submission['confession_id']} / {case['case_id']}"))
+                fields.append(("Submission State", f"{submission.get('status', 'unknown').replace('_', ' ').title()} / {submission.get('review_status', 'none').replace('_', ' ').title()}"))
+            elif restriction_label != "None":
+                fields.append(("Restriction", restriction_label))
+                if state.get("last_case_id"):
+                    fields.append(("Reference", str(state["last_case_id"])))
+            else:
+                return False, "Reference your own confession or case ID, or send the appeal while the restriction is still active."
+            title = "Anonymous Appeal"
+        else:
+            if not cleaned_target:
+                return False, "Reports should include a confession ID or case ID."
+            if cleaned_target.startswith(f"{CASE_ID_PREFIX}-"):
+                case = await self.store.fetch_case(guild.id, cleaned_target)
+                if case is None:
+                    return False, "That case ID was not found."
+                fields.append(("Reference", f"{case['confession_id']} / {case['case_id']}"))
+                fields.append(("Case Kind", str(case.get("case_kind") or "unknown").replace("_", " ").title()))
+            elif cleaned_target.startswith(f"{CONFESSION_ID_PREFIX}-"):
+                submission = await self.store.fetch_submission_by_confession_id(guild.id, cleaned_target)
+                if submission is None:
+                    return False, "That confession ID was not found."
+                fields.append(("Reference", submission["confession_id"]))
+                fields.append(("Submission State", str(submission.get("status") or "unknown").replace("_", " ").title()))
+            else:
+                return False, "Reports should reference a confession ID like `CF-XXXXXX` or a case ID like `CS-XXXXXX`."
+            title = "Anonymous Report"
+        rate_limit_message = self._support_rate_limit_message(guild.id, author_id, kind)
+        if rate_limit_message is not None:
+            return False, rate_limit_message
+        fields.append(("Details", cleaned_details))
+        ok, support_result = await self._post_support_ticket(
+            guild,
+            title=title,
+            description="The author identity remains hidden from staff. Use the public IDs below for follow-up.",
+            fields=fields,
+        )
+        if not ok:
+            return False, support_result
+        self._mark_support_rate_limit(guild.id, author_id, kind)
+        return True, f"{title} `{support_result}` was sent privately."
+
     def _member_reason_message(self, result: ConfessionSubmissionResult) -> str:
         flags = set(result.flag_codes)
+        noun = "reply" if result.submission_kind == "reply" else "confession"
         if result.state == "published":
+            if result.submission_kind == "reply" and result.parent_confession_id:
+                return f"Your reply to `{result.parent_confession_id}` was posted without your name attached."
             return "Your confession was posted without your name attached."
         if result.state == "queued":
+            if result.submission_kind == "reply" and result.parent_confession_id:
+                return f"Your reply to `{result.parent_confession_id}` was received and queued for private review."
             return "Your confession was received and queued for private review."
         if result.state == "restricted":
             return result.message
@@ -1295,18 +1759,19 @@ class ConfessionsService:
         if "mention_abuse" in flags:
             return "Confessions cannot include user, role, channel, or mass mentions."
         if "private_pattern" in flags:
-            return "Confessions cannot include private contact or identifying details."
+            return f"{noun.title()}s cannot include private contact or identifying details."
         if "duplicate_spam" in flags or "near_duplicate_spam" in flags or "repetitive_spam" in flags:
-            return "That confession is too close to recent submissions."
+            return f"That {noun} is too close to recent submissions."
         if "hate_speech" in flags or "abusive_language" in flags or "vulgar_language" in flags:
-            return "That confession includes language this server blocks."
+            return f"That {noun} includes language this server blocks."
         return result.message
 
     def build_member_result_embed(self, result: ConfessionSubmissionResult) -> discord.Embed:
+        noun_title = "Reply" if result.submission_kind == "reply" else "Confession"
         title_map = {
-            "published": "Confession Posted",
-            "queued": "Confession Received",
-            "blocked": "Confession Not Sent",
+            "published": f"{noun_title} Posted",
+            "queued": f"{noun_title} Received",
+            "blocked": f"{noun_title} Not Sent",
             "restricted": "Confessions Paused",
             "unavailable": "Confessions Unavailable",
         }
@@ -1325,6 +1790,8 @@ class ConfessionsService:
         )
         if result.confession_id is not None:
             embed.add_field(name="Confession ID", value=f"`{result.confession_id}`", inline=True)
+        if result.parent_confession_id is not None:
+            embed.add_field(name="Replying To", value=f"`{result.parent_confession_id}`", inline=True)
         if result.state == "queued":
             embed.add_field(name="Status", value="Private review", inline=True)
         elif result.state == "published":
@@ -1346,6 +1813,8 @@ class ConfessionsService:
             if config["allow_images"]
             else "Off by default"
         )
+        reply_policy = "Enabled with warning" if config["allow_anonymous_replies"] else "Off by default"
+        edit_policy = "Enabled with warning" if config["allow_self_edit"] else "Off by default"
         description = (
             "Share something quietly through a private composer. When admins enable Confessions, Babblebox keeps the author hidden from members and staff while still enforcing safety internally."
             if ready
@@ -1361,7 +1830,9 @@ class ConfessionsService:
             value=(
                 "Tap **Send Confession**.\n"
                 "Add text and at most one trusted link.\n"
-                "Images are off by default and only work after admins enable them. Enabled images always go through private review."
+                "Use **Manage My Confession** to delete your own submission privately.\n"
+                "Use **Appeal / Report** for false positives, restrictions, or problem reports.\n"
+                "Images and anonymous replies stay off by default unless admins explicitly enable them."
             ),
             inline=False,
         )
@@ -1371,7 +1842,17 @@ class ConfessionsService:
                 f"Review mode: **{'On' if config['review_mode'] else 'Off'}**\n"
                 f"Adult content: **{'Blocked' if config['block_adult_language'] else 'Allowed'}**\n"
                 f"Trusted links: **{'Allowed' if config['allow_trusted_mainstream_links'] else 'Blocked'}**\n"
-                f"Images: **{image_policy}**"
+                f"Images: **{image_policy}**\n"
+                f"Replies: **{reply_policy}**\n"
+                f"Self-edit: **{edit_policy}**"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Private Support",
+            value=(
+                "Appeals / reports channel: "
+                f"**{self._format_channel_label(config.get('appeals_channel_id'))}**"
             ),
             inline=False,
         )
@@ -1391,6 +1872,11 @@ class ConfessionsService:
             if config["allow_images"]
             else "Text and one trusted link total. Images are off by default unless admins explicitly enable them."
         )
+        reply_line = (
+            "Anonymous replies are enabled with extra moderation burden, so every reply stays text-only and goes through private review."
+            if config["allow_anonymous_replies"]
+            else "Anonymous replies are off by default unless admins explicitly enable them."
+        )
         embed = discord.Embed(
             title="How Anonymous Confessions Work",
             description="Confessions are submitted privately and published by Babblebox, not by you.",
@@ -1403,7 +1889,15 @@ class ConfessionsService:
         )
         embed.add_field(
             name="What You Can Add",
-            value=image_line,
+            value=f"{image_line}\n{reply_line}",
+            inline=False,
+        )
+        embed.add_field(
+            name="Owner Controls",
+            value=(
+                "You can privately delete your own confession or reply.\n"
+                "Self-edit is only available if this server enables it and the submission is still pending review."
+            ),
             inline=False,
         )
         embed.add_field(
@@ -1435,17 +1929,22 @@ class ConfessionsService:
             color=ge.EMBED_THEME["info"],
         )
         if section == "policy":
-            image_policy = (
-                f"Enabled, max {config['max_images']}, always reviewed"
-                if config["allow_images"]
-                else "Disabled by default"
+            embed.add_field(
+                name="Risky Features",
+                value=(
+                    f"Images: **{'Enabled with warning' if config['allow_images'] else 'Off by default'}**\n"
+                    f"Replies: **{'Enabled with warning' if config['allow_anonymous_replies'] else 'Off by default'}**\n"
+                    f"Self-edit: **{'Enabled with warning' if config['allow_self_edit'] else 'Off by default'}**\n"
+                    f"Review mode: **{'On' if config['review_mode'] else 'Off'}**"
+                ),
+                inline=False,
             )
             embed.add_field(
-                name="Safety",
+                name="Warnings",
                 value=(
-                    f"Adult content: **{'Blocked' if config['block_adult_language'] else 'Allowed'}**\n"
-                    f"Review mode: **{'On' if config['review_mode'] else 'Off'}**\n"
-                    f"Images: **{image_policy}**"
+                    "Images can increase moderation burden and abuse risk.\n"
+                    "Replies can increase abuse, drama, and moderation complexity.\n"
+                    "Editing can create bait-and-switch moderation problems."
                 ),
                 inline=False,
             )
@@ -1465,7 +1964,8 @@ class ConfessionsService:
                     f"Cooldown: **{format_duration_brief(int(config['cooldown_seconds']))}**\n"
                     f"Burst limit: **{config['burst_limit']} in {format_duration_brief(int(config['burst_window_seconds']))}**\n"
                     f"Auto suspend: **{config['auto_suspend_hours']}h**\n"
-                    f"Temp ban at **{config['strike_temp_ban_threshold']}** strikes, permanent at **{config['strike_perm_ban_threshold']}**"
+                    f"Temp ban at **{config['strike_temp_ban_threshold']}** strikes, permanent at **{config['strike_perm_ban_threshold']}**\n"
+                    "ID actions: **Delete, pause, temp-ban, perm-ban, restrict images, clear, false positive**"
                 ),
                 inline=False,
             )
@@ -1475,6 +1975,7 @@ class ConfessionsService:
                 value=(
                     f"Review mode: **{'On' if config['review_mode'] else 'Off'}**\n"
                     f"Review channel: {self._format_channel_label(config['review_channel_id'])}\n"
+                    f"Appeals / reports: {self._format_channel_label(config.get('appeals_channel_id'))}\n"
                     f"Open queue: **{counts['open_review_cases']}** case(s)\n"
                     f"Open safety blocks: **{counts['open_safety_cases']}**\n"
                     f"Open moderation cases: **{counts['open_moderation_cases']}**"
@@ -1483,7 +1984,7 @@ class ConfessionsService:
             )
             embed.add_field(
                 name="Quick Help",
-                value="Use `/confessions moderate` with a confession ID or case ID to approve, deny, delete, pause, ban, clear, or override a false positive without seeing the author.",
+                value="Use `/confessions moderate` with a confession ID or case ID to approve, deny, delete, pause, ban, restrict images, clear, or override a false positive without seeing the author.",
                 inline=False,
             )
         elif section == "launch":
@@ -1514,7 +2015,8 @@ class ConfessionsService:
                     f"Enabled: **{'Yes' if config['enabled'] else 'No'}**\n"
                     f"Confession channel: {self._format_channel_label(config['confession_channel_id'])}\n"
                     f"Panel channel: {self._format_channel_label(config.get('panel_channel_id'))}\n"
-                    f"Review channel: {self._format_channel_label(config['review_channel_id'])}"
+                    f"Review channel: {self._format_channel_label(config['review_channel_id'])}\n"
+                    f"Appeals / reports: {self._format_channel_label(config.get('appeals_channel_id'))}"
                 ),
                 inline=False,
             )
@@ -1537,11 +2039,19 @@ class ConfessionsService:
         shared_link_url = normalize_plain_text(submission.get("shared_link_url"))
         private_media = await self.store.fetch_private_media(submission["submission_id"])
         attachment_urls = list((private_media or {}).get("attachment_urls") or [])
+        is_reply = submission.get("submission_kind") == "reply"
+        title = (
+            f"Anonymous Reply `{submission['confession_id']}`"
+            if is_reply
+            else f"Anonymous Confession `{submission['confession_id']}`"
+        )
         main = discord.Embed(
-            title=f"Anonymous Confession `{submission['confession_id']}`",
+            title=title,
             description=body or "Shared quietly through Babblebox.",
             color=ge.EMBED_THEME["accent"],
         )
+        if submission.get("parent_confession_id"):
+            main.add_field(name="Replying To", value=f"`{submission['parent_confession_id']}`", inline=True)
         if shared_link_url:
             main.add_field(name="Trusted Link", value=shared_link_url, inline=False)
         attachment_meta = list(submission.get("attachment_meta") or [])
@@ -1589,6 +2099,8 @@ class ConfessionsService:
             "case_kind": row["case_kind"],
             "status": row["status"],
             "review_version": int(row.get("review_version") or 0),
+            "submission_kind": row.get("submission_kind") or "confession",
+            "parent_confession_id": row.get("parent_confession_id"),
             "preview": row.get("staff_preview") or "[quiet confession]",
             "flag_codes": tuple(row.get("flag_codes") or ()),
             "reason_labels": tuple(_staff_reason_labels(row.get("flag_codes") or ())),
@@ -1618,7 +2130,11 @@ class ConfessionsService:
                 embed.add_field(name="Last Update", value=ge.safe_field_text(note), inline=False)
             return ge.style_embed(embed, footer="Babblebox Confessions | Staff-blind review")
         current = pending_rows[0]
-        embed.add_field(name="Current", value=f"Case `{current['case_id']}` | Confession `{current['confession_id']}`", inline=False)
+        current_label = "Reply" if current.get("submission_kind") == "reply" else "Confession"
+        current_value = f"Case `{current['case_id']}` | {current_label} `{current['confession_id']}`"
+        if current.get("parent_confession_id"):
+            current_value += f"\nParent: `{current['parent_confession_id']}`"
+        embed.add_field(name="Current", value=current_value, inline=False)
         embed.add_field(name="Age", value=current["age"], inline=True)
         embed.add_field(name="Reasons", value=", ".join(current.get("reason_labels") or ("None",)), inline=True)
         embed.add_field(name="Preview", value=current["preview"], inline=False)
@@ -1628,7 +2144,8 @@ class ConfessionsService:
             embed.add_field(name="Attachments", value=current["attachment_summary"], inline=False)
         backlog = []
         for row in pending_rows[:REVIEW_PREVIEW_LIMIT]:
-            backlog.append(f"`{row['case_id']}` / `{row['confession_id']}`")
+            label = "RP" if row.get("submission_kind") == "reply" else "CF"
+            backlog.append(f"`{row['case_id']}` / `{row['confession_id']}` ({label})")
         if len(pending_rows) > REVIEW_PREVIEW_LIMIT:
             backlog.append(f"... and {len(pending_rows) - REVIEW_PREVIEW_LIMIT} more queued case(s).")
         embed.add_field(name="Backlog", value=ge.safe_field_text("\n".join(backlog), limit=1024), inline=False)
@@ -1802,6 +2319,8 @@ class ConfessionsService:
         last_case = payload["last_case"]
         restriction_source, override_note = self._restriction_origin_labels(current_case=case, last_case=last_case)
         identifiers_value = f"Confession: `{submission['confession_id']}`\nCase: `{case['case_id']}`" if case is not None else f"Confession: `{submission['confession_id']}`\nCase: `None`"
+        if submission.get("parent_confession_id"):
+            identifiers_value += f"\nParent: `{submission['parent_confession_id']}`"
         embed = discord.Embed(
             title="Confession Detail",
             description="Anonymous moderation detail. Staff see the confession and case state, never the author.",
@@ -1811,6 +2330,7 @@ class ConfessionsService:
         embed.add_field(
             name="State",
             value=(
+                f"Type: **{self._submission_kind_label(submission)}**\n"
                 f"Post state: **{submission.get('status', 'unknown').replace('_', ' ').title()}**\n"
                 f"Review state: **{submission.get('review_status', 'none').replace('_', ' ').title()}**\n"
                 f"Case kind: **{str(case.get('case_kind') if case else 'none').replace('_', ' ').title()}**"
@@ -1821,6 +2341,7 @@ class ConfessionsService:
             name="Restriction",
             value=(
                 f"Current: **{self._restriction_label(state)}**\n"
+                f"Images: **{self._image_restriction_message(state) or 'Allowed'}**\n"
                 f"Source: **{restriction_source}**\n"
                 f"{override_note}"
             ),
@@ -1901,6 +2422,10 @@ class ConfessionsService:
         updated["is_permanent_ban"] = False
         updated["active_restriction"] = "none"
         updated["restricted_until"] = None
+        if updated.get("image_restriction_case_id") == case_id:
+            updated["image_restriction_active"] = False
+            updated["image_restricted_until"] = None
+            updated["image_restriction_case_id"] = None
         if clear_strikes:
             updated["strike_count"] = 0
         elif updated.get("last_case_id") == case_id and int(updated.get("strike_count") or 0) > 0:
@@ -1936,7 +2461,7 @@ class ConfessionsService:
         if action in {"approve", "false_positive"} and case.get("case_kind") == "safety_block":
             compiled = self.get_compiled_config(guild.id)
             attachment_meta = list(submission.get("attachment_meta") or [])
-            requires_review = bool(attachment_meta or compiled["review_mode"])
+            requires_review = bool(submission.get("submission_kind") == "reply" or attachment_meta or compiled["review_mode"])
             relaxed_state = self._relax_case_penalty(state, case_id=case_id, now_iso=now_iso, clear_strikes=clear_strikes)
             resolution_status = "approved" if action == "approve" else "overridden"
             submission["flag_codes"] = []
@@ -2051,7 +2576,10 @@ class ConfessionsService:
             await self._sync_review_queue(guild, note=f"Case `{case_id}` was removed from the queue.")
             return True, f"Confession `{submission['confession_id']}` was deleted."
 
-        if action in {"suspend", "temp_ban", "perm_ban", "clear", "false_positive"}:
+        if action == "false_positive":
+            return False, "False positive is only available for automatic safety or review cases."
+
+        if action in {"suspend", "temp_ban", "perm_ban", "clear", "restrict_images"}:
             if action == "perm_ban":
                 state["is_permanent_ban"] = True
                 state["active_restriction"] = "perm_ban"
@@ -2060,10 +2588,15 @@ class ConfessionsService:
                 state["is_permanent_ban"] = False
                 state["active_restriction"] = "none"
                 state["restricted_until"] = None
+                state["image_restriction_active"] = False
+                state["image_restricted_until"] = None
+                state["image_restriction_case_id"] = None
                 if clear_strikes:
                     state["strike_count"] = 0
-            elif action == "false_positive":
-                state = self._relax_case_penalty(state, case_id=case_id, now_iso=now_iso, clear_strikes=clear_strikes)
+            elif action == "restrict_images":
+                state["image_restriction_active"] = True
+                state["image_restricted_until"] = (now + timedelta(seconds=duration_seconds)).isoformat() if duration_seconds else None
+                state["image_restriction_case_id"] = case_id
             else:
                 seconds = duration_seconds
                 if seconds is None:
@@ -2128,6 +2661,16 @@ class ConfessionsService:
                     clear_strikes=clear_strikes,
                 )
         if action in {"delete", "suspend", "temp_ban", "perm_ban", "clear", "false_positive"}:
+            case_id = await self._ensure_published_moderation_case(guild.id, submission)
+            return await self.handle_case_action(
+                guild,
+                case_id=case_id,
+                action=action,
+                actor=actor,
+                duration_seconds=duration_seconds,
+                clear_strikes=clear_strikes,
+            )
+        if action == "restrict_images":
             case_id = await self._ensure_published_moderation_case(guild.id, submission)
             return await self.handle_case_action(
                 guild,

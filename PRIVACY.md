@@ -29,7 +29,7 @@ Depending on the feature being used, Babblebox may process or store:
 - Discord identifiers such as user IDs, guild IDs, channel IDs, message IDs, role IDs, and timestamps
 - compact feature configuration and state, including Watch preferences, ignored channels or users, Later markers, reminders, AFK state, AFK schedules, Daily Arcade results, Buddy or profile state, and Shield or admin configuration
 - limited message or attachment context needed to respond to commands, build Moment Cards from visible messages, deliver Watch alerts, process Capture requests, or evaluate locally flagged Shield events
-- anonymous confession submission text, trusted-link fields, compact review metadata, and bot-private author mappings needed to run staff-blind moderation when a server has Confessions enabled
+- anonymous confession or reply submission text, trusted-link fields, compact review metadata, bot-private author mappings, and limited private appeals or reports needed to run staff-blind confession moderation when a server has Confessions enabled
 
 ## Information Babblebox Intentionally Avoids Storing Durably
 
@@ -66,7 +66,10 @@ Babblebox intentionally uses different visibility defaults depending on the feat
 - Capture transcripts are delivered privately rather than kept as long-term database archives
 - Later markers, reminders, and sensitive setup flows are private-first
 - anonymous confessions are optional, are submitted privately when enabled, keep the author hidden from staff, and let staff review by confession ID and case ID only while Babblebox still enforces safety internally
+- anonymous replies are off by default, are text-only when enabled, and always route through private review
+- self-edit is off by default and limited to pending submissions when enabled; self-delete is available privately to the original author through Babblebox's internal ownership check
 - images are off by default for Confessions and only work after admins explicitly enable them; enabled image confessions always route through private review
+- appeals or reports can be sent privately to a configured support channel without exposing the author's Discord identity to staff
 - Babblebox hides the account behind a confession, but a self-identifying link destination or image content can still reveal the sender if they choose to include it
 - Shield and admin configuration flows are intended for administrators or moderators rather than general public display
 
@@ -96,7 +99,7 @@ Examples:
 - Daily Arcade raw result rows are designed to prune after 180 days while streak and lifetime totals remain in profile-level storage
 - short-lived admin lifecycle rows remain only while they are operationally relevant
 - ban-return candidate records are intended to have a bounded purge window
-- terminal anonymous confession rows scrub previews, body text, trusted-link fields, fingerprints, similarity keys, and attachment metadata after resolution while the bot-private author mapping is retained only for moderation continuity
+- terminal anonymous confession rows scrub previews, body text, trusted-link fields, and attachment metadata after resolution while the bot-private author mapping and compact non-reversible duplicate signatures are retained only for moderation continuity and abuse prevention
 - Watch settings, reminders, AFK settings, and Later markers remain until changed, cleared, expired, or removed
 
 Deletion timing may depend on the feature. Some state expires naturally, some is replaced by newer state, and some is removed when a user or administrator clears it.

@@ -18,7 +18,8 @@ DEFAULT_DATABASE_URL_ENV_ORDER = ("UTILITY_DATABASE_URL", "SUPABASE_DB_URL", "DA
 DISCORD_MEDIA_HOSTS = frozenset({"cdn.discordapp.com", "media.discordapp.net"})
 VALID_RESTRICTIONS = {"none", "suspended", "temp_ban", "perm_ban"}
 VALID_SUBMISSION_STATUSES = {"blocked", "queued", "published", "denied", "deleted", "overridden"}
-VALID_REVIEW_STATUSES = {"none", "pending", "approved", "denied", "overridden", "blocked"}
+VALID_REVIEW_STATUSES = {"none", "pending", "approved", "denied", "overridden", "blocked", "withdrawn"}
+VALID_SUBMISSION_KINDS = {"confession", "reply"}
 VALID_CASE_KINDS = {"review", "safety_block", "published_moderation"}
 VALID_CASE_STATUSES = {"open", "resolved"}
 
@@ -35,12 +36,15 @@ def default_confession_config(guild_id: int | None = None) -> dict[str, Any]:
         "panel_channel_id": None,
         "panel_message_id": None,
         "review_channel_id": None,
+        "appeals_channel_id": None,
         "review_mode": True,
         "block_adult_language": True,
         "allow_trusted_mainstream_links": True,
         "custom_allow_domains": [],
         "custom_block_domains": [],
         "allow_images": False,
+        "allow_anonymous_replies": False,
+        "allow_self_edit": False,
         "max_images": 3,
         "cooldown_seconds": 5 * 60,
         "burst_limit": 3,
@@ -65,6 +69,9 @@ def default_enforcement_state(guild_id: int, user_id: int) -> dict[str, Any]:
         "burst_count": 0,
         "burst_window_started_at": None,
         "last_case_id": None,
+        "image_restriction_active": False,
+        "image_restricted_until": None,
+        "image_restriction_case_id": None,
         "updated_at": None,
     }
 
@@ -213,12 +220,15 @@ def normalize_confession_config(guild_id: int, payload: Any) -> dict[str, Any]:
     cleaned["panel_channel_id"] = _clean_int(payload.get("panel_channel_id"))
     cleaned["panel_message_id"] = _clean_int(payload.get("panel_message_id"))
     cleaned["review_channel_id"] = _clean_int(payload.get("review_channel_id"))
+    cleaned["appeals_channel_id"] = _clean_int(payload.get("appeals_channel_id"))
     cleaned["review_mode"] = bool(payload.get("review_mode", True))
     cleaned["block_adult_language"] = bool(payload.get("block_adult_language", True))
     cleaned["allow_trusted_mainstream_links"] = bool(payload.get("allow_trusted_mainstream_links", True))
     cleaned["custom_allow_domains"] = _clean_domain_list(payload.get("custom_allow_domains"))
     cleaned["custom_block_domains"] = _clean_domain_list(payload.get("custom_block_domains"))
     cleaned["allow_images"] = bool(payload.get("allow_images", False))
+    cleaned["allow_anonymous_replies"] = bool(payload.get("allow_anonymous_replies", False))
+    cleaned["allow_self_edit"] = bool(payload.get("allow_self_edit", False))
     max_images = payload.get("max_images")
     cleaned["max_images"] = max_images if isinstance(max_images, int) and 1 <= max_images <= 3 else 3
     for field, default_value, minimum, maximum in (
@@ -238,6 +248,7 @@ def normalize_confession_config(guild_id: int, payload: Any) -> dict[str, Any]:
         cleaned["panel_message_id"] = None
     if cleaned["review_channel_id"] is None or cleaned["review_channel_id"] == cleaned["confession_channel_id"]:
         cleaned["allow_images"] = False
+        cleaned["allow_anonymous_replies"] = False
     return cleaned
 
 
@@ -247,17 +258,24 @@ def normalize_submission(payload: Any) -> dict[str, Any] | None:
     guild_id = _clean_int(payload.get("guild_id"))
     submission_id = _clean_optional_text(payload.get("submission_id"), max_length=64)
     confession_id = _clean_optional_text(payload.get("confession_id"), max_length=32)
+    submission_kind = str(payload.get("submission_kind", "confession")).strip().lower()
     status = str(payload.get("status", "queued")).strip().lower()
     review_status = str(payload.get("review_status", "none")).strip().lower()
     created_at = _serialize_datetime(payload.get("created_at"))
     if guild_id is None or submission_id is None or confession_id is None or created_at is None:
         return None
-    if status not in VALID_SUBMISSION_STATUSES or review_status not in VALID_REVIEW_STATUSES:
+    if (
+        status not in VALID_SUBMISSION_STATUSES
+        or review_status not in VALID_REVIEW_STATUSES
+        or submission_kind not in VALID_SUBMISSION_KINDS
+    ):
         return None
     return {
         "submission_id": submission_id,
         "guild_id": guild_id,
         "confession_id": confession_id,
+        "submission_kind": submission_kind,
+        "parent_confession_id": _clean_optional_text(payload.get("parent_confession_id"), max_length=32),
         "status": status,
         "review_status": review_status,
         "staff_preview": _clean_optional_text(payload.get("staff_preview"), max_length=260),
@@ -265,6 +283,7 @@ def normalize_submission(payload: Any) -> dict[str, Any] | None:
         "shared_link_url": _clean_optional_text(payload.get("shared_link_url"), max_length=500),
         "content_fingerprint": _clean_optional_text(payload.get("content_fingerprint"), max_length=96),
         "similarity_key": _clean_optional_text(payload.get("similarity_key"), max_length=160),
+        "fuzzy_signature": _clean_optional_text(payload.get("fuzzy_signature") or payload.get("similarity_key"), max_length=64),
         "flag_codes": _clean_string_list(payload.get("flag_codes")),
         "attachment_meta": _clean_attachment_meta(payload.get("attachment_meta")),
         "posted_channel_id": _clean_int(payload.get("posted_channel_id")),
@@ -336,6 +355,9 @@ def normalize_enforcement_state(payload: Any) -> dict[str, Any] | None:
         "burst_count": burst_count if isinstance(burst_count, int) and burst_count >= 0 else 0,
         "burst_window_started_at": _serialize_datetime(payload.get("burst_window_started_at")),
         "last_case_id": _clean_optional_text(payload.get("last_case_id"), max_length=32),
+        "image_restriction_active": bool(payload.get("image_restriction_active")),
+        "image_restricted_until": _serialize_datetime(payload.get("image_restricted_until")),
+        "image_restriction_case_id": _clean_optional_text(payload.get("image_restriction_case_id"), max_length=32),
         "updated_at": _serialize_datetime(payload.get("updated_at")),
     }
 
@@ -395,13 +417,16 @@ def _submission_from_row(row: Any) -> dict[str, Any] | None:
             "submission_id": row["submission_id"],
             "guild_id": row["guild_id"],
             "confession_id": row["confession_id"],
-                "status": row["status"],
-                "review_status": row["review_status"],
-                "staff_preview": row["staff_preview"],
-                "content_body": row["content_body"],
-                "shared_link_url": row.get("shared_link_url"),
-                "content_fingerprint": row["content_fingerprint"],
-                "similarity_key": row["similarity_key"],
+            "submission_kind": row.get("submission_kind") or "confession",
+            "parent_confession_id": row.get("parent_confession_id"),
+            "status": row["status"],
+            "review_status": row["review_status"],
+            "staff_preview": row["staff_preview"],
+            "content_body": row["content_body"],
+            "shared_link_url": row.get("shared_link_url"),
+            "content_fingerprint": row["content_fingerprint"],
+            "similarity_key": row.get("similarity_key"),
+            "fuzzy_signature": row.get("fuzzy_signature"),
             "flag_codes": decode_postgres_json_array(row["flag_codes"], label="confession_submissions.flag_codes"),
             "attachment_meta": decode_postgres_json_array(row["attachment_meta"], label="confession_submissions.attachment_meta"),
             "posted_channel_id": row["posted_channel_id"],
@@ -448,6 +473,7 @@ def _config_from_row(row: Any) -> dict[str, Any] | None:
             "panel_channel_id": row["panel_channel_id"],
             "panel_message_id": row["panel_message_id"],
             "review_channel_id": row["review_channel_id"],
+            "appeals_channel_id": row.get("appeals_channel_id"),
             "review_mode": row["review_mode"],
             "block_adult_language": row["block_adult_language"],
             "allow_trusted_mainstream_links": row["allow_trusted_mainstream_links"],
@@ -460,6 +486,8 @@ def _config_from_row(row: Any) -> dict[str, Any] | None:
                 label="confession_guild_configs.custom_block_domains",
             ),
             "allow_images": row["allow_images"],
+            "allow_anonymous_replies": row.get("allow_anonymous_replies"),
+            "allow_self_edit": row.get("allow_self_edit"),
             "max_images": row["max_images"],
             "cooldown_seconds": row["cooldown_seconds"],
             "burst_limit": row["burst_limit"],
@@ -501,6 +529,9 @@ def _enforcement_from_row(row: Any) -> dict[str, Any] | None:
             "burst_count": row["burst_count"],
             "burst_window_started_at": row["burst_window_started_at"],
             "last_case_id": row["last_case_id"],
+            "image_restriction_active": row.get("image_restriction_active"),
+            "image_restricted_until": row.get("image_restricted_until"),
+            "image_restriction_case_id": row.get("image_restriction_case_id"),
             "updated_at": row["updated_at"],
         }
     )
@@ -755,6 +786,8 @@ class _MemoryConfessionsStore(_BaseConfessionsStore):
                     "case_kind": record["case_kind"],
                     "status": record["status"],
                     "review_version": int(record.get("review_version") or 0),
+                    "submission_kind": submission.get("submission_kind") or "confession",
+                    "parent_confession_id": submission.get("parent_confession_id"),
                     "staff_preview": submission.get("staff_preview"),
                     "flag_codes": list(submission.get("flag_codes") or ()),
                     "attachment_meta": deepcopy(submission.get("attachment_meta") or []),
@@ -846,12 +879,15 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                 "panel_channel_id BIGINT NULL, "
                 "panel_message_id BIGINT NULL, "
                 "review_channel_id BIGINT NULL, "
+                "appeals_channel_id BIGINT NULL, "
                 "review_mode BOOLEAN NOT NULL DEFAULT TRUE, "
                 "block_adult_language BOOLEAN NOT NULL DEFAULT TRUE, "
                 "allow_trusted_mainstream_links BOOLEAN NOT NULL DEFAULT TRUE, "
                 "custom_allow_domains JSONB NOT NULL DEFAULT '[]'::jsonb, "
                 "custom_block_domains JSONB NOT NULL DEFAULT '[]'::jsonb, "
                 "allow_images BOOLEAN NOT NULL DEFAULT FALSE, "
+                "allow_anonymous_replies BOOLEAN NOT NULL DEFAULT FALSE, "
+                "allow_self_edit BOOLEAN NOT NULL DEFAULT FALSE, "
                 "max_images SMALLINT NOT NULL DEFAULT 3, "
                 "cooldown_seconds INTEGER NOT NULL DEFAULT 300, "
                 "burst_limit SMALLINT NOT NULL DEFAULT 3, "
@@ -868,6 +904,8 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                 "submission_id TEXT PRIMARY KEY, "
                 "guild_id BIGINT NOT NULL, "
                 "confession_id TEXT NOT NULL, "
+                "submission_kind TEXT NOT NULL DEFAULT 'confession', "
+                "parent_confession_id TEXT NULL, "
                 "status TEXT NOT NULL, "
                 "review_status TEXT NOT NULL DEFAULT 'none', "
                 "staff_preview TEXT NULL, "
@@ -875,6 +913,7 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                 "shared_link_url TEXT NULL, "
                 "content_fingerprint TEXT NULL, "
                 "similarity_key TEXT NULL, "
+                "fuzzy_signature TEXT NULL, "
                 "flag_codes JSONB NOT NULL DEFAULT '[]'::jsonb, "
                 "attachment_meta JSONB NOT NULL DEFAULT '[]'::jsonb, "
                 "posted_channel_id BIGINT NULL, "
@@ -915,6 +954,9 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                 "burst_count INTEGER NOT NULL DEFAULT 0, "
                 "burst_window_started_at TIMESTAMPTZ NULL, "
                 "last_case_id TEXT NULL, "
+                "image_restriction_active BOOLEAN NOT NULL DEFAULT FALSE, "
+                "image_restricted_until TIMESTAMPTZ NULL, "
+                "image_restriction_case_id TEXT NULL, "
                 "updated_at TIMESTAMPTZ NULL, "
                 "PRIMARY KEY (guild_id, user_id)"
                 ")"
@@ -957,14 +999,23 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
             "ALTER TABLE confession_guild_configs ADD COLUMN IF NOT EXISTS max_images SMALLINT NOT NULL DEFAULT 3",
             "ALTER TABLE confession_guild_configs ADD COLUMN IF NOT EXISTS panel_channel_id BIGINT NULL",
             "ALTER TABLE confession_guild_configs ADD COLUMN IF NOT EXISTS panel_message_id BIGINT NULL",
+            "ALTER TABLE confession_guild_configs ADD COLUMN IF NOT EXISTS appeals_channel_id BIGINT NULL",
+            "ALTER TABLE confession_guild_configs ADD COLUMN IF NOT EXISTS allow_anonymous_replies BOOLEAN NOT NULL DEFAULT FALSE",
+            "ALTER TABLE confession_guild_configs ADD COLUMN IF NOT EXISTS allow_self_edit BOOLEAN NOT NULL DEFAULT FALSE",
             "ALTER TABLE confession_submissions ADD COLUMN IF NOT EXISTS review_status TEXT NOT NULL DEFAULT 'none'",
+            "ALTER TABLE confession_submissions ADD COLUMN IF NOT EXISTS submission_kind TEXT NOT NULL DEFAULT 'confession'",
+            "ALTER TABLE confession_submissions ADD COLUMN IF NOT EXISTS parent_confession_id TEXT NULL",
             "ALTER TABLE confession_submissions ADD COLUMN IF NOT EXISTS content_body TEXT NULL",
             "ALTER TABLE confession_submissions ADD COLUMN IF NOT EXISTS shared_link_url TEXT NULL",
             "ALTER TABLE confession_submissions ADD COLUMN IF NOT EXISTS content_fingerprint TEXT NULL",
             "ALTER TABLE confession_submissions ADD COLUMN IF NOT EXISTS similarity_key TEXT NULL",
+            "ALTER TABLE confession_submissions ADD COLUMN IF NOT EXISTS fuzzy_signature TEXT NULL",
             "ALTER TABLE confession_submissions ADD COLUMN IF NOT EXISTS flag_codes JSONB NOT NULL DEFAULT '[]'::jsonb",
             "ALTER TABLE confession_submissions ADD COLUMN IF NOT EXISTS attachment_meta JSONB NOT NULL DEFAULT '[]'::jsonb",
             "ALTER TABLE confession_submissions ADD COLUMN IF NOT EXISTS current_case_id TEXT NULL",
+            "ALTER TABLE confession_enforcement_states ADD COLUMN IF NOT EXISTS image_restriction_active BOOLEAN NOT NULL DEFAULT FALSE",
+            "ALTER TABLE confession_enforcement_states ADD COLUMN IF NOT EXISTS image_restricted_until TIMESTAMPTZ NULL",
+            "ALTER TABLE confession_enforcement_states ADD COLUMN IF NOT EXISTS image_restriction_case_id TEXT NULL",
             "ALTER TABLE confession_cases ADD COLUMN IF NOT EXISTS review_version INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE confession_cases ADD COLUMN IF NOT EXISTS resolution_action TEXT NULL",
             "ALTER TABLE confession_cases ADD COLUMN IF NOT EXISTS resolution_note TEXT NULL",
@@ -976,11 +1027,17 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                 "SET allow_images = FALSE "
                 "WHERE allow_images = TRUE AND (review_channel_id IS NULL OR review_channel_id = confession_channel_id)"
             ),
+            (
+                "UPDATE confession_guild_configs "
+                "SET allow_anonymous_replies = FALSE "
+                "WHERE allow_anonymous_replies = TRUE AND (review_channel_id IS NULL OR review_channel_id = confession_channel_id)"
+            ),
         ]
         index_statements = [
             "CREATE UNIQUE INDEX IF NOT EXISTS ix_confession_submissions_confession_id ON confession_submissions (guild_id, confession_id)",
             "CREATE INDEX IF NOT EXISTS ix_confession_submissions_status_created ON confession_submissions (guild_id, status, created_at DESC)",
             "CREATE INDEX IF NOT EXISTS ix_confession_submissions_message_id ON confession_submissions (guild_id, posted_message_id)",
+            "CREATE INDEX IF NOT EXISTS ix_confession_submissions_parent_confession_id ON confession_submissions (guild_id, parent_confession_id)",
             "CREATE INDEX IF NOT EXISTS ix_confession_cases_status_created ON confession_cases (guild_id, status, created_at DESC)",
             "CREATE INDEX IF NOT EXISTS ix_confession_cases_submission_id ON confession_cases (submission_id)",
             "CREATE INDEX IF NOT EXISTS ix_confession_author_links_author_created ON confession_author_links (guild_id, author_user_id, created_at DESC)",
@@ -1015,13 +1072,13 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                 await conn.execute(
                     (
                         "INSERT INTO confession_guild_configs ("
-                        "guild_id, enabled, confession_channel_id, panel_channel_id, panel_message_id, review_channel_id, review_mode, block_adult_language, "
-                        "allow_trusted_mainstream_links, custom_allow_domains, custom_block_domains, allow_images, max_images, "
+                        "guild_id, enabled, confession_channel_id, panel_channel_id, panel_message_id, review_channel_id, appeals_channel_id, review_mode, block_adult_language, "
+                        "allow_trusted_mainstream_links, custom_allow_domains, custom_block_domains, allow_images, allow_anonymous_replies, allow_self_edit, max_images, "
                         "cooldown_seconds, burst_limit, burst_window_seconds, auto_suspend_hours, strike_temp_ban_threshold, temp_ban_days, strike_perm_ban_threshold, updated_at"
                         ") VALUES ("
-                        "$1, $2, $3, $4, $5, $6, $7, $8, "
-                        "$9, $10::jsonb, $11::jsonb, $12, $13, "
-                        "$14, $15, $16, $17, $18, $19, $20, timezone('utc', now())"
+                        "$1, $2, $3, $4, $5, $6, $7, $8, $9, "
+                        "$10, $11::jsonb, $12::jsonb, $13, $14, $15, $16, "
+                        "$17, $18, $19, $20, $21, $22, $23, timezone('utc', now())"
                         ") "
                         "ON CONFLICT (guild_id) DO UPDATE SET "
                         "enabled = EXCLUDED.enabled, "
@@ -1029,12 +1086,15 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                         "panel_channel_id = EXCLUDED.panel_channel_id, "
                         "panel_message_id = EXCLUDED.panel_message_id, "
                         "review_channel_id = EXCLUDED.review_channel_id, "
+                        "appeals_channel_id = EXCLUDED.appeals_channel_id, "
                         "review_mode = EXCLUDED.review_mode, "
                         "block_adult_language = EXCLUDED.block_adult_language, "
                         "allow_trusted_mainstream_links = EXCLUDED.allow_trusted_mainstream_links, "
                         "custom_allow_domains = EXCLUDED.custom_allow_domains, "
                         "custom_block_domains = EXCLUDED.custom_block_domains, "
                         "allow_images = EXCLUDED.allow_images, "
+                        "allow_anonymous_replies = EXCLUDED.allow_anonymous_replies, "
+                        "allow_self_edit = EXCLUDED.allow_self_edit, "
                         "max_images = EXCLUDED.max_images, "
                         "cooldown_seconds = EXCLUDED.cooldown_seconds, "
                         "burst_limit = EXCLUDED.burst_limit, "
@@ -1051,12 +1111,15 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                     normalized["panel_channel_id"],
                     normalized["panel_message_id"],
                     normalized["review_channel_id"],
+                    normalized["appeals_channel_id"],
                     normalized["review_mode"],
                     normalized["block_adult_language"],
                     normalized["allow_trusted_mainstream_links"],
                     json.dumps(normalized["custom_allow_domains"]),
                     json.dumps(normalized["custom_block_domains"]),
                     normalized["allow_images"],
+                    normalized["allow_anonymous_replies"],
+                    normalized["allow_self_edit"],
                     normalized["max_images"],
                     normalized["cooldown_seconds"],
                     normalized["burst_limit"],
@@ -1076,13 +1139,15 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                 await conn.execute(
                     (
                         "INSERT INTO confession_submissions ("
-                        "submission_id, guild_id, confession_id, status, review_status, staff_preview, content_body, shared_link_url, content_fingerprint, similarity_key, "
-                        "flag_codes, attachment_meta, posted_channel_id, posted_message_id, current_case_id, created_at, published_at, resolved_at"
+                        "submission_id, guild_id, confession_id, submission_kind, parent_confession_id, status, review_status, staff_preview, content_body, shared_link_url, "
+                        "content_fingerprint, similarity_key, fuzzy_signature, flag_codes, attachment_meta, posted_channel_id, posted_message_id, current_case_id, created_at, published_at, resolved_at"
                         ") VALUES ("
                         "$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, "
-                        "$11::jsonb, $12::jsonb, $13, $14, $15, $16, $17, $18"
+                        "$11, $12, $13, $14::jsonb, $15::jsonb, $16, $17, $18, $19, $20, $21"
                         ") "
                         "ON CONFLICT (submission_id) DO UPDATE SET "
+                        "submission_kind = EXCLUDED.submission_kind, "
+                        "parent_confession_id = EXCLUDED.parent_confession_id, "
                         "status = EXCLUDED.status, "
                         "review_status = EXCLUDED.review_status, "
                         "staff_preview = EXCLUDED.staff_preview, "
@@ -1090,6 +1155,7 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                         "shared_link_url = EXCLUDED.shared_link_url, "
                         "content_fingerprint = EXCLUDED.content_fingerprint, "
                         "similarity_key = EXCLUDED.similarity_key, "
+                        "fuzzy_signature = EXCLUDED.fuzzy_signature, "
                         "flag_codes = EXCLUDED.flag_codes, "
                         "attachment_meta = EXCLUDED.attachment_meta, "
                         "posted_channel_id = EXCLUDED.posted_channel_id, "
@@ -1101,6 +1167,8 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                     normalized["submission_id"],
                     normalized["guild_id"],
                     normalized["confession_id"],
+                    normalized["submission_kind"],
+                    normalized["parent_confession_id"],
                     normalized["status"],
                     normalized["review_status"],
                     normalized["staff_preview"],
@@ -1108,6 +1176,7 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                     normalized["shared_link_url"],
                     normalized["content_fingerprint"],
                     normalized["similarity_key"],
+                    normalized["fuzzy_signature"],
                     json.dumps(normalized["flag_codes"]),
                     json.dumps(normalized["attachment_meta"]),
                     normalized["posted_channel_id"],
@@ -1303,10 +1372,10 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                     (
                         "INSERT INTO confession_enforcement_states ("
                         "guild_id, user_id, active_restriction, restricted_until, is_permanent_ban, strike_count, last_strike_at, cooldown_until, "
-                        "burst_count, burst_window_started_at, last_case_id, updated_at"
+                        "burst_count, burst_window_started_at, last_case_id, image_restriction_active, image_restricted_until, image_restriction_case_id, updated_at"
                         ") VALUES ("
                         "$1, $2, $3, $4, $5, $6, $7, $8, "
-                        "$9, $10, $11, $12"
+                        "$9, $10, $11, $12, $13, $14, $15"
                         ") "
                         "ON CONFLICT (guild_id, user_id) DO UPDATE SET "
                         "active_restriction = EXCLUDED.active_restriction, "
@@ -1318,6 +1387,9 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                         "burst_count = EXCLUDED.burst_count, "
                         "burst_window_started_at = EXCLUDED.burst_window_started_at, "
                         "last_case_id = EXCLUDED.last_case_id, "
+                        "image_restriction_active = EXCLUDED.image_restriction_active, "
+                        "image_restricted_until = EXCLUDED.image_restricted_until, "
+                        "image_restriction_case_id = EXCLUDED.image_restriction_case_id, "
                         "updated_at = EXCLUDED.updated_at"
                     ),
                     normalized["guild_id"],
@@ -1331,6 +1403,9 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                     normalized["burst_count"],
                     _parse_datetime(normalized["burst_window_started_at"]),
                     normalized["last_case_id"],
+                    normalized["image_restriction_active"],
+                    _parse_datetime(normalized["image_restricted_until"]),
+                    normalized["image_restriction_case_id"],
                     _parse_datetime(normalized["updated_at"]),
                 )
 
@@ -1353,7 +1428,7 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                 (
                     "SELECT "
                     "c.case_id, c.case_kind, c.status, c.review_version, "
-                    "s.confession_id, s.staff_preview, s.flag_codes, s.attachment_meta, s.shared_link_url, s.created_at "
+                    "s.confession_id, s.submission_kind, s.parent_confession_id, s.staff_preview, s.flag_codes, s.attachment_meta, s.shared_link_url, s.created_at "
                     "FROM confession_cases c "
                     "JOIN confession_submissions s ON s.submission_id = c.submission_id "
                     "WHERE c.guild_id = $1 AND c.status = 'open' AND c.case_kind = 'review' AND s.status = 'queued' "
@@ -1371,6 +1446,8 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                     "case_kind": row["case_kind"],
                     "status": row["status"],
                     "review_version": int(row["review_version"] or 0),
+                    "submission_kind": row["submission_kind"] or "confession",
+                    "parent_confession_id": row["parent_confession_id"],
                     "staff_preview": row["staff_preview"],
                     "flag_codes": decode_postgres_json_array(row["flag_codes"], label="confession_submissions.flag_codes"),
                     "attachment_meta": decode_postgres_json_array(row["attachment_meta"], label="confession_submissions.attachment_meta"),
