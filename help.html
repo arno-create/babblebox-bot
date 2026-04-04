@@ -4,17 +4,17 @@
   <meta charset="UTF-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1.0" />
   <title>Babblebox Help | Commands and FAQ</title>
-  <meta name="description" content="Babblebox help page for party games, Question Drops, Daily Arcade, Buddy, Profile, Vault, utilities, Shield, and FAQ." />
+  <meta name="description" content="Babblebox help page for party games, anonymous confessions, Question Drops, Daily Arcade, Buddy, Profile, Vault, utilities, Shield, and FAQ." />
   <meta name="robots" content="index,follow,max-image-preview:large" />
   <link rel="canonical" href="https://arno-create.github.io/babblebox-bot/help.html" />
   <meta property="og:title" content="Babblebox Help | Commands and FAQ" />
-  <meta property="og:description" content="Learn how Babblebox works in Discord, what stays public or private, how the main commands fit together, and how Shield behaves." />
+  <meta property="og:description" content="Learn how Babblebox works in Discord, what stays public or private, how party games, anonymous confessions, utilities, and Shield fit together." />
   <meta property="og:url" content="https://arno-create.github.io/babblebox-bot/help.html" />
   <meta property="og:type" content="website" />
   <meta property="og:image" content="https://arno-create.github.io/babblebox-bot/banner.png" />
   <meta name="twitter:card" content="summary_large_image" />
   <meta name="twitter:title" content="Babblebox Help | Commands and FAQ" />
-  <meta name="twitter:description" content="Babblebox help for party games, Question Drops, Daily Arcade, Buddy, Profile, Vault, utilities, and compact Shield moderation." />
+  <meta name="twitter:description" content="Babblebox help for party games, anonymous confessions, Question Drops, Daily Arcade, Buddy, Profile, Vault, utilities, and compact Shield moderation." />
   <meta name="twitter:image" content="https://arno-create.github.io/babblebox-bot/banner.png" />
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -60,6 +60,7 @@
         <div class="nav-links">
           <a href="index.html">Home</a>
           <a href="#getting-started">Getting Started</a>
+          <a href="#confessions">Confessions</a>
           <a href="#daily-arcade">Daily Arcade</a>
           <a href="#utilities">Utilities</a>
           <a href="#shield-admin">Shield</a>
@@ -79,7 +80,7 @@
       <div class="hero-copy">
         <div class="eyebrow">Hosted help page</div>
         <h1>Babblebox, explained clearly.</h1>
-        <p>Babblebox is built around a few clean lanes instead of a giant command maze: party games when the room is active, Daily Arcade for lighter rituals, identity surfaces worth showing, utilities that stay quiet, and compact admin safety when a server needs it.</p>
+        <p>Babblebox is built around a few clean lanes instead of a giant command maze: party games when the room is active, anonymous confessions when a community needs staff-blind posting, Daily Arcade for lighter rituals, identity surfaces worth showing, utilities that stay quiet, and compact admin safety when a server needs it.</p>
         <p>This page covers setup, what stays public or private, the commands people actually use, and how Shield behaves without pretending every heuristic is certain.</p>
         <div class="hero-actions">
           <a class="btn btn-primary" href="https://discord.com/oauth2/authorize?client_id=1480903089518022739" target="_blank" rel="noopener noreferrer">Invite Babblebox</a>
@@ -102,7 +103,7 @@
         </ol>
       </aside>
       <div class="jump-chips" aria-label="Section jumps">
-        <a href="#getting-started">Getting Started</a><a href="#visibility">Public vs Private</a><a href="#party-games">Party Games</a><a href="#daily-arcade">Daily Arcade</a><a href="#buddy-profile-vault">Buddy / Profile / Vault</a><a href="#utilities">Utilities</a><a href="#shield-admin">Shield / Admin</a><a href="#faq">FAQ</a>
+        <a href="#getting-started">Getting Started</a><a href="#visibility">Public vs Private</a><a href="#confessions">Confessions</a><a href="#party-games">Party Games</a><a href="#daily-arcade">Daily Arcade</a><a href="#buddy-profile-vault">Buddy / Profile / Vault</a><a href="#utilities">Utilities</a><a href="#shield-admin">Shield / Admin</a><a href="#faq">FAQ</a>
       </div>
     </div>
   </header>
@@ -113,6 +114,7 @@
         <div class="label">Jump to</div>
         <a href="#getting-started">Getting Started</a>
         <a href="#visibility">Public vs Private</a>
+        <a href="#confessions">Confessions</a>
         <a href="#party-games">Party Games</a>
         <a href="#daily-arcade">Daily Arcade</a>
         <a href="#buddy-profile-vault">Buddy / Profile / Vault</a>
@@ -143,6 +145,16 @@
             <article class="info"><strong>Usually private</strong><p><code>/watch</code>, <code>/later</code>, <code>/capture</code>, <code>/remind</code>, <code>/afk</code>, and most setup or failure states stay private or DM-oriented.</p></article>
             <article class="info"><strong>Moderator-private</strong><p>Shield configuration, admin cleanup tooling, and mod alerts are meant for admins and moderator channels, not public callouts.</p></article>
             <article class="info"><strong>Mobile-friendly intent</strong><p>Cards aim for short titles, compact lists, and spacing that still scans cleanly on Discord mobile.</p></article>
+          </div>
+        </section>
+
+        <section class="section" id="confessions">
+          <div class="kicker">Anonymous Confessions</div>
+          <h2>Staff-blind anonymous posting with calm, bounded safety.</h2>
+          <p>Confessions are optional in Babblebox and do nothing until admins enable and configure them. Once live, <code>/confess</code> opens a private composer, members stay anonymous, and server staff moderate by confession ID and case ID only while Babblebox still enforces safety internally. Members can also privately manage their own submissions and use appeals or reports without exposing their Discord identity to staff.</p>
+          <div class="command-list">
+            <div class="command-row"><div><code>/confess</code></div><div><p>Open the private composer when a server has Confessions enabled.</p><span>Text is optional, one trusted link total is allowed, offensive or derogatory language is filtered, adult / 18+ language is blocked by default unless admins change that policy, images stay off by default, replies stay off by default, and self-edit stays off by default unless admins explicitly enable those riskier options. Babblebox hides your account, but a personal link or identifiable image can still reveal you if you include it.</span></div></div>
+            <div class="command-row"><div><code>/confessions</code> and <code>/confessions moderate</code></div><div><p>Open the admin panel and moderate by confession ID or case ID.</p><span>Admins can enable the feature, tune trusted-link and language policy, explicitly turn images or replies on after setting a separate private review channel, configure a dedicated appeals / reports channel, and approve, deny, delete, pause, restrict images, clear, or mark false positive without exposing the author. Members can privately delete their own submissions, and self-edit only applies to still-pending submissions when admins choose to enable it.</span></div></div>
           </div>
         </section>
 

@@ -172,3 +172,15 @@ class EventsCogTests(unittest.IsolatedAsyncioTestCase):
         question_drops_service.retire_drop_for_party_game.assert_awaited_once_with(message.guild.id, message.channel.id)
         handle_hunt.assert_awaited_once()
         question_drops_service.handle_message.assert_not_awaited()
+
+    async def test_raw_delete_notifies_confessions_service_before_other_handlers(self):
+        confessions_service = types.SimpleNamespace(handle_raw_message_delete=AsyncMock())
+        question_drops_service = types.SimpleNamespace(handle_raw_message_delete=AsyncMock())
+        bot = types.SimpleNamespace(confessions_service=confessions_service, question_drops_service=question_drops_service)
+        cog = EventsCog(bot)
+        payload = types.SimpleNamespace(guild_id=10, message_id=99)
+
+        await cog.on_raw_message_delete(payload)
+
+        confessions_service.handle_raw_message_delete.assert_awaited_once_with(payload)
+        question_drops_service.handle_raw_message_delete.assert_awaited_once_with(payload)

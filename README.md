@@ -2,10 +2,11 @@
 
 Babblebox is a modular Discord bot built with Python and `discord.py`.
 
-It is designed around six clear product lanes:
+It is designed around seven clear product lanes:
 
 - Party Games for active voice/text hangouts
 - Question Drops for scheduled guild knowledge play and mastery progression
+- Anonymous Confessions for staff-blind community submissions
 - Everyday Utilities for quiet server life
 - Daily Arcade for low-player-count return visits
 - Buddy / Profile / Vault for identity, streaks, and showable progress
@@ -90,6 +91,30 @@ Babblebox is intentionally compact:
   - duration parsing for `30m`, `2h`, `2d`, and compact combos like `1h30m`
   - elapsed and return-time messaging
 
+### Anonymous Confessions
+
+- optional feature that only works after admins enable and configure it
+- private composer launched with `/confess`
+- Babblebox keeps the author hidden from members and server staff
+- staff-blind moderation by confession ID and case ID only while the bot still enforces safety internally
+- one trusted link total per confession
+- built-in safe families for mainstream social, docs, wiki, and developer links when trusted links are enabled
+- offensive, vulgar, derogatory, spammy, and private-info patterns are filtered before anything posts
+- adult / 18+ language is blocked by default unless an admin changes that policy
+- shorteners, link-in-bio hubs, storefronts, malicious domains, and adult domains blocked unless a guild explicitly allowlists them
+- images are off by default and must be explicitly enabled by admins
+- anonymous replies are off by default and must be explicitly enabled by admins
+- self-edit is off by default and only applies to still-pending submissions when enabled
+- enabled image support stays bounded and always routes through private review, which requires a separate private review channel
+- enabled replies stay text-only, depth-1, and always route through private review
+- private owner tools let a member delete their own confession or reply without exposing identity
+- admins can configure a dedicated appeals / reports channel so members can privately appeal restrictions or report confession problems
+- attachment filenames and Discord CDN URLs stay out of staff-visible surfaces
+- Babblebox hides the Discord account, but a member-chosen link destination or image itself can still reveal who sent it
+- Babblebox can automatically suspend or confession-ban internally without exposing the author
+- moderation supports approve, deny, delete, pause, restrict-images, clear, and false-positive flows without revealing the author
+- terminal confession records scrub body text, previews, links, and attachment metadata while retaining compact non-reversible duplicate signatures for abuse prevention
+
 ### Shield / Safety
 
 - Babblebox Shield
@@ -158,6 +183,7 @@ Slash commands and the `bb!` prefix both work.
 | Slash | Prefix | Purpose |
 | --- | --- | --- |
 | `/help` | `bb!help` | Open the in-bot manual |
+| `/confess` | n/a | Open the anonymous confession composer |
 | `/ping` | `bb!ping` | Health check |
 | `/play` | `bb!play` | Open a game lobby |
 | `/stop` | `bb!stop` | Force stop the active lobby/game |
@@ -325,6 +351,32 @@ Daily visibility notes:
 | `/buddy stats` | `bb!buddy stats` | View Buddy progression |
 | `/profile` | `bb!profile` | View a public-friendly profile card |
 | `/vault` | `bb!vault` | Open your more personal vault view |
+
+### Anonymous Confessions
+
+| Slash | Prefix | Purpose |
+| --- | --- | --- |
+| `/confess` | n/a | Open the private confession composer |
+| `/confessions` | `bb!confessions` | Open the admin control panel for setup, review, and status |
+| `/confessions moderate` | `bb!confessions moderate` | Approve, deny, delete, pause, restrict images, ban, clear, or mark a confession false positive by confession ID or case ID |
+
+Confession notes:
+
+- Confessions are optional and stay unavailable until admins enable and configure them
+- staff see confession IDs and case IDs, never the author
+- Babblebox still enforces safety internally and can automatically restrict repeat abuse without exposing identity
+- adult / 18+ language is blocked by default unless admins change that policy
+- trusted-link mode allows Babblebox's bundled safe families for mainstream social, docs, wiki, and developer domains
+- one trusted link total is allowed per confession
+- images are off by default and only work after admins explicitly enable them
+- anonymous replies are off by default and only work after admins explicitly enable them
+- self-edit is off by default and only applies to pending submissions when enabled
+- enabled image confessions always enter the private review queue and require a separate private review channel
+- enabled anonymous replies stay text-only, depth-1, and always enter the private review queue
+- members can privately delete their own confessions and use a dedicated appeals / reports channel when admins configure one
+- Babblebox hides the sender's account identity, but a personal link or identifiable image can still reveal them if they include it
+- attachment filenames and raw Discord attachment URLs are kept out of staff-visible embeds
+- `/confessions moderate` supports ID-based moderation plus restrict-images, clear, and false-positive override paths
 
 ## Watch V2 Notes
 
@@ -642,6 +694,12 @@ Enable:
 
 ```bash
 python main.py
+```
+
+### Tests
+
+```bash
+PYTHONPATH=. pytest -q
 ```
 
 ## Recommended Permissions

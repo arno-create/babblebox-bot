@@ -613,7 +613,7 @@
             <li>No full quote-feed archive.</li>
             <li>No media or attachment blob storage in the database.</li>
             <li>No always-on AI scanning by default.</li>
-            <li>Private-first delivery for sensitive utility flows.</li>
+            <li>Private-first delivery for sensitive utility flows and anonymous confessions.</li>
             <li>Feature data is kept small and purpose-bound.</li>
           </ul>
         </aside>
@@ -626,7 +626,7 @@
         </article>
         <article class="mini-card">
           <h2>Discord-first visibility</h2>
-          <p>Some surfaces are public by design, while Watch, reminders, Later, Capture, and setup flows are private-first.</p>
+          <p>Some surfaces are public by design, while Watch, reminders, Later, Capture, anonymous confessions, and setup flows are private-first.</p>
         </article>
         <article class="mini-card">
           <h2>Compact moderation model</h2>
@@ -685,16 +685,19 @@
               <li>Later markers, reminders, AFK state, AFK schedules, and related user preferences.</li>
               <li>Daily Arcade scores, attempts, streak counters, Buddy and profile state, and other compact identity or progression fields.</li>
               <li>Shield and admin configuration such as enabled modules, scope controls, allowlists, trusted roles, log destinations, and short-lived admin lifecycle state.</li>
+              <li>Anonymous confession or reply submission text, one trusted-link field, compact review metadata, limited private appeals or reports, and a bot-private author mapping needed to run staff-blind confession moderation when a server enables the feature.</li>
             </ul>
             <h3>Limited message and attachment context</h3>
             <ul>
               <li>Babblebox may read message content or metadata needed to respond to commands, deliver Watch alerts, build Moment Cards from visible messages, process Capture requests, or evaluate locally flagged Shield events.</li>
               <li>Attachment names or URLs may be used at send time when needed for previews or private transcript delivery.</li>
+              <li>For anonymous confessions, raw attachment filenames and raw Discord CDN URLs are kept out of staff-visible review surfaces.</li>
             </ul>
             <h3>What Babblebox is designed not to store durably</h3>
             <ul>
               <li>No general-purpose message archive.</li>
               <li>No media or attachment blob storage in Postgres.</li>
+              <li>No durable storage of raw confession attachment filenames or raw Discord CDN URLs in staff-facing moderation records.</li>
               <li>No durable quote-feed database for Moment Cards.</li>
               <li>No full deleted-message archive table.</li>
               <li>No long-term storage of DM bodies or full Capture transcript archives.</li>
@@ -738,7 +741,13 @@
               <li>Moment Cards are built from visible server messages and remain tied to visible Discord context instead of becoming a hidden archive.</li>
               <li>Watch alerts are delivered through Discord DMs.</li>
               <li>Capture transcripts are delivered privately rather than kept as a long-term database archive.</li>
-              <li>Later markers, reminders, and sensitive setup flows are designed to avoid unnecessary public exposure.</li>
+              <li>Later markers, reminders, anonymous confessions, and sensitive setup flows are designed to avoid unnecessary public exposure.</li>
+              <li>Anonymous confessions are optional, keep the author hidden from staff, and are moderated by confession ID and case ID only while Babblebox still enforces safety internally.</li>
+              <li>Anonymous replies are off by default, stay text-only when enabled, and always enter private review.</li>
+              <li>Self-edit is off by default and limited to pending submissions when enabled; self-delete is available privately through Babblebox's internal ownership check.</li>
+              <li>Confession images are off by default and only work after admins explicitly enable them; enabled image confessions always enter private review.</li>
+              <li>Appeals or reports can be sent privately to a configured support channel without exposing the author's Discord identity to staff.</li>
+              <li>Babblebox hides the sender's account identity, but a self-identifying link destination or image content can still reveal them if they choose to include it.</li>
               <li>Shield and admin configuration flows are intended for administrators and moderators, not general public broadcast.</li>
             </ul>
           </article>
@@ -766,6 +775,7 @@
               <li>Daily Arcade raw result rows are designed to prune after 180 days while streak and lifetime totals remain in the profile row.</li>
               <li>Short-lived admin lifecycle records are kept only while they are operationally relevant, such as pending verification or active follow-up role management.</li>
               <li>Ban-return candidate records are intended to have a bounded purge window rather than indefinite retention.</li>
+              <li>Resolved anonymous confession rows scrub previews, body text, trusted-link fields, and attachment metadata after the moderation workflow is complete while compact non-reversible duplicate signatures are retained for abuse prevention.</li>
               <li>Watch configuration, Later markers, reminders, AFK settings, and similar utility records remain until changed, cleared, expired, or removed.</li>
             </ul>
             <p>Deletion timing can depend on when a reminder expires, a schedule ends, a configuration is removed, or a short-lived moderation workflow finishes.</p>
