@@ -60,6 +60,8 @@ class ConfessionComposerModal(discord.ui.Modal, title="Anonymous Confession"):
         super().__init__(timeout=300)
         self.cog = cog
         config = self.cog.service.get_config(guild_id)
+        self.image_upload_requested = bool(config["allow_images"])
+        self.image_upload_available = False
         self.body_input = discord.ui.TextInput(
             label="What do you want to share?",
             style=discord.TextStyle.paragraph,
@@ -77,18 +79,103 @@ class ConfessionComposerModal(discord.ui.Modal, title="Anonymous Confession"):
         self.add_item(self.body_input)
         self.add_item(self.link_input)
         self.upload_input: discord.ui.FileUpload | None = None
-        if config["allow_images"]:
-            self.upload_input = discord.ui.FileUpload(
-                custom_id="bb-confession-modal:files",
-                required=False,
-                min_values=0,
-                max_values=int(config["max_images"]),
-            )
-            self.add_item(self.upload_input)
+        if self.image_upload_requested:
+            if not self.cog.modal_file_upload_available():
+                self._apply_image_upload_fallback(guild_id, code="confession_modal_upload_runtime_unavailable")
+            else:
+                try:
+                    self.upload_input = discord.ui.FileUpload(
+                        custom_id="bb-confession-modal:files",
+                        required=False,
+                        min_values=0,
+                        max_values=int(config["max_images"]),
+                    )
+                    self.add_item(self.upload_input)
+                    self.image_upload_available = True
+                except Exception as exc:
+                    self._apply_image_upload_fallback(
+                        guild_id,
+                        code="confession_modal_upload_construct_failed",
+                        exc=exc,
+                    )
+
+    def _apply_image_upload_fallback(self, guild_id: int, *, code: str, exc: Exception | None = None):
+        self.body_input.placeholder = "Image upload is temporarily unavailable right now. You can still send text and one trusted link."
+        self.link_input.placeholder = "Text and one trusted link only right now."
+        self.cog.log_modal_diagnostic(
+            code=code,
+            stage="construct_upload",
+            modal_kind="confession",
+            guild_id=guild_id,
+            allow_images=self.image_upload_requested,
+            upload_present=False,
+            attachment_count=0,
+            storage_ready=self.cog.service.storage_ready,
+            operability_ready=self.cog.service.operability_message(guild_id) == "Confessions are ready.",
+            exc=exc,
+        )
+
+    def _collect_attachments(self) -> list[Any]:
+        if self.upload_input is None:
+            return []
+        return list(self.upload_input.values or [])
 
     async def on_submit(self, interaction: discord.Interaction):
         if interaction.guild is None or interaction.user is None:
             await interaction.response.send_message("Anonymous confessions only work inside a server.", ephemeral=True)
+            return
+        if not self.cog.service.storage_ready:
+            await self.cog._send_private_interaction(
+                interaction,
+                embed=self.cog._modal_unavailable_embed(self.cog.service.storage_message("Confessions")),
+            )
+            return
+        ready_message = self.cog.service.operability_message(interaction.guild.id)
+        if ready_message != "Confessions are ready.":
+            await self.cog._send_confession_result_response(
+                interaction,
+                guild_id=interaction.guild.id,
+                modal_kind="confession",
+                result=ConfessionSubmissionResult(False, "unavailable", ready_message),
+                allow_images=self.image_upload_requested,
+                upload_present=self.upload_input is not None,
+                attachment_count=0,
+            )
+            return
+        if not await self.cog._acknowledge_modal_submit(
+            interaction,
+            modal_kind="confession",
+            guild_id=interaction.guild.id,
+            allow_images=self.image_upload_requested,
+            upload_present=self.upload_input is not None,
+            attachment_count=0,
+            failure_message="Babblebox could not continue that private confession flow right now. Please try again in a moment.",
+        ):
+            return
+        try:
+            attachments = self._collect_attachments()
+        except Exception as exc:
+            self.cog.log_modal_diagnostic(
+                code="confession_modal_attachment_extract_failed",
+                stage="extract_attachments",
+                modal_kind="confession",
+                guild_id=interaction.guild.id,
+                allow_images=self.image_upload_requested,
+                upload_present=self.upload_input is not None,
+                attachment_count=0,
+                storage_ready=self.cog.service.storage_ready,
+                operability_ready=True,
+                exc=exc,
+            )
+            await self.cog._send_private_interaction(
+                interaction,
+                embed=ge.make_status_embed(
+                    "Image Upload Unavailable",
+                    "Babblebox could not safely read that uploaded image. Try again in a moment or send the confession without images.",
+                    tone="warning",
+                    footer="Babblebox Confessions",
+                ),
+            )
             return
         try:
             result = await self.cog.service.submit_confession(
@@ -96,22 +183,37 @@ class ConfessionComposerModal(discord.ui.Modal, title="Anonymous Confession"):
                 author_id=interaction.user.id,
                 content=self.body_input.value,
                 link=self.link_input.value,
-                attachments=list(self.upload_input.values) if self.upload_input is not None else [],
+                attachments=attachments,
             )
-            embed = self.cog.service.build_member_result_embed(result)
-            view = self.cog.build_member_result_view(result=result, guild_id=interaction.guild.id)
-            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
-        except Exception:
-            embed = ge.make_status_embed(
-                "Confessions Unavailable",
-                "Babblebox could not process that confession safely right now. Please try again in a moment.",
-                tone="warning",
-                footer="Babblebox Confessions",
+        except Exception as exc:
+            self.cog.log_modal_diagnostic(
+                code="confession_modal_submit_failed",
+                stage="submit",
+                modal_kind="confession",
+                guild_id=interaction.guild.id,
+                allow_images=self.image_upload_requested,
+                upload_present=self.upload_input is not None,
+                attachment_count=len(attachments),
+                storage_ready=self.cog.service.storage_ready,
+                operability_ready=True,
+                exc=exc,
             )
-            if interaction.response.is_done():
-                await interaction.followup.send(embed=embed, ephemeral=True)
-            else:
-                await interaction.response.send_message(embed=embed, ephemeral=True)
+            await self.cog._send_private_interaction(
+                interaction,
+                embed=self.cog._modal_unavailable_embed(
+                    "Babblebox could not process that confession safely right now. Please try again in a moment."
+                ),
+            )
+            return
+        await self.cog._send_confession_result_response(
+            interaction,
+            guild_id=interaction.guild.id,
+            modal_kind="confession",
+            result=result,
+            allow_images=self.image_upload_requested,
+            upload_present=self.upload_input is not None,
+            attachment_count=len(attachments),
+        )
 
 
 class ReplyComposerModal(discord.ui.Modal, title="Anonymous Reply"):
@@ -140,17 +242,58 @@ class ReplyComposerModal(discord.ui.Modal, title="Anonymous Reply"):
         if interaction.guild is None or interaction.user is None:
             await interaction.response.send_message("Anonymous replies only work inside a server.", ephemeral=True)
             return
-        result = await self.cog.service.submit_confession(
-            interaction.guild,
-            author_id=interaction.user.id,
-            content=self.body_input.value,
-            submission_kind="reply",
-            parent_confession_id=self.target_input.value,
-        )
-        await interaction.response.send_message(
-            embed=self.cog.service.build_member_result_embed(result),
-            view=self.cog.build_member_result_view(result=result, guild_id=interaction.guild.id),
-            ephemeral=True,
+        if not self.cog.service.storage_ready:
+            await self.cog._send_private_interaction(
+                interaction,
+                embed=self.cog._modal_unavailable_embed(self.cog.service.storage_message("Confessions")),
+            )
+            return
+        ready_message = self.cog.service.operability_message(interaction.guild.id)
+        if ready_message != "Confessions are ready.":
+            await self.cog._send_confession_result_response(
+                interaction,
+                guild_id=interaction.guild.id,
+                modal_kind="reply",
+                result=ConfessionSubmissionResult(False, "unavailable", ready_message, submission_kind="reply"),
+            )
+            return
+        if not await self.cog._acknowledge_modal_submit(
+            interaction,
+            modal_kind="reply",
+            guild_id=interaction.guild.id,
+            failure_message="Babblebox could not continue that private reply flow right now. Please try again in a moment.",
+        ):
+            return
+        try:
+            result = await self.cog.service.submit_confession(
+                interaction.guild,
+                author_id=interaction.user.id,
+                content=self.body_input.value,
+                submission_kind="reply",
+                parent_confession_id=self.target_input.value,
+            )
+        except Exception as exc:
+            self.cog.log_modal_diagnostic(
+                code="reply_modal_submit_failed",
+                stage="submit",
+                modal_kind="reply",
+                guild_id=interaction.guild.id,
+                storage_ready=self.cog.service.storage_ready,
+                operability_ready=True,
+                exc=exc,
+            )
+            await self.cog._send_private_interaction(
+                interaction,
+                embed=self.cog._modal_unavailable_embed(
+                    "Babblebox could not process that anonymous reply safely right now. Please try again in a moment."
+                ),
+            )
+            return
+        await self.cog._send_confession_result_response(
+            interaction,
+            guild_id=interaction.guild.id,
+            modal_kind="reply",
+            result=result,
         )
 
 
@@ -172,29 +315,81 @@ class ManageConfessionModal(discord.ui.Modal, title="Manage My Confession"):
         if interaction.guild is None or interaction.user is None:
             await interaction.response.send_message("Private owner tools only work inside a server.", ephemeral=True)
             return
-        context, error = await self.cog.service.get_owned_submission_context(
-            interaction.guild.id,
-            author_id=interaction.user.id,
-            target_id=self.target_input.value,
-        )
+        if not self.cog.service.storage_ready:
+            await self.cog._send_private_interaction(
+                interaction,
+                embed=self.cog._modal_unavailable_embed(self.cog.service.storage_message("Confessions")),
+            )
+            return
+        if not await self.cog._acknowledge_modal_submit(
+            interaction,
+            modal_kind="manage",
+            guild_id=interaction.guild.id,
+            failure_message="Babblebox could not open that private owner flow right now. Please try again in a moment.",
+        ):
+            return
+        try:
+            context, error = await self.cog.service.get_owned_submission_context(
+                interaction.guild.id,
+                author_id=interaction.user.id,
+                target_id=self.target_input.value,
+            )
+        except Exception as exc:
+            self.cog.log_modal_diagnostic(
+                code="manage_modal_context_failed",
+                stage="load_context",
+                modal_kind="manage",
+                guild_id=interaction.guild.id,
+                storage_ready=self.cog.service.storage_ready,
+                operability_ready=self.cog.service.operability_message(interaction.guild.id) == "Confessions are ready.",
+                exc=exc,
+            )
+            await self.cog._send_private_interaction(
+                interaction,
+                embed=ge.make_status_embed(
+                    "Owner Tools Unavailable",
+                    "Babblebox could not open that private owner flow safely right now. Please try again in a moment.",
+                    tone="warning",
+                    footer="Babblebox Confessions",
+                ),
+            )
+            return
         if context is None:
-            await interaction.response.send_message(
+            await self.cog._send_private_interaction(
+                interaction,
                 embed=ge.make_status_embed("Cannot Open Owner Tools", error or "That confession could not be verified.", tone="warning", footer="Babblebox Confessions"),
-                ephemeral=True,
             )
             return
         submission = context["submission"]
-        await interaction.response.send_message(
-            embed=self.cog.service.build_member_manage_embed(context),
-            view=MemberManageActionView(
+        try:
+            embed = self.cog.service.build_member_manage_embed(context)
+            view = MemberManageActionView(
                 self.cog,
                 guild_id=interaction.guild.id,
                 target_id=submission["confession_id"],
                 can_delete=context["can_delete"],
                 can_edit=context["can_edit"],
-            ),
-            ephemeral=True,
-        )
+            )
+            await self.cog._send_private_interaction(interaction, embed=embed, view=view)
+        except Exception as exc:
+            self.cog.log_modal_diagnostic(
+                code="manage_modal_render_failed",
+                stage="render",
+                modal_kind="manage",
+                guild_id=interaction.guild.id,
+                storage_ready=self.cog.service.storage_ready,
+                operability_ready=self.cog.service.operability_message(interaction.guild.id) == "Confessions are ready.",
+                exc=exc,
+            )
+            await self.cog._send_private_interaction(
+                interaction,
+                embed=ge.make_status_embed(
+                    "Owner Tools Unavailable",
+                    "Babblebox could not finish that private owner response safely right now. Please try again in a moment.",
+                    tone="warning",
+                    footer="Babblebox Confessions",
+                ),
+            )
 
 
 class EditConfessionModal(discord.ui.Modal):
@@ -229,17 +424,52 @@ class EditConfessionModal(discord.ui.Modal):
         if interaction.guild is None or interaction.user is None:
             await interaction.response.send_message("Private owner tools only work inside a server.", ephemeral=True)
             return
-        result = await self.cog.service.self_edit_confession(
-            interaction.guild,
-            author_id=interaction.user.id,
-            target_id=self.target_id,
-            content=self.body_input.value,
-            link=self.link_input.value if self.link_input is not None else None,
-        )
-        await interaction.response.send_message(
-            embed=self.cog.service.build_member_result_embed(result),
-            view=self.cog.build_member_result_view(result=result, guild_id=interaction.guild.id),
-            ephemeral=True,
+        if not self.cog.service.storage_ready:
+            await self.cog._send_private_interaction(
+                interaction,
+                embed=self.cog._modal_unavailable_embed(self.cog.service.storage_message("Confessions")),
+            )
+            return
+        if not await self.cog._acknowledge_modal_submit(
+            interaction,
+            modal_kind="edit",
+            guild_id=interaction.guild.id,
+            failure_message="Babblebox could not continue that private edit flow right now. Please try again in a moment.",
+        ):
+            return
+        try:
+            result = await self.cog.service.self_edit_confession(
+                interaction.guild,
+                author_id=interaction.user.id,
+                target_id=self.target_id,
+                content=self.body_input.value,
+                link=self.link_input.value if self.link_input is not None else None,
+            )
+        except Exception as exc:
+            self.cog.log_modal_diagnostic(
+                code="edit_modal_submit_failed",
+                stage="submit",
+                modal_kind="edit",
+                guild_id=interaction.guild.id,
+                storage_ready=self.cog.service.storage_ready,
+                operability_ready=self.cog.service.operability_message(interaction.guild.id) == "Confessions are ready.",
+                exc=exc,
+            )
+            await self.cog._send_private_interaction(
+                interaction,
+                embed=ge.make_status_embed(
+                    "Edit Unavailable",
+                    "Babblebox could not process that private edit safely right now. Please try again in a moment.",
+                    tone="warning",
+                    footer="Babblebox Confessions",
+                ),
+            )
+            return
+        await self.cog._send_confession_result_response(
+            interaction,
+            guild_id=interaction.guild.id,
+            modal_kind="edit",
+            result=result,
         )
 
 
@@ -269,17 +499,71 @@ class AppealModal(discord.ui.Modal, title="Anonymous Appeal"):
         if interaction.guild is None or interaction.user is None:
             await interaction.response.send_message("Private support only works inside a server.", ephemeral=True)
             return
-        ok, message = await self.cog.service.submit_support_request(
-            interaction.guild,
-            author_id=interaction.user.id,
-            kind="appeal",
-            target_id=self.target_input.value,
-            details=self.details_input.value,
-        )
-        await interaction.response.send_message(
-            embed=ge.make_status_embed("Anonymous Appeal", message, tone="success" if ok else "warning", footer="Babblebox Confessions"),
-            ephemeral=True,
-        )
+        if not self.cog.service.storage_ready:
+            await self.cog._send_private_interaction(
+                interaction,
+                embed=self.cog._modal_unavailable_embed(self.cog.service.storage_message("Confessions")),
+            )
+            return
+        if not await self.cog._acknowledge_modal_submit(
+            interaction,
+            modal_kind="appeal",
+            guild_id=interaction.guild.id,
+            failure_message="Babblebox could not continue that private appeal flow right now. Please try again in a moment.",
+        ):
+            return
+        try:
+            ok, message = await self.cog.service.submit_support_request(
+                interaction.guild,
+                author_id=interaction.user.id,
+                kind="appeal",
+                target_id=self.target_input.value,
+                details=self.details_input.value,
+            )
+        except Exception as exc:
+            self.cog.log_modal_diagnostic(
+                code="appeal_modal_submit_failed",
+                stage="submit",
+                modal_kind="appeal",
+                guild_id=interaction.guild.id,
+                storage_ready=self.cog.service.storage_ready,
+                operability_ready=self.cog.service.operability_message(interaction.guild.id) == "Confessions are ready.",
+                exc=exc,
+            )
+            await self.cog._send_private_interaction(
+                interaction,
+                embed=ge.make_status_embed(
+                    "Anonymous Appeal",
+                    "Babblebox could not send that anonymous appeal safely right now. Please try again in a moment.",
+                    tone="warning",
+                    footer="Babblebox Confessions",
+                ),
+            )
+            return
+        try:
+            await self.cog._send_private_interaction(
+                interaction,
+                embed=ge.make_status_embed("Anonymous Appeal", message, tone="success" if ok else "warning", footer="Babblebox Confessions"),
+            )
+        except Exception as exc:
+            self.cog.log_modal_diagnostic(
+                code="appeal_modal_send_failed",
+                stage="send_result",
+                modal_kind="appeal",
+                guild_id=interaction.guild.id,
+                storage_ready=self.cog.service.storage_ready,
+                operability_ready=self.cog.service.operability_message(interaction.guild.id) == "Confessions are ready.",
+                exc=exc,
+            )
+            await self.cog._send_private_interaction(
+                interaction,
+                embed=ge.make_status_embed(
+                    "Anonymous Appeal",
+                    "Babblebox received that appeal, but could not finish the private confirmation safely. Please check your appeals channel or try again in a moment.",
+                    tone="warning",
+                    footer="Babblebox Confessions",
+                ),
+            )
 
 
 class ReportModal(discord.ui.Modal, title="Anonymous Report"):
@@ -308,17 +592,71 @@ class ReportModal(discord.ui.Modal, title="Anonymous Report"):
         if interaction.guild is None or interaction.user is None:
             await interaction.response.send_message("Private support only works inside a server.", ephemeral=True)
             return
-        ok, message = await self.cog.service.submit_support_request(
-            interaction.guild,
-            author_id=interaction.user.id,
-            kind="report",
-            target_id=self.target_input.value,
-            details=self.details_input.value,
-        )
-        await interaction.response.send_message(
-            embed=ge.make_status_embed("Anonymous Report", message, tone="success" if ok else "warning", footer="Babblebox Confessions"),
-            ephemeral=True,
-        )
+        if not self.cog.service.storage_ready:
+            await self.cog._send_private_interaction(
+                interaction,
+                embed=self.cog._modal_unavailable_embed(self.cog.service.storage_message("Confessions")),
+            )
+            return
+        if not await self.cog._acknowledge_modal_submit(
+            interaction,
+            modal_kind="report",
+            guild_id=interaction.guild.id,
+            failure_message="Babblebox could not continue that private report flow right now. Please try again in a moment.",
+        ):
+            return
+        try:
+            ok, message = await self.cog.service.submit_support_request(
+                interaction.guild,
+                author_id=interaction.user.id,
+                kind="report",
+                target_id=self.target_input.value,
+                details=self.details_input.value,
+            )
+        except Exception as exc:
+            self.cog.log_modal_diagnostic(
+                code="report_modal_submit_failed",
+                stage="submit",
+                modal_kind="report",
+                guild_id=interaction.guild.id,
+                storage_ready=self.cog.service.storage_ready,
+                operability_ready=self.cog.service.operability_message(interaction.guild.id) == "Confessions are ready.",
+                exc=exc,
+            )
+            await self.cog._send_private_interaction(
+                interaction,
+                embed=ge.make_status_embed(
+                    "Anonymous Report",
+                    "Babblebox could not send that anonymous report safely right now. Please try again in a moment.",
+                    tone="warning",
+                    footer="Babblebox Confessions",
+                ),
+            )
+            return
+        try:
+            await self.cog._send_private_interaction(
+                interaction,
+                embed=ge.make_status_embed("Anonymous Report", message, tone="success" if ok else "warning", footer="Babblebox Confessions"),
+            )
+        except Exception as exc:
+            self.cog.log_modal_diagnostic(
+                code="report_modal_send_failed",
+                stage="send_result",
+                modal_kind="report",
+                guild_id=interaction.guild.id,
+                storage_ready=self.cog.service.storage_ready,
+                operability_ready=self.cog.service.operability_message(interaction.guild.id) == "Confessions are ready.",
+                exc=exc,
+            )
+            await self.cog._send_private_interaction(
+                interaction,
+                embed=ge.make_status_embed(
+                    "Anonymous Report",
+                    "Babblebox received that report, but could not finish the private confirmation safely. Please check your appeals channel or try again in a moment.",
+                    tone="warning",
+                    footer="Babblebox Confessions",
+                ),
+            )
 
 
 class MemberSupportView(discord.ui.View):
@@ -824,6 +1162,190 @@ class ConfessionsCog(commands.Cog):
         if result.state not in {"published", "queued", "blocked", "restricted"}:
             return self.service.build_member_result_view(result)
         return MemberResultActionView(self, guild_id=guild_id, result=result)
+
+    def modal_file_upload_available(self) -> bool:
+        file_upload = getattr(discord.ui, "FileUpload", None)
+        return file_upload is not None and callable(getattr(file_upload, "to_component_dict", None))
+
+    def _modal_unavailable_embed(self, message: str) -> discord.Embed:
+        return ge.make_status_embed("Confessions Unavailable", message, tone="warning", footer="Babblebox Confessions")
+
+    def _minimal_member_result_embed(self, result: ConfessionSubmissionResult) -> discord.Embed:
+        noun_title = "Reply" if result.submission_kind == "reply" else "Confession"
+        title_map = {
+            "published": f"{noun_title} Posted",
+            "queued": f"{noun_title} Received",
+            "blocked": f"{noun_title} Not Sent",
+            "restricted": "Confessions Paused",
+            "unavailable": "Confessions Unavailable",
+        }
+        tone_map = {
+            "published": "success",
+            "queued": "info",
+            "blocked": "warning",
+            "restricted": "warning",
+            "unavailable": "warning",
+        }
+        embed = ge.make_status_embed(
+            title_map.get(result.state, "Anonymous Confession"),
+            result.message,
+            tone=tone_map.get(result.state, "info"),
+            footer="Babblebox Confessions",
+        )
+        if result.confession_id is not None:
+            embed.add_field(name="Confession ID", value=f"`{result.confession_id}`", inline=True)
+        if result.parent_confession_id is not None:
+            embed.add_field(name="Replying To", value=f"`{result.parent_confession_id}`", inline=True)
+        if result.state == "queued":
+            embed.add_field(name="Status", value="Private review", inline=True)
+        elif result.state == "published":
+            embed.add_field(name="Status", value="Live", inline=True)
+        return embed
+
+    def log_modal_diagnostic(
+        self,
+        *,
+        code: str,
+        stage: str,
+        modal_kind: str,
+        guild_id: int | None,
+        allow_images: bool | None = None,
+        upload_present: bool | None = None,
+        attachment_count: int | None = None,
+        storage_ready: bool | None = None,
+        operability_ready: bool | None = None,
+        result_state: str | None = None,
+        exc: Exception | None = None,
+    ):
+        parts = [
+            f"code={code}",
+            f"stage={stage}",
+            f"modal={modal_kind}",
+            f"guild_id={guild_id if guild_id is not None else 'none'}",
+        ]
+        if storage_ready is not None:
+            parts.append(f"storage_ready={bool(storage_ready)}")
+        if operability_ready is not None:
+            parts.append(f"operability_ready={bool(operability_ready)}")
+        if allow_images is not None:
+            parts.append(f"allow_images={bool(allow_images)}")
+        if upload_present is not None:
+            parts.append(f"upload_present={bool(upload_present)}")
+        if attachment_count is not None:
+            parts.append(f"attachment_count={int(max(0, attachment_count))}")
+        if result_state:
+            parts.append(f"result_state={result_state}")
+        if exc is not None:
+            parts.append(f"exception={type(exc).__name__}")
+        print(f"Confessions modal diagnostic: {', '.join(parts)}")
+
+    async def _send_private_interaction(self, interaction: discord.Interaction, **kwargs):
+        kwargs["ephemeral"] = True
+        try:
+            if interaction.response.is_done():
+                return await interaction.followup.send(**kwargs)
+            return await interaction.response.send_message(**kwargs)
+        except discord.InteractionResponded:
+            with contextlib.suppress(discord.NotFound, discord.HTTPException):
+                return await interaction.followup.send(**kwargs)
+            return None
+        except (discord.NotFound, discord.HTTPException):
+            return None
+
+    async def _acknowledge_modal_submit(
+        self,
+        interaction: discord.Interaction,
+        *,
+        modal_kind: str,
+        guild_id: int,
+        failure_message: str,
+        allow_images: bool | None = None,
+        upload_present: bool | None = None,
+        attachment_count: int | None = None,
+    ) -> bool:
+        try:
+            await interaction.response.defer(ephemeral=True, thinking=True)
+            return True
+        except Exception as exc:
+            self.log_modal_diagnostic(
+                code=f"{modal_kind}_modal_defer_failed",
+                stage="defer",
+                modal_kind=modal_kind,
+                guild_id=guild_id,
+                allow_images=allow_images,
+                upload_present=upload_present,
+                attachment_count=attachment_count,
+                storage_ready=self.service.storage_ready,
+                operability_ready=self.service.operability_message(guild_id) == "Confessions are ready.",
+                exc=exc,
+            )
+            await self._send_private_interaction(interaction, embed=self._modal_unavailable_embed(failure_message))
+            return False
+
+    async def _send_confession_result_response(
+        self,
+        interaction: discord.Interaction,
+        *,
+        guild_id: int,
+        modal_kind: str,
+        result: ConfessionSubmissionResult,
+        allow_images: bool | None = None,
+        upload_present: bool | None = None,
+        attachment_count: int | None = None,
+    ):
+        try:
+            embed = self.service.build_member_result_embed(result)
+        except Exception as exc:
+            self.log_modal_diagnostic(
+                code=f"{modal_kind}_modal_build_embed_failed",
+                stage="build_embed",
+                modal_kind=modal_kind,
+                guild_id=guild_id,
+                allow_images=allow_images,
+                upload_present=upload_present,
+                attachment_count=attachment_count,
+                storage_ready=self.service.storage_ready,
+                operability_ready=self.service.operability_message(guild_id) == "Confessions are ready.",
+                result_state=result.state,
+                exc=exc,
+            )
+            embed = self._minimal_member_result_embed(result)
+        try:
+            view = self.build_member_result_view(result=result, guild_id=guild_id)
+        except Exception as exc:
+            self.log_modal_diagnostic(
+                code=f"{modal_kind}_modal_build_view_failed",
+                stage="build_view",
+                modal_kind=modal_kind,
+                guild_id=guild_id,
+                allow_images=allow_images,
+                upload_present=upload_present,
+                attachment_count=attachment_count,
+                storage_ready=self.service.storage_ready,
+                operability_ready=self.service.operability_message(guild_id) == "Confessions are ready.",
+                result_state=result.state,
+                exc=exc,
+            )
+            view = None
+        try:
+            await self._send_private_interaction(interaction, embed=embed, view=view)
+            return
+        except Exception as exc:
+            self.log_modal_diagnostic(
+                code=f"{modal_kind}_modal_send_result_failed",
+                stage="send_result",
+                modal_kind=modal_kind,
+                guild_id=guild_id,
+                allow_images=allow_images,
+                upload_present=upload_present,
+                attachment_count=attachment_count,
+                storage_ready=self.service.storage_ready,
+                operability_ready=self.service.operability_message(guild_id) == "Confessions are ready.",
+                result_state=result.state,
+                exc=exc,
+            )
+        with contextlib.suppress(Exception):
+            await self._send_private_interaction(interaction, embed=embed)
 
     async def _send_policy_warning(
         self,
