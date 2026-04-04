@@ -671,18 +671,22 @@ class ReportModal(discord.ui.Modal, title="Anonymous Report"):
 
 
 class MemberSupportView(discord.ui.View):
-    def __init__(self, cog: "ConfessionsCog", *, default_target: str | None = None):
+    def __init__(self, cog: "ConfessionsCog", *, guild_id: int, default_target: str | None = None):
         super().__init__(timeout=300)
         self.cog = cog
+        self.guild_id = guild_id
         self.default_target = default_target
+        support_ready = self.cog._support_channel_ready_for_guild_id(guild_id)
+        self.appeal_button.disabled = not support_ready
+        self.report_button.disabled = not support_ready
 
     @discord.ui.button(label="Appeal Restriction", style=discord.ButtonStyle.secondary, row=0)
     async def appeal_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(AppealModal(self.cog, default_target=self.default_target))
+        await self.cog._open_appeal_modal(interaction, default_target=self.default_target)
 
     @discord.ui.button(label="Report Problem", style=discord.ButtonStyle.secondary, row=0)
     async def report_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_modal(ReportModal(self.cog, default_target=self.default_target))
+        await self.cog._open_report_modal(interaction, default_target=self.default_target)
 
 
 class MemberManageActionView(discord.ui.View):
@@ -693,6 +697,7 @@ class MemberManageActionView(discord.ui.View):
         self.target_id = target_id
         self.delete_button.disabled = not can_delete
         self.edit_button.disabled = not can_edit
+        self.support_button.disabled = not self.cog._support_channel_ready_for_guild_id(guild_id)
 
     @discord.ui.button(label="Delete Privately", style=discord.ButtonStyle.danger, row=0)
     async def delete_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -736,6 +741,7 @@ class MemberResultActionView(discord.ui.View):
         self.cog = cog
         self.guild_id = guild_id
         self.result = result
+        self.support_button.disabled = not self.cog._support_channel_ready_for_guild_id(guild_id)
         if result.jump_url:
             self.add_item(discord.ui.Button(label="Open Post", style=discord.ButtonStyle.link, url=result.jump_url))
 
@@ -803,6 +809,7 @@ class ConfessionMemberPanelView(discord.ui.View):
         self.guild_id = guild_id
         ready = self.cog.service.operability_message(guild_id) == "Confessions are ready."
         self.send_button.disabled = not ready
+        self.support_button.disabled = not self.cog._support_channel_ready_for_guild_id(guild_id)
 
     @discord.ui.button(
         label="Send Confession",
@@ -1139,6 +1146,28 @@ class ConfessionsCog(commands.Cog):
         guild = getattr(role, "guild", None)
         return getattr(role, "id", None) == getattr(guild, "id", None)
 
+    def _support_channel_ready_for_guild_id(self, guild_id: int) -> bool:
+        guild = self.bot.get_guild(guild_id)
+        return bool(guild is not None and self.service.support_channel_snapshot(guild)["ok"])
+
+    async def _ensure_support_channel_ready(self, interaction: discord.Interaction) -> dict[str, object] | None:
+        if interaction.guild is None:
+            await interaction.response.send_message("Private support only works inside a server.", ephemeral=True)
+            return None
+        snapshot = self.service.support_channel_snapshot(interaction.guild)
+        if snapshot["ok"]:
+            return snapshot
+        await interaction.response.send_message(
+            embed=ge.make_status_embed(
+                "Private Support Unavailable",
+                str(snapshot["message"]),
+                tone="warning",
+                footer="Babblebox Confessions",
+            ),
+            ephemeral=True,
+        )
+        return None
+
     async def _send_slash_only_notice(self, ctx: commands.Context, message: str):
         await ctx.send(content=message, delete_after=15)
 
@@ -1207,8 +1236,8 @@ class ConfessionsCog(commands.Cog):
         await interaction.response.send_modal(ManageConfessionModal(self, default_target=default_target))
 
     async def _send_support_entry(self, interaction: discord.Interaction, *, default_target: str | None = None):
-        if interaction.guild is None:
-            await interaction.response.send_message("Private support only works inside a server.", ephemeral=True)
+        snapshot = await self._ensure_support_channel_ready(interaction)
+        if snapshot is None:
             return
         await interaction.response.send_message(
             embed=ge.make_status_embed(
@@ -1217,19 +1246,19 @@ class ConfessionsCog(commands.Cog):
                 tone="info",
                 footer="Babblebox Confessions",
             ),
-            view=MemberSupportView(self, default_target=default_target),
+            view=MemberSupportView(self, guild_id=interaction.guild.id, default_target=default_target),
             ephemeral=True,
         )
 
     async def _open_appeal_modal(self, interaction: discord.Interaction, *, default_target: str | None = None):
-        if interaction.guild is None:
-            await interaction.response.send_message("Private support only works inside a server.", ephemeral=True)
+        snapshot = await self._ensure_support_channel_ready(interaction)
+        if snapshot is None:
             return
         await interaction.response.send_modal(AppealModal(self, default_target=default_target))
 
     async def _open_report_modal(self, interaction: discord.Interaction, *, default_target: str | None = None):
-        if interaction.guild is None:
-            await interaction.response.send_message("Private support only works inside a server.", ephemeral=True)
+        snapshot = await self._ensure_support_channel_ready(interaction)
+        if snapshot is None:
             return
         await interaction.response.send_modal(ReportModal(self, default_target=default_target))
 
@@ -1591,6 +1620,20 @@ class ConfessionsCog(commands.Cog):
     ):
         if not await self._require_admin(ctx):
             return
+        if appeals_channel is not None:
+            support_snapshot = self.service.support_channel_snapshot(ctx.guild, channel_id=appeals_channel.id)
+            if not support_snapshot["ok"]:
+                await send_hybrid_response(
+                    ctx,
+                    embed=ge.make_status_embed(
+                        "Confessions Setup",
+                        str(support_snapshot["message"]),
+                        tone="warning",
+                        footer="Babblebox Confessions",
+                    ),
+                    ephemeral=True,
+                )
+                return
         previous_config = self.service.get_config(ctx.guild.id)
         ok, message = await self.service.configure_guild(
             ctx.guild.id,

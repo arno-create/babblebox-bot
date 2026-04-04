@@ -24,6 +24,14 @@ class FakeGuildPermissions:
         self.manage_guild = manage_guild
 
 
+class FakeChannelPermissions:
+    def __init__(self, **values):
+        self.__dict__.update(values)
+
+    def __getattr__(self, name: str):
+        return False
+
+
 class FakeRole:
     def __init__(self, role_id: int, *, name: str | None = None, guild=None):
         self.id = role_id
@@ -78,10 +86,23 @@ class FakeMessage:
 
 
 class FakeChannel:
-    def __init__(self, channel_id: int, *, name: str = "general"):
+    def __init__(
+        self,
+        channel_id: int,
+        *,
+        name: str = "general",
+        public_view: bool = False,
+        bot_can_view: bool = True,
+        bot_can_send: bool = True,
+        bot_can_embed: bool = True,
+    ):
         self.id = channel_id
         self.name = name
         self.mention = f"<#{channel_id}>"
+        self.public_view = public_view
+        self.bot_can_view = bot_can_view
+        self.bot_can_send = bot_can_send
+        self.bot_can_embed = bot_can_embed
         self.sent: list[FakeMessage] = []
         self._messages: dict[int, FakeMessage] = {}
 
@@ -104,6 +125,18 @@ class FakeChannel:
             raise Exception("missing")
         return message
 
+    def permissions_for(self, target):
+        is_default = getattr(target, "is_default", None)
+        if callable(is_default) and is_default():
+            return FakeChannelPermissions(view_channel=self.public_view)
+        if getattr(target, "id", None) == 999:
+            return FakeChannelPermissions(
+                view_channel=self.bot_can_view,
+                send_messages=self.bot_can_send,
+                embed_links=self.bot_can_embed,
+            )
+        return FakeChannelPermissions(view_channel=True, send_messages=True, embed_links=True)
+
 
 class FakeGuild:
     def __init__(self, guild_id: int):
@@ -113,6 +146,7 @@ class FakeGuild:
         self.roles: dict[int, FakeRole] = {}
         self.members: dict[int, FakeUser] = {}
         self.default_role = FakeRole(guild_id, name="@everyone", guild=self)
+        self.me = types.SimpleNamespace(id=999)
         self.roles[self.default_role.id] = self.default_role
 
     def get_channel(self, channel_id: int):
@@ -1082,6 +1116,66 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(ok, message)
         self.assertEqual(len(self.appeals_channel.sent), 2)
 
+    async def test_support_channel_snapshot_marks_public_channel_unsafe(self):
+        await self._configure(review_mode=True, review_channel=True, appeals_channel=True)
+        self.appeals_channel.public_view = True
+
+        snapshot = self.service.support_channel_snapshot(self.guild)
+
+        self.assertFalse(snapshot["ok"])
+        self.assertEqual(snapshot["status"], "public")
+        self.assertIn("@everyone", snapshot["message"])
+
+    async def test_support_channel_snapshot_reports_missing_bot_permissions(self):
+        await self._configure(review_mode=True, review_channel=True, appeals_channel=True)
+        self.appeals_channel.bot_can_embed = False
+
+        snapshot = self.service.support_channel_snapshot(self.guild)
+
+        self.assertFalse(snapshot["ok"])
+        self.assertEqual(snapshot["status"], "bot_missing_permissions")
+        self.assertIn("Embed Links", snapshot["message"])
+
+    async def test_support_requests_fail_closed_when_channel_becomes_public(self):
+        await self._configure(review_mode=True, review_channel=True, appeals_channel=True)
+        blocked = await self.service.submit_confession(self.guild, author_id=952, content="nigger", attachments=[])
+        self.assertEqual(blocked.state, "blocked")
+        self.appeals_channel.public_view = True
+
+        ok, message = await self.service.submit_support_request(
+            self.guild,
+            author_id=952,
+            kind="appeal",
+            target_id=blocked.case_id,
+            details="Please review the context.",
+        )
+
+        self.assertFalse(ok)
+        self.assertIn("@everyone", message)
+        self.assertEqual(len(self.appeals_channel.sent), 0)
+
+    async def test_member_panel_embed_reports_support_only_when_private_channel_is_ready(self):
+        await self._configure(review_mode=True, review_channel=True, appeals_channel=True)
+        ready_embed = self.service.build_member_panel_embed(self.guild)
+        ready_rendered = json.dumps(ready_embed.to_dict())
+        self.assertIn("Status: **Ready**", ready_rendered)
+
+        self.appeals_channel.public_view = True
+        unsafe_embed = self.service.build_member_panel_embed(self.guild)
+        unsafe_rendered = json.dumps(unsafe_embed.to_dict())
+        self.assertIn("Public / Unsafe", unsafe_rendered)
+        self.assertIn("@everyone", unsafe_rendered)
+
+    async def test_dashboard_embed_reports_support_channel_health(self):
+        await self._configure(review_mode=True, review_channel=True, appeals_channel=True)
+        self.appeals_channel.public_view = True
+
+        embed = await self.service.build_dashboard_embed(self.guild, section="review")
+        rendered = json.dumps(embed.to_dict())
+
+        self.assertIn("Support Channel", rendered)
+        self.assertIn("Public / Unsafe", rendered)
+
     async def test_image_only_restriction_blocks_attachments_but_not_text_and_clear_restores(self):
         await self._configure(review_channel=True, allow_images=True)
         published = await self.service.submit_confession(self.guild, author_id=960, content="moderate me", attachments=[])
@@ -1194,8 +1288,9 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(interaction.response.modal_calls[0].upload_input)
 
     async def test_member_panel_manage_and_support_buttons_open_private_flows(self):
-        await self.cog.service.configure_guild(self.guild.id, enabled=True, confession_channel_id=20, review_mode=False)
+        await self.cog.service.configure_guild(self.guild.id, enabled=True, confession_channel_id=20, appeals_channel_id=50, review_mode=False)
         view = self.cog.build_member_panel_view(guild_id=self.guild.id)
+        self.assertFalse(view.support_button.disabled)
 
         manage_interaction = FakeInteraction(guild=self.guild, user=self._member(120))
         await view.manage_button.callback(manage_interaction)
@@ -1206,8 +1301,77 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(support_interaction.response.sent[0]["kwargs"]["embed"].title, "Private Support")
         self.assertIsNotNone(support_interaction.response.sent[0]["kwargs"]["view"])
 
+    async def test_confessions_setup_rejects_public_appeals_channel(self):
+        self.guild.channels[50].public_view = True
+        ctx = FakeContext(guild=self.guild, author=FakeUser(91, manage_guild=True))
+
+        await ConfessionsCog.confessions_setup_command.callback(
+            self.cog,
+            ctx,
+            True,
+            self.guild.channels[20],
+            None,
+            None,
+            self.guild.channels[50],
+            False,
+            False,
+            False,
+            False,
+            False,
+        )
+
+        self.assertEqual(len(ctx.send_calls), 1)
+        self.assertEqual(ctx.send_calls[0]["embed"].title, "Confessions Setup")
+        self.assertIn("@everyone", ctx.send_calls[0]["embed"].description)
+        self.assertIsNone(self.cog.service.get_config(self.guild.id)["appeals_channel_id"])
+
+    async def test_confessions_setup_rejects_appeals_channel_missing_bot_permissions(self):
+        self.guild.channels[50].bot_can_embed = False
+        ctx = FakeContext(guild=self.guild, author=FakeUser(92, manage_guild=True))
+
+        await ConfessionsCog.confessions_setup_command.callback(
+            self.cog,
+            ctx,
+            True,
+            self.guild.channels[20],
+            None,
+            None,
+            self.guild.channels[50],
+            False,
+            False,
+            False,
+            False,
+            False,
+        )
+
+        self.assertEqual(len(ctx.send_calls), 1)
+        self.assertIn("Embed Links", ctx.send_calls[0]["embed"].description)
+        self.assertIsNone(self.cog.service.get_config(self.guild.id)["appeals_channel_id"])
+
+    async def test_confessions_setup_accepts_private_appeals_channel(self):
+        ctx = FakeContext(guild=self.guild, author=FakeUser(93, manage_guild=True))
+
+        await ConfessionsCog.confessions_setup_command.callback(
+            self.cog,
+            ctx,
+            True,
+            self.guild.channels[20],
+            None,
+            None,
+            self.guild.channels[50],
+            False,
+            False,
+            False,
+            False,
+            False,
+        )
+
+        self.assertEqual(len(ctx.send_calls), 1)
+        self.assertEqual(ctx.send_calls[0]["embed"].title, "Confessions Setup")
+        self.assertEqual(self.cog.service.get_config(self.guild.id)["appeals_channel_id"], 50)
+
     async def test_confess_manage_appeal_report_and_about_commands_open_private_flows(self):
-        await self.cog.service.configure_guild(self.guild.id, enabled=True, confession_channel_id=20, review_mode=False)
+        await self.cog.service.configure_guild(self.guild.id, enabled=True, confession_channel_id=20, appeals_channel_id=50, review_mode=False)
         manage_ctx = FakeContext(guild=self.guild, author=self._member(122))
         appeal_ctx = FakeContext(guild=self.guild, author=self._member(123))
         report_ctx = FakeContext(guild=self.guild, author=self._member(124))
@@ -1222,6 +1386,35 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(appeal_ctx.interaction.response.modal_calls[0].title, "Anonymous Appeal")
         self.assertEqual(report_ctx.interaction.response.modal_calls[0].title, "Anonymous Report")
         self.assertEqual(about_ctx.interaction.response.sent[0]["kwargs"]["embed"].title, "How Anonymous Confessions Work")
+
+    async def test_confess_appeal_and_report_warn_privately_when_support_channel_is_unsafe(self):
+        await self.cog.service.configure_guild(self.guild.id, enabled=True, confession_channel_id=20, appeals_channel_id=50, review_mode=False)
+        self.guild.channels[50].public_view = True
+        appeal_ctx = FakeContext(guild=self.guild, author=self._member(127))
+        report_ctx = FakeContext(guild=self.guild, author=self._member(128))
+
+        await ConfessionsCog.confess_appeal_command.callback(self.cog, appeal_ctx)
+        await ConfessionsCog.confess_report_command.callback(self.cog, report_ctx)
+
+        self.assertEqual(len(appeal_ctx.interaction.response.modal_calls), 0)
+        self.assertEqual(appeal_ctx.interaction.response.sent[0]["kwargs"]["embed"].title, "Private Support Unavailable")
+        self.assertEqual(len(report_ctx.interaction.response.modal_calls), 0)
+        self.assertEqual(report_ctx.interaction.response.sent[0]["kwargs"]["embed"].title, "Private Support Unavailable")
+
+    async def test_stale_private_support_view_warns_instead_of_opening_modal(self):
+        await self.cog.service.configure_guild(self.guild.id, enabled=True, confession_channel_id=20, appeals_channel_id=50, review_mode=False)
+        entry_interaction = FakeInteraction(guild=self.guild, user=self._member(129))
+
+        await self.cog._send_support_entry(entry_interaction, default_target="CF-123456")
+
+        support_view = entry_interaction.response.sent[0]["kwargs"]["view"]
+        self.guild.channels[50].public_view = True
+        stale_interaction = FakeInteraction(guild=self.guild, user=self._member(130))
+
+        await support_view.appeal_button.callback(stale_interaction)
+
+        self.assertEqual(len(stale_interaction.response.modal_calls), 0)
+        self.assertEqual(stale_interaction.response.sent[0]["kwargs"]["embed"].title, "Private Support Unavailable")
 
     async def test_confess_command_blocks_non_allowlisted_members_privately(self):
         await self.cog.service.configure_guild(self.guild.id, enabled=True, confession_channel_id=20, review_mode=False)
@@ -1241,6 +1434,24 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("bb-confession-panel:compose", custom_ids)
         self.assertNotIn("bb-confession-panel:reply", custom_ids)
+
+    async def test_member_panel_support_button_is_disabled_when_support_channel_is_not_private(self):
+        await self.cog.service.configure_guild(self.guild.id, enabled=True, confession_channel_id=20, appeals_channel_id=50, review_mode=False)
+        self.guild.channels[50].public_view = True
+
+        view = self.cog.build_member_panel_view(guild_id=self.guild.id)
+
+        self.assertTrue(view.support_button.disabled)
+
+    async def test_member_result_view_support_button_is_active_only_with_private_support_channel(self):
+        await self.cog.service.configure_guild(self.guild.id, enabled=True, confession_channel_id=20, appeals_channel_id=50, review_mode=False)
+        published = await self.cog.service.submit_confession(self.guild, author_id=130, content="ready", attachments=[])
+        ready_view = self.cog.build_member_result_view(result=published, guild_id=self.guild.id)
+        self.assertFalse(ready_view.support_button.disabled)
+
+        self.guild.channels[50].public_view = True
+        unsafe_view = self.cog.build_member_result_view(result=published, guild_id=self.guild.id)
+        self.assertTrue(unsafe_view.support_button.disabled)
 
     async def test_role_changes_after_modal_open_are_rechecked_on_submit(self):
         await self.cog.service.configure_guild(self.guild.id, enabled=True, confession_channel_id=20, review_mode=False)
@@ -1545,6 +1756,22 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
         await report_modal.on_submit(report_interaction)
         self.assertEqual(len(report_interaction.response.defer_calls), 1)
         self.assertEqual(len(report_interaction.followup_calls), 1)
+
+    async def test_stale_support_view_fails_closed_when_channel_becomes_public(self):
+        await self.cog.service.configure_guild(
+            self.guild.id,
+            enabled=True,
+            confession_channel_id=20,
+            appeals_channel_id=50,
+            review_mode=False,
+        )
+        view = self.cog.build_member_panel_view(guild_id=self.guild.id)
+        self.guild.channels[50].public_view = True
+        interaction = FakeInteraction(guild=self.guild, user=FakeUser(24))
+
+        await view.support_button.callback(interaction)
+
+        self.assertEqual(interaction.response.sent[0]["kwargs"]["embed"].title, "Private Support Unavailable")
 
     async def test_status_command_with_target_returns_anonymous_detail_privately(self):
         await self.cog.service.configure_guild(self.guild.id, enabled=True, confession_channel_id=20, review_mode=False)
