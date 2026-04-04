@@ -697,6 +697,9 @@ class ShieldCog(commands.Cog):
         user_id = getattr(user, "id", None)
         return (True, int(user_id)) if isinstance(user_id, int) else (False, "Select a member for that filter target.")
 
+    @app_commands.allowed_installs(guilds=True, users=False)
+    @app_commands.guild_only()
+    @app_commands.default_permissions(manage_guild=True)
     @commands.hybrid_group(
         name="shield",
         with_app_command=True,
@@ -714,14 +717,12 @@ class ShieldCog(commands.Cog):
             return
         await self._send_panel(ctx, section="overview")
 
-    @app_commands.default_permissions(manage_guild=True)
     @shield_group.command(name="panel", with_app_command=True, description="Open the Shield admin panel")
     async def shield_panel_command(self, ctx: commands.Context):
         if not await self._guard(ctx):
             return
         await self._send_panel(ctx, section="overview")
 
-    @app_commands.default_permissions(manage_guild=True)
     @shield_group.command(name="rules", with_app_command=True, description="Configure core Shield rules, actions, and escalation")
     @app_commands.describe(
         module="Turn the Shield module on or off",
@@ -798,7 +799,6 @@ class ShieldCog(commands.Cog):
             return
         await self._send_result(ctx, "Shield Rules", "\n".join(messages), ok=ok)
 
-    @app_commands.default_permissions(manage_guild=True)
     @shield_group.command(name="logs", with_app_command=True, description="Configure Shield log delivery")
     @app_commands.describe(channel="Channel for Shield alerts", role="Optional role to ping for alerts", clear_channel="Clear the current log channel", clear_role="Clear the current alert role")
     async def shield_logs_command(
@@ -826,7 +826,6 @@ class ShieldCog(commands.Cog):
             return
         await self._send_result(ctx, "Shield Logs", "\n".join(messages), ok=ok)
 
-    @app_commands.default_permissions(manage_guild=True)
     @shield_group.command(name="filters", with_app_command=True, description="Configure Shield scope, includes, excludes, and trusted roles")
     @app_commands.describe(
         mode="Scan everything eligible or only explicitly included scope",
@@ -884,7 +883,6 @@ class ShieldCog(commands.Cog):
             return
         await self._send_result(ctx, "Shield Filters", "\n".join(messages), ok=ok)
 
-    @app_commands.default_permissions(manage_guild=True)
     @shield_group.command(name="allowlist", with_app_command=True, description="Configure Shield allowlists for domains, invite codes, and phrases")
     @app_commands.describe(bucket="Which allowlist bucket to change", state="Turn this allowlist entry on or off", value="The domain, invite code, or phrase to change")
     @app_commands.choices(bucket=ALLOWLIST_BUCKET_CHOICES, state=STATE_CHOICES)
@@ -911,7 +909,6 @@ class ShieldCog(commands.Cog):
         ok, message = await self.service.set_allow_entry(ctx.guild.id, bucket, value, state == "on")
         await self._send_result(ctx, "Shield Allowlists", message, ok=ok)
 
-    @app_commands.default_permissions(manage_guild=True)
     @shield_group.command(name="ai", with_app_command=True, description="Configure optional Shield AI second-pass review")
     @app_commands.describe(
         enabled="Turn Shield AI second-pass review on or off",

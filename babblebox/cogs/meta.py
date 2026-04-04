@@ -53,12 +53,12 @@ HELP_PAGES: list[dict[str, str]] = [
             "`/drops status` shows the guild knowledge lane clearly.\n"
             "`/drops stats` and `/drops leaderboard` stay guild-first, while Buddy and Profile surfaces fold the knowledge lane into identity cleanly.\n"
             "`/drops roles status`, `/drops roles remove`, and `/drops roles preference` give members a private way to remove current Babblebox roles or stop future grants without touching achievement history.\n"
-            "`/drops mastery category ...` and `/drops mastery scholar ...` configure category mastery roles, the guild scholar ladder, and custom mastery announcement copy in one place.\n"
+            "`/dropsadmin mastery category ...` and `/dropsadmin mastery scholar ...` configure category mastery roles, the guild scholar ladder, and custom mastery announcement copy in one place.\n"
             "Template editing stays inside those mastery commands with `template_action`, supports a default template plus optional tier overrides, and falls back as: tier override -> scope default -> Babblebox default.\n"
             "Category tokens: `{user.mention}` `{user.name}` `{user.display_name}` `{role.name}` `{tier.label}` `{threshold}` `{category.name}`. Scholar tokens: `{user.mention}` `{user.name}` `{user.display_name}` `{role.name}` `{tier.label}` `{threshold}`.\n"
-            "Admins can run 1-10 drops a day, pick channels and categories, and opt into rare AI celebration copy without turning the lane into spam."
+            "Admins can use `/dropsadmin` to run 1-10 drops a day, pick channels and categories, and opt into rare AI celebration copy without turning the lane into spam."
         ),
-        "try": "`/drops status`, `/drops mastery category`, `/drops leaderboard`",
+        "try": "`/drops status`, `/dropsadmin mastery category`, `/drops leaderboard`",
     },
     {
         "title": "Everyday Utilities",

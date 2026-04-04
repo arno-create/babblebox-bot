@@ -6,8 +6,11 @@ from typing import Optional
 from unittest.mock import AsyncMock, patch
 
 import discord
+from discord.ext import commands
 
 from babblebox import game_engine as ge
+from babblebox.cogs.admin import AdminCog
+from babblebox.cogs.confessions import ConfessionsCog
 from babblebox.cogs.gameplay import GameplayCog
 from babblebox.cogs.identity import IdentityCog
 from babblebox.cogs.meta import HELP_PAGES, MetaCog
@@ -196,7 +199,8 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/drops status", question_drops_page["body"])
         self.assertIn("/drops roles status", question_drops_page["body"])
         self.assertNotIn("/drops panel", question_drops_page["body"])
-        self.assertIn("/drops mastery category", question_drops_page["body"])
+        self.assertIn("/dropsadmin mastery category", question_drops_page["body"])
+        self.assertNotIn("/drops mastery category", question_drops_page["body"])
         self.assertIn("template_action", question_drops_page["body"])
         self.assertIn("{user.mention}", question_drops_page["body"])
         self.assertIn("{category.name}", question_drops_page["body"])
@@ -205,18 +209,50 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         daily_page = next(page for page in HELP_PAGES if page["title"] == "Daily Arcade")
         self.assertIn("Question Drops stay separate as the guild knowledge lane", daily_page["body"])
 
-    def test_question_drops_group_no_longer_registers_duplicate_panel_command(self):
+    def test_question_drops_slash_tree_splits_public_and_admin_surfaces(self):
         cog = QuestionDropsCog(types.SimpleNamespace(loop=None))
-        command_names = {command.name for command in cog.drops_group.commands}
-        mastery_command_names = {command.name for command in cog.drops_mastery_group.commands}
+        public_slash_names = {command.name for command in cog.drops_group.app_command.commands}
+        prefix_alias_names = {command.name for command in cog.drops_group.commands}
+        admin_slash_names = {command.name for command in cog.dropsadmin_group.app_command.commands}
+        prefix_mastery_names = {command.name for command in cog.drops_mastery_group.commands}
+        admin_slash_mastery_names = {command.name for command in cog.dropsadmin_mastery_group.app_command.commands}
 
-        self.assertIn("roles", command_names)
-        self.assertIn("status", command_names)
-        self.assertNotIn("panel", command_names)
-        self.assertIn("category", mastery_command_names)
-        self.assertIn("scholar", mastery_command_names)
-        self.assertNotIn("category-template", mastery_command_names)
-        self.assertNotIn("scholar-template", mastery_command_names)
+        self.assertEqual(public_slash_names, {"leaderboard", "roles", "stats", "status"})
+        self.assertTrue({"config", "channels", "categories", "digest", "mastery"}.issubset(prefix_alias_names))
+        self.assertEqual(admin_slash_names, {"categories", "channels", "config", "digest", "mastery"})
+        self.assertEqual(prefix_mastery_names, {"category", "recalc", "scholar"})
+        self.assertEqual(admin_slash_mastery_names, {"category", "recalc", "scholar"})
+
+    def test_admin_only_roots_emit_hidden_guild_only_metadata(self):
+        bot = commands.Bot(command_prefix="!", intents=discord.Intents.none())
+        expected = {
+            "admin": AdminCog.admin_group.app_command,
+            "shield": ShieldCog.shield_group.app_command,
+            "confessions": ConfessionsCog.confessions_group.app_command,
+            "dropsadmin": QuestionDropsCog.dropsadmin_group.app_command,
+        }
+
+        for name, command in expected.items():
+            with self.subTest(command=name):
+                payload = command.to_dict(bot.tree)
+
+                self.assertEqual(payload["default_member_permissions"], 32)
+                self.assertEqual(payload["contexts"], [0])
+                self.assertEqual(payload["integration_types"], [0])
+                self.assertFalse(payload["dm_permission"])
+                self.assertTrue(command.guild_only)
+                self.assertTrue(command.allowed_contexts.guild)
+                self.assertFalse(command.allowed_contexts.dm_channel)
+                self.assertFalse(command.allowed_contexts.private_channel)
+                self.assertTrue(command.allowed_installs.guild)
+                self.assertFalse(command.allowed_installs.user)
+
+    def test_public_member_roots_remain_visible(self):
+        drops_names = {command.name for command in QuestionDropsCog.drops_group.app_command.commands}
+        confess_names = {command.name for command in ConfessionsCog.confess_group.app_command.commands}
+
+        self.assertEqual(drops_names, {"leaderboard", "roles", "stats", "status"})
+        self.assertEqual(confess_names, {"about", "appeal", "manage", "report"})
 
     def test_only16_lobby_copy_stays_aligned_with_manual(self):
         saved_games = ge.games
@@ -1081,6 +1117,26 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             )
 
             await QuestionDropsCog.drops_mastery_group.callback(cog, ctx)
+
+            self.assertEqual(len(ctx.send_calls), 1)
+            self.assertTrue(ctx.send_calls[0]["ephemeral"])
+            self.assertIn("Manage Server", ctx.send_calls[0]["embed"].description)
+        finally:
+            await cog.service.close()
+
+    async def test_dropsadmin_group_denies_non_admins_privately(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
+        cog = QuestionDropsCog(bot)
+        try:
+            cog.service.storage_ready = True
+            ctx = FakeContext(
+                interaction=FakeInteraction(),
+                guild=FakeGuild(),
+                channel=FakeChannel(),
+                author=FakeAuthor(manage_guild=False),
+            )
+
+            await QuestionDropsCog.dropsadmin_group.callback(cog, ctx)
 
             self.assertEqual(len(ctx.send_calls), 1)
             self.assertTrue(ctx.send_calls[0]["ephemeral"])

@@ -1113,6 +1113,9 @@ class AdminCog(commands.Cog):
             empty="No placeholders were rendered.",
         )
 
+    @app_commands.allowed_installs(guilds=True, users=False)
+    @app_commands.guild_only()
+    @app_commands.default_permissions(manage_guild=True)
     @commands.hybrid_group(
         name="admin",
         with_app_command=True,
@@ -1133,14 +1136,12 @@ class AdminCog(commands.Cog):
             return
         await send_hybrid_response(ctx, embed=await self._member_status_embed(member), ephemeral=True)
 
-    @app_commands.default_permissions(manage_guild=True)
     @admin_group.command(name="panel", with_app_command=True, description="Open the private admin panel")
     async def admin_panel_command(self, ctx: commands.Context):
         if not await self._guard(ctx):
             return
         await self._send_panel(ctx, section="overview")
 
-    @app_commands.default_permissions(manage_guild=True)
     @admin_group.command(name="followup", with_app_command=True, description="Configure returned-after-ban follow-up roles")
     @app_commands.describe(
         enabled="Turn punishment follow-up on or off",
@@ -1175,7 +1176,6 @@ class AdminCog(commands.Cog):
         )
         await self._send_result(ctx, "Punishment Follow-up", message, ok=ok)
 
-    @app_commands.default_permissions(manage_guild=True)
     @admin_group.command(name="verification", with_app_command=True, description="Configure verification retention and cleanup")
     @app_commands.describe(
         enabled="Turn verification cleanup on or off",
@@ -1228,7 +1228,6 @@ class AdminCog(commands.Cog):
         )
         await self._send_result(ctx, "Verification Cleanup", message, ok=ok)
 
-    @app_commands.default_permissions(manage_guild=True)
     @admin_group.command(name="logs", with_app_command=True, description="Configure admin log delivery and alert pings")
     async def admin_logs_command(
         self,
@@ -1249,7 +1248,6 @@ class AdminCog(commands.Cog):
         ok, message = await self.service.set_logs_config(ctx.guild.id, channel_id=resolved_channel_id, alert_role_id=resolved_role_id)
         await self._send_result(ctx, "Admin Logs", message, ok=ok)
 
-    @app_commands.default_permissions(manage_guild=True)
     @admin_group.command(name="exclusions", with_app_command=True, description="Configure shared exclusions and trusted-role behavior")
     @app_commands.choices(target=EXCLUSION_TARGET_CHOICES, state=STATE_CHOICES)
     async def admin_exclusions_command(
@@ -1311,7 +1309,6 @@ class AdminCog(commands.Cog):
             messages.append(part_message)
         await self._send_result(ctx, "Admin Exclusions", "\n".join(messages), ok=ok)
 
-    @app_commands.default_permissions(manage_guild=True)
     @admin_group.command(name="templates", with_app_command=True, description="Configure verification DM templates and invite link")
     async def admin_templates_command(
         self,
@@ -1336,7 +1333,6 @@ class AdminCog(commands.Cog):
         )
         await self._send_result(ctx, "Admin Templates", message, ok=ok)
 
-    @app_commands.default_permissions(manage_guild=True)
     @admin_group.command(name="test", with_app_command=True, description="Safely preview verification templates and log delivery")
     @app_commands.describe(
         kind="Choose whether to preview the warning DM, final kick DM, or logs channel output",
@@ -1474,7 +1470,6 @@ class AdminCog(commands.Cog):
         preview_embed.add_field(name="Prechecks", value=self._format_precheck_lines(checks), inline=False)
         await send_hybrid_response(ctx, embed=preview_embed, ephemeral=True)
 
-    @app_commands.default_permissions(manage_guild=True)
     @admin_group.command(name="sync", with_app_command=True, description="Review, preview, and safely run a verification catch-up sync")
     async def admin_sync_command(self, ctx: commands.Context):
         if not await self._guard(ctx):
