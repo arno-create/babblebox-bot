@@ -1584,6 +1584,87 @@ class ConfessionsService:
     def _format_channel_label(self, channel_id: int | None) -> str:
         return f"<#{channel_id}>" if isinstance(channel_id, int) else "Not set"
 
+    def _bot_member_for_guild(self, guild: discord.Guild) -> object | None:
+        member = getattr(guild, "me", None)
+        if member is not None:
+            return member
+        bot_id = getattr(getattr(self.bot, "user", None), "id", None)
+        get_member = getattr(guild, "get_member", None)
+        if callable(get_member) and isinstance(bot_id, int):
+            with contextlib.suppress(Exception):
+                resolved = get_member(bot_id)
+                if resolved is not None:
+                    return resolved
+        return getattr(self.bot, "user", None)
+
+    def support_channel_snapshot(self, guild: discord.Guild, *, channel_id: int | None = None) -> dict[str, Any]:
+        configured_id = channel_id
+        if configured_id is None:
+            configured_id = self.get_config(guild.id).get("appeals_channel_id")
+        snapshot = {
+            "ok": False,
+            "status": "missing",
+            "status_label": "Missing",
+            "channel_id": configured_id,
+            "channel": None,
+            "message": "Admins still need to configure a private appeals/report channel for this server.",
+            "detail": "No appeals/report channel is configured yet.",
+            "missing_permissions": (),
+        }
+        if not isinstance(configured_id, int):
+            return snapshot
+        channel = guild.get_channel(configured_id)
+        snapshot["channel"] = channel
+        if channel is None:
+            snapshot["status"] = "unavailable"
+            snapshot["status_label"] = "Unavailable"
+            snapshot["message"] = "The configured appeals/report channel is unavailable."
+            snapshot["detail"] = "The stored appeals/report channel no longer exists in this server."
+            return snapshot
+        permissions_for = getattr(channel, "permissions_for", None)
+        everyone_perms = None
+        if callable(permissions_for):
+            with contextlib.suppress(Exception):
+                everyone_perms = permissions_for(guild.default_role)
+        if getattr(everyone_perms, "view_channel", False):
+            snapshot["status"] = "public"
+            snapshot["status_label"] = "Public / Unsafe"
+            snapshot["message"] = (
+                "Babblebox can only use a private appeals/report channel. "
+                "This channel is visible to @everyone, so support is unavailable until an admin fixes it."
+            )
+            snapshot["detail"] = f"{getattr(channel, 'mention', self._format_channel_label(configured_id))} is visible to @everyone."
+            return snapshot
+        bot_target = self._bot_member_for_guild(guild)
+        bot_perms = None
+        if callable(permissions_for) and bot_target is not None:
+            with contextlib.suppress(Exception):
+                bot_perms = permissions_for(bot_target)
+        required_permissions = (
+            ("view_channel", "View Channel"),
+            ("send_messages", "Send Messages"),
+            ("embed_links", "Embed Links"),
+        )
+        missing_permissions = tuple(
+            label for attr, label in required_permissions if not getattr(bot_perms, attr, False)
+        )
+        if missing_permissions:
+            snapshot["status"] = "bot_missing_permissions"
+            snapshot["status_label"] = "Bot Missing Permissions"
+            snapshot["message"] = (
+                "Babblebox cannot use the configured appeals/report channel until it has "
+                f"{', '.join(missing_permissions)}."
+            )
+            snapshot["detail"] = f"Missing bot permissions: {', '.join(missing_permissions)}."
+            snapshot["missing_permissions"] = missing_permissions
+            return snapshot
+        snapshot["ok"] = True
+        snapshot["status"] = "ready"
+        snapshot["status_label"] = "Ready"
+        snapshot["message"] = "Private support is ready."
+        snapshot["detail"] = "Private and ready for anonymous appeals and reports."
+        return snapshot
+
     def _restriction_label(self, state: dict[str, Any]) -> str:
         if state.get("is_permanent_ban"):
             return "Permanent confession ban"
@@ -1827,11 +1908,10 @@ class ConfessionsService:
         description: str,
         fields: Sequence[tuple[str, str]],
     ) -> tuple[bool, str]:
-        config = self.get_config(guild.id)
-        channel_id = config.get("appeals_channel_id")
-        if not isinstance(channel_id, int):
-            return False, "Admins still need to configure a private appeals/report channel for this server."
-        channel = guild.get_channel(channel_id) or self.bot.get_channel(channel_id)
+        support_snapshot = self.support_channel_snapshot(guild)
+        if not support_snapshot["ok"]:
+            return False, str(support_snapshot["message"])
+        channel = support_snapshot["channel"]
         if channel is None:
             return False, "The configured appeals/report channel is unavailable."
         ticket_id = _public_id(SUPPORT_TICKET_ID_PREFIX)
@@ -2003,6 +2083,7 @@ class ConfessionsService:
         reply_policy = "Enabled with warning" if config["allow_anonymous_replies"] else "Off by default"
         edit_policy = "Enabled with warning" if config["allow_self_edit"] else "Off by default"
         role_access = self._member_role_access_label(guild)
+        support_snapshot = self.support_channel_snapshot(guild)
         description = (
             "Share something quietly through a private composer. When admins enable Confessions, Babblebox keeps the author hidden from members and staff while still enforcing safety internally."
             if ready
@@ -2020,7 +2101,7 @@ class ConfessionsService:
                 "Add text and at most one trusted link.\n"
                 "Reply from a live confession post when replies are enabled.\n"
                 "Use **Manage My Confession** to delete your own submission privately.\n"
-                "Use **Appeal / Report** for false positives, restrictions, or problem reports.\n"
+                "Use **Appeal / Report** for false positives, restrictions, or problem reports when this server has private support configured.\n"
                 "Images and anonymous replies stay off by default unless admins explicitly enable them."
             ),
             inline=False,
@@ -2042,7 +2123,13 @@ class ConfessionsService:
             name="Private Support",
             value=(
                 "Appeals / reports channel: "
-                f"**{self._format_channel_label(config.get('appeals_channel_id'))}**"
+                f"**{self._format_channel_label(support_snapshot['channel_id'])}**\n"
+                f"Status: **{support_snapshot['status_label']}**\n"
+                + (
+                    "Members can use appeal/report while admins keep that channel private."
+                    if support_snapshot["ok"]
+                    else str(support_snapshot["message"])
+                )
             ),
             inline=False,
         )
@@ -2058,6 +2145,7 @@ class ConfessionsService:
     def build_member_panel_help_embed(self, guild: discord.Guild) -> discord.Embed:
         config = self.get_config(guild.id)
         role_snapshot = self._role_policy_snapshot(guild)
+        support_snapshot = self.support_channel_snapshot(guild)
         image_line = (
             f"Text, one trusted link total, and up to {config['max_images']} images only if admins explicitly enable them. Enabled images always enter private review."
             if config["allow_images"]
@@ -2097,6 +2185,15 @@ class ConfessionsService:
             inline=False,
         )
         embed.add_field(
+            name="Private Support",
+            value=(
+                "Appeal/report opens a private member flow only when admins configure a private appeals/report channel Babblebox can use."
+                if not support_snapshot["ok"]
+                else "Appeal/report stays member-facing, but Babblebox only delivers it while the configured support channel stays private."
+            ),
+            inline=False,
+        )
+        embed.add_field(
             name="What Gets Blocked",
             value="Mentions, unsafe links, private details, spam, offensive or derogatory language, unsupported image types, and anything this server has disabled.",
             inline=False,
@@ -2111,6 +2208,7 @@ class ConfessionsService:
     async def build_dashboard_embed(self, guild: discord.Guild, *, section: str = "overview") -> discord.Embed:
         config = self.get_config(guild.id)
         role_snapshot = self._role_policy_snapshot(guild)
+        support_snapshot = self.support_channel_snapshot(guild)
         role_value = (
             f"Allowlist: **{len(role_snapshot['active_allowed_ids'])}** active\n"
             f"{self._format_role_labels(role_snapshot['allow_labels'])}\n"
@@ -2123,6 +2221,11 @@ class ConfessionsService:
                 f"\nStale configured roles: allowlist **{role_snapshot['stale_allowed']}**, "
                 f"blacklist **{role_snapshot['stale_blocked']}**"
             )
+        support_value = (
+            f"Channel: {self._format_channel_label(support_snapshot['channel_id'])}\n"
+            f"Status: **{support_snapshot['status_label']}**\n"
+            f"{support_snapshot['detail']}"
+        )
         counts = await self.store.fetch_guild_counts(guild.id) if self.storage_ready else {
             "queued_submissions": 0,
             "published_submissions": 0,
@@ -2179,19 +2282,20 @@ class ConfessionsService:
                 ),
                 inline=False,
             )
+            embed.add_field(name="Support Channel", value=ge.safe_field_text(support_value, limit=1024), inline=False)
         elif section == "review":
             embed.add_field(
                 name="Review",
                 value=(
                     f"Review mode: **{'On' if config['review_mode'] else 'Off'}**\n"
                     f"Review channel: {self._format_channel_label(config['review_channel_id'])}\n"
-                    f"Appeals / reports: {self._format_channel_label(config.get('appeals_channel_id'))}\n"
                     f"Open queue: **{counts['open_review_cases']}** case(s)\n"
                     f"Open safety blocks: **{counts['open_safety_cases']}**\n"
                     f"Open moderation cases: **{counts['open_moderation_cases']}**"
                 ),
                 inline=False,
             )
+            embed.add_field(name="Support Channel", value=ge.safe_field_text(support_value, limit=1024), inline=False)
             embed.add_field(
                 name="Quick Help",
                 value="Use `/confessions moderate` with a confession ID or case ID to approve, deny, delete, pause, ban, restrict images, clear, or override a false positive without seeing the author.",
@@ -2225,8 +2329,7 @@ class ConfessionsService:
                     f"Enabled: **{'Yes' if config['enabled'] else 'No'}**\n"
                     f"Confession channel: {self._format_channel_label(config['confession_channel_id'])}\n"
                     f"Panel channel: {self._format_channel_label(config.get('panel_channel_id'))}\n"
-                    f"Review channel: {self._format_channel_label(config['review_channel_id'])}\n"
-                    f"Appeals / reports: {self._format_channel_label(config.get('appeals_channel_id'))}"
+                    f"Review channel: {self._format_channel_label(config['review_channel_id'])}"
                 ),
                 inline=False,
             )
@@ -2241,6 +2344,7 @@ class ConfessionsService:
                 inline=False,
             )
             embed.add_field(name="Role Eligibility", value=ge.safe_field_text(role_value, limit=1024), inline=False)
+            embed.add_field(name="Support Channel", value=ge.safe_field_text(support_value, limit=1024), inline=False)
             embed.add_field(name="Operability", value=self.operability_message(guild.id), inline=False)
         return ge.style_embed(embed, footer="Babblebox Confessions | Staff-blind moderation")
 
