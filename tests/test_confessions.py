@@ -4,9 +4,17 @@ import asyncio
 import json
 import types
 import unittest
+from unittest import mock
 
-from babblebox.cogs.confessions import ConfessionComposerModal, ConfessionsCog
-from babblebox.confessions_service import CASE_ID_PREFIX, CONFESSION_ID_PREFIX, ConfessionsService
+from babblebox.cogs.confessions import (
+    AppealModal,
+    ConfessionComposerModal,
+    ConfessionsCog,
+    EditConfessionModal,
+    ReplyComposerModal,
+    ReportModal,
+)
+from babblebox.confessions_service import CASE_ID_PREFIX, CONFESSION_ID_PREFIX, ConfessionSubmissionResult, ConfessionsService
 from babblebox.confessions_store import ConfessionsStore
 
 
@@ -117,6 +125,7 @@ class FakeRawDeletePayload:
 class FakeResponse:
     def __init__(self):
         self._done = False
+        self.defer_calls = []
         self.sent = []
         self.edits = []
         self.modal_calls = []
@@ -124,9 +133,21 @@ class FakeResponse:
     def is_done(self):
         return self._done
 
+    async def defer(self, *, ephemeral=False, thinking=False):
+        self._done = True
+        self.defer_calls.append({"ephemeral": ephemeral, "thinking": thinking})
+
     async def send_message(self, *args, **kwargs):
         self._done = True
         self.sent.append({"args": args, "kwargs": kwargs})
+        return FakeMessage(
+            content=kwargs.get("content"),
+            embed=kwargs.get("embed"),
+            embeds=kwargs.get("embeds"),
+            view=kwargs.get("view"),
+            ephemeral=kwargs.get("ephemeral"),
+            allowed_mentions=kwargs.get("allowed_mentions"),
+        )
 
     async def edit_message(self, **kwargs):
         self._done = True
@@ -147,6 +168,14 @@ class FakeInteraction:
 
     async def _followup_send(self, *args, **kwargs):
         self.followup_calls.append({"args": args, "kwargs": kwargs})
+        return FakeMessage(
+            content=kwargs.get("content"),
+            embed=kwargs.get("embed"),
+            embeds=kwargs.get("embeds"),
+            view=kwargs.get("view"),
+            ephemeral=kwargs.get("ephemeral"),
+            allowed_mentions=kwargs.get("allowed_mentions"),
+        )
 
     def is_expired(self):
         return False
@@ -977,6 +1006,35 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(config["allow_anonymous_replies"])
         self.assertFalse(config["allow_self_edit"])
 
+    async def test_modal_submission_text_only_defers_and_posts_privately(self):
+        await self.cog.service.configure_guild(self.guild.id, enabled=True, confession_channel_id=20, review_mode=False)
+        interaction = FakeInteraction(guild=self.guild, user=FakeUser(13))
+        modal = ConfessionComposerModal(self.cog, guild_id=self.guild.id)
+        modal.body_input._value = "hello from the modal"
+        modal.link_input._value = ""
+
+        await modal.on_submit(interaction)
+
+        self.assertEqual(len(interaction.response.defer_calls), 1)
+        self.assertEqual(len(interaction.response.sent), 0)
+        self.assertEqual(len(interaction.followup_calls), 1)
+        self.assertTrue(interaction.followup_calls[0]["kwargs"]["ephemeral"])
+        self.assertEqual(interaction.followup_calls[0]["kwargs"]["embed"].title, "Confession Posted")
+
+    async def test_modal_submission_with_trusted_link_defers_and_posts_privately(self):
+        await self.cog.service.configure_guild(self.guild.id, enabled=True, confession_channel_id=20, review_mode=False)
+        interaction = FakeInteraction(guild=self.guild, user=FakeUser(14))
+        modal = ConfessionComposerModal(self.cog, guild_id=self.guild.id)
+        modal.body_input._value = "Useful reading"
+        modal.link_input._value = "https://www.google.com/search?q=babblebox"
+
+        await modal.on_submit(interaction)
+
+        self.assertEqual(len(interaction.response.defer_calls), 1)
+        self.assertEqual(len(interaction.followup_calls), 1)
+        embed = interaction.followup_calls[0]["kwargs"]["embed"]
+        self.assertEqual(embed.title, "Confession Posted")
+
     async def test_modal_submission_supports_image_only_and_stays_private(self):
         await self.cog.service.configure_guild(
             self.guild.id,
@@ -994,10 +1052,227 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
 
         await modal.on_submit(interaction)
 
-        self.assertEqual(len(interaction.response.sent), 1)
-        self.assertTrue(interaction.response.sent[0]["kwargs"]["ephemeral"])
-        embed = interaction.response.sent[0]["kwargs"]["embed"]
+        self.assertEqual(len(interaction.response.defer_calls), 1)
+        self.assertEqual(len(interaction.followup_calls), 1)
+        self.assertTrue(interaction.followup_calls[0]["kwargs"]["ephemeral"])
+        embed = interaction.followup_calls[0]["kwargs"]["embed"]
         self.assertEqual(embed.title, "Confession Received")
+
+    async def test_modal_submission_falls_back_to_text_when_runtime_upload_support_is_unavailable(self):
+        await self.cog.service.configure_guild(
+            self.guild.id,
+            enabled=True,
+            confession_channel_id=20,
+            review_channel_id=30,
+            review_mode=False,
+            allow_images=True,
+        )
+        self.cog.modal_file_upload_available = lambda: False
+        interaction = FakeInteraction(guild=self.guild, user=FakeUser(15))
+        modal = ConfessionComposerModal(self.cog, guild_id=self.guild.id)
+        modal.body_input._value = "text only fallback"
+        modal.link_input._value = ""
+
+        self.assertIsNone(modal.upload_input)
+        self.assertIn("temporarily unavailable", modal.body_input.placeholder.lower())
+
+        await modal.on_submit(interaction)
+
+        self.assertEqual(len(interaction.response.defer_calls), 1)
+        self.assertEqual(len(interaction.followup_calls), 1)
+        self.assertEqual(interaction.followup_calls[0]["kwargs"]["embed"].title, "Confession Posted")
+
+    async def test_modal_submission_handles_attachment_extraction_failure_privately(self):
+        class BrokenUpload:
+            @property
+            def values(self):
+                raise RuntimeError("attachment payload mismatch")
+
+        await self.cog.service.configure_guild(
+            self.guild.id,
+            enabled=True,
+            confession_channel_id=20,
+            review_channel_id=30,
+            review_mode=False,
+            allow_images=True,
+        )
+        interaction = FakeInteraction(guild=self.guild, user=FakeUser(115))
+        modal = ConfessionComposerModal(self.cog, guild_id=self.guild.id)
+        modal.body_input._value = "hello with image"
+        modal.link_input._value = ""
+        modal.upload_input = BrokenUpload()
+
+        await modal.on_submit(interaction)
+
+        self.assertEqual(len(interaction.response.defer_calls), 1)
+        self.assertEqual(len(interaction.followup_calls), 1)
+        self.assertEqual(interaction.followup_calls[0]["kwargs"]["embed"].title, "Image Upload Unavailable")
+
+    async def test_modal_submission_acknowledges_before_slow_service_finishes(self):
+        await self.cog.service.configure_guild(self.guild.id, enabled=True, confession_channel_id=20, review_mode=False)
+        interaction = FakeInteraction(guild=self.guild, user=FakeUser(16))
+        modal = ConfessionComposerModal(self.cog, guild_id=self.guild.id)
+        modal.body_input._value = "slow path"
+        modal.link_input._value = ""
+        original_submit = self.cog.service.submit_confession
+
+        async def slow_submit(*args, **kwargs):
+            await asyncio.sleep(0.1)
+            return ConfessionSubmissionResult(True, "published", "ok", confession_id="CF-SLOW000", jump_url="https://discord.com/channels/10/20/30")
+
+        self.cog.service.submit_confession = slow_submit
+        try:
+            task = asyncio.create_task(modal.on_submit(interaction))
+            await asyncio.sleep(0.02)
+            self.assertTrue(interaction.response.is_done())
+            self.assertEqual(len(interaction.response.defer_calls), 1)
+            self.assertEqual(len(interaction.followup_calls), 0)
+            await task
+        finally:
+            self.cog.service.submit_confession = original_submit
+
+        self.assertEqual(len(interaction.followup_calls), 1)
+
+    async def test_modal_submission_storage_unavailable_returns_private_feedback_without_deferring(self):
+        self.cog.service.storage_ready = False
+        self.cog.service.storage_error = "db down"
+        interaction = FakeInteraction(guild=self.guild, user=FakeUser(17))
+        modal = ConfessionComposerModal(self.cog, guild_id=self.guild.id)
+        modal.body_input._value = "hello"
+        modal.link_input._value = ""
+
+        await modal.on_submit(interaction)
+
+        self.assertEqual(len(interaction.response.defer_calls), 0)
+        self.assertEqual(len(interaction.response.sent), 1)
+        self.assertEqual(interaction.response.sent[0]["kwargs"]["embed"].title, "Confessions Unavailable")
+
+    async def test_modal_submission_operability_failure_returns_private_feedback_without_deferring(self):
+        interaction = FakeInteraction(guild=self.guild, user=FakeUser(18))
+        modal = ConfessionComposerModal(self.cog, guild_id=self.guild.id)
+        modal.body_input._value = "hello"
+        modal.link_input._value = ""
+
+        await modal.on_submit(interaction)
+
+        self.assertEqual(len(interaction.response.defer_calls), 0)
+        self.assertEqual(len(interaction.response.sent), 1)
+        self.assertEqual(interaction.response.sent[0]["kwargs"]["embed"].title, "Confessions Unavailable")
+
+    async def test_modal_submission_uses_fallback_embed_when_result_rendering_breaks(self):
+        await self.cog.service.configure_guild(self.guild.id, enabled=True, confession_channel_id=20, review_mode=False)
+        interaction = FakeInteraction(guild=self.guild, user=FakeUser(19))
+        modal = ConfessionComposerModal(self.cog, guild_id=self.guild.id)
+        modal.body_input._value = "hello"
+        modal.link_input._value = ""
+        original_builder = self.cog.service.build_member_result_embed
+
+        def broken_builder(*args, **kwargs):
+            raise RuntimeError("builder exploded")
+
+        self.cog.service.build_member_result_embed = broken_builder
+        try:
+            await modal.on_submit(interaction)
+        finally:
+            self.cog.service.build_member_result_embed = original_builder
+
+        self.assertEqual(len(interaction.response.defer_calls), 1)
+        self.assertEqual(len(interaction.followup_calls), 1)
+        self.assertEqual(interaction.followup_calls[0]["kwargs"]["embed"].title, "Confession Posted")
+
+    async def test_modal_submission_uses_fallback_when_result_view_breaks(self):
+        await self.cog.service.configure_guild(self.guild.id, enabled=True, confession_channel_id=20, review_mode=False)
+        interaction = FakeInteraction(guild=self.guild, user=FakeUser(116))
+        modal = ConfessionComposerModal(self.cog, guild_id=self.guild.id)
+        modal.body_input._value = "hello"
+        modal.link_input._value = ""
+        original_view_builder = self.cog.build_member_result_view
+
+        def broken_view_builder(*args, **kwargs):
+            raise RuntimeError("view exploded")
+
+        self.cog.build_member_result_view = broken_view_builder
+        try:
+            await modal.on_submit(interaction)
+        finally:
+            self.cog.build_member_result_view = original_view_builder
+
+        self.assertEqual(len(interaction.response.defer_calls), 1)
+        self.assertEqual(len(interaction.followup_calls), 1)
+        self.assertEqual(interaction.followup_calls[0]["kwargs"]["embed"].title, "Confession Posted")
+
+    async def test_modal_submission_logs_safe_diagnostics_without_content_leaks(self):
+        await self.cog.service.configure_guild(self.guild.id, enabled=True, confession_channel_id=20, review_mode=False)
+        interaction = FakeInteraction(guild=self.guild, user=FakeUser(99991))
+        modal = ConfessionComposerModal(self.cog, guild_id=self.guild.id)
+        modal.body_input._value = "super private confession body"
+        modal.link_input._value = "https://private.example/path"
+        original_submit = self.cog.service.submit_confession
+
+        async def broken_submit(*args, **kwargs):
+            raise RuntimeError("payload should not leak")
+
+        self.cog.service.submit_confession = broken_submit
+        try:
+            with mock.patch("builtins.print") as mocked_print:
+                await modal.on_submit(interaction)
+        finally:
+            self.cog.service.submit_confession = original_submit
+
+        printed = " ".join(" ".join(str(value) for value in call.args) for call in mocked_print.call_args_list)
+        self.assertIn("code=confession_modal_submit_failed", printed)
+        self.assertNotIn("super private confession body", printed)
+        self.assertNotIn("https://private.example/path", printed)
+        self.assertNotIn("99991", printed)
+        self.assertNotIn("payload should not leak", interaction.followup_calls[0]["kwargs"]["embed"].description)
+
+    async def test_reply_edit_and_support_modals_defer_and_send_followups(self):
+        await self.cog.service.configure_guild(
+            self.guild.id,
+            enabled=True,
+            confession_channel_id=20,
+            review_channel_id=30,
+            appeals_channel_id=50,
+            review_mode=True,
+            allow_anonymous_replies=True,
+            allow_self_edit=True,
+        )
+        pending = await self.cog.service.submit_confession(self.guild, author_id=21, content="pending edit", attachments=[])
+        self.assertEqual(pending.state, "queued")
+
+        reply_interaction = FakeInteraction(guild=self.guild, user=FakeUser(22))
+        reply_modal = ReplyComposerModal(self.cog, guild_id=self.guild.id, default_target=pending.confession_id)
+        reply_modal.target_input._value = pending.confession_id
+        reply_modal.body_input._value = "reply body"
+        await reply_modal.on_submit(reply_interaction)
+        self.assertEqual(len(reply_interaction.response.defer_calls), 1)
+        self.assertEqual(len(reply_interaction.followup_calls), 1)
+
+        edit_interaction = FakeInteraction(guild=self.guild, user=FakeUser(21))
+        submission = await self.cog.service.store.fetch_submission_by_confession_id(self.guild.id, pending.confession_id)
+        edit_modal = EditConfessionModal(self.cog, guild_id=self.guild.id, target_id=pending.confession_id, submission=submission)
+        edit_modal.body_input._value = "updated pending edit"
+        if edit_modal.link_input is not None:
+            edit_modal.link_input._value = ""
+        await edit_modal.on_submit(edit_interaction)
+        self.assertEqual(len(edit_interaction.response.defer_calls), 1)
+        self.assertEqual(len(edit_interaction.followup_calls), 1)
+
+        appeal_interaction = FakeInteraction(guild=self.guild, user=FakeUser(21))
+        appeal_modal = AppealModal(self.cog, default_target=pending.confession_id)
+        appeal_modal.target_input._value = pending.confession_id
+        appeal_modal.details_input._value = "Please review this restriction."
+        await appeal_modal.on_submit(appeal_interaction)
+        self.assertEqual(len(appeal_interaction.response.defer_calls), 1)
+        self.assertEqual(len(appeal_interaction.followup_calls), 1)
+
+        report_interaction = FakeInteraction(guild=self.guild, user=FakeUser(23))
+        report_modal = ReportModal(self.cog, default_target=pending.confession_id)
+        report_modal.target_input._value = pending.confession_id
+        report_modal.details_input._value = "This confession needs review."
+        await report_modal.on_submit(report_interaction)
+        self.assertEqual(len(report_interaction.response.defer_calls), 1)
+        self.assertEqual(len(report_interaction.followup_calls), 1)
 
     async def test_status_command_with_target_returns_anonymous_detail_privately(self):
         await self.cog.service.configure_guild(self.guild.id, enabled=True, confession_channel_id=20, review_mode=False)
@@ -1081,7 +1356,8 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
 
         await modal.on_submit(interaction)
 
-        self.assertEqual(interaction.response.sent[0]["kwargs"]["embed"].title, "Confessions Unavailable")
+        self.assertEqual(len(interaction.response.defer_calls), 1)
+        self.assertEqual(interaction.followup_calls[0]["kwargs"]["embed"].title, "Confessions Unavailable")
 
         self.cog.service.submit_confession = original_submit
         queued = await self.cog.service.submit_confession(self.guild, author_id=42, content="needs review", attachments=[])
