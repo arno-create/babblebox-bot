@@ -57,7 +57,13 @@ class EventsCogTests(unittest.IsolatedAsyncioTestCase):
         shield_service = types.SimpleNamespace(
             handle_message=AsyncMock(return_value=ShieldDecision(matched=True, action="log", pack="promo", reasons=()))
         )
-        bot = types.SimpleNamespace(utility_service=utility_service, shield_service=shield_service, get_cog=lambda name: None)
+        confessions_service = types.SimpleNamespace(handle_member_response_message=AsyncMock())
+        bot = types.SimpleNamespace(
+            utility_service=utility_service,
+            shield_service=shield_service,
+            confessions_service=confessions_service,
+            get_cog=lambda name: None,
+        )
         cog = EventsCog(bot)
         message = FakeMessage()
 
@@ -66,6 +72,7 @@ class EventsCogTests(unittest.IsolatedAsyncioTestCase):
 
         utility_service.handle_watch_message.assert_not_awaited()
         utility_service.handle_return_watch_message.assert_not_awaited()
+        confessions_service.handle_member_response_message.assert_not_awaited()
 
     async def test_single_afk_notice_attaches_return_ping_button(self):
         target = FakeTarget(5)
@@ -184,3 +191,27 @@ class EventsCogTests(unittest.IsolatedAsyncioTestCase):
 
         confessions_service.handle_raw_message_delete.assert_awaited_once_with(payload)
         question_drops_service.handle_raw_message_delete.assert_awaited_once_with(payload)
+
+    async def test_guild_messages_forward_to_confession_response_detection(self):
+        utility_service = types.SimpleNamespace(
+            clear_afk_on_activity=AsyncMock(return_value=None),
+            collect_afk_notice_targets=lambda **kwargs: [],
+            handle_watch_message=AsyncMock(),
+            handle_return_watch_message=AsyncMock(),
+        )
+        confessions_service = types.SimpleNamespace(handle_member_response_message=AsyncMock())
+        question_drops_service = types.SimpleNamespace(observe_message_activity=Mock(), handle_message=AsyncMock(return_value=False))
+        bot = types.SimpleNamespace(
+            utility_service=utility_service,
+            shield_service=None,
+            confessions_service=confessions_service,
+            question_drops_service=question_drops_service,
+            get_cog=lambda name: None,
+        )
+        cog = EventsCog(bot)
+        message = FakeMessage()
+
+        with patch("babblebox.cogs.events.is_command_message", new=AsyncMock(return_value=False)):
+            await cog.on_message(message)
+
+        confessions_service.handle_member_response_message.assert_awaited_once_with(message)

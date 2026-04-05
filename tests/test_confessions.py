@@ -14,6 +14,7 @@ from babblebox.cogs.confessions import (
     ReplyComposerModal,
     ReportModal,
     StatelessConfessionMemberPanelView,
+    StatelessOwnerReplyPromptView,
     StatelessPublishedConfessionReplyView,
 )
 from babblebox.confessions_service import CASE_ID_PREFIX, CONFESSION_ID_PREFIX, ConfessionSubmissionResult, ConfessionsService
@@ -52,12 +53,42 @@ class FakeUser:
         self.mention = f"<@{user_id}>"
         self.guild_permissions = FakeGuildPermissions(manage_guild=manage_guild, administrator=manage_guild)
         self.roles = list(roles or [])
+        self.sent: list[FakeMessage] = []
+
+    async def send(self, content=None, embed=None, embeds=None, view=None, ephemeral=None, allowed_mentions=None, **kwargs):
+        message = FakeMessage(
+            content=content,
+            embed=embed,
+            embeds=embeds,
+            view=view,
+            ephemeral=ephemeral,
+            allowed_mentions=allowed_mentions,
+            author=None,
+            guild=None,
+            channel=None,
+        )
+        self.sent.append(message)
+        return message
 
 
 class FakeMessage:
     _next_id = 1000
 
-    def __init__(self, *, content=None, embed=None, embeds=None, view=None, ephemeral=None, allowed_mentions=None):
+    def __init__(
+        self,
+        *,
+        content=None,
+        embed=None,
+        embeds=None,
+        view=None,
+        ephemeral=None,
+        allowed_mentions=None,
+        author=None,
+        guild=None,
+        channel=None,
+        reference=None,
+        attachments=None,
+    ):
         self.id = FakeMessage._next_id
         FakeMessage._next_id += 1
         self.content = content
@@ -66,6 +97,16 @@ class FakeMessage:
         self.view = view
         self.ephemeral = ephemeral
         self.allowed_mentions = allowed_mentions
+        self.author = author
+        self.guild = guild
+        self.channel = channel
+        self.reference = reference
+        self.attachments = list(attachments or [])
+        self.jump_url = (
+            f"https://discord.com/channels/{guild.id}/{channel.id}/{self.id}"
+            if guild is not None and channel is not None
+            else None
+        )
         self.deleted = False
         self.edits = []
 
@@ -101,6 +142,7 @@ class FakeChannel:
         self.id = channel_id
         self.name = name
         self.mention = f"<#{channel_id}>"
+        self.guild = None
         self.public_view = public_view
         self.bot_can_view = bot_can_view
         self.bot_can_send = bot_can_send
@@ -116,6 +158,8 @@ class FakeChannel:
             view=view,
             ephemeral=ephemeral,
             allowed_mentions=allowed_mentions,
+            guild=self.guild,
+            channel=self,
         )
         self.sent.append(message)
         self._messages[message.id] = message
@@ -168,6 +212,18 @@ class FakeGuild:
     def add_member(self, member: FakeUser):
         self.members[member.id] = member
         return member
+
+    def add_channel(self, channel: FakeChannel):
+        channel.guild = self
+        self.channels[channel.id] = channel
+        return channel
+
+
+class FakeMessageReference:
+    def __init__(self, *, message_id: int, resolved=None, cached_message=None):
+        self.message_id = message_id
+        self.resolved = resolved
+        self.cached_message = cached_message
 
 
 class FakeAttachment:
@@ -288,6 +344,16 @@ class FakeBot:
     def get_guild(self, guild_id: int):
         return self._guilds.get(guild_id)
 
+    def get_user(self, user_id: int):
+        for guild in self._guilds.values():
+            member = guild.get_member(user_id)
+            if member is not None:
+                return member
+        return None
+
+    async def fetch_user(self, user_id: int):
+        return self.get_user(user_id)
+
     def add_view(self, view, *, message_id=None):
         self.views.append((view, message_id))
 
@@ -319,6 +385,14 @@ class ServiceCogStub:
             children=[types.SimpleNamespace(custom_id="bb-confession-post:reply")],
         )
 
+    def build_owner_reply_prompt_view(self):
+        return types.SimpleNamespace(
+            children=[
+                types.SimpleNamespace(custom_id="bb-confession-owner-reply:open"),
+                types.SimpleNamespace(custom_id="bb-confession-owner-reply:dismiss"),
+            ]
+        )
+
 
 class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
@@ -329,14 +403,14 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.appeals_channel = FakeChannel(50, name="confession-appeals")
         self.allowed_role = self.guild.add_role(FakeRole(501, name="Allowed"))
         self.blocked_role = self.guild.add_role(FakeRole(502, name="Blocked"))
-        self.guild.channels[self.confession_channel.id] = self.confession_channel
-        self.guild.channels[self.review_channel.id] = self.review_channel
-        self.guild.channels[self.panel_channel.id] = self.panel_channel
-        self.guild.channels[self.appeals_channel.id] = self.appeals_channel
+        self.guild.add_channel(self.confession_channel)
+        self.guild.add_channel(self.review_channel)
+        self.guild.add_channel(self.panel_channel)
+        self.guild.add_channel(self.appeals_channel)
         self.other_guild = FakeGuild(11)
         self.other_confession_channel = FakeChannel(21, name="other-confessions")
         self.other_allowed_role = self.other_guild.add_role(FakeRole(601, name="Other Allowed"))
-        self.other_guild.channels[self.other_confession_channel.id] = self.other_confession_channel
+        self.other_guild.add_channel(self.other_confession_channel)
         self.bot = FakeBot([self.guild, self.other_guild])
         self.store = ConfessionsStore(backend="memory")
         self.service = ConfessionsService(self.bot, store=self.store)
@@ -358,6 +432,27 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
         member = FakeUser(user_id, manage_guild=manage_guild, roles=roles)
         target.add_member(member)
         return member
+
+    def _reply_message(
+        self,
+        *,
+        guild: FakeGuild | None = None,
+        channel: FakeChannel | None = None,
+        author: FakeUser | None = None,
+        reply_to_message_id: int,
+        content: str,
+    ) -> FakeMessage:
+        target_guild = guild or self.guild
+        target_channel = channel or self.confession_channel
+        message = FakeMessage(
+            content=content,
+            author=author or self._member(9900, guild=target_guild),
+            guild=target_guild,
+            channel=target_channel,
+            reference=FakeMessageReference(message_id=reply_to_message_id),
+        )
+        target_channel._messages[message.id] = message
+        return message
 
     async def _configure(
         self,
@@ -861,9 +956,154 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reply.state, "queued")
         self.assertEqual(reply.submission_kind, "reply")
         self.assertEqual(reply.parent_confession_id, published.confession_id)
+        self.assertIn("stays anonymous", reply.message)
         stored = await self.service.store.fetch_submission_by_confession_id(self.guild.id, reply.confession_id)
         self.assertEqual(stored["submission_kind"], "reply")
+        self.assertEqual(stored["reply_flow"], "reply_to_confession")
         self.assertEqual(stored["parent_confession_id"], published.confession_id)
+
+    async def test_direct_member_reply_creates_owner_reply_opportunity_and_dm_prompt(self):
+        await self._configure(review_channel=True)
+        owner = self._member(922)
+        published = await self.service.submit_confession(self.guild, author_id=owner.id, member=owner, content="lonely tonight", attachments=[])
+        self.assertEqual(published.state, "published")
+
+        responder = self._member(923)
+        response = self._reply_message(
+            author=responder,
+            reply_to_message_id=self.confession_channel.sent[0].id,
+            content="We're here for you",
+        )
+
+        await self.service.handle_member_response_message(response)
+
+        pending = await self.service.store.list_pending_owner_reply_opportunities_for_author(self.guild.id, owner.id, limit=5)
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0]["root_confession_id"], published.confession_id)
+        self.assertEqual(pending[0]["source_author_name"], responder.display_name)
+        self.assertEqual(pending[0]["notification_status"], "sent")
+        self.assertEqual(len(owner.sent), 1)
+        self.assertEqual(owner.sent[0].embed.title, "Someone responded to your confession")
+        self.assertEqual(
+            [child.custom_id for child in owner.sent[0].view.children if getattr(child, "custom_id", None)],
+            ["bb-confession-owner-reply:open", "bb-confession-owner-reply:dismiss"],
+        )
+
+    async def test_reply_to_member_reply_creates_owner_opportunity_but_owner_reply_chain_does_not_retrigger(self):
+        await self._configure(review_channel=True, allow_replies=True)
+        owner = self._member(924)
+        published = await self.service.submit_confession(self.guild, author_id=owner.id, member=owner, content="base confession", attachments=[])
+        anonymous_reply = await self.service.submit_confession(
+            self.guild,
+            author_id=925,
+            content="anonymous support",
+            submission_kind="reply",
+            parent_confession_id=published.confession_id,
+        )
+        self.assertEqual(anonymous_reply.state, "queued")
+        ok, message = await self.service.handle_case_action(self.guild, case_id=anonymous_reply.case_id, action="approve", version=1)
+        self.assertTrue(ok, message)
+
+        member_response = self._reply_message(
+            author=self._member(926),
+            reply_to_message_id=self.confession_channel.sent[1].id,
+            content="responding to the anonymous reply",
+        )
+        await self.service.handle_member_response_message(member_response)
+        pending = await self.service.store.list_pending_owner_reply_opportunities_for_author(self.guild.id, owner.id, limit=5)
+        self.assertEqual(len(pending), 1)
+        await self.service._mark_owner_reply_opportunity_used_record(pending[0])
+
+        owner_reply = await self.service.submit_confession(
+            self.guild,
+            author_id=owner.id,
+            member=owner,
+            content="owner follow-up",
+            submission_kind="reply",
+            parent_confession_id=published.confession_id,
+            reply_flow="owner_reply_to_user",
+        )
+        self.assertEqual(owner_reply.state, "queued")
+        ok, message = await self.service.handle_case_action(self.guild, case_id=owner_reply.case_id, action="approve", version=1)
+        self.assertTrue(ok, message)
+        stored_owner_reply = await self.service.store.fetch_submission_by_confession_id(self.guild.id, owner_reply.confession_id)
+        self.assertEqual(stored_owner_reply["reply_flow"], "owner_reply_to_user")
+
+        no_retrigger = self._reply_message(
+            author=self._member(927),
+            reply_to_message_id=self.confession_channel.sent[2].id,
+            content="this should not ping the owner again",
+        )
+        await self.service.handle_member_response_message(no_retrigger)
+        pending_after = await self.service.store.list_pending_owner_reply_opportunities_for_author(self.guild.id, owner.id, limit=5)
+        self.assertEqual(pending_after, [])
+
+    async def test_owner_reply_prompts_dedupe_source_and_respect_dm_cooldown(self):
+        await self._configure(review_channel=True)
+        owner = self._member(928)
+        published = await self.service.submit_confession(self.guild, author_id=owner.id, member=owner, content="cooldown test", attachments=[])
+        self.assertEqual(published.state, "published")
+
+        first = self._reply_message(
+            author=self._member(929),
+            reply_to_message_id=self.confession_channel.sent[0].id,
+            content="first response",
+        )
+        await self.service.handle_member_response_message(first)
+        await self.service.handle_member_response_message(first)
+
+        second = self._reply_message(
+            author=self._member(930),
+            reply_to_message_id=self.confession_channel.sent[0].id,
+            content="second response",
+        )
+        await self.service.handle_member_response_message(second)
+
+        opportunities = await self.service.store.list_owner_reply_opportunities_for_root_submission(
+            (await self.service.store.fetch_submission_by_confession_id(self.guild.id, published.confession_id))["submission_id"],
+            limit=10,
+        )
+        self.assertEqual(len(opportunities), 2)
+        self.assertEqual(sorted(row["notification_status"] for row in opportunities), ["cooldown", "sent"])
+        self.assertEqual(len(owner.sent), 1)
+
+    async def test_owner_reply_prompt_dm_failure_keeps_pending_fallback_context(self):
+        await self._configure(review_channel=True)
+        owner = self._member(933)
+        published = await self.service.submit_confession(self.guild, author_id=owner.id, member=owner, content="fallback owner reply", attachments=[])
+        response = self._reply_message(
+            author=self._member(934),
+            reply_to_message_id=self.confession_channel.sent[0].id,
+            content="dm fallback please",
+        )
+        with mock.patch.object(self.service, "_send_owner_reply_notification", new=mock.AsyncMock(return_value=(False, None))):
+            await self.service.handle_member_response_message(response)
+
+        self.assertEqual(published.state, "published")
+        pending = await self.service.store.list_pending_owner_reply_opportunities_for_author(self.guild.id, owner.id, limit=5)
+        self.assertEqual(len(pending), 1)
+        self.assertEqual(pending[0]["notification_status"], "failed")
+        contexts = await self.service.list_pending_owner_reply_contexts(self.guild, author_id=owner.id, limit=5)
+        self.assertEqual(len(contexts), 1)
+        self.assertEqual(contexts[0]["opportunity"]["source_preview"], "dm fallback please")
+
+    async def test_owner_reply_opportunity_expires_when_source_message_is_deleted(self):
+        await self._configure(review_channel=True)
+        owner = self._member(931)
+        published = await self.service.submit_confession(self.guild, author_id=owner.id, member=owner, content="source delete", attachments=[])
+        response = self._reply_message(
+            author=self._member(932),
+            reply_to_message_id=self.confession_channel.sent[0].id,
+            content="temporary response",
+        )
+        await self.service.handle_member_response_message(response)
+        pending = await self.service.store.list_pending_owner_reply_opportunities_for_author(self.guild.id, owner.id, limit=5)
+        self.assertEqual(len(pending), 1)
+
+        await self.service.handle_raw_message_delete(FakeRawDeletePayload(guild_id=self.guild.id, message_id=response.id))
+
+        expired = await self.service.store.fetch_owner_reply_opportunity(pending[0]["opportunity_id"])
+        self.assertEqual(expired["status"], "expired")
 
     async def test_role_allowlist_blocks_members_without_allowed_roles(self):
         await self._configure()
@@ -1240,10 +1480,10 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
         self.guild = FakeGuild(10)
         self.allowed_role = self.guild.add_role(FakeRole(701, name="Allowed"))
         self.blocked_role = self.guild.add_role(FakeRole(702, name="Blocked"))
-        self.guild.channels[20] = FakeChannel(20, name="confessions")
-        self.guild.channels[30] = FakeChannel(30, name="review")
-        self.guild.channels[40] = FakeChannel(40, name="panel")
-        self.guild.channels[50] = FakeChannel(50, name="appeals")
+        self.guild.add_channel(FakeChannel(20, name="confessions"))
+        self.guild.add_channel(FakeChannel(30, name="review"))
+        self.guild.add_channel(FakeChannel(40, name="panel"))
+        self.guild.add_channel(FakeChannel(50, name="appeals"))
         self.bot = FakeBot([self.guild])
         self.cog = ConfessionsCog(self.bot)
         self.bot._cog = self.cog
@@ -1262,6 +1502,18 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
         member = FakeUser(user_id, roles=roles, manage_guild=manage_guild)
         self.guild.add_member(member)
         return member
+
+    def _reply_message(self, *, author: FakeUser, reply_to_message_id: int, content: str) -> FakeMessage:
+        channel = self.guild.get_channel(20)
+        message = FakeMessage(
+            content=content,
+            author=author,
+            guild=self.guild,
+            channel=channel,
+            reference=FakeMessageReference(message_id=reply_to_message_id),
+        )
+        channel._messages[message.id] = message
+        return message
 
     async def test_status_command_opens_private_dashboard(self):
         ctx = FakeContext(guild=self.guild, author=FakeUser(1, manage_guild=True))
@@ -1295,7 +1547,7 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
     def test_confess_create_slash_fallback_is_registered(self):
         command_names = {command.name for command in self.cog.confess_group.app_command.commands}
 
-        self.assertEqual(command_names, {"about", "appeal", "create", "manage", "report"})
+        self.assertEqual(command_names, {"about", "appeal", "create", "manage", "reply-to-user", "report"})
 
     async def test_cog_load_registers_global_fallback_views(self):
         self.bot.views.clear()
@@ -1305,12 +1557,106 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
             await self.cog.cog_load()
 
         self.assertIs(self.bot.confessions_service, self.cog.service)
-        self.assertEqual(len(self.bot.views), 2)
-        self.assertEqual([message_id for _, message_id in self.bot.views], [None, None])
+        self.assertEqual(len(self.bot.views), 3)
+        self.assertEqual([message_id for _, message_id in self.bot.views], [None, None, None])
         self.assertCountEqual(
             [type(view) for view, _ in self.bot.views],
-            [StatelessConfessionMemberPanelView, StatelessPublishedConfessionReplyView],
+            [StatelessConfessionMemberPanelView, StatelessPublishedConfessionReplyView, StatelessOwnerReplyPromptView],
         )
+
+    async def test_reply_ui_uses_explicit_anonymity_copy(self):
+        await self.cog.service.configure_guild(
+            self.guild.id,
+            enabled=True,
+            confession_channel_id=20,
+            review_channel_id=30,
+            review_mode=False,
+            allow_anonymous_replies=True,
+        )
+        published = await self.cog.service.submit_confession(self.guild, author_id=200, content="posted", attachments=[])
+        self.assertEqual(published.state, "published")
+
+        reply_modal = ReplyComposerModal(self.cog, guild_id=self.guild.id, default_target=published.confession_id)
+        result_view = self.cog.build_member_result_view(result=published, guild_id=self.guild.id)
+        public_view = self.cog.build_public_confession_view(guild_id=self.guild.id)
+
+        self.assertEqual(reply_modal.body_input.label, "Anonymous reply")
+        self.assertIn("stays anonymous", reply_modal.body_input.placeholder)
+        self.assertIn("private approval", reply_modal.body_input.placeholder)
+        self.assertNotIn("reviewed", reply_modal.body_input.placeholder.casefold())
+        self.assertIn("Reply to confession anonymously", [child.label for child in result_view.children if getattr(child, "label", None)])
+        self.assertIn("Reply to confession anonymously", [child.label for child in public_view.children if getattr(child, "label", None)])
+
+    async def test_reply_to_user_command_opens_private_owner_reply_inbox(self):
+        await self.cog.service.configure_guild(
+            self.guild.id,
+            enabled=True,
+            confession_channel_id=20,
+            review_channel_id=30,
+            review_mode=False,
+        )
+        owner = self._member(201)
+        published = await self.cog.service.submit_confession(self.guild, author_id=owner.id, member=owner, content="need support", attachments=[])
+        response = self._reply_message(author=self._member(202), reply_to_message_id=self.guild.get_channel(20).sent[0].id, content="we hear you")
+        await self.cog.service.handle_member_response_message(response)
+
+        ctx = FakeContext(guild=self.guild, author=owner)
+        await ConfessionsCog.confess_reply_to_user_command.callback(self.cog, ctx)
+
+        self.assertEqual(published.state, "published")
+        self.assertEqual(len(ctx.interaction.response.sent), 1)
+        payload = ctx.interaction.response.sent[0]["kwargs"]
+        self.assertTrue(payload["ephemeral"])
+        self.assertEqual(payload["embed"].title, "Owner Reply Inbox")
+        self.assertIsNotNone(payload["view"])
+        self.assertEqual(payload["view"].children[0].placeholder, "Choose a member response to review privately")
+
+    async def test_owner_reply_prompt_open_and_dismiss_resolve_private_context(self):
+        await self.cog.service.configure_guild(
+            self.guild.id,
+            enabled=True,
+            confession_channel_id=20,
+            review_channel_id=30,
+            review_mode=False,
+        )
+        owner = self._member(203)
+        await self.cog.service.submit_confession(self.guild, author_id=owner.id, member=owner, content="prompt me", attachments=[])
+        response = self._reply_message(author=self._member(204), reply_to_message_id=self.guild.get_channel(20).sent[0].id, content="direct response")
+        await self.cog.service.handle_member_response_message(response)
+        prompt_message = owner.sent[0]
+
+        open_interaction = FakeInteraction(guild=None, user=owner, message=prompt_message, client=self.bot)
+        await self.cog._handle_owner_reply_prompt_open(open_interaction)
+
+        self.assertEqual(len(open_interaction.response.modal_calls), 1)
+        self.assertEqual(open_interaction.response.modal_calls[0].title, "Reply to Member Anonymously")
+
+        dismiss_interaction = FakeInteraction(guild=None, user=owner, message=prompt_message, client=self.bot)
+        await self.cog._handle_owner_reply_prompt_dismiss(dismiss_interaction)
+
+        self.assertEqual(len(dismiss_interaction.response.edits), 1)
+        self.assertEqual(dismiss_interaction.response.edits[0]["embed"].title, "Owner Reply Prompt")
+        self.assertIsNone(dismiss_interaction.response.edits[0]["view"])
+
+    async def test_owner_reply_prompt_rejects_non_owner(self):
+        await self.cog.service.configure_guild(
+            self.guild.id,
+            enabled=True,
+            confession_channel_id=20,
+            review_channel_id=30,
+            review_mode=False,
+        )
+        owner = self._member(205)
+        await self.cog.service.submit_confession(self.guild, author_id=owner.id, member=owner, content="private owner flow", attachments=[])
+        response = self._reply_message(author=self._member(206), reply_to_message_id=self.guild.get_channel(20).sent[0].id, content="hello owner")
+        await self.cog.service.handle_member_response_message(response)
+
+        interaction = FakeInteraction(guild=None, user=self._member(207), message=owner.sent[0], client=self.bot)
+        await self.cog._handle_owner_reply_prompt_open(interaction)
+
+        self.assertEqual(len(interaction.response.sent), 1)
+        self.assertEqual(interaction.response.sent[0]["kwargs"]["embed"].title, "Owner Reply Unavailable")
+        self.assertIn("does not belong to you", interaction.response.sent[0]["kwargs"]["embed"].description)
 
     async def test_member_panel_button_opens_modal(self):
         await self.cog.service.configure_guild(self.guild.id, enabled=True, confession_channel_id=20, review_mode=False)

@@ -29,7 +29,7 @@ Depending on the feature being used, Babblebox may process or store:
 - Discord identifiers such as user IDs, guild IDs, channel IDs, message IDs, role IDs, and timestamps
 - compact feature configuration and state, including Watch preferences, ignored channels or users, Later markers, reminders, AFK state, AFK schedules, Daily Arcade results, Buddy or profile state, and Shield or admin configuration
 - limited message or attachment context needed to respond to commands, build Moment Cards from visible messages, deliver Watch alerts, process Capture requests, or evaluate locally flagged Shield events
-- anonymous confession or reply submission text, trusted-link fields, compact review metadata, bot-private author mappings, and limited private appeals or reports needed to run staff-blind confession moderation when a server has Confessions enabled
+- anonymous confession or reply submission text, trusted-link fields, compact review metadata, bot-private author mappings, bot-private owner reply opportunities, and limited private appeals or reports needed to run staff-blind confession moderation when a server has Confessions enabled
 
 ## Information Babblebox Intentionally Avoids Storing Durably
 
@@ -66,7 +66,8 @@ Babblebox intentionally uses different visibility defaults depending on the feat
 - Capture transcripts are delivered privately rather than kept as long-term database archives
 - Later markers, reminders, and sensitive setup flows are private-first
 - anonymous confessions are optional, are submitted privately when enabled, keep the author hidden from staff, and let staff review by confession ID and case ID only while Babblebox still enforces safety internally
-- anonymous replies are off by default, are text-only when enabled, and always route through private review
+- `Reply to confession anonymously` is off by default, stays text-only when enabled, and any approval happens privately without exposing the author
+- owner reply opportunities are bot-private, only trigger from explicit Discord replies to a confession discussion, and can be opened from a DM prompt or `/confess reply-to-user`
 - self-edit is off by default and limited to pending submissions when enabled; self-delete is available privately to the original author through Babblebox's internal ownership check
 - images are off by default for Confessions and only work after admins explicitly enable them; enabled image confessions always route through private review
 - appeals or reports can be sent privately to a configured support channel without exposing the author's Discord identity to staff

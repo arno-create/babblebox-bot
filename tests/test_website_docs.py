@@ -58,6 +58,10 @@ class WebsiteDocsTests(unittest.TestCase):
         self.assertIn("Babblebox still enforces safety internally", help_html)
         self.assertIn("adult / 18+ language is blocked by default", help_html)
         self.assertIn("images stay off by default", help_html)
+        self.assertIn("/confess reply-to-user", help_html)
+        self.assertIn("Reply to confession anonymously", help_html)
+        self.assertIn("private approval before posting", help_html)
+        self.assertIn("explicitly replies to your confession discussion", help_html)
         self.assertIn("can still reveal you if you include it", help_html)
         self.assertIn("simple number words only count for whole-number answers", help_html)
         self.assertNotIn("jump-nav", help_html)
@@ -100,11 +104,14 @@ class WebsiteDocsTests(unittest.TestCase):
             "Pattern Hunt coder role DMs",
             "Anonymous Confessions",
             "/confess",
+            "/confess reply-to-user",
             "/confessions moderate",
             "PYTHONPATH=. pytest -q",
             "optional feature that only works after admins enable and configure it",
             "adult / 18+ language is blocked by default",
             "images are off by default",
+            "Reply to confession anonymously",
+            "private approval before posting",
             "automatically suspend or confession-ban",
             "can still reveal who sent it",
         ):
@@ -141,6 +148,7 @@ class WebsiteDocsTests(unittest.TestCase):
             "anonymous confessions",
             "staff-blind",
             "bot-private author mapping",
+            "owner reply opportunities",
             "raw attachment filenames",
             "raw Discord CDN URLs",
             "Resolved anonymous confession rows scrub previews",

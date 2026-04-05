@@ -72,6 +72,12 @@ STRIKE_SUSPEND_HOURS = 24
 QUEUE_AGE_NEW_SECONDS = 15 * 60
 QUEUE_AGE_RECENT_SECONDS = 2 * 3600
 SUPPORT_RATE_LIMIT_SECONDS = 5 * 60
+OWNER_REPLY_NOTIFICATION_COOLDOWN_SECONDS = 10 * 60
+OWNER_REPLY_OPPORTUNITY_TTL_SECONDS = 72 * 3600
+OWNER_REPLY_INBOX_LIMIT = 5
+OWNER_REPLY_PREVIEW_LIMIT = 220
+REPLY_FLOW_TO_CONFESSION = "reply_to_confession"
+REPLY_FLOW_OWNER_TO_USER = "owner_reply_to_user"
 LINK_IN_BIO_DOMAINS = frozenset({"linktr.ee", "beacons.ai", "carrd.co"})
 SPAM_RATE_LIMIT_FLAGS = frozenset(
     {"duplicate_spam", "empty_content", "low_signal_spam", "near_duplicate_spam", "repetitive_spam"}
@@ -280,6 +286,33 @@ def _rounded_age_text(iso_value: str | None) -> str:
     if seconds < QUEUE_AGE_RECENT_SECONDS:
         return "Recent"
     return "Older"
+
+
+def _owner_reply_source_preview(content: str | None, attachments: Sequence[Any] | None = None) -> str:
+    preview = normalize_plain_text(content)
+    attachment_count = len(list(attachments or []))
+    if preview:
+        return ge.safe_field_text(preview, limit=OWNER_REPLY_PREVIEW_LIMIT)
+    if attachment_count:
+        noun = "attachment" if attachment_count == 1 else "attachments"
+        return f"[{attachment_count} {noun}]"
+    return "[message unavailable]"
+
+
+def _owner_reply_opportunity_age_text(iso_value: str | None) -> str:
+    created_at = deserialize_datetime(iso_value)
+    if created_at is None:
+        return "Unknown"
+    seconds = int(max(0, (ge.now_utc() - created_at).total_seconds()))
+    if seconds < 60:
+        return "Just now"
+    if seconds < 3600:
+        minutes = max(1, seconds // 60)
+        noun = "minute" if minutes == 1 else "minutes"
+        return f"{minutes} {noun} ago"
+    hours = max(1, seconds // 3600)
+    noun = "hour" if hours == 1 else "hours"
+    return f"{hours} {noun} ago"
 
 
 def _tokens(text: str) -> list[str]:
@@ -1034,11 +1067,12 @@ class ConfessionsService:
         state: dict[str, Any],
         *,
         case_id: str | None = None,
+        ignore_existing_cooldown: bool = False,
     ) -> tuple[bool, dict[str, Any], str | None]:
         now = ge.now_utc()
         updated = self._normalize_restriction_state(state)
         cooldown_until = deserialize_datetime(updated.get("cooldown_until"))
-        if cooldown_until is not None and cooldown_until > now:
+        if not ignore_existing_cooldown and cooldown_until is not None and cooldown_until > now:
             updated["updated_at"] = now.isoformat()
             await self.store.upsert_enforcement_state(updated)
             return False, updated, f"Please wait about {format_duration_brief(int((cooldown_until - now).total_seconds()))} before sending another confession."
@@ -1292,6 +1326,7 @@ class ConfessionsService:
         attachments: Sequence[Any] | None = None,
         submission_kind: str = "confession",
         parent_confession_id: str | None = None,
+        reply_flow: str | None = None,
     ) -> ConfessionSubmissionResult:
         if not self.storage_ready:
             return ConfessionSubmissionResult(False, "unavailable", self.storage_message("Confessions"))
@@ -1302,6 +1337,13 @@ class ConfessionsService:
         submission_kind = normalize_plain_text(submission_kind).casefold() or "confession"
         if submission_kind not in {"confession", "reply"}:
             return ConfessionSubmissionResult(False, "blocked", "That anonymous submission type is not supported.")
+        normalized_reply_flow = normalize_plain_text(reply_flow).casefold() if reply_flow else ""
+        if submission_kind == "reply":
+            normalized_reply_flow = normalized_reply_flow or REPLY_FLOW_TO_CONFESSION
+            if normalized_reply_flow not in {REPLY_FLOW_TO_CONFESSION, REPLY_FLOW_OWNER_TO_USER}:
+                return ConfessionSubmissionResult(False, "blocked", "That anonymous reply flow is not supported.", submission_kind=submission_kind)
+        else:
+            normalized_reply_flow = None
         normalized_parent_confession_id = normalize_plain_text(parent_confession_id).upper() if parent_confession_id else None
         role_gate_message = self.member_submission_gate_message(
             guild,
@@ -1331,7 +1373,8 @@ class ConfessionsService:
             return ConfessionSubmissionResult(False, "blocked", image_restriction_message, submission_kind=submission_kind)
 
         if submission_kind == "reply":
-            if not compiled["allow_anonymous_replies"]:
+            is_owner_reply = normalized_reply_flow == REPLY_FLOW_OWNER_TO_USER
+            if not is_owner_reply and not compiled["allow_anonymous_replies"]:
                 return ConfessionSubmissionResult(
                     False,
                     "blocked",
@@ -1382,12 +1425,14 @@ class ConfessionsService:
         now = ge.now_utc()
         now_iso = now.isoformat()
         requires_review = submission_kind == "reply" or self._needs_review(compiled, safety=safety, attachment_meta=attachment_meta)
+        ignore_existing_cooldown = submission_kind == "reply" and normalized_reply_flow == REPLY_FLOW_OWNER_TO_USER
 
         submission = {
             "submission_id": submission_id,
             "guild_id": guild.id,
             "confession_id": confession_id,
             "submission_kind": submission_kind,
+            "reply_flow": normalized_reply_flow,
             "parent_confession_id": normalized_parent_confession_id,
             "status": "queued" if requires_review else "published",
             "review_status": "pending" if requires_review else "none",
@@ -1444,7 +1489,12 @@ class ConfessionsService:
                 escalated = self._strike_escalation(compiled, updated_state, case_id=case_id)
                 await self.store.upsert_enforcement_state(escalated)
             elif set(safety.flag_codes) & SPAM_RATE_LIMIT_FLAGS:
-                rate_ok, _, rate_message = await self._update_rate_limits(compiled, state, case_id=case_id)
+                rate_ok, _, rate_message = await self._update_rate_limits(
+                    compiled,
+                    state,
+                    case_id=case_id,
+                    ignore_existing_cooldown=ignore_existing_cooldown,
+                )
                 if not rate_ok:
                     return ConfessionSubmissionResult(
                         False,
@@ -1485,7 +1535,11 @@ class ConfessionsService:
                 parent_confession_id=normalized_parent_confession_id,
             )
 
-        rate_ok, updated_state, rate_message = await self._update_rate_limits(compiled, state)
+        rate_ok, updated_state, rate_message = await self._update_rate_limits(
+            compiled,
+            state,
+            ignore_existing_cooldown=ignore_existing_cooldown,
+        )
         if not rate_ok:
             return ConfessionSubmissionResult(
                 False,
@@ -1532,7 +1586,7 @@ class ConfessionsService:
             return ConfessionSubmissionResult(
                 True,
                 "queued",
-                "Your anonymous reply was received and queued for private review."
+                "Your anonymous reply stays anonymous and may go through private approval before posting."
                 if submission_kind == "reply"
                 else "Your confession was received and queued for anonymous review.",
                 confession_id=confession_id,
@@ -1569,7 +1623,9 @@ class ConfessionsService:
         return ConfessionSubmissionResult(
             True,
             "published",
-            "Your anonymous reply was posted." if submission_kind == "reply" else "Your anonymous confession was posted.",
+            "Your anonymous reply was posted without your name attached."
+            if submission_kind == "reply"
+            else "Your anonymous confession was posted.",
             confession_id=confession_id,
             jump_url=self._message_jump_url(guild.id, channel_id, publish_message_id),
             submission_kind=submission_kind,
@@ -1580,6 +1636,322 @@ class ConfessionsService:
         if not isinstance(channel_id, int) or not isinstance(message_id, int):
             return None
         return f"https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"
+
+    async def _resolve_public_reply_target(
+        self,
+        guild_id: int,
+        target_submission: dict[str, Any] | None,
+    ) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        if target_submission is None or target_submission.get("status") != "published":
+            return None, None
+        if target_submission.get("submission_kind") == "confession":
+            return target_submission, target_submission
+        if (
+            target_submission.get("submission_kind") == "reply"
+            and target_submission.get("reply_flow") == REPLY_FLOW_TO_CONFESSION
+            and target_submission.get("parent_confession_id")
+        ):
+            root_submission = await self.store.fetch_submission_by_confession_id(
+                guild_id,
+                str(target_submission["parent_confession_id"]),
+            )
+            if (
+                root_submission is not None
+                and root_submission.get("status") == "published"
+                and root_submission.get("submission_kind") == "confession"
+            ):
+                return root_submission, target_submission
+        return None, None
+
+    async def _resolve_dm_recipient(self, guild: discord.Guild, user_id: int) -> object | None:
+        recipient = guild.get_member(user_id)
+        if recipient is not None:
+            return recipient
+        get_user = getattr(self.bot, "get_user", None)
+        if callable(get_user):
+            with contextlib.suppress(Exception):
+                recipient = get_user(user_id)
+                if recipient is not None:
+                    return recipient
+        fetch_user = getattr(self.bot, "fetch_user", None)
+        if callable(fetch_user):
+            with contextlib.suppress(discord.NotFound, discord.Forbidden, discord.HTTPException, Exception):
+                recipient = await fetch_user(user_id)
+                if recipient is not None:
+                    return recipient
+        return None
+
+    async def _expire_owner_reply_opportunity(self, opportunity: dict[str, Any]) -> dict[str, Any]:
+        if opportunity.get("status") != "pending":
+            return opportunity
+        updated = dict(opportunity)
+        updated["status"] = "expired"
+        updated["resolved_at"] = ge.now_utc().isoformat()
+        await self.store.upsert_owner_reply_opportunity(updated)
+        return updated
+
+    async def _dismiss_owner_reply_opportunity_record(self, opportunity: dict[str, Any]) -> dict[str, Any]:
+        if opportunity.get("status") != "pending":
+            return opportunity
+        updated = dict(opportunity)
+        updated["status"] = "dismissed"
+        updated["resolved_at"] = ge.now_utc().isoformat()
+        await self.store.upsert_owner_reply_opportunity(updated)
+        return updated
+
+    async def _mark_owner_reply_opportunity_used_record(self, opportunity: dict[str, Any]) -> dict[str, Any]:
+        if opportunity.get("status") != "pending":
+            return opportunity
+        updated = dict(opportunity)
+        updated["status"] = "used"
+        updated["resolved_at"] = ge.now_utc().isoformat()
+        await self.store.upsert_owner_reply_opportunity(updated)
+        return updated
+
+    async def _update_owner_reply_notification(
+        self,
+        opportunity: dict[str, Any],
+        *,
+        status: str,
+        notification_message_id: int | None = None,
+        notified_at: str | None = None,
+    ) -> dict[str, Any]:
+        updated = dict(opportunity)
+        updated["notification_status"] = status
+        updated["notification_message_id"] = notification_message_id
+        updated["notified_at"] = notified_at
+        await self.store.upsert_owner_reply_opportunity(updated)
+        return updated
+
+    def _owner_reply_notification_is_on_cooldown(self, opportunity_rows: Sequence[dict[str, Any]]) -> bool:
+        now = ge.now_utc()
+        for row in opportunity_rows:
+            if row.get("notification_status") != "sent":
+                continue
+            notified_at = deserialize_datetime(row.get("notified_at"))
+            if notified_at is None:
+                continue
+            if (now - notified_at).total_seconds() < OWNER_REPLY_NOTIFICATION_COOLDOWN_SECONDS:
+                return True
+        return False
+
+    async def _send_owner_reply_notification(
+        self,
+        guild: discord.Guild,
+        *,
+        owner_user_id: int,
+        opportunity: dict[str, Any],
+        referenced_submission: dict[str, Any],
+    ) -> tuple[bool, int | None]:
+        recipient = await self._resolve_dm_recipient(guild, owner_user_id)
+        if recipient is None:
+            return False, None
+        embed = self.build_owner_reply_notification_embed(guild, opportunity, referenced_submission)
+        view = None
+        cog = self.bot.get_cog("ConfessionsCog")
+        if cog is not None:
+            build_view = getattr(cog, "build_owner_reply_prompt_view", None)
+            if callable(build_view):
+                view = build_view()
+        with contextlib.suppress(discord.Forbidden, discord.HTTPException):
+            message = await recipient.send(embed=embed, view=view)
+            return True, getattr(message, "id", None)
+        return False, None
+
+    async def handle_member_response_message(self, message: discord.Message):
+        guild = getattr(message, "guild", None)
+        author = getattr(message, "author", None)
+        if guild is None or author is None or not self.storage_ready:
+            return
+        reference = getattr(message, "reference", None)
+        target_message_id = getattr(reference, "message_id", None)
+        if not isinstance(target_message_id, int):
+            return
+        if not self._has_review_channel(guild.id):
+            return
+        target_submission = await self.store.fetch_submission_by_message_id(guild.id, target_message_id)
+        root_submission, referenced_submission = await self._resolve_public_reply_target(guild.id, target_submission)
+        if root_submission is None or referenced_submission is None:
+            return
+        owner_link = await self.store.fetch_author_link(root_submission["submission_id"])
+        owner_user_id = int((owner_link or {}).get("author_user_id") or 0)
+        if owner_user_id <= 0 or owner_user_id == int(getattr(author, "id", 0) or 0):
+            return
+        existing = await self.store.fetch_owner_reply_opportunity_by_source_message_id(guild.id, int(message.id))
+        if existing is not None:
+            return
+        now_iso = ge.now_utc().isoformat()
+        opportunity = {
+            "opportunity_id": secrets.token_hex(16),
+            "guild_id": guild.id,
+            "root_submission_id": root_submission["submission_id"],
+            "root_confession_id": root_submission["confession_id"],
+            "referenced_submission_id": referenced_submission["submission_id"],
+            "source_channel_id": int(message.channel.id),
+            "source_message_id": int(message.id),
+            "source_author_name": ge.display_name_of(author),
+            "source_preview": _owner_reply_source_preview(getattr(message, "content", None), getattr(message, "attachments", None)),
+            "status": "pending",
+            "notification_status": "none",
+            "notification_message_id": None,
+            "created_at": now_iso,
+            "expires_at": (ge.now_utc() + timedelta(seconds=OWNER_REPLY_OPPORTUNITY_TTL_SECONDS)).isoformat(),
+            "notified_at": None,
+            "resolved_at": None,
+        }
+        await self.store.upsert_owner_reply_opportunity(opportunity)
+        recent_rows = await self.store.list_owner_reply_opportunities_for_root_submission(root_submission["submission_id"], limit=10)
+        if self._owner_reply_notification_is_on_cooldown(recent_rows):
+            await self._update_owner_reply_notification(opportunity, status="cooldown")
+            return
+        sent, notification_message_id = await self._send_owner_reply_notification(
+            guild,
+            owner_user_id=owner_user_id,
+            opportunity=opportunity,
+            referenced_submission=referenced_submission,
+        )
+        if sent:
+            await self._update_owner_reply_notification(
+                opportunity,
+                status="sent",
+                notification_message_id=notification_message_id,
+                notified_at=ge.now_utc().isoformat(),
+            )
+            return
+        await self._update_owner_reply_notification(opportunity, status="failed")
+
+    async def _validate_owner_reply_opportunity(
+        self,
+        guild: discord.Guild,
+        opportunity: dict[str, Any],
+        *,
+        author_id: int,
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        if opportunity.get("status") != "pending":
+            return None, "That reply opportunity is no longer available."
+        expires_at = deserialize_datetime(opportunity.get("expires_at"))
+        if expires_at is None or expires_at <= ge.now_utc():
+            await self._expire_owner_reply_opportunity(opportunity)
+            return None, "That reply opportunity expired. Babblebox left the response anonymous and unchanged."
+        root_submission = await self.store.fetch_submission(opportunity["root_submission_id"])
+        if (
+            root_submission is None
+            or root_submission.get("status") != "published"
+            or root_submission.get("submission_kind") != "confession"
+        ):
+            await self._expire_owner_reply_opportunity(opportunity)
+            return None, "That confession is no longer available for owner replies."
+        owner_link = await self.store.fetch_author_link(root_submission["submission_id"])
+        if owner_link is None or int(owner_link.get("author_user_id") or 0) != int(author_id):
+            return None, "That reply opportunity does not belong to you."
+        referenced_submission = await self.store.fetch_submission(opportunity["referenced_submission_id"])
+        if referenced_submission is None or referenced_submission.get("status") != "published":
+            await self._expire_owner_reply_opportunity(opportunity)
+            return None, "That response is no longer available for an owner reply."
+        source_channel = guild.get_channel(opportunity["source_channel_id"]) or self.bot.get_channel(opportunity["source_channel_id"])
+        if source_channel is None:
+            await self._expire_owner_reply_opportunity(opportunity)
+            return None, "That response is no longer available for an owner reply."
+        source_message = await self._queue_message(source_channel, message_id=opportunity["source_message_id"])
+        if source_message is None:
+            await self._expire_owner_reply_opportunity(opportunity)
+            return None, "That response is no longer available for an owner reply."
+        return {
+            "guild": guild,
+            "opportunity": opportunity,
+            "root_submission": root_submission,
+            "referenced_submission": referenced_submission,
+            "source_channel": source_channel,
+            "source_message": source_message,
+            "source_jump_url": self._message_jump_url(guild.id, opportunity["source_channel_id"], opportunity["source_message_id"]),
+        }, None
+
+    async def get_owner_reply_opportunity_context(
+        self,
+        guild: discord.Guild,
+        *,
+        author_id: int,
+        opportunity_id: str,
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        cleaned_id = normalize_plain_text(opportunity_id)
+        if not cleaned_id:
+            return None, "That reply opportunity is no longer available."
+        opportunity = await self.store.fetch_owner_reply_opportunity(cleaned_id)
+        if opportunity is None or int(opportunity.get("guild_id") or 0) != int(guild.id):
+            return None, "That reply opportunity is no longer available."
+        return await self._validate_owner_reply_opportunity(guild, opportunity, author_id=author_id)
+
+    async def get_owner_reply_opportunity_context_from_notification_message(
+        self,
+        *,
+        notification_message_id: int,
+        author_id: int,
+    ) -> tuple[dict[str, Any] | None, str | None]:
+        opportunity = await self.store.fetch_owner_reply_opportunity_by_notification_message_id(notification_message_id)
+        if opportunity is None:
+            return None, "That reply prompt is no longer available."
+        guild = self.bot.get_guild(opportunity["guild_id"])
+        if guild is None:
+            return None, "That server is no longer available to Babblebox."
+        return await self._validate_owner_reply_opportunity(guild, opportunity, author_id=author_id)
+
+    async def list_pending_owner_reply_contexts(
+        self,
+        guild: discord.Guild,
+        *,
+        author_id: int,
+        limit: int = OWNER_REPLY_INBOX_LIMIT,
+    ) -> list[dict[str, Any]]:
+        rows = await self.store.list_pending_owner_reply_opportunities_for_author(guild.id, author_id, limit=max(limit * 3, limit))
+        contexts: list[dict[str, Any]] = []
+        for row in rows:
+            context, _ = await self._validate_owner_reply_opportunity(guild, row, author_id=author_id)
+            if context is not None:
+                contexts.append(context)
+            if len(contexts) >= limit:
+                break
+        return contexts
+
+    async def dismiss_owner_reply_opportunity(
+        self,
+        guild: discord.Guild,
+        *,
+        author_id: int,
+        opportunity_id: str,
+    ) -> tuple[bool, str]:
+        context, error = await self.get_owner_reply_opportunity_context(guild, author_id=author_id, opportunity_id=opportunity_id)
+        if context is None:
+            return False, error or "That reply opportunity is no longer available."
+        await self._dismiss_owner_reply_opportunity_record(context["opportunity"])
+        return True, "Babblebox dismissed that owner reply prompt privately."
+
+    async def dismiss_owner_reply_opportunity_from_notification(
+        self,
+        *,
+        notification_message_id: int,
+        author_id: int,
+    ) -> tuple[bool, str]:
+        context, error = await self.get_owner_reply_opportunity_context_from_notification_message(
+            notification_message_id=notification_message_id,
+            author_id=author_id,
+        )
+        if context is None:
+            return False, error or "That reply prompt is no longer available."
+        await self._dismiss_owner_reply_opportunity_record(context["opportunity"])
+        return True, "Babblebox dismissed that owner reply prompt privately."
+
+    async def mark_owner_reply_opportunity_used(
+        self,
+        guild: discord.Guild,
+        *,
+        author_id: int,
+        opportunity_id: str,
+    ) -> tuple[bool, str]:
+        context, error = await self.get_owner_reply_opportunity_context(guild, author_id=author_id, opportunity_id=opportunity_id)
+        if context is None:
+            return False, error or "That reply opportunity is no longer available."
+        await self._mark_owner_reply_opportunity_used_record(context["opportunity"])
+        return True, "Owner reply opportunity completed."
 
     def _format_channel_label(self, channel_id: int | None) -> str:
         return f"<#{channel_id}>" if isinstance(channel_id, int) else "Not set"
@@ -1765,6 +2137,92 @@ class ConfessionsService:
             actions.append("Edit is only available when admins enable it and the submission is still pending review.")
         embed.add_field(name="Available Actions", value="\n".join(actions), inline=False)
         return ge.style_embed(embed, footer="Babblebox Confessions | Private owner tools")
+
+    def _owner_reply_target_label(self, referenced_submission: dict[str, Any]) -> str:
+        if referenced_submission.get("submission_kind") == "confession":
+            return "your confession"
+        return "an anonymous reply on your confession"
+
+    def build_owner_reply_notification_embed(
+        self,
+        guild: discord.Guild,
+        opportunity: dict[str, Any],
+        referenced_submission: dict[str, Any],
+    ) -> discord.Embed:
+        target_label = self._owner_reply_target_label(referenced_submission)
+        embed = discord.Embed(
+            title="Someone responded to your confession",
+            description=(
+                f"**{opportunity['source_author_name']}** replied to {target_label} in **{guild.name}**. "
+                "You can answer anonymously without revealing yourself."
+            ),
+            color=ge.EMBED_THEME["info"],
+        )
+        embed.add_field(name="Confession", value=f"`{opportunity['root_confession_id']}`", inline=True)
+        embed.add_field(name="When", value=_owner_reply_opportunity_age_text(opportunity.get("created_at")), inline=True)
+        embed.add_field(name="Response", value=ge.safe_field_text(opportunity["source_preview"], limit=1024), inline=False)
+        embed.add_field(
+            name="Your Privacy",
+            value="Your reply stays anonymous. Babblebox may send it through private approval before posting.",
+            inline=False,
+        )
+        jump_url = self._message_jump_url(guild.id, opportunity.get("source_channel_id"), opportunity.get("source_message_id"))
+        if jump_url:
+            embed.add_field(name="Source", value=f"[Open response]({jump_url})", inline=False)
+        return ge.style_embed(embed, footer="Babblebox Confessions | Private owner prompt")
+
+    def build_owner_reply_inbox_embed(self, guild: discord.Guild, contexts: Sequence[dict[str, Any]]) -> discord.Embed:
+        if not contexts:
+            return ge.make_status_embed(
+                "Owner Reply Inbox",
+                "No current member responses are waiting for an owner reply. Babblebox will DM you if someone explicitly replies to your confession discussion and DMs are available.",
+                tone="info",
+                footer="Babblebox Confessions",
+            )
+        lines = []
+        for index, context in enumerate(contexts[:OWNER_REPLY_INBOX_LIMIT], start=1):
+            opportunity = context["opportunity"]
+            target_label = self._owner_reply_target_label(context["referenced_submission"])
+            lines.append(
+                f"**{index}. {opportunity['source_author_name']}** replied to {target_label} about `{opportunity['root_confession_id']}`.\n"
+                f"{ge.safe_field_text(opportunity['source_preview'], limit=120)}"
+            )
+        embed = discord.Embed(
+            title="Owner Reply Inbox",
+            description="Choose a member response below to review it privately and decide whether to answer anonymously.",
+            color=ge.EMBED_THEME["info"],
+        )
+        embed.add_field(name="Pending Responses", value="\n\n".join(lines), inline=False)
+        embed.add_field(
+            name="Privacy",
+            value="Your reply stays anonymous. Babblebox may send it through private approval before posting.",
+            inline=False,
+        )
+        return ge.style_embed(embed, footer="Babblebox Confessions | Private owner prompt")
+
+    def build_owner_reply_detail_embed(self, guild: discord.Guild, context: dict[str, Any]) -> discord.Embed:
+        opportunity = context["opportunity"]
+        target_label = self._owner_reply_target_label(context["referenced_submission"])
+        embed = discord.Embed(
+            title="Reply to Member Anonymously",
+            description=(
+                f"**{opportunity['source_author_name']}** replied to {target_label}. "
+                "Babblebox verified privately that this confession belongs to you."
+            ),
+            color=ge.EMBED_THEME["info"],
+        )
+        embed.add_field(name="Confession", value=f"`{opportunity['root_confession_id']}`", inline=True)
+        embed.add_field(name="Age", value=_owner_reply_opportunity_age_text(opportunity.get("created_at")), inline=True)
+        embed.add_field(name="Response", value=ge.safe_field_text(opportunity["source_preview"], limit=1024), inline=False)
+        jump_url = context.get("source_jump_url")
+        if jump_url:
+            embed.add_field(name="Source", value=f"[Open response]({jump_url})", inline=False)
+        embed.add_field(
+            name="Your Privacy",
+            value="Your reply stays anonymous. Babblebox may send it through private approval before posting. Owner replies stay text-only.",
+            inline=False,
+        )
+        return ge.style_embed(embed, footer="Babblebox Confessions | Private owner prompt")
 
     async def self_delete_confession(
         self,
@@ -2013,7 +2471,9 @@ class ConfessionsService:
             return "Your confession was posted without your name attached."
         if result.state == "queued":
             if result.submission_kind == "reply" and result.parent_confession_id:
-                return f"Your reply to `{result.parent_confession_id}` was received and queued for private review."
+                return (
+                    f"Your anonymous reply to `{result.parent_confession_id}` stays anonymous and may go through private approval before posting."
+                )
             return "Your confession was received and queued for private review."
         if result.state == "restricted":
             return result.message
@@ -2099,7 +2559,8 @@ class ConfessionsService:
             value=(
                 "Run `/confess create` or tap **Send Confession**.\n"
                 "Add text and at most one trusted link.\n"
-                "Reply from a live confession post when replies are enabled.\n"
+                "Use **Reply to confession anonymously** from a live confession post when replies are enabled.\n"
+                "If someone explicitly replies to your confession discussion, Babblebox can privately offer you an anonymous owner reply.\n"
                 "Use **Manage My Confession** to delete your own submission privately.\n"
                 "Use **Appeal / Report** for false positives, restrictions, or problem reports when this server has private support configured.\n"
                 "Images and anonymous replies stay off by default unless admins explicitly enable them."
@@ -2152,7 +2613,7 @@ class ConfessionsService:
             else "Text and one trusted link total. Images are off by default unless admins explicitly enable them."
         )
         reply_line = (
-            "Anonymous replies are enabled with extra moderation burden, so every reply stays text-only, launches from a live confession post, and goes through private review."
+            "Reply to confession anonymously is enabled with extra moderation burden, so every reply stays anonymous, text-only, launches from a live confession post, and may go through private approval before posting."
             if config["allow_anonymous_replies"]
             else "Anonymous replies are off by default unless admins explicitly enable them."
         )
@@ -2180,6 +2641,7 @@ class ConfessionsService:
             name="Owner Controls",
             value=(
                 "Use `/confess create` whenever you want the direct private composer.\n"
+                "Use `/confess reply-to-user` to review member responses to your confession and answer anonymously.\n"
                 "You can privately delete your own confession or reply.\n"
                 "Self-edit is only available if this server enables it and the submission is still pending review."
             ),
@@ -3046,6 +3508,9 @@ class ConfessionsService:
     async def handle_raw_message_delete(self, payload: discord.RawMessageDeleteEvent):
         if payload.guild_id is None:
             return
+        source_opportunity = await self.store.fetch_owner_reply_opportunity_by_source_message_id(payload.guild_id, payload.message_id)
+        if source_opportunity is not None and source_opportunity.get("status") == "pending":
+            await self._expire_owner_reply_opportunity(source_opportunity)
         submission = await self.store.fetch_submission_by_message_id(payload.guild_id, payload.message_id)
         if submission is None:
             return
@@ -3054,6 +3519,10 @@ class ConfessionsService:
         submission["posted_message_id"] = None
         submission["resolved_at"] = ge.now_utc().isoformat()
         await self.store.upsert_submission(submission)
+        related_opportunities = await self.store.list_owner_reply_opportunities_for_submission(submission["submission_id"], limit=50)
+        for opportunity in related_opportunities:
+            if opportunity.get("status") == "pending":
+                await self._expire_owner_reply_opportunity(opportunity)
 
     async def build_status_embed(self, guild: discord.Guild) -> discord.Embed:
         return await self.build_dashboard_embed(guild, section="overview")

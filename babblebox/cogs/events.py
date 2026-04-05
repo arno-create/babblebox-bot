@@ -45,6 +45,7 @@ class EventsCog(commands.Cog):
 
         utility_service = getattr(self.bot, "utility_service", None)
         shield_service = getattr(self.bot, "shield_service", None)
+        confessions_service = getattr(self.bot, "confessions_service", None)
         question_drops_service = getattr(self.bot, "question_drops_service", None)
         author_afk = None
         if utility_service is not None:
@@ -101,6 +102,8 @@ class EventsCog(commands.Cog):
         if utility_service is not None:
             await utility_service.handle_watch_message(message)
             await utility_service.handle_return_watch_message(message)
+        if confessions_service is not None and message.guild is not None:
+            await confessions_service.handle_member_response_message(message)
         if question_drops_service is not None:
             question_drops_service.observe_message_activity(message)
 

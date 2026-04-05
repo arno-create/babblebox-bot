@@ -288,7 +288,7 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual({option["name"] for option in drops_payload["options"]}, {"leaderboard", "roles", "stats", "status"})
         self.assertEqual(
             {option["name"] for option in confess_payload["options"]},
-            {"about", "appeal", "create", "manage", "report"},
+            {"about", "appeal", "create", "manage", "reply-to-user", "report"},
         )
 
     async def test_registered_tree_requires_instance_hardening_for_hybrid_root_visibility(self):
