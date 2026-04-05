@@ -5,6 +5,7 @@ import random
 import re
 from collections import Counter
 from dataclasses import dataclass
+from decimal import Decimal, InvalidOperation
 from typing import Any, Callable
 
 
@@ -52,6 +53,12 @@ _ANSWER_LEAD_RE = re.compile(
 _URL_RE = re.compile(r"https?://|\bdiscord\.gg/\S+", re.IGNORECASE)
 _MENTION_RE = re.compile(r"<[@#]&?\d+>")
 _NUMBER_WORD_RE = re.compile(r"[a-z]+", re.IGNORECASE)
+_DIVISIBILITY_PROMPT_RE = re.compile(r"^Which number is divisible by (\d+)\? A\) (\d+) B\) (\d+) C\) (\d+)$")
+_AVERAGE_PROMPT_RE = re.compile(r"^Find the average: ([\d,\s]+)$")
+_MEDIAN_PROMPT_RE = re.compile(r"^Find the median: ([\d,\s]+)$")
+_PERCENT_CHANGE_PROMPT_RE = re.compile(r"^A \$(\d+) item is discounted by (\d+)%\. What is the sale price\?$")
+_ANAGRAM_PROMPT_RE = re.compile(r"^Unscramble the clue-backed word\. Clue: (.+?) Letters: \*\*([A-Z]+)\*\*$")
+QUESTION_DROP_VALIDATION_VARIANTS_PER_GENERATOR = 24
 _CHATTER_LEAD_TOKENS = {
     "and",
     "because",
@@ -195,6 +202,38 @@ def extract_single_number(raw: str | None) -> float | None:
         return None
 
 
+def _decimal_from_numeric_value(value: Any) -> Decimal | None:
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
+        return None
+    try:
+        decimal_value = Decimal(str(value))
+    except InvalidOperation:
+        return None
+    if not decimal_value.is_finite():
+        return None
+    return decimal_value
+
+
+def _format_decimal_value(value: Decimal) -> str:
+    if value == value.to_integral_value():
+        return str(int(value))
+    text = format(value.normalize(), "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text or "0"
+
+
+def _json_numeric_value(value: Decimal) -> int | float:
+    if value == value.to_integral_value():
+        return int(value)
+    return float(_format_decimal_value(value))
+
+
+def _numeric_words_allowed(answer_spec: dict[str, Any]) -> bool:
+    expected = _decimal_from_numeric_value(answer_spec.get("value"))
+    return expected is not None and expected == expected.to_integral_value()
+
+
 def _strip_trailing_terminal_punctuation(raw: str | None) -> str:
     return str(raw or "").strip().rstrip(".!?").strip()
 
@@ -263,18 +302,19 @@ def _parse_number_word_tokens(words: list[str]) -> int | None:
     return sign * ((_NUMBER_WORDS[head] * 100) + tail_value)
 
 
-def _parse_clean_numeric_payload(raw: str | None) -> float | None:
+def _parse_clean_numeric_payload(raw: str | None, *, allow_number_words: bool = True) -> Decimal | None:
     content = _strip_trailing_terminal_punctuation(raw)
     if not content:
         return None
     if _EXACT_NUMERIC_RE.fullmatch(content):
         try:
-            return float(content.replace(",", ""))
-        except ValueError:
+            return Decimal(content.replace(",", ""))
+        except InvalidOperation:
             return None
-    word_value = _parse_number_words_exact(content)
-    if word_value is not None:
-        return float(word_value)
+    if allow_number_words:
+        word_value = _parse_number_words_exact(content)
+        if word_value is not None:
+            return Decimal(word_value)
     return None
 
 
@@ -347,7 +387,7 @@ def validate_answer_spec(spec: dict[str, Any]) -> tuple[bool, str | None]:
             return False, "Text answers need at least one accepted alias."
         return True, None
     if answer_type == "numeric":
-        if not isinstance(spec.get("value"), (int, float)):
+        if _decimal_from_numeric_value(spec.get("value")) is None:
             return False, "Numeric answers need a numeric value."
         return True, None
     if answer_type == "boolean":
@@ -361,6 +401,8 @@ def validate_answer_spec(spec: dict[str, Any]) -> tuple[bool, str | None]:
         normalized_answer = normalize_answer_text(answer) if isinstance(answer, str) else ""
         if len(normalized_choices) < 2 or not all(normalized_choices):
             return False, "Multiple-choice answers need at least two non-empty options."
+        if len(set(normalized_choices)) != len(normalized_choices):
+            return False, "Multiple-choice answers need distinct options."
         if not normalized_answer:
             return False, "Multiple-choice answers need a correct option."
         if normalized_answer not in normalized_choices:
@@ -383,10 +425,13 @@ def judge_answer(answer_spec: dict[str, Any], raw_answer: str | None) -> bool:
         accepted = {normalize_answer_text(item) for item in answer_spec.get("accepted", []) if isinstance(item, str)}
         return any(bool(normalize_answer_text(candidate)) and normalize_answer_text(candidate) in accepted for candidate in candidates)
     if answer_type == "numeric":
-        expected = float(answer_spec["value"])
+        expected = _decimal_from_numeric_value(answer_spec.get("value"))
+        if expected is None:
+            return False
+        allow_number_words = expected == expected.to_integral_value()
         return any(
-            candidate is not None and abs(candidate - expected) < 1e-9
-            for candidate in (_parse_clean_numeric_payload(item) for item in candidates)
+            candidate is not None and candidate == expected
+            for candidate in (_parse_clean_numeric_payload(item, allow_number_words=allow_number_words) for item in candidates)
         )
     if answer_type == "boolean":
         if answer_spec.get("value") is True:
@@ -428,7 +473,10 @@ def is_answer_attempt(answer_spec: dict[str, Any], raw_answer: str | None, *, di
                 return True
         return False
     if answer_type == "numeric":
-        return any(_parse_clean_numeric_payload(candidate) is not None for candidate in candidates)
+        return any(
+            _parse_clean_numeric_payload(candidate, allow_number_words=_numeric_words_allowed(answer_spec)) is not None
+            for candidate in candidates
+        )
     if answer_type == "boolean":
         normalized_values = {normalize_answer_text(candidate) for candidate in candidates if normalize_answer_text(candidate)}
         return bool(normalized_values.intersection(TRUE_ALIASES | FALSE_ALIASES))
@@ -466,10 +514,8 @@ def render_answer_summary(answer_spec: dict[str, Any]) -> str:
         accepted = [normalize_answer_text(item) for item in answer_spec.get("accepted", []) if isinstance(item, str)]
         return accepted[0] if accepted else "unknown"
     if answer_type == "numeric":
-        value = answer_spec.get("value")
-        if isinstance(value, float) and value.is_integer():
-            return str(int(value))
-        return str(value)
+        value = _decimal_from_numeric_value(answer_spec.get("value"))
+        return _format_decimal_value(value) if value is not None else "unknown"
     if answer_type == "boolean":
         return "true" if answer_spec.get("value") else "false"
     if answer_type == "multiple_choice":
@@ -486,7 +532,9 @@ def render_answer_instruction(answer_spec: dict[str, Any]) -> str:
     if answer_type == "multiple_choice":
         return "Reply here or send the option text. The correct letter also works: `C` or `option c`."
     if answer_type == "numeric":
-        return "Reply here or send just the number. Clean digits or simple number words both count."
+        if _numeric_words_allowed(answer_spec):
+            return "Reply here or send just the number. Clean digits work, and simple number words also count for whole-number answers."
+        return "Reply here or send just the number. Use digits for decimals, like `14.4`."
     if answer_type == "boolean":
         return "Reply here or send `true` / `false` or `yes` / `no`."
     if answer_type == "ordered_tokens":
@@ -785,8 +833,18 @@ def _math_divisibility(seed: dict[str, Any], *, seed_material: str, variant_inde
     rng = _make_rng(f"{seed_material}:{seed['concept_id']}:{variant_index}")
     divisor = rng.choice((3, 4, 5, 6, 8, 9))
     correct = divisor * rng.randint(6, 14)
-    wrong_a = correct + rng.choice((1, 2, 4, 5, 7))
-    wrong_b = correct + rng.choice((3, 5, 6, 8))
+
+    def pick_wrong(existing: set[int]) -> int:
+        offsets = [offset for offset in range(-11, 12) if offset != 0 and (correct + offset) > 0 and (correct + offset) % divisor != 0]
+        while True:
+            candidate = correct + rng.choice(offsets)
+            if candidate not in existing:
+                return candidate
+
+    existing = {correct}
+    wrong_a = pick_wrong(existing)
+    existing.add(wrong_a)
+    wrong_b = pick_wrong(existing)
     options = [str(correct), str(wrong_a), str(wrong_b)]
     rng.shuffle(options)
     prompt = f"Which number is divisible by {divisor}? A) {options[0]} B) {options[1]} C) {options[2]}"
@@ -807,10 +865,9 @@ def _math_percent_change(seed: dict[str, Any], *, seed_material: str, variant_in
     rng = _make_rng(f"{seed_material}:{seed['concept_id']}:{variant_index}")
     base_price = rng.choice((20, 24, 30, 32, 36, 40, 48, 60, 72))
     percent = rng.choice((10, 15, 20, 25, 30, 40))
-    discount = int(base_price * (percent / 100.0))
-    sale_price = base_price - discount
+    sale_price = Decimal(base_price) * (Decimal("1") - (Decimal(percent) / Decimal("100")))
     prompt = f"A ${base_price} item is discounted by {percent}%. What is the sale price?"
-    return _build_numeric_variant(seed, prompt=prompt, answer=sale_price)
+    return _build_numeric_variant(seed, prompt=prompt, answer=_json_numeric_value(sale_price))
 
 
 def _math_average_or_median(seed: dict[str, Any], *, seed_material: str, variant_index: int) -> QuestionDropVariant:
@@ -824,8 +881,12 @@ def _math_average_or_median(seed: dict[str, Any], *, seed_material: str, variant
         step = rng.randint(2, 6)
         values = [start + (step * index) for index in range(4)]
         prompt = f"Find the average: {', '.join(str(value) for value in values)}"
-        answer = sum(values) // len(values)
-    return _build_numeric_variant(seed, prompt=prompt, answer=answer)
+        answer = Decimal(sum(values)) / Decimal(len(values))
+    if isinstance(answer, Decimal):
+        answer_value = _json_numeric_value(answer)
+    else:
+        answer_value = answer
+    return _build_numeric_variant(seed, prompt=prompt, answer=answer_value)
 
 
 def _math_algebra_lite(seed: dict[str, Any], *, seed_material: str, variant_index: int) -> QuestionDropVariant:
@@ -904,7 +965,7 @@ def _logic_odd_one_out(seed: dict[str, Any], *, seed_material: str, variant_inde
     sets = (
         (["violin", "flute", "clarinet"], "violin", "Which is the odd one out? A) violin B) flute C) clarinet"),
         (["triangle", "square", "circle"], "circle", "Which is the odd one out? A) triangle B) square C) circle"),
-        (["january", "march", "may"], "march", "Which is the odd one out? A) january B) march C) may"),
+        (["whale", "sparrow", "maple"], "maple", "Which is the odd one out? A) whale B) sparrow C) maple"),
         (["gold", "silver", "birch"], "birch", "Which is the odd one out? A) gold B) silver C) birch"),
     )
     choices, answer, prompt = sets[rng.randrange(len(sets))]
@@ -1020,23 +1081,31 @@ def _logic_rotation(seed: dict[str, Any], *, seed_material: str, variant_index: 
 
 def _language_anagram(seed: dict[str, Any], *, seed_material: str, variant_index: int) -> QuestionDropVariant:
     rng = _make_rng(f"{seed_material}:{seed['concept_id']}:{variant_index}")
-    payload = rng.choice(
-        (
-            ("silent", "listen"),
-            ("secure", "rescue"),
-            ("later", "alter"),
-            ("heart", "earth"),
-            ("tears", "stare"),
-            ("night", "thing"),
-            ("save", "vase"),
-            ("stone", "tones"),
-            ("spear", "spare"),
-            ("angel", "glean"),
-            ("friend", "finder"),
-        )
+    targets = (
+        ("planet", "a world that orbits a star"),
+        ("camera", "a device used to take photos"),
+        ("island", "land surrounded by water"),
+        ("winter", "the coldest season"),
+        ("garden", "a place where flowers or vegetables grow"),
+        ("silver", "a gray-white precious metal"),
+        ("bridge", "a structure used to cross a river"),
+        ("library", "a place full of books"),
+        ("rocket", "a vehicle launched into space"),
+        ("blanket", "a soft cover used for warmth"),
+        ("harvest", "the season or act of gathering crops"),
     )
-    prompt = f"Unscramble this word into a real English word: **{payload[1]}**"
-    return _build_text_variant(seed, prompt=prompt, accepted=[payload[0]])
+    target, clue = targets[rng.randrange(len(targets))]
+    letters = list(target.upper())
+    scrambled = target.upper()
+    for _ in range(12):
+        rng.shuffle(letters)
+        scrambled = "".join(letters)
+        if scrambled != target.upper():
+            break
+    if scrambled == target.upper():
+        scrambled = target.upper()[::-1]
+    prompt = f"Unscramble the clue-backed word. Clue: {clue}. Letters: **{scrambled}**"
+    return _build_text_variant(seed, prompt=prompt, accepted=[target])
 
 
 GENERATOR_HANDLERS: dict[str, Callable[..., QuestionDropVariant]] = {
@@ -1119,8 +1188,8 @@ QUESTION_DROP_SEEDS: tuple[dict[str, Any], ...] = (
         "science",
         2,
         "science.ecology",
-        _variant("In a simple food chain, what comes right after a producer?", _text_spec("primary consumer", "consumer", "herbivore")),
-        _variant("A producer is eaten by what kind of consumer first?", _text_spec("primary consumer", "consumer", "herbivore")),
+        _variant("In a simple food chain, what comes right after a producer?", _text_spec("primary consumer", "first consumer", "herbivore")),
+        _variant("A producer is eaten by what kind of consumer first?", _text_spec("primary consumer", "first consumer", "herbivore")),
     ),
     _static_seed(
         "science:experiment-control",
@@ -1397,7 +1466,7 @@ QUESTION_DROP_SEEDS: tuple[dict[str, Any], ...] = (
         "language",
         2,
         "language.analogy",
-        _variant("Book is to read as song is to ___", _text_spec("listen", "listening", "hear")),
+        _variant("Book is to read as song is to ___", _text_spec("listen", "listen to", "listening")),
         _variant("Page is to book as note is to ___", _text_spec("song", "music")),
     ),
     _static_seed(
@@ -1539,6 +1608,75 @@ def question_drop_seed_for_concept(concept_id: str | None) -> dict[str, Any] | N
     return QUESTION_DROP_SEED_BY_CONCEPT_ID.get(str(concept_id or ""))
 
 
+def _parse_prompt_number_list(raw: str) -> list[int]:
+    return [int(token.strip()) for token in raw.split(",") if token.strip()]
+
+
+def _audit_generated_variant(seed: dict[str, Any], variant: QuestionDropVariant) -> str | None:
+    generator_type = str(seed.get("generator_type") or "")
+    if generator_type == "math_percent_change":
+        match = _PERCENT_CHANGE_PROMPT_RE.fullmatch(variant.prompt)
+        if match is None:
+            return "Percent-change prompt format is invalid."
+        base_price = Decimal(match.group(1))
+        percent = Decimal(match.group(2))
+        expected = base_price * (Decimal("1") - (percent / Decimal("100")))
+        actual = _decimal_from_numeric_value(variant.answer_spec.get("value"))
+        if actual != expected:
+            return f"Expected sale price {_format_decimal_value(expected)}, got {render_answer_summary(variant.answer_spec)}."
+        return None
+
+    if generator_type == "math_average_or_median":
+        average_match = _AVERAGE_PROMPT_RE.fullmatch(variant.prompt)
+        if average_match is not None:
+            values = _parse_prompt_number_list(average_match.group(1))
+            expected = Decimal(sum(values)) / Decimal(len(values))
+        else:
+            median_match = _MEDIAN_PROMPT_RE.fullmatch(variant.prompt)
+            if median_match is None:
+                return "Average-or-median prompt format is invalid."
+            values = sorted(_parse_prompt_number_list(median_match.group(1)))
+            expected = Decimal(values[len(values) // 2])
+        actual = _decimal_from_numeric_value(variant.answer_spec.get("value"))
+        if actual != expected:
+            return f"Expected {_format_decimal_value(expected)}, got {render_answer_summary(variant.answer_spec)}."
+        return None
+
+    if generator_type == "math_divisibility":
+        match = _DIVISIBILITY_PROMPT_RE.fullmatch(variant.prompt)
+        if match is None:
+            return "Divisibility prompt format is invalid."
+        divisor = int(match.group(1))
+        options = [int(match.group(index)) for index in range(2, 5)]
+        divisible = [option for option in options if option % divisor == 0]
+        if len(set(options)) != 3:
+            return "Divisibility options must be distinct."
+        if len(divisible) != 1:
+            return "Divisibility prompt must have exactly one correct option."
+        if str(divisible[0]) != str(variant.answer_spec.get("answer")):
+            return "Divisibility answer spec does not match the only valid option."
+        return None
+
+    if generator_type == "language_anagram":
+        match = _ANAGRAM_PROMPT_RE.fullmatch(variant.prompt)
+        if match is None:
+            return "Anagram prompt format is invalid."
+        accepted = [str(item).strip().casefold() for item in variant.answer_spec.get("accepted", []) if isinstance(item, str)]
+        if len(accepted) != 1:
+            return "Anagram prompts must have a single intended answer."
+        target = accepted[0]
+        scrambled = match.group(2).casefold()
+        if sorted(target) != sorted(scrambled):
+            return "Anagram letters do not match the target answer."
+        if target == scrambled:
+            return "Anagram letters must be scrambled."
+        if target in normalize_answer_text(variant.prompt):
+            return "Anagram prompt leaks the answer."
+        return None
+
+    return None
+
+
 def validate_content_pack(seeds: tuple[dict[str, Any], ...] | None = None) -> tuple[bool, str | None]:
     checked = seeds or QUESTION_DROP_SEEDS
     seen_ids: set[str] = set()
@@ -1571,6 +1709,19 @@ def validate_content_pack(seeds: tuple[dict[str, Any], ...] | None = None) -> tu
                 valid, message = validate_answer_spec(payload.get("answer_spec", {}))
                 if not valid:
                     return False, f"Seed '{concept_id}' has an invalid answer spec: {message}"
+        else:
+            for variant_index in range(QUESTION_DROP_VALIDATION_VARIANTS_PER_GENERATOR):
+                try:
+                    variant = build_variant(
+                        seed,
+                        seed_material=f"validation:{concept_id}",
+                        variant_index=variant_index,
+                    )
+                except Exception as exc:
+                    return False, f"Seed '{concept_id}' failed to build validation variant {variant_index}: {exc}"
+                message = _audit_generated_variant(seed, variant)
+                if message is not None:
+                    return False, f"Seed '{concept_id}' failed generated audit at variant {variant_index}: {message}"
     return True, None
 
 

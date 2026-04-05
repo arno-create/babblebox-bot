@@ -17,13 +17,19 @@ from babblebox.question_drops_content import (
     QUESTION_DROP_DIFFICULTY_PROFILES,
     QUESTION_DROP_SEEDS,
     QuestionDropVariant,
+    _language_anagram,
+    _math_average_or_median,
+    _math_divisibility,
+    _math_percent_change,
     answer_points_for_difficulty,
     build_variant,
     is_answer_attempt,
     iter_candidate_variants,
     judge_answer,
     normalize_answer_text,
+    question_drop_seed_for_concept,
     render_answer_instruction,
+    render_answer_summary,
     validate_content_pack,
 )
 from babblebox.question_drops_service import QuestionDropsService
@@ -161,6 +167,19 @@ class DummyDeletePayload:
 
 
 class QuestionDropsContentTests(unittest.TestCase):
+    def _seed_for(self, concept_id: str) -> dict[str, object]:
+        seed = question_drop_seed_for_concept(concept_id)
+        self.assertIsNotNone(seed)
+        return seed
+
+    def _find_variant_by_prompt(self, concept_id: str, builder, prompt: str) -> QuestionDropVariant:
+        seed = self._seed_for(concept_id)
+        for variant_index in range(400):
+            variant = builder(seed, seed_material="regression", variant_index=variant_index)
+            if variant.prompt == prompt:
+                return variant
+        self.fail(f"Could not build expected prompt for {concept_id}: {prompt}")
+
     def _correct_answer_text(self, answer_spec: dict[str, object]) -> str:
         answer_type = str(answer_spec.get("type"))
         if answer_type == "text":
@@ -288,6 +307,25 @@ class QuestionDropsContentTests(unittest.TestCase):
         self.assertFalse(judge_answer({"type": "ordered_tokens", "tokens": ["red", "blue", "green"]}, "green, blue, red"))
         self.assertEqual(normalize_answer_text("  Hello,  World! "), "hello world")
 
+    def test_decimal_numeric_judging_accepts_equivalent_clean_inputs_only(self):
+        answer_spec = {"type": "numeric", "value": 14.4}
+
+        self.assertTrue(judge_answer(answer_spec, "14.4"))
+        self.assertTrue(judge_answer(answer_spec, "14.40"))
+        self.assertTrue(judge_answer(answer_spec, "answer: 14.4"))
+        self.assertFalse(judge_answer(answer_spec, "14"))
+        self.assertFalse(judge_answer(answer_spec, "15"))
+        self.assertFalse(judge_answer(answer_spec, "fourteen point four"))
+
+    def test_decimal_numeric_attempt_gate_and_rendering_stay_truthful(self):
+        answer_spec = {"type": "numeric", "value": 14.4}
+
+        self.assertTrue(is_answer_attempt(answer_spec, "14.4"))
+        self.assertTrue(is_answer_attempt(answer_spec, "answer 14.40"))
+        self.assertFalse(is_answer_attempt(answer_spec, "fourteen point four"))
+        self.assertIn("Use digits for decimals", render_answer_instruction(answer_spec))
+        self.assertEqual(render_answer_summary(answer_spec), "14.4")
+
     def test_answer_attempt_gate_accepts_clean_guesses_and_rejects_chatter(self):
         text_spec = {"type": "text", "accepted": ["mars"]}
         self.assertTrue(is_answer_attempt(text_spec, "venus"))
@@ -323,6 +361,81 @@ class QuestionDropsContentTests(unittest.TestCase):
         self.assertIn("true", render_answer_instruction({"type": "boolean", "value": True}))
         self.assertIn("full sequence", render_answer_instruction({"type": "ordered_tokens", "tokens": ["red", "blue"]}))
         self.assertIn("short clean answer", render_answer_instruction({"type": "text", "accepted": ["mars"]}))
+
+    def test_percent_change_generator_hits_exact_sale_price_regressions(self):
+        expected = {
+            "A $24 item is discounted by 40%. What is the sale price?": "14.4",
+            "A $48 item is discounted by 20%. What is the sale price?": "38.4",
+            "A $72 item is discounted by 10%. What is the sale price?": "64.8",
+            "A $30 item is discounted by 40%. What is the sale price?": "18",
+        }
+
+        for prompt, answer in expected.items():
+            with self.subTest(prompt=prompt):
+                variant = self._find_variant_by_prompt("math:percent-change", _math_percent_change, prompt)
+                self.assertEqual(render_answer_summary(variant.answer_spec), answer)
+                self.assertTrue(judge_answer(variant.answer_spec, answer))
+
+    def test_average_generator_keeps_decimal_half_values(self):
+        target_prompt = "Find the average: 5, 8, 11, 14"
+        variant = self._find_variant_by_prompt("math:average-or-median", _math_average_or_median, target_prompt)
+
+        self.assertEqual(render_answer_summary(variant.answer_spec), "9.5")
+        self.assertTrue(judge_answer(variant.answer_spec, "9.5"))
+        self.assertFalse(judge_answer(variant.answer_spec, "9"))
+
+    def test_average_generator_still_handles_integer_averages(self):
+        seed = self._seed_for("math:average-or-median")
+        found_integer_average = False
+        for variant_index in range(120):
+            variant = _math_average_or_median(seed, seed_material="regression", variant_index=variant_index)
+            if variant.prompt.startswith("Find the average: ") and "." not in render_answer_summary(variant.answer_spec):
+                found_integer_average = True
+                self.assertTrue(judge_answer(variant.answer_spec, render_answer_summary(variant.answer_spec)))
+                break
+        self.assertTrue(found_integer_average)
+
+    def test_divisibility_generator_has_one_distinct_correct_choice(self):
+        seed = self._seed_for("math:divisibility")
+
+        for variant_index in range(48):
+            variant = _math_divisibility(seed, seed_material="regression", variant_index=variant_index)
+            with self.subTest(variant_index=variant_index):
+                choices = [int(choice) for choice in variant.answer_spec["choices"]]
+                divisor = int(variant.prompt.split(" by ")[1].split("?")[0])
+                divisible = [choice for choice in choices if choice % divisor == 0]
+                self.assertEqual(len(set(choices)), len(choices))
+                self.assertEqual(len(divisible), 1)
+                self.assertEqual(str(divisible[0]), str(variant.answer_spec["answer"]))
+
+    def test_language_anagram_variants_are_clue_backed_and_unambiguous(self):
+        seed = self._seed_for("language:anagram")
+
+        for variant_index in range(24):
+            variant = _language_anagram(seed, seed_material="regression", variant_index=variant_index)
+            with self.subTest(variant_index=variant_index):
+                self.assertIn("Unscramble the clue-backed word.", variant.prompt)
+                self.assertIn("Clue:", variant.prompt)
+                self.assertEqual(len(variant.answer_spec["accepted"]), 1)
+                answer = variant.answer_spec["accepted"][0]
+                self.assertTrue(judge_answer(variant.answer_spec, answer))
+
+    def test_curated_aliases_stay_specific(self):
+        food_chain_variant = next(
+            variant
+            for variant in iter_candidate_variants(categories={"science"}, seed_material="curated", variants_per_seed=2)
+            if variant.concept_id == "science:food-chain" and "producer" in variant.prompt
+        )
+        self.assertTrue(judge_answer(food_chain_variant.answer_spec, "primary consumer"))
+        self.assertFalse(judge_answer(food_chain_variant.answer_spec, "consumer"))
+
+        analogy_variant = next(
+            variant
+            for variant in iter_candidate_variants(categories={"language"}, seed_material="curated", variants_per_seed=2)
+            if variant.concept_id == "language:book-song-analogy" and "Book is to read" in variant.prompt
+        )
+        self.assertTrue(judge_answer(analogy_variant.answer_spec, "listen"))
+        self.assertFalse(judge_answer(analogy_variant.answer_spec, "hear"))
 
 
 class QuestionDropsPostgresDecodeTests(unittest.TestCase):
@@ -901,6 +1014,29 @@ class QuestionDropsServiceTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
         self.assertIn("Solved", self.channel.sent[-1][1]["embed"].title)
+
+    async def test_decimal_numeric_drop_accepts_equivalent_decimal_and_surfaces_clean_summary(self):
+        variant = QuestionDropVariant(
+            concept_id="math:decimal-sale",
+            category="math",
+            difficulty=3,
+            source_type="generated",
+            generator_type="math_percent_change",
+            prompt="A $24 item is discounted by 40%. What is the sale price?",
+            answer_spec={"type": "numeric", "value": 14.4},
+            variant_hash="decimal-sale",
+        )
+        self.service._select_variant = lambda *args, **kwargs: variant
+        active = await self._post_one_drop()
+
+        handled = await self.service.handle_message(
+            DummyMessage(guild=self.guild, channel=self.channel, author=DummyUser(46), content="14.40")
+        )
+
+        self.assertTrue(handled)
+        self.assertEqual(active["answer_spec"]["value"], 14.4)
+        self.assertIn("**14.4**", self.channel.sent[-1][1]["embed"].description)
+        self.bot.profile_service.record_question_drop_results_batch.assert_awaited_once()
 
     async def test_first_try_correct_solve_skips_participant_persist_write(self):
         active = await self._post_one_drop()

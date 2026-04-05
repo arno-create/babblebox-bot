@@ -22,6 +22,7 @@
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
   <link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Sora:wght@500;600;700&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="assets/site-shell.css" />
   <style>
     :root {
       --line: rgba(169, 190, 255, 0.14);
@@ -559,28 +560,78 @@
   </style>
 </head>
 <body>
-  <div class="nav-shell">
+  <div class="site-nav-shell" data-site-nav>
     <div class="container">
-      <nav aria-label="Primary">
-        <a class="brand" href="index.html" aria-label="Babblebox home">
-          <img src="logo.jpg" alt="Babblebox logo" />
-          <span>
-            <span class="brand-title">Babblebox</span>
-            <span class="brand-subtitle">Terms of Service</span>
-          </span>
-        </a>
-        <div class="nav-links">
-          <a href="#overview">Overview</a>
-          <a href="#service">Service</a>
-          <a href="#responsibilities">Responsibilities</a>
-          <a href="#content">Content</a>
-          <a href="#availability">Availability</a>
-          <a href="#contact">Contact</a>
+      <nav class="site-nav" aria-label="Primary">
+        <div class="site-nav-desktop">
+          <div class="site-nav-desktop-main">
+            <a class="site-brand" href="index.html" aria-label="Babblebox home">
+              <img src="logo.jpg" alt="Babblebox logo" />
+              <span class="site-brand-copy">
+                <span class="site-brand-title">Babblebox</span>
+                <span class="site-brand-subtitle">Terms of Service</span>
+              </span>
+            </a>
+            <div class="site-nav-links">
+              <a href="#overview">Overview</a>
+              <a href="#service">Service</a>
+              <a href="#responsibilities">Responsibilities</a>
+              <a href="#content">Content</a>
+              <a href="#availability">Availability</a>
+              <a href="#contact">Contact</a>
+            </div>
+          </div>
+          <div class="site-nav-actions">
+            <a class="site-nav-quiet" href="help.html">Help</a>
+            <a class="site-nav-quiet" href="privacy.html">Privacy Policy</a>
+            <a class="site-nav-quiet" href="https://github.com/arno-create/babblebox-bot" target="_blank" rel="noopener noreferrer">GitHub</a>
+            <a class="btn btn-secondary" href="index.html">Back to Website</a>
+          </div>
         </div>
-        <div class="nav-actions">
-          <a class="nav-quiet" href="help.html">Help</a>
-          <a class="nav-quiet" href="privacy.html">Privacy Policy</a>
-          <a class="btn btn-secondary" href="index.html">Back to Website</a>
+
+        <div class="site-nav-compact">
+          <div class="site-nav-compact-top">
+            <a class="site-brand" href="index.html" aria-label="Babblebox home">
+              <img src="logo.jpg" alt="Babblebox logo" />
+              <span class="site-brand-copy">
+                <span class="site-brand-title">Babblebox</span>
+                <span class="site-brand-subtitle">Terms of Service</span>
+              </span>
+            </a>
+            <div class="site-nav-compact-quick">
+              <a class="btn btn-secondary" href="index.html">Home</a>
+              <button
+                class="site-nav-toggle"
+                type="button"
+                aria-expanded="false"
+                aria-controls="terms-nav-panel"
+                data-nav-toggle
+              >
+                <span class="site-visually-hidden">Toggle navigation</span>
+                <span class="site-nav-toggle-icon" aria-hidden="true">
+                  <span></span>
+                  <span></span>
+                  <span></span>
+                </span>
+              </button>
+            </div>
+          </div>
+          <div class="site-nav-panel" id="terms-nav-panel" data-nav-panel hidden>
+            <div class="site-nav-links">
+              <a href="#overview">Overview</a>
+              <a href="#service">Service</a>
+              <a href="#responsibilities">Responsibilities</a>
+              <a href="#content">Content</a>
+              <a href="#availability">Availability</a>
+              <a href="#contact">Contact</a>
+            </div>
+            <div class="site-nav-actions">
+              <a class="site-nav-quiet" href="help.html">Help</a>
+              <a class="site-nav-quiet" href="privacy.html">Privacy Policy</a>
+              <a class="site-nav-quiet" href="https://github.com/arno-create/babblebox-bot" target="_blank" rel="noopener noreferrer">GitHub</a>
+              <a class="site-nav-quiet" href="index.html">Back to Website</a>
+            </div>
+          </div>
         </div>
       </nav>
     </div>
@@ -961,5 +1012,6 @@
       </div>
     </div>
   </footer>
+  <script defer src="assets/site-shell.js"></script>
 </body>
 </html>

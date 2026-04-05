@@ -243,7 +243,7 @@ Question Drops notes:
 - 1-10 drops per day
 - `/dropsadmin config` now carries a compact difficulty profile: Standard stays welcoming, Smart leans medium and hard, Hard is noticeably tougher without changing point values
 - live drops stay compact and block `/play` only in the same channel while unresolved
-- numeric answers accept clean digits, simple number words, and safe judged formats
+- numeric answers accept clean digits, and simple number words only for whole-number prompts
 - category and family repeat protection now keep higher-volume lanes from turning into a trivial farm
 - removing current Babblebox roles does not erase earned mastery history, and opt-out is the durable "do not re-grant" switch
 - mastery announcements can use Babblebox's default copy, a scope default template, or a tier override with fallback order: tier override -> scope default -> Babblebox default
