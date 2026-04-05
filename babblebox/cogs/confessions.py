@@ -264,9 +264,9 @@ class ReplyComposerModal(discord.ui.Modal, title="Anonymous Reply"):
             default=default_target or None,
         )
         self.body_input = discord.ui.TextInput(
-            label="Reply",
+            label="Anonymous reply",
             style=discord.TextStyle.paragraph,
-            placeholder="Replies are text-only and always reviewed before posting.",
+            placeholder="Your anonymous reply stays anonymous. Babblebox may send it through private approval before posting.",
             required=True,
             max_length=1800,
         )
@@ -331,6 +331,93 @@ class ReplyComposerModal(discord.ui.Modal, title="Anonymous Reply"):
             modal_kind="reply",
             result=result,
         )
+
+
+class OwnerReplyComposerModal(discord.ui.Modal, title="Reply to Member Anonymously"):
+    def __init__(self, cog: "ConfessionsCog", *, guild_id: int, opportunity_id: str):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.guild_id = guild_id
+        self.opportunity_id = opportunity_id
+        self.body_input = discord.ui.TextInput(
+            label="Anonymous owner reply",
+            style=discord.TextStyle.paragraph,
+            placeholder="Your reply stays anonymous. Babblebox may send it through private approval before posting.",
+            required=True,
+            max_length=1800,
+        )
+        self.add_item(self.body_input)
+
+    async def on_submit(self, interaction: discord.Interaction):
+        guild = self.cog.bot.get_guild(self.guild_id)
+        if guild is None or interaction.user is None:
+            await self.cog._send_private_interaction(
+                interaction,
+                embed=ge.make_status_embed(
+                    "Owner Reply Unavailable",
+                    "Babblebox could not reach that server to continue the owner-reply flow.",
+                    tone="warning",
+                    footer="Babblebox Confessions",
+                ),
+            )
+            return
+        context, error = await self.cog.service.get_owner_reply_opportunity_context(
+            guild,
+            author_id=interaction.user.id,
+            opportunity_id=self.opportunity_id,
+        )
+        if context is None:
+            await self.cog._send_private_interaction(
+                interaction,
+                embed=ge.make_status_embed(
+                    "Owner Reply Unavailable",
+                    error or "That owner-reply prompt is no longer available.",
+                    tone="warning",
+                    footer="Babblebox Confessions",
+                ),
+            )
+            return
+        if not await self.cog._acknowledge_modal_submit(
+            interaction,
+            modal_kind="owner_reply",
+            guild_id=guild.id,
+            failure_message="Babblebox could not continue that private owner-reply flow right now. Please try again in a moment.",
+        ):
+            return
+        try:
+            member = guild.get_member(interaction.user.id) or interaction.user
+            result = await self.cog.service.submit_confession(
+                guild,
+                author_id=interaction.user.id,
+                member=member,
+                content=self.body_input.value,
+                submission_kind="reply",
+                parent_confession_id=context["root_submission"]["confession_id"],
+                reply_flow="owner_reply_to_user",
+            )
+        except Exception as exc:
+            self.cog.log_modal_diagnostic(
+                code="owner_reply_modal_submit_failed",
+                stage="submit",
+                modal_kind="owner_reply",
+                guild_id=guild.id,
+                storage_ready=self.cog.service.storage_ready,
+                operability_ready=True,
+                exc=exc,
+            )
+            await self.cog._send_private_interaction(
+                interaction,
+                embed=self.cog._modal_unavailable_embed(
+                    "Babblebox could not process that anonymous owner reply safely right now. Please try again in a moment."
+                ),
+            )
+            return
+        if result.ok and result.state in {"queued", "published"}:
+            with contextlib.suppress(Exception):
+                await self.cog.service._mark_owner_reply_opportunity_used_record(context["opportunity"])
+        embed = self.cog.service.build_member_result_embed(result)
+        view = self.cog.service.build_member_result_view(result)
+        await self.cog._send_private_interaction(interaction, embed=embed, view=view)
 
 
 class ManageConfessionModal(discord.ui.Modal, title="Manage My Confession"):
@@ -775,7 +862,7 @@ class MemberResultActionView(discord.ui.View):
         default_target = self.result.confession_id or self.result.case_id
         await self.cog._open_manage_modal(interaction, default_target=default_target)
 
-    @discord.ui.button(label="Reply", style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(label="Reply to confession anonymously", style=discord.ButtonStyle.primary, row=0)
     async def reply_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         default_target = self.result.confession_id if self.result.submission_kind == "confession" else self.result.parent_confession_id
         await self.cog._open_reply_modal(interaction, default_target=default_target)
@@ -906,7 +993,7 @@ class PublishedConfessionReplyView(discord.ui.View):
         return cog
 
     @discord.ui.button(
-        label="Reply",
+        label="Reply to confession anonymously",
         style=discord.ButtonStyle.primary,
         custom_id="bb-confession-post:reply",
         row=0,
@@ -983,7 +1070,7 @@ class StatelessPublishedConfessionReplyView(discord.ui.View):
         super().__init__(timeout=None)
 
     @discord.ui.button(
-        label="Reply",
+        label="Reply to confession anonymously",
         style=discord.ButtonStyle.primary,
         custom_id="bb-confession-post:reply",
         row=0,
@@ -994,6 +1081,175 @@ class StatelessPublishedConfessionReplyView(discord.ui.View):
             await _send_confessions_runtime_unavailable(interaction)
             return
         await cog._handle_published_reply_button(interaction)
+
+
+class OwnerReplyOpportunitySelect(discord.ui.Select):
+    def __init__(self, cog: "ConfessionsCog", *, guild_id: int, author_id: int, contexts: list[dict[str, Any]]):
+        self.cog = cog
+        self.guild_id = guild_id
+        self.author_id = author_id
+        self.contexts = contexts
+        options = []
+        for context in contexts[:5]:
+            opportunity = context["opportunity"]
+            options.append(
+                discord.SelectOption(
+                    label=ge.safe_field_text(opportunity["source_author_name"], limit=100),
+                    value=opportunity["opportunity_id"],
+                    description=ge.safe_field_text(opportunity["source_preview"], limit=100).replace("\n", " "),
+                )
+            )
+        super().__init__(
+            placeholder="Choose a member response to review privately",
+            min_values=1,
+            max_values=1,
+            options=options,
+        )
+
+    async def callback(self, interaction: discord.Interaction):
+        if interaction.guild is None or interaction.user is None or interaction.guild.id != self.guild_id:
+            await self.cog._send_private_interaction(interaction, content="That owner-reply flow is no longer available.")
+            return
+        if interaction.user.id != self.author_id:
+            await self.cog._send_private_interaction(interaction, content="Run the command yourself to open your private owner-reply inbox.")
+            return
+        context, error = await self.cog.service.get_owner_reply_opportunity_context(
+            interaction.guild,
+            author_id=interaction.user.id,
+            opportunity_id=self.values[0],
+        )
+        if context is None:
+            await interaction.response.edit_message(
+                embed=ge.make_status_embed(
+                    "Owner Reply Unavailable",
+                    error or "That owner-reply prompt is no longer available.",
+                    tone="warning",
+                    footer="Babblebox Confessions",
+                ),
+                view=None,
+            )
+            return
+        await interaction.response.edit_message(
+            embed=self.cog.service.build_owner_reply_detail_embed(interaction.guild, context),
+            view=OwnerReplyOpportunityActionView(
+                self.cog,
+                guild_id=interaction.guild.id,
+                author_id=interaction.user.id,
+                opportunity_id=context["opportunity"]["opportunity_id"],
+            ),
+        )
+
+
+class OwnerReplyInboxView(discord.ui.View):
+    def __init__(self, cog: "ConfessionsCog", *, guild_id: int, author_id: int, contexts: list[dict[str, Any]]):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.guild_id = guild_id
+        self.author_id = author_id
+        if contexts:
+            self.add_item(OwnerReplyOpportunitySelect(cog, guild_id=guild_id, author_id=author_id, contexts=contexts))
+
+
+class OwnerReplyOpportunityActionView(discord.ui.View):
+    def __init__(self, cog: "ConfessionsCog", *, guild_id: int, author_id: int, opportunity_id: str):
+        super().__init__(timeout=300)
+        self.cog = cog
+        self.guild_id = guild_id
+        self.author_id = author_id
+        self.opportunity_id = opportunity_id
+
+    @discord.ui.button(label="Reply anonymously", style=discord.ButtonStyle.primary, row=0)
+    async def reply_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.guild is None or interaction.user is None or interaction.guild.id != self.guild_id:
+            await self.cog._send_private_interaction(interaction, content="That owner-reply flow is no longer available.")
+            return
+        if interaction.user.id != self.author_id:
+            await self.cog._send_private_interaction(interaction, content="Run the command yourself to open your private owner-reply flow.")
+            return
+        context, error = await self.cog.service.get_owner_reply_opportunity_context(
+            interaction.guild,
+            author_id=interaction.user.id,
+            opportunity_id=self.opportunity_id,
+        )
+        if context is None:
+            await interaction.response.edit_message(
+                embed=ge.make_status_embed(
+                    "Owner Reply Unavailable",
+                    error or "That owner-reply prompt is no longer available.",
+                    tone="warning",
+                    footer="Babblebox Confessions",
+                ),
+                view=None,
+            )
+            return
+        await interaction.response.send_modal(
+            OwnerReplyComposerModal(
+                self.cog,
+                guild_id=interaction.guild.id,
+                opportunity_id=context["opportunity"]["opportunity_id"],
+            )
+        )
+
+    @discord.ui.button(label="Dismiss", style=discord.ButtonStyle.secondary, row=0)
+    async def dismiss_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.guild is None or interaction.user is None or interaction.guild.id != self.guild_id:
+            await self.cog._send_private_interaction(interaction, content="That owner-reply flow is no longer available.")
+            return
+        if interaction.user.id != self.author_id:
+            await self.cog._send_private_interaction(interaction, content="Run the command yourself to manage your private owner-reply flow.")
+            return
+        ok, message = await self.cog.service.dismiss_owner_reply_opportunity(
+            interaction.guild,
+            author_id=interaction.user.id,
+            opportunity_id=self.opportunity_id,
+        )
+        await interaction.response.edit_message(
+            embed=ge.make_status_embed(
+                "Owner Reply Inbox",
+                message,
+                tone="info" if ok else "warning",
+                footer="Babblebox Confessions",
+            ),
+            view=None,
+        )
+
+    @discord.ui.button(label="Back to Inbox", style=discord.ButtonStyle.secondary, row=1)
+    async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        if interaction.guild is None or interaction.user is None or interaction.guild.id != self.guild_id:
+            await self.cog._send_private_interaction(interaction, content="That owner-reply flow is no longer available.")
+            return
+        await self.cog._send_owner_reply_inbox(interaction, edit_existing=True)
+
+
+class StatelessOwnerReplyPromptView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    @discord.ui.button(
+        label="Reply anonymously",
+        style=discord.ButtonStyle.primary,
+        custom_id="bb-confession-owner-reply:open",
+        row=0,
+    )
+    async def open_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cog = _resolve_live_confessions_cog(interaction)
+        if cog is None:
+            await _send_confessions_runtime_unavailable(interaction)
+            return
+        await cog._handle_owner_reply_prompt_open(interaction)
+
+    @discord.ui.button(
+        label="Dismiss",
+        style=discord.ButtonStyle.secondary,
+        custom_id="bb-confession-owner-reply:dismiss",
+        row=0,
+    )
+    async def dismiss_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        cog = _resolve_live_confessions_cog(interaction)
+        if cog is None:
+            await _send_confessions_runtime_unavailable(interaction)
+            return
+        await cog._handle_owner_reply_prompt_dismiss(interaction)
 
 
 class ConfessionReviewView(discord.ui.View):
@@ -1247,6 +1503,8 @@ class ConfessionsCog(commands.Cog):
             self.bot.add_view(StatelessConfessionMemberPanelView())
         with contextlib.suppress(Exception):
             self.bot.add_view(StatelessPublishedConfessionReplyView())
+        with contextlib.suppress(Exception):
+            self.bot.add_view(StatelessOwnerReplyPromptView())
 
     async def _restore_runtime_surfaces_once(self):
         if not self.service.storage_ready:
@@ -1280,6 +1538,9 @@ class ConfessionsCog(commands.Cog):
 
     def build_public_confession_view(self, *, guild_id: int) -> PublishedConfessionReplyView:
         return PublishedConfessionReplyView(self, guild_id=guild_id)
+
+    def build_owner_reply_prompt_view(self) -> StatelessOwnerReplyPromptView:
+        return StatelessOwnerReplyPromptView()
 
     def modal_file_upload_available(self) -> bool:
         file_upload = getattr(discord.ui, "FileUpload", None)
@@ -1390,6 +1651,73 @@ class ConfessionsCog(commands.Cog):
             await interaction.response.send_message("That confession is not available for anonymous replies.", ephemeral=True)
             return
         await self._open_reply_modal(interaction, default_target=submission["confession_id"])
+
+    async def _send_owner_reply_inbox(self, interaction: discord.Interaction, *, edit_existing: bool = False):
+        if interaction.guild is None or interaction.user is None:
+            await self._send_private_interaction(interaction, content="Private owner replies only work inside a server.")
+            return
+        contexts = await self.service.list_pending_owner_reply_contexts(
+            interaction.guild,
+            author_id=interaction.user.id,
+            limit=5,
+        )
+        embed = self.service.build_owner_reply_inbox_embed(interaction.guild, contexts)
+        view = OwnerReplyInboxView(self, guild_id=interaction.guild.id, author_id=interaction.user.id, contexts=contexts) if contexts else None
+        if edit_existing:
+            await interaction.response.edit_message(embed=embed, view=view)
+            return
+        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+    async def _handle_owner_reply_prompt_open(self, interaction: discord.Interaction):
+        message = getattr(interaction, "message", None)
+        message_id = getattr(message, "id", None)
+        author = getattr(interaction, "user", None)
+        if not isinstance(message_id, int) or author is None:
+            await self._send_private_interaction(interaction, content="That owner-reply prompt is no longer available.")
+            return
+        context, error = await self.service.get_owner_reply_opportunity_context_from_notification_message(
+            notification_message_id=message_id,
+            author_id=author.id,
+        )
+        if context is None:
+            await self._send_private_interaction(
+                interaction,
+                embed=ge.make_status_embed(
+                    "Owner Reply Unavailable",
+                    error or "That owner-reply prompt is no longer available.",
+                    tone="warning",
+                    footer="Babblebox Confessions",
+                ),
+            )
+            return
+        await interaction.response.send_modal(
+            OwnerReplyComposerModal(
+                self,
+                guild_id=context["guild"].id,
+                opportunity_id=context["opportunity"]["opportunity_id"],
+            )
+        )
+
+    async def _handle_owner_reply_prompt_dismiss(self, interaction: discord.Interaction):
+        message = getattr(interaction, "message", None)
+        message_id = getattr(message, "id", None)
+        author = getattr(interaction, "user", None)
+        if not isinstance(message_id, int) or author is None:
+            await self._send_private_interaction(interaction, content="That owner-reply prompt is no longer available.")
+            return
+        ok, note = await self.service.dismiss_owner_reply_opportunity_from_notification(
+            notification_message_id=message_id,
+            author_id=author.id,
+        )
+        await interaction.response.edit_message(
+            embed=ge.make_status_embed(
+                "Owner Reply Prompt",
+                note,
+                tone="info" if ok else "warning",
+                footer="Babblebox Confessions",
+            ),
+            view=None,
+        )
 
     async def _open_manage_modal(self, interaction: discord.Interaction, *, default_target: str | None = None):
         if interaction.guild is None:
@@ -1503,7 +1831,10 @@ class ConfessionsCog(commands.Cog):
         print(f"Confessions modal diagnostic: {', '.join(parts)}")
 
     async def _send_private_interaction(self, interaction: discord.Interaction, **kwargs):
-        kwargs["ephemeral"] = True
+        if interaction.guild is not None:
+            kwargs["ephemeral"] = True
+        else:
+            kwargs.pop("ephemeral", None)
         try:
             if interaction.response.is_done():
                 return await interaction.followup.send(**kwargs)
@@ -1527,7 +1858,7 @@ class ConfessionsCog(commands.Cog):
         attachment_count: int | None = None,
     ) -> bool:
         try:
-            await interaction.response.defer(ephemeral=True, thinking=True)
+            await interaction.response.defer(ephemeral=interaction.guild is not None, thinking=True)
             return True
         except Exception as exc:
             self.log_modal_diagnostic(
@@ -1726,6 +2057,14 @@ class ConfessionsCog(commands.Cog):
             await self._send_slash_only_notice(ctx, "Use `/confess report` in a server to open the private report flow.")
             return
         await self._open_report_modal(interaction)
+
+    @confess_group.command(name="reply-to-user", description="Review member responses to your confession and reply anonymously")
+    async def confess_reply_to_user_command(self, ctx: commands.Context):
+        interaction = getattr(ctx, "interaction", None)
+        if interaction is None:
+            await self._send_slash_only_notice(ctx, "Use `/confess reply-to-user` in a server to review private owner-reply prompts.")
+            return
+        await self._send_owner_reply_inbox(interaction)
 
     @confess_group.command(name="about", description="Learn how anonymous confessions work in this server")
     async def confess_about_command(self, ctx: commands.Context):

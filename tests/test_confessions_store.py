@@ -3,9 +3,11 @@ import unittest
 
 from babblebox.confessions_store import (
     _PostgresConfessionsStore,
+    _owner_reply_opportunity_from_row,
     _submission_from_row,
     default_confession_config,
     normalize_confession_config,
+    normalize_owner_reply_opportunity,
     normalize_private_media,
     normalize_submission,
 )
@@ -143,6 +145,58 @@ class ConfessionsStoreNormalizationTests(unittest.TestCase):
         self.assertNotIn("bytes", record["attachment_meta"][0])
         self.assertEqual(set(record["attachment_meta"][0].keys()), {"kind", "size", "width", "height", "spoiler"})
 
+    def test_normalize_submission_defaults_reply_flow_for_reply_records_only(self):
+        reply_record = normalize_submission(
+            {
+                "submission_id": "sub-2",
+                "guild_id": 10,
+                "confession_id": "CF-BBBB2222",
+                "submission_kind": "reply",
+                "status": "queued",
+                "review_status": "pending",
+                "created_at": "2026-04-03T00:00:00+00:00",
+            }
+        )
+        confession_record = normalize_submission(
+            {
+                "submission_id": "sub-3",
+                "guild_id": 10,
+                "confession_id": "CF-CCCC3333",
+                "submission_kind": "confession",
+                "reply_flow": "owner_reply_to_user",
+                "status": "queued",
+                "review_status": "pending",
+                "created_at": "2026-04-03T00:00:00+00:00",
+            }
+        )
+
+        self.assertEqual(reply_record["reply_flow"], "reply_to_confession")
+        self.assertIsNone(confession_record["reply_flow"])
+
+    def test_normalize_owner_reply_opportunity_keeps_compact_private_state(self):
+        record = normalize_owner_reply_opportunity(
+            {
+                "opportunity_id": "opp-1",
+                "guild_id": 10,
+                "root_submission_id": "sub-root",
+                "root_confession_id": "CF-ROOT111",
+                "referenced_submission_id": "sub-ref",
+                "source_channel_id": 20,
+                "source_message_id": 30,
+                "source_author_name": "Responder",
+                "source_preview": "Thanks for sharing",
+                "status": "invalid-status",
+                "notification_status": "invalid-notification",
+                "created_at": "2026-04-03T00:00:00+00:00",
+                "expires_at": "2026-04-06T00:00:00+00:00",
+            }
+        )
+
+        self.assertEqual(record["status"], "pending")
+        self.assertEqual(record["notification_status"], "none")
+        self.assertEqual(record["source_author_name"], "Responder")
+        self.assertEqual(record["source_preview"], "Thanks for sharing")
+
     def test_normalize_private_media_keeps_only_attachment_urls(self):
         record = normalize_private_media(
             {
@@ -168,6 +222,7 @@ class ConfessionsPostgresStoreTests(unittest.IsolatedAsyncioTestCase):
             "guild_id": 10,
             "confession_id": "CF-AAAA1111",
             "submission_kind": "reply",
+            "reply_flow": "owner_reply_to_user",
             "parent_confession_id": "CF-ZZZZ9999",
             "status": "queued",
             "review_status": "pending",
@@ -190,11 +245,38 @@ class ConfessionsPostgresStoreTests(unittest.IsolatedAsyncioTestCase):
         }
         record = _submission_from_row(row)
         self.assertEqual(record["submission_kind"], "reply")
+        self.assertEqual(record["reply_flow"], "owner_reply_to_user")
         self.assertEqual(record["parent_confession_id"], "CF-ZZZZ9999")
         self.assertEqual(record["shared_link_url"], "https://www.google.com/search?q=preview")
         self.assertEqual(record["fuzzy_signature"], "def")
         self.assertEqual(record["flag_codes"], ["adult_language", "link_unsafe"])
         self.assertEqual(record["attachment_meta"][0]["kind"], "image")
+
+    async def test_owner_reply_opportunity_row_decodes_private_notification_fields(self):
+        row = {
+            "opportunity_id": "opp-1",
+            "guild_id": 10,
+            "root_submission_id": "sub-root",
+            "root_confession_id": "CF-ROOT111",
+            "referenced_submission_id": "sub-ref",
+            "source_channel_id": 20,
+            "source_message_id": 30,
+            "source_author_name": "Responder",
+            "source_preview": "Kind reply",
+            "status": "pending",
+            "notification_status": "sent",
+            "notification_message_id": 40,
+            "created_at": "2026-04-03T00:00:00+00:00",
+            "expires_at": "2026-04-06T00:00:00+00:00",
+            "notified_at": "2026-04-03T00:01:00+00:00",
+            "resolved_at": None,
+        }
+
+        record = _owner_reply_opportunity_from_row(row)
+
+        self.assertEqual(record["notification_status"], "sent")
+        self.assertEqual(record["notification_message_id"], 40)
+        self.assertEqual(record["source_preview"], "Kind reply")
 
     async def test_schema_bootstrap_creates_confession_tables_and_indexes(self):
         connection = _FakeConnection()
@@ -208,13 +290,19 @@ class ConfessionsPostgresStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("allow_images BOOLEAN NOT NULL DEFAULT FALSE", executed)
         self.assertIn("allow_anonymous_replies BOOLEAN NOT NULL DEFAULT FALSE", executed)
         self.assertIn("CREATE TABLE IF NOT EXISTS confession_submissions", executed)
+        self.assertIn("reply_flow TEXT NULL", executed)
         self.assertIn("fuzzy_signature TEXT NULL", executed)
         self.assertIn("CREATE TABLE IF NOT EXISTS confession_author_links", executed)
+        self.assertIn("CREATE TABLE IF NOT EXISTS confession_owner_reply_opportunities", executed)
         self.assertIn("CREATE TABLE IF NOT EXISTS confession_private_media", executed)
         self.assertIn("CREATE TABLE IF NOT EXISTS confession_enforcement_states", executed)
         self.assertIn("image_restriction_active BOOLEAN NOT NULL DEFAULT FALSE", executed)
         self.assertIn("CREATE TABLE IF NOT EXISTS confession_cases", executed)
         self.assertIn("CREATE TABLE IF NOT EXISTS confession_review_queues", executed)
         self.assertIn("ALTER TABLE confession_guild_configs ALTER COLUMN allow_images SET DEFAULT FALSE", executed)
+        self.assertIn("ALTER TABLE confession_submissions ADD COLUMN IF NOT EXISTS reply_flow TEXT NULL", executed)
         self.assertIn("ix_confession_submissions_confession_id", executed)
+        self.assertIn("ix_confession_submissions_reply_flow", executed)
         self.assertIn("ix_confession_author_links_author_created", executed)
+        self.assertIn("ix_confession_owner_reply_source_message", executed)
+        self.assertIn("ix_confession_owner_reply_notification_message_id", executed)
