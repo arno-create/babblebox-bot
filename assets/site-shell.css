@@ -49,6 +49,8 @@
 .site-brand-copy {
   min-width: 0;
   overflow: hidden;
+  display: grid;
+  gap: 4px;
 }
 
 .site-brand-title {
@@ -64,15 +66,12 @@
 
 .site-brand-subtitle {
   display: block;
-  margin-top: 4px;
   color: var(--muted);
   font-size: 0.72rem;
   font-weight: 700;
   letter-spacing: 0.14em;
   text-transform: uppercase;
   white-space: nowrap;
-  overflow: hidden;
-  text-overflow: ellipsis;
 }
 
 .site-nav-links {
@@ -239,6 +238,17 @@
     width: 42px;
     height: 42px;
     border-radius: 14px;
+  }
+
+  .site-nav-compact .site-brand-subtitle {
+    display: none;
+  }
+}
+
+@media (max-width: 1340px) {
+  .site-nav-desktop .site-brand-subtitle {
+    font-size: 0.68rem;
+    letter-spacing: 0.11em;
   }
 }
 
