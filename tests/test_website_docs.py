@@ -6,6 +6,17 @@ ROOT = Path(__file__).resolve().parent.parent
 
 
 class WebsiteDocsTests(unittest.TestCase):
+    def test_all_hosted_pages_use_shared_site_shell_contract(self):
+        for page_name in ("index.html", "help.html", "privacy.html", "terms.html"):
+            with self.subTest(page=page_name):
+                html = (ROOT / page_name).read_text(encoding="utf-8")
+                self.assertIn('href="assets/site-shell.css"', html)
+                self.assertIn('src="assets/site-shell.js"', html)
+                self.assertIn("data-site-nav", html)
+                self.assertIn("data-nav-toggle", html)
+                self.assertIn("data-nav-panel", html)
+                self.assertIn("site-nav-shell", html)
+
     def test_help_page_exists_and_covers_required_sections(self):
         help_html = (ROOT / "help.html").read_text(encoding="utf-8")
 
@@ -48,6 +59,9 @@ class WebsiteDocsTests(unittest.TestCase):
         self.assertIn("adult / 18+ language is blocked by default", help_html)
         self.assertIn("images stay off by default", help_html)
         self.assertIn("can still reveal you if you include it", help_html)
+        self.assertIn("simple number words only count for whole-number answers", help_html)
+        self.assertNotIn("jump-nav", help_html)
+        self.assertIn("guide-band", help_html)
 
     def test_help_page_is_linked_from_site_shells(self):
         index_html = (ROOT / "index.html").read_text(encoding="utf-8")
@@ -169,6 +183,7 @@ class WebsiteDocsTests(unittest.TestCase):
         self.assertNotIn("scholar-template", readme)
         self.assertNotIn("category-template", help_html)
         self.assertNotIn("scholar-template", help_html)
+        self.assertIn("whole-number prompts", readme)
 
     def test_homepage_keeps_trust_and_utility_positioning_grounded(self):
         index_html = (ROOT / "index.html").read_text(encoding="utf-8")

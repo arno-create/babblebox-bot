@@ -31,6 +31,7 @@
     href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Sora:wght@500;600;700;800&display=swap"
     rel="stylesheet"
   />
+  <link rel="stylesheet" href="assets/site-shell.css" />
   <style>
     :root {
       --bg-0: #040914;
@@ -1280,19 +1281,19 @@
 </head>
 <body>
   <div class="site-shell">
-    <div class="nav-shell">
+    <div class="site-nav-shell" data-site-nav>
       <div class="container">
-        <nav aria-label="Primary">
-          <div class="nav-desktop">
-            <div class="nav-desktop-main">
-              <a class="brand" href="#top" aria-label="Babblebox home">
+        <nav class="site-nav" aria-label="Primary">
+          <div class="site-nav-desktop">
+            <div class="site-nav-desktop-main">
+              <a class="site-brand" href="#top" aria-label="Babblebox home">
                 <img src="logo.jpg" alt="Babblebox logo" width="48" height="48" />
-                <span class="brand-copy">
-                  <span class="brand-title">Babblebox</span>
-                  <span class="brand-subtitle">Party games, replay loops, and quiet utilities for Discord</span>
+                <span class="site-brand-copy">
+                  <span class="site-brand-title">Babblebox</span>
+                  <span class="site-brand-subtitle">Party games, replay loops, and quiet utilities for Discord</span>
                 </span>
               </a>
-              <div class="nav-links">
+              <div class="site-nav-links">
                 <a href="#product">Product</a>
                 <a href="#showcase">Showcase</a>
                 <a href="#utilities">Utilities</a>
@@ -1300,10 +1301,10 @@
                 <a href="help.html">Help</a>
               </div>
             </div>
-            <div class="nav-actions">
-              <a class="nav-quiet" href="https://github.com/arno-create/babblebox-bot" target="_blank" rel="noopener noreferrer">GitHub</a>
+            <div class="site-nav-actions">
+              <a class="site-nav-quiet" href="https://github.com/arno-create/babblebox-bot" target="_blank" rel="noopener noreferrer">GitHub</a>
               <a
-                class="nav-quiet"
+                class="site-nav-quiet"
                 href="https://discord.com/servers/inevitable-friendship-1322933864360050688"
                 target="_blank"
                 rel="noopener noreferrer"
@@ -1318,16 +1319,16 @@
             </div>
           </div>
 
-          <div class="nav-compact">
-            <div class="nav-compact-top">
-              <a class="brand" href="#top" aria-label="Babblebox home">
+          <div class="site-nav-compact">
+            <div class="site-nav-compact-top">
+              <a class="site-brand" href="#top" aria-label="Babblebox home">
                 <img src="logo.jpg" alt="Babblebox logo" width="48" height="48" />
-                <span class="brand-copy">
-                  <span class="brand-title">Babblebox</span>
-                  <span class="brand-subtitle">Party games, replay loops, and quiet utilities for Discord</span>
+                <span class="site-brand-copy">
+                  <span class="site-brand-title">Babblebox</span>
+                  <span class="site-brand-subtitle">Party games, replay loops, and quiet utilities for Discord</span>
                 </span>
               </a>
-              <div class="nav-compact-quick">
+              <div class="site-nav-compact-quick">
                 <a
                   class="btn btn-primary nav-invite nav-compact-invite"
                   href="https://discord.com/oauth2/authorize?client_id=1480903089518022739"
@@ -1336,14 +1337,14 @@
                   aria-label="Invite Babblebox"
                 >Invite</a>
                 <button
-                  class="nav-toggle"
+                  class="site-nav-toggle"
                   type="button"
                   aria-expanded="false"
                   aria-controls="primary-nav-panel"
                   data-nav-toggle
                 >
-                  <span class="visually-hidden">Toggle navigation</span>
-                  <span class="nav-toggle-icon" aria-hidden="true">
+                  <span class="site-visually-hidden">Toggle navigation</span>
+                  <span class="site-nav-toggle-icon" aria-hidden="true">
                     <span></span>
                     <span></span>
                     <span></span>
@@ -1351,18 +1352,18 @@
                 </button>
               </div>
             </div>
-            <div class="nav-compact-panel" id="primary-nav-panel" data-nav-panel hidden>
-              <div class="nav-links">
+            <div class="site-nav-panel" id="primary-nav-panel" data-nav-panel hidden>
+              <div class="site-nav-links">
                 <a href="#product">Product</a>
                 <a href="#showcase">Showcase</a>
                 <a href="#utilities">Utilities</a>
                 <a href="#safety">Safety</a>
                 <a href="help.html">Help</a>
               </div>
-              <div class="nav-actions">
-                <a class="nav-quiet" href="https://github.com/arno-create/babblebox-bot" target="_blank" rel="noopener noreferrer">GitHub</a>
+              <div class="site-nav-actions">
+                <a class="site-nav-quiet" href="https://github.com/arno-create/babblebox-bot" target="_blank" rel="noopener noreferrer">GitHub</a>
                 <a
-                  class="nav-quiet"
+                  class="site-nav-quiet"
                   href="https://discord.com/servers/inevitable-friendship-1322933864360050688"
                   target="_blank"
                   rel="noopener noreferrer"
@@ -2013,71 +2014,6 @@ categories, scholar progress, and mastery announcement setup in one readable sur
       </div>
     </footer>
   </div>
-  <script>
-    (() => {
-      const toggle = document.querySelector("[data-nav-toggle]");
-      const panel = document.querySelector("[data-nav-panel]");
-
-      if (!toggle || !panel) {
-        return;
-      }
-
-      const compactQuery = window.matchMedia("(max-width: 1180px)");
-
-      const closePanel = () => {
-        toggle.setAttribute("aria-expanded", "false");
-        panel.hidden = true;
-      };
-
-      const syncNav = () => {
-        if (compactQuery.matches) {
-          if (toggle.getAttribute("aria-expanded") !== "true") {
-            panel.hidden = true;
-          }
-        } else {
-          closePanel();
-        }
-      };
-
-      toggle.addEventListener("click", () => {
-        const isExpanded = toggle.getAttribute("aria-expanded") === "true";
-        const nextExpanded = !isExpanded;
-        toggle.setAttribute("aria-expanded", String(nextExpanded));
-        panel.hidden = !nextExpanded;
-      });
-
-      panel.querySelectorAll("a").forEach((link) => {
-        link.addEventListener("click", () => {
-          if (compactQuery.matches) {
-            closePanel();
-          }
-        });
-      });
-
-      document.addEventListener("keydown", (event) => {
-        if (event.key === "Escape" && compactQuery.matches && !panel.hidden) {
-          closePanel();
-          toggle.focus();
-        }
-      });
-
-      if (typeof compactQuery.addEventListener === "function") {
-        compactQuery.addEventListener("change", syncNav);
-      } else if (typeof compactQuery.addListener === "function") {
-        compactQuery.addListener(syncNav);
-      }
-
-      window.addEventListener("resize", syncNav);
-
-      if (typeof ResizeObserver === "function") {
-        const navResizeObserver = new ResizeObserver(() => {
-          syncNav();
-        });
-        navResizeObserver.observe(document.documentElement);
-      }
-
-      syncNav();
-    })();
-  </script>
+  <script defer src="assets/site-shell.js"></script>
 </body>
 </html>
