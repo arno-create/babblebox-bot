@@ -15,6 +15,7 @@ from babblebox.app_command_hardening import harden_admin_root_group
 from babblebox import game_engine as ge
 from babblebox.command_utils import defer_hybrid_response, send_hybrid_response
 from babblebox.confessions_service import ConfessionSubmissionResult, ConfessionsService
+from babblebox.text_safety import normalize_plain_text
 
 
 LOGGER = logging.getLogger(__name__)
@@ -34,6 +35,10 @@ ROLE_STATE_CHOICES = [
 ROLE_RESET_CHOICES = [
     app_commands.Choice(name="Allowlist", value="allowlist"),
     app_commands.Choice(name="Blacklist", value="blacklist"),
+    app_commands.Choice(name="All", value="all"),
+]
+EXEMPTION_RESET_CHOICES = [
+    app_commands.Choice(name="Roles", value="roles"),
     app_commands.Choice(name="All", value="all"),
 ]
 STAFF_ACTION_CHOICES = [
@@ -93,12 +98,24 @@ async def _send_confessions_runtime_unavailable(interaction: discord.Interaction
         await interaction.response.send_message(embed=embed, ephemeral=True)
 
 
+class TimedMemberPrivateView(discord.ui.View):
+    def __init__(self, cog: "ConfessionsCog", *, timeout: float = 300, expired_message: str):
+        super().__init__(timeout=timeout)
+        self.cog = cog
+        self._expired = False
+        self._expired_message = expired_message
+
+    async def on_timeout(self):
+        self._expired = True
+
+
 class ConfessionComposerModal(discord.ui.Modal, title="Anonymous Confession"):
-    def __init__(self, cog: "ConfessionsCog", *, guild_id: int):
+    def __init__(self, cog: "ConfessionsCog", *, guild_id: int, image_upload_notice: str | None = None):
         super().__init__(timeout=300)
         self.cog = cog
         config = self.cog.service.get_config(guild_id)
         self.image_upload_requested = bool(config["allow_images"])
+        self.image_upload_notice = ge.safe_field_text(normalize_plain_text(image_upload_notice) or "", limit=180) or None
         self.image_upload_available = False
         self.body_input = discord.ui.TextInput(
             label="What do you want to share?",
@@ -117,7 +134,10 @@ class ConfessionComposerModal(discord.ui.Modal, title="Anonymous Confession"):
         self.add_item(self.body_input)
         self.add_item(self.link_input)
         self.upload_input: discord.ui.FileUpload | None = None
-        if self.image_upload_requested:
+        if self.image_upload_notice:
+            self.body_input.placeholder = f"{self.image_upload_notice} You can still send text and one trusted link."
+            self.link_input.placeholder = "Text and one trusted link only right now."
+        elif self.image_upload_requested:
             if not self.cog.modal_file_upload_available():
                 self._apply_image_upload_fallback(guild_id, code="confession_modal_upload_runtime_unavailable")
             else:
@@ -781,10 +801,13 @@ class ReportModal(discord.ui.Modal, title="Anonymous Report"):
             )
 
 
-class MemberSupportView(discord.ui.View):
+class MemberSupportView(TimedMemberPrivateView):
     def __init__(self, cog: "ConfessionsCog", *, guild_id: int, default_target: str | None = None):
-        super().__init__(timeout=300)
-        self.cog = cog
+        super().__init__(
+            cog,
+            timeout=300,
+            expired_message="This private support view expired. Run `/confess appeal` or `/confess report` again.",
+        )
         self.guild_id = guild_id
         self.default_target = default_target
         support_ready = self.cog._support_channel_ready_for_guild_id(guild_id)
@@ -793,17 +816,34 @@ class MemberSupportView(discord.ui.View):
 
     @discord.ui.button(label="Appeal Restriction", style=discord.ButtonStyle.secondary, row=0)
     async def appeal_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog._open_appeal_modal(interaction, default_target=self.default_target)
+        await self.cog._run_member_interaction(
+            interaction,
+            stage="support_view_appeal",
+            view=self,
+            action=lambda: self.cog._open_appeal_modal(interaction, default_target=self.default_target),
+            failure_title="Private Support Unavailable",
+            failure_message="Babblebox could not open that private appeal flow right now. Run `/confess appeal` again in a moment.",
+        )
 
     @discord.ui.button(label="Report Problem", style=discord.ButtonStyle.secondary, row=0)
     async def report_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog._open_report_modal(interaction, default_target=self.default_target)
+        await self.cog._run_member_interaction(
+            interaction,
+            stage="support_view_report",
+            view=self,
+            action=lambda: self.cog._open_report_modal(interaction, default_target=self.default_target),
+            failure_title="Private Support Unavailable",
+            failure_message="Babblebox could not open that private report flow right now. Run `/confess report` again in a moment.",
+        )
 
 
-class MemberManageActionView(discord.ui.View):
+class MemberManageActionView(TimedMemberPrivateView):
     def __init__(self, cog: "ConfessionsCog", *, guild_id: int, target_id: str, can_delete: bool, can_edit: bool):
-        super().__init__(timeout=300)
-        self.cog = cog
+        super().__init__(
+            cog,
+            timeout=300,
+            expired_message="This private manage view expired. Run `/confess manage` again to open a fresh one.",
+        )
         self.guild_id = guild_id
         self.target_id = target_id
         self.delete_button.disabled = not can_delete
@@ -812,44 +852,81 @@ class MemberManageActionView(discord.ui.View):
 
     @discord.ui.button(label="Delete Privately", style=discord.ButtonStyle.danger, row=0)
     async def delete_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.guild is None or interaction.user is None:
-            await interaction.response.send_message("Private owner tools only work inside a server.", ephemeral=True)
-            return
-        ok, message = await self.cog.service.self_delete_confession(interaction.guild, author_id=interaction.user.id, target_id=self.target_id)
-        await interaction.response.send_message(
-            embed=ge.make_status_embed("Private Delete", message, tone="success" if ok else "warning", footer="Babblebox Confessions"),
-            ephemeral=True,
+        async def _action():
+            if interaction.guild is None or interaction.user is None:
+                await interaction.response.send_message("Private owner tools only work inside a server.", ephemeral=True)
+                return
+            ok, message = await self.cog.service.self_delete_confession(
+                interaction.guild,
+                author_id=interaction.user.id,
+                target_id=self.target_id,
+            )
+            await interaction.response.send_message(
+                embed=ge.make_status_embed("Private Delete", message, tone="success" if ok else "warning", footer="Babblebox Confessions"),
+                ephemeral=True,
+            )
+
+        await self.cog._run_member_interaction(
+            interaction,
+            stage="manage_view_delete",
+            view=self,
+            action=_action,
+            failure_message="Babblebox could not finish that private delete flow right now. Run `/confess manage` again in a moment.",
         )
 
     @discord.ui.button(label="Edit Pending Submission", style=discord.ButtonStyle.primary, row=0)
     async def edit_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.guild is None or interaction.user is None:
-            await interaction.response.send_message("Private owner tools only work inside a server.", ephemeral=True)
-            return
-        context, error = await self.cog.service.get_owned_submission_context(
-            interaction.guild.id,
-            author_id=interaction.user.id,
-            target_id=self.target_id,
-        )
-        if context is None:
-            await interaction.response.send_message(
-                embed=ge.make_status_embed("Cannot Edit", error or "That confession could not be verified.", tone="warning", footer="Babblebox Confessions"),
-                ephemeral=True,
+        async def _action():
+            if interaction.guild is None or interaction.user is None:
+                await interaction.response.send_message("Private owner tools only work inside a server.", ephemeral=True)
+                return
+            context, error = await self.cog.service.get_owned_submission_context(
+                interaction.guild.id,
+                author_id=interaction.user.id,
+                target_id=self.target_id,
             )
-            return
-        await interaction.response.send_modal(
-            EditConfessionModal(self.cog, guild_id=interaction.guild.id, target_id=self.target_id, submission=context["submission"])
+            if context is None:
+                await interaction.response.send_message(
+                    embed=ge.make_status_embed(
+                        "Cannot Edit",
+                        error or "That confession could not be verified.",
+                        tone="warning",
+                        footer="Babblebox Confessions",
+                    ),
+                    ephemeral=True,
+                )
+                return
+            await interaction.response.send_modal(
+                EditConfessionModal(self.cog, guild_id=interaction.guild.id, target_id=self.target_id, submission=context["submission"])
+            )
+
+        await self.cog._run_member_interaction(
+            interaction,
+            stage="manage_view_edit",
+            view=self,
+            action=_action,
+            failure_message="Babblebox could not reopen that private edit flow right now. Run `/confess manage` again in a moment.",
         )
 
     @discord.ui.button(label="Appeal / Report", style=discord.ButtonStyle.secondary, row=1)
     async def support_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self.cog._send_support_entry(interaction, default_target=self.target_id)
+        await self.cog._run_member_interaction(
+            interaction,
+            stage="manage_view_support",
+            view=self,
+            action=lambda: self.cog._send_support_entry(interaction, default_target=self.target_id),
+            failure_title="Private Support Unavailable",
+            failure_message="Babblebox could not open private support from that manage view right now. Run `/confess report` or `/confess appeal` again.",
+        )
 
 
-class MemberResultActionView(discord.ui.View):
+class MemberResultActionView(TimedMemberPrivateView):
     def __init__(self, cog: "ConfessionsCog", *, guild_id: int, result: ConfessionSubmissionResult):
-        super().__init__(timeout=300)
-        self.cog = cog
+        super().__init__(
+            cog,
+            timeout=300,
+            expired_message="This private result view expired. Run `/confess create` or `/confess manage` again for a fresh private view.",
+        )
         self.guild_id = guild_id
         self.result = result
         self.support_button.disabled = not self.cog._support_channel_ready_for_guild_id(guild_id)
@@ -859,17 +936,36 @@ class MemberResultActionView(discord.ui.View):
     @discord.ui.button(label="Manage My Confession", style=discord.ButtonStyle.secondary, row=0)
     async def manage_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         default_target = self.result.confession_id or self.result.case_id
-        await self.cog._open_manage_modal(interaction, default_target=default_target)
+        await self.cog._run_member_interaction(
+            interaction,
+            stage="result_view_manage",
+            view=self,
+            action=lambda: self.cog._open_manage_modal(interaction, default_target=default_target),
+            failure_message="Babblebox could not reopen that private manage flow right now. Run `/confess manage` again in a moment.",
+        )
 
     @discord.ui.button(label="Reply to confession anonymously", style=discord.ButtonStyle.primary, row=0)
     async def reply_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         default_target = self.result.confession_id if self.result.submission_kind == "confession" else self.result.parent_confession_id
-        await self.cog._open_reply_modal(interaction, default_target=default_target)
+        await self.cog._run_member_interaction(
+            interaction,
+            stage="result_view_reply",
+            view=self,
+            action=lambda: self.cog._open_reply_modal(interaction, default_target=default_target),
+            failure_message="Babblebox could not open that anonymous reply flow right now. Run `/confess create` or use a live confession post again in a moment.",
+        )
 
     @discord.ui.button(label="Appeal / Report", style=discord.ButtonStyle.secondary, row=1)
     async def support_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         default_target = self.result.case_id or self.result.confession_id
-        await self.cog._send_support_entry(interaction, default_target=default_target)
+        await self.cog._run_member_interaction(
+            interaction,
+            stage="result_view_support",
+            view=self,
+            action=lambda: self.cog._send_support_entry(interaction, default_target=default_target),
+            failure_title="Private Support Unavailable",
+            failure_message="Babblebox could not open private support from that result view right now. Run `/confess report` or `/confess appeal` again.",
+        )
 
 
 class RiskyConfigConfirmView(discord.ui.View):
@@ -959,7 +1055,12 @@ class ConfessionMemberPanelView(discord.ui.View):
         cog = await self._resolve_cog(interaction)
         if cog is None:
             return
-        await cog._open_confession_modal(interaction)
+        await cog._run_member_interaction(
+            interaction,
+            stage="panel_view_compose",
+            action=lambda: cog._open_confession_modal(interaction),
+            failure_message="Babblebox could not open the private confession composer right now. Run `/confess create` again in a moment.",
+        )
 
     @discord.ui.button(
         label="Manage My Confession",
@@ -971,7 +1072,12 @@ class ConfessionMemberPanelView(discord.ui.View):
         cog = await self._resolve_cog(interaction)
         if cog is None:
             return
-        await cog._open_manage_modal(interaction)
+        await cog._run_member_interaction(
+            interaction,
+            stage="panel_view_manage",
+            action=lambda: cog._open_manage_modal(interaction),
+            failure_message="Babblebox could not open that private manage flow right now. Run `/confess manage` again in a moment.",
+        )
 
     @discord.ui.button(
         label="Appeal / Report",
@@ -983,7 +1089,13 @@ class ConfessionMemberPanelView(discord.ui.View):
         cog = await self._resolve_cog(interaction)
         if cog is None:
             return
-        await cog._send_support_entry(interaction)
+        await cog._run_member_interaction(
+            interaction,
+            stage="panel_view_support",
+            action=lambda: cog._send_support_entry(interaction),
+            failure_title="Private Support Unavailable",
+            failure_message="Babblebox could not open private support right now. Run `/confess appeal` or `/confess report` again in a moment.",
+        )
 
     @discord.ui.button(
         label="How It Works",
@@ -995,7 +1107,12 @@ class ConfessionMemberPanelView(discord.ui.View):
         cog = await self._resolve_cog(interaction)
         if cog is None:
             return
-        await cog._send_confession_about(interaction)
+        await cog._run_member_interaction(
+            interaction,
+            stage="panel_view_help",
+            action=lambda: cog._send_confession_about(interaction),
+            failure_message="Babblebox could not open the Confessions help panel right now. Run `/confess about` again in a moment.",
+        )
 
 
 class PublishedConfessionReplyView(discord.ui.View):
@@ -1021,7 +1138,12 @@ class PublishedConfessionReplyView(discord.ui.View):
         cog = await self._resolve_cog(interaction)
         if cog is None:
             return
-        await cog._handle_published_reply_button(interaction)
+        await cog._run_member_interaction(
+            interaction,
+            stage="public_reply_button",
+            action=lambda: cog._handle_published_reply_button(interaction),
+            failure_message="Babblebox could not open that anonymous reply flow right now. Try the reply button again in a moment.",
+        )
 
 
 class StatelessConfessionMemberPanelView(discord.ui.View):
@@ -1045,7 +1167,12 @@ class StatelessConfessionMemberPanelView(discord.ui.View):
         cog = await self._resolve_cog(interaction)
         if cog is None:
             return
-        await cog._open_confession_modal(interaction)
+        await cog._run_member_interaction(
+            interaction,
+            stage="stateless_panel_compose",
+            action=lambda: cog._open_confession_modal(interaction),
+            failure_message="Babblebox could not open the private confession composer right now. Run `/confess create` again in a moment.",
+        )
 
     @discord.ui.button(
         label="Manage My Confession",
@@ -1057,7 +1184,12 @@ class StatelessConfessionMemberPanelView(discord.ui.View):
         cog = await self._resolve_cog(interaction)
         if cog is None:
             return
-        await cog._open_manage_modal(interaction)
+        await cog._run_member_interaction(
+            interaction,
+            stage="stateless_panel_manage",
+            action=lambda: cog._open_manage_modal(interaction),
+            failure_message="Babblebox could not open that private manage flow right now. Run `/confess manage` again in a moment.",
+        )
 
     @discord.ui.button(
         label="Appeal / Report",
@@ -1069,7 +1201,13 @@ class StatelessConfessionMemberPanelView(discord.ui.View):
         cog = await self._resolve_cog(interaction)
         if cog is None:
             return
-        await cog._send_support_entry(interaction)
+        await cog._run_member_interaction(
+            interaction,
+            stage="stateless_panel_support",
+            action=lambda: cog._send_support_entry(interaction),
+            failure_title="Private Support Unavailable",
+            failure_message="Babblebox could not open private support right now. Run `/confess appeal` or `/confess report` again in a moment.",
+        )
 
     @discord.ui.button(
         label="How It Works",
@@ -1081,7 +1219,12 @@ class StatelessConfessionMemberPanelView(discord.ui.View):
         cog = await self._resolve_cog(interaction)
         if cog is None:
             return
-        await cog._send_confession_about(interaction)
+        await cog._run_member_interaction(
+            interaction,
+            stage="stateless_panel_help",
+            action=lambda: cog._send_confession_about(interaction),
+            failure_message="Babblebox could not open the Confessions help panel right now. Run `/confess about` again in a moment.",
+        )
 
 
 class StatelessPublishedConfessionReplyView(discord.ui.View):
@@ -1099,7 +1242,12 @@ class StatelessPublishedConfessionReplyView(discord.ui.View):
         if cog is None:
             await _send_confessions_runtime_unavailable(interaction)
             return
-        await cog._handle_published_reply_button(interaction)
+        await cog._run_member_interaction(
+            interaction,
+            stage="stateless_public_reply_button",
+            action=lambda: cog._handle_published_reply_button(interaction),
+            failure_message="Babblebox could not open that anonymous reply flow right now. Try the reply button again in a moment.",
+        )
 
 
 class OwnerReplyOpportunitySelect(discord.ui.Select):
@@ -1126,118 +1274,164 @@ class OwnerReplyOpportunitySelect(discord.ui.Select):
         )
 
     async def callback(self, interaction: discord.Interaction):
-        if interaction.guild is None or interaction.user is None or interaction.guild.id != self.guild_id:
-            await self.cog._send_private_interaction(interaction, content="That owner-reply flow is no longer available.")
-            return
-        if interaction.user.id != self.author_id:
-            await self.cog._send_private_interaction(interaction, content="Run the command yourself to open your private owner-reply inbox.")
-            return
-        context, error = await self.cog.service.get_owner_reply_opportunity_context(
-            interaction.guild,
-            author_id=interaction.user.id,
-            opportunity_id=self.values[0],
-        )
-        if context is None:
-            await interaction.response.edit_message(
-                embed=ge.make_status_embed(
-                    "Owner Reply Unavailable",
-                    error or "That owner-reply prompt is no longer available.",
-                    tone="warning",
-                    footer="Babblebox Confessions",
-                ),
-                view=None,
-            )
-            return
-        await interaction.response.edit_message(
-            embed=self.cog.service.build_owner_reply_detail_embed(interaction.guild, context),
-            view=OwnerReplyOpportunityActionView(
-                self.cog,
-                guild_id=interaction.guild.id,
+        async def _action():
+            if interaction.guild is None or interaction.user is None or interaction.guild.id != self.guild_id:
+                await self.cog._send_private_interaction(interaction, content="That owner-reply flow is no longer available.")
+                return
+            if interaction.user.id != self.author_id:
+                await self.cog._send_private_interaction(interaction, content="Run the command yourself to open your private owner-reply inbox.")
+                return
+            context, error = await self.cog.service.get_owner_reply_opportunity_context(
+                interaction.guild,
                 author_id=interaction.user.id,
-                opportunity_id=context["opportunity"]["opportunity_id"],
-            ),
+                opportunity_id=self.values[0],
+            )
+            if context is None:
+                await interaction.response.edit_message(
+                    embed=ge.make_status_embed(
+                        "Owner Reply Unavailable",
+                        error or "That owner-reply prompt is no longer available.",
+                        tone="warning",
+                        footer="Babblebox Confessions",
+                    ),
+                    view=None,
+                )
+                return
+            await interaction.response.edit_message(
+                embed=self.cog.service.build_owner_reply_detail_embed(interaction.guild, context),
+                view=OwnerReplyOpportunityActionView(
+                    self.cog,
+                    guild_id=interaction.guild.id,
+                    author_id=interaction.user.id,
+                    opportunity_id=context["opportunity"]["opportunity_id"],
+                ),
+            )
+
+        await self.cog._run_member_interaction(
+            interaction,
+            stage="owner_reply_select",
+            view=getattr(self, "view", None),
+            action=_action,
+            failure_message="Babblebox could not open that private owner-reply detail right now. Run `/confess reply-to-user` again in a moment.",
+            failure_title="Owner Reply Unavailable",
         )
 
 
-class OwnerReplyInboxView(discord.ui.View):
+class OwnerReplyInboxView(TimedMemberPrivateView):
     def __init__(self, cog: "ConfessionsCog", *, guild_id: int, author_id: int, contexts: list[dict[str, Any]]):
-        super().__init__(timeout=300)
-        self.cog = cog
+        super().__init__(
+            cog,
+            timeout=300,
+            expired_message="This private owner-reply inbox expired. Run `/confess reply-to-user` again to open a fresh one.",
+        )
         self.guild_id = guild_id
         self.author_id = author_id
         if contexts:
             self.add_item(OwnerReplyOpportunitySelect(cog, guild_id=guild_id, author_id=author_id, contexts=contexts))
 
 
-class OwnerReplyOpportunityActionView(discord.ui.View):
+class OwnerReplyOpportunityActionView(TimedMemberPrivateView):
     def __init__(self, cog: "ConfessionsCog", *, guild_id: int, author_id: int, opportunity_id: str):
-        super().__init__(timeout=300)
-        self.cog = cog
+        super().__init__(
+            cog,
+            timeout=300,
+            expired_message="This private owner-reply view expired. Run `/confess reply-to-user` again to reopen it.",
+        )
         self.guild_id = guild_id
         self.author_id = author_id
         self.opportunity_id = opportunity_id
 
     @discord.ui.button(label="Reply anonymously", style=discord.ButtonStyle.primary, row=0)
     async def reply_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.guild is None or interaction.user is None or interaction.guild.id != self.guild_id:
-            await self.cog._send_private_interaction(interaction, content="That owner-reply flow is no longer available.")
-            return
-        if interaction.user.id != self.author_id:
-            await self.cog._send_private_interaction(interaction, content="Run the command yourself to open your private owner-reply flow.")
-            return
-        context, error = await self.cog.service.get_owner_reply_opportunity_context(
-            interaction.guild,
-            author_id=interaction.user.id,
-            opportunity_id=self.opportunity_id,
-        )
-        if context is None:
-            await interaction.response.edit_message(
-                embed=ge.make_status_embed(
-                    "Owner Reply Unavailable",
-                    error or "That owner-reply prompt is no longer available.",
-                    tone="warning",
-                    footer="Babblebox Confessions",
-                ),
-                view=None,
+        async def _action():
+            if interaction.guild is None or interaction.user is None or interaction.guild.id != self.guild_id:
+                await self.cog._send_private_interaction(interaction, content="That owner-reply flow is no longer available.")
+                return
+            if interaction.user.id != self.author_id:
+                await self.cog._send_private_interaction(interaction, content="Run the command yourself to open your private owner-reply flow.")
+                return
+            context, error = await self.cog.service.get_owner_reply_opportunity_context(
+                interaction.guild,
+                author_id=interaction.user.id,
+                opportunity_id=self.opportunity_id,
             )
-            return
-        await interaction.response.send_modal(
-            OwnerReplyComposerModal(
-                self.cog,
-                guild_id=interaction.guild.id,
-                opportunity_id=context["opportunity"]["opportunity_id"],
+            if context is None:
+                await interaction.response.edit_message(
+                    embed=ge.make_status_embed(
+                        "Owner Reply Unavailable",
+                        error or "That owner-reply prompt is no longer available.",
+                        tone="warning",
+                        footer="Babblebox Confessions",
+                    ),
+                    view=None,
+                )
+                return
+            await interaction.response.send_modal(
+                OwnerReplyComposerModal(
+                    self.cog,
+                    guild_id=interaction.guild.id,
+                    opportunity_id=context["opportunity"]["opportunity_id"],
+                )
             )
+
+        await self.cog._run_member_interaction(
+            interaction,
+            stage="owner_reply_action_reply",
+            view=self,
+            action=_action,
+            failure_message="Babblebox could not reopen that private owner-reply composer right now. Run `/confess reply-to-user` again in a moment.",
+            failure_title="Owner Reply Unavailable",
         )
 
     @discord.ui.button(label="Dismiss", style=discord.ButtonStyle.secondary, row=0)
     async def dismiss_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.guild is None or interaction.user is None or interaction.guild.id != self.guild_id:
-            await self.cog._send_private_interaction(interaction, content="That owner-reply flow is no longer available.")
-            return
-        if interaction.user.id != self.author_id:
-            await self.cog._send_private_interaction(interaction, content="Run the command yourself to manage your private owner-reply flow.")
-            return
-        ok, message = await self.cog.service.dismiss_owner_reply_opportunity(
-            interaction.guild,
-            author_id=interaction.user.id,
-            opportunity_id=self.opportunity_id,
-        )
-        await interaction.response.edit_message(
-            embed=ge.make_status_embed(
-                "Owner Reply Inbox",
-                message,
-                tone="info" if ok else "warning",
-                footer="Babblebox Confessions",
-            ),
-            view=None,
+        async def _action():
+            if interaction.guild is None or interaction.user is None or interaction.guild.id != self.guild_id:
+                await self.cog._send_private_interaction(interaction, content="That owner-reply flow is no longer available.")
+                return
+            if interaction.user.id != self.author_id:
+                await self.cog._send_private_interaction(interaction, content="Run the command yourself to manage your private owner-reply flow.")
+                return
+            ok, message = await self.cog.service.dismiss_owner_reply_opportunity(
+                interaction.guild,
+                author_id=interaction.user.id,
+                opportunity_id=self.opportunity_id,
+            )
+            await interaction.response.edit_message(
+                embed=ge.make_status_embed(
+                    "Owner Reply Inbox",
+                    message,
+                    tone="info" if ok else "warning",
+                    footer="Babblebox Confessions",
+                ),
+                view=None,
+            )
+
+        await self.cog._run_member_interaction(
+            interaction,
+            stage="owner_reply_action_dismiss",
+            view=self,
+            action=_action,
+            failure_message="Babblebox could not dismiss that owner-reply opportunity right now. Run `/confess reply-to-user` again in a moment.",
+            failure_title="Owner Reply Unavailable",
         )
 
     @discord.ui.button(label="Back to Inbox", style=discord.ButtonStyle.secondary, row=1)
     async def back_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        if interaction.guild is None or interaction.user is None or interaction.guild.id != self.guild_id:
-            await self.cog._send_private_interaction(interaction, content="That owner-reply flow is no longer available.")
-            return
-        await self.cog._send_owner_reply_inbox(interaction, edit_existing=True)
+        async def _action():
+            if interaction.guild is None or interaction.user is None or interaction.guild.id != self.guild_id:
+                await self.cog._send_private_interaction(interaction, content="That owner-reply flow is no longer available.")
+                return
+            await self.cog._send_owner_reply_inbox(interaction, edit_existing=True)
+
+        await self.cog._run_member_interaction(
+            interaction,
+            stage="owner_reply_action_back",
+            view=self,
+            action=_action,
+            failure_message="Babblebox could not reopen that private owner-reply inbox right now. Run `/confess reply-to-user` again in a moment.",
+            failure_title="Owner Reply Unavailable",
+        )
 
 
 class StatelessOwnerReplyPromptView(discord.ui.View):
@@ -1255,7 +1449,13 @@ class StatelessOwnerReplyPromptView(discord.ui.View):
         if cog is None:
             await _send_confessions_runtime_unavailable(interaction)
             return
-        await cog._handle_owner_reply_prompt_open(interaction)
+        await cog._run_member_interaction(
+            interaction,
+            stage="owner_reply_prompt_open",
+            action=lambda: cog._handle_owner_reply_prompt_open(interaction),
+            failure_message="Babblebox could not reopen that private owner-reply prompt right now. Run `/confess reply-to-user` again in a moment.",
+            failure_title="Owner Reply Unavailable",
+        )
 
     @discord.ui.button(
         label="Dismiss",
@@ -1268,7 +1468,13 @@ class StatelessOwnerReplyPromptView(discord.ui.View):
         if cog is None:
             await _send_confessions_runtime_unavailable(interaction)
             return
-        await cog._handle_owner_reply_prompt_dismiss(interaction)
+        await cog._run_member_interaction(
+            interaction,
+            stage="owner_reply_prompt_dismiss",
+            action=lambda: cog._handle_owner_reply_prompt_dismiss(interaction),
+            failure_message="Babblebox could not dismiss that owner-reply prompt right now. Run `/confess reply-to-user` again in a moment.",
+            failure_title="Owner Reply Unavailable",
+        )
 
 
 class ConfessionReviewView(discord.ui.View):
@@ -1774,6 +1980,105 @@ class ConfessionsCog(commands.Cog):
             return
         LOGGER.warning(message)
 
+    def log_member_diagnostic(
+        self,
+        *,
+        code: str,
+        stage: str,
+        interaction: discord.Interaction,
+        note: str | None = None,
+        exc: Exception | None = None,
+    ):
+        guild_id = getattr(getattr(interaction, "guild", None), "id", None)
+        user_id = getattr(getattr(interaction, "user", None), "id", None)
+        message_id = getattr(getattr(interaction, "message", None), "id", None)
+        parts = [
+            f"code={code}",
+            f"stage={stage}",
+            f"guild_id={guild_id if guild_id is not None else 'none'}",
+            f"user_id={user_id if user_id is not None else 'none'}",
+        ]
+        if message_id is not None:
+            parts.append(f"message_id={message_id}")
+        if note:
+            parts.append(f"note={str(note)[:160]}")
+        if exc is not None:
+            parts.append(f"exception={type(exc).__name__}")
+        parts.append(f"backend={getattr(self.service.store, 'backend_name', 'unknown')}")
+        message = f"Confessions member diagnostic: {', '.join(parts)}"
+        if exc is not None:
+            LOGGER.exception(message)
+            return
+        LOGGER.warning(message)
+
+    def _member_status_embed(self, title: str, message: str, *, tone: str = "warning") -> discord.Embed:
+        return ge.make_status_embed(title, message, tone=tone, footer="Babblebox Confessions")
+
+    def _member_gate_embed(self, result: ConfessionSubmissionResult, *, title: str | None = None) -> discord.Embed:
+        embed = self.service.build_member_result_embed(result)
+        if title:
+            embed.title = title
+        return embed
+
+    async def _run_member_interaction(
+        self,
+        interaction: discord.Interaction,
+        *,
+        stage: str,
+        action,
+        failure_message: str,
+        failure_title: str = "Confessions Unavailable",
+        view: object | None = None,
+        expired_message: str | None = None,
+        expired_title: str = "Private View Expired",
+    ):
+        if view is not None and getattr(view, "_expired", False):
+            await self._send_private_interaction(
+                interaction,
+                embed=self._member_status_embed(
+                    expired_title,
+                    expired_message or getattr(view, "_expired_message", "That private Confessions view expired. Run the command again."),
+                    tone="info",
+                ),
+            )
+            return None
+        try:
+            return await action()
+        except Exception as exc:
+            self.log_member_diagnostic(
+                code=f"{stage}_failed",
+                stage=stage,
+                interaction=interaction,
+                exc=exc,
+            )
+            await self._send_private_interaction(
+                interaction,
+                embed=self._member_status_embed(failure_title, failure_message),
+            )
+            return None
+
+    async def _run_member_slash_command(
+        self,
+        ctx: commands.Context,
+        *,
+        stage: str,
+        slash_only_message: str,
+        failure_message: str,
+        failure_title: str = "Confessions Unavailable",
+        action,
+    ):
+        interaction = getattr(ctx, "interaction", None)
+        if interaction is None:
+            await self._send_slash_only_notice(ctx, slash_only_message)
+            return
+        await self._run_member_interaction(
+            interaction,
+            stage=stage,
+            action=action,
+            failure_message=failure_message,
+            failure_title=failure_title,
+        )
+
     def modal_file_upload_available(self) -> bool:
         file_upload = getattr(discord.ui, "FileUpload", None)
         return file_upload is not None and callable(getattr(file_upload, "to_component_dict", None))
@@ -1815,55 +2120,44 @@ class ConfessionsCog(commands.Cog):
         if interaction.guild is None or interaction.user is None:
             await interaction.response.send_message("Anonymous confessions only work inside a server.", ephemeral=True)
             return
-        ready_message = self.service.operability_message(interaction.guild.id)
-        if ready_message != "Confessions are ready.":
-            unavailable = ConfessionSubmissionResult(False, "unavailable", ready_message)
-            await interaction.response.send_message(embed=self.service.build_member_result_embed(unavailable), ephemeral=True)
-            return
-        gate_message = self.service.member_submission_gate_message(
+        gate = await self.service.preflight_submission_access(
             interaction.guild,
-            submission_kind="confession",
             author_id=interaction.user.id,
             member=interaction.user,
+            submission_kind="confession",
+            image_restriction_mode="advisory",
         )
-        if gate_message is not None:
+        if not gate.ok or gate.result is not None:
             await interaction.response.send_message(
-                embed=ge.make_status_embed("Confession Access", gate_message, tone="warning", footer="Babblebox Confessions"),
+                embed=self._member_gate_embed(gate.result or ConfessionSubmissionResult(False, "unavailable", "Confessions are unavailable."), title=gate.title),
                 ephemeral=True,
             )
             return
-        await interaction.response.send_modal(ConfessionComposerModal(self, guild_id=interaction.guild.id))
+        await interaction.response.send_modal(
+            ConfessionComposerModal(
+                self,
+                guild_id=interaction.guild.id,
+                image_upload_notice=gate.image_restriction_message,
+            )
+        )
 
     async def _open_reply_modal(self, interaction: discord.Interaction, *, default_target: str | None = None):
         if interaction.guild is None or interaction.user is None:
             await interaction.response.send_message("Anonymous replies only work inside a server.", ephemeral=True)
             return
-        ready_message = self.service.operability_message(interaction.guild.id)
-        if ready_message != "Confessions are ready.":
-            unavailable = ConfessionSubmissionResult(False, "unavailable", ready_message, submission_kind="reply")
-            await interaction.response.send_message(embed=self.service.build_member_result_embed(unavailable), ephemeral=True)
-            return
-        config = self.service.get_config(interaction.guild.id)
-        if not config["allow_anonymous_replies"]:
-            await interaction.response.send_message(
-                embed=ge.make_status_embed(
-                    "Replies Are Off",
-                    "Anonymous replies are off by default in this server unless admins explicitly enable them.",
-                    tone="info",
-                    footer="Babblebox Confessions",
-                ),
-                ephemeral=True,
-            )
-            return
-        gate_message = self.service.member_submission_gate_message(
+        gate = await self.service.preflight_submission_access(
             interaction.guild,
-            submission_kind="reply",
             author_id=interaction.user.id,
             member=interaction.user,
+            submission_kind="reply",
+            reply_flow="reply_to_confession",
         )
-        if gate_message is not None:
+        if not gate.ok or gate.result is not None:
             await interaction.response.send_message(
-                embed=ge.make_status_embed("Reply Access", gate_message, tone="warning", footer="Babblebox Confessions"),
+                embed=self._member_gate_embed(
+                    gate.result or ConfessionSubmissionResult(False, "unavailable", "Confessions are unavailable.", submission_kind="reply"),
+                    title=gate.title,
+                ),
                 ephemeral=True,
             )
             return
@@ -1887,6 +2181,30 @@ class ConfessionsCog(commands.Cog):
     async def _send_owner_reply_inbox(self, interaction: discord.Interaction, *, edit_existing: bool = False):
         if interaction.guild is None or interaction.user is None:
             await self._send_private_interaction(interaction, content="Private owner replies only work inside a server.")
+            return
+        gate = await self.service.preflight_submission_access(
+            interaction.guild,
+            author_id=interaction.user.id,
+            member=interaction.user,
+            submission_kind="reply",
+            reply_flow="owner_reply_to_user",
+        )
+        if not gate.ok or gate.result is not None:
+            sender = interaction.response.edit_message if edit_existing else self._send_private_interaction
+            embed = self._member_gate_embed(
+                gate.result or ConfessionSubmissionResult(
+                    False,
+                    "unavailable",
+                    "Confessions are unavailable.",
+                    submission_kind="reply",
+                    reply_flow="owner_reply_to_user",
+                ),
+                title=gate.title,
+            )
+            if edit_existing:
+                await sender(embed=embed, view=None)
+            else:
+                await sender(interaction, embed=embed)
             return
         contexts = await self.service.list_pending_owner_reply_contexts(
             interaction.guild,
@@ -1919,6 +2237,30 @@ class ConfessionsCog(commands.Cog):
                     error or "That owner-reply prompt is no longer available.",
                     tone="warning",
                     footer="Babblebox Confessions",
+                ),
+            )
+            return
+        gate = await self.service.preflight_submission_access(
+            context["guild"],
+            author_id=author.id,
+            member=context["guild"].get_member(author.id) or author,
+            submission_kind="reply",
+            reply_flow="owner_reply_to_user",
+            owner_reply_context_required=True,
+            owner_reply_context=context,
+        )
+        if not gate.ok or gate.result is not None:
+            await self._send_private_interaction(
+                interaction,
+                embed=self._member_gate_embed(
+                    gate.result or ConfessionSubmissionResult(
+                        False,
+                        "unavailable",
+                        "Confessions are unavailable.",
+                        submission_kind="reply",
+                        reply_flow="owner_reply_to_user",
+                    ),
+                    title=gate.title,
                 ),
             )
             return
@@ -2308,7 +2650,6 @@ class ConfessionsCog(commands.Cog):
         name="confess",
         with_app_command=True,
         description="Private anonymous confession and support flows",
-        fallback="create",
         invoke_without_command=True,
     )
     async def confess_group(self, ctx: commands.Context):
@@ -2316,39 +2657,65 @@ class ConfessionsCog(commands.Cog):
         if interaction is None:
             await self._send_slash_only_notice(ctx, "Use `/confess create` in a server to open the private confession composer.")
             return
-        await self._open_confession_modal(interaction)
+        await self._run_member_interaction(
+            interaction,
+            stage="confess_group_root",
+            action=lambda: self._send_confession_about(interaction),
+            failure_message="Babblebox could not open the Confessions help panel right now. Run `/confess about` again in a moment.",
+        )
+
+    @confess_group.command(name="create", description="Open the private anonymous confession composer")
+    async def confess_create_command(self, ctx: commands.Context):
+        await self._run_member_slash_command(
+            ctx,
+            stage="confess_create_command",
+            slash_only_message="Use `/confess create` in a server to open the private confession composer.",
+            failure_message="Babblebox could not open the private confession composer right now. Run `/confess create` again in a moment.",
+            action=lambda: self._open_confession_modal(ctx.interaction),
+        )
 
     @confess_group.command(name="manage", description="Open the private manage-my-confession flow")
     async def confess_manage_command(self, ctx: commands.Context):
-        interaction = getattr(ctx, "interaction", None)
-        if interaction is None:
-            await self._send_slash_only_notice(ctx, "Use `/confess manage` in a server to open the private manage flow.")
-            return
-        await self._open_manage_modal(interaction)
+        await self._run_member_slash_command(
+            ctx,
+            stage="confess_manage_command",
+            slash_only_message="Use `/confess manage` in a server to open the private manage flow.",
+            failure_message="Babblebox could not open that private manage flow right now. Run `/confess manage` again in a moment.",
+            action=lambda: self._open_manage_modal(ctx.interaction),
+        )
 
     @confess_group.command(name="appeal", description="Open the private anonymous appeal flow")
     async def confess_appeal_command(self, ctx: commands.Context):
-        interaction = getattr(ctx, "interaction", None)
-        if interaction is None:
-            await self._send_slash_only_notice(ctx, "Use `/confess appeal` in a server to open the private appeal flow.")
-            return
-        await self._open_appeal_modal(interaction)
+        await self._run_member_slash_command(
+            ctx,
+            stage="confess_appeal_command",
+            slash_only_message="Use `/confess appeal` in a server to open the private appeal flow.",
+            failure_message="Babblebox could not open that private appeal flow right now. Run `/confess appeal` again in a moment.",
+            failure_title="Private Support Unavailable",
+            action=lambda: self._open_appeal_modal(ctx.interaction),
+        )
 
     @confess_group.command(name="report", description="Open the private anonymous report flow")
     async def confess_report_command(self, ctx: commands.Context):
-        interaction = getattr(ctx, "interaction", None)
-        if interaction is None:
-            await self._send_slash_only_notice(ctx, "Use `/confess report` in a server to open the private report flow.")
-            return
-        await self._open_report_modal(interaction)
+        await self._run_member_slash_command(
+            ctx,
+            stage="confess_report_command",
+            slash_only_message="Use `/confess report` in a server to open the private report flow.",
+            failure_message="Babblebox could not open that private report flow right now. Run `/confess report` again in a moment.",
+            failure_title="Private Support Unavailable",
+            action=lambda: self._open_report_modal(ctx.interaction),
+        )
 
     @confess_group.command(name="reply-to-user", description="Review member responses to your confession and post an anonymous owner reply")
     async def confess_reply_to_user_command(self, ctx: commands.Context):
-        interaction = getattr(ctx, "interaction", None)
-        if interaction is None:
-            await self._send_slash_only_notice(ctx, "Use `/confess reply-to-user` in a server to review private owner-reply opportunities.")
-            return
-        await self._send_owner_reply_inbox(interaction)
+        await self._run_member_slash_command(
+            ctx,
+            stage="confess_reply_to_user_command",
+            slash_only_message="Use `/confess reply-to-user` in a server to review private owner-reply opportunities.",
+            failure_message="Babblebox could not open that private owner-reply inbox right now. Run `/confess reply-to-user` again in a moment.",
+            failure_title="Owner Reply Unavailable",
+            action=lambda: self._send_owner_reply_inbox(ctx.interaction),
+        )
 
     @confess_group.command(name="about", description="Learn how anonymous confessions work in this server")
     async def confess_about_command(self, ctx: commands.Context):
@@ -2359,7 +2726,12 @@ class ConfessionsCog(commands.Cog):
                 return
             await ctx.send(embed=self.service.build_member_panel_help_embed(ctx.guild))
             return
-        await self._send_confession_about(interaction)
+        await self._run_member_interaction(
+            interaction,
+            stage="confess_about_command",
+            action=lambda: self._send_confession_about(interaction),
+            failure_message="Babblebox could not open the Confessions help panel right now. Run `/confess about` again in a moment.",
+        )
 
     @app_commands.allowed_installs(guilds=True, users=False)
     @app_commands.guild_only()
@@ -2716,6 +3088,103 @@ class ConfessionsCog(commands.Cog):
             title="Confessions Role Eligibility",
             stage="role_reset_command",
             failure_message="Babblebox could not reset that Confessions role policy right now. Try again in a moment.",
+            action=_action,
+        )
+
+    @confessions_group.group(
+        name="exemptions",
+        with_app_command=True,
+        invoke_without_command=True,
+        description="Manage automatic moderation exemptions for Confessions",
+    )
+    async def confessions_exemptions_group(self, ctx: commands.Context):
+        async def _action():
+            await send_hybrid_response(
+                ctx,
+                embed=self.service.build_automatic_moderation_exemptions_embed(ctx.guild),
+                ephemeral=True,
+            )
+
+        await self._run_admin_command(
+            ctx,
+            title="Confessions Automatic Moderation",
+            stage="exemptions_group",
+            failure_message="Babblebox could not open the Confessions exemption view right now. Try `/confessions exemptions` again in a moment.",
+            action=_action,
+        )
+
+    @app_commands.describe(state="Turn automatic moderation admin exemptions on or off")
+    @app_commands.choices(state=ROLE_STATE_CHOICES)
+    @confessions_exemptions_group.command(name="admins", description="Control whether administrators are exempt from automatic Confessions punishment")
+    async def confessions_exemptions_admins_command(self, ctx: commands.Context, state: str = "on"):
+        async def _action():
+            ok, message = await self.service.update_automatic_moderation_admin_exemption(ctx.guild.id, enabled=state == "on")
+            await send_hybrid_response(
+                ctx,
+                embed=self._admin_status_embed("Confessions Automatic Moderation", message, ok=ok),
+                ephemeral=True,
+            )
+
+        await self._run_admin_command(
+            ctx,
+            title="Confessions Automatic Moderation",
+            stage="exemptions_admins_command",
+            failure_message="Babblebox could not update the admin exemption setting right now. Try again in a moment.",
+            action=_action,
+        )
+
+    @app_commands.describe(role="Role to add or remove from the automatic moderation exemption list", state="Turn this exemption on or off")
+    @app_commands.choices(state=ROLE_STATE_CHOICES)
+    @confessions_exemptions_group.command(name="role", description="Add or remove a role from automatic Confessions moderation exemptions")
+    async def confessions_exemptions_role_command(self, ctx: commands.Context, role: discord.Role, state: str = "on"):
+        async def _action():
+            if self._is_default_role(role):
+                await send_hybrid_response(
+                    ctx,
+                    embed=self._admin_status_embed(
+                        "Confessions Automatic Moderation",
+                        "Babblebox does not allow `@everyone` in the automatic moderation exemption list.",
+                        ok=False,
+                    ),
+                    ephemeral=True,
+                )
+                return
+            ok, message = await self.service.update_automatic_moderation_role_exemption(
+                ctx.guild.id,
+                role_id=role.id,
+                enabled=state == "on",
+            )
+            await send_hybrid_response(
+                ctx,
+                embed=self._admin_status_embed("Confessions Automatic Moderation", message, ok=ok),
+                ephemeral=True,
+            )
+
+        await self._run_admin_command(
+            ctx,
+            title="Confessions Automatic Moderation",
+            stage="exemptions_role_command",
+            failure_message="Babblebox could not update that Confessions exemption role right now. Try again in a moment.",
+            action=_action,
+        )
+
+    @app_commands.describe(target="Reset exempt roles or restore all automatic moderation exemptions to safe defaults")
+    @app_commands.choices(target=EXEMPTION_RESET_CHOICES)
+    @confessions_exemptions_group.command(name="reset", description="Reset automatic Confessions moderation exemptions")
+    async def confessions_exemptions_reset_command(self, ctx: commands.Context, target: str):
+        async def _action():
+            ok, message = await self.service.reset_automatic_moderation_exemptions(ctx.guild.id, target=target)
+            await send_hybrid_response(
+                ctx,
+                embed=self._admin_status_embed("Confessions Automatic Moderation", message, ok=ok),
+                ephemeral=True,
+            )
+
+        await self._run_admin_command(
+            ctx,
+            title="Confessions Automatic Moderation",
+            stage="exemptions_reset_command",
+            failure_message="Babblebox could not reset those Confessions exemptions right now. Try again in a moment.",
             action=_action,
         )
 

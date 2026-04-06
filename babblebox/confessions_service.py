@@ -255,6 +255,15 @@ class ConfessionsRuntimeSyncResult:
     issues: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class ConfessionFlowGate:
+    ok: bool
+    result: ConfessionSubmissionResult | None = None
+    title: str | None = None
+    state: dict[str, Any] | None = None
+    image_restriction_message: str | None = None
+
+
 def _sorted_unique_text(values: Iterable[str]) -> list[str]:
     return sorted({normalize_plain_text(value).casefold() for value in values if normalize_plain_text(value)})
 
@@ -576,6 +585,7 @@ class ConfessionsService:
         compiled["custom_block_domain_set"] = frozenset(config["custom_block_domains"])
         compiled["allowed_role_id_set"] = frozenset(config["allowed_role_ids"])
         compiled["blocked_role_id_set"] = frozenset(config["blocked_role_ids"])
+        compiled["auto_moderation_exempt_role_id_set"] = frozenset(config["auto_moderation_exempt_role_ids"])
         return compiled
 
     def get_config(self, guild_id: int) -> dict[str, Any]:
@@ -586,6 +596,7 @@ class ConfessionsService:
             config.pop("custom_block_domain_set", None)
             config.pop("allowed_role_id_set", None)
             config.pop("blocked_role_id_set", None)
+            config.pop("auto_moderation_exempt_role_id_set", None)
             return config
         return default_confession_config(guild_id)
 
@@ -712,6 +723,8 @@ class ConfessionsService:
         burst_limit: int | None = None,
         burst_window_seconds: int | None = None,
         auto_suspend_hours: int | None = None,
+        auto_moderation_exempt_admins: bool | None = None,
+        auto_moderation_exempt_role_ids: list[int] | None = None,
         strike_temp_ban_threshold: int | None = None,
         temp_ban_days: int | None = None,
         strike_perm_ban_threshold: int | None = None,
@@ -773,6 +786,10 @@ class ConfessionsService:
                 config["burst_window_seconds"] = burst_window_seconds
             if auto_suspend_hours is not None:
                 config["auto_suspend_hours"] = auto_suspend_hours
+            if auto_moderation_exempt_admins is not None:
+                config["auto_moderation_exempt_admins"] = bool(auto_moderation_exempt_admins)
+            if auto_moderation_exempt_role_ids is not None:
+                config["auto_moderation_exempt_role_ids"] = list(auto_moderation_exempt_role_ids)
             if strike_temp_ban_threshold is not None:
                 config["strike_temp_ban_threshold"] = strike_temp_ban_threshold
             if temp_ban_days is not None:
@@ -794,6 +811,7 @@ class ConfessionsService:
                 f"Review mode is {'on' if current['review_mode'] else 'off'}. "
                 f"Owner replies are {'on' if current['allow_owner_replies'] else 'off'}, "
                 f"owner-reply review is {'on' if current['owner_reply_review_mode'] else 'off'}. "
+                f"Automatic moderation admin exemptions are {'on' if current['auto_moderation_exempt_admins'] else 'off'}. "
                 f"{ready} {privacy_message}"
             ),
         )
@@ -883,6 +901,57 @@ class ConfessionsService:
         label = "allowlist and blacklist" if target == "all" else target
         return True, f"Confessions role {label} reset."
 
+    async def update_automatic_moderation_admin_exemption(self, guild_id: int, *, enabled: bool) -> tuple[bool, str]:
+        ok, message = await self.configure_guild(guild_id, auto_moderation_exempt_admins=enabled)
+        if not ok:
+            return False, message
+        return True, (
+            "Administrators are now exempt from automatic Confessions punishment while hard content blocking still stays on."
+            if enabled
+            else "Administrators will now receive automatic Confessions punishment the same way as other members."
+        )
+
+    async def update_automatic_moderation_role_exemption(
+        self,
+        guild_id: int,
+        *,
+        role_id: int,
+        enabled: bool,
+    ) -> tuple[bool, str]:
+        def mutate(config: dict[str, Any]):
+            values = {int(value) for value in config.get("auto_moderation_exempt_role_ids", []) if isinstance(value, int) and value > 0}
+            if enabled:
+                values.add(int(role_id))
+            else:
+                values.discard(int(role_id))
+            config["auto_moderation_exempt_role_ids"] = sorted(values)
+
+        ok, message = await self._update_config(guild_id, mutate)
+        if not ok:
+            return False, message
+        action = "added to" if enabled else "removed from"
+        return True, (
+            f"<@&{role_id}> was {action} the automatic Confessions moderation exemption list. "
+            "Hard safety blocking still applies."
+        )
+
+    async def reset_automatic_moderation_exemptions(self, guild_id: int, *, target: str) -> tuple[bool, str]:
+        if target not in {"roles", "all"}:
+            return False, "Choose roles or all."
+
+        def mutate(config: dict[str, Any]):
+            if target in {"roles", "all"}:
+                config["auto_moderation_exempt_role_ids"] = []
+            if target == "all":
+                config["auto_moderation_exempt_admins"] = True
+
+        ok, message = await self._update_config(guild_id, mutate)
+        if not ok:
+            return False, message
+        if target == "roles":
+            return True, "Automatic Confessions moderation role exemptions reset."
+        return True, "Automatic Confessions moderation exemptions reset to the safe defaults."
+
     def _resolve_submission_member(
         self,
         guild: discord.Guild,
@@ -937,6 +1006,56 @@ class ConfessionsService:
             "stale_allowed": stale_allowed,
             "stale_blocked": stale_blocked,
         }
+
+    def _automatic_moderation_exemptions_snapshot(self, guild: discord.Guild) -> dict[str, Any]:
+        config = self.get_config(guild.id)
+        active_role_ids, role_labels, stale_roles = self._resolve_role_labels(
+            guild,
+            list(config["auto_moderation_exempt_role_ids"]),
+        )
+        return {
+            "admins_enabled": bool(config["auto_moderation_exempt_admins"]),
+            "active_role_ids": active_role_ids,
+            "role_labels": role_labels,
+            "stale_roles": stale_roles,
+        }
+
+    @staticmethod
+    def _flow_access_title(submission_kind: str, reply_flow: str | None = None) -> str:
+        if submission_kind == "reply" and reply_flow == REPLY_FLOW_OWNER_TO_USER:
+            return "Owner Reply Access"
+        if submission_kind == "reply":
+            return "Reply Access"
+        return "Confession Access"
+
+    @staticmethod
+    def _flow_paused_title(submission_kind: str, reply_flow: str | None = None) -> str:
+        if submission_kind == "reply" and reply_flow == REPLY_FLOW_OWNER_TO_USER:
+            return "Owner Reply Paused"
+        if submission_kind == "reply":
+            return "Replies Paused"
+        return "Confessions Paused"
+
+    @staticmethod
+    def _member_is_administrator(member: object | None) -> bool:
+        perms = getattr(member, "guild_permissions", None)
+        return bool(getattr(perms, "administrator", False))
+
+    def _automatic_moderation_exemption_reason(
+        self,
+        guild: discord.Guild,
+        compiled: dict[str, Any],
+        *,
+        author_id: int,
+        member: object | None = None,
+    ) -> str | None:
+        resolved_member = self._resolve_submission_member(guild, author_id=author_id, member=member)
+        if bool(compiled.get("auto_moderation_exempt_admins")) and self._member_is_administrator(resolved_member):
+            return "administrator"
+        member_role_ids = self._member_role_ids(resolved_member)
+        if member_role_ids & set(compiled.get("auto_moderation_exempt_role_id_set", ())):
+            return "role"
+        return None
 
     def _format_role_labels(self, labels: Sequence[str]) -> str:
         if not labels:
@@ -1008,6 +1127,44 @@ class ConfessionsService:
             inline=False,
         )
         return ge.style_embed(embed, footer="Babblebox Confessions | Role eligibility")
+
+    def build_automatic_moderation_exemptions_embed(self, guild: discord.Guild) -> discord.Embed:
+        snapshot = self._automatic_moderation_exemptions_snapshot(guild)
+        role_lines = [
+            f"Admins exempt by default: **{'On' if snapshot['admins_enabled'] else 'Off'}**",
+            f"Exempt roles: **{len(snapshot['active_role_ids'])}** active",
+            self._format_role_labels(snapshot["role_labels"]),
+        ]
+        if snapshot["stale_roles"]:
+            role_lines.append(f"Stale configured roles: **{snapshot['stale_roles']}**")
+        embed = discord.Embed(
+            title="Confessions Automatic Moderation Exemptions",
+            description=(
+                "These exemptions only skip automatic punishment like strikes, auto-suspensions, and auto-bans. "
+                "They do not allow blocked content through, and staff can still use manual moderation."
+            ),
+            color=ge.EMBED_THEME["info"],
+        )
+        embed.add_field(name="Current", value=ge.safe_field_text("\n".join(role_lines), limit=1024), inline=False)
+        embed.add_field(
+            name="Commands",
+            value=(
+                "Use `/confessions exemptions admins` to turn admin exemption on or off.\n"
+                "Use `/confessions exemptions role` to add or remove exempt roles.\n"
+                "Use `/confessions exemptions reset` to clear exempt roles or restore the safe defaults."
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Safety",
+            value=(
+                "Hard content blocking still applies to everyone.\n"
+                "Manual staff moderation still works on exempt users.\n"
+                "Only automatic bot punishment is skipped."
+            ),
+            inline=False,
+        )
+        return ge.style_embed(embed, footer="Babblebox Confessions | Automatic moderation")
 
     def operability_message(self, guild_id: int) -> str:
         config = self.get_config(guild_id)
@@ -1139,6 +1296,196 @@ class ConfessionsService:
             remaining = int(max(0, (until - ge.now_utc()).total_seconds()))
             return f"Image attachments are paused for you for about {format_duration_brief(remaining)}."
         return "Image attachments are currently disabled for you in this server."
+
+    async def _preflight_submission_gate(
+        self,
+        guild: discord.Guild,
+        *,
+        author_id: int,
+        member: object | None = None,
+        submission_kind: str = "confession",
+        reply_flow: str | None = None,
+        image_restriction_mode: str = "ignore",
+        owner_reply_context_required: bool = False,
+        owner_reply_context: dict[str, Any] | None = None,
+    ) -> ConfessionFlowGate:
+        normalized_kind = normalize_plain_text(submission_kind).casefold() or "confession"
+        normalized_reply_flow = normalize_plain_text(reply_flow).casefold() if reply_flow else ""
+        if normalized_kind not in {"confession", "reply"}:
+            return ConfessionFlowGate(
+                False,
+                result=ConfessionSubmissionResult(False, "blocked", "That anonymous submission type is not supported."),
+                title=self._flow_access_title(normalized_kind, normalized_reply_flow or None),
+            )
+        if normalized_kind == "reply":
+            normalized_reply_flow = normalized_reply_flow or REPLY_FLOW_TO_CONFESSION
+            if normalized_reply_flow not in {REPLY_FLOW_TO_CONFESSION, REPLY_FLOW_OWNER_TO_USER}:
+                return ConfessionFlowGate(
+                    False,
+                    result=ConfessionSubmissionResult(
+                        False,
+                        "blocked",
+                        "That anonymous reply flow is not supported.",
+                        submission_kind=normalized_kind,
+                        reply_flow=normalized_reply_flow,
+                    ),
+                    title=self._flow_access_title(normalized_kind, normalized_reply_flow),
+                )
+        else:
+            normalized_reply_flow = ""
+        if not self.storage_ready:
+            return ConfessionFlowGate(
+                False,
+                result=ConfessionSubmissionResult(
+                    False,
+                    "unavailable",
+                    self.storage_message("Confessions"),
+                    submission_kind=normalized_kind,
+                    reply_flow=normalized_reply_flow or None,
+                ),
+            )
+        ready_message = self.operability_message(guild.id)
+        if ready_message != "Confessions are ready.":
+            return ConfessionFlowGate(
+                False,
+                result=ConfessionSubmissionResult(
+                    False,
+                    "unavailable",
+                    ready_message,
+                    submission_kind=normalized_kind,
+                    reply_flow=normalized_reply_flow or None,
+                ),
+            )
+        compiled = self.get_compiled_config(guild.id)
+        if normalized_kind == "reply":
+            if normalized_reply_flow == REPLY_FLOW_OWNER_TO_USER:
+                if not compiled.get("allow_owner_replies", True):
+                    return ConfessionFlowGate(
+                        False,
+                        result=ConfessionSubmissionResult(
+                            False,
+                            "blocked",
+                            "Owner replies are currently disabled in this server.",
+                            submission_kind=normalized_kind,
+                            reply_flow=normalized_reply_flow,
+                        ),
+                        title="Owner Replies Are Off",
+                    )
+                if owner_reply_context_required and not isinstance(owner_reply_context, dict):
+                    return ConfessionFlowGate(
+                        False,
+                        result=ConfessionSubmissionResult(
+                            False,
+                            "blocked",
+                            "That owner-reply opportunity is no longer available.",
+                            submission_kind=normalized_kind,
+                            reply_flow=normalized_reply_flow,
+                        ),
+                        title=self._flow_access_title(normalized_kind, normalized_reply_flow),
+                    )
+            else:
+                if not compiled["allow_anonymous_replies"]:
+                    return ConfessionFlowGate(
+                        False,
+                        result=ConfessionSubmissionResult(
+                            False,
+                            "blocked",
+                            "Anonymous replies are off by default in this server unless admins explicitly enable them.",
+                            submission_kind=normalized_kind,
+                            reply_flow=normalized_reply_flow,
+                        ),
+                        title="Replies Are Off",
+                    )
+                if not self._has_review_channel(guild.id):
+                    return ConfessionFlowGate(
+                        False,
+                        result=ConfessionSubmissionResult(
+                            False,
+                            "blocked",
+                            self._review_channel_requirement_message(),
+                            submission_kind=normalized_kind,
+                            reply_flow=normalized_reply_flow,
+                        ),
+                        title=self._flow_access_title(normalized_kind, normalized_reply_flow),
+                    )
+        role_gate_message = self.member_submission_gate_message(
+            guild,
+            submission_kind=normalized_kind,
+            author_id=author_id,
+            member=member,
+        )
+        if role_gate_message is not None:
+            return ConfessionFlowGate(
+                False,
+                result=ConfessionSubmissionResult(
+                    False,
+                    "blocked",
+                    role_gate_message,
+                    submission_kind=normalized_kind,
+                    reply_flow=normalized_reply_flow or None,
+                ),
+                title=self._flow_access_title(normalized_kind, normalized_reply_flow or None),
+            )
+        state = self._normalize_restriction_state(await self._enforcement_state(guild.id, author_id))
+        restriction_message = self._restriction_message(state)
+        if restriction_message is not None:
+            await self.store.upsert_enforcement_state(state)
+            return ConfessionFlowGate(
+                False,
+                result=ConfessionSubmissionResult(
+                    False,
+                    "restricted",
+                    restriction_message,
+                    submission_kind=normalized_kind,
+                    reply_flow=normalized_reply_flow or None,
+                ),
+                title=self._flow_paused_title(normalized_kind, normalized_reply_flow or None),
+                state=state,
+            )
+        image_message = self._image_restriction_message(state)
+        if image_message is not None and image_restriction_mode != "ignore":
+            await self.store.upsert_enforcement_state(state)
+            if image_restriction_mode == "block":
+                return ConfessionFlowGate(
+                    False,
+                    result=ConfessionSubmissionResult(
+                        False,
+                        "blocked",
+                        image_message,
+                        submission_kind=normalized_kind,
+                        reply_flow=normalized_reply_flow or None,
+                    ),
+                    title="Image Attachments Paused",
+                    state=state,
+                )
+        return ConfessionFlowGate(
+            True,
+            state=state,
+            image_restriction_message=image_message if image_restriction_mode == "advisory" else None,
+        )
+
+    async def preflight_submission_access(
+        self,
+        guild: discord.Guild,
+        *,
+        author_id: int,
+        member: object | None = None,
+        submission_kind: str = "confession",
+        reply_flow: str | None = None,
+        image_restriction_mode: str = "ignore",
+        owner_reply_context_required: bool = False,
+        owner_reply_context: dict[str, Any] | None = None,
+    ) -> ConfessionFlowGate:
+        return await self._preflight_submission_gate(
+            guild,
+            author_id=author_id,
+            member=member,
+            submission_kind=submission_kind,
+            reply_flow=reply_flow,
+            image_restriction_mode=image_restriction_mode,
+            owner_reply_context_required=owner_reply_context_required,
+            owner_reply_context=owner_reply_context,
+        )
 
     def _needs_review(
         self,
@@ -1279,6 +1626,7 @@ class ConfessionsService:
         *,
         case_id: str | None = None,
         ignore_existing_cooldown: bool = False,
+        automatic_moderation_exempt: bool = False,
     ) -> tuple[bool, dict[str, Any], str | None]:
         now = ge.now_utc()
         updated = self._normalize_restriction_state(state)
@@ -1295,6 +1643,12 @@ class ConfessionsService:
         else:
             updated["burst_count"] = int(updated.get("burst_count") or 0) + 1
         if int(updated.get("burst_count") or 0) > int(compiled["burst_limit"]):
+            if automatic_moderation_exempt:
+                updated["burst_count"] = int(compiled["burst_limit"])
+                updated["cooldown_until"] = (now + timedelta(seconds=int(compiled["cooldown_seconds"]))).isoformat()
+                updated["updated_at"] = now.isoformat()
+                await self.store.upsert_enforcement_state(updated)
+                return True, updated, None
             until = now + timedelta(hours=int(compiled["auto_suspend_hours"]))
             updated["active_restriction"] = "suspended"
             updated["restricted_until"] = until.isoformat()
@@ -1557,82 +1911,42 @@ class ConfessionsService:
         reply_flow: str | None = None,
         _owner_reply_context: dict[str, Any] | None = None,
     ) -> ConfessionSubmissionResult:
-        if not self.storage_ready:
-            return ConfessionSubmissionResult(False, "unavailable", self.storage_message("Confessions"))
-        compiled = self.get_compiled_config(guild.id)
-        ready_message = self.operability_message(guild.id)
-        if ready_message != "Confessions are ready.":
-            return ConfessionSubmissionResult(False, "unavailable", ready_message)
         submission_kind = normalize_plain_text(submission_kind).casefold() or "confession"
-        if submission_kind not in {"confession", "reply"}:
-            return ConfessionSubmissionResult(False, "blocked", "That anonymous submission type is not supported.")
         normalized_reply_flow = normalize_plain_text(reply_flow).casefold() if reply_flow else ""
+        attachment_list = list(attachments or [])
+        preflight = await self._preflight_submission_gate(
+            guild,
+            author_id=author_id,
+            member=member,
+            submission_kind=submission_kind,
+            reply_flow=normalized_reply_flow or None,
+            image_restriction_mode="block" if attachment_list else "ignore",
+            owner_reply_context_required=submission_kind == "reply" and normalized_reply_flow == REPLY_FLOW_OWNER_TO_USER,
+            owner_reply_context=_owner_reply_context,
+        )
+        if not preflight.ok and preflight.result is not None:
+            return preflight.result
+        compiled = self.get_compiled_config(guild.id)
         if submission_kind == "reply":
             normalized_reply_flow = normalized_reply_flow or REPLY_FLOW_TO_CONFESSION
-            if normalized_reply_flow not in {REPLY_FLOW_TO_CONFESSION, REPLY_FLOW_OWNER_TO_USER}:
-                return ConfessionSubmissionResult(False, "blocked", "That anonymous reply flow is not supported.", submission_kind=submission_kind)
-            if normalized_reply_flow == REPLY_FLOW_OWNER_TO_USER and not isinstance(_owner_reply_context, dict):
-                return ConfessionSubmissionResult(
-                    False,
-                    "blocked",
-                    "Owner replies can only start from a Babblebox owner-reply opportunity.",
-                    submission_kind=submission_kind,
-                    reply_flow=normalized_reply_flow,
-                )
         else:
             normalized_reply_flow = None
         normalized_parent_confession_id = normalize_plain_text(parent_confession_id).upper() if parent_confession_id else None
-        role_gate_message = self.member_submission_gate_message(
+        state = preflight.state or self._normalize_restriction_state(await self._enforcement_state(guild.id, author_id))
+        automatic_moderation_exempt = self._automatic_moderation_exemption_reason(
             guild,
-            submission_kind=submission_kind,
+            compiled,
             author_id=author_id,
             member=member,
-        )
-        if role_gate_message is not None:
-            return ConfessionSubmissionResult(
-                False,
-                "blocked",
-                role_gate_message,
-                submission_kind=submission_kind,
-                reply_flow=normalized_reply_flow,
-                parent_confession_id=normalized_parent_confession_id,
-            )
-
-        state = self._normalize_restriction_state(await self._enforcement_state(guild.id, author_id))
-        restriction_message = self._restriction_message(state)
-        if restriction_message is not None:
-            await self.store.upsert_enforcement_state(state)
-            return ConfessionSubmissionResult(False, "restricted", restriction_message, submission_kind=submission_kind, reply_flow=normalized_reply_flow)
-
-        attachment_list = list(attachments or [])
-        image_restriction_message = self._image_restriction_message(state)
-        if attachment_list and image_restriction_message is not None:
-            await self.store.upsert_enforcement_state(state)
-            return ConfessionSubmissionResult(False, "blocked", image_restriction_message, submission_kind=submission_kind, reply_flow=normalized_reply_flow)
+        ) is not None
 
         if submission_kind == "reply":
             is_owner_reply = normalized_reply_flow == REPLY_FLOW_OWNER_TO_USER
-            if not is_owner_reply and not compiled["allow_anonymous_replies"]:
-                return ConfessionSubmissionResult(
-                    False,
-                    "blocked",
-                    "Anonymous replies are off by default in this server unless admins explicitly enable them.",
-                    submission_kind=submission_kind,
-                    reply_flow=normalized_reply_flow,
-                )
             if attachment_list:
                 return ConfessionSubmissionResult(False, "blocked", "Anonymous replies are text-only right now.", submission_kind=submission_kind, reply_flow=normalized_reply_flow)
             if normalize_plain_text(link):
                 return ConfessionSubmissionResult(False, "blocked", "Anonymous replies do not allow links right now.", submission_kind=submission_kind, reply_flow=normalized_reply_flow)
             if is_owner_reply:
-                if not compiled.get("allow_owner_replies", True):
-                    return ConfessionSubmissionResult(
-                        False,
-                        "blocked",
-                        "Owner replies are currently disabled in this server.",
-                        submission_kind=submission_kind,
-                        reply_flow=normalized_reply_flow,
-                    )
                 owner_context = _owner_reply_context or {}
                 root_submission = owner_context.get("root_submission")
                 referenced_submission = owner_context.get("referenced_submission")
@@ -1648,8 +1962,6 @@ class ConfessionsService:
                 owner_reply_generation = 1 if referenced_submission.get("submission_kind") == "confession" else 2
             else:
                 owner_reply_generation = None
-                if not self._has_review_channel(guild.id):
-                    return ConfessionSubmissionResult(False, "blocked", self._review_channel_requirement_message(), submission_kind=submission_kind, reply_flow=normalized_reply_flow)
                 if not normalized_parent_confession_id or not normalized_parent_confession_id.startswith(f"{CONFESSION_ID_PREFIX}-"):
                     return ConfessionSubmissionResult(False, "blocked", "Reply to a published confession ID like `CF-XXXXXX`.", submission_kind=submission_kind, reply_flow=normalized_reply_flow)
                 parent_submission = await self.store.fetch_submission_by_confession_id(guild.id, normalized_parent_confession_id)
@@ -1771,14 +2083,16 @@ class ConfessionsService:
                 }
             )
             if safety.strike_worthy:
-                escalated = self._strike_escalation(compiled, updated_state, case_id=case_id)
-                await self.store.upsert_enforcement_state(escalated)
+                if not automatic_moderation_exempt:
+                    escalated = self._strike_escalation(compiled, updated_state, case_id=case_id)
+                    await self.store.upsert_enforcement_state(escalated)
             elif set(safety.flag_codes) & SPAM_RATE_LIMIT_FLAGS:
                 rate_ok, _, rate_message = await self._update_rate_limits(
                     compiled,
                     state,
                     case_id=case_id,
                     ignore_existing_cooldown=ignore_existing_cooldown,
+                    automatic_moderation_exempt=automatic_moderation_exempt,
                 )
                 if not rate_ok:
                     return ConfessionSubmissionResult(
@@ -1828,6 +2142,7 @@ class ConfessionsService:
             compiled,
             state,
             ignore_existing_cooldown=ignore_existing_cooldown,
+            automatic_moderation_exempt=automatic_moderation_exempt,
         )
         if not rate_ok:
             return ConfessionSubmissionResult(
@@ -3251,6 +3566,7 @@ class ConfessionsService:
     async def build_dashboard_embed(self, guild: discord.Guild, *, section: str = "overview") -> discord.Embed:
         config = self.get_config(guild.id)
         role_snapshot = self._role_policy_snapshot(guild)
+        exemption_snapshot = self._automatic_moderation_exemptions_snapshot(guild)
         support_snapshot = self.support_channel_snapshot(guild)
         privacy_status = await self._guild_privacy_status(guild.id, stage="build_dashboard_privacy")
         role_value = (
@@ -3265,6 +3581,15 @@ class ConfessionsService:
                 f"\nStale configured roles: allowlist **{role_snapshot['stale_allowed']}**, "
                 f"blacklist **{role_snapshot['stale_blocked']}**"
             )
+        exemption_value = (
+            f"Admins exempt by default: **{'On' if exemption_snapshot['admins_enabled'] else 'Off'}**\n"
+            f"Exempt roles: **{len(exemption_snapshot['active_role_ids'])}** active\n"
+            f"{self._format_role_labels(exemption_snapshot['role_labels'])}\n"
+            "Hard content blocking: **Still applies**\n"
+            "Manual staff moderation: **Still applies**"
+        )
+        if exemption_snapshot["stale_roles"]:
+            exemption_value += f"\nStale exempt roles: **{exemption_snapshot['stale_roles']}**"
         support_value = (
             f"Channel: {self._format_channel_label(support_snapshot['channel_id'])}\n"
             f"Status: **{support_snapshot['status_label']}**\n"
@@ -3320,6 +3645,7 @@ class ConfessionsService:
                 inline=False,
             )
             embed.add_field(name="Role Eligibility", value=ge.safe_field_text(role_value, limit=1024), inline=False)
+            embed.add_field(name="Automatic Moderation", value=ge.safe_field_text(exemption_value, limit=1024), inline=False)
             embed.add_field(
                 name="Restrictions",
                 value=(

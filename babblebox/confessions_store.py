@@ -76,6 +76,8 @@ def default_confession_config(guild_id: int | None = None) -> dict[str, Any]:
         "cooldown_seconds": 5 * 60,
         "burst_limit": 3,
         "burst_window_seconds": 30 * 60,
+        "auto_moderation_exempt_admins": True,
+        "auto_moderation_exempt_role_ids": [],
         "auto_suspend_hours": 12,
         "strike_temp_ban_threshold": 3,
         "temp_ban_days": 7,
@@ -271,6 +273,8 @@ def normalize_confession_config(guild_id: int, payload: Any) -> dict[str, Any]:
     cleaned["allow_owner_replies"] = bool(payload.get("allow_owner_replies", True))
     cleaned["owner_reply_review_mode"] = bool(payload.get("owner_reply_review_mode", False))
     cleaned["allow_self_edit"] = bool(payload.get("allow_self_edit", False))
+    cleaned["auto_moderation_exempt_admins"] = bool(payload.get("auto_moderation_exempt_admins", True))
+    cleaned["auto_moderation_exempt_role_ids"] = _clean_int_list(payload.get("auto_moderation_exempt_role_ids"))
     max_images = payload.get("max_images")
     cleaned["max_images"] = max_images if isinstance(max_images, int) and 1 <= max_images <= 3 else 3
     for field, default_value, minimum, maximum in (
@@ -851,6 +855,11 @@ def _config_from_row(row: Any) -> dict[str, Any] | None:
             "allow_owner_replies": row.get("allow_owner_replies"),
             "owner_reply_review_mode": row.get("owner_reply_review_mode"),
             "allow_self_edit": row.get("allow_self_edit"),
+            "auto_moderation_exempt_admins": row.get("auto_moderation_exempt_admins"),
+            "auto_moderation_exempt_role_ids": decode_postgres_json_array(
+                row.get("auto_moderation_exempt_role_ids"),
+                label="confession_guild_configs.auto_moderation_exempt_role_ids",
+            ),
             "max_images": row["max_images"],
             "cooldown_seconds": row["cooldown_seconds"],
             "burst_limit": row["burst_limit"],
@@ -2080,6 +2089,8 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                 "allow_owner_replies BOOLEAN NOT NULL DEFAULT TRUE, "
                 "owner_reply_review_mode BOOLEAN NOT NULL DEFAULT FALSE, "
                 "allow_self_edit BOOLEAN NOT NULL DEFAULT FALSE, "
+                "auto_moderation_exempt_admins BOOLEAN NOT NULL DEFAULT TRUE, "
+                "auto_moderation_exempt_role_ids JSONB NOT NULL DEFAULT '[]'::jsonb, "
                 "max_images SMALLINT NOT NULL DEFAULT 3, "
                 "cooldown_seconds INTEGER NOT NULL DEFAULT 300, "
                 "burst_limit SMALLINT NOT NULL DEFAULT 3, "
@@ -2253,6 +2264,8 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
             "ALTER TABLE confession_guild_configs ADD COLUMN IF NOT EXISTS allow_owner_replies BOOLEAN NOT NULL DEFAULT TRUE",
             "ALTER TABLE confession_guild_configs ADD COLUMN IF NOT EXISTS owner_reply_review_mode BOOLEAN NOT NULL DEFAULT FALSE",
             "ALTER TABLE confession_guild_configs ADD COLUMN IF NOT EXISTS allow_self_edit BOOLEAN NOT NULL DEFAULT FALSE",
+            "ALTER TABLE confession_guild_configs ADD COLUMN IF NOT EXISTS auto_moderation_exempt_admins BOOLEAN NOT NULL DEFAULT TRUE",
+            "ALTER TABLE confession_guild_configs ADD COLUMN IF NOT EXISTS auto_moderation_exempt_role_ids JSONB NOT NULL DEFAULT '[]'::jsonb",
             "ALTER TABLE confession_submissions ADD COLUMN IF NOT EXISTS review_status TEXT NOT NULL DEFAULT 'none'",
             "ALTER TABLE confession_submissions ADD COLUMN IF NOT EXISTS submission_kind TEXT NOT NULL DEFAULT 'confession'",
             "ALTER TABLE confession_submissions ADD COLUMN IF NOT EXISTS reply_flow TEXT NULL",
@@ -2351,12 +2364,13 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                         "INSERT INTO confession_guild_configs ("
                         "guild_id, enabled, confession_channel_id, panel_channel_id, panel_message_id, review_channel_id, appeals_channel_id, review_mode, block_adult_language, "
                         "allow_trusted_mainstream_links, custom_allow_domains, custom_block_domains, allowed_role_ids, blocked_role_ids, "
-                        "allow_images, allow_anonymous_replies, allow_owner_replies, owner_reply_review_mode, allow_self_edit, max_images, "
-                        "cooldown_seconds, burst_limit, burst_window_seconds, auto_suspend_hours, strike_temp_ban_threshold, temp_ban_days, strike_perm_ban_threshold, updated_at"
+                        "allow_images, allow_anonymous_replies, allow_owner_replies, owner_reply_review_mode, allow_self_edit, "
+                        "auto_moderation_exempt_admins, auto_moderation_exempt_role_ids, max_images, cooldown_seconds, "
+                        "burst_limit, burst_window_seconds, auto_suspend_hours, strike_temp_ban_threshold, temp_ban_days, strike_perm_ban_threshold, updated_at"
                         ") VALUES ("
                         "$1, $2, $3, $4, $5, $6, $7, $8, $9, "
                         "$10, $11::jsonb, $12::jsonb, $13::jsonb, $14::jsonb, $15, $16, $17, $18, $19, "
-                        "$20, $21, $22, $23, $24, $25, $26, $27, timezone('utc', now())"
+                        "$20, $21::jsonb, $22, $23, $24, $25, $26, $27, $28, $29, timezone('utc', now())"
                         ") "
                         "ON CONFLICT (guild_id) DO UPDATE SET "
                         "enabled = EXCLUDED.enabled, "
@@ -2377,6 +2391,8 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                         "allow_owner_replies = EXCLUDED.allow_owner_replies, "
                         "owner_reply_review_mode = EXCLUDED.owner_reply_review_mode, "
                         "allow_self_edit = EXCLUDED.allow_self_edit, "
+                        "auto_moderation_exempt_admins = EXCLUDED.auto_moderation_exempt_admins, "
+                        "auto_moderation_exempt_role_ids = EXCLUDED.auto_moderation_exempt_role_ids, "
                         "max_images = EXCLUDED.max_images, "
                         "cooldown_seconds = EXCLUDED.cooldown_seconds, "
                         "burst_limit = EXCLUDED.burst_limit, "
@@ -2406,6 +2422,8 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                     normalized["allow_owner_replies"],
                     normalized["owner_reply_review_mode"],
                     normalized["allow_self_edit"],
+                    normalized["auto_moderation_exempt_admins"],
+                    json.dumps(normalized["auto_moderation_exempt_role_ids"]),
                     normalized["max_images"],
                     normalized["cooldown_seconds"],
                     normalized["burst_limit"],
