@@ -176,6 +176,34 @@ class WebsiteDocsTests(unittest.TestCase):
         self.assertIn("Babblebox still enforces safety internally", privacy_html)
         self.assertIn("operator-proof", privacy_html)
 
+    def test_env_example_matches_confessions_deploy_model(self):
+        env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+        for text in (
+            "CONFESSIONS_CONTENT_KEY",
+            "CONFESSIONS_IDENTITY_KEY",
+            "CONFESSIONS_CONTENT_KEY_ID",
+            "CONFESSIONS_IDENTITY_KEY_ID",
+            "CONFESSIONS_CONTENT_LEGACY_KEYS",
+            "CONFESSIONS_IDENTITY_LEGACY_KEYS",
+            "Required for Postgres-backed Confessions privacy hardening",
+            "Optional but recommended active key labels",
+            "Optional only during Confessions key rotation or compatibility windows",
+            "python -m babblebox.confessions_backfill --dry-run",
+            "python -m babblebox.confessions_backfill --apply --batch-size 100",
+        ):
+            self.assertIn(text, env_example)
+
+        for text in (
+            "required for Postgres-backed Confessions",
+            "optional but recommended active key labels",
+            "used only during key rotation or compatibility windows",
+            "code deploy plus keys is not enough",
+            "privacy hardening is `Ready` or `Partial`",
+        ):
+            self.assertIn(text, readme)
+
     def test_homepage_and_readme_use_current_proof_assets(self):
         index_html = (ROOT / "index.html").read_text(encoding="utf-8")
         readme = (ROOT / "README.md").read_text(encoding="utf-8")

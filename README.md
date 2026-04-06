@@ -708,8 +708,8 @@ Environment variable notes:
 - `UTILITY_DATABASE_URL` is the preferred Postgres connection string
 - `SUPABASE_DB_URL` and `DATABASE_URL` are also accepted
 - `CONFESSIONS_CONTENT_KEY` and `CONFESSIONS_IDENTITY_KEY` are required for Postgres-backed Confessions and should be separate random secrets of at least 32 characters each
-- `CONFESSIONS_CONTENT_KEY_ID` and `CONFESSIONS_IDENTITY_KEY_ID` are optional active key labels; if omitted they default to `active`
-- `CONFESSIONS_CONTENT_LEGACY_KEYS` and `CONFESSIONS_IDENTITY_LEGACY_KEYS` are optional comma-separated `key_id=secret` lists that let Babblebox read old Confessions rows while writing with the new active key
+- `CONFESSIONS_CONTENT_KEY_ID` and `CONFESSIONS_IDENTITY_KEY_ID` are optional but recommended active key labels; if omitted they default to `active`
+- `CONFESSIONS_CONTENT_LEGACY_KEYS` and `CONFESSIONS_IDENTITY_LEGACY_KEYS` are optional comma-separated `key_id=secret` lists used only during key rotation or compatibility windows so Babblebox can read old Confessions rows while writing with the new active key
 - `OPENAI_API_KEY` is optional and only needed for Shield AI assist
 - `SHIELD_AI_MODEL`, `SHIELD_AI_TIMEOUT_SECONDS`, and `SHIELD_AI_MAX_CHARS` are optional Shield AI tuning knobs
 - `UTILITY_STORAGE_BACKEND=memory` is for explicit local/test work only
