@@ -36,9 +36,28 @@ class _FakeAcquire:
 class _FakeConnection:
     def __init__(self):
         self.executed: list[str] = []
+        self.execute_calls: list[tuple[str, tuple[object, ...]]] = []
+        self.fetch_calls: list[tuple[str, tuple[object, ...]]] = []
+        self.fetchrow_calls: list[tuple[str, tuple[object, ...]]] = []
+        self.fetch_results: list[list[object]] = []
+        self.fetchrow_results: list[object] = []
 
     async def execute(self, statement: str, *args):
         self.executed.append(statement)
+        self.execute_calls.append((statement, args))
+        return "EXECUTE"
+
+    async def fetch(self, statement: str, *args):
+        self.fetch_calls.append((statement, args))
+        if self.fetch_results:
+            return self.fetch_results.pop(0)
+        return []
+
+    async def fetchrow(self, statement: str, *args):
+        self.fetchrow_calls.append((statement, args))
+        if self.fetchrow_results:
+            return self.fetchrow_results.pop(0)
+        return None
 
 
 class _FakePool:
@@ -47,6 +66,9 @@ class _FakePool:
 
     def acquire(self):
         return _FakeAcquire(self.connection)
+
+    async def close(self):
+        return None
 
 
 class ConfessionsStoreNormalizationTests(unittest.TestCase):
@@ -676,3 +698,320 @@ class ConfessionsStorePrivacyTests(unittest.IsolatedAsyncioTestCase):
         with mock.patch.dict("os.environ", {}, clear=True):
             with self.assertRaises(ConfessionsStorageUnavailable):
                 ConfessionsStore(backend="postgres", database_url="postgresql://example")
+
+
+class PostgresConfessionsStoreTests(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self):
+        self.connection = _FakeConnection()
+        self.store = _PostgresConfessionsStore("postgresql://example", _privacy())
+        self.store._pool = _FakePool(self.connection)
+
+    async def asyncTearDown(self):
+        await self.store.close()
+
+    async def test_postgres_store_upsert_config_includes_admin_runtime_fields(self):
+        await self.store.upsert_config(
+            {
+                "guild_id": 10,
+                "enabled": True,
+                "confession_channel_id": 20,
+                "panel_channel_id": 40,
+                "panel_message_id": 50,
+                "review_channel_id": 30,
+                "appeals_channel_id": 60,
+                "review_mode": False,
+                "block_adult_language": True,
+                "allow_trusted_mainstream_links": True,
+                "custom_allow_domains": ["google.com"],
+                "custom_block_domains": ["bad.example"],
+                "allowed_role_ids": [501],
+                "blocked_role_ids": [502],
+                "allow_images": True,
+                "allow_anonymous_replies": True,
+                "allow_owner_replies": True,
+                "owner_reply_review_mode": True,
+                "allow_self_edit": True,
+                "max_images": 2,
+                "cooldown_seconds": 600,
+                "burst_limit": 2,
+                "burst_window_seconds": 900,
+                "auto_suspend_hours": 24,
+                "strike_temp_ban_threshold": 3,
+                "temp_ban_days": 14,
+                "strike_perm_ban_threshold": 5,
+            }
+        )
+
+        statement, args = self.connection.execute_calls[-1]
+        self.assertIn("panel_message_id", statement)
+        self.assertIn("appeals_channel_id", statement)
+        self.assertIn("owner_reply_review_mode", statement)
+        self.assertEqual(args[0], 10)
+        self.assertEqual(args[3], 40)
+        self.assertEqual(args[4], 50)
+        self.assertEqual(args[6], 60)
+        self.assertEqual(json.loads(args[10]), ["google.com"])
+        self.assertEqual(json.loads(args[11]), ["bad.example"])
+        self.assertEqual(json.loads(args[12]), [501])
+        self.assertEqual(json.loads(args[13]), [502])
+        self.assertTrue(args[14])
+        self.assertTrue(args[15])
+        self.assertTrue(args[16])
+        self.assertTrue(args[17])
+
+    async def test_postgres_store_fetch_config_round_trips_admin_runtime_fields(self):
+        self.connection.fetchrow_results.append(
+            {
+                "guild_id": 10,
+                "enabled": True,
+                "confession_channel_id": 20,
+                "panel_channel_id": 40,
+                "panel_message_id": 50,
+                "review_channel_id": 30,
+                "appeals_channel_id": 60,
+                "review_mode": False,
+                "block_adult_language": True,
+                "allow_trusted_mainstream_links": True,
+                "custom_allow_domains": json.dumps(["google.com"]),
+                "custom_block_domains": json.dumps(["bad.example"]),
+                "allowed_role_ids": json.dumps([501]),
+                "blocked_role_ids": json.dumps([502]),
+                "allow_images": True,
+                "allow_anonymous_replies": True,
+                "allow_owner_replies": True,
+                "owner_reply_review_mode": True,
+                "allow_self_edit": True,
+                "max_images": 2,
+                "cooldown_seconds": 600,
+                "burst_limit": 2,
+                "burst_window_seconds": 900,
+                "auto_suspend_hours": 24,
+                "strike_temp_ban_threshold": 3,
+                "temp_ban_days": 14,
+                "strike_perm_ban_threshold": 5,
+            }
+        )
+
+        config = await self.store.fetch_config(10)
+
+        self.assertEqual(config["panel_channel_id"], 40)
+        self.assertEqual(config["panel_message_id"], 50)
+        self.assertEqual(config["appeals_channel_id"], 60)
+        self.assertEqual(config["allowed_role_ids"], [501])
+        self.assertEqual(config["blocked_role_ids"], [502])
+        self.assertTrue(config["allow_images"])
+        self.assertTrue(config["allow_anonymous_replies"])
+        self.assertTrue(config["allow_owner_replies"])
+        self.assertTrue(config["owner_reply_review_mode"])
+        self.assertTrue(config["allow_self_edit"])
+
+    async def test_postgres_store_fetch_all_configs_round_trips_admin_runtime_fields(self):
+        self.connection.fetch_results.append(
+            [
+                {
+                    "guild_id": 10,
+                    "enabled": True,
+                    "confession_channel_id": 20,
+                    "panel_channel_id": 40,
+                    "panel_message_id": 50,
+                    "review_channel_id": 30,
+                    "appeals_channel_id": 60,
+                    "review_mode": False,
+                    "block_adult_language": True,
+                    "allow_trusted_mainstream_links": True,
+                    "custom_allow_domains": json.dumps(["google.com"]),
+                    "custom_block_domains": json.dumps(["bad.example"]),
+                    "allowed_role_ids": json.dumps([501]),
+                    "blocked_role_ids": json.dumps([502]),
+                    "allow_images": True,
+                    "allow_anonymous_replies": True,
+                    "allow_owner_replies": True,
+                    "owner_reply_review_mode": True,
+                    "allow_self_edit": True,
+                    "max_images": 2,
+                    "cooldown_seconds": 600,
+                    "burst_limit": 2,
+                    "burst_window_seconds": 900,
+                    "auto_suspend_hours": 24,
+                    "strike_temp_ban_threshold": 3,
+                    "temp_ban_days": 14,
+                    "strike_perm_ban_threshold": 5,
+                },
+                {
+                    "guild_id": 11,
+                    "enabled": False,
+                    "confession_channel_id": 21,
+                    "panel_channel_id": None,
+                    "panel_message_id": None,
+                    "review_channel_id": None,
+                    "appeals_channel_id": None,
+                    "review_mode": True,
+                    "block_adult_language": True,
+                    "allow_trusted_mainstream_links": True,
+                    "custom_allow_domains": json.dumps([]),
+                    "custom_block_domains": json.dumps([]),
+                    "allowed_role_ids": json.dumps([]),
+                    "blocked_role_ids": json.dumps([]),
+                    "allow_images": False,
+                    "allow_anonymous_replies": False,
+                    "allow_owner_replies": True,
+                    "owner_reply_review_mode": False,
+                    "allow_self_edit": False,
+                    "max_images": 1,
+                    "cooldown_seconds": 300,
+                    "burst_limit": 3,
+                    "burst_window_seconds": 1800,
+                    "auto_suspend_hours": 12,
+                    "strike_temp_ban_threshold": 3,
+                    "temp_ban_days": 7,
+                    "strike_perm_ban_threshold": 5,
+                },
+            ]
+        )
+
+        configs = await self.store.fetch_all_configs()
+
+        self.assertEqual(sorted(configs), [10, 11])
+        self.assertEqual(configs[10]["panel_message_id"], 50)
+        self.assertEqual(configs[10]["appeals_channel_id"], 60)
+        self.assertEqual(configs[11]["confession_channel_id"], 21)
+        self.assertEqual(configs[11]["allowed_role_ids"], [])
+
+    async def test_postgres_store_review_queue_round_trip_methods(self):
+        await self.store.upsert_review_queue(
+            {
+                "guild_id": 10,
+                "channel_id": 30,
+                "message_id": 40,
+                "updated_at": "2026-04-03T00:00:00+00:00",
+            }
+        )
+
+        statement, args = self.connection.execute_calls[-1]
+        self.assertIn("confession_review_queues", statement)
+        self.assertEqual(args[0], 10)
+        self.assertEqual(args[1], 30)
+        self.assertEqual(args[2], 40)
+        self.assertIsNotNone(args[3])
+
+        self.connection.fetchrow_results.append(
+            {
+                "guild_id": 10,
+                "channel_id": 30,
+                "message_id": 40,
+                "updated_at": "2026-04-03T00:00:00+00:00",
+            }
+        )
+        record = await self.store.fetch_review_queue(10)
+        self.assertEqual(record["channel_id"], 30)
+        self.assertEqual(record["message_id"], 40)
+
+        self.connection.fetch_results.append(
+            [
+                {
+                    "guild_id": 10,
+                    "channel_id": 30,
+                    "message_id": 40,
+                    "updated_at": "2026-04-03T00:00:00+00:00",
+                },
+                {
+                    "guild_id": 11,
+                    "channel_id": 31,
+                    "message_id": 41,
+                    "updated_at": "2026-04-03T00:05:00+00:00",
+                },
+            ]
+        )
+        rows = await self.store.list_review_queues()
+        self.assertEqual([row["guild_id"] for row in rows], [10, 11])
+
+    async def test_postgres_store_privacy_status_accepts_current_row_shapes(self):
+        privacy = _privacy()
+        submission_ciphertext = privacy.encrypt_payload(
+            domain="submission-content",
+            aad_fields={"guild_id": 10, "submission_id": "sub-1", "confession_id": "CF-AAAA1111"},
+            payload={"staff_preview": "Preview", "content_body": "Body"},
+            key_domain="content",
+        )
+        private_media_payload = privacy.encrypt_payload(
+            domain="private-media",
+            aad_fields={"guild_id": 10, "submission_id": "sub-1"},
+            payload={"attachment_urls": ["https://cdn.discordapp.com/attachments/1/2/image.png"]},
+            key_domain="content",
+        )
+        author_lookup_hash = privacy.blind_index(label="author-link", guild_id=10, value=400)
+        author_ciphertext = privacy.encrypt_payload(
+            domain="author-link",
+            aad_fields={"guild_id": 10, "submission_id": "sub-1"},
+            payload={"author_user_id": 400},
+            key_domain="identity",
+        )
+        source_lookup_hash = privacy.blind_index(label="owner-reply-source-author", guild_id=10, value=401)
+        owner_reply_payload = privacy.encrypt_payload(
+            domain="owner-reply-opportunity",
+            aad_fields={"guild_id": 10, "opportunity_id": "opp-1", "root_submission_id": "sub-root"},
+            payload={"source_author_user_id": 401, "source_author_name": "Responder", "source_preview": "Preview"},
+            key_domain="content",
+        )
+        enforcement_lookup_hash = privacy.blind_index(label="enforcement-state", guild_id=10, value=402)
+        enforcement_ciphertext = privacy.encrypt_payload(
+            domain="enforcement-state",
+            aad_fields={"guild_id": 10, "user_lookup_hash": enforcement_lookup_hash},
+            payload={"user_id": 402},
+            key_domain="identity",
+        )
+        self.connection.fetch_results = [
+            [
+                {
+                    "guild_id": 10,
+                    "staff_preview": None,
+                    "content_body": None,
+                    "shared_link_url": None,
+                    "content_ciphertext": submission_ciphertext,
+                    "content_fingerprint": privacy.exact_duplicate_hash("hello", guild_id=10),
+                    "similarity_key": None,
+                    "fuzzy_signature": privacy.fuzzy_duplicate_signature(["hello"], guild_id=10),
+                }
+            ],
+            [
+                {
+                    "guild_id": 10,
+                    "attachment_urls": "[]",
+                    "attachment_payload": private_media_payload,
+                }
+            ],
+            [
+                {
+                    "guild_id": 10,
+                    "author_lookup_hash": author_lookup_hash,
+                    "author_identity_ciphertext": author_ciphertext,
+                }
+            ],
+            [],
+            [
+                {
+                    "guild_id": 10,
+                    "source_author_user_id": None,
+                    "source_author_lookup_hash": source_lookup_hash,
+                    "source_author_name": None,
+                    "source_preview": None,
+                    "source_message_fingerprint": None,
+                    "private_payload": owner_reply_payload,
+                }
+            ],
+            [
+                {
+                    "guild_id": 10,
+                    "user_lookup_hash": enforcement_lookup_hash,
+                    "user_identity_ciphertext": enforcement_ciphertext,
+                }
+            ],
+            [],
+        ]
+
+        status = await self.store.fetch_privacy_status(10)
+
+        self.assertEqual(status["scope"], "guild")
+        self.assertEqual(status["guild_id"], 10)
+        self.assertEqual(status["state"], "ready")
+        self.assertEqual(status["categories"], [])

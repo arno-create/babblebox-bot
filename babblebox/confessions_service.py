@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import hashlib
+import logging
 import re
 import secrets
 import time
@@ -58,6 +59,9 @@ from babblebox.utility_helpers import (
     deserialize_datetime,
     format_duration_brief,
 )
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 PUBLIC_ID_ALPHABET = "ABCDEFGHJKLMNPQRSTUVWXYZ23456789"
@@ -243,6 +247,12 @@ class SafetyResult:
     strike_worthy: bool
     reason: str
     link_assessments: tuple[ShieldLinkAssessment, ...] = ()
+
+
+@dataclass(frozen=True)
+class ConfessionsRuntimeSyncResult:
+    ok: bool
+    issues: tuple[str, ...] = ()
 
 
 def _sorted_unique_text(values: Iterable[str]) -> list[str]:
@@ -476,7 +486,7 @@ class ConfessionsService:
             try:
                 self.store = ConfessionsStore()
             except ConfessionsStorageUnavailable as exc:
-                print(f"Confessions storage constructor failed: {exc}")
+                LOGGER.warning("Confessions storage constructor failed: %s", exc)
                 self.store = ConfessionsStore(backend="memory")
                 self._startup_storage_error = str(exc)
                 self.storage_error = str(exc)
@@ -490,28 +500,28 @@ class ConfessionsService:
         if self._startup_storage_error is not None:
             self.storage_ready = False
             self.storage_error = self._startup_storage_error
-            print(f"Confessions storage unavailable: {self._startup_storage_error}")
+            LOGGER.warning("Confessions storage unavailable: %s", self._startup_storage_error)
             return False
         try:
             await self.store.load()
         except ConfessionsStorageUnavailable as exc:
             self.storage_ready = False
             self.storage_error = str(exc)
-            print(f"Confessions storage unavailable: {exc}")
+            LOGGER.warning("Confessions storage unavailable: %s", exc)
             return False
         self.storage_ready = True
         self.storage_error = None
         await self._rebuild_config_cache()
         self._privacy_status_global = await self.store.fetch_privacy_status()
         if self._privacy_status_global.get("needs_backfill"):
-            print(
+            LOGGER.warning(
                 "Confessions privacy warning: hardening is partial. "
                 f"Categories: {', '.join(self._privacy_category_labels(self._privacy_status_global))}. "
                 "Run `python -m babblebox.confessions_backfill --dry-run` and then "
                 "`python -m babblebox.confessions_backfill --apply --batch-size 100`."
             )
         else:
-            print("Confessions privacy status: hardening is ready.")
+            LOGGER.info("Confessions privacy status: hardening is ready.")
         return True
 
     async def close(self):
@@ -544,7 +554,12 @@ class ConfessionsService:
                 parts.append(f"note={cleaned_note[:160]}")
         if exc is not None:
             parts.append(f"exception={type(exc).__name__}")
-        print(f"Confessions admin diagnostic: {', '.join(parts)}")
+        parts.append(f"backend={getattr(self.store, 'backend_name', 'unknown')}")
+        message = f"Confessions admin diagnostic: {', '.join(parts)}"
+        if exc is not None:
+            LOGGER.exception(message)
+            return
+        LOGGER.warning(message)
 
     def storage_message(self, feature_name: str = "Confessions") -> str:
         return f"{feature_name} are temporarily unavailable because Babblebox could not reach the confessions database."
@@ -582,6 +597,49 @@ class ConfessionsService:
         self._compiled_configs[guild_id] = compiled
         return compiled
 
+    async def _persist_config_snapshot(
+        self,
+        guild_id: int,
+        config: dict[str, Any],
+        *,
+        stage_prefix: str,
+        validate_message: str,
+        save_message: str,
+        reload_message: str,
+    ) -> tuple[bool, str, dict[str, Any] | None]:
+        try:
+            normalized = normalize_confession_config(guild_id, config)
+        except Exception as exc:
+            self.log_admin_diagnostic(
+                code=f"{stage_prefix}_normalize_failed",
+                stage=f"{stage_prefix}_normalize",
+                guild_id=guild_id,
+                exc=exc,
+            )
+            return False, validate_message, None
+        try:
+            compiled = self._compile_config(guild_id, normalized)
+        except Exception as exc:
+            self.log_admin_diagnostic(
+                code=f"{stage_prefix}_compile_failed",
+                stage=f"{stage_prefix}_compile",
+                guild_id=guild_id,
+                exc=exc,
+            )
+            return False, reload_message, None
+        try:
+            await self.store.upsert_config(normalized)
+        except Exception as exc:
+            self.log_admin_diagnostic(
+                code=f"{stage_prefix}_upsert_failed",
+                stage=f"{stage_prefix}_upsert",
+                guild_id=guild_id,
+                exc=exc,
+            )
+            return False, save_message, None
+        self._compiled_configs[guild_id] = compiled
+        return True, "", normalized
+
     async def _update_config(self, guild_id: int, mutate) -> tuple[bool, str]:
         if not self.storage_ready:
             return False, self.storage_message("Confessions")
@@ -617,8 +675,16 @@ class ConfessionsService:
                 and normalized["confession_channel_id"] == normalized["review_channel_id"]
             ):
                 return False, "Confession and review channels must be different."
-            await self.store.upsert_config(normalized)
-            self._compiled_configs[guild_id] = self._compile_config(guild_id, normalized)
+            persisted_ok, persisted_message, _ = await self._persist_config_snapshot(
+                guild_id,
+                config,
+                stage_prefix="configure",
+                validate_message="Babblebox could not validate those Confessions settings right now.",
+                save_message="Babblebox could not save those Confessions settings right now.",
+                reload_message="Babblebox could not reload those Confessions settings right now.",
+            )
+            if not persisted_ok:
+                return False, persisted_message
         return True, "Confessions settings updated."
 
     async def configure_guild(
@@ -732,19 +798,34 @@ class ConfessionsService:
             ),
         )
 
-    async def update_panel_record(
+    async def persist_panel_record(
         self,
         guild_id: int,
         *,
         channel_id: int | None,
         message_id: int | None,
     ) -> tuple[bool, str]:
-        return await self.configure_guild(
-            guild_id,
-            panel_channel_id=channel_id,
-            panel_message_id=message_id,
-            clear_panel=channel_id is None or message_id is None,
-        )
+        if not self.storage_ready:
+            return False, self.storage_message("Confessions")
+        async with self._lock:
+            config = self.get_config(guild_id)
+            if isinstance(channel_id, int) and isinstance(message_id, int):
+                config["panel_channel_id"] = channel_id
+                config["panel_message_id"] = message_id
+            else:
+                config["panel_channel_id"] = None
+                config["panel_message_id"] = None
+            persisted_ok, persisted_message, _ = await self._persist_config_snapshot(
+                guild_id,
+                config,
+                stage_prefix="panel_record",
+                validate_message="Babblebox could not validate the updated panel location right now.",
+                save_message="Babblebox could not save the updated panel location right now.",
+                reload_message="Babblebox could not reload the updated panel location right now.",
+            )
+            if not persisted_ok:
+                return False, persisted_message
+        return True, "Confession panel location updated."
 
     async def update_domain_policy(self, guild_id: int, *, bucket: str, domain: str, enabled: bool) -> tuple[bool, str]:
         if bucket not in {"allow", "block"}:
@@ -3495,8 +3576,17 @@ class ConfessionsService:
             with contextlib.suppress(discord.Forbidden, discord.HTTPException):
                 await message.edit(view=view)
             if view is not None:
-                with contextlib.suppress(Exception):
+                try:
                     self.bot.add_view(view, message_id=message.id)
+                except Exception as exc:
+                    self.log_admin_diagnostic(
+                        code="published_view_register_failed",
+                        stage="sync_published_confession_views_register",
+                        guild_id=guild.id,
+                        channel_id=getattr(channel, "id", None),
+                        message_id=getattr(message, "id", None),
+                        exc=exc,
+                    )
 
     async def resume_public_confession_views(self):
         for guild_id in sorted(self._compiled_configs):
@@ -3558,21 +3648,24 @@ class ConfessionsService:
                 return False, "Babblebox could not publish the confession panel in that channel."
         if message is None:
             return False, "Babblebox could not publish the confession panel in that channel."
-        try:
-            await self.update_panel_record(guild.id, channel_id=getattr(channel, "id", None), message_id=getattr(message, "id", None))
-        except Exception as exc:
+        record_ok, record_message = await self.persist_panel_record(
+            guild.id,
+            channel_id=getattr(channel, "id", None),
+            message_id=getattr(message, "id", None),
+        )
+        if not record_ok:
             self.log_admin_diagnostic(
                 code="panel_record_update_failed",
                 stage="sync_member_panel_record",
                 guild_id=guild.id,
                 channel_id=getattr(channel, "id", None),
                 message_id=getattr(message, "id", None),
-                exc=exc,
+                note=record_message,
             )
             return (
                 True,
-                f"Confession panel is live in <#{channel.id}>. "
-                "Babblebox could not save the updated panel location, so rerun `/confessions panel` if it looks stale after a restart.",
+                f"Confession panel is live in <#{channel.id}>. {record_message} "
+                "Rerun `/confessions panel` if it looks stale after a restart.",
             )
         if view is not None:
             try:
@@ -3616,14 +3709,14 @@ class ConfessionsService:
         compiled = self.get_compiled_config(guild.id)
         if not compiled["enabled"] or compiled["review_channel_id"] is None:
             await self._retire_review_queue(guild, note=note or "Confession review is inactive.")
-            return True, note or "Confession review queue is inactive."
+            return True, "Confession review queue is inactive."
         if compiled["confession_channel_id"] == compiled["review_channel_id"]:
             await self._retire_review_queue(guild, note="Confession review is disabled until the public and private channels differ.")
             return False, "Confession review is disabled until the public and private channels differ."
         pending_rows = await self.list_review_targets(guild.id, limit=25)
         if not pending_rows:
-            await self._retire_review_queue(guild, note=note)
-            return True, note or "Confession review queue is clear."
+            await self._retire_review_queue(guild, note=note or "Confession review queue is clear.")
+            return True, "Confession review queue is clear."
         channel = guild.get_channel(compiled["review_channel_id"]) or self.bot.get_channel(compiled["review_channel_id"])
         if channel is None:
             return False, "That review channel is unavailable."
@@ -3634,7 +3727,7 @@ class ConfessionsService:
         if cog is not None:
             build_view = getattr(cog, "build_review_view", None)
             if callable(build_view):
-                    view = build_view(case_id=current["case_id"], version=current["review_version"])
+                view = build_view(case_id=current["case_id"], version=current["review_version"])
         embed = self.build_review_queue_embed(guild, pending_rows, note=note)
         message = await self._queue_message(channel, message_id=queue_record.get("message_id") if queue_record else None)
         if message is not None:
@@ -3681,12 +3774,12 @@ class ConfessionsService:
                 message_id=getattr(message, "id", None),
                 exc=exc,
             )
-            refresh_message = note or f"Confession review queue is live in <#{channel.id}>."
             return (
                 True,
-                f"{refresh_message} Babblebox could not save the refreshed review queue state, so rerun `/confessions` if it looks stale.",
+                f"Confession review queue is live in <#{channel.id}>. "
+                "Babblebox could not save the refreshed review queue state, so rerun `/confessions` if it looks stale.",
             )
-        return True, note or f"Confession review queue is live in <#{channel.id}>."
+        return True, f"Confession review queue is live in <#{channel.id}>."
 
     async def resume_review_queues(self):
         guild_ids = {guild_id for guild_id, config in self._compiled_configs.items() if config["enabled"] and config.get("review_channel_id")}
@@ -3700,6 +3793,85 @@ class ConfessionsService:
 
     async def sync_review_queue(self, guild: discord.Guild, *, note: str | None = None) -> tuple[bool, str]:
         return await self._sync_review_queue(guild, note=note)
+
+    def _runtime_attention_needed(self, ok: bool, message: str | None) -> bool:
+        if not ok:
+            return True
+        if not message:
+            return False
+        lowered = message.casefold()
+        return (
+            "could not" in lowered
+            or "unavailable" in lowered
+            or "disabled until" in lowered
+            or "still needs attention" in lowered
+            or "rerun `/confessions`" in lowered
+        )
+
+    async def sync_runtime_surfaces(
+        self,
+        guild: discord.Guild,
+        *,
+        stage_prefix: str = "runtime_sync",
+        review_note: str = "Confessions runtime refreshed.",
+    ) -> ConfessionsRuntimeSyncResult:
+        issues: list[str] = []
+        config = self.get_config(guild.id)
+        if config.get("panel_channel_id") or config.get("panel_message_id"):
+            try:
+                panel_ok, panel_message = await self.sync_member_panel(guild)
+            except Exception as exc:
+                self.log_admin_diagnostic(
+                    code=f"{stage_prefix}_panel_failed",
+                    stage=f"{stage_prefix}_panel",
+                    guild_id=guild.id,
+                    exc=exc,
+                )
+                issues.append("Babblebox could not refresh the public confessions panel right now.")
+            else:
+                if self._runtime_attention_needed(panel_ok, panel_message):
+                    self.log_admin_diagnostic(
+                        code=f"{stage_prefix}_panel_attention",
+                        stage=f"{stage_prefix}_panel",
+                        guild_id=guild.id,
+                        note=panel_message,
+                    )
+                    issues.append(panel_message)
+        try:
+            await self.sync_published_confession_views(guild)
+        except Exception as exc:
+            self.log_admin_diagnostic(
+                code=f"{stage_prefix}_views_failed",
+                stage=f"{stage_prefix}_views",
+                guild_id=guild.id,
+                exc=exc,
+            )
+            issues.append("Babblebox could not refresh one or more live confession reply buttons.")
+        try:
+            review_ok, review_message = await self.sync_review_queue(guild, note=review_note)
+        except Exception as exc:
+            self.log_admin_diagnostic(
+                code=f"{stage_prefix}_review_failed",
+                stage=f"{stage_prefix}_review",
+                guild_id=guild.id,
+                exc=exc,
+            )
+            issues.append("Babblebox could not refresh the confession review queue right now.")
+        else:
+            if self._runtime_attention_needed(review_ok, review_message):
+                self.log_admin_diagnostic(
+                    code=f"{stage_prefix}_review_attention",
+                    stage=f"{stage_prefix}_review",
+                    guild_id=guild.id,
+                    note=review_message,
+                )
+                issues.append(review_message)
+        cleaned_issues: list[str] = []
+        for issue in issues:
+            text = str(issue).strip()
+            if text and text not in cleaned_issues:
+                cleaned_issues.append(text)
+        return ConfessionsRuntimeSyncResult(ok=not cleaned_issues, issues=tuple(cleaned_issues))
 
     async def _detail_payload_for_target(self, guild_id: int, target_id: str) -> tuple[dict[str, Any] | None, str | None]:
         cleaned_target = normalize_plain_text(target_id).upper()
