@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+import logging
 import os
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -13,6 +14,9 @@ from babblebox.confessions_crypto import ConfessionsCrypto, ConfessionsCryptoErr
 from babblebox.confessions_privacy import build_duplicate_signals
 from babblebox.postgres_json import decode_postgres_json_array
 from babblebox.text_safety import normalize_plain_text
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 DEFAULT_BACKEND = "postgres"
@@ -2352,7 +2356,7 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                         ") VALUES ("
                         "$1, $2, $3, $4, $5, $6, $7, $8, $9, "
                         "$10, $11::jsonb, $12::jsonb, $13::jsonb, $14::jsonb, $15, $16, $17, $18, $19, "
-                        "$20, $21, $22, $23, $24, $25, $26, timezone('utc', now())"
+                        "$20, $21, $22, $23, $24, $25, $26, $27, timezone('utc', now())"
                         ") "
                         "ON CONFLICT (guild_id) DO UPDATE SET "
                         "enabled = EXCLUDED.enabled, "
@@ -3386,12 +3390,12 @@ class ConfessionsStore:
         self._construct_store(requested_backend)
 
     def _construct_store(self, requested_backend: str):
-        print(
-            "Confessions storage init: "
-            f"backend_preference={requested_backend}, "
-            f"database_url_configured={'yes' if self.database_url else 'no'}, "
-            f"database_url_source={self.database_url_source or 'none'}, "
-            f"privacy_source={'ephemeral' if self.privacy.status.ephemeral else 'environment'}"
+        LOGGER.info(
+            "Confessions storage init: backend_preference=%s, database_url_configured=%s, database_url_source=%s, privacy_source=%s",
+            requested_backend,
+            "yes" if self.database_url else "no",
+            self.database_url_source or "none",
+            "ephemeral" if self.privacy.status.ephemeral else "environment",
         )
         if requested_backend in {"memory", "test", "dev"}:
             self._store = _MemoryConfessionsStore(self.privacy)
@@ -3404,7 +3408,7 @@ class ConfessionsStore:
         else:
             raise ConfessionsStorageUnavailable(f"Unsupported confessions storage backend '{requested_backend}'.")
         self.backend_name = self._store.backend_name
-        print(f"Confessions storage init succeeded: backend={self.backend_name}")
+        LOGGER.info("Confessions storage init succeeded: backend=%s", self.backend_name)
 
     async def load(self):
         if self._store is None:
