@@ -479,6 +479,16 @@ def normalize_enforcement_state(payload: Any) -> dict[str, Any] | None:
     }
 
 
+def _enforcement_state_requires_gate_cache(payload: Any) -> bool:
+    if not isinstance(payload, dict):
+        return False
+    if bool(payload.get("is_permanent_ban")):
+        return True
+    if bool(payload.get("image_restriction_active")):
+        return True
+    return str(payload.get("active_restriction") or "none").strip().lower() != "none"
+
+
 def normalize_case(payload: Any) -> dict[str, Any] | None:
     if not isinstance(payload, dict):
         return None
@@ -1187,6 +1197,9 @@ class _BaseConfessionsStore:
     async def upsert_enforcement_state(self, record: dict[str, Any]):
         raise NotImplementedError
 
+    async def list_active_enforcement_states(self, *, guild_id: int | None = None) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
     async def list_review_queues(self) -> list[dict[str, Any]]:
         raise NotImplementedError
 
@@ -1668,6 +1681,33 @@ class _MemoryConfessionsStore(_BaseConfessionsStore):
             secure_row = self._encode_enforcement_state_row(normalized)
             self.secure_enforcement_states[(normalized["guild_id"], secure_row["user_lookup_hash"])] = secure_row
             self.enforcement_states.pop((normalized["guild_id"], normalized["user_id"]), None)
+
+    async def list_active_enforcement_states(self, *, guild_id: int | None = None) -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        seen: set[tuple[int, int]] = set()
+        for secure_row in self.secure_enforcement_states.values():
+            decoded = _enforcement_from_secure_row(deepcopy(secure_row), self._privacy)
+            if decoded is None:
+                continue
+            if guild_id is not None and decoded["guild_id"] != guild_id:
+                continue
+            if not _enforcement_state_requires_gate_cache(decoded):
+                continue
+            key = (decoded["guild_id"], decoded["user_id"])
+            seen.add(key)
+            rows.append(decoded)
+        for legacy_row in self.enforcement_states.values():
+            decoded = _enforcement_from_legacy_row(deepcopy(legacy_row))
+            if decoded is None:
+                continue
+            if guild_id is not None and decoded["guild_id"] != guild_id:
+                continue
+            key = (decoded["guild_id"], decoded["user_id"])
+            if key in seen or not _enforcement_state_requires_gate_cache(decoded):
+                continue
+            rows.append(decoded)
+        rows.sort(key=lambda item: (int(item.get("guild_id") or 0), int(item.get("user_id") or 0)))
+        return rows
 
     async def list_review_queues(self) -> list[dict[str, Any]]:
         rows = [deepcopy(record) for record in self.review_queues.values()]
@@ -3049,6 +3089,47 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                     normalized["user_id"],
                 )
 
+    async def list_active_enforcement_states(self, *, guild_id: int | None = None) -> list[dict[str, Any]]:
+        guild_clause = "WHERE guild_id = $1 AND " if guild_id is not None else "WHERE "
+        secure_params: tuple[object, ...] = (guild_id,) if guild_id is not None else ()
+        legacy_params: tuple[object, ...] = (guild_id,) if guild_id is not None else ()
+        async with self._pool.acquire() as conn:
+            secure_rows = await conn.fetch(
+                (
+                    f"SELECT * FROM {SECURE_ENFORCEMENT_TABLE} "
+                    f"{guild_clause}(is_permanent_ban = TRUE OR active_restriction <> 'none' OR image_restriction_active = TRUE) "
+                    "ORDER BY guild_id ASC, user_lookup_hash ASC"
+                ),
+                *secure_params,
+            )
+            legacy_rows = await conn.fetch(
+                (
+                    "SELECT * FROM confession_enforcement_states "
+                    f"{guild_clause}(is_permanent_ban = TRUE OR active_restriction <> 'none' OR image_restriction_active = TRUE) "
+                    "ORDER BY guild_id ASC, user_id ASC"
+                ),
+                *legacy_params,
+            )
+        rows: list[dict[str, Any]] = []
+        seen: set[tuple[int, int]] = set()
+        for secure_row in secure_rows:
+            decoded = _enforcement_from_secure_row(secure_row, self._privacy)
+            if decoded is None or not _enforcement_state_requires_gate_cache(decoded):
+                continue
+            key = (decoded["guild_id"], decoded["user_id"])
+            seen.add(key)
+            rows.append(decoded)
+        for legacy_row in legacy_rows:
+            decoded = _enforcement_from_legacy_row(legacy_row)
+            if decoded is None:
+                continue
+            key = (decoded["guild_id"], decoded["user_id"])
+            if key in seen or not _enforcement_state_requires_gate_cache(decoded):
+                continue
+            rows.append(decoded)
+        rows.sort(key=lambda item: (int(item.get("guild_id") or 0), int(item.get("user_id") or 0)))
+        return rows
+
     async def list_review_queues(self) -> list[dict[str, Any]]:
         async with self._pool.acquire() as conn:
             rows = await conn.fetch("SELECT guild_id, channel_id, message_id, updated_at FROM confession_review_queues ORDER BY guild_id ASC")
@@ -3580,6 +3661,9 @@ class ConfessionsStore:
 
     async def upsert_enforcement_state(self, record: dict[str, Any]):
         await self._store.upsert_enforcement_state(record)
+
+    async def list_active_enforcement_states(self, *, guild_id: int | None = None) -> list[dict[str, Any]]:
+        return await self._store.list_active_enforcement_states(guild_id=guild_id)
 
     async def list_review_queues(self) -> list[dict[str, Any]]:
         return await self._store.list_review_queues()

@@ -109,6 +109,23 @@ class TimedMemberPrivateView(discord.ui.View):
         self._expired = True
 
 
+class _ConfessionModalUploadRuntimeProbe(discord.ui.Modal, title="Babblebox Upload Probe"):
+    def __init__(self):
+        super().__init__(timeout=60)
+        self.add_item(
+            discord.ui.Label(
+                text="Images (optional)",
+                description="Runtime probe for labeled modal upload support.",
+                component=discord.ui.FileUpload(
+                    custom_id="bb-confession-modal:runtime-probe",
+                    required=False,
+                    min_values=0,
+                    max_values=1,
+                ),
+            )
+        )
+
+
 class ConfessionComposerModal(discord.ui.Modal, title="Anonymous Confession"):
     def __init__(self, cog: "ConfessionsCog", *, guild_id: int, image_upload_notice: str | None = None):
         super().__init__(timeout=300)
@@ -134,6 +151,7 @@ class ConfessionComposerModal(discord.ui.Modal, title="Anonymous Confession"):
         self.add_item(self.body_input)
         self.add_item(self.link_input)
         self.upload_input: discord.ui.FileUpload | None = None
+        self.upload_label: discord.ui.Label | None = None
         if self.image_upload_notice:
             self.body_input.placeholder = f"{self.image_upload_notice} You can still send text and one trusted link."
             self.link_input.placeholder = "Text and one trusted link only right now."
@@ -148,7 +166,12 @@ class ConfessionComposerModal(discord.ui.Modal, title="Anonymous Confession"):
                         min_values=0,
                         max_values=int(config["max_images"]),
                     )
-                    self.add_item(self.upload_input)
+                    self.upload_label = discord.ui.Label(
+                        text="Images (optional)",
+                        description=f"Up to {int(config['max_images'])} image{'s' if int(config['max_images']) != 1 else ''}. Images always go through review.",
+                        component=self.upload_input,
+                    )
+                    self.add_item(self.upload_label)
                     self.image_upload_available = True
                 except Exception as exc:
                     self._apply_image_upload_fallback(
@@ -162,7 +185,7 @@ class ConfessionComposerModal(discord.ui.Modal, title="Anonymous Confession"):
         self.link_input.placeholder = "Text and one trusted link only right now."
         self.cog.log_modal_diagnostic(
             code=code,
-            stage="construct_upload",
+            stage="modal_upload_runtime",
             modal_kind="confession",
             guild_id=guild_id,
             allow_images=self.image_upload_requested,
@@ -1046,7 +1069,7 @@ class ConfessionMemberPanelView(discord.ui.View):
         return cog
 
     @discord.ui.button(
-        label="Send Confession",
+        label="Create a confession",
         style=discord.ButtonStyle.primary,
         custom_id="bb-confession-panel:compose",
         row=0,
@@ -1055,6 +1078,13 @@ class ConfessionMemberPanelView(discord.ui.View):
         cog = await self._resolve_cog(interaction)
         if cog is None:
             return
+        cog.log_create_diagnostic(
+            code="panel_compose_open",
+            stage="panel_compose_open",
+            interaction=interaction,
+            note="member_panel",
+            info=True,
+        )
         await cog._run_member_interaction(
             interaction,
             stage="panel_view_compose",
@@ -1158,7 +1188,7 @@ class StatelessConfessionMemberPanelView(discord.ui.View):
         return cog
 
     @discord.ui.button(
-        label="Send Confession",
+        label="Create a confession",
         style=discord.ButtonStyle.primary,
         custom_id="bb-confession-panel:compose",
         row=0,
@@ -1167,6 +1197,13 @@ class StatelessConfessionMemberPanelView(discord.ui.View):
         cog = await self._resolve_cog(interaction)
         if cog is None:
             return
+        cog.log_create_diagnostic(
+            code="panel_compose_open",
+            stage="panel_compose_open",
+            interaction=interaction,
+            note="stateless_member_panel",
+            info=True,
+        )
         await cog._run_member_interaction(
             interaction,
             stage="stateless_panel_compose",
@@ -1853,6 +1890,12 @@ class ConfessionsCog(commands.Cog):
         self._pending_policy_updates: dict[str, dict[str, Any]] = {}
         self._persistent_restore_lock = asyncio.Lock()
         self._persistent_views_restored = False
+        self._persistent_surface_restore_status = {
+            "member_panels": False,
+            "public_views": False,
+            "review_queues": False,
+        }
+        self._modal_upload_runtime_safe: bool | None = None
         harden_admin_root_group(self.confessions_group)
 
     async def cog_load(self):
@@ -1872,14 +1915,22 @@ class ConfessionsCog(commands.Cog):
         return bool(callable(is_ready) and is_ready())
 
     def _register_global_persistent_views(self):
-        with contextlib.suppress(Exception):
-            self.bot.add_view(StatelessConfessionMemberPanelView())
-        with contextlib.suppress(Exception):
-            self.bot.add_view(StatelessPublishedConfessionReplyView())
-        with contextlib.suppress(Exception):
-            self.bot.add_view(StatelessOwnerReplyPromptView())
-        with contextlib.suppress(Exception):
-            self.bot.add_view(StatelessConfessionsAdminPanelView())
+        registrations = (
+            ("member_panel", StatelessConfessionMemberPanelView),
+            ("published_reply", StatelessPublishedConfessionReplyView),
+            ("owner_reply_prompt", StatelessOwnerReplyPromptView),
+            ("admin_panel", StatelessConfessionsAdminPanelView),
+        )
+        for label, view_factory in registrations:
+            try:
+                self.bot.add_view(view_factory())
+            except Exception as exc:
+                self.log_admin_diagnostic(
+                    code=f"{label}_global_view_register_failed",
+                    stage="register_global_persistent_views",
+                    guild_id=None,
+                    exc=exc,
+                )
 
     async def _restore_runtime_surfaces_once(self):
         if not self.service.storage_ready:
@@ -1887,10 +1938,26 @@ class ConfessionsCog(commands.Cog):
         async with self._persistent_restore_lock:
             if self._persistent_views_restored:
                 return
-            await self.service.resume_member_panels()
-            await self.service.resume_public_confession_views()
-            await self.service.resume_review_queues()
-            self._persistent_views_restored = True
+            steps = (
+                ("member_panels", self.service.resume_member_panels, "restore_member_panels"),
+                ("public_views", self.service.resume_public_confession_views, "restore_public_confession_views"),
+                ("review_queues", self.service.resume_review_queues, "restore_review_queues"),
+            )
+            for key, action, stage in steps:
+                if self._persistent_surface_restore_status.get(key):
+                    continue
+                try:
+                    await action()
+                except Exception as exc:
+                    self.log_admin_diagnostic(
+                        code=f"{key}_restore_failed",
+                        stage=stage,
+                        guild_id=None,
+                        exc=exc,
+                    )
+                else:
+                    self._persistent_surface_restore_status[key] = True
+            self._persistent_views_restored = all(self._persistent_surface_restore_status.values())
 
     @commands.Cog.listener()
     async def on_ready(self):
@@ -2011,6 +2078,54 @@ class ConfessionsCog(commands.Cog):
             return
         LOGGER.warning(message)
 
+    def log_create_diagnostic(
+        self,
+        *,
+        code: str,
+        stage: str,
+        interaction: discord.Interaction | None = None,
+        guild_id: int | None = None,
+        message_id: int | None = None,
+        note: str | None = None,
+        allow_images: bool | None = None,
+        upload_present: bool | None = None,
+        exc: Exception | None = None,
+        info: bool = False,
+    ):
+        resolved_guild_id = guild_id
+        resolved_message_id = message_id
+        if interaction is not None:
+            resolved_guild_id = resolved_guild_id if resolved_guild_id is not None else getattr(getattr(interaction, "guild", None), "id", None)
+            resolved_message_id = (
+                resolved_message_id
+                if resolved_message_id is not None
+                else getattr(getattr(interaction, "message", None), "id", None)
+            )
+        parts = [
+            f"code={code}",
+            f"stage={stage}",
+            f"guild_id={resolved_guild_id if resolved_guild_id is not None else 'none'}",
+        ]
+        if resolved_message_id is not None:
+            parts.append(f"message_id={resolved_message_id}")
+        if allow_images is not None:
+            parts.append(f"allow_images={bool(allow_images)}")
+        if upload_present is not None:
+            parts.append(f"upload_present={bool(upload_present)}")
+        if note:
+            parts.append(f"note={str(note)[:160]}")
+        if exc is not None:
+            parts.append(f"exception={type(exc).__name__}")
+        parts.append(f"backend={getattr(self.service.store, 'backend_name', 'unknown')}")
+        message = f"Confessions create diagnostic: {', '.join(parts)}"
+        if exc is not None:
+            LOGGER.exception(message)
+            return
+        if info:
+            LOGGER.info(message)
+            return
+        LOGGER.warning(message)
+
     def _member_status_embed(self, title: str, message: str, *, tone: str = "warning") -> discord.Embed:
         return ge.make_status_embed(title, message, tone=tone, footer="Babblebox Confessions")
 
@@ -2033,6 +2148,13 @@ class ConfessionsCog(commands.Cog):
         expired_title: str = "Private View Expired",
     ):
         if view is not None and getattr(view, "_expired", False):
+            if "compose" in stage:
+                self.log_create_diagnostic(
+                    code="panel_compose_expired",
+                    stage="panel_compose_expired",
+                    interaction=interaction,
+                    note=stage,
+                )
             await self._send_private_interaction(
                 interaction,
                 embed=self._member_status_embed(
@@ -2080,8 +2202,75 @@ class ConfessionsCog(commands.Cog):
         )
 
     def modal_file_upload_available(self) -> bool:
+        if self._modal_upload_runtime_safe is not None:
+            return self._modal_upload_runtime_safe
         file_upload = getattr(discord.ui, "FileUpload", None)
-        return file_upload is not None and callable(getattr(file_upload, "to_component_dict", None))
+        label = getattr(discord.ui, "Label", None)
+        if file_upload is None or label is None:
+            self._modal_upload_runtime_safe = False
+            self.log_modal_diagnostic(
+                code="confession_modal_upload_runtime_unavailable",
+                stage="modal_upload_runtime",
+                modal_kind="confession",
+                guild_id=None,
+                allow_images=True,
+                upload_present=False,
+                attachment_count=0,
+                storage_ready=self.service.storage_ready,
+                operability_ready=None,
+            )
+            return False
+        try:
+            payload = _ConfessionModalUploadRuntimeProbe().to_dict()
+        except Exception as exc:
+            self._modal_upload_runtime_safe = False
+            self.log_modal_diagnostic(
+                code="confession_modal_upload_runtime_probe_failed",
+                stage="modal_upload_runtime",
+                modal_kind="confession",
+                guild_id=None,
+                allow_images=True,
+                upload_present=False,
+                attachment_count=0,
+                storage_ready=self.service.storage_ready,
+                operability_ready=None,
+                exc=exc,
+            )
+            return False
+        safe = self._modal_payload_has_safe_upload_component(payload)
+        self._modal_upload_runtime_safe = safe
+        if not safe:
+            self.log_modal_diagnostic(
+                code="confession_modal_upload_runtime_invalid_payload",
+                stage="modal_upload_runtime",
+                modal_kind="confession",
+                guild_id=None,
+                allow_images=True,
+                upload_present=False,
+                attachment_count=0,
+                storage_ready=self.service.storage_ready,
+                operability_ready=None,
+            )
+        return safe
+
+    @staticmethod
+    def _modal_payload_has_safe_upload_component(payload: dict[str, Any]) -> bool:
+        components = payload.get("components")
+        if not isinstance(components, list):
+            return False
+        safe_upload = False
+        for item in components:
+            if not isinstance(item, dict):
+                return False
+            item_type = int(item.get("type") or 0)
+            if item_type == 19:
+                return False
+            if item_type == 18:
+                component = item.get("component")
+                if not isinstance(component, dict) or int(component.get("type") or 0) != 19:
+                    return False
+                safe_upload = True
+        return safe_upload
 
     def _is_default_role(self, role: discord.Role) -> bool:
         is_default = getattr(role, "is_default", None)
@@ -2120,26 +2309,64 @@ class ConfessionsCog(commands.Cog):
         if interaction.guild is None or interaction.user is None:
             await interaction.response.send_message("Anonymous confessions only work inside a server.", ephemeral=True)
             return
-        gate = await self.service.preflight_submission_access(
-            interaction.guild,
-            author_id=interaction.user.id,
-            member=interaction.user,
-            submission_kind="confession",
-            image_restriction_mode="advisory",
+        failure_embed = self._member_status_embed(
+            "Confession Composer Unavailable",
+            "Babblebox could not open the private confession composer right now. Run `/confess create` again in a moment.",
         )
+        try:
+            gate = await self.service.preflight_submission_access(
+                interaction.guild,
+                author_id=interaction.user.id,
+                member=interaction.user,
+                submission_kind="confession",
+                image_restriction_mode="advisory",
+                cached_enforcement_only=True,
+            )
+        except Exception as exc:
+            self.log_create_diagnostic(
+                code="confess_create_preflight_failed",
+                stage="confess_create_preflight",
+                interaction=interaction,
+                exc=exc,
+            )
+            await self._send_private_interaction(interaction, embed=failure_embed)
+            return
         if not gate.ok or gate.result is not None:
-            await interaction.response.send_message(
-                embed=self._member_gate_embed(gate.result or ConfessionSubmissionResult(False, "unavailable", "Confessions are unavailable."), title=gate.title),
-                ephemeral=True,
+            await self._send_private_interaction(
+                interaction,
+                embed=self._member_gate_embed(
+                    gate.result or ConfessionSubmissionResult(False, "unavailable", "Confessions are unavailable."),
+                    title=gate.title,
+                ),
             )
             return
-        await interaction.response.send_modal(
-            ConfessionComposerModal(
+        try:
+            modal = ConfessionComposerModal(
                 self,
                 guild_id=interaction.guild.id,
                 image_upload_notice=gate.image_restriction_message,
             )
-        )
+        except Exception as exc:
+            self.log_create_diagnostic(
+                code="confess_create_modal_construct_failed",
+                stage="confess_create_modal_construct",
+                interaction=interaction,
+                exc=exc,
+            )
+            await self._send_private_interaction(interaction, embed=failure_embed)
+            return
+        try:
+            await interaction.response.send_modal(modal)
+        except Exception as exc:
+            self.log_create_diagnostic(
+                code="confess_create_send_modal_failed",
+                stage="confess_create_send_modal",
+                interaction=interaction,
+                allow_images=modal.image_upload_requested,
+                upload_present=modal.upload_input is not None,
+                exc=exc,
+            )
+            await self._send_private_interaction(interaction, embed=failure_embed)
 
     async def _open_reply_modal(self, interaction: discord.Interaction, *, default_target: str | None = None):
         if interaction.guild is None or interaction.user is None:
@@ -2151,6 +2378,7 @@ class ConfessionsCog(commands.Cog):
             member=interaction.user,
             submission_kind="reply",
             reply_flow="reply_to_confession",
+            cached_enforcement_only=True,
         )
         if not gate.ok or gate.result is not None:
             await interaction.response.send_message(
