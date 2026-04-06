@@ -29,6 +29,7 @@ from babblebox.confessions_store import (
     default_confession_config,
     default_enforcement_state,
     normalize_confession_config,
+    normalize_enforcement_state,
 )
 from babblebox.shield_link_safety import (
     ADULT_LINK_CATEGORY,
@@ -502,6 +503,7 @@ class ConfessionsService:
         self._lock = asyncio.Lock()
         self.link_safety = ShieldLinkSafetyEngine()
         self._compiled_configs: dict[int, dict[str, Any]] = {}
+        self._active_enforcement_cache: dict[tuple[int, int], dict[str, Any]] = {}
         self._support_rate_limits: dict[tuple[int, int, str], float] = {}
         self._privacy_status_global: dict[str, Any] | None = None
 
@@ -521,6 +523,7 @@ class ConfessionsService:
         self.storage_ready = True
         self.storage_error = None
         await self._rebuild_config_cache()
+        await self._warm_active_enforcement_cache()
         self._privacy_status_global = await self.store.fetch_privacy_status()
         if self._privacy_status_global.get("needs_backfill"):
             LOGGER.warning(
@@ -577,6 +580,52 @@ class ConfessionsService:
         self._compiled_configs = {}
         for guild_id, raw in (await self.store.fetch_all_configs()).items():
             self._compiled_configs[guild_id] = self._compile_config(guild_id, raw)
+
+    def _state_requires_fast_gate(self, state: dict[str, Any]) -> bool:
+        return bool(
+            state.get("is_permanent_ban")
+            or state.get("image_restriction_active")
+            or str(state.get("active_restriction") or "none").strip().lower() != "none"
+        )
+
+    def _cache_enforcement_state(self, state: dict[str, Any] | None):
+        normalized = normalize_enforcement_state(state)
+        if normalized is None:
+            return
+        refreshed = self._normalize_restriction_state(normalized)
+        key = (refreshed["guild_id"], refreshed["user_id"])
+        if self._state_requires_fast_gate(refreshed):
+            self._active_enforcement_cache[key] = refreshed
+            return
+        self._active_enforcement_cache.pop(key, None)
+
+    def _cached_enforcement_state(self, guild_id: int, user_id: int) -> dict[str, Any] | None:
+        cached = self._active_enforcement_cache.get((guild_id, user_id))
+        if cached is None:
+            return None
+        refreshed = self._normalize_restriction_state(cached)
+        if self._state_requires_fast_gate(refreshed):
+            self._active_enforcement_cache[(guild_id, user_id)] = refreshed
+            return refreshed
+        self._active_enforcement_cache.pop((guild_id, user_id), None)
+        return None
+
+    async def _warm_active_enforcement_cache(self):
+        self._active_enforcement_cache = {}
+        if not self.storage_ready:
+            return
+        try:
+            states = await self.store.list_active_enforcement_states()
+        except Exception as exc:
+            self.log_admin_diagnostic(
+                code="enforcement_cache_warm_failed",
+                stage="warm_active_enforcement_cache",
+                guild_id=None,
+                exc=exc,
+            )
+            return
+        for state in states:
+            self._cache_enforcement_state(state)
 
     def _compile_config(self, guild_id: int, raw: Any) -> dict[str, Any]:
         config = normalize_confession_config(guild_id, raw)
@@ -1094,9 +1143,14 @@ class ConfessionsService:
         member_role_ids = self._member_role_ids(resolved_member)
         noun = "anonymous replies" if submission_kind == "reply" else "anonymous confessions"
         if snapshot["active_blocked_ids"] & member_role_ids:
-            return f"{noun.capitalize()} are not available for your current role setup in this server."
+            return (
+                f"This server currently blocks your role setup from using {noun}. "
+                "Ask an admin if you think that access should be enabled for you."
+            )
         if snapshot["active_allowed_ids"] and not (snapshot["active_allowed_ids"] & member_role_ids):
-            return f"This server only allows {noun} from selected roles."
+            return (
+                f"This server only allows {noun} from selected roles, and your current role setup does not match that access list."
+            )
         return None
 
     def build_role_policy_embed(self, guild: discord.Guild) -> discord.Embed:
@@ -1251,7 +1305,16 @@ class ConfessionsService:
         state = await self.store.fetch_enforcement_state(guild_id, user_id)
         if state is None:
             state = default_enforcement_state(guild_id, user_id)
+        else:
+            self._cache_enforcement_state(state)
         return state
+
+    async def _persist_enforcement_state(self, state: dict[str, Any]):
+        normalized = normalize_enforcement_state(state)
+        if normalized is None:
+            return
+        await self.store.upsert_enforcement_state(normalized)
+        self._cache_enforcement_state(normalized)
 
     def _normalize_restriction_state(self, state: dict[str, Any]) -> dict[str, Any]:
         now = ge.now_utc()
@@ -1278,15 +1341,15 @@ class ConfessionsService:
 
     def _restriction_message(self, state: dict[str, Any]) -> str | None:
         if state.get("is_permanent_ban"):
-            return "Babblebox confessions are permanently disabled for you in this server."
+            return "Babblebox is permanently blocking anonymous confessions and replies for you in this server."
         active = str(state.get("active_restriction") or "none")
         if active == "none":
             return None
         until = deserialize_datetime(state.get("restricted_until"))
         if until is not None:
             remaining = int(max(0, (until - ge.now_utc()).total_seconds()))
-            return f"Babblebox confessions are temporarily restricted for you for about {format_duration_brief(remaining)}."
-        return "Babblebox confessions are temporarily restricted for you."
+            return f"Babblebox is temporarily pausing your anonymous confessions and replies for about {format_duration_brief(remaining)}."
+        return "Babblebox is temporarily pausing your anonymous confessions and replies in this server."
 
     def _image_restriction_message(self, state: dict[str, Any]) -> str | None:
         if not state.get("image_restriction_active"):
@@ -1294,8 +1357,8 @@ class ConfessionsService:
         until = deserialize_datetime(state.get("image_restricted_until"))
         if until is not None:
             remaining = int(max(0, (until - ge.now_utc()).total_seconds()))
-            return f"Image attachments are paused for you for about {format_duration_brief(remaining)}."
-        return "Image attachments are currently disabled for you in this server."
+            return f"You can still send text-only confessions, but image attachments are paused for you for about {format_duration_brief(remaining)}."
+        return "You can still send text-only confessions, but image attachments are currently disabled for you in this server."
 
     async def _preflight_submission_gate(
         self,
@@ -1306,6 +1369,7 @@ class ConfessionsService:
         submission_kind: str = "confession",
         reply_flow: str | None = None,
         image_restriction_mode: str = "ignore",
+        cached_enforcement_only: bool = False,
         owner_reply_context_required: bool = False,
         owner_reply_context: dict[str, Any] | None = None,
     ) -> ConfessionFlowGate:
@@ -1426,10 +1490,16 @@ class ConfessionsService:
                 ),
                 title=self._flow_access_title(normalized_kind, normalized_reply_flow or None),
             )
-        state = self._normalize_restriction_state(await self._enforcement_state(guild.id, author_id))
+        if cached_enforcement_only:
+            state = self._cached_enforcement_state(guild.id, author_id)
+            if state is None:
+                return ConfessionFlowGate(True)
+        else:
+            state = self._normalize_restriction_state(await self._enforcement_state(guild.id, author_id))
         restriction_message = self._restriction_message(state)
         if restriction_message is not None:
-            await self.store.upsert_enforcement_state(state)
+            if not cached_enforcement_only:
+                await self._persist_enforcement_state(state)
             return ConfessionFlowGate(
                 False,
                 result=ConfessionSubmissionResult(
@@ -1444,7 +1514,8 @@ class ConfessionsService:
             )
         image_message = self._image_restriction_message(state)
         if image_message is not None and image_restriction_mode != "ignore":
-            await self.store.upsert_enforcement_state(state)
+            if not cached_enforcement_only:
+                await self._persist_enforcement_state(state)
             if image_restriction_mode == "block":
                 return ConfessionFlowGate(
                     False,
@@ -1473,6 +1544,7 @@ class ConfessionsService:
         submission_kind: str = "confession",
         reply_flow: str | None = None,
         image_restriction_mode: str = "ignore",
+        cached_enforcement_only: bool = False,
         owner_reply_context_required: bool = False,
         owner_reply_context: dict[str, Any] | None = None,
     ) -> ConfessionFlowGate:
@@ -1483,6 +1555,7 @@ class ConfessionsService:
             submission_kind=submission_kind,
             reply_flow=reply_flow,
             image_restriction_mode=image_restriction_mode,
+            cached_enforcement_only=cached_enforcement_only,
             owner_reply_context_required=owner_reply_context_required,
             owner_reply_context=owner_reply_context,
         )
@@ -1633,7 +1706,7 @@ class ConfessionsService:
         cooldown_until = deserialize_datetime(updated.get("cooldown_until"))
         if not ignore_existing_cooldown and cooldown_until is not None and cooldown_until > now:
             updated["updated_at"] = now.isoformat()
-            await self.store.upsert_enforcement_state(updated)
+            await self._persist_enforcement_state(updated)
             return False, updated, f"Please wait about {format_duration_brief(int((cooldown_until - now).total_seconds()))} before sending another confession."
 
         burst_start = deserialize_datetime(updated.get("burst_window_started_at"))
@@ -1647,19 +1720,19 @@ class ConfessionsService:
                 updated["burst_count"] = int(compiled["burst_limit"])
                 updated["cooldown_until"] = (now + timedelta(seconds=int(compiled["cooldown_seconds"]))).isoformat()
                 updated["updated_at"] = now.isoformat()
-                await self.store.upsert_enforcement_state(updated)
+                await self._persist_enforcement_state(updated)
                 return True, updated, None
             until = now + timedelta(hours=int(compiled["auto_suspend_hours"]))
             updated["active_restriction"] = "suspended"
             updated["restricted_until"] = until.isoformat()
             updated["last_case_id"] = case_id
             updated["updated_at"] = now.isoformat()
-            await self.store.upsert_enforcement_state(updated)
+            await self._persist_enforcement_state(updated)
             return False, updated, f"Confessions are temporarily suspended for about {format_duration_brief(int((until - now).total_seconds()))} due to rapid repeat submissions."
 
         updated["cooldown_until"] = (now + timedelta(seconds=int(compiled["cooldown_seconds"]))).isoformat()
         updated["updated_at"] = now.isoformat()
-        await self.store.upsert_enforcement_state(updated)
+        await self._persist_enforcement_state(updated)
         return True, updated, None
 
     def _strike_escalation(self, compiled: dict[str, Any], state: dict[str, Any], *, case_id: str | None) -> dict[str, Any]:
@@ -2085,7 +2158,7 @@ class ConfessionsService:
             if safety.strike_worthy:
                 if not automatic_moderation_exempt:
                     escalated = self._strike_escalation(compiled, updated_state, case_id=case_id)
-                    await self.store.upsert_enforcement_state(escalated)
+                    await self._persist_enforcement_state(escalated)
             elif set(safety.flag_codes) & SPAM_RATE_LIMIT_FLAGS:
                 rate_ok, _, rate_message = await self._update_rate_limits(
                     compiled,
@@ -3426,7 +3499,7 @@ class ConfessionsService:
         role_access = self._member_role_access_label(guild)
         support_snapshot = self.support_channel_snapshot(guild)
         description = (
-            "Share something quietly through a private composer. Use `/confess create` or the panel button below. "
+            "Share something quietly through a private composer. Use `/confess create` or the **Create a confession** button below. "
             "When admins enable Confessions, Babblebox keeps the author hidden from members and staff in normal use while still enforcing safety internally."
             if ready
             else "Anonymous confessions are optional in Babblebox and are not ready in this server yet. The panel stays here so admins can finish setup without reposting it."
@@ -3439,7 +3512,7 @@ class ConfessionsService:
         embed.add_field(
             name="How It Works",
             value=(
-                "Run `/confess create` or tap **Send Confession**.\n"
+                "Run `/confess create` or tap **Create a confession**.\n"
                 "Add text and at most one trusted link.\n"
                 "Use **Reply to confession anonymously** from a live confession post when replies are enabled.\n"
                 "If someone explicitly replies to your confession or first owner reply, Babblebox can privately offer you a public anonymous owner reply.\n"
@@ -3516,7 +3589,7 @@ class ConfessionsService:
         )
         embed = discord.Embed(
             title="How Anonymous Confessions Work",
-            description="Confessions are submitted privately and published by Babblebox, not by you. `/confess create` is the direct fallback entry point if the public panel is unavailable.",
+            description="Confessions are submitted privately and published by Babblebox, not by you. The public panel and `/confess create` open the same private composer.",
             color=ge.EMBED_THEME["info"],
         )
         embed.add_field(
@@ -3535,7 +3608,7 @@ class ConfessionsService:
         embed.add_field(
             name="Owner Controls",
             value=(
-                "Use `/confess create` whenever you want the direct private composer.\n"
+                "Use `/confess create` or **Create a confession** whenever you want the direct private composer.\n"
                 "Use `/confess reply-to-user` to review member responses to your confession and post an anonymous owner reply publicly.\n"
                 "You can privately delete your own confession or reply.\n"
                 "Self-edit is only available if this server enables it and the submission is still pending review."
@@ -3887,6 +3960,39 @@ class ConfessionsService:
             )
         return None
 
+    def _looks_like_member_panel_message(self, message: Any) -> bool:
+        embed = getattr(message, "embed", None)
+        embeds = getattr(message, "embeds", None)
+        if embed is None and isinstance(embeds, list) and embeds:
+            embed = embeds[0]
+        if embed is None or str(getattr(embed, "title", "") or "") != "Anonymous Confessions":
+            return False
+        description = str(getattr(embed, "description", "") or "").casefold()
+        return "confess create" in description or "create a confession" in description or "share something quietly" in description
+
+    async def _prune_orphan_member_panel_messages(self, channel: Any, *, keep_message_id: int | None):
+        history = getattr(channel, "history", None)
+        if not callable(history):
+            return
+        try:
+            async for message in history(limit=10):
+                message_id = getattr(message, "id", None)
+                if not isinstance(message_id, int) or message_id == keep_message_id:
+                    continue
+                if not self._looks_like_member_panel_message(message):
+                    continue
+                with contextlib.suppress(discord.Forbidden, discord.HTTPException, Exception):
+                    await message.delete()
+        except Exception as exc:
+            self.log_admin_diagnostic(
+                code="panel_orphan_cleanup_failed",
+                stage="sync_member_panel_cleanup",
+                guild_id=getattr(getattr(channel, "guild", None), "id", None),
+                channel_id=getattr(channel, "id", None),
+                message_id=keep_message_id,
+                exc=exc,
+            )
+
     async def _sync_published_confession_views(self, guild: discord.Guild):
         submissions = await self.store.list_published_top_level_submissions(guild.id)
         for submission in submissions:
@@ -3953,6 +4059,7 @@ class ConfessionsService:
                             exc=exc,
                         )
         message = await self._queue_message(channel, message_id=previous_message_id if previous_channel_id == target_channel_id else None)
+        republished = message is None
         embed = self.build_member_panel_embed(guild)
         view = None
         cog = self.bot.get_cog("ConfessionsCog")
@@ -3965,6 +4072,7 @@ class ConfessionsService:
                 await message.edit(embed=embed, view=view)
             except discord.NotFound:
                 message = None
+                republished = True
             except (discord.Forbidden, discord.HTTPException):
                 return False, "Babblebox could not refresh the confession panel in that channel."
         if message is None:
@@ -3974,6 +4082,8 @@ class ConfessionsService:
                 return False, "Babblebox could not publish the confession panel in that channel."
         if message is None:
             return False, "Babblebox could not publish the confession panel in that channel."
+        if republished:
+            await self._prune_orphan_member_panel_messages(channel, keep_message_id=getattr(message, "id", None))
         record_ok, record_message = await self.persist_panel_record(
             guild.id,
             channel_id=getattr(channel, "id", None),
@@ -4392,7 +4502,7 @@ class ConfessionsService:
                 case["resolution_action"] = action
                 case["resolved_at"] = now_iso
                 await self.store.upsert_case(case)
-                await self.store.upsert_enforcement_state(relaxed_state)
+                await self._persist_enforcement_state(relaxed_state)
                 await self._sync_review_queue(guild, note=f"Case `{case_id}` was cleared and moved into review.")
                 return True, f"Case `{case_id}` was resolved and confession `{submission['confession_id']}` moved into review as `{new_case_id}`."
 
@@ -4410,7 +4520,7 @@ class ConfessionsService:
             case["resolution_action"] = action
             case["resolved_at"] = now_iso
             await self.store.upsert_case(case)
-            await self.store.upsert_enforcement_state(relaxed_state)
+            await self._persist_enforcement_state(relaxed_state)
             return True, f"Case `{case_id}` was resolved and confession `{submission['confession_id']}` was published."
 
         if action == "false_positive" and case.get("case_kind") == "review":
@@ -4431,7 +4541,7 @@ class ConfessionsService:
             if state.get("last_case_id") == case_id and (
                 state.get("is_permanent_ban") or state.get("active_restriction") != "none" or int(state.get("strike_count") or 0) > 0
             ):
-                await self.store.upsert_enforcement_state(
+                await self._persist_enforcement_state(
                     self._relax_case_penalty(state, case_id=case_id, now_iso=now_iso, clear_strikes=clear_strikes)
                 )
             await self._sync_review_queue(guild, note=f"Case `{case_id}` was overridden and posted.")
@@ -4456,7 +4566,7 @@ class ConfessionsService:
             case["resolved_at"] = now_iso
             await self.store.upsert_case(case)
             if state.get("last_case_id") == case_id and (state.get("is_permanent_ban") or state.get("active_restriction") != "none" or int(state.get("strike_count") or 0) > 0):
-                await self.store.upsert_enforcement_state(self._relax_case_penalty(state, case_id=case_id, now_iso=now_iso, clear_strikes=clear_strikes))
+                await self._persist_enforcement_state(self._relax_case_penalty(state, case_id=case_id, now_iso=now_iso, clear_strikes=clear_strikes))
             await self._sync_review_queue(guild, note=f"Case `{case_id}` was approved.")
             return True, f"Case `{case_id}` was approved and posted as confession `{submission['confession_id']}`."
 
@@ -4524,7 +4634,7 @@ class ConfessionsService:
                 state["restricted_until"] = (now + timedelta(seconds=seconds)).isoformat()
             state["last_case_id"] = case_id
             state["updated_at"] = now_iso
-            await self.store.upsert_enforcement_state(state)
+            await self._persist_enforcement_state(state)
             if submission["status"] in {"queued", "blocked"}:
                 submission["status"] = "denied"
                 submission["review_status"] = "denied"

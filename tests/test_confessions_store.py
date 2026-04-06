@@ -665,6 +665,74 @@ class ConfessionsStorePrivacyTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await store.close()
 
+    async def test_memory_store_lists_active_enforcement_states_for_gate_cache(self):
+        store = ConfessionsStore(backend="memory")
+        await store.load()
+        try:
+            await store.upsert_enforcement_state(
+                {
+                    "guild_id": 10,
+                    "user_id": 401,
+                    "active_restriction": "temp_ban",
+                    "restricted_until": "2026-04-10T00:00:00+00:00",
+                    "is_permanent_ban": False,
+                    "strike_count": 2,
+                    "last_strike_at": None,
+                    "cooldown_until": None,
+                    "burst_count": 0,
+                    "burst_window_started_at": None,
+                    "last_case_id": "CS-GATE401",
+                    "image_restriction_active": False,
+                    "image_restricted_until": None,
+                    "image_restriction_case_id": None,
+                    "updated_at": "2026-04-03T00:00:00+00:00",
+                }
+            )
+            await store.upsert_enforcement_state(
+                {
+                    "guild_id": 10,
+                    "user_id": 402,
+                    "active_restriction": "none",
+                    "restricted_until": None,
+                    "is_permanent_ban": False,
+                    "strike_count": 0,
+                    "last_strike_at": None,
+                    "cooldown_until": None,
+                    "burst_count": 0,
+                    "burst_window_started_at": None,
+                    "last_case_id": "CS-GATE402",
+                    "image_restriction_active": True,
+                    "image_restricted_until": "2026-04-11T00:00:00+00:00",
+                    "image_restriction_case_id": "CS-IMG402",
+                    "updated_at": "2026-04-03T00:00:00+00:00",
+                }
+            )
+            await store.upsert_enforcement_state(
+                {
+                    "guild_id": 10,
+                    "user_id": 403,
+                    "active_restriction": "none",
+                    "restricted_until": None,
+                    "is_permanent_ban": False,
+                    "strike_count": 0,
+                    "last_strike_at": None,
+                    "cooldown_until": None,
+                    "burst_count": 0,
+                    "burst_window_started_at": None,
+                    "last_case_id": None,
+                    "image_restriction_active": False,
+                    "image_restricted_until": None,
+                    "image_restriction_case_id": None,
+                    "updated_at": "2026-04-03T00:00:00+00:00",
+                }
+            )
+
+            active_rows = await store.list_active_enforcement_states()
+
+            self.assertEqual({(row["guild_id"], row["user_id"]) for row in active_rows}, {(10, 401), (10, 402)})
+        finally:
+            await store.close()
+
     async def test_memory_store_supports_legacy_key_lookup_then_rewrites_to_active_keys(self):
         store = ConfessionsStore(backend="memory")
         await store.load()
@@ -1253,6 +1321,8 @@ class PostgresConfessionsStoreTests(unittest.IsolatedAsyncioTestCase):
         await self.store.list_owner_reply_opportunities_for_submission("sub-2", limit=25)
         await self.store.list_owner_reply_opportunities_for_responder_path(10, "sub-1", "sub-2", 102, limit=25)
         await self.store.fetch_enforcement_state(10, 101)
+        await self.store.list_active_enforcement_states()
+        await self.store.list_active_enforcement_states(guild_id=10)
         await self.store.list_review_queues()
         await self.store.fetch_review_queue(10)
         await self.store.list_review_surfaces(10, limit=25)
@@ -1274,6 +1344,24 @@ class PostgresConfessionsStoreTests(unittest.IsolatedAsyncioTestCase):
         await self.store.fetch_privacy_status(10)
         guild_calls = self.connection.fetch_calls[-7:]
         self.assertEqual(len(guild_calls), 7)
+        self.assertTrue(all(args == (10,) for _, args in guild_calls))
+
+    async def test_postgres_store_list_active_enforcement_states_uses_expected_param_shape(self):
+        self.connection.fetch_results = [
+            [],
+            [],
+            [],
+            [],
+        ]
+
+        await self.store.list_active_enforcement_states()
+        global_calls = self.connection.fetch_calls[-2:]
+        self.assertEqual(len(global_calls), 2)
+        self.assertTrue(all(args == () for _, args in global_calls))
+
+        await self.store.list_active_enforcement_states(guild_id=10)
+        guild_calls = self.connection.fetch_calls[-2:]
+        self.assertEqual(len(guild_calls), 2)
         self.assertTrue(all(args == (10,) for _, args in guild_calls))
 
 

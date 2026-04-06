@@ -130,6 +130,8 @@ class FakeMessage:
 
     async def delete(self):
         self.deleted = True
+        if self.channel is not None:
+            self.channel._messages.pop(self.id, None)
 
 
 class FakeChannel:
@@ -174,6 +176,17 @@ class FakeChannel:
         if message is None:
             raise Exception("missing")
         return message
+
+    async def history(self, *, limit: int | None = None):
+        remaining = None if limit is None else max(0, int(limit))
+        for message in reversed(list(self._messages.values())):
+            if message.deleted:
+                continue
+            if remaining is not None and remaining <= 0:
+                break
+            if remaining is not None:
+                remaining -= 1
+            yield message
 
     def permissions_for(self, target):
         is_default = getattr(target, "is_default", None)
@@ -249,6 +262,17 @@ class FakeRawDeletePayload:
         self.message_id = message_id
 
 
+def _validate_modal_payload(payload: dict[str, object]):
+    components = payload.get("components")
+    if not isinstance(components, list):
+        raise AssertionError("Modal payload is missing components.")
+    for component in components:
+        if not isinstance(component, dict):
+            raise AssertionError("Modal component must be a dict.")
+        if int(component.get("type") or 0) == 19:
+            raise AssertionError("Modal payload cannot contain a top-level FileUpload component.")
+
+
 class FakeResponse:
     def __init__(self):
         self._done = False
@@ -256,6 +280,7 @@ class FakeResponse:
         self.sent = []
         self.edits = []
         self.modal_calls = []
+        self.modal_payloads = []
 
     def is_done(self):
         return self._done
@@ -281,8 +306,11 @@ class FakeResponse:
         self.edits.append(kwargs)
 
     async def send_modal(self, modal):
+        payload = modal.to_dict()
+        _validate_modal_payload(payload)
         self._done = True
         self.modal_calls.append(modal)
+        self.modal_payloads.append(payload)
 
 
 class FakeInteraction:
@@ -864,7 +892,7 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(gate.ok)
         self.assertEqual(gate.title, "Confessions Paused")
         self.assertEqual(gate.result.state, "restricted")
-        self.assertIn("temporarily restricted", gate.result.message)
+        self.assertIn("temporarily pausing", gate.result.message)
 
     async def test_preflight_image_restriction_allows_text_only_but_blocks_uploads(self):
         await self._configure(review_channel=True, allow_images=True)
@@ -897,7 +925,7 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
             image_restriction_mode="advisory",
         )
         self.assertTrue(gate.ok)
-        self.assertIn("Image attachments are paused", gate.image_restriction_message)
+        self.assertIn("image attachments are paused", gate.image_restriction_message.lower())
 
         text_only = await self.service.submit_confession(self.guild, author_id=member.id, member=member, content="text only", attachments=[])
         blocked = await self.service.submit_confession(
@@ -910,7 +938,7 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(text_only.ok)
         self.assertEqual(blocked.state, "blocked")
-        self.assertIn("Image attachments are paused", blocked.message)
+        self.assertIn("image attachments are paused", blocked.message.lower())
 
     async def test_review_approval_stale_version_and_raw_delete_reconciliation(self):
         await self._configure(review_mode=True, review_channel=True)
@@ -2051,6 +2079,7 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
                 "updated_at": "2999-01-01T00:00:00+00:00",
             }
         )
+        self.cog.service._cache_enforcement_state(await self.cog.service.store.fetch_enforcement_state(self.guild.id, member.id))
 
         await ConfessionsCog.confess_create_command.callback(self.cog, ctx)
 
@@ -2087,12 +2116,112 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
                 "updated_at": "2999-01-01T00:00:00+00:00",
             }
         )
+        self.cog.service._cache_enforcement_state(await self.cog.service.store.fetch_enforcement_state(self.guild.id, member.id))
 
         await ConfessionsCog.confess_create_command.callback(self.cog, ctx)
 
         modal = ctx.interaction.response.modal_calls[0]
         self.assertIsNone(modal.upload_input)
-        self.assertIn("Image attachments are paused", modal.body_input.placeholder)
+        self.assertIn("image attachments are paused", modal.body_input.placeholder.lower())
+
+    async def test_confess_create_with_images_enabled_uses_labeled_upload_component(self):
+        await self.cog.service.configure_guild(
+            self.guild.id,
+            enabled=True,
+            confession_channel_id=20,
+            review_channel_id=30,
+            review_mode=False,
+            allow_images=True,
+        )
+        member = self._member(113)
+        ctx = FakeContext(guild=self.guild, author=member)
+
+        await ConfessionsCog.confess_create_command.callback(self.cog, ctx)
+
+        self.assertEqual(len(ctx.interaction.response.modal_calls), 1)
+        modal = ctx.interaction.response.modal_calls[0]
+        payload = ctx.interaction.response.modal_payloads[0]
+        self.assertIsNotNone(modal.upload_input)
+        self.assertTrue(any(int(component.get("type") or 0) == 18 for component in payload["components"]))
+        self.assertFalse(any(int(component.get("type") or 0) == 19 for component in payload["components"]))
+
+    async def test_confess_create_storage_unavailable_returns_private_failure_without_modal(self):
+        await self.cog.service.configure_guild(self.guild.id, enabled=True, confession_channel_id=20, review_mode=False)
+        self.cog.service.storage_ready = False
+        self.cog.service.storage_error = "db offline"
+        ctx = FakeContext(guild=self.guild, author=self._member(114))
+
+        await ConfessionsCog.confess_create_command.callback(self.cog, ctx)
+
+        self.assertEqual(len(ctx.interaction.response.modal_calls), 0)
+        self.assertEqual(ctx.interaction.response.sent[0]["kwargs"]["embed"].title, "Confessions Unavailable")
+        self.assertIn("database", ctx.interaction.response.sent[0]["kwargs"]["embed"].description.lower())
+
+    async def test_confess_create_operability_unavailable_returns_private_failure_without_modal(self):
+        await self.cog.service.configure_guild(
+            self.guild.id,
+            enabled=True,
+            confession_channel_id=20,
+            review_channel_id=None,
+            review_mode=True,
+        )
+        ctx = FakeContext(guild=self.guild, author=self._member(115))
+
+        await ConfessionsCog.confess_create_command.callback(self.cog, ctx)
+
+        self.assertEqual(len(ctx.interaction.response.modal_calls), 0)
+        self.assertEqual(ctx.interaction.response.sent[0]["kwargs"]["embed"].title, "Confessions Unavailable")
+        self.assertIn("review channel", ctx.interaction.response.sent[0]["kwargs"]["embed"].description.lower())
+
+    async def test_confess_create_role_gated_member_sees_gate_before_modal(self):
+        await self.cog.service.configure_guild(self.guild.id, enabled=True, confession_channel_id=20, review_mode=False)
+        await self.cog.service.update_role_policy(self.guild.id, bucket="allow", role_id=self.allowed_role.id, enabled=True)
+        ctx = FakeContext(guild=self.guild, author=self._member(116))
+
+        await ConfessionsCog.confess_create_command.callback(self.cog, ctx)
+
+        self.assertEqual(len(ctx.interaction.response.modal_calls), 0)
+        self.assertIn("selected roles", ctx.interaction.response.sent[0]["kwargs"]["embed"].description.lower())
+
+    async def test_confess_create_falls_back_to_text_only_when_modal_upload_runtime_is_not_safe(self):
+        await self.cog.service.configure_guild(
+            self.guild.id,
+            enabled=True,
+            confession_channel_id=20,
+            review_channel_id=30,
+            review_mode=False,
+            allow_images=True,
+        )
+        ctx = FakeContext(guild=self.guild, author=self._member(117))
+
+        with mock.patch.object(self.cog, "modal_file_upload_available", return_value=False):
+            await ConfessionsCog.confess_create_command.callback(self.cog, ctx)
+
+        self.assertEqual(len(ctx.interaction.response.modal_calls), 1)
+        modal = ctx.interaction.response.modal_calls[0]
+        self.assertIsNone(modal.upload_input)
+        self.assertIn("temporarily unavailable", modal.body_input.placeholder.lower())
+
+    async def test_confess_create_send_modal_failure_returns_private_create_unavailable(self):
+        await self.cog.service.configure_guild(self.guild.id, enabled=True, confession_channel_id=20, review_mode=False)
+        ctx = FakeContext(guild=self.guild, author=self._member(118))
+
+        with mock.patch.object(ctx.interaction.response, "send_modal", side_effect=RuntimeError("send boom")):
+            await ConfessionsCog.confess_create_command.callback(self.cog, ctx)
+
+        self.assertEqual(len(ctx.interaction.response.modal_calls), 0)
+        self.assertEqual(ctx.interaction.response.sent[0]["kwargs"]["embed"].title, "Confession Composer Unavailable")
+        self.assertTrue(ctx.interaction.response.is_done())
+
+    async def test_confess_create_modal_construction_failure_returns_private_create_unavailable(self):
+        await self.cog.service.configure_guild(self.guild.id, enabled=True, confession_channel_id=20, review_mode=False)
+        ctx = FakeContext(guild=self.guild, author=self._member(119))
+
+        with mock.patch("babblebox.cogs.confessions.ConfessionComposerModal", side_effect=RuntimeError("construct boom")):
+            await ConfessionsCog.confess_create_command.callback(self.cog, ctx)
+
+        self.assertEqual(len(ctx.interaction.response.modal_calls), 0)
+        self.assertEqual(ctx.interaction.response.sent[0]["kwargs"]["embed"].title, "Confession Composer Unavailable")
 
     async def test_confess_reply_to_user_blocks_restricted_owner_before_inbox(self):
         await self.cog.service.configure_guild(self.guild.id, enabled=True, confession_channel_id=20, review_mode=False)
@@ -2638,6 +2767,28 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
             await view.send_button.callback(interaction)
 
         self.assertEqual(interaction.response.sent[0]["kwargs"]["embed"].title, "Confessions Unavailable")
+
+    async def test_member_panel_create_button_uses_clear_label_and_opens_modal(self):
+        await self.cog.service.configure_guild(self.guild.id, enabled=True, confession_channel_id=20, review_mode=False)
+        view = self.cog.build_member_panel_view(guild_id=self.guild.id)
+        interaction = FakeInteraction(guild=self.guild, user=self._member(1262), client=self.bot)
+
+        await view.send_button.callback(interaction)
+
+        self.assertEqual(view.send_button.label, "Create a confession")
+        self.assertEqual(len(interaction.response.modal_calls), 1)
+        self.assertEqual(interaction.response.modal_calls[0].title, "Anonymous Confession")
+
+    async def test_stateless_member_panel_create_button_uses_clear_label_and_opens_modal(self):
+        await self.cog.service.configure_guild(self.guild.id, enabled=True, confession_channel_id=20, review_mode=False)
+        view = StatelessConfessionMemberPanelView()
+        interaction = FakeInteraction(guild=self.guild, user=self._member(1263), client=self.bot)
+
+        await view.send_button.callback(interaction)
+
+        self.assertEqual(view.send_button.label, "Create a confession")
+        self.assertEqual(len(interaction.response.modal_calls), 1)
+        self.assertEqual(interaction.response.modal_calls[0].title, "Anonymous Confession")
 
     async def test_member_panel_no_longer_shows_generic_reply_button(self):
         await self.cog.service.configure_guild(self.guild.id, enabled=True, confession_channel_id=20, review_mode=False)
@@ -3332,6 +3483,34 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.guild.get_channel(40).sent), 1)
         self.assertNotEqual(self.cog.service.get_config(self.guild.id)["panel_message_id"], 999999)
 
+    async def test_resume_member_panels_prunes_recent_orphan_panel_duplicates_when_republishing(self):
+        ok, message = await self.cog.service.configure_guild(
+            self.guild.id,
+            enabled=True,
+            confession_channel_id=20,
+            panel_channel_id=40,
+            panel_message_id=999999,
+            review_mode=False,
+        )
+        self.assertTrue(ok, message)
+        panel_channel = self.guild.get_channel(40)
+        orphan_one = await panel_channel.send(
+            embed=self.cog.service.build_member_panel_embed(self.guild),
+            view=self.cog.build_member_panel_view(guild_id=self.guild.id),
+        )
+        orphan_two = await panel_channel.send(
+            embed=self.cog.service.build_member_panel_embed(self.guild),
+            view=self.cog.build_member_panel_view(guild_id=self.guild.id),
+        )
+        self.bot.views.clear()
+
+        await self.cog.service.resume_member_panels()
+
+        current_message_id = self.cog.service.get_config(self.guild.id)["panel_message_id"]
+        self.assertEqual(current_message_id, panel_channel.sent[-1].id)
+        self.assertTrue(orphan_one.deleted)
+        self.assertTrue(orphan_two.deleted)
+
     async def test_on_ready_restores_runtime_surfaces_once_after_guild_cache_is_available(self):
         ok, message = await self.cog.service.configure_guild(
             self.guild.id,
@@ -3371,6 +3550,35 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
         await self.cog.on_ready()
 
         self.assertEqual(len(self.bot.views), 3)
+
+    async def test_restore_runtime_surfaces_isolated_by_surface_and_retries_only_failed_surface(self):
+        member_panels = mock.AsyncMock(side_effect=RuntimeError("panel restore boom"))
+        public_views = mock.AsyncMock()
+        review_queues = mock.AsyncMock()
+        self.cog.service.resume_member_panels = member_panels
+        self.cog.service.resume_public_confession_views = public_views
+        self.cog.service.resume_review_queues = review_queues
+
+        await self.cog._restore_runtime_surfaces_once()
+
+        member_panels.assert_awaited_once()
+        public_views.assert_awaited_once()
+        review_queues.assert_awaited_once()
+        self.assertFalse(self.cog._persistent_views_restored)
+        self.assertFalse(self.cog._persistent_surface_restore_status["member_panels"])
+        self.assertTrue(self.cog._persistent_surface_restore_status["public_views"])
+        self.assertTrue(self.cog._persistent_surface_restore_status["review_queues"])
+
+        self.cog.service.resume_member_panels = mock.AsyncMock()
+        self.cog.service.resume_public_confession_views = mock.AsyncMock()
+        self.cog.service.resume_review_queues = mock.AsyncMock()
+
+        await self.cog._restore_runtime_surfaces_once()
+
+        self.cog.service.resume_member_panels.assert_awaited_once()
+        self.cog.service.resume_public_confession_views.assert_not_awaited()
+        self.cog.service.resume_review_queues.assert_not_awaited()
+        self.assertTrue(self.cog._persistent_views_restored)
 
     async def test_resume_public_confession_views_restores_persistent_reply_buttons(self):
         ok, message = await self.cog.service.configure_guild(
