@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 import secrets
 from typing import Any
 from typing import Optional
@@ -15,6 +16,8 @@ from babblebox import game_engine as ge
 from babblebox.command_utils import defer_hybrid_response, send_hybrid_response
 from babblebox.confessions_service import ConfessionSubmissionResult, ConfessionsService
 
+
+LOGGER = logging.getLogger(__name__)
 
 DOMAIN_BUCKET_CHOICES = [
     app_commands.Choice(name="Allowlist", value="allow"),
@@ -889,11 +892,12 @@ class RiskyConfigConfirmView(discord.ui.View):
             return
         try:
             ok, message = await self.cog.service.configure_guild(payload["guild_id"], **payload["updates"])
-            runtime_issues: list[str] = []
+            runtime_issues: tuple[str, ...] = ()
             if ok and interaction.guild is not None:
-                runtime_issues = await self.cog._sync_runtime_surfaces(interaction.guild, stage_prefix="policy_confirm")
+                runtime_result = await self.cog.service.sync_runtime_surfaces(interaction.guild, stage_prefix="policy_confirm")
+                runtime_issues = runtime_result.issues
             self.cog._pending_policy_updates.pop(self.token, None)
-            result_message = self.cog._compose_admin_result(message, runtime_issues)
+            result_message = self.cog._compose_admin_result(message, list(runtime_issues))
             await interaction.response.edit_message(
                 embed=self.cog._admin_status_embed("Confessions Policy", result_message, ok=ok and not runtime_issues),
                 view=None,
@@ -1564,14 +1568,15 @@ class ConfessionsAdminPanelView(discord.ui.View):
         async def _action():
             current = self.cog.service.get_config(self.guild_id)
             ok, message = await self.cog.service.configure_guild(self.guild_id, enabled=not current["enabled"])
-            runtime_issues: list[str] = []
+            runtime_issues: tuple[str, ...] = ()
             if ok:
-                runtime_issues = await self.cog._sync_runtime_surfaces(
+                runtime_result = await self.cog.service.sync_runtime_surfaces(
                     guild,
                     stage_prefix="panel_toggle",
                     review_note="Confessions runtime refreshed.",
                 )
-            result_message = self.cog._compose_admin_result(message, runtime_issues)
+                runtime_issues = runtime_result.issues
+            result_message = self.cog._compose_admin_result(message, list(runtime_issues))
             await self._rerender(interaction, note=result_message, note_ok=ok and not runtime_issues)
 
         await self._safe_action(
@@ -1762,7 +1767,12 @@ class ConfessionsCog(commands.Cog):
             parts.append(f"note={str(note)[:160]}")
         if exc is not None:
             parts.append(f"exception={type(exc).__name__}")
-        print(f"Confessions admin diagnostic: {', '.join(parts)}")
+        parts.append(f"backend={getattr(self.service.store, 'backend_name', 'unknown')}")
+        message = f"Confessions admin diagnostic: {', '.join(parts)}"
+        if exc is not None:
+            LOGGER.exception(message)
+            return
+        LOGGER.warning(message)
 
     def modal_file_upload_available(self) -> bool:
         file_upload = getattr(discord.ui, "FileUpload", None)
@@ -2050,7 +2060,12 @@ class ConfessionsCog(commands.Cog):
             parts.append(f"result_state={result_state}")
         if exc is not None:
             parts.append(f"exception={type(exc).__name__}")
-        print(f"Confessions modal diagnostic: {', '.join(parts)}")
+        parts.append(f"backend={getattr(self.service.store, 'backend_name', 'unknown')}")
+        message = f"Confessions modal diagnostic: {', '.join(parts)}"
+        if exc is not None:
+            LOGGER.exception(message)
+            return
+        LOGGER.warning(message)
 
     async def _send_private_interaction(self, interaction: discord.Interaction, **kwargs):
         if interaction.guild is not None:
@@ -2194,7 +2209,22 @@ class ConfessionsCog(commands.Cog):
         channel = guild.get_channel(channel_id) or self.bot.get_channel(channel_id)
         if channel is None:
             return None
-        message = await self.service._queue_message(channel, message_id=message_id)
+        fetch_message = getattr(channel, "fetch_message", None)
+        if not callable(fetch_message):
+            return None
+        try:
+            message = await fetch_message(message_id)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            return None
+        except Exception as exc:
+            self.log_admin_diagnostic(
+                code="setup_fetch_stale_panel_failed",
+                stage="setup_fetch_stale_panel",
+                guild_id=guild.id,
+                note=f"message_id={message_id}",
+                exc=exc,
+            )
+            return "Babblebox could not inspect the previous public confessions panel message."
         if message is not None:
             try:
                 await message.delete()
@@ -2273,66 +2303,6 @@ class ConfessionsCog(commands.Cog):
                 ephemeral=True,
             )
             return None
-
-    async def _sync_runtime_surfaces(
-        self,
-        guild: discord.Guild,
-        *,
-        stage_prefix: str = "runtime_sync",
-        review_note: str = "Confessions runtime refreshed.",
-    ) -> list[str]:
-        issues: list[str] = []
-        config = self.service.get_config(guild.id)
-        if config.get("panel_channel_id") or config.get("panel_message_id"):
-            try:
-                panel_ok, panel_message = await self.service.sync_member_panel(guild)
-            except Exception as exc:
-                self.log_admin_diagnostic(
-                    code=f"{stage_prefix}_panel_failed",
-                    stage=f"{stage_prefix}_panel",
-                    guild_id=guild.id,
-                    exc=exc,
-                )
-                issues.append("Babblebox could not refresh the public confessions panel right now.")
-            else:
-                if self._admin_attention_needed(panel_ok, panel_message):
-                    self.log_admin_diagnostic(
-                        code=f"{stage_prefix}_panel_attention",
-                        stage=f"{stage_prefix}_panel",
-                        guild_id=guild.id,
-                        note=panel_message,
-                    )
-                    issues.append(panel_message)
-        try:
-            await self.service.sync_published_confession_views(guild)
-        except Exception as exc:
-            self.log_admin_diagnostic(
-                code=f"{stage_prefix}_views_failed",
-                stage=f"{stage_prefix}_views",
-                guild_id=guild.id,
-                exc=exc,
-            )
-            issues.append("Babblebox could not refresh one or more live confession reply buttons.")
-        try:
-            review_ok, review_message = await self.service.sync_review_queue(guild, note=review_note)
-        except Exception as exc:
-            self.log_admin_diagnostic(
-                code=f"{stage_prefix}_review_failed",
-                stage=f"{stage_prefix}_review",
-                guild_id=guild.id,
-                exc=exc,
-            )
-            issues.append("Babblebox could not refresh the confession review queue right now.")
-        else:
-            if self._admin_attention_needed(review_ok, review_message):
-                self.log_admin_diagnostic(
-                    code=f"{stage_prefix}_review_attention",
-                    stage=f"{stage_prefix}_review",
-                    guild_id=guild.id,
-                    note=review_message,
-                )
-                issues.append(review_message)
-        return issues
 
     @commands.hybrid_group(
         name="confess",
@@ -2495,13 +2465,25 @@ class ConfessionsCog(commands.Cog):
                     stale_panel_issue = await self._delete_stored_panel_message(ctx.guild, previous_config)
                     if stale_panel_issue:
                         issues.append(stale_panel_issue)
-                issues.extend(
-                    await self._sync_runtime_surfaces(
-                        ctx.guild,
-                        stage_prefix="setup_sync",
-                        review_note="Confessions runtime refreshed.",
-                    )
+                runtime_result = await self.service.sync_runtime_surfaces(
+                    ctx.guild,
+                    stage_prefix="setup_sync",
+                    review_note="Confessions runtime refreshed.",
                 )
+                issues.extend(runtime_result.issues)
+                current_config = self.service.get_config(ctx.guild.id)
+                previous_panel_channel_id = previous_config.get("panel_channel_id")
+                previous_panel_message_id = previous_config.get("panel_message_id")
+                if (
+                    not clear_panel
+                    and isinstance(previous_panel_channel_id, int)
+                    and isinstance(previous_panel_message_id, int)
+                    and previous_panel_channel_id != current_config.get("panel_channel_id")
+                    and current_config.get("panel_message_id") != previous_panel_message_id
+                ):
+                    stale_panel_issue = await self._delete_stored_panel_message(ctx.guild, previous_config)
+                    if stale_panel_issue:
+                        issues.append(stale_panel_issue)
             result_message = self._compose_admin_result(message, issues)
             await send_hybrid_response(
                 ctx,
@@ -2586,7 +2568,8 @@ class ConfessionsCog(commands.Cog):
             ok, message = await self.service.configure_guild(ctx.guild.id, **updates)
             runtime_issues: list[str] = []
             if ok:
-                runtime_issues = await self._sync_runtime_surfaces(ctx.guild, stage_prefix="policy_update")
+                runtime_result = await self.service.sync_runtime_surfaces(ctx.guild, stage_prefix="policy_update")
+                runtime_issues = list(runtime_result.issues)
             result_message = self._compose_admin_result(message, runtime_issues)
             await send_hybrid_response(
                 ctx,
@@ -2658,7 +2641,8 @@ class ConfessionsCog(commands.Cog):
             ok, message = await self.service.update_role_policy(ctx.guild.id, bucket="allow", role_id=role.id, enabled=state == "on")
             runtime_issues: list[str] = []
             if ok:
-                runtime_issues = await self._sync_runtime_surfaces(ctx.guild, stage_prefix="role_allowlist")
+                runtime_result = await self.service.sync_runtime_surfaces(ctx.guild, stage_prefix="role_allowlist")
+                runtime_issues = list(runtime_result.issues)
             result_message = self._compose_admin_result(message, runtime_issues)
             await send_hybrid_response(
                 ctx,
@@ -2693,7 +2677,8 @@ class ConfessionsCog(commands.Cog):
             ok, message = await self.service.update_role_policy(ctx.guild.id, bucket="block", role_id=role.id, enabled=state == "on")
             runtime_issues: list[str] = []
             if ok:
-                runtime_issues = await self._sync_runtime_surfaces(ctx.guild, stage_prefix="role_blacklist")
+                runtime_result = await self.service.sync_runtime_surfaces(ctx.guild, stage_prefix="role_blacklist")
+                runtime_issues = list(runtime_result.issues)
             result_message = self._compose_admin_result(message, runtime_issues)
             await send_hybrid_response(
                 ctx,
@@ -2717,7 +2702,8 @@ class ConfessionsCog(commands.Cog):
             ok, message = await self.service.reset_role_policy(ctx.guild.id, target=target)
             runtime_issues: list[str] = []
             if ok:
-                runtime_issues = await self._sync_runtime_surfaces(ctx.guild, stage_prefix="role_reset")
+                runtime_result = await self.service.sync_runtime_surfaces(ctx.guild, stage_prefix="role_reset")
+                runtime_issues = list(runtime_result.issues)
             result_message = self._compose_admin_result(message, runtime_issues)
             await send_hybrid_response(
                 ctx,
