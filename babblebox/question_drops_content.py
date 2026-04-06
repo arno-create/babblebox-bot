@@ -50,6 +50,10 @@ _ANSWER_LEAD_RE = re.compile(
     r"^\s*(?:(?:the\s+)?answer(?:\s+is)?|guess(?:\s+is)?|my guess(?:\s+is)?|i pick|i choose|i(?:'ll| will) go with|it(?:'s| is))\s*:?\s+(?P<payload>.+?)\s*$",
     re.IGNORECASE,
 )
+_HEDGED_ANSWER_LEAD_RE = re.compile(
+    r"^\s*(?:(?:i\s+think(?:\s+that)?|i\s+guess|maybe|perhaps|is\s+it|could\s+it\s+be)(?:\s+it(?:'s| is))?)\s*:?\s+(?P<payload>.+?)\s*$",
+    re.IGNORECASE,
+)
 _URL_RE = re.compile(r"https?://|\bdiscord\.gg/\S+", re.IGNORECASE)
 _MENTION_RE = re.compile(r"<[@#]&?\d+>")
 _NUMBER_WORD_RE = re.compile(r"[a-z]+", re.IGNORECASE)
@@ -74,6 +78,7 @@ _CHATTER_LEAD_TOKENS = {
     "it",
     "lol",
     "lmao",
+    "maybe",
     "nah",
     "no",
     "nope",
@@ -81,6 +86,7 @@ _CHATTER_LEAD_TOKENS = {
     "okay",
     "oh",
     "omg",
+    "perhaps",
     "same",
     "seriously",
     "that",
@@ -106,13 +112,17 @@ _CHATTER_TOKENS = {
     "huh",
     "lol",
     "lmao",
+    "later",
     "no",
     "oh",
     "omg",
+    "perhaps",
+    "probably",
     "real",
     "really",
     "same",
     "seriously",
+    "sure",
     "thanks",
     "thank",
     "true",
@@ -333,7 +343,7 @@ def _correct_choice_letter(answer_spec: dict[str, Any]) -> str | None:
 
 
 def _parse_choice_letter(raw_answer: str | None, answer_spec: dict[str, Any]) -> str | None:
-    match = _CHOICE_LETTER_RE.match(str(raw_answer or ""))
+    match = _CHOICE_LETTER_RE.match(_strip_trailing_terminal_punctuation(raw_answer))
     if match is None:
         return None
     letter = str(match.group(1) or "").casefold()
@@ -349,11 +359,17 @@ def _answer_payload_candidates(raw_answer: str | None) -> list[str]:
     if not content:
         return []
     candidates = [content]
-    lead_match = _ANSWER_LEAD_RE.match(content)
-    if lead_match is not None:
-        payload = str(lead_match.group("payload") or "").strip()
-        if payload and payload not in candidates:
-            candidates.append(payload)
+    index = 0
+    while index < len(candidates) and len(candidates) < 6:
+        candidate = candidates[index]
+        for pattern in (_ANSWER_LEAD_RE, _HEDGED_ANSWER_LEAD_RE):
+            lead_match = pattern.match(candidate)
+            if lead_match is None:
+                continue
+            payload = str(lead_match.group("payload") or "").strip()
+            if payload and payload not in candidates:
+                candidates.append(payload)
+        index += 1
     return candidates
 
 
@@ -362,7 +378,7 @@ def _contains_attempt_noise(raw_answer: str) -> bool:
 
 
 def _looks_like_free_text_guess(raw_answer: str | None, *, max_tokens: int) -> bool:
-    raw = str(raw_answer or "").strip()
+    raw = _strip_trailing_terminal_punctuation(raw_answer)
     if not raw or "?" in raw or "\n" in raw:
         return False
     tokens = _normalize_token_sequence(raw)
@@ -375,6 +391,11 @@ def _looks_like_free_text_guess(raw_answer: str | None, *, max_tokens: int) -> b
     if sum(1 for token in tokens if token in _CHATTER_TOKENS) >= 2:
         return False
     return True
+
+
+def _starts_with_soft_hedge(raw_answer: str | None) -> bool:
+    content = str(raw_answer or "").strip().casefold()
+    return content.startswith("maybe ") or content.startswith("maybe:") or content.startswith("perhaps ")
 
 
 def validate_answer_spec(spec: dict[str, Any]) -> tuple[bool, str | None]:
@@ -498,7 +519,11 @@ def is_answer_attempt(answer_spec: dict[str, Any], raw_answer: str | None, *, di
             normalized = normalize_answer_text(candidate)
             if normalized and normalized in accepted:
                 return True
-        if len(candidates) > 1 and _looks_like_free_text_guess(candidates[-1], max_tokens=standalone_max_tokens + 1):
+        if (
+            len(candidates) > 1
+            and _looks_like_free_text_guess(candidates[-1], max_tokens=standalone_max_tokens + 1)
+            and (direct_reply or not _starts_with_soft_hedge(content))
+        ):
             return True
         if direct_reply and _looks_like_free_text_guess(candidates[0], max_tokens=standalone_max_tokens + 1):
             return True
@@ -530,16 +555,16 @@ def render_answer_summary(answer_spec: dict[str, Any]) -> str:
 def render_answer_instruction(answer_spec: dict[str, Any]) -> str:
     answer_type = answer_spec.get("type")
     if answer_type == "multiple_choice":
-        return "Reply here or send the option text. The correct letter also works: `C` or `option c`."
+        return "Reply to this drop or send the option text. The letter also works: `C` or `option c`."
     if answer_type == "numeric":
         if _numeric_words_allowed(answer_spec):
-            return "Reply here or send just the number. Clean digits work, and simple number words also count for whole-number answers."
-        return "Reply here or send just the number. Use digits for decimals, like `14.4`."
+            return "Reply to this drop or send just the number. Clean digits work, and simple number words count for whole-number answers."
+        return "Reply to this drop or send just the number. Use digits for decimals, like `14.4`."
     if answer_type == "boolean":
-        return "Reply here or send `true` / `false` or `yes` / `no`."
+        return "Reply to this drop or send `true` / `false` or `yes` / `no`."
     if answer_type == "ordered_tokens":
-        return "Reply here or send the full sequence in order, like `red, blue, green`."
-    return "Reply here or send a short clean answer."
+        return "Reply to this drop or send the full sequence in order, like `red, blue, green`."
+    return "Reply to this drop or send a short clean guess."
 
 
 def answer_points_for_difficulty(difficulty: int) -> int:
