@@ -1,7 +1,12 @@
 import json
 import unittest
+from unittest import mock
 
+from babblebox.confessions_crypto import ConfessionsCrypto
 from babblebox.confessions_store import (
+    PROTECTED_OWNER_REPLY_PREVIEW,
+    ConfessionsStorageUnavailable,
+    ConfessionsStore,
     _PostgresConfessionsStore,
     _owner_reply_opportunity_from_row,
     _submission_from_row,
@@ -11,6 +16,10 @@ from babblebox.confessions_store import (
     normalize_private_media,
     normalize_submission,
 )
+
+
+def _privacy() -> ConfessionsCrypto:
+    return ConfessionsCrypto.from_environment(backend_name="test")
 
 
 class _FakeAcquire:
@@ -129,7 +138,7 @@ class ConfessionsStoreNormalizationTests(unittest.TestCase):
                 "staff_preview": "hello",
                 "content_body": "hello",
                 "shared_link_url": "https://www.google.com/search?q=hello",
-                "fuzzy_signature": "abc123",
+                "fuzzy_signature": "fh1:abc123",
                 "attachment_meta": [
                     {
                         "filename": "image.png",
@@ -147,7 +156,7 @@ class ConfessionsStoreNormalizationTests(unittest.TestCase):
         self.assertEqual(record["submission_kind"], "reply")
         self.assertEqual(record["parent_confession_id"], "CF-ZZZZ9999")
         self.assertEqual(record["shared_link_url"], "https://www.google.com/search?q=hello")
-        self.assertEqual(record["fuzzy_signature"], "abc123")
+        self.assertEqual(record["fuzzy_signature"], "fh1:abc123")
         self.assertNotIn("bytes", record["attachment_meta"][0])
         self.assertEqual(set(record["attachment_meta"][0].keys()), {"kind", "size", "width", "height", "spoiler"})
 
@@ -175,26 +184,9 @@ class ConfessionsStoreNormalizationTests(unittest.TestCase):
                 "created_at": "2026-04-03T00:00:00+00:00",
             }
         )
-
         self.assertEqual(reply_record["reply_flow"], "reply_to_confession")
         self.assertEqual(confession_record["owner_reply_generation"], None)
         self.assertIsNone(confession_record["reply_flow"])
-
-        owner_reply_record = normalize_submission(
-            {
-                "submission_id": "sub-4",
-                "guild_id": 10,
-                "confession_id": "CF-DDDD4444",
-                "submission_kind": "reply",
-                "reply_flow": "owner_reply_to_user",
-                "owner_reply_generation": 3,
-                "status": "queued",
-                "review_status": "pending",
-                "created_at": "2026-04-03T00:00:00+00:00",
-            }
-        )
-        self.assertEqual(owner_reply_record["reply_flow"], "owner_reply_to_user")
-        self.assertEqual(owner_reply_record["owner_reply_generation"], 2)
 
     def test_normalize_owner_reply_opportunity_keeps_compact_private_state(self):
         record = normalize_owner_reply_opportunity(
@@ -217,7 +209,6 @@ class ConfessionsStoreNormalizationTests(unittest.TestCase):
                 "expires_at": "2026-04-06T00:00:00+00:00",
             }
         )
-
         self.assertEqual(record["status"], "pending")
         self.assertEqual(record["notification_status"], "none")
         self.assertEqual(record["source_author_user_id"], 40)
@@ -244,8 +235,9 @@ class ConfessionsStoreNormalizationTests(unittest.TestCase):
         self.assertEqual(record["attachment_urls"], ["https://cdn.discordapp.com/attachments/1/2/image.png"])
 
 
-class ConfessionsPostgresStoreTests(unittest.IsolatedAsyncioTestCase):
-    async def test_submission_row_decodes_json_string_columns(self):
+class ConfessionsStorePrivacyTests(unittest.IsolatedAsyncioTestCase):
+    async def test_submission_row_decrypts_ciphertext_without_leaking_raw_columns(self):
+        privacy = _privacy()
         row = {
             "submission_id": "sub-1",
             "guild_id": 10,
@@ -256,12 +248,22 @@ class ConfessionsPostgresStoreTests(unittest.IsolatedAsyncioTestCase):
             "parent_confession_id": "CF-ZZZZ9999",
             "status": "queued",
             "review_status": "pending",
-            "staff_preview": "queued preview",
-            "content_body": "full text",
-            "shared_link_url": "https://www.google.com/search?q=preview",
-            "content_fingerprint": "abc",
-            "similarity_key": "abc",
-            "fuzzy_signature": "def",
+            "staff_preview": None,
+            "content_body": None,
+            "shared_link_url": None,
+            "content_ciphertext": privacy.encrypt_payload(
+                domain="submission-content",
+                aad_fields={"guild_id": 10, "submission_id": "sub-1", "confession_id": "CF-AAAA1111"},
+                payload={
+                    "staff_preview": "queued preview",
+                    "content_body": "full text",
+                    "shared_link_url": "https://www.google.com/search?q=preview",
+                },
+                key_domain="content",
+            ),
+            "content_fingerprint": "h1:abc",
+            "similarity_key": None,
+            "fuzzy_signature": "fh1:def",
             "flag_codes": json.dumps(["adult_language", "link_unsafe"]),
             "attachment_meta": json.dumps(
                 [{"kind": "image", "size": 12, "width": 8, "height": 8, "spoiler": False}]
@@ -273,17 +275,15 @@ class ConfessionsPostgresStoreTests(unittest.IsolatedAsyncioTestCase):
             "published_at": None,
             "resolved_at": None,
         }
-        record = _submission_from_row(row)
-        self.assertEqual(record["submission_kind"], "reply")
-        self.assertEqual(record["reply_flow"], "owner_reply_to_user")
-        self.assertEqual(record["owner_reply_generation"], 2)
-        self.assertEqual(record["parent_confession_id"], "CF-ZZZZ9999")
+        record = _submission_from_row(row, privacy)
+        self.assertEqual(record["content_body"], "full text")
         self.assertEqual(record["shared_link_url"], "https://www.google.com/search?q=preview")
-        self.assertEqual(record["fuzzy_signature"], "def")
+        self.assertEqual(record["fuzzy_signature"], "fh1:def")
         self.assertEqual(record["flag_codes"], ["adult_language", "link_unsafe"])
         self.assertEqual(record["attachment_meta"][0]["kind"], "image")
 
-    async def test_owner_reply_opportunity_row_decodes_private_notification_fields(self):
+    async def test_owner_reply_opportunity_row_decrypts_private_payload(self):
+        privacy = _privacy()
         row = {
             "opportunity_id": "opp-1",
             "guild_id": 10,
@@ -292,8 +292,22 @@ class ConfessionsPostgresStoreTests(unittest.IsolatedAsyncioTestCase):
             "referenced_submission_id": "sub-ref",
             "source_channel_id": 20,
             "source_message_id": 30,
-            "source_author_name": "Responder",
-            "source_preview": "Kind reply",
+            "source_author_user_id": None,
+            "source_author_lookup_hash": privacy.blind_index(label="owner-reply-source-author", guild_id=10, value=40),
+            "source_author_name": "Protected member",
+            "source_preview": PROTECTED_OWNER_REPLY_PREVIEW,
+            "source_message_fingerprint": None,
+            "private_payload": privacy.encrypt_payload(
+                domain="owner-reply-opportunity",
+                aad_fields={"guild_id": 10, "opportunity_id": "opp-1", "root_submission_id": "sub-root"},
+                payload={
+                    "source_author_user_id": 40,
+                    "source_author_name": "Responder",
+                    "source_preview": "Kind reply",
+                    "source_message_fingerprint": "abc123",
+                },
+                key_domain="content",
+            ),
             "status": "pending",
             "notification_status": "sent",
             "notification_message_id": 40,
@@ -302,38 +316,228 @@ class ConfessionsPostgresStoreTests(unittest.IsolatedAsyncioTestCase):
             "notified_at": "2026-04-03T00:01:00+00:00",
             "resolved_at": None,
         }
-
-        record = _owner_reply_opportunity_from_row(row)
-
+        record = _owner_reply_opportunity_from_row(row, privacy)
         self.assertEqual(record["notification_status"], "sent")
         self.assertEqual(record["notification_message_id"], 40)
+        self.assertEqual(record["source_author_user_id"], 40)
         self.assertEqual(record["source_preview"], "Kind reply")
 
-    async def test_schema_bootstrap_creates_confession_tables_and_indexes(self):
+    async def test_schema_bootstrap_creates_secure_confession_tables_and_indexes(self):
         connection = _FakeConnection()
-        store = _PostgresConfessionsStore("postgresql://example")
+        store = _PostgresConfessionsStore("postgresql://example", _privacy())
         store._pool = _FakePool(connection)
 
         await store._ensure_schema()
 
         executed = "\n".join(connection.executed)
         self.assertIn("CREATE TABLE IF NOT EXISTS confession_guild_configs", executed)
-        self.assertIn("allow_images BOOLEAN NOT NULL DEFAULT FALSE", executed)
-        self.assertIn("allow_anonymous_replies BOOLEAN NOT NULL DEFAULT FALSE", executed)
         self.assertIn("CREATE TABLE IF NOT EXISTS confession_submissions", executed)
-        self.assertIn("reply_flow TEXT NULL", executed)
-        self.assertIn("fuzzy_signature TEXT NULL", executed)
+        self.assertIn("content_ciphertext TEXT NULL", executed)
         self.assertIn("CREATE TABLE IF NOT EXISTS confession_author_links", executed)
-        self.assertIn("CREATE TABLE IF NOT EXISTS confession_owner_reply_opportunities", executed)
+        self.assertIn("CREATE TABLE IF NOT EXISTS confession_author_identities", executed)
+        self.assertIn("author_lookup_hash TEXT NOT NULL", executed)
+        self.assertIn("author_identity_ciphertext TEXT NOT NULL", executed)
         self.assertIn("CREATE TABLE IF NOT EXISTS confession_private_media", executed)
+        self.assertIn("attachment_payload TEXT NULL", executed)
+        self.assertIn("CREATE TABLE IF NOT EXISTS confession_owner_reply_opportunities", executed)
+        self.assertIn("source_author_lookup_hash TEXT NULL", executed)
+        self.assertIn("private_payload TEXT NULL", executed)
         self.assertIn("CREATE TABLE IF NOT EXISTS confession_enforcement_states", executed)
-        self.assertIn("image_restriction_active BOOLEAN NOT NULL DEFAULT FALSE", executed)
-        self.assertIn("CREATE TABLE IF NOT EXISTS confession_cases", executed)
-        self.assertIn("CREATE TABLE IF NOT EXISTS confession_review_queues", executed)
-        self.assertIn("ALTER TABLE confession_guild_configs ALTER COLUMN allow_images SET DEFAULT FALSE", executed)
-        self.assertIn("ALTER TABLE confession_submissions ADD COLUMN IF NOT EXISTS reply_flow TEXT NULL", executed)
-        self.assertIn("ix_confession_submissions_confession_id", executed)
-        self.assertIn("ix_confession_submissions_reply_flow", executed)
-        self.assertIn("ix_confession_author_links_author_created", executed)
-        self.assertIn("ix_confession_owner_reply_source_message", executed)
-        self.assertIn("ix_confession_owner_reply_notification_message_id", executed)
+        self.assertIn("CREATE TABLE IF NOT EXISTS confession_enforcement_states_secure", executed)
+        self.assertIn("user_lookup_hash TEXT NOT NULL", executed)
+        self.assertIn("user_identity_ciphertext TEXT NOT NULL", executed)
+        self.assertIn("ix_confession_author_identities_lookup_created", executed)
+        self.assertIn("ix_confession_enforcement_states_secure_lookup", executed)
+        self.assertIn("ix_confession_owner_reply_responder_path_lookup_status", executed)
+
+    async def test_memory_store_backfill_encrypts_sensitive_rows_and_preserves_lookup_flows(self):
+        store = ConfessionsStore(backend="memory")
+        await store.load()
+        try:
+            raw_store = store._store
+            raw_store.submissions["sub-active"] = {
+                "submission_id": "sub-active",
+                "guild_id": 10,
+                "confession_id": "CF-ACTIVE1",
+                "submission_kind": "confession",
+                "reply_flow": None,
+                "owner_reply_generation": None,
+                "parent_confession_id": None,
+                "status": "queued",
+                "review_status": "pending",
+                "staff_preview": "Legacy preview",
+                "content_body": "Legacy queued confession body",
+                "shared_link_url": "https://www.google.com/search?q=queued",
+                "content_fingerprint": "legacy-fingerprint",
+                "similarity_key": "legacy similarity key",
+                "fuzzy_signature": "deadbeefdeadbeef",
+                "flag_codes": [],
+                "attachment_meta": [{"kind": "image", "size": 12, "width": 8, "height": 8, "spoiler": False}],
+                "posted_channel_id": None,
+                "posted_message_id": None,
+                "current_case_id": None,
+                "created_at": "2026-04-03T00:00:00+00:00",
+                "published_at": None,
+                "resolved_at": None,
+            }
+            raw_store.submissions["sub-terminal"] = {
+                "submission_id": "sub-terminal",
+                "guild_id": 10,
+                "confession_id": "CF-DONE111",
+                "submission_kind": "confession",
+                "reply_flow": None,
+                "owner_reply_generation": None,
+                "parent_confession_id": None,
+                "status": "published",
+                "review_status": "approved",
+                "staff_preview": "Old published preview",
+                "content_body": "Old published body",
+                "shared_link_url": "https://www.google.com/search?q=done",
+                "content_fingerprint": "legacy-fingerprint-2",
+                "similarity_key": "legacy similarity key 2",
+                "fuzzy_signature": "feedfacefeedface",
+                "flag_codes": [],
+                "attachment_meta": [{"kind": "image", "size": 12, "width": 8, "height": 8, "spoiler": False}],
+                "posted_channel_id": 20,
+                "posted_message_id": 30,
+                "current_case_id": None,
+                "created_at": "2026-04-02T00:00:00+00:00",
+                "published_at": "2026-04-02T00:05:00+00:00",
+                "resolved_at": None,
+            }
+            raw_store.private_media["sub-active"] = {
+                "submission_id": "sub-active",
+                "guild_id": 10,
+                "attachment_urls": ["https://cdn.discordapp.com/attachments/1/2/image.png"],
+                "created_at": "2026-04-03T00:00:00+00:00",
+                "updated_at": "2026-04-03T00:01:00+00:00",
+            }
+            raw_store.private_media["sub-terminal"] = {
+                "submission_id": "sub-terminal",
+                "guild_id": 10,
+                "attachment_urls": ["https://cdn.discordapp.com/attachments/1/2/old.png"],
+                "created_at": "2026-04-02T00:00:00+00:00",
+                "updated_at": "2026-04-02T00:01:00+00:00",
+            }
+            raw_store.author_links["sub-active"] = {
+                "submission_id": "sub-active",
+                "guild_id": 10,
+                "author_user_id": 40,
+                "created_at": "2026-04-03T00:00:00+00:00",
+            }
+            raw_store.owner_reply_opportunities["opp-1"] = {
+                "opportunity_id": "opp-1",
+                "guild_id": 10,
+                "root_submission_id": "sub-active",
+                "root_confession_id": "CF-ACTIVE1",
+                "referenced_submission_id": "sub-active",
+                "source_channel_id": 20,
+                "source_message_id": 31,
+                "source_author_user_id": 40,
+                "source_author_name": "Responder",
+                "source_preview": "Reply preview",
+                "source_message_fingerprint": "fingerprint",
+                "status": "pending",
+                "notification_status": "none",
+                "notification_channel_id": None,
+                "notification_message_id": None,
+                "created_at": "2026-04-03T00:00:00+00:00",
+                "expires_at": "2026-04-06T00:00:00+00:00",
+                "notified_at": None,
+                "resolved_at": None,
+            }
+            raw_store.enforcement_states[(10, 40)] = {
+                "guild_id": 10,
+                "user_id": 40,
+                "active_restriction": "suspended",
+                "restricted_until": "2026-04-04T00:00:00+00:00",
+                "is_permanent_ban": False,
+                "strike_count": 2,
+                "last_strike_at": "2026-04-03T00:00:00+00:00",
+                "cooldown_until": None,
+                "burst_count": 1,
+                "burst_window_started_at": "2026-04-03T00:00:00+00:00",
+                "last_case_id": "CS-STATE01",
+                "image_restriction_active": False,
+                "image_restricted_until": None,
+                "image_restriction_case_id": None,
+                "updated_at": "2026-04-03T00:00:00+00:00",
+            }
+
+            dry_run = await store.run_privacy_backfill(apply=False, batch_size=10)
+            self.assertEqual(dry_run["submissions"], 2)
+            self.assertEqual(dry_run["private_media"], 2)
+            self.assertEqual(dry_run["author_links"], 1)
+            self.assertEqual(dry_run["owner_reply_opportunities"], 1)
+            self.assertEqual(dry_run["enforcement_states"], 1)
+
+            applied = await store.run_privacy_backfill(apply=True, batch_size=10)
+            self.assertEqual(applied["mode"], "apply")
+
+            active_submission = await store.fetch_submission("sub-active")
+            self.assertEqual(active_submission["content_body"], "Legacy queued confession body")
+            self.assertEqual(active_submission["shared_link_url"], "https://www.google.com/search?q=queued")
+            active_private_media = await store.fetch_private_media("sub-active")
+            self.assertEqual(active_private_media["attachment_urls"], ["https://cdn.discordapp.com/attachments/1/2/image.png"])
+            author_link = await store.fetch_author_link("sub-active")
+            self.assertEqual(author_link["author_user_id"], 40)
+            owner_reply = await store.fetch_owner_reply_opportunity("opp-1")
+            self.assertEqual(owner_reply["source_author_user_id"], 40)
+            state = await store.fetch_enforcement_state(10, 40)
+            self.assertEqual(state["user_id"], 40)
+            recent = await store.list_recent_submissions_for_author(10, 40, limit=5)
+            self.assertEqual([row["submission_id"] for row in recent], ["sub-active"])
+
+            raw_active_submission = raw_store.submissions["sub-active"]
+            self.assertIsNone(raw_active_submission["staff_preview"])
+            self.assertIsNone(raw_active_submission["content_body"])
+            self.assertIsNone(raw_active_submission["shared_link_url"])
+            self.assertIsNone(raw_active_submission["similarity_key"])
+            self.assertTrue(str(raw_active_submission["content_ciphertext"]).startswith("bbx1:"))
+            self.assertTrue(str(raw_active_submission["content_fingerprint"]).startswith("h1:"))
+            self.assertTrue(str(raw_active_submission["fuzzy_signature"]).startswith("fh1:"))
+
+            raw_terminal_submission = raw_store.submissions["sub-terminal"]
+            self.assertIsNone(raw_terminal_submission["staff_preview"])
+            self.assertIsNone(raw_terminal_submission["content_body"])
+            self.assertIsNone(raw_terminal_submission["shared_link_url"])
+            self.assertIsNone(raw_terminal_submission["content_ciphertext"])
+            self.assertIsNone(raw_terminal_submission["similarity_key"])
+            self.assertEqual(raw_terminal_submission["attachment_meta"], [])
+            self.assertNotIn("sub-terminal", raw_store.private_media)
+
+            raw_private_media = raw_store.private_media["sub-active"]
+            self.assertEqual(raw_private_media["attachment_urls"], [])
+            self.assertTrue(str(raw_private_media["attachment_payload"]).startswith("bbx1:"))
+
+            self.assertEqual(raw_store.author_links, {})
+            secure_author_link = raw_store.secure_author_links["sub-active"]
+            self.assertNotIn("author_user_id", secure_author_link)
+            self.assertTrue(str(secure_author_link["author_lookup_hash"]).startswith("bi1:"))
+            self.assertTrue(str(secure_author_link["author_identity_ciphertext"]).startswith("bbx1:"))
+
+            raw_owner_reply = raw_store.owner_reply_opportunities["opp-1"]
+            self.assertIsNone(raw_owner_reply["source_author_user_id"])
+            self.assertEqual(raw_owner_reply["source_preview"], PROTECTED_OWNER_REPLY_PREVIEW)
+            self.assertTrue(str(raw_owner_reply["source_author_lookup_hash"]).startswith("bi1:"))
+            self.assertTrue(str(raw_owner_reply["private_payload"]).startswith("bbx1:"))
+
+            self.assertEqual(raw_store.enforcement_states, {})
+            secure_enforcement = next(iter(raw_store.secure_enforcement_states.values()))
+            self.assertNotIn("user_id", secure_enforcement)
+            self.assertTrue(str(secure_enforcement["user_lookup_hash"]).startswith("bi1:"))
+            self.assertTrue(str(secure_enforcement["user_identity_ciphertext"]).startswith("bbx1:"))
+        finally:
+            await store.close()
+
+    async def test_memory_store_uses_ephemeral_keys(self):
+        store = ConfessionsStore(backend="memory")
+        try:
+            self.assertTrue(store.privacy.status.ephemeral)
+        finally:
+            await store.close()
+
+    async def test_postgres_backend_requires_privacy_keys(self):
+        with mock.patch.dict("os.environ", {}, clear=True):
+            with self.assertRaises(ConfessionsStorageUnavailable):
+                ConfessionsStore(backend="postgres", database_url="postgresql://example")

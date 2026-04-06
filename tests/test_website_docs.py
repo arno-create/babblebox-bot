@@ -158,12 +158,15 @@ class WebsiteDocsTests(unittest.TestCase):
             "raw Discord CDN URLs",
             "Resolved anonymous confession rows scrub previews",
             "self-identifying link destination or image content",
+            "application-level encryption",
+            "trust model",
         ):
             self.assertIn(text, privacy_md if text != "Resolved anonymous confession rows scrub previews" else privacy_html)
         self.assertIn("anonymous confession rows scrub previews", privacy_md.casefold())
         self.assertIn("confession ID and case ID only", privacy_html)
         self.assertIn("images are off by default", privacy_md)
         self.assertIn("Babblebox still enforces safety internally", privacy_html)
+        self.assertIn("operator-proof", privacy_html)
 
     def test_homepage_and_readme_use_current_proof_assets(self):
         index_html = (ROOT / "index.html").read_text(encoding="utf-8")

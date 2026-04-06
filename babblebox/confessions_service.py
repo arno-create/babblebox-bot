@@ -8,7 +8,6 @@ import secrets
 import time
 from dataclasses import dataclass
 from datetime import timedelta
-from difflib import SequenceMatcher
 from typing import Any, Iterable, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
@@ -16,6 +15,11 @@ import discord
 from discord.ext import commands
 
 from babblebox import game_engine as ge
+from babblebox.confessions_privacy import (
+    build_duplicate_signals,
+    fuzzy_signature_ratio,
+    legacy_similarity_ratio,
+)
 from babblebox.confessions_store import (
     ConfessionsStorageUnavailable,
     ConfessionsStore,
@@ -103,7 +107,6 @@ TRUSTED_MAINSTREAM_DOMAINS = {
     "mozilla.org",
 }
 
-TOKEN_RE = re.compile(r"[a-z0-9']+")
 RAW_MENTION_RE = re.compile(r"(?i)<\s*[@#][!&]?\s*\d+\s*>|@\s*(?:everyone|here)")
 LOW_SIGNAL_RE = re.compile(r"(?i)^(?:[a-z0-9]\s*){1,3}$")
 REPEATED_CHAR_RE = re.compile(r"(.)\1{7,}")
@@ -318,56 +321,6 @@ def _owner_reply_opportunity_age_text(iso_value: str | None) -> str:
     hours = max(1, seconds // 3600)
     noun = "hour" if hours == 1 else "hours"
     return f"{hours} {noun} ago"
-
-
-def _tokens(text: str) -> list[str]:
-    return TOKEN_RE.findall(text.casefold())
-
-
-def _canonical_duplicate_text(text: str, attachment_meta: Sequence[dict[str, Any]], shared_link_url: str | None = None) -> str:
-    lowered = normalize_plain_text(text).casefold()
-    shared_link = normalize_plain_text(shared_link_url).casefold() if shared_link_url else ""
-    attachment_signature = " ".join(str(item.get("kind") or "").casefold() for item in attachment_meta)
-    attachment_count = f"attachments:{len(attachment_meta)}" if attachment_meta else ""
-    return normalize_plain_text(f"{lowered} {shared_link} {attachment_signature} {attachment_count}").casefold()
-
-
-def _fingerprint_text(
-    text: str,
-    attachment_meta: Sequence[dict[str, Any]],
-    shared_link_url: str | None = None,
-) -> tuple[str | None, str | None, str | None]:
-    canonical = _canonical_duplicate_text(text, attachment_meta, shared_link_url)
-    if not canonical:
-        return None, None, None
-    fingerprint = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:32]
-    similarity = " ".join(_tokens(canonical)[:24])[:160] or canonical[:160]
-    signature_tokens = _tokens(canonical)
-    if len(signature_tokens) > 1:
-        signature_tokens.extend(f"{left}|{right}" for left, right in zip(signature_tokens, signature_tokens[1:]))
-    signature_tokens = signature_tokens[:64]
-    vector = [0] * 64
-    for token in signature_tokens:
-        bits = int.from_bytes(hashlib.sha256(token.encode("utf-8")).digest()[:8], "big")
-        for index in range(64):
-            weight = 1 if bits & (1 << index) else -1
-            vector[index] += weight
-    fuzzy_value = 0
-    for index, score in enumerate(vector):
-        if score >= 0:
-            fuzzy_value |= 1 << index
-    fuzzy_signature = f"{fuzzy_value:016x}" if signature_tokens else None
-    return fingerprint, similarity, fuzzy_signature
-
-
-def _fuzzy_signature_ratio(left: str, right: str) -> float:
-    try:
-        left_bits = int(left, 16)
-        right_bits = int(right, 16)
-    except ValueError:
-        return 0.0
-    distance = bin(left_bits ^ right_bits).count("1")
-    return 1.0 - (distance / 64.0)
 
 
 def _public_id(prefix: str) -> str:
@@ -1347,24 +1300,40 @@ class ConfessionsService:
         if has_links and not assessments and not compiled["allow_trusted_mainstream_links"] and not compiled["custom_allow_domains"]:
             return SafetyResult("blocked", ("link_unsafe",), True, "Links are disabled for confessions in this server.")
 
-        fingerprint, similarity_key, fuzzy_signature = _fingerprint_text(text, attachment_meta, shared_link_url)
+        duplicate_signals = build_duplicate_signals(self.store.privacy, text, attachment_meta, shared_link_url)
         now = ge.now_utc()
         for row in recent_rows:
             created_at = deserialize_datetime(row.get("created_at"))
             if created_at is None:
                 continue
             age = (now - created_at).total_seconds()
-            if fingerprint and row.get("content_fingerprint") == fingerprint and age <= EXACT_DUPLICATE_WINDOW_SECONDS:
-                return SafetyResult("blocked", ("duplicate_spam",), False, "That looks like a duplicate confession.")
+            previous_fingerprint = str(row.get("content_fingerprint") or "")
+            if age <= EXACT_DUPLICATE_WINDOW_SECONDS and duplicate_signals.exact_hash:
+                if self.store.privacy.is_keyed_exact_hash(previous_fingerprint):
+                    if previous_fingerprint == duplicate_signals.exact_hash:
+                        return SafetyResult("blocked", ("duplicate_spam",), False, "That looks like a duplicate confession.")
+                elif duplicate_signals.legacy_exact_hash and previous_fingerprint == duplicate_signals.legacy_exact_hash:
+                    return SafetyResult("blocked", ("duplicate_spam",), False, "That looks like a duplicate confession.")
             previous_fuzzy_signature = str(row.get("fuzzy_signature") or "")
             previous_similarity = str(row.get("similarity_key") or "")
-            if fuzzy_signature and previous_fuzzy_signature:
-                ratio = _fuzzy_signature_ratio(fuzzy_signature, previous_fuzzy_signature)
-                if ratio >= FUZZY_DUPLICATE_RATIO and age <= EXACT_DUPLICATE_WINDOW_SECONDS:
+            if age > EXACT_DUPLICATE_WINDOW_SECONDS:
+                continue
+            if duplicate_signals.fuzzy_signature and previous_fuzzy_signature:
+                if self.store.privacy.is_keyed_fuzzy_signature(previous_fuzzy_signature):
+                    ratio = fuzzy_signature_ratio(privacy=self.store.privacy, left=duplicate_signals.fuzzy_signature, right=previous_fuzzy_signature)
+                elif duplicate_signals.legacy_fuzzy_signature:
+                    ratio = fuzzy_signature_ratio(
+                        privacy=self.store.privacy,
+                        left=duplicate_signals.legacy_fuzzy_signature,
+                        right=previous_fuzzy_signature,
+                    )
+                else:
+                    ratio = 0.0
+                if ratio >= FUZZY_DUPLICATE_RATIO:
                     return SafetyResult("blocked", ("near_duplicate_spam",), False, "That looks too close to a recent confession.")
-            elif similarity_key and previous_similarity:
-                ratio = SequenceMatcher(None, similarity_key, previous_similarity).ratio()
-                if ratio >= NEAR_DUPLICATE_RATIO and age <= EXACT_DUPLICATE_WINDOW_SECONDS:
+            elif duplicate_signals.legacy_similarity_key and previous_similarity:
+                ratio = legacy_similarity_ratio(duplicate_signals.legacy_similarity_key, previous_similarity)
+                if ratio >= NEAR_DUPLICATE_RATIO:
                     return SafetyResult("blocked", ("near_duplicate_spam",), False, "That looks too close to a recent confession.")
 
         language_result = self._classify_language(compiled, text, squashed)
@@ -1529,7 +1498,7 @@ class ConfessionsService:
         confession_id = await self._generate_confession_id(guild.id)
         submission_id = secrets.token_hex(16)
         preview = _staff_preview_text(normalized, attachment_meta)
-        fingerprint, similarity_key, fuzzy_signature = _fingerprint_text(normalized, attachment_meta, shared_link_url)
+        duplicate_signals = build_duplicate_signals(self.store.privacy, normalized, attachment_meta, shared_link_url)
         now = ge.now_utc()
         now_iso = now.isoformat()
         if submission_kind == "reply" and normalized_reply_flow == REPLY_FLOW_OWNER_TO_USER and safety.outcome == "review" and not compiled.get("owner_reply_review_mode"):
@@ -1561,9 +1530,9 @@ class ConfessionsService:
             "staff_preview": preview,
             "content_body": normalized or None,
             "shared_link_url": shared_link_url,
-            "content_fingerprint": fingerprint,
-            "similarity_key": similarity_key,
-            "fuzzy_signature": fuzzy_signature,
+            "content_fingerprint": duplicate_signals.exact_hash,
+            "similarity_key": None,
+            "fuzzy_signature": duplicate_signals.fuzzy_signature,
             "flag_codes": list(safety.flag_codes),
             "attachment_meta": attachment_meta,
             "posted_channel_id": None,
@@ -2439,8 +2408,13 @@ class ConfessionsService:
     def _owner_reply_delivery_copy(self, guild_id: int) -> str:
         config = self.get_config(guild_id)
         if config.get("owner_reply_review_mode"):
-            return "Your reply posts publicly as an Anonymous Owner Reply, stays text-only, and may go through private review first."
-        return "Your reply posts publicly as an Anonymous Owner Reply, stays text-only, and Babblebox keeps your identity hidden."
+            return (
+                "Your reply posts publicly as an Anonymous Owner Reply, stays text-only, may go through private review first, "
+                "and Babblebox keeps your identity hidden from members and staff."
+            )
+        return (
+            "Your reply posts publicly as an Anonymous Owner Reply, stays text-only, and Babblebox keeps your identity hidden from members and staff."
+        )
 
     async def get_owned_submission_context(
         self,
@@ -2487,7 +2461,10 @@ class ConfessionsService:
         kind_label = self._submission_kind_label(submission)
         embed = discord.Embed(
             title=f"My Anonymous {kind_label}",
-            description="Babblebox verified ownership privately. Staff still do not see your account through this flow.",
+            description=(
+                "Babblebox verified ownership privately. Staff still do not see your account through this flow, "
+                "and the private ownership link stays protected in Confessions storage."
+            ),
             color=ge.EMBED_THEME["info"],
         )
         embed.add_field(
@@ -2698,13 +2675,18 @@ class ConfessionsService:
                 submission_kind=str(submission.get("submission_kind") or "confession"),
                 parent_confession_id=submission.get("parent_confession_id"),
             )
-        fingerprint, similarity_key, fuzzy_signature = _fingerprint_text(normalized, list(submission.get("attachment_meta") or []), shared_link_url)
+        duplicate_signals = build_duplicate_signals(
+            self.store.privacy,
+            normalized,
+            list(submission.get("attachment_meta") or []),
+            shared_link_url,
+        )
         submission["content_body"] = normalized or None
         submission["shared_link_url"] = shared_link_url
         submission["staff_preview"] = _staff_preview_text(normalized, list(submission.get("attachment_meta") or []))
-        submission["content_fingerprint"] = fingerprint
-        submission["similarity_key"] = similarity_key
-        submission["fuzzy_signature"] = fuzzy_signature
+        submission["content_fingerprint"] = duplicate_signals.exact_hash
+        submission["similarity_key"] = None
+        submission["fuzzy_signature"] = duplicate_signals.fuzzy_signature
         submission["flag_codes"] = list(safety.flag_codes)
         await self.store.upsert_submission(submission)
         if case is not None:
@@ -2934,7 +2916,8 @@ class ConfessionsService:
         role_access = self._member_role_access_label(guild)
         support_snapshot = self.support_channel_snapshot(guild)
         description = (
-            "Share something quietly through a private composer. Use `/confess create` or the panel button below. When admins enable Confessions, Babblebox keeps the author hidden from members and staff while still enforcing safety internally."
+            "Share something quietly through a private composer. Use `/confess create` or the panel button below. "
+            "When admins enable Confessions, Babblebox keeps the author hidden from members and staff in normal use while still enforcing safety internally."
             if ready
             else "Anonymous confessions are optional in Babblebox and are not ready in this server yet. The panel stays here so admins can finish setup without reposting it."
         )
@@ -2987,7 +2970,10 @@ class ConfessionsService:
         )
         embed.add_field(
             name="Stay Anonymous",
-            value="Babblebox hides your account from staff, but the words, link destination, and image contents you choose can still identify you.",
+            value=(
+                "Babblebox hides your account from members and staff, and private Confessions data is protected in storage. "
+                "The service still enforces safety internally, operators are still part of the trust model, and the words, link destination, or image contents you choose can still identify you."
+            ),
             inline=False,
         )
         if not ready:
@@ -3025,7 +3011,10 @@ class ConfessionsService:
         )
         embed.add_field(
             name="Privacy",
-            value="Members and server staff see confession IDs, not the author behind them. Babblebox still enforces safety internally.",
+            value=(
+                "Members and server staff see confession IDs, not the author behind them. "
+                "Babblebox protects private Confessions data in storage and still enforces safety internally, but it does not remove the service operator from the trust model."
+            ),
             inline=False,
         )
         embed.add_field(

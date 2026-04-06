@@ -30,6 +30,7 @@ Depending on the feature being used, Babblebox may process or store:
 - compact feature configuration and state, including Watch preferences, ignored channels or users, Later markers, reminders, AFK state, AFK schedules, Daily Arcade results, Buddy or profile state, and Shield or admin configuration
 - limited message or attachment context needed to respond to commands, build Moment Cards from visible messages, deliver Watch alerts, process Capture requests, or evaluate locally flagged Shield events
 - anonymous confession or reply submission text, trusted-link fields, compact review metadata, bot-private author mappings, bot-private owner reply opportunities, and limited private appeals or reports needed to run staff-blind confession moderation when a server has Confessions enabled
+- for Confessions, Babblebox now protects sensitive content and identity linkage with application-level encryption and separate lookup domains before those fields reach durable Postgres storage
 
 ## Information Babblebox Intentionally Avoids Storing Durably
 
@@ -66,6 +67,7 @@ Babblebox intentionally uses different visibility defaults depending on the feat
 - Capture transcripts are delivered privately rather than kept as long-term database archives
 - Later markers, reminders, and sensitive setup flows are private-first
 - anonymous confessions are optional, are submitted privately when enabled, keep the author hidden from staff, and let staff review by confession ID and case ID only while Babblebox still enforces safety internally
+- that privacy model is meant to make raw database browsing and accidental exposure materially harder, not to claim that the service operator has been removed from the trust boundary
 - `Reply to confession anonymously` is off by default, stays text-only when enabled, and any approval happens privately without exposing the author
 - owner reply opportunities are bot-private, only trigger from explicit Discord replies to a published confession or first public owner reply, and can be opened from a DM prompt or `/confess reply-to-user`
 - public owner replies post as `Anonymous Owner Reply`, stay text-only, and do not expose the confession owner or the responding member in public or staff-facing moderation surfaces
@@ -101,7 +103,7 @@ Examples:
 - Daily Arcade raw result rows are designed to prune after 180 days while streak and lifetime totals remain in profile-level storage
 - short-lived admin lifecycle rows remain only while they are operationally relevant
 - ban-return candidate records are intended to have a bounded purge window
-- terminal anonymous confession rows scrub previews, body text, trusted-link fields, and attachment metadata after resolution while the bot-private author mapping and compact non-reversible duplicate signatures are retained only for moderation continuity and abuse prevention
+- terminal anonymous confession rows scrub previews, body text, trusted-link fields, and attachment metadata after resolution while the bot-private author mapping and compact keyed duplicate signatures are retained only for moderation continuity and abuse prevention
 - Watch settings, reminders, AFK settings, and Later markers remain until changed, cleared, expired, or removed
 
 Deletion timing may depend on the feature. Some state expires naturally, some is replaced by newer state, and some is removed when a user or administrator clears it.
@@ -115,7 +117,10 @@ Babblebox is intended to:
 - keep persistence compact and purpose-limited
 - avoid large archive behavior where possible
 - use private-first flows for sensitive utilities
+- protect sensitive Confessions content and identity linkage with separate application-managed encryption domains and keyed lookup hashes
 - rely on server administrators to configure Discord permissions and channels responsibly
+
+Babblebox does not claim to be zero-knowledge or operator-proof. Infrastructure operators with code, runtime, and key control are still part of the trust model even after these privacy hardening measures.
 
 ## User and Admin Controls
 

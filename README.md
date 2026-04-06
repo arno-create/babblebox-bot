@@ -95,8 +95,10 @@ Babblebox is intentionally compact:
 
 - optional feature that only works after admins enable and configure it
 - private composer and private member utilities launched with `/confess`, `/confess manage`, `/confess appeal`, `/confess report`, `/confess reply-to-user`, and `/confess about`
-- Babblebox keeps the author hidden from members and server staff
+- Babblebox keeps the author hidden from members and server staff in normal product use
 - staff-blind moderation by confession ID and case ID only while the bot still enforces safety internally
+- sensitive confession text, trusted-link fields, private media URLs, and owner/accountability linkages are protected with app-level encryption before they reach durable storage
+- author linkage and enforcement identity lookups use a separate protected identity domain plus keyed lookup hashes instead of ordinary plaintext user IDs in routine Confessions tables
 - one trusted link total per confession
 - built-in safe families for mainstream social, docs, wiki, and developer links when trusted links are enabled
 - offensive, vulgar, derogatory, spammy, and private-info patterns are filtered before anything posts
@@ -115,9 +117,10 @@ Babblebox is intentionally compact:
 - admins can configure a dedicated appeals / reports channel so members can privately appeal restrictions or report confession problems
 - attachment filenames and Discord CDN URLs stay out of staff-visible surfaces
 - Babblebox hides the Discord account, but a member-chosen link destination or image itself can still reveal who sent it
+- the service still relies on operator trust; privacy hardening reduces casual access and routine DB readability, but it is not a zero-knowledge system
 - Babblebox can automatically suspend or confession-ban internally without exposing the author
 - moderation supports approve, deny, delete, pause, restrict-images, clear, and false-positive flows without revealing the author
-- terminal confession records scrub body text, previews, links, and attachment metadata while retaining compact non-reversible duplicate signatures for abuse prevention
+- terminal confession records scrub body text, previews, links, and attachment metadata while retaining compact keyed duplicate signatures for abuse prevention
 
 ### Shield / Safety
 
@@ -382,6 +385,7 @@ Confession notes:
 - Confessions are optional and stay unavailable until admins enable and configure them
 - staff see confession IDs and case IDs, never the author
 - Babblebox still enforces safety internally and can automatically restrict repeat abuse without exposing identity
+- Confessions storage protects sensitive submission content, private media URLs, and author linkage with app-level encryption plus separate identity lookup hashes
 - adult / 18+ language is blocked by default unless admins change that policy
 - trusted-link mode allows Babblebox's bundled safe families for mainstream social, docs, wiki, and developer domains
 - one trusted link total is allowed per confession
@@ -396,6 +400,7 @@ Confession notes:
 - owner replies only come from Babblebox-owned reply opportunities after someone explicitly replies to your confession or your first owner reply; the chain stops after that extra bounce
 - members can privately delete their own confessions and use a dedicated appeals / reports channel when admins configure one
 - Babblebox hides the sender's account identity, but a personal link or identifiable image can still reveal them if they include it
+- the service operator is still part of the trust model; the privacy upgrade is meant to reduce casual access, not to claim impossible operator access
 - attachment filenames and raw Discord attachment URLs are kept out of staff-visible embeds
 - `/confessions moderate` supports ID-based moderation plus restrict-images, clear, and false-positive override paths
 
@@ -697,12 +702,24 @@ Environment variable notes:
 - `DEV_GUILD_ID` is optional and helps faster dev sync
 - `UTILITY_DATABASE_URL` is the preferred Postgres connection string
 - `SUPABASE_DB_URL` and `DATABASE_URL` are also accepted
+- `CONFESSIONS_CONTENT_KEY` and `CONFESSIONS_IDENTITY_KEY` are required for Postgres-backed Confessions and should be separate random secrets of at least 32 characters each
 - `OPENAI_API_KEY` is optional and only needed for Shield AI assist
 - `SHIELD_AI_MODEL`, `SHIELD_AI_TIMEOUT_SECONDS`, and `SHIELD_AI_MAX_CHARS` are optional Shield AI tuning knobs
 - `UTILITY_STORAGE_BACKEND=memory` is for explicit local/test work only
 - `ADMIN_STORAGE_BACKEND=memory` is optional for local/test admin lifecycle work
 - `SHIELD_STORAGE_BACKEND=memory` is optional for local/test Shield work
 - `PROFILE_STORAGE_BACKEND=memory` is optional for tests and local development
+
+### Confessions Privacy Backfill
+
+After deploying the privacy-hardened Confessions code and keys, run the staged backfill:
+
+```bash
+python -m babblebox.confessions_backfill --dry-run
+python -m babblebox.confessions_backfill --apply --batch-size 100
+```
+
+The backfill is idempotent, rewrites legacy plaintext-style Confessions rows into the protected model, and removes legacy plaintext fields where the current product no longer needs them.
 
 ### Discord Portal Settings
 

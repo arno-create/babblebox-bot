@@ -509,6 +509,8 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(result.jump_url)
         submission = await self.service.store.fetch_submission_by_confession_id(self.guild.id, result.confession_id)
         author_link = await self.service.store.fetch_author_link(submission["submission_id"])
+        raw_submission = self.service.store._store.submissions[submission["submission_id"]]
+        raw_author_link = self.service.store._store.secure_author_links[submission["submission_id"]]
         self.assertEqual(submission["status"], "published")
         self.assertIsNone(submission["content_body"])
         self.assertIsNone(submission["staff_preview"])
@@ -518,6 +520,13 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(submission["fuzzy_signature"])
         self.assertEqual(submission["attachment_meta"], [])
         self.assertEqual(author_link["author_user_id"], 123456789)
+        self.assertIsNone(raw_submission["content_body"])
+        self.assertIsNone(raw_submission["staff_preview"])
+        self.assertIsNone(raw_submission["shared_link_url"])
+        self.assertIsNone(raw_submission["content_ciphertext"])
+        self.assertTrue(str(raw_submission["content_fingerprint"]).startswith("h1:"))
+        self.assertNotIn("author_user_id", raw_author_link)
+        self.assertTrue(str(raw_author_link["author_lookup_hash"]).startswith("bi1:"))
 
     async def test_text_link_and_images_queue_for_review_and_keep_private_media_out_of_staff_storage(self):
         await self._configure(review_channel=True, allow_images=True)
@@ -534,6 +543,8 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.state, "queued")
         submission = await self.service.store.fetch_submission_by_confession_id(self.guild.id, result.confession_id)
         private_media = await self.service.store.fetch_private_media(submission["submission_id"])
+        raw_submission = self.service.store._store.submissions[submission["submission_id"]]
+        raw_private_media = self.service.store._store.private_media[submission["submission_id"]]
         self.assertEqual(submission["shared_link_url"], "https://www.google.com/search?q=babblebox")
         self.assertEqual(len(submission["attachment_meta"]), 2)
         self.assertEqual(set(submission["attachment_meta"][0].keys()), {"kind", "size", "width", "height", "spoiler"})
@@ -544,6 +555,11 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
                 "https://cdn.discordapp.com/attachments/1/2/two.png",
             ],
         )
+        self.assertIsNone(raw_submission["content_body"])
+        self.assertIsNone(raw_submission["shared_link_url"])
+        self.assertTrue(str(raw_submission["content_ciphertext"]).startswith("bbx1:"))
+        self.assertEqual(raw_private_media["attachment_urls"], [])
+        self.assertTrue(str(raw_private_media["attachment_payload"]).startswith("bbx1:"))
 
         ok, message = await self.service.handle_case_action(self.guild, case_id=result.case_id, action="approve", version=1)
 
