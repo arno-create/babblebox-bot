@@ -67,7 +67,8 @@ Babblebox intentionally uses different visibility defaults depending on the feat
 - Later markers, reminders, and sensitive setup flows are private-first
 - anonymous confessions are optional, are submitted privately when enabled, keep the author hidden from staff, and let staff review by confession ID and case ID only while Babblebox still enforces safety internally
 - `Reply to confession anonymously` is off by default, stays text-only when enabled, and any approval happens privately without exposing the author
-- owner reply opportunities are bot-private, only trigger from explicit Discord replies to a confession discussion, and can be opened from a DM prompt or `/confess reply-to-user`
+- owner reply opportunities are bot-private, only trigger from explicit Discord replies to a published confession or first public owner reply, and can be opened from a DM prompt or `/confess reply-to-user`
+- public owner replies post as `Anonymous Owner Reply`, stay text-only, and do not expose the confession owner or the responding member in public or staff-facing moderation surfaces
 - self-edit is off by default and limited to pending submissions when enabled; self-delete is available privately to the original author through Babblebox's internal ownership check
 - images are off by default for Confessions and only work after admins explicitly enable them; enabled image confessions always route through private review
 - appeals or reports can be sent privately to a configured support channel without exposing the author's Discord identity to staff

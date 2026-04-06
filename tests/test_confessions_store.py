@@ -49,6 +49,8 @@ class ConfessionsStoreNormalizationTests(unittest.TestCase):
         self.assertTrue(config["allow_trusted_mainstream_links"])
         self.assertFalse(config["allow_images"])
         self.assertFalse(config["allow_anonymous_replies"])
+        self.assertTrue(config["allow_owner_replies"])
+        self.assertFalse(config["owner_reply_review_mode"])
         self.assertFalse(config["allow_self_edit"])
         self.assertIsNone(config["appeals_channel_id"])
         self.assertIsNone(config["panel_channel_id"])
@@ -70,6 +72,8 @@ class ConfessionsStoreNormalizationTests(unittest.TestCase):
                 "custom_block_domains": ["bad.example", "Bad.Example"],
                 "allow_images": True,
                 "allow_anonymous_replies": True,
+                "allow_owner_replies": False,
+                "owner_reply_review_mode": True,
                 "allow_self_edit": True,
                 "max_images": 99,
                 "cooldown_seconds": 1,
@@ -87,6 +91,8 @@ class ConfessionsStoreNormalizationTests(unittest.TestCase):
         self.assertEqual(config["custom_block_domains"], ["bad.example"])
         self.assertFalse(config["allow_images"])
         self.assertFalse(config["allow_anonymous_replies"])
+        self.assertFalse(config["allow_owner_replies"])
+        self.assertFalse(config["owner_reply_review_mode"])
         self.assertTrue(config["allow_self_edit"])
         self.assertEqual(config["max_images"], 3)
         self.assertEqual(config["cooldown_seconds"], 300)
@@ -171,7 +177,24 @@ class ConfessionsStoreNormalizationTests(unittest.TestCase):
         )
 
         self.assertEqual(reply_record["reply_flow"], "reply_to_confession")
+        self.assertEqual(confession_record["owner_reply_generation"], None)
         self.assertIsNone(confession_record["reply_flow"])
+
+        owner_reply_record = normalize_submission(
+            {
+                "submission_id": "sub-4",
+                "guild_id": 10,
+                "confession_id": "CF-DDDD4444",
+                "submission_kind": "reply",
+                "reply_flow": "owner_reply_to_user",
+                "owner_reply_generation": 3,
+                "status": "queued",
+                "review_status": "pending",
+                "created_at": "2026-04-03T00:00:00+00:00",
+            }
+        )
+        self.assertEqual(owner_reply_record["reply_flow"], "owner_reply_to_user")
+        self.assertEqual(owner_reply_record["owner_reply_generation"], 2)
 
     def test_normalize_owner_reply_opportunity_keeps_compact_private_state(self):
         record = normalize_owner_reply_opportunity(
@@ -183,8 +206,11 @@ class ConfessionsStoreNormalizationTests(unittest.TestCase):
                 "referenced_submission_id": "sub-ref",
                 "source_channel_id": 20,
                 "source_message_id": 30,
+                "source_author_user_id": 40,
                 "source_author_name": "Responder",
                 "source_preview": "Thanks for sharing",
+                "source_message_fingerprint": "abc123",
+                "notification_channel_id": 50,
                 "status": "invalid-status",
                 "notification_status": "invalid-notification",
                 "created_at": "2026-04-03T00:00:00+00:00",
@@ -194,8 +220,11 @@ class ConfessionsStoreNormalizationTests(unittest.TestCase):
 
         self.assertEqual(record["status"], "pending")
         self.assertEqual(record["notification_status"], "none")
+        self.assertEqual(record["source_author_user_id"], 40)
         self.assertEqual(record["source_author_name"], "Responder")
         self.assertEqual(record["source_preview"], "Thanks for sharing")
+        self.assertEqual(record["source_message_fingerprint"], "abc123")
+        self.assertEqual(record["notification_channel_id"], 50)
 
     def test_normalize_private_media_keeps_only_attachment_urls(self):
         record = normalize_private_media(
@@ -223,6 +252,7 @@ class ConfessionsPostgresStoreTests(unittest.IsolatedAsyncioTestCase):
             "confession_id": "CF-AAAA1111",
             "submission_kind": "reply",
             "reply_flow": "owner_reply_to_user",
+            "owner_reply_generation": 2,
             "parent_confession_id": "CF-ZZZZ9999",
             "status": "queued",
             "review_status": "pending",
@@ -246,6 +276,7 @@ class ConfessionsPostgresStoreTests(unittest.IsolatedAsyncioTestCase):
         record = _submission_from_row(row)
         self.assertEqual(record["submission_kind"], "reply")
         self.assertEqual(record["reply_flow"], "owner_reply_to_user")
+        self.assertEqual(record["owner_reply_generation"], 2)
         self.assertEqual(record["parent_confession_id"], "CF-ZZZZ9999")
         self.assertEqual(record["shared_link_url"], "https://www.google.com/search?q=preview")
         self.assertEqual(record["fuzzy_signature"], "def")

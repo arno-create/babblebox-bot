@@ -23,7 +23,7 @@ VALID_SUBMISSION_KINDS = {"confession", "reply"}
 VALID_REPLY_FLOWS = {"reply_to_confession", "owner_reply_to_user"}
 VALID_CASE_KINDS = {"review", "safety_block", "published_moderation"}
 VALID_CASE_STATUSES = {"open", "resolved"}
-VALID_OWNER_REPLY_OPPORTUNITY_STATUSES = {"pending", "used", "dismissed", "expired"}
+VALID_OWNER_REPLY_OPPORTUNITY_STATUSES = {"pending", "locked", "used", "dismissed", "expired"}
 VALID_OWNER_REPLY_NOTIFICATION_STATUSES = {"none", "sent", "failed", "cooldown"}
 
 
@@ -49,6 +49,8 @@ def default_confession_config(guild_id: int | None = None) -> dict[str, Any]:
         "blocked_role_ids": [],
         "allow_images": False,
         "allow_anonymous_replies": False,
+        "allow_owner_replies": True,
+        "owner_reply_review_mode": False,
         "allow_self_edit": False,
         "max_images": 3,
         "cooldown_seconds": 5 * 60,
@@ -246,6 +248,8 @@ def normalize_confession_config(guild_id: int, payload: Any) -> dict[str, Any]:
     cleaned["blocked_role_ids"] = _clean_int_list(payload.get("blocked_role_ids"))
     cleaned["allow_images"] = bool(payload.get("allow_images", False))
     cleaned["allow_anonymous_replies"] = bool(payload.get("allow_anonymous_replies", False))
+    cleaned["allow_owner_replies"] = bool(payload.get("allow_owner_replies", True))
+    cleaned["owner_reply_review_mode"] = bool(payload.get("owner_reply_review_mode", False))
     cleaned["allow_self_edit"] = bool(payload.get("allow_self_edit", False))
     max_images = payload.get("max_images")
     cleaned["max_images"] = max_images if isinstance(max_images, int) and 1 <= max_images <= 3 else 3
@@ -267,6 +271,7 @@ def normalize_confession_config(guild_id: int, payload: Any) -> dict[str, Any]:
     if cleaned["review_channel_id"] is None or cleaned["review_channel_id"] == cleaned["confession_channel_id"]:
         cleaned["allow_images"] = False
         cleaned["allow_anonymous_replies"] = False
+        cleaned["owner_reply_review_mode"] = False
     return cleaned
 
 
@@ -292,14 +297,24 @@ def normalize_submission(payload: Any) -> dict[str, Any] | None:
     if submission_kind == "reply":
         if reply_flow not in VALID_REPLY_FLOWS:
             reply_flow = "reply_to_confession"
+        owner_reply_generation = payload.get("owner_reply_generation")
+        if reply_flow == "owner_reply_to_user":
+            if not isinstance(owner_reply_generation, int) or owner_reply_generation < 1:
+                owner_reply_generation = 1
+            elif owner_reply_generation > 2:
+                owner_reply_generation = 2
+        else:
+            owner_reply_generation = None
     else:
         reply_flow = None
+        owner_reply_generation = None
     return {
         "submission_id": submission_id,
         "guild_id": guild_id,
         "confession_id": confession_id,
         "submission_kind": submission_kind,
         "reply_flow": reply_flow,
+        "owner_reply_generation": owner_reply_generation,
         "parent_confession_id": _clean_optional_text(payload.get("parent_confession_id"), max_length=32),
         "status": status,
         "review_status": review_status,
@@ -394,10 +409,13 @@ def normalize_owner_reply_opportunity(payload: Any) -> dict[str, Any] | None:
         "referenced_submission_id": referenced_submission_id,
         "source_channel_id": source_channel_id,
         "source_message_id": source_message_id,
+        "source_author_user_id": _clean_int(payload.get("source_author_user_id")),
         "source_author_name": _clean_optional_text(payload.get("source_author_name"), max_length=120) or "A member",
         "source_preview": _clean_optional_text(payload.get("source_preview"), max_length=320) or "[message unavailable]",
+        "source_message_fingerprint": _clean_optional_text(payload.get("source_message_fingerprint"), max_length=96),
         "status": status,
         "notification_status": notification_status,
+        "notification_channel_id": _clean_int(payload.get("notification_channel_id")),
         "notification_message_id": _clean_int(payload.get("notification_message_id")),
         "created_at": created_at,
         "expires_at": expires_at,
@@ -494,6 +512,7 @@ def _submission_from_row(row: Any) -> dict[str, Any] | None:
             "confession_id": row["confession_id"],
             "submission_kind": row.get("submission_kind") or "confession",
             "reply_flow": row.get("reply_flow"),
+            "owner_reply_generation": row.get("owner_reply_generation"),
             "parent_confession_id": row.get("parent_confession_id"),
             "status": row["status"],
             "review_status": row["review_status"],
@@ -571,6 +590,8 @@ def _config_from_row(row: Any) -> dict[str, Any] | None:
             ),
             "allow_images": row["allow_images"],
             "allow_anonymous_replies": row.get("allow_anonymous_replies"),
+            "allow_owner_replies": row.get("allow_owner_replies"),
+            "owner_reply_review_mode": row.get("owner_reply_review_mode"),
             "allow_self_edit": row.get("allow_self_edit"),
             "max_images": row["max_images"],
             "cooldown_seconds": row["cooldown_seconds"],
@@ -660,10 +681,13 @@ def _owner_reply_opportunity_from_row(row: Any) -> dict[str, Any] | None:
             "referenced_submission_id": row["referenced_submission_id"],
             "source_channel_id": row["source_channel_id"],
             "source_message_id": row["source_message_id"],
+            "source_author_user_id": row.get("source_author_user_id"),
             "source_author_name": row["source_author_name"],
             "source_preview": row["source_preview"],
+            "source_message_fingerprint": row.get("source_message_fingerprint"),
             "status": row["status"],
             "notification_status": row["notification_status"],
+            "notification_channel_id": row.get("notification_channel_id"),
             "notification_message_id": row["notification_message_id"],
             "created_at": row["created_at"],
             "expires_at": row["expires_at"],
@@ -745,6 +769,15 @@ class _BaseConfessionsStore:
     async def fetch_owner_reply_opportunity_by_notification_message_id(self, notification_message_id: int) -> dict[str, Any] | None:
         raise NotImplementedError
 
+    async def fetch_pending_owner_reply_opportunity_for_path(
+        self,
+        guild_id: int,
+        root_submission_id: str,
+        referenced_submission_id: str,
+        source_author_user_id: int,
+    ) -> dict[str, Any] | None:
+        raise NotImplementedError
+
     async def list_pending_owner_reply_opportunities_for_author(
         self,
         guild_id: int,
@@ -760,6 +793,32 @@ class _BaseConfessionsStore:
         *,
         limit: int = 25,
     ) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    async def list_owner_reply_opportunities_for_responder_path(
+        self,
+        guild_id: int,
+        root_submission_id: str,
+        referenced_submission_id: str,
+        source_author_user_id: int,
+        *,
+        limit: int = 25,
+    ) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    async def list_owner_reply_opportunities_for_source_author(
+        self,
+        guild_id: int,
+        source_author_user_id: int,
+        *,
+        limit: int = 25,
+    ) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    async def claim_owner_reply_opportunity(self, opportunity_id: str) -> dict[str, Any] | None:
+        raise NotImplementedError
+
+    async def release_owner_reply_opportunity(self, opportunity_id: str) -> dict[str, Any] | None:
         raise NotImplementedError
 
     async def list_owner_reply_opportunities_for_submission(
@@ -938,6 +997,25 @@ class _MemoryConfessionsStore(_BaseConfessionsStore):
                 return deepcopy(record)
         return None
 
+    async def fetch_pending_owner_reply_opportunity_for_path(
+        self,
+        guild_id: int,
+        root_submission_id: str,
+        referenced_submission_id: str,
+        source_author_user_id: int,
+    ) -> dict[str, Any] | None:
+        rows = await self.list_owner_reply_opportunities_for_responder_path(
+            guild_id,
+            root_submission_id,
+            referenced_submission_id,
+            source_author_user_id,
+            limit=1,
+        )
+        for record in rows:
+            if record.get("status") == "pending":
+                return deepcopy(record)
+        return None
+
     async def list_pending_owner_reply_opportunities_for_author(
         self,
         guild_id: int,
@@ -984,6 +1062,59 @@ class _MemoryConfessionsStore(_BaseConfessionsStore):
         rows.sort(key=lambda item: item.get("created_at") or "", reverse=True)
         return rows[:limit]
 
+    async def list_owner_reply_opportunities_for_responder_path(
+        self,
+        guild_id: int,
+        root_submission_id: str,
+        referenced_submission_id: str,
+        source_author_user_id: int,
+        *,
+        limit: int = 25,
+    ) -> list[dict[str, Any]]:
+        rows = [
+            deepcopy(record)
+            for record in self.owner_reply_opportunities.values()
+            if record["guild_id"] == guild_id
+            and record.get("root_submission_id") == root_submission_id
+            and record.get("referenced_submission_id") == referenced_submission_id
+            and int(record.get("source_author_user_id") or 0) == source_author_user_id
+        ]
+        rows.sort(key=lambda item: item.get("created_at") or "", reverse=True)
+        return rows[:limit]
+
+    async def list_owner_reply_opportunities_for_source_author(
+        self,
+        guild_id: int,
+        source_author_user_id: int,
+        *,
+        limit: int = 25,
+    ) -> list[dict[str, Any]]:
+        rows = [
+            deepcopy(record)
+            for record in self.owner_reply_opportunities.values()
+            if record["guild_id"] == guild_id and int(record.get("source_author_user_id") or 0) == source_author_user_id
+        ]
+        rows.sort(key=lambda item: item.get("created_at") or "", reverse=True)
+        return rows[:limit]
+
+    async def claim_owner_reply_opportunity(self, opportunity_id: str) -> dict[str, Any] | None:
+        record = self.owner_reply_opportunities.get(opportunity_id)
+        if record is None or record.get("status") != "pending":
+            return None
+        updated = deepcopy(record)
+        updated["status"] = "locked"
+        self.owner_reply_opportunities[opportunity_id] = updated
+        return deepcopy(updated)
+
+    async def release_owner_reply_opportunity(self, opportunity_id: str) -> dict[str, Any] | None:
+        record = self.owner_reply_opportunities.get(opportunity_id)
+        if record is None or record.get("status") != "locked":
+            return deepcopy(record) if record is not None else None
+        updated = deepcopy(record)
+        updated["status"] = "pending"
+        self.owner_reply_opportunities[opportunity_id] = updated
+        return deepcopy(updated)
+
     async def fetch_enforcement_state(self, guild_id: int, user_id: int) -> dict[str, Any] | None:
         record = self.enforcement_states.get((guild_id, user_id))
         return deepcopy(record) if record is not None else None
@@ -1018,6 +1149,8 @@ class _MemoryConfessionsStore(_BaseConfessionsStore):
                     "status": record["status"],
                     "review_version": int(record.get("review_version") or 0),
                     "submission_kind": submission.get("submission_kind") or "confession",
+                    "reply_flow": submission.get("reply_flow"),
+                    "owner_reply_generation": submission.get("owner_reply_generation"),
                     "parent_confession_id": submission.get("parent_confession_id"),
                     "staff_preview": submission.get("staff_preview"),
                     "flag_codes": list(submission.get("flag_codes") or ()),
@@ -1120,6 +1253,8 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                 "blocked_role_ids JSONB NOT NULL DEFAULT '[]'::jsonb, "
                 "allow_images BOOLEAN NOT NULL DEFAULT FALSE, "
                 "allow_anonymous_replies BOOLEAN NOT NULL DEFAULT FALSE, "
+                "allow_owner_replies BOOLEAN NOT NULL DEFAULT TRUE, "
+                "owner_reply_review_mode BOOLEAN NOT NULL DEFAULT FALSE, "
                 "allow_self_edit BOOLEAN NOT NULL DEFAULT FALSE, "
                 "max_images SMALLINT NOT NULL DEFAULT 3, "
                 "cooldown_seconds INTEGER NOT NULL DEFAULT 300, "
@@ -1139,6 +1274,7 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                 "confession_id TEXT NOT NULL, "
                 "submission_kind TEXT NOT NULL DEFAULT 'confession', "
                 "reply_flow TEXT NULL, "
+                "owner_reply_generation SMALLINT NULL, "
                 "parent_confession_id TEXT NULL, "
                 "status TEXT NOT NULL, "
                 "review_status TEXT NOT NULL DEFAULT 'none', "
@@ -1184,10 +1320,13 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                 "referenced_submission_id TEXT NOT NULL REFERENCES confession_submissions(submission_id) ON DELETE CASCADE, "
                 "source_channel_id BIGINT NOT NULL, "
                 "source_message_id BIGINT NOT NULL, "
+                "source_author_user_id BIGINT NULL, "
                 "source_author_name TEXT NOT NULL, "
                 "source_preview TEXT NOT NULL, "
+                "source_message_fingerprint TEXT NULL, "
                 "status TEXT NOT NULL DEFAULT 'pending', "
                 "notification_status TEXT NOT NULL DEFAULT 'none', "
+                "notification_channel_id BIGINT NULL, "
                 "notification_message_id BIGINT NULL, "
                 "created_at TIMESTAMPTZ NOT NULL, "
                 "expires_at TIMESTAMPTZ NOT NULL, "
@@ -1257,10 +1396,13 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
             "ALTER TABLE confession_guild_configs ADD COLUMN IF NOT EXISTS panel_message_id BIGINT NULL",
             "ALTER TABLE confession_guild_configs ADD COLUMN IF NOT EXISTS appeals_channel_id BIGINT NULL",
             "ALTER TABLE confession_guild_configs ADD COLUMN IF NOT EXISTS allow_anonymous_replies BOOLEAN NOT NULL DEFAULT FALSE",
+            "ALTER TABLE confession_guild_configs ADD COLUMN IF NOT EXISTS allow_owner_replies BOOLEAN NOT NULL DEFAULT TRUE",
+            "ALTER TABLE confession_guild_configs ADD COLUMN IF NOT EXISTS owner_reply_review_mode BOOLEAN NOT NULL DEFAULT FALSE",
             "ALTER TABLE confession_guild_configs ADD COLUMN IF NOT EXISTS allow_self_edit BOOLEAN NOT NULL DEFAULT FALSE",
             "ALTER TABLE confession_submissions ADD COLUMN IF NOT EXISTS review_status TEXT NOT NULL DEFAULT 'none'",
             "ALTER TABLE confession_submissions ADD COLUMN IF NOT EXISTS submission_kind TEXT NOT NULL DEFAULT 'confession'",
             "ALTER TABLE confession_submissions ADD COLUMN IF NOT EXISTS reply_flow TEXT NULL",
+            "ALTER TABLE confession_submissions ADD COLUMN IF NOT EXISTS owner_reply_generation SMALLINT NULL",
             "ALTER TABLE confession_submissions ADD COLUMN IF NOT EXISTS parent_confession_id TEXT NULL",
             "ALTER TABLE confession_submissions ADD COLUMN IF NOT EXISTS content_body TEXT NULL",
             "ALTER TABLE confession_submissions ADD COLUMN IF NOT EXISTS shared_link_url TEXT NULL",
@@ -1279,12 +1421,16 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
             "ALTER TABLE confession_cases ADD COLUMN IF NOT EXISTS review_message_channel_id BIGINT NULL",
             "ALTER TABLE confession_cases ADD COLUMN IF NOT EXISTS review_message_id BIGINT NULL",
             "ALTER TABLE confession_owner_reply_opportunities ADD COLUMN IF NOT EXISTS root_confession_id TEXT NULL",
+            "ALTER TABLE confession_owner_reply_opportunities ADD COLUMN IF NOT EXISTS source_author_user_id BIGINT NULL",
             "ALTER TABLE confession_owner_reply_opportunities ADD COLUMN IF NOT EXISTS notification_status TEXT NOT NULL DEFAULT 'none'",
+            "ALTER TABLE confession_owner_reply_opportunities ADD COLUMN IF NOT EXISTS source_message_fingerprint TEXT NULL",
+            "ALTER TABLE confession_owner_reply_opportunities ADD COLUMN IF NOT EXISTS notification_channel_id BIGINT NULL",
             "ALTER TABLE confession_owner_reply_opportunities ADD COLUMN IF NOT EXISTS notification_message_id BIGINT NULL",
             "ALTER TABLE confession_owner_reply_opportunities ADD COLUMN IF NOT EXISTS notified_at TIMESTAMPTZ NULL",
             "ALTER TABLE confession_owner_reply_opportunities ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMPTZ NULL",
             "ALTER TABLE confession_guild_configs ALTER COLUMN allow_images SET DEFAULT FALSE",
             "UPDATE confession_submissions SET reply_flow = 'reply_to_confession' WHERE submission_kind = 'reply' AND (reply_flow IS NULL OR reply_flow = '')",
+            "UPDATE confession_submissions SET owner_reply_generation = 1 WHERE submission_kind = 'reply' AND reply_flow = 'owner_reply_to_user' AND owner_reply_generation IS NULL",
             (
                 "UPDATE confession_guild_configs "
                 "SET allow_images = FALSE "
@@ -1307,6 +1453,8 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
             "CREATE INDEX IF NOT EXISTS ix_confession_author_links_author_created ON confession_author_links (guild_id, author_user_id, created_at DESC)",
             "CREATE UNIQUE INDEX IF NOT EXISTS ix_confession_owner_reply_source_message ON confession_owner_reply_opportunities (guild_id, source_message_id)",
             "CREATE INDEX IF NOT EXISTS ix_confession_owner_reply_root_created ON confession_owner_reply_opportunities (root_submission_id, created_at DESC)",
+            "CREATE INDEX IF NOT EXISTS ix_confession_owner_reply_responder_path_status ON confession_owner_reply_opportunities (guild_id, root_submission_id, referenced_submission_id, source_author_user_id, status, created_at DESC)",
+            "CREATE INDEX IF NOT EXISTS ix_confession_owner_reply_source_author_created ON confession_owner_reply_opportunities (guild_id, source_author_user_id, created_at DESC)",
             "CREATE INDEX IF NOT EXISTS ix_confession_owner_reply_notification_message_id ON confession_owner_reply_opportunities (notification_message_id)",
         ]
         async with self._pool.acquire() as conn:
@@ -1341,12 +1489,12 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                         "INSERT INTO confession_guild_configs ("
                         "guild_id, enabled, confession_channel_id, panel_channel_id, panel_message_id, review_channel_id, appeals_channel_id, review_mode, block_adult_language, "
                         "allow_trusted_mainstream_links, custom_allow_domains, custom_block_domains, allowed_role_ids, blocked_role_ids, "
-                        "allow_images, allow_anonymous_replies, allow_self_edit, max_images, "
+                        "allow_images, allow_anonymous_replies, allow_owner_replies, owner_reply_review_mode, allow_self_edit, max_images, "
                         "cooldown_seconds, burst_limit, burst_window_seconds, auto_suspend_hours, strike_temp_ban_threshold, temp_ban_days, strike_perm_ban_threshold, updated_at"
                         ") VALUES ("
                         "$1, $2, $3, $4, $5, $6, $7, $8, $9, "
-                        "$10, $11::jsonb, $12::jsonb, $13::jsonb, $14::jsonb, $15, $16, $17, $18, "
-                        "$19, $20, $21, $22, $23, $24, $25, timezone('utc', now())"
+                        "$10, $11::jsonb, $12::jsonb, $13::jsonb, $14::jsonb, $15, $16, $17, $18, $19, "
+                        "$20, $21, $22, $23, $24, $25, $26, timezone('utc', now())"
                         ") "
                         "ON CONFLICT (guild_id) DO UPDATE SET "
                         "enabled = EXCLUDED.enabled, "
@@ -1364,6 +1512,8 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                         "blocked_role_ids = EXCLUDED.blocked_role_ids, "
                         "allow_images = EXCLUDED.allow_images, "
                         "allow_anonymous_replies = EXCLUDED.allow_anonymous_replies, "
+                        "allow_owner_replies = EXCLUDED.allow_owner_replies, "
+                        "owner_reply_review_mode = EXCLUDED.owner_reply_review_mode, "
                         "allow_self_edit = EXCLUDED.allow_self_edit, "
                         "max_images = EXCLUDED.max_images, "
                         "cooldown_seconds = EXCLUDED.cooldown_seconds, "
@@ -1391,6 +1541,8 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                     json.dumps(normalized["blocked_role_ids"]),
                     normalized["allow_images"],
                     normalized["allow_anonymous_replies"],
+                    normalized["allow_owner_replies"],
+                    normalized["owner_reply_review_mode"],
                     normalized["allow_self_edit"],
                     normalized["max_images"],
                     normalized["cooldown_seconds"],
@@ -1411,15 +1563,16 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                 await conn.execute(
                     (
                         "INSERT INTO confession_submissions ("
-                        "submission_id, guild_id, confession_id, submission_kind, reply_flow, parent_confession_id, status, review_status, staff_preview, content_body, shared_link_url, "
+                        "submission_id, guild_id, confession_id, submission_kind, reply_flow, owner_reply_generation, parent_confession_id, status, review_status, staff_preview, content_body, shared_link_url, "
                         "content_fingerprint, similarity_key, fuzzy_signature, flag_codes, attachment_meta, posted_channel_id, posted_message_id, current_case_id, created_at, published_at, resolved_at"
                         ") VALUES ("
-                        "$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, "
-                        "$12, $13, $14, $15::jsonb, $16::jsonb, $17, $18, $19, $20, $21, $22"
+                        "$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, "
+                        "$13, $14, $15, $16::jsonb, $17::jsonb, $18, $19, $20, $21, $22, $23"
                         ") "
                         "ON CONFLICT (submission_id) DO UPDATE SET "
                         "submission_kind = EXCLUDED.submission_kind, "
                         "reply_flow = EXCLUDED.reply_flow, "
+                        "owner_reply_generation = EXCLUDED.owner_reply_generation, "
                         "parent_confession_id = EXCLUDED.parent_confession_id, "
                         "status = EXCLUDED.status, "
                         "review_status = EXCLUDED.review_status, "
@@ -1442,6 +1595,7 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                     normalized["confession_id"],
                     normalized["submission_kind"],
                     normalized["reply_flow"],
+                    normalized["owner_reply_generation"],
                     normalized["parent_confession_id"],
                     normalized["status"],
                     normalized["review_status"],
@@ -1650,12 +1804,12 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                     (
                         "INSERT INTO confession_owner_reply_opportunities ("
                         "opportunity_id, guild_id, root_submission_id, root_confession_id, referenced_submission_id, "
-                        "source_channel_id, source_message_id, source_author_name, source_preview, status, notification_status, "
-                        "notification_message_id, created_at, expires_at, notified_at, resolved_at"
+                        "source_channel_id, source_message_id, source_author_user_id, source_author_name, source_preview, source_message_fingerprint, status, notification_status, "
+                        "notification_channel_id, notification_message_id, created_at, expires_at, notified_at, resolved_at"
                         ") VALUES ("
                         "$1, $2, $3, $4, $5, "
-                        "$6, $7, $8, $9, $10, $11, "
-                        "$12, $13, $14, $15, $16"
+                        "$6, $7, $8, $9, $10, $11, $12, $13, "
+                        "$14, $15, $16, $17, $18, $19"
                         ") "
                         "ON CONFLICT (opportunity_id) DO UPDATE SET "
                         "guild_id = EXCLUDED.guild_id, "
@@ -1664,10 +1818,13 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                         "referenced_submission_id = EXCLUDED.referenced_submission_id, "
                         "source_channel_id = EXCLUDED.source_channel_id, "
                         "source_message_id = EXCLUDED.source_message_id, "
+                        "source_author_user_id = EXCLUDED.source_author_user_id, "
                         "source_author_name = EXCLUDED.source_author_name, "
                         "source_preview = EXCLUDED.source_preview, "
+                        "source_message_fingerprint = EXCLUDED.source_message_fingerprint, "
                         "status = EXCLUDED.status, "
                         "notification_status = EXCLUDED.notification_status, "
+                        "notification_channel_id = EXCLUDED.notification_channel_id, "
                         "notification_message_id = EXCLUDED.notification_message_id, "
                         "created_at = EXCLUDED.created_at, "
                         "expires_at = EXCLUDED.expires_at, "
@@ -1681,10 +1838,13 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                     normalized["referenced_submission_id"],
                     normalized["source_channel_id"],
                     normalized["source_message_id"],
+                    normalized["source_author_user_id"],
                     normalized["source_author_name"],
                     normalized["source_preview"],
+                    normalized["source_message_fingerprint"],
                     normalized["status"],
                     normalized["notification_status"],
+                    normalized["notification_channel_id"],
                     normalized["notification_message_id"],
                     _parse_datetime(normalized["created_at"]),
                     _parse_datetime(normalized["expires_at"]),
@@ -1714,6 +1874,28 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
             row = await conn.fetchrow(
                 "SELECT * FROM confession_owner_reply_opportunities WHERE notification_message_id = $1",
                 notification_message_id,
+            )
+        return _owner_reply_opportunity_from_row(row)
+
+    async def fetch_pending_owner_reply_opportunity_for_path(
+        self,
+        guild_id: int,
+        root_submission_id: str,
+        referenced_submission_id: str,
+        source_author_user_id: int,
+    ) -> dict[str, Any] | None:
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                (
+                    "SELECT * FROM confession_owner_reply_opportunities "
+                    "WHERE guild_id = $1 AND root_submission_id = $2 AND referenced_submission_id = $3 "
+                    "AND source_author_user_id = $4 AND status = 'pending' "
+                    "ORDER BY created_at DESC LIMIT 1"
+                ),
+                guild_id,
+                root_submission_id,
+                referenced_submission_id,
+                source_author_user_id,
             )
         return _owner_reply_opportunity_from_row(row)
 
@@ -1774,6 +1956,79 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                 limit,
             )
         return [record for row in rows if (record := _owner_reply_opportunity_from_row(row)) is not None]
+
+    async def list_owner_reply_opportunities_for_responder_path(
+        self,
+        guild_id: int,
+        root_submission_id: str,
+        referenced_submission_id: str,
+        source_author_user_id: int,
+        *,
+        limit: int = 25,
+    ) -> list[dict[str, Any]]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                (
+                    "SELECT * FROM confession_owner_reply_opportunities "
+                    "WHERE guild_id = $1 AND root_submission_id = $2 AND referenced_submission_id = $3 "
+                    "AND source_author_user_id = $4 "
+                    "ORDER BY created_at DESC LIMIT $5"
+                ),
+                guild_id,
+                root_submission_id,
+                referenced_submission_id,
+                source_author_user_id,
+                limit,
+            )
+        return [record for row in rows if (record := _owner_reply_opportunity_from_row(row)) is not None]
+
+    async def list_owner_reply_opportunities_for_source_author(
+        self,
+        guild_id: int,
+        source_author_user_id: int,
+        *,
+        limit: int = 25,
+    ) -> list[dict[str, Any]]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                (
+                    "SELECT * FROM confession_owner_reply_opportunities "
+                    "WHERE guild_id = $1 AND source_author_user_id = $2 "
+                    "ORDER BY created_at DESC LIMIT $3"
+                ),
+                guild_id,
+                source_author_user_id,
+                limit,
+            )
+        return [record for row in rows if (record := _owner_reply_opportunity_from_row(row)) is not None]
+
+    async def claim_owner_reply_opportunity(self, opportunity_id: str) -> dict[str, Any] | None:
+        async with self._io_lock:
+            async with self._pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    (
+                        "UPDATE confession_owner_reply_opportunities "
+                        "SET status = 'locked' "
+                        "WHERE opportunity_id = $1 AND status = 'pending' "
+                        "RETURNING *"
+                    ),
+                    opportunity_id,
+                )
+        return _owner_reply_opportunity_from_row(row)
+
+    async def release_owner_reply_opportunity(self, opportunity_id: str) -> dict[str, Any] | None:
+        async with self._io_lock:
+            async with self._pool.acquire() as conn:
+                row = await conn.fetchrow(
+                    (
+                        "UPDATE confession_owner_reply_opportunities "
+                        "SET status = 'pending' "
+                        "WHERE opportunity_id = $1 AND status = 'locked' "
+                        "RETURNING *"
+                    ),
+                    opportunity_id,
+                )
+        return _owner_reply_opportunity_from_row(row)
 
     async def fetch_enforcement_state(self, guild_id: int, user_id: int) -> dict[str, Any] | None:
         async with self._pool.acquire() as conn:
@@ -1850,7 +2105,7 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                 (
                     "SELECT "
                     "c.case_id, c.case_kind, c.status, c.review_version, "
-                    "s.confession_id, s.submission_kind, s.parent_confession_id, s.staff_preview, s.flag_codes, s.attachment_meta, s.shared_link_url, s.created_at "
+                    "s.confession_id, s.submission_kind, s.reply_flow, s.owner_reply_generation, s.parent_confession_id, s.staff_preview, s.flag_codes, s.attachment_meta, s.shared_link_url, s.created_at "
                     "FROM confession_cases c "
                     "JOIN confession_submissions s ON s.submission_id = c.submission_id "
                     "WHERE c.guild_id = $1 AND c.status = 'open' AND c.case_kind = 'review' AND s.status = 'queued' "
@@ -1869,6 +2124,8 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                     "status": row["status"],
                     "review_version": int(row["review_version"] or 0),
                     "submission_kind": row["submission_kind"] or "confession",
+                    "reply_flow": row.get("reply_flow"),
+                    "owner_reply_generation": row.get("owner_reply_generation"),
                     "parent_confession_id": row["parent_confession_id"],
                     "staff_preview": row["staff_preview"],
                     "flag_codes": decode_postgres_json_array(row["flag_codes"], label="confession_submissions.flag_codes"),
@@ -2031,6 +2288,20 @@ class ConfessionsStore:
     async def fetch_owner_reply_opportunity_by_notification_message_id(self, notification_message_id: int) -> dict[str, Any] | None:
         return await self._store.fetch_owner_reply_opportunity_by_notification_message_id(notification_message_id)
 
+    async def fetch_pending_owner_reply_opportunity_for_path(
+        self,
+        guild_id: int,
+        root_submission_id: str,
+        referenced_submission_id: str,
+        source_author_user_id: int,
+    ) -> dict[str, Any] | None:
+        return await self._store.fetch_pending_owner_reply_opportunity_for_path(
+            guild_id,
+            root_submission_id,
+            referenced_submission_id,
+            source_author_user_id,
+        )
+
     async def list_pending_owner_reply_opportunities_for_author(
         self,
         guild_id: int,
@@ -2055,6 +2326,42 @@ class ConfessionsStore:
         limit: int = 25,
     ) -> list[dict[str, Any]]:
         return await self._store.list_owner_reply_opportunities_for_submission(submission_id, limit=limit)
+
+    async def list_owner_reply_opportunities_for_responder_path(
+        self,
+        guild_id: int,
+        root_submission_id: str,
+        referenced_submission_id: str,
+        source_author_user_id: int,
+        *,
+        limit: int = 25,
+    ) -> list[dict[str, Any]]:
+        return await self._store.list_owner_reply_opportunities_for_responder_path(
+            guild_id,
+            root_submission_id,
+            referenced_submission_id,
+            source_author_user_id,
+            limit=limit,
+        )
+
+    async def list_owner_reply_opportunities_for_source_author(
+        self,
+        guild_id: int,
+        source_author_user_id: int,
+        *,
+        limit: int = 25,
+    ) -> list[dict[str, Any]]:
+        return await self._store.list_owner_reply_opportunities_for_source_author(
+            guild_id,
+            source_author_user_id,
+            limit=limit,
+        )
+
+    async def claim_owner_reply_opportunity(self, opportunity_id: str) -> dict[str, Any] | None:
+        return await self._store.claim_owner_reply_opportunity(opportunity_id)
+
+    async def release_owner_reply_opportunity(self, opportunity_id: str) -> dict[str, Any] | None:
+        return await self._store.release_owner_reply_opportunity(opportunity_id)
 
     async def fetch_enforcement_state(self, guild_id: int, user_id: int) -> dict[str, Any] | None:
         return await self._store.fetch_enforcement_state(guild_id, user_id)

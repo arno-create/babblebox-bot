@@ -187,6 +187,16 @@ class EventsCog(commands.Cog):
                     return
 
     @commands.Cog.listener()
+    async def on_message_edit(self, before: discord.Message, after: discord.Message):
+        if getattr(after, "guild", None) is None or getattr(getattr(after, "author", None), "bot", False):
+            return
+        if getattr(after, "webhook_id", None) is not None:
+            return
+        confessions_service = getattr(self.bot, "confessions_service", None)
+        if confessions_service is not None:
+            await confessions_service.handle_message_edit(after)
+
+    @commands.Cog.listener()
     async def on_member_remove(self, member: discord.Member):
         game = ge.games.get(member.guild.id)
         if not game or game.get("closing"):
