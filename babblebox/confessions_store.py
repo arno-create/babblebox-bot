@@ -9,6 +9,8 @@ from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
+from babblebox.confessions_crypto import ConfessionsCrypto, ConfessionsCryptoError, ConfessionsKeyConfigError
+from babblebox.confessions_privacy import build_duplicate_signals
 from babblebox.postgres_json import decode_postgres_json_array
 from babblebox.text_safety import normalize_plain_text
 
@@ -25,6 +27,20 @@ VALID_CASE_KINDS = {"review", "safety_block", "published_moderation"}
 VALID_CASE_STATUSES = {"open", "resolved"}
 VALID_OWNER_REPLY_OPPORTUNITY_STATUSES = {"pending", "locked", "used", "dismissed", "expired"}
 VALID_OWNER_REPLY_NOTIFICATION_STATUSES = {"none", "sent", "failed", "cooldown"}
+PROTECTED_OWNER_REPLY_NAME = "Protected member"
+PROTECTED_OWNER_REPLY_PREVIEW = "[protected]"
+SECURE_AUTHOR_LINK_TABLE = "confession_author_identities"
+SECURE_ENFORCEMENT_TABLE = "confession_enforcement_states_secure"
+PRIVACY_CATEGORY_LABELS = {
+    "plaintext_submission_content": "Plaintext submission content still exists",
+    "legacy_duplicate_fields": "Legacy duplicate fields still exist",
+    "plaintext_private_media": "Plaintext private-media URLs still exist",
+    "legacy_author_links": "Legacy author-link rows still exist",
+    "plaintext_owner_reply_rows": "Owner-reply private fields still exist in plaintext",
+    "legacy_enforcement_rows": "Legacy enforcement rows still exist",
+    "stale_key_rows": "Legacy key material is still required for some rows",
+}
+PRIVACY_CATEGORY_ORDER = tuple(PRIVACY_CATEGORY_LABELS)
 
 
 class ConfessionsStorageUnavailable(RuntimeError):
@@ -321,9 +337,9 @@ def normalize_submission(payload: Any) -> dict[str, Any] | None:
         "staff_preview": _clean_optional_text(payload.get("staff_preview"), max_length=260),
         "content_body": _clean_optional_text(payload.get("content_body"), max_length=2000),
         "shared_link_url": _clean_optional_text(payload.get("shared_link_url"), max_length=500),
-        "content_fingerprint": _clean_optional_text(payload.get("content_fingerprint"), max_length=96),
+        "content_fingerprint": _clean_optional_text(payload.get("content_fingerprint"), max_length=160),
         "similarity_key": _clean_optional_text(payload.get("similarity_key"), max_length=160),
-        "fuzzy_signature": _clean_optional_text(payload.get("fuzzy_signature") or payload.get("similarity_key"), max_length=64),
+        "fuzzy_signature": _clean_optional_text(payload.get("fuzzy_signature"), max_length=96),
         "flag_codes": _clean_string_list(payload.get("flag_codes")),
         "attachment_meta": _clean_attachment_meta(payload.get("attachment_meta")),
         "posted_channel_id": _clean_int(payload.get("posted_channel_id")),
@@ -502,9 +518,247 @@ def normalize_review_queue(payload: Any) -> dict[str, Any] | None:
     }
 
 
-def _submission_from_row(row: Any) -> dict[str, Any] | None:
+def _submission_requires_sensitive_payload(record: dict[str, Any]) -> bool:
+    status = str(record.get("status") or "")
+    review_status = str(record.get("review_status") or "")
+    return status in {"queued", "blocked"} or review_status in {"pending", "blocked"}
+
+
+def _raw_json_array_length(value: Any) -> int:
+    if value is None:
+        return 0
+    if isinstance(value, list):
+        return len(value)
+    if isinstance(value, tuple):
+        return len(value)
+    if isinstance(value, str):
+        cleaned = value.strip()
+        if not cleaned or cleaned == "[]":
+            return 0
+        try:
+            parsed = json.loads(cleaned)
+        except ValueError:
+            return 0
+        return len(parsed) if isinstance(parsed, list) else 0
+    return 0
+
+
+def _has_sensitive_submission_plaintext(row: Any) -> bool:
+    return any(
+        _clean_optional_text(row.get(field), max_length=2000) is not None
+        for field in ("staff_preview", "content_body", "shared_link_url")
+    )
+
+
+def _submission_privacy_categories(row: Any, privacy: ConfessionsCrypto) -> set[str]:
+    categories: set[str] = set()
+    if _has_sensitive_submission_plaintext(row):
+        categories.add("plaintext_submission_content")
+    content_ciphertext = _clean_optional_text(row.get("content_ciphertext"), max_length=12000)
+    if content_ciphertext is not None and (
+        not privacy.is_versioned_envelope(content_ciphertext)
+        or not privacy.envelope_is_active(content_ciphertext, key_domain="content")
+    ):
+        categories.add("stale_key_rows")
+    exact_hash = _clean_optional_text(row.get("content_fingerprint"), max_length=160)
+    if exact_hash is not None:
+        if privacy.is_keyed_exact_hash(exact_hash):
+            if not privacy.exact_duplicate_hash_is_active(exact_hash):
+                categories.add("stale_key_rows")
+        else:
+            categories.add("legacy_duplicate_fields")
+    similarity_key = _clean_optional_text(row.get("similarity_key"), max_length=160)
+    if similarity_key is not None:
+        categories.add("legacy_duplicate_fields")
+    fuzzy_signature = _clean_optional_text(row.get("fuzzy_signature"), max_length=96)
+    if fuzzy_signature is not None:
+        if privacy.is_keyed_fuzzy_signature(fuzzy_signature):
+            if not privacy.fuzzy_signature_is_active(fuzzy_signature):
+                categories.add("stale_key_rows")
+        else:
+            categories.add("legacy_duplicate_fields")
+    return categories
+
+
+def _private_media_privacy_categories(row: Any, privacy: ConfessionsCrypto) -> set[str]:
+    categories: set[str] = set()
+    if _raw_json_array_length(row.get("attachment_urls")) > 0:
+        categories.add("plaintext_private_media")
+    attachment_payload = _clean_optional_text(row.get("attachment_payload"), max_length=12000)
+    if attachment_payload is not None and (
+        not privacy.is_versioned_envelope(attachment_payload)
+        or not privacy.envelope_is_active(attachment_payload, key_domain="content")
+    ):
+        categories.add("stale_key_rows")
+    return categories
+
+
+def _author_link_privacy_categories(row: Any, privacy: ConfessionsCrypto) -> set[str]:
+    categories: set[str] = set()
+    author_lookup_hash = _clean_optional_text(row.get("author_lookup_hash"), max_length=160)
+    author_ciphertext = _clean_optional_text(row.get("author_identity_ciphertext"), max_length=12000)
+    if author_lookup_hash is None or not privacy.is_blind_index(author_lookup_hash) or not privacy.blind_index_is_active(author_lookup_hash):
+        categories.add("stale_key_rows")
+    if author_ciphertext is None or not privacy.is_versioned_envelope(author_ciphertext) or not privacy.envelope_is_active(
+        author_ciphertext,
+        key_domain="identity",
+    ):
+        categories.add("stale_key_rows")
+    return categories
+
+
+def _owner_reply_plaintext_present(row: Any) -> bool:
+    author_name = _clean_optional_text(row.get("source_author_name"), max_length=120)
+    source_preview = _clean_optional_text(row.get("source_preview"), max_length=320)
+    return (
+        _clean_int(row.get("source_author_user_id")) is not None
+        or _clean_optional_text(row.get("source_message_fingerprint"), max_length=96) is not None
+        or (author_name is not None and author_name != PROTECTED_OWNER_REPLY_NAME)
+        or (source_preview is not None and source_preview != PROTECTED_OWNER_REPLY_PREVIEW)
+        or _clean_optional_text(row.get("private_payload"), max_length=12000) is None
+    )
+
+
+def _owner_reply_privacy_categories(row: Any, privacy: ConfessionsCrypto) -> set[str]:
+    categories: set[str] = set()
+    if _owner_reply_plaintext_present(row):
+        categories.add("plaintext_owner_reply_rows")
+    lookup_hash = _clean_optional_text(row.get("source_author_lookup_hash"), max_length=160)
+    if lookup_hash is not None and (not privacy.is_blind_index(lookup_hash) or not privacy.blind_index_is_active(lookup_hash)):
+        categories.add("stale_key_rows")
+    private_payload = _clean_optional_text(row.get("private_payload"), max_length=12000)
+    if private_payload is not None and (
+        not privacy.is_versioned_envelope(private_payload)
+        or not privacy.envelope_is_active(private_payload, key_domain="content")
+    ):
+        categories.add("stale_key_rows")
+    return categories
+
+
+def _enforcement_privacy_categories(row: Any, privacy: ConfessionsCrypto) -> set[str]:
+    categories: set[str] = set()
+    lookup_hash = _clean_optional_text(row.get("user_lookup_hash"), max_length=160)
+    identity_ciphertext = _clean_optional_text(row.get("user_identity_ciphertext"), max_length=12000)
+    if lookup_hash is None or not privacy.is_blind_index(lookup_hash) or not privacy.blind_index_is_active(lookup_hash):
+        categories.add("stale_key_rows")
+    if identity_ciphertext is None or not privacy.is_versioned_envelope(identity_ciphertext) or not privacy.envelope_is_active(
+        identity_ciphertext,
+        key_domain="identity",
+    ):
+        categories.add("stale_key_rows")
+    return categories
+
+
+def _empty_privacy_status(*, scope: str, guild_id: int | None = None) -> dict[str, Any]:
+    return {
+        "scope": scope,
+        "guild_id": guild_id,
+        "state": "ready",
+        "privacy_hardened": True,
+        "needs_backfill": False,
+        "categories": [],
+        "category_counts": {name: 0 for name in PRIVACY_CATEGORY_ORDER},
+    }
+
+
+def _apply_privacy_categories(status: dict[str, Any], categories: set[str]) -> None:
+    for category in categories:
+        if category in status["category_counts"]:
+            status["category_counts"][category] += 1
+
+
+def _finalize_privacy_status(status: dict[str, Any]) -> dict[str, Any]:
+    categories = [name for name in PRIVACY_CATEGORY_ORDER if int(status["category_counts"].get(name) or 0) > 0]
+    status["categories"] = categories
+    status["privacy_hardened"] = not categories
+    status["needs_backfill"] = bool(categories)
+    status["state"] = "ready" if not categories else "partial"
+    return status
+
+
+def _backfill_submission_duplicate_fields(
+    privacy: ConfessionsCrypto,
+    record: dict[str, Any],
+) -> dict[str, Any]:
+    updated = deepcopy(record)
+    guild_id = int(record["guild_id"])
+    can_rebuild = bool(
+        normalize_plain_text(record.get("content_body"))
+        or normalize_plain_text(record.get("shared_link_url"))
+        or list(record.get("attachment_meta") or [])
+    )
+    clear_similarity_key = False
+    if can_rebuild:
+        signals = build_duplicate_signals(
+            privacy,
+            guild_id,
+            str(record.get("content_body") or ""),
+            list(record.get("attachment_meta") or []),
+            record.get("shared_link_url"),
+        )
+        if signals.exact_hash is not None:
+            updated["content_fingerprint"] = signals.exact_hash
+        if signals.fuzzy_signature is not None:
+            updated["fuzzy_signature"] = signals.fuzzy_signature
+            clear_similarity_key = True
+    else:
+        exact_hash = _clean_optional_text(record.get("content_fingerprint"), max_length=160)
+        if exact_hash is not None and not privacy.exact_duplicate_hash_is_active(exact_hash):
+            transformed_exact = privacy.transform_legacy_exact_hash(exact_hash, guild_id=guild_id)
+            if transformed_exact is not None:
+                updated["content_fingerprint"] = transformed_exact
+        fuzzy_signature = _clean_optional_text(record.get("fuzzy_signature"), max_length=96)
+        if fuzzy_signature is not None:
+            if privacy.fuzzy_signature_is_active(fuzzy_signature):
+                clear_similarity_key = True
+            else:
+                transformed_fuzzy = privacy.transform_legacy_fuzzy_signature(fuzzy_signature, guild_id=guild_id)
+                if transformed_fuzzy is not None:
+                    updated["fuzzy_signature"] = transformed_fuzzy
+                    clear_similarity_key = True
+    if clear_similarity_key:
+        updated["similarity_key"] = None
+    return updated
+
+
+def _decrypt_payload(
+    privacy: ConfessionsCrypto,
+    *,
+    label: str,
+    domain: str,
+    aad_fields: dict[str, Any],
+    envelope: str | None,
+    key_domain: str,
+) -> dict[str, Any] | None:
+    cleaned = _clean_optional_text(envelope, max_length=12000)
+    if cleaned is None:
+        return None
+    try:
+        return privacy.decrypt_payload(
+            domain=domain,
+            aad_fields=aad_fields,
+            envelope=cleaned,
+            key_domain=key_domain,
+        )
+    except ConfessionsCryptoError as exc:
+        raise ConfessionsStorageUnavailable(f"Confessions privacy error while reading {label}.") from exc
+
+
+def _submission_from_row(row: Any, privacy: ConfessionsCrypto) -> dict[str, Any] | None:
     if row is None:
         return None
+    payload = _decrypt_payload(
+        privacy,
+        label="submission content",
+        domain="submission-content",
+        aad_fields={
+            "guild_id": row["guild_id"],
+            "submission_id": row["submission_id"],
+            "confession_id": row["confession_id"],
+        },
+        envelope=row.get("content_ciphertext"),
+        key_domain="content",
+    ) or {}
     return normalize_submission(
         {
             "submission_id": row["submission_id"],
@@ -516,9 +770,9 @@ def _submission_from_row(row: Any) -> dict[str, Any] | None:
             "parent_confession_id": row.get("parent_confession_id"),
             "status": row["status"],
             "review_status": row["review_status"],
-            "staff_preview": row["staff_preview"],
-            "content_body": row["content_body"],
-            "shared_link_url": row.get("shared_link_url"),
+            "staff_preview": payload.get("staff_preview", row["staff_preview"]),
+            "content_body": payload.get("content_body", row["content_body"]),
+            "shared_link_url": payload.get("shared_link_url", row.get("shared_link_url")),
             "content_fingerprint": row["content_fingerprint"],
             "similarity_key": row.get("similarity_key"),
             "fuzzy_signature": row.get("fuzzy_signature"),
@@ -605,7 +859,31 @@ def _config_from_row(row: Any) -> dict[str, Any] | None:
     )
 
 
-def _author_link_from_row(row: Any) -> dict[str, Any] | None:
+def _author_link_from_secure_row(row: Any, privacy: ConfessionsCrypto) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    payload = _decrypt_payload(
+        privacy,
+        label="author link",
+        domain="author-link",
+        aad_fields={
+            "guild_id": row["guild_id"],
+            "submission_id": row["submission_id"],
+        },
+        envelope=row.get("author_identity_ciphertext"),
+        key_domain="identity",
+    ) or {}
+    return normalize_author_link(
+        {
+            "guild_id": row["guild_id"],
+            "submission_id": row["submission_id"],
+            "author_user_id": payload.get("author_user_id"),
+            "created_at": row["created_at"],
+        }
+    )
+
+
+def _author_link_from_legacy_row(row: Any) -> dict[str, Any] | None:
     if row is None:
         return None
     return normalize_author_link(
@@ -618,7 +896,42 @@ def _author_link_from_row(row: Any) -> dict[str, Any] | None:
     )
 
 
-def _enforcement_from_row(row: Any) -> dict[str, Any] | None:
+def _enforcement_from_secure_row(row: Any, privacy: ConfessionsCrypto) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    payload = _decrypt_payload(
+        privacy,
+        label="enforcement state",
+        domain="enforcement-state",
+        aad_fields={
+            "guild_id": row["guild_id"],
+            "user_lookup_hash": row["user_lookup_hash"],
+        },
+        envelope=row.get("user_identity_ciphertext"),
+        key_domain="identity",
+    ) or {}
+    return normalize_enforcement_state(
+        {
+            "guild_id": row["guild_id"],
+            "user_id": payload.get("user_id"),
+            "active_restriction": row["active_restriction"],
+            "restricted_until": row["restricted_until"],
+            "is_permanent_ban": row["is_permanent_ban"],
+            "strike_count": row["strike_count"],
+            "last_strike_at": row["last_strike_at"],
+            "cooldown_until": row["cooldown_until"],
+            "burst_count": row["burst_count"],
+            "burst_window_started_at": row["burst_window_started_at"],
+            "last_case_id": row["last_case_id"],
+            "image_restriction_active": row.get("image_restriction_active"),
+            "image_restricted_until": row.get("image_restricted_until"),
+            "image_restriction_case_id": row.get("image_restriction_case_id"),
+            "updated_at": row["updated_at"],
+        }
+    )
+
+
+def _enforcement_from_legacy_row(row: Any) -> dict[str, Any] | None:
     if row is None:
         return None
     return normalize_enforcement_state(
@@ -655,23 +968,49 @@ def _review_queue_from_row(row: Any) -> dict[str, Any] | None:
     )
 
 
-def _private_media_from_row(row: Any) -> dict[str, Any] | None:
+def _private_media_from_row(row: Any, privacy: ConfessionsCrypto) -> dict[str, Any] | None:
     if row is None:
         return None
+    payload = _decrypt_payload(
+        privacy,
+        label="private media",
+        domain="private-media",
+        aad_fields={
+            "guild_id": row["guild_id"],
+            "submission_id": row["submission_id"],
+        },
+        envelope=row.get("attachment_payload"),
+        key_domain="content",
+    ) or {}
     return normalize_private_media(
         {
             "guild_id": row["guild_id"],
             "submission_id": row["submission_id"],
-            "attachment_urls": decode_postgres_json_array(row["attachment_urls"], label="confession_private_media.attachment_urls"),
+            "attachment_urls": payload.get(
+                "attachment_urls",
+                decode_postgres_json_array(row["attachment_urls"], label="confession_private_media.attachment_urls"),
+            ),
             "created_at": row["created_at"],
             "updated_at": row["updated_at"],
         }
     )
 
 
-def _owner_reply_opportunity_from_row(row: Any) -> dict[str, Any] | None:
+def _owner_reply_opportunity_from_row(row: Any, privacy: ConfessionsCrypto) -> dict[str, Any] | None:
     if row is None:
         return None
+    payload = _decrypt_payload(
+        privacy,
+        label="owner reply opportunity",
+        domain="owner-reply-opportunity",
+        aad_fields={
+            "guild_id": row["guild_id"],
+            "opportunity_id": row["opportunity_id"],
+            "root_submission_id": row["root_submission_id"],
+        },
+        envelope=row.get("private_payload"),
+        key_domain="content",
+    ) or {}
     return normalize_owner_reply_opportunity(
         {
             "opportunity_id": row["opportunity_id"],
@@ -681,10 +1020,10 @@ def _owner_reply_opportunity_from_row(row: Any) -> dict[str, Any] | None:
             "referenced_submission_id": row["referenced_submission_id"],
             "source_channel_id": row["source_channel_id"],
             "source_message_id": row["source_message_id"],
-            "source_author_user_id": row.get("source_author_user_id"),
-            "source_author_name": row["source_author_name"],
-            "source_preview": row["source_preview"],
-            "source_message_fingerprint": row.get("source_message_fingerprint"),
+            "source_author_user_id": payload.get("source_author_user_id", row.get("source_author_user_id")),
+            "source_author_name": payload.get("source_author_name", row["source_author_name"]),
+            "source_preview": payload.get("source_preview", row["source_preview"]),
+            "source_message_fingerprint": payload.get("source_message_fingerprint", row.get("source_message_fingerprint")),
             "status": row["status"],
             "notification_status": row["notification_status"],
             "notification_channel_id": row.get("notification_channel_id"),
@@ -853,17 +1192,26 @@ class _BaseConfessionsStore:
     async def fetch_guild_counts(self, guild_id: int) -> dict[str, int]:
         raise NotImplementedError
 
+    async def fetch_privacy_status(self, guild_id: int | None = None) -> dict[str, Any]:
+        raise NotImplementedError
+
+    async def run_privacy_backfill(self, *, apply: bool, batch_size: int = 100) -> dict[str, Any]:
+        raise NotImplementedError
+
 
 class _MemoryConfessionsStore(_BaseConfessionsStore):
     backend_name = "memory"
 
-    def __init__(self):
+    def __init__(self, privacy: ConfessionsCrypto):
+        self._privacy = privacy
         self.configs: dict[int, dict[str, Any]] = {}
         self.submissions: dict[str, dict[str, Any]] = {}
         self.author_links: dict[str, dict[str, Any]] = {}
         self.private_media: dict[str, dict[str, Any]] = {}
         self.owner_reply_opportunities: dict[str, dict[str, Any]] = {}
         self.enforcement_states: dict[tuple[int, int], dict[str, Any]] = {}
+        self.secure_author_links: dict[str, dict[str, Any]] = {}
+        self.secure_enforcement_states: dict[tuple[int, str], dict[str, Any]] = {}
         self.cases: dict[tuple[int, str], dict[str, Any]] = {}
         self.review_queues: dict[int, dict[str, Any]] = {}
 
@@ -874,8 +1222,139 @@ class _MemoryConfessionsStore(_BaseConfessionsStore):
         self.private_media = {}
         self.owner_reply_opportunities = {}
         self.enforcement_states = {}
+        self.secure_author_links = {}
+        self.secure_enforcement_states = {}
         self.cases = {}
         self.review_queues = {}
+
+    def _encode_submission_row(self, normalized: dict[str, Any]) -> dict[str, Any]:
+        row = deepcopy(normalized)
+        payload = {
+            "staff_preview": normalized.get("staff_preview"),
+            "content_body": normalized.get("content_body"),
+            "shared_link_url": normalized.get("shared_link_url"),
+        }
+        if any(value is not None for value in payload.values()):
+            row["content_ciphertext"] = self._privacy.encrypt_payload(
+                domain="submission-content",
+                aad_fields={
+                    "guild_id": normalized["guild_id"],
+                    "submission_id": normalized["submission_id"],
+                    "confession_id": normalized["confession_id"],
+                },
+                payload=payload,
+                key_domain="content",
+            )
+            row["staff_preview"] = None
+            row["content_body"] = None
+            row["shared_link_url"] = None
+        else:
+            row["content_ciphertext"] = None
+        return row
+
+    def _encode_author_link_row(self, normalized: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "submission_id": normalized["submission_id"],
+            "guild_id": normalized["guild_id"],
+            "author_lookup_hash": self._privacy.blind_index(
+                label="author-link",
+                guild_id=normalized["guild_id"],
+                value=normalized["author_user_id"],
+            ),
+            "author_identity_ciphertext": self._privacy.encrypt_payload(
+                domain="author-link",
+                aad_fields={
+                    "guild_id": normalized["guild_id"],
+                    "submission_id": normalized["submission_id"],
+                },
+                payload={"author_user_id": normalized["author_user_id"]},
+                key_domain="identity",
+            ),
+            "created_at": normalized["created_at"],
+        }
+
+    def _encode_private_media_row(self, normalized: dict[str, Any]) -> dict[str, Any]:
+        row = deepcopy(normalized)
+        if normalized["attachment_urls"]:
+            row["attachment_payload"] = self._privacy.encrypt_payload(
+                domain="private-media",
+                aad_fields={
+                    "guild_id": normalized["guild_id"],
+                    "submission_id": normalized["submission_id"],
+                },
+                payload={"attachment_urls": list(normalized["attachment_urls"])},
+                key_domain="content",
+            )
+            row["attachment_urls"] = []
+        else:
+            row["attachment_payload"] = None
+        return row
+
+    def _encode_owner_reply_opportunity_row(self, normalized: dict[str, Any]) -> dict[str, Any]:
+        row = deepcopy(normalized)
+        payload = {
+            "source_author_user_id": normalized.get("source_author_user_id"),
+            "source_author_name": normalized.get("source_author_name"),
+            "source_preview": normalized.get("source_preview"),
+            "source_message_fingerprint": normalized.get("source_message_fingerprint"),
+        }
+        row["private_payload"] = self._privacy.encrypt_payload(
+            domain="owner-reply-opportunity",
+            aad_fields={
+                "guild_id": normalized["guild_id"],
+                "opportunity_id": normalized["opportunity_id"],
+                "root_submission_id": normalized["root_submission_id"],
+            },
+            payload=payload,
+            key_domain="content",
+        )
+        row["source_author_lookup_hash"] = (
+            self._privacy.blind_index(
+                label="owner-reply-source-author",
+                guild_id=normalized["guild_id"],
+                value=normalized["source_author_user_id"],
+            )
+            if normalized.get("source_author_user_id")
+            else None
+        )
+        row["source_author_user_id"] = None
+        row["source_author_name"] = PROTECTED_OWNER_REPLY_NAME
+        row["source_preview"] = PROTECTED_OWNER_REPLY_PREVIEW
+        row["source_message_fingerprint"] = None
+        return row
+
+    def _encode_enforcement_state_row(self, normalized: dict[str, Any]) -> dict[str, Any]:
+        lookup_hash = self._privacy.blind_index(
+            label="enforcement-state",
+            guild_id=normalized["guild_id"],
+            value=normalized["user_id"],
+        )
+        return {
+            "guild_id": normalized["guild_id"],
+            "user_lookup_hash": lookup_hash,
+            "user_identity_ciphertext": self._privacy.encrypt_payload(
+                domain="enforcement-state",
+                aad_fields={
+                    "guild_id": normalized["guild_id"],
+                    "user_lookup_hash": lookup_hash,
+                },
+                payload={"user_id": normalized["user_id"]},
+                key_domain="identity",
+            ),
+            "active_restriction": normalized["active_restriction"],
+            "restricted_until": normalized["restricted_until"],
+            "is_permanent_ban": normalized["is_permanent_ban"],
+            "strike_count": normalized["strike_count"],
+            "last_strike_at": normalized["last_strike_at"],
+            "cooldown_until": normalized["cooldown_until"],
+            "burst_count": normalized["burst_count"],
+            "burst_window_started_at": normalized["burst_window_started_at"],
+            "last_case_id": normalized["last_case_id"],
+            "image_restriction_active": normalized["image_restriction_active"],
+            "image_restricted_until": normalized["image_restricted_until"],
+            "image_restriction_case_id": normalized["image_restriction_case_id"],
+            "updated_at": normalized["updated_at"],
+        }
 
     async def fetch_all_configs(self) -> dict[int, dict[str, Any]]:
         return {guild_id: deepcopy(record) for guild_id, record in self.configs.items()}
@@ -891,22 +1370,22 @@ class _MemoryConfessionsStore(_BaseConfessionsStore):
     async def upsert_submission(self, record: dict[str, Any]):
         normalized = normalize_submission(record)
         if normalized is not None:
-            self.submissions[normalized["submission_id"]] = normalized
+            self.submissions[normalized["submission_id"]] = self._encode_submission_row(normalized)
 
     async def fetch_submission(self, submission_id: str) -> dict[str, Any] | None:
         record = self.submissions.get(submission_id)
-        return deepcopy(record) if record is not None else None
+        return _submission_from_row(deepcopy(record), self._privacy) if record is not None else None
 
     async def fetch_submission_by_confession_id(self, guild_id: int, confession_id: str) -> dict[str, Any] | None:
         for record in self.submissions.values():
             if record["guild_id"] == guild_id and record["confession_id"] == confession_id:
-                return deepcopy(record)
+                return _submission_from_row(deepcopy(record), self._privacy)
         return None
 
     async def fetch_submission_by_message_id(self, guild_id: int, message_id: int) -> dict[str, Any] | None:
         for record in self.submissions.values():
             if record["guild_id"] == guild_id and int(record.get("posted_message_id") or 0) == message_id:
-                return deepcopy(record)
+                return _submission_from_row(deepcopy(record), self._privacy)
         return None
 
     async def list_published_top_level_submissions(self, guild_id: int) -> list[dict[str, Any]]:
@@ -918,19 +1397,35 @@ class _MemoryConfessionsStore(_BaseConfessionsStore):
                 continue
             if not isinstance(record.get("posted_channel_id"), int) or not isinstance(record.get("posted_message_id"), int):
                 continue
-            rows.append(deepcopy(record))
+            rows.append(_submission_from_row(deepcopy(record), self._privacy))
         rows.sort(key=lambda item: item.get("published_at") or item.get("created_at") or "")
         return rows
 
     async def list_recent_submissions_for_author(self, guild_id: int, author_user_id: int, *, limit: int = 5) -> list[dict[str, Any]]:
         rows = []
+        author_lookup_hashes = set(
+            self._privacy.blind_index_candidates(label="author-link", guild_id=guild_id, value=author_user_id)
+        )
+        for submission_id, link in self.secure_author_links.items():
+            if link["guild_id"] != guild_id or link["author_lookup_hash"] not in author_lookup_hashes:
+                continue
+            submission = self.submissions.get(submission_id)
+            if submission is None:
+                continue
+            decoded = _submission_from_row(deepcopy(submission), self._privacy)
+            if decoded is not None:
+                rows.append(decoded)
         for link in self.author_links.values():
             if link["guild_id"] != guild_id or link["author_user_id"] != author_user_id:
+                continue
+            if link["submission_id"] in self.secure_author_links:
                 continue
             submission = self.submissions.get(link["submission_id"])
             if submission is None:
                 continue
-            rows.append(deepcopy(submission))
+            decoded = _submission_from_row(deepcopy(submission), self._privacy)
+            if decoded is not None:
+                rows.append(decoded)
         rows.sort(key=lambda item: item.get("created_at") or "", reverse=True)
         return rows[:limit]
 
@@ -958,20 +1453,24 @@ class _MemoryConfessionsStore(_BaseConfessionsStore):
     async def upsert_author_link(self, record: dict[str, Any]):
         normalized = normalize_author_link(record)
         if normalized is not None:
-            self.author_links[normalized["submission_id"]] = normalized
+            self.secure_author_links[normalized["submission_id"]] = self._encode_author_link_row(normalized)
+            self.author_links.pop(normalized["submission_id"], None)
 
     async def fetch_author_link(self, submission_id: str) -> dict[str, Any] | None:
+        secure_record = self.secure_author_links.get(submission_id)
+        if secure_record is not None:
+            return _author_link_from_secure_row(deepcopy(secure_record), self._privacy)
         record = self.author_links.get(submission_id)
-        return deepcopy(record) if record is not None else None
+        return _author_link_from_legacy_row(deepcopy(record)) if record is not None else None
 
     async def upsert_private_media(self, record: dict[str, Any]):
         normalized = normalize_private_media(record)
         if normalized is not None:
-            self.private_media[normalized["submission_id"]] = normalized
+            self.private_media[normalized["submission_id"]] = self._encode_private_media_row(normalized)
 
     async def fetch_private_media(self, submission_id: str) -> dict[str, Any] | None:
         record = self.private_media.get(submission_id)
-        return deepcopy(record) if record is not None else None
+        return _private_media_from_row(deepcopy(record), self._privacy) if record is not None else None
 
     async def delete_private_media(self, submission_id: str):
         self.private_media.pop(submission_id, None)
@@ -979,22 +1478,22 @@ class _MemoryConfessionsStore(_BaseConfessionsStore):
     async def upsert_owner_reply_opportunity(self, record: dict[str, Any]):
         normalized = normalize_owner_reply_opportunity(record)
         if normalized is not None:
-            self.owner_reply_opportunities[normalized["opportunity_id"]] = normalized
+            self.owner_reply_opportunities[normalized["opportunity_id"]] = self._encode_owner_reply_opportunity_row(normalized)
 
     async def fetch_owner_reply_opportunity(self, opportunity_id: str) -> dict[str, Any] | None:
         record = self.owner_reply_opportunities.get(opportunity_id)
-        return deepcopy(record) if record is not None else None
+        return _owner_reply_opportunity_from_row(deepcopy(record), self._privacy) if record is not None else None
 
     async def fetch_owner_reply_opportunity_by_source_message_id(self, guild_id: int, source_message_id: int) -> dict[str, Any] | None:
         for record in self.owner_reply_opportunities.values():
             if record["guild_id"] == guild_id and int(record.get("source_message_id") or 0) == source_message_id:
-                return deepcopy(record)
+                return _owner_reply_opportunity_from_row(deepcopy(record), self._privacy)
         return None
 
     async def fetch_owner_reply_opportunity_by_notification_message_id(self, notification_message_id: int) -> dict[str, Any] | None:
         for record in self.owner_reply_opportunities.values():
             if int(record.get("notification_message_id") or 0) == notification_message_id:
-                return deepcopy(record)
+                return _owner_reply_opportunity_from_row(deepcopy(record), self._privacy)
         return None
 
     async def fetch_pending_owner_reply_opportunity_for_path(
@@ -1027,10 +1526,12 @@ class _MemoryConfessionsStore(_BaseConfessionsStore):
         for record in self.owner_reply_opportunities.values():
             if record["guild_id"] != guild_id or record.get("status") != "pending":
                 continue
-            owner_link = self.author_links.get(record["root_submission_id"])
+            owner_link = await self.fetch_author_link(record["root_submission_id"])
             if owner_link is None or owner_link["author_user_id"] != author_user_id:
                 continue
-            rows.append(deepcopy(record))
+            decoded = _owner_reply_opportunity_from_row(deepcopy(record), self._privacy)
+            if decoded is not None:
+                rows.append(decoded)
         rows.sort(key=lambda item: item.get("created_at") or "", reverse=True)
         return rows[:limit]
 
@@ -1041,10 +1542,11 @@ class _MemoryConfessionsStore(_BaseConfessionsStore):
         limit: int = 25,
     ) -> list[dict[str, Any]]:
         rows = [
-            deepcopy(record)
+            _owner_reply_opportunity_from_row(deepcopy(record), self._privacy)
             for record in self.owner_reply_opportunities.values()
             if record.get("root_submission_id") == root_submission_id
         ]
+        rows = [record for record in rows if record is not None]
         rows.sort(key=lambda item: item.get("created_at") or "", reverse=True)
         return rows[:limit]
 
@@ -1055,10 +1557,11 @@ class _MemoryConfessionsStore(_BaseConfessionsStore):
         limit: int = 25,
     ) -> list[dict[str, Any]]:
         rows = [
-            deepcopy(record)
+            _owner_reply_opportunity_from_row(deepcopy(record), self._privacy)
             for record in self.owner_reply_opportunities.values()
             if record.get("root_submission_id") == submission_id or record.get("referenced_submission_id") == submission_id
         ]
+        rows = [record for record in rows if record is not None]
         rows.sort(key=lambda item: item.get("created_at") or "", reverse=True)
         return rows[:limit]
 
@@ -1071,14 +1574,25 @@ class _MemoryConfessionsStore(_BaseConfessionsStore):
         *,
         limit: int = 25,
     ) -> list[dict[str, Any]]:
+        source_lookup_hashes = set(
+            self._privacy.blind_index_candidates(
+                label="owner-reply-source-author",
+                guild_id=guild_id,
+                value=source_author_user_id,
+            )
+        )
         rows = [
-            deepcopy(record)
+            _owner_reply_opportunity_from_row(deepcopy(record), self._privacy)
             for record in self.owner_reply_opportunities.values()
             if record["guild_id"] == guild_id
             and record.get("root_submission_id") == root_submission_id
             and record.get("referenced_submission_id") == referenced_submission_id
-            and int(record.get("source_author_user_id") or 0) == source_author_user_id
+            and (
+                record.get("source_author_lookup_hash") in source_lookup_hashes
+                or int(record.get("source_author_user_id") or 0) == source_author_user_id
+            )
         ]
+        rows = [record for record in rows if record is not None]
         rows.sort(key=lambda item: item.get("created_at") or "", reverse=True)
         return rows[:limit]
 
@@ -1089,11 +1603,23 @@ class _MemoryConfessionsStore(_BaseConfessionsStore):
         *,
         limit: int = 25,
     ) -> list[dict[str, Any]]:
+        source_lookup_hashes = set(
+            self._privacy.blind_index_candidates(
+                label="owner-reply-source-author",
+                guild_id=guild_id,
+                value=source_author_user_id,
+            )
+        )
         rows = [
-            deepcopy(record)
+            _owner_reply_opportunity_from_row(deepcopy(record), self._privacy)
             for record in self.owner_reply_opportunities.values()
-            if record["guild_id"] == guild_id and int(record.get("source_author_user_id") or 0) == source_author_user_id
+            if record["guild_id"] == guild_id
+            and (
+                record.get("source_author_lookup_hash") in source_lookup_hashes
+                or int(record.get("source_author_user_id") or 0) == source_author_user_id
+            )
         ]
+        rows = [record for record in rows if record is not None]
         rows.sort(key=lambda item: item.get("created_at") or "", reverse=True)
         return rows[:limit]
 
@@ -1104,25 +1630,31 @@ class _MemoryConfessionsStore(_BaseConfessionsStore):
         updated = deepcopy(record)
         updated["status"] = "locked"
         self.owner_reply_opportunities[opportunity_id] = updated
-        return deepcopy(updated)
+        return _owner_reply_opportunity_from_row(deepcopy(updated), self._privacy)
 
     async def release_owner_reply_opportunity(self, opportunity_id: str) -> dict[str, Any] | None:
         record = self.owner_reply_opportunities.get(opportunity_id)
         if record is None or record.get("status") != "locked":
-            return deepcopy(record) if record is not None else None
+            return _owner_reply_opportunity_from_row(deepcopy(record), self._privacy) if record is not None else None
         updated = deepcopy(record)
         updated["status"] = "pending"
         self.owner_reply_opportunities[opportunity_id] = updated
-        return deepcopy(updated)
+        return _owner_reply_opportunity_from_row(deepcopy(updated), self._privacy)
 
     async def fetch_enforcement_state(self, guild_id: int, user_id: int) -> dict[str, Any] | None:
+        for lookup_hash in self._privacy.blind_index_candidates(label="enforcement-state", guild_id=guild_id, value=user_id):
+            secure_record = self.secure_enforcement_states.get((guild_id, lookup_hash))
+            if secure_record is not None:
+                return _enforcement_from_secure_row(deepcopy(secure_record), self._privacy)
         record = self.enforcement_states.get((guild_id, user_id))
-        return deepcopy(record) if record is not None else None
+        return _enforcement_from_legacy_row(deepcopy(record)) if record is not None else None
 
     async def upsert_enforcement_state(self, record: dict[str, Any]):
         normalized = normalize_enforcement_state(record)
         if normalized is not None:
-            self.enforcement_states[(normalized["guild_id"], normalized["user_id"])] = normalized
+            secure_row = self._encode_enforcement_state_row(normalized)
+            self.secure_enforcement_states[(normalized["guild_id"], secure_row["user_lookup_hash"])] = secure_row
+            self.enforcement_states.pop((normalized["guild_id"], normalized["user_id"]), None)
 
     async def list_review_queues(self) -> list[dict[str, Any]]:
         rows = [deepcopy(record) for record in self.review_queues.values()]
@@ -1138,7 +1670,8 @@ class _MemoryConfessionsStore(_BaseConfessionsStore):
         for record in self.cases.values():
             if record["guild_id"] != guild_id or record.get("status") != "open" or record.get("case_kind") != "review":
                 continue
-            submission = self.submissions.get(record["submission_id"])
+            submission_row = self.submissions.get(record["submission_id"])
+            submission = _submission_from_row(deepcopy(submission_row), self._privacy) if submission_row is not None else None
             if submission is None or submission.get("status") != "queued":
                 continue
             rows.append(
@@ -1189,12 +1722,170 @@ class _MemoryConfessionsStore(_BaseConfessionsStore):
             ),
         }
 
+    async def fetch_privacy_status(self, guild_id: int | None = None) -> dict[str, Any]:
+        status = _empty_privacy_status(scope="guild" if guild_id is not None else "global", guild_id=guild_id)
+        for row in self.submissions.values():
+            if guild_id is not None and int(row.get("guild_id") or 0) != guild_id:
+                continue
+            _apply_privacy_categories(status, _submission_privacy_categories(row, self._privacy))
+        for row in self.private_media.values():
+            if guild_id is not None and int(row.get("guild_id") or 0) != guild_id:
+                continue
+            _apply_privacy_categories(status, _private_media_privacy_categories(row, self._privacy))
+        for row in self.secure_author_links.values():
+            if guild_id is not None and int(row.get("guild_id") or 0) != guild_id:
+                continue
+            _apply_privacy_categories(status, _author_link_privacy_categories(row, self._privacy))
+        for row in self.author_links.values():
+            if guild_id is not None and int(row.get("guild_id") or 0) != guild_id:
+                continue
+            _apply_privacy_categories(status, {"legacy_author_links"})
+        for row in self.owner_reply_opportunities.values():
+            if guild_id is not None and int(row.get("guild_id") or 0) != guild_id:
+                continue
+            _apply_privacy_categories(status, _owner_reply_privacy_categories(row, self._privacy))
+        for row in self.secure_enforcement_states.values():
+            if guild_id is not None and int(row.get("guild_id") or 0) != guild_id:
+                continue
+            _apply_privacy_categories(status, _enforcement_privacy_categories(row, self._privacy))
+        for row in self.enforcement_states.values():
+            if guild_id is not None and int(row.get("guild_id") or 0) != guild_id:
+                continue
+            _apply_privacy_categories(status, {"legacy_enforcement_rows"})
+        return _finalize_privacy_status(status)
+
+    async def run_privacy_backfill(self, *, apply: bool, batch_size: int = 100) -> dict[str, Any]:
+        summary = {
+            "mode": "apply" if apply else "dry-run",
+            "submissions": 0,
+            "private_media": 0,
+            "author_links": 0,
+            "owner_reply_opportunities": 0,
+            "enforcement_states": 0,
+            "batch_size": batch_size,
+        }
+        seen = 0
+        for submission_id, row in list(self.submissions.items()):
+            if seen >= batch_size:
+                break
+            if not _submission_privacy_categories(row, self._privacy):
+                continue
+            summary["submissions"] += 1
+            seen += 1
+            if not apply:
+                continue
+            normalized = _submission_from_row(deepcopy(row), self._privacy)
+            if normalized is None:
+                continue
+            if _submission_requires_sensitive_payload(normalized):
+                self.submissions[submission_id] = self._encode_submission_row(
+                    _backfill_submission_duplicate_fields(self._privacy, normalized)
+                )
+            else:
+                terminal = _backfill_submission_duplicate_fields(self._privacy, normalized)
+                terminal["staff_preview"] = None
+                terminal["content_body"] = None
+                terminal["shared_link_url"] = None
+                terminal["attachment_meta"] = []
+                self.submissions[submission_id] = self._encode_submission_row(terminal)
+                self.private_media.pop(submission_id, None)
+        seen = 0
+        for submission_id, row in list(self.private_media.items()):
+            if seen >= batch_size:
+                break
+            if not _private_media_privacy_categories(row, self._privacy):
+                continue
+            summary["private_media"] += 1
+            seen += 1
+            if not apply:
+                continue
+            submission = self.submissions.get(submission_id)
+            decoded_submission = _submission_from_row(deepcopy(submission), self._privacy) if submission is not None else None
+            if decoded_submission is not None and not _submission_requires_sensitive_payload(decoded_submission):
+                del self.private_media[submission_id]
+                continue
+            normalized = _private_media_from_row(deepcopy(row), self._privacy)
+            if normalized is None:
+                continue
+            self.private_media[submission_id] = self._encode_private_media_row(normalized)
+        seen = 0
+        for submission_id, row in list(self.author_links.items()):
+            if seen >= batch_size:
+                break
+            summary["author_links"] += 1
+            seen += 1
+            if not apply:
+                continue
+            normalized = normalize_author_link(row)
+            if normalized is None:
+                continue
+            self.secure_author_links[submission_id] = self._encode_author_link_row(normalized)
+            del self.author_links[submission_id]
+        for submission_id, row in list(self.secure_author_links.items()):
+            if seen >= batch_size:
+                break
+            if not _author_link_privacy_categories(row, self._privacy):
+                continue
+            summary["author_links"] += 1
+            seen += 1
+            if not apply:
+                continue
+            normalized = _author_link_from_secure_row(deepcopy(row), self._privacy)
+            if normalized is None:
+                continue
+            self.secure_author_links[submission_id] = self._encode_author_link_row(normalized)
+        seen = 0
+        for opportunity_id, row in list(self.owner_reply_opportunities.items()):
+            if seen >= batch_size:
+                break
+            if not _owner_reply_privacy_categories(row, self._privacy):
+                continue
+            summary["owner_reply_opportunities"] += 1
+            seen += 1
+            if not apply:
+                continue
+            normalized = _owner_reply_opportunity_from_row(deepcopy(row), self._privacy)
+            if normalized is None:
+                continue
+            self.owner_reply_opportunities[opportunity_id] = self._encode_owner_reply_opportunity_row(normalized)
+        seen = 0
+        for key, row in list(self.enforcement_states.items()):
+            if seen >= batch_size:
+                break
+            normalized = normalize_enforcement_state(row)
+            if normalized is None:
+                continue
+            summary["enforcement_states"] += 1
+            seen += 1
+            if not apply:
+                continue
+            secure_row = self._encode_enforcement_state_row(normalized)
+            self.secure_enforcement_states[(normalized["guild_id"], secure_row["user_lookup_hash"])] = secure_row
+            del self.enforcement_states[key]
+        for key, row in list(self.secure_enforcement_states.items()):
+            if seen >= batch_size:
+                break
+            if not _enforcement_privacy_categories(row, self._privacy):
+                continue
+            summary["enforcement_states"] += 1
+            seen += 1
+            if not apply:
+                continue
+            normalized = _enforcement_from_secure_row(deepcopy(row), self._privacy)
+            if normalized is None:
+                continue
+            secure_row = self._encode_enforcement_state_row(normalized)
+            self.secure_enforcement_states[(normalized["guild_id"], secure_row["user_lookup_hash"])] = secure_row
+        summary["privacy_status"] = await self.fetch_privacy_status()
+        return summary
+
 
 class _PostgresConfessionsStore(_BaseConfessionsStore):
     backend_name = "postgres"
 
-    def __init__(self, dsn: str):
+    def __init__(self, dsn: str, privacy: ConfessionsCrypto):
         self.dsn = dsn
+        self._privacy = privacy
         self._asyncpg = None
         self._pool = None
         self._io_lock = asyncio.Lock()
@@ -1207,6 +1898,135 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
         if self._pool is not None:
             await self._pool.close()
             self._pool = None
+
+    def _encode_submission_row(self, normalized: dict[str, Any]) -> dict[str, Any]:
+        row = deepcopy(normalized)
+        payload = {
+            "staff_preview": normalized.get("staff_preview"),
+            "content_body": normalized.get("content_body"),
+            "shared_link_url": normalized.get("shared_link_url"),
+        }
+        if any(value is not None for value in payload.values()):
+            row["content_ciphertext"] = self._privacy.encrypt_payload(
+                domain="submission-content",
+                aad_fields={
+                    "guild_id": normalized["guild_id"],
+                    "submission_id": normalized["submission_id"],
+                    "confession_id": normalized["confession_id"],
+                },
+                payload=payload,
+                key_domain="content",
+            )
+            row["staff_preview"] = None
+            row["content_body"] = None
+            row["shared_link_url"] = None
+        else:
+            row["content_ciphertext"] = None
+        return row
+
+    def _encode_author_link_row(self, normalized: dict[str, Any]) -> dict[str, Any]:
+        return {
+            "submission_id": normalized["submission_id"],
+            "guild_id": normalized["guild_id"],
+            "author_lookup_hash": self._privacy.blind_index(
+                label="author-link",
+                guild_id=normalized["guild_id"],
+                value=normalized["author_user_id"],
+            ),
+            "author_identity_ciphertext": self._privacy.encrypt_payload(
+                domain="author-link",
+                aad_fields={
+                    "guild_id": normalized["guild_id"],
+                    "submission_id": normalized["submission_id"],
+                },
+                payload={"author_user_id": normalized["author_user_id"]},
+                key_domain="identity",
+            ),
+            "created_at": normalized["created_at"],
+        }
+
+    def _encode_private_media_row(self, normalized: dict[str, Any]) -> dict[str, Any]:
+        row = deepcopy(normalized)
+        if normalized["attachment_urls"]:
+            row["attachment_payload"] = self._privacy.encrypt_payload(
+                domain="private-media",
+                aad_fields={
+                    "guild_id": normalized["guild_id"],
+                    "submission_id": normalized["submission_id"],
+                },
+                payload={"attachment_urls": list(normalized["attachment_urls"])},
+                key_domain="content",
+            )
+            row["attachment_urls"] = []
+        else:
+            row["attachment_payload"] = None
+        return row
+
+    def _encode_owner_reply_opportunity_row(self, normalized: dict[str, Any]) -> dict[str, Any]:
+        row = deepcopy(normalized)
+        payload = {
+            "source_author_user_id": normalized.get("source_author_user_id"),
+            "source_author_name": normalized.get("source_author_name"),
+            "source_preview": normalized.get("source_preview"),
+            "source_message_fingerprint": normalized.get("source_message_fingerprint"),
+        }
+        row["private_payload"] = self._privacy.encrypt_payload(
+            domain="owner-reply-opportunity",
+            aad_fields={
+                "guild_id": normalized["guild_id"],
+                "opportunity_id": normalized["opportunity_id"],
+                "root_submission_id": normalized["root_submission_id"],
+            },
+            payload=payload,
+            key_domain="content",
+        )
+        row["source_author_lookup_hash"] = (
+            self._privacy.blind_index(
+                label="owner-reply-source-author",
+                guild_id=normalized["guild_id"],
+                value=normalized["source_author_user_id"],
+            )
+            if normalized.get("source_author_user_id")
+            else None
+        )
+        row["source_author_user_id"] = None
+        row["source_author_name"] = PROTECTED_OWNER_REPLY_NAME
+        row["source_preview"] = PROTECTED_OWNER_REPLY_PREVIEW
+        row["source_message_fingerprint"] = None
+        return row
+
+    def _encode_enforcement_state_row(self, normalized: dict[str, Any]) -> dict[str, Any]:
+        lookup_hash = self._privacy.blind_index(
+            label="enforcement-state",
+            guild_id=normalized["guild_id"],
+            value=normalized["user_id"],
+        )
+        return {
+            "guild_id": normalized["guild_id"],
+            "user_lookup_hash": lookup_hash,
+            "user_identity_ciphertext": self._privacy.encrypt_payload(
+                domain="enforcement-state",
+                aad_fields={
+                    "guild_id": normalized["guild_id"],
+                    "user_lookup_hash": lookup_hash,
+                },
+                payload={"user_id": normalized["user_id"]},
+                key_domain="identity",
+            ),
+            "active_restriction": normalized["active_restriction"],
+            "restricted_until": normalized["restricted_until"],
+            "is_permanent_ban": normalized["is_permanent_ban"],
+            "strike_count": normalized["strike_count"],
+            "last_strike_at": normalized["last_strike_at"],
+            "cooldown_until": normalized["cooldown_until"],
+            "burst_count": normalized["burst_count"],
+            "burst_window_started_at": normalized["burst_window_started_at"],
+            "last_case_id": normalized["last_case_id"],
+            "image_restriction_active": normalized["image_restriction_active"],
+            "image_restricted_until": normalized["image_restricted_until"],
+            "image_restriction_case_id": normalized["image_restriction_case_id"],
+            "updated_at": normalized["updated_at"],
+        }
 
     async def _connect(self):
         if self._pool is not None:
@@ -1303,6 +2123,15 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                 ")"
             ),
             (
+                f"CREATE TABLE IF NOT EXISTS {SECURE_AUTHOR_LINK_TABLE} ("
+                "submission_id TEXT PRIMARY KEY REFERENCES confession_submissions(submission_id) ON DELETE CASCADE, "
+                "guild_id BIGINT NOT NULL, "
+                "author_lookup_hash TEXT NOT NULL, "
+                "author_identity_ciphertext TEXT NOT NULL, "
+                "created_at TIMESTAMPTZ NOT NULL"
+                ")"
+            ),
+            (
                 "CREATE TABLE IF NOT EXISTS confession_private_media ("
                 "submission_id TEXT PRIMARY KEY REFERENCES confession_submissions(submission_id) ON DELETE CASCADE, "
                 "guild_id BIGINT NOT NULL, "
@@ -1352,6 +2181,27 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                 "image_restriction_case_id TEXT NULL, "
                 "updated_at TIMESTAMPTZ NULL, "
                 "PRIMARY KEY (guild_id, user_id)"
+                ")"
+            ),
+            (
+                f"CREATE TABLE IF NOT EXISTS {SECURE_ENFORCEMENT_TABLE} ("
+                "guild_id BIGINT NOT NULL, "
+                "user_lookup_hash TEXT NOT NULL, "
+                "user_identity_ciphertext TEXT NOT NULL, "
+                "active_restriction TEXT NOT NULL DEFAULT 'none', "
+                "restricted_until TIMESTAMPTZ NULL, "
+                "is_permanent_ban BOOLEAN NOT NULL DEFAULT FALSE, "
+                "strike_count INTEGER NOT NULL DEFAULT 0, "
+                "last_strike_at TIMESTAMPTZ NULL, "
+                "cooldown_until TIMESTAMPTZ NULL, "
+                "burst_count INTEGER NOT NULL DEFAULT 0, "
+                "burst_window_started_at TIMESTAMPTZ NULL, "
+                "last_case_id TEXT NULL, "
+                "image_restriction_active BOOLEAN NOT NULL DEFAULT FALSE, "
+                "image_restricted_until TIMESTAMPTZ NULL, "
+                "image_restriction_case_id TEXT NULL, "
+                "updated_at TIMESTAMPTZ NULL, "
+                "PRIMARY KEY (guild_id, user_lookup_hash)"
                 ")"
             ),
             (
@@ -1406,12 +2256,14 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
             "ALTER TABLE confession_submissions ADD COLUMN IF NOT EXISTS parent_confession_id TEXT NULL",
             "ALTER TABLE confession_submissions ADD COLUMN IF NOT EXISTS content_body TEXT NULL",
             "ALTER TABLE confession_submissions ADD COLUMN IF NOT EXISTS shared_link_url TEXT NULL",
+            "ALTER TABLE confession_submissions ADD COLUMN IF NOT EXISTS content_ciphertext TEXT NULL",
             "ALTER TABLE confession_submissions ADD COLUMN IF NOT EXISTS content_fingerprint TEXT NULL",
             "ALTER TABLE confession_submissions ADD COLUMN IF NOT EXISTS similarity_key TEXT NULL",
             "ALTER TABLE confession_submissions ADD COLUMN IF NOT EXISTS fuzzy_signature TEXT NULL",
             "ALTER TABLE confession_submissions ADD COLUMN IF NOT EXISTS flag_codes JSONB NOT NULL DEFAULT '[]'::jsonb",
             "ALTER TABLE confession_submissions ADD COLUMN IF NOT EXISTS attachment_meta JSONB NOT NULL DEFAULT '[]'::jsonb",
             "ALTER TABLE confession_submissions ADD COLUMN IF NOT EXISTS current_case_id TEXT NULL",
+            "ALTER TABLE confession_private_media ADD COLUMN IF NOT EXISTS attachment_payload TEXT NULL",
             "ALTER TABLE confession_enforcement_states ADD COLUMN IF NOT EXISTS image_restriction_active BOOLEAN NOT NULL DEFAULT FALSE",
             "ALTER TABLE confession_enforcement_states ADD COLUMN IF NOT EXISTS image_restricted_until TIMESTAMPTZ NULL",
             "ALTER TABLE confession_enforcement_states ADD COLUMN IF NOT EXISTS image_restriction_case_id TEXT NULL",
@@ -1422,8 +2274,10 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
             "ALTER TABLE confession_cases ADD COLUMN IF NOT EXISTS review_message_id BIGINT NULL",
             "ALTER TABLE confession_owner_reply_opportunities ADD COLUMN IF NOT EXISTS root_confession_id TEXT NULL",
             "ALTER TABLE confession_owner_reply_opportunities ADD COLUMN IF NOT EXISTS source_author_user_id BIGINT NULL",
+            "ALTER TABLE confession_owner_reply_opportunities ADD COLUMN IF NOT EXISTS source_author_lookup_hash TEXT NULL",
             "ALTER TABLE confession_owner_reply_opportunities ADD COLUMN IF NOT EXISTS notification_status TEXT NOT NULL DEFAULT 'none'",
             "ALTER TABLE confession_owner_reply_opportunities ADD COLUMN IF NOT EXISTS source_message_fingerprint TEXT NULL",
+            "ALTER TABLE confession_owner_reply_opportunities ADD COLUMN IF NOT EXISTS private_payload TEXT NULL",
             "ALTER TABLE confession_owner_reply_opportunities ADD COLUMN IF NOT EXISTS notification_channel_id BIGINT NULL",
             "ALTER TABLE confession_owner_reply_opportunities ADD COLUMN IF NOT EXISTS notification_message_id BIGINT NULL",
             "ALTER TABLE confession_owner_reply_opportunities ADD COLUMN IF NOT EXISTS notified_at TIMESTAMPTZ NULL",
@@ -1451,11 +2305,15 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
             "CREATE INDEX IF NOT EXISTS ix_confession_cases_status_created ON confession_cases (guild_id, status, created_at DESC)",
             "CREATE INDEX IF NOT EXISTS ix_confession_cases_submission_id ON confession_cases (submission_id)",
             "CREATE INDEX IF NOT EXISTS ix_confession_author_links_author_created ON confession_author_links (guild_id, author_user_id, created_at DESC)",
+            f"CREATE INDEX IF NOT EXISTS ix_confession_author_identities_lookup_created ON {SECURE_AUTHOR_LINK_TABLE} (guild_id, author_lookup_hash, created_at DESC)",
             "CREATE UNIQUE INDEX IF NOT EXISTS ix_confession_owner_reply_source_message ON confession_owner_reply_opportunities (guild_id, source_message_id)",
             "CREATE INDEX IF NOT EXISTS ix_confession_owner_reply_root_created ON confession_owner_reply_opportunities (root_submission_id, created_at DESC)",
             "CREATE INDEX IF NOT EXISTS ix_confession_owner_reply_responder_path_status ON confession_owner_reply_opportunities (guild_id, root_submission_id, referenced_submission_id, source_author_user_id, status, created_at DESC)",
             "CREATE INDEX IF NOT EXISTS ix_confession_owner_reply_source_author_created ON confession_owner_reply_opportunities (guild_id, source_author_user_id, created_at DESC)",
+            "CREATE INDEX IF NOT EXISTS ix_confession_owner_reply_responder_path_lookup_status ON confession_owner_reply_opportunities (guild_id, root_submission_id, referenced_submission_id, source_author_lookup_hash, status, created_at DESC)",
+            "CREATE INDEX IF NOT EXISTS ix_confession_owner_reply_source_author_lookup_created ON confession_owner_reply_opportunities (guild_id, source_author_lookup_hash, created_at DESC)",
             "CREATE INDEX IF NOT EXISTS ix_confession_owner_reply_notification_message_id ON confession_owner_reply_opportunities (notification_message_id)",
+            f"CREATE INDEX IF NOT EXISTS ix_confession_enforcement_states_secure_lookup ON {SECURE_ENFORCEMENT_TABLE} (guild_id, user_lookup_hash)",
         ]
         async with self._pool.acquire() as conn:
             for statement in table_statements:
@@ -1558,16 +2416,17 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
         normalized = normalize_submission(record)
         if normalized is None:
             return
+        row = self._encode_submission_row(normalized)
         async with self._io_lock:
             async with self._pool.acquire() as conn:
                 await conn.execute(
                     (
                         "INSERT INTO confession_submissions ("
-                        "submission_id, guild_id, confession_id, submission_kind, reply_flow, owner_reply_generation, parent_confession_id, status, review_status, staff_preview, content_body, shared_link_url, "
+                        "submission_id, guild_id, confession_id, submission_kind, reply_flow, owner_reply_generation, parent_confession_id, status, review_status, staff_preview, content_body, shared_link_url, content_ciphertext, "
                         "content_fingerprint, similarity_key, fuzzy_signature, flag_codes, attachment_meta, posted_channel_id, posted_message_id, current_case_id, created_at, published_at, resolved_at"
                         ") VALUES ("
-                        "$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, "
-                        "$13, $14, $15, $16::jsonb, $17::jsonb, $18, $19, $20, $21, $22, $23"
+                        "$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, "
+                        "$14, $15, $16, $17::jsonb, $18::jsonb, $19, $20, $21, $22, $23, $24"
                         ") "
                         "ON CONFLICT (submission_id) DO UPDATE SET "
                         "submission_kind = EXCLUDED.submission_kind, "
@@ -1579,6 +2438,7 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                         "staff_preview = EXCLUDED.staff_preview, "
                         "content_body = EXCLUDED.content_body, "
                         "shared_link_url = EXCLUDED.shared_link_url, "
+                        "content_ciphertext = EXCLUDED.content_ciphertext, "
                         "content_fingerprint = EXCLUDED.content_fingerprint, "
                         "similarity_key = EXCLUDED.similarity_key, "
                         "fuzzy_signature = EXCLUDED.fuzzy_signature, "
@@ -1590,35 +2450,36 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                         "published_at = EXCLUDED.published_at, "
                         "resolved_at = EXCLUDED.resolved_at"
                     ),
-                    normalized["submission_id"],
-                    normalized["guild_id"],
-                    normalized["confession_id"],
-                    normalized["submission_kind"],
-                    normalized["reply_flow"],
-                    normalized["owner_reply_generation"],
-                    normalized["parent_confession_id"],
-                    normalized["status"],
-                    normalized["review_status"],
-                    normalized["staff_preview"],
-                    normalized["content_body"],
-                    normalized["shared_link_url"],
-                    normalized["content_fingerprint"],
-                    normalized["similarity_key"],
-                    normalized["fuzzy_signature"],
-                    json.dumps(normalized["flag_codes"]),
-                    json.dumps(normalized["attachment_meta"]),
-                    normalized["posted_channel_id"],
-                    normalized["posted_message_id"],
-                    normalized["current_case_id"],
-                    _parse_datetime(normalized["created_at"]),
-                    _parse_datetime(normalized["published_at"]),
-                    _parse_datetime(normalized["resolved_at"]),
+                    row["submission_id"],
+                    row["guild_id"],
+                    row["confession_id"],
+                    row["submission_kind"],
+                    row["reply_flow"],
+                    row["owner_reply_generation"],
+                    row["parent_confession_id"],
+                    row["status"],
+                    row["review_status"],
+                    row["staff_preview"],
+                    row["content_body"],
+                    row["shared_link_url"],
+                    row["content_ciphertext"],
+                    row["content_fingerprint"],
+                    row["similarity_key"],
+                    row["fuzzy_signature"],
+                    json.dumps(row["flag_codes"]),
+                    json.dumps(row["attachment_meta"]),
+                    row["posted_channel_id"],
+                    row["posted_message_id"],
+                    row["current_case_id"],
+                    _parse_datetime(row["created_at"]),
+                    _parse_datetime(row["published_at"]),
+                    _parse_datetime(row["resolved_at"]),
                 )
 
     async def fetch_submission(self, submission_id: str) -> dict[str, Any] | None:
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow("SELECT * FROM confession_submissions WHERE submission_id = $1", submission_id)
-        return _submission_from_row(row)
+        return _submission_from_row(row, self._privacy)
 
     async def fetch_submission_by_confession_id(self, guild_id: int, confession_id: str) -> dict[str, Any] | None:
         async with self._pool.acquire() as conn:
@@ -1627,7 +2488,7 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                 guild_id,
                 confession_id,
             )
-        return _submission_from_row(row)
+        return _submission_from_row(row, self._privacy)
 
     async def fetch_submission_by_message_id(self, guild_id: int, message_id: int) -> dict[str, Any] | None:
         async with self._pool.acquire() as conn:
@@ -1636,7 +2497,7 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                 guild_id,
                 message_id,
             )
-        return _submission_from_row(row)
+        return _submission_from_row(row, self._privacy)
 
     async def list_published_top_level_submissions(self, guild_id: int) -> list[dict[str, Any]]:
         async with self._pool.acquire() as conn:
@@ -1649,23 +2510,33 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                 ),
                 guild_id,
             )
-        return [record for row in rows if (record := _submission_from_row(row)) is not None]
+        return [record for row in rows if (record := _submission_from_row(row, self._privacy)) is not None]
 
     async def list_recent_submissions_for_author(self, guild_id: int, author_user_id: int, *, limit: int = 5) -> list[dict[str, Any]]:
+        author_lookup_hashes = list(
+            self._privacy.blind_index_candidates(label="author-link", guild_id=guild_id, value=author_user_id)
+        )
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 (
+                    "SELECT * FROM ("
+                    "SELECT s.* "
+                    f"FROM {SECURE_AUTHOR_LINK_TABLE} a "
+                    "JOIN confession_submissions s ON s.submission_id = a.submission_id "
+                    "WHERE a.guild_id = $1 AND a.author_lookup_hash = ANY($2::text[]) "
+                    "UNION ALL "
                     "SELECT s.* "
                     "FROM confession_author_links a "
                     "JOIN confession_submissions s ON s.submission_id = a.submission_id "
-                    "WHERE a.guild_id = $1 AND a.author_user_id = $2 "
-                    "ORDER BY s.created_at DESC LIMIT $3"
+                    f"WHERE a.guild_id = $1 AND a.author_user_id = $3 AND NOT EXISTS (SELECT 1 FROM {SECURE_AUTHOR_LINK_TABLE} sa WHERE sa.submission_id = a.submission_id)"
+                    ") recent_rows ORDER BY created_at DESC LIMIT $4"
                 ),
                 guild_id,
+                author_lookup_hashes,
                 author_user_id,
                 limit,
             )
-        return [record for row in rows if (record := _submission_from_row(row)) is not None]
+        return [record for row in rows if (record := _submission_from_row(row, self._privacy)) is not None]
 
     async def list_review_cases(self, guild_id: int, *, limit: int = 25) -> list[dict[str, Any]]:
         async with self._pool.acquire() as conn:
@@ -1735,59 +2606,74 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
         normalized = normalize_author_link(record)
         if normalized is None:
             return
+        row = self._encode_author_link_row(normalized)
         async with self._io_lock:
             async with self._pool.acquire() as conn:
                 await conn.execute(
                     (
-                        "INSERT INTO confession_author_links (submission_id, guild_id, author_user_id, created_at) "
-                        "VALUES ($1, $2, $3, $4) "
+                        f"INSERT INTO {SECURE_AUTHOR_LINK_TABLE} (submission_id, guild_id, author_lookup_hash, author_identity_ciphertext, created_at) "
+                        "VALUES ($1, $2, $3, $4, $5) "
                         "ON CONFLICT (submission_id) DO UPDATE SET "
-                        "guild_id = EXCLUDED.guild_id, author_user_id = EXCLUDED.author_user_id, created_at = EXCLUDED.created_at"
+                        "guild_id = EXCLUDED.guild_id, "
+                        "author_lookup_hash = EXCLUDED.author_lookup_hash, "
+                        "author_identity_ciphertext = EXCLUDED.author_identity_ciphertext, "
+                        "created_at = EXCLUDED.created_at"
                     ),
-                    normalized["submission_id"],
-                    normalized["guild_id"],
-                    normalized["author_user_id"],
-                    _parse_datetime(normalized["created_at"]),
+                    row["submission_id"],
+                    row["guild_id"],
+                    row["author_lookup_hash"],
+                    row["author_identity_ciphertext"],
+                    _parse_datetime(row["created_at"]),
                 )
+                await conn.execute("DELETE FROM confession_author_links WHERE submission_id = $1", row["submission_id"])
 
     async def fetch_author_link(self, submission_id: str) -> dict[str, Any] | None:
         async with self._pool.acquire() as conn:
+            secure_row = await conn.fetchrow(
+                f"SELECT submission_id, guild_id, author_lookup_hash, author_identity_ciphertext, created_at FROM {SECURE_AUTHOR_LINK_TABLE} WHERE submission_id = $1",
+                submission_id,
+            )
+            if secure_row is not None:
+                return _author_link_from_secure_row(secure_row, self._privacy)
             row = await conn.fetchrow(
                 "SELECT submission_id, guild_id, author_user_id, created_at FROM confession_author_links WHERE submission_id = $1",
                 submission_id,
             )
-        return _author_link_from_row(row)
+        return _author_link_from_legacy_row(row)
 
     async def upsert_private_media(self, record: dict[str, Any]):
         normalized = normalize_private_media(record)
         if normalized is None:
             return
+        row = self._encode_private_media_row(normalized)
         async with self._io_lock:
             async with self._pool.acquire() as conn:
                 await conn.execute(
                     (
-                        "INSERT INTO confession_private_media (submission_id, guild_id, attachment_urls, created_at, updated_at) "
-                        "VALUES ($1, $2, $3::jsonb, $4, $5) "
+                        "INSERT INTO confession_private_media (submission_id, guild_id, attachment_urls, attachment_payload, created_at, updated_at) "
+                        "VALUES ($1, $2, $3::jsonb, $4, $5, $6) "
                         "ON CONFLICT (submission_id) DO UPDATE SET "
                         "guild_id = EXCLUDED.guild_id, "
                         "attachment_urls = EXCLUDED.attachment_urls, "
+                        "attachment_payload = EXCLUDED.attachment_payload, "
                         "created_at = EXCLUDED.created_at, "
                         "updated_at = EXCLUDED.updated_at"
                     ),
-                    normalized["submission_id"],
-                    normalized["guild_id"],
-                    json.dumps(normalized["attachment_urls"]),
-                    _parse_datetime(normalized["created_at"]),
-                    _parse_datetime(normalized["updated_at"]),
+                    row["submission_id"],
+                    row["guild_id"],
+                    json.dumps(row["attachment_urls"]),
+                    row["attachment_payload"],
+                    _parse_datetime(row["created_at"]),
+                    _parse_datetime(row["updated_at"]),
                 )
 
     async def fetch_private_media(self, submission_id: str) -> dict[str, Any] | None:
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
-                "SELECT submission_id, guild_id, attachment_urls, created_at, updated_at FROM confession_private_media WHERE submission_id = $1",
+                "SELECT submission_id, guild_id, attachment_urls, attachment_payload, created_at, updated_at FROM confession_private_media WHERE submission_id = $1",
                 submission_id,
             )
-        return _private_media_from_row(row)
+        return _private_media_from_row(row, self._privacy)
 
     async def delete_private_media(self, submission_id: str):
         async with self._io_lock:
@@ -1798,18 +2684,19 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
         normalized = normalize_owner_reply_opportunity(record)
         if normalized is None:
             return
+        row = self._encode_owner_reply_opportunity_row(normalized)
         async with self._io_lock:
             async with self._pool.acquire() as conn:
                 await conn.execute(
                     (
                         "INSERT INTO confession_owner_reply_opportunities ("
                         "opportunity_id, guild_id, root_submission_id, root_confession_id, referenced_submission_id, "
-                        "source_channel_id, source_message_id, source_author_user_id, source_author_name, source_preview, source_message_fingerprint, status, notification_status, "
+                        "source_channel_id, source_message_id, source_author_user_id, source_author_lookup_hash, source_author_name, source_preview, source_message_fingerprint, private_payload, status, notification_status, "
                         "notification_channel_id, notification_message_id, created_at, expires_at, notified_at, resolved_at"
                         ") VALUES ("
                         "$1, $2, $3, $4, $5, "
-                        "$6, $7, $8, $9, $10, $11, $12, $13, "
-                        "$14, $15, $16, $17, $18, $19"
+                        "$6, $7, $8, $9, $10, $11, $12, $13, $14, "
+                        "$15, $16, $17, $18, $19, $20, $21"
                         ") "
                         "ON CONFLICT (opportunity_id) DO UPDATE SET "
                         "guild_id = EXCLUDED.guild_id, "
@@ -1819,9 +2706,11 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                         "source_channel_id = EXCLUDED.source_channel_id, "
                         "source_message_id = EXCLUDED.source_message_id, "
                         "source_author_user_id = EXCLUDED.source_author_user_id, "
+                        "source_author_lookup_hash = EXCLUDED.source_author_lookup_hash, "
                         "source_author_name = EXCLUDED.source_author_name, "
                         "source_preview = EXCLUDED.source_preview, "
                         "source_message_fingerprint = EXCLUDED.source_message_fingerprint, "
+                        "private_payload = EXCLUDED.private_payload, "
                         "status = EXCLUDED.status, "
                         "notification_status = EXCLUDED.notification_status, "
                         "notification_channel_id = EXCLUDED.notification_channel_id, "
@@ -1831,25 +2720,27 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                         "notified_at = EXCLUDED.notified_at, "
                         "resolved_at = EXCLUDED.resolved_at"
                     ),
-                    normalized["opportunity_id"],
-                    normalized["guild_id"],
-                    normalized["root_submission_id"],
-                    normalized["root_confession_id"],
-                    normalized["referenced_submission_id"],
-                    normalized["source_channel_id"],
-                    normalized["source_message_id"],
-                    normalized["source_author_user_id"],
-                    normalized["source_author_name"],
-                    normalized["source_preview"],
-                    normalized["source_message_fingerprint"],
-                    normalized["status"],
-                    normalized["notification_status"],
-                    normalized["notification_channel_id"],
-                    normalized["notification_message_id"],
-                    _parse_datetime(normalized["created_at"]),
-                    _parse_datetime(normalized["expires_at"]),
-                    _parse_datetime(normalized["notified_at"]),
-                    _parse_datetime(normalized["resolved_at"]),
+                    row["opportunity_id"],
+                    row["guild_id"],
+                    row["root_submission_id"],
+                    row["root_confession_id"],
+                    row["referenced_submission_id"],
+                    row["source_channel_id"],
+                    row["source_message_id"],
+                    row["source_author_user_id"],
+                    row["source_author_lookup_hash"],
+                    row["source_author_name"],
+                    row["source_preview"],
+                    row["source_message_fingerprint"],
+                    row["private_payload"],
+                    row["status"],
+                    row["notification_status"],
+                    row["notification_channel_id"],
+                    row["notification_message_id"],
+                    _parse_datetime(row["created_at"]),
+                    _parse_datetime(row["expires_at"]),
+                    _parse_datetime(row["notified_at"]),
+                    _parse_datetime(row["resolved_at"]),
                 )
 
     async def fetch_owner_reply_opportunity(self, opportunity_id: str) -> dict[str, Any] | None:
@@ -1858,7 +2749,7 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                 "SELECT * FROM confession_owner_reply_opportunities WHERE opportunity_id = $1",
                 opportunity_id,
             )
-        return _owner_reply_opportunity_from_row(row)
+        return _owner_reply_opportunity_from_row(row, self._privacy)
 
     async def fetch_owner_reply_opportunity_by_source_message_id(self, guild_id: int, source_message_id: int) -> dict[str, Any] | None:
         async with self._pool.acquire() as conn:
@@ -1867,7 +2758,7 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                 guild_id,
                 source_message_id,
             )
-        return _owner_reply_opportunity_from_row(row)
+        return _owner_reply_opportunity_from_row(row, self._privacy)
 
     async def fetch_owner_reply_opportunity_by_notification_message_id(self, notification_message_id: int) -> dict[str, Any] | None:
         async with self._pool.acquire() as conn:
@@ -1875,7 +2766,7 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                 "SELECT * FROM confession_owner_reply_opportunities WHERE notification_message_id = $1",
                 notification_message_id,
             )
-        return _owner_reply_opportunity_from_row(row)
+        return _owner_reply_opportunity_from_row(row, self._privacy)
 
     async def fetch_pending_owner_reply_opportunity_for_path(
         self,
@@ -1884,20 +2775,28 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
         referenced_submission_id: str,
         source_author_user_id: int,
     ) -> dict[str, Any] | None:
+        source_lookup_hashes = list(
+            self._privacy.blind_index_candidates(
+                label="owner-reply-source-author",
+                guild_id=guild_id,
+                value=source_author_user_id,
+            )
+        )
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
                 (
                     "SELECT * FROM confession_owner_reply_opportunities "
                     "WHERE guild_id = $1 AND root_submission_id = $2 AND referenced_submission_id = $3 "
-                    "AND source_author_user_id = $4 AND status = 'pending' "
+                    "AND (source_author_lookup_hash = ANY($4::text[]) OR source_author_user_id = $5) AND status = 'pending' "
                     "ORDER BY created_at DESC LIMIT 1"
                 ),
                 guild_id,
                 root_submission_id,
                 referenced_submission_id,
+                source_lookup_hashes,
                 source_author_user_id,
             )
-        return _owner_reply_opportunity_from_row(row)
+        return _owner_reply_opportunity_from_row(row, self._privacy)
 
     async def list_pending_owner_reply_opportunities_for_author(
         self,
@@ -1906,20 +2805,30 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
         *,
         limit: int = 5,
     ) -> list[dict[str, Any]]:
+        author_lookup_hashes = list(
+            self._privacy.blind_index_candidates(label="author-link", guild_id=guild_id, value=author_user_id)
+        )
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 (
+                    "SELECT * FROM ("
+                    "SELECT o.* "
+                    "FROM confession_owner_reply_opportunities o "
+                    f"JOIN {SECURE_AUTHOR_LINK_TABLE} a ON a.submission_id = o.root_submission_id "
+                    "WHERE o.guild_id = $1 AND a.author_lookup_hash = ANY($2::text[]) AND o.status = 'pending' "
+                    "UNION ALL "
                     "SELECT o.* "
                     "FROM confession_owner_reply_opportunities o "
                     "JOIN confession_author_links a ON a.submission_id = o.root_submission_id "
-                    "WHERE o.guild_id = $1 AND a.author_user_id = $2 AND o.status = 'pending' "
-                    "ORDER BY o.created_at DESC LIMIT $3"
+                    f"WHERE o.guild_id = $1 AND a.author_user_id = $3 AND o.status = 'pending' AND NOT EXISTS (SELECT 1 FROM {SECURE_AUTHOR_LINK_TABLE} sa WHERE sa.submission_id = a.submission_id)"
+                    ") owner_rows ORDER BY created_at DESC LIMIT $4"
                 ),
                 guild_id,
+                author_lookup_hashes,
                 author_user_id,
                 limit,
             )
-        return [record for row in rows if (record := _owner_reply_opportunity_from_row(row)) is not None]
+        return [record for row in rows if (record := _owner_reply_opportunity_from_row(row, self._privacy)) is not None]
 
     async def list_owner_reply_opportunities_for_root_submission(
         self,
@@ -1937,7 +2846,7 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                 root_submission_id,
                 limit,
             )
-        return [record for row in rows if (record := _owner_reply_opportunity_from_row(row)) is not None]
+        return [record for row in rows if (record := _owner_reply_opportunity_from_row(row, self._privacy)) is not None]
 
     async def list_owner_reply_opportunities_for_submission(
         self,
@@ -1955,7 +2864,7 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                 submission_id,
                 limit,
             )
-        return [record for row in rows if (record := _owner_reply_opportunity_from_row(row)) is not None]
+        return [record for row in rows if (record := _owner_reply_opportunity_from_row(row, self._privacy)) is not None]
 
     async def list_owner_reply_opportunities_for_responder_path(
         self,
@@ -1966,21 +2875,29 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
         *,
         limit: int = 25,
     ) -> list[dict[str, Any]]:
+        source_lookup_hashes = list(
+            self._privacy.blind_index_candidates(
+                label="owner-reply-source-author",
+                guild_id=guild_id,
+                value=source_author_user_id,
+            )
+        )
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 (
                     "SELECT * FROM confession_owner_reply_opportunities "
                     "WHERE guild_id = $1 AND root_submission_id = $2 AND referenced_submission_id = $3 "
-                    "AND source_author_user_id = $4 "
-                    "ORDER BY created_at DESC LIMIT $5"
+                    "AND (source_author_lookup_hash = ANY($4::text[]) OR source_author_user_id = $5) "
+                    "ORDER BY created_at DESC LIMIT $6"
                 ),
                 guild_id,
                 root_submission_id,
                 referenced_submission_id,
+                source_lookup_hashes,
                 source_author_user_id,
                 limit,
             )
-        return [record for row in rows if (record := _owner_reply_opportunity_from_row(row)) is not None]
+        return [record for row in rows if (record := _owner_reply_opportunity_from_row(row, self._privacy)) is not None]
 
     async def list_owner_reply_opportunities_for_source_author(
         self,
@@ -1989,18 +2906,26 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
         *,
         limit: int = 25,
     ) -> list[dict[str, Any]]:
+        source_lookup_hashes = list(
+            self._privacy.blind_index_candidates(
+                label="owner-reply-source-author",
+                guild_id=guild_id,
+                value=source_author_user_id,
+            )
+        )
         async with self._pool.acquire() as conn:
             rows = await conn.fetch(
                 (
                     "SELECT * FROM confession_owner_reply_opportunities "
-                    "WHERE guild_id = $1 AND source_author_user_id = $2 "
-                    "ORDER BY created_at DESC LIMIT $3"
+                    "WHERE guild_id = $1 AND (source_author_lookup_hash = ANY($2::text[]) OR source_author_user_id = $3) "
+                    "ORDER BY created_at DESC LIMIT $4"
                 ),
                 guild_id,
+                source_lookup_hashes,
                 source_author_user_id,
                 limit,
             )
-        return [record for row in rows if (record := _owner_reply_opportunity_from_row(row)) is not None]
+        return [record for row in rows if (record := _owner_reply_opportunity_from_row(row, self._privacy)) is not None]
 
     async def claim_owner_reply_opportunity(self, opportunity_id: str) -> dict[str, Any] | None:
         async with self._io_lock:
@@ -2014,7 +2939,7 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                     ),
                     opportunity_id,
                 )
-        return _owner_reply_opportunity_from_row(row)
+        return _owner_reply_opportunity_from_row(row, self._privacy)
 
     async def release_owner_reply_opportunity(self, opportunity_id: str) -> dict[str, Any] | None:
         async with self._io_lock:
@@ -2028,33 +2953,43 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                     ),
                     opportunity_id,
                 )
-        return _owner_reply_opportunity_from_row(row)
+        return _owner_reply_opportunity_from_row(row, self._privacy)
 
     async def fetch_enforcement_state(self, guild_id: int, user_id: int) -> dict[str, Any] | None:
+        lookup_hashes = list(self._privacy.blind_index_candidates(label="enforcement-state", guild_id=guild_id, value=user_id))
         async with self._pool.acquire() as conn:
+            secure_row = await conn.fetchrow(
+                f"SELECT * FROM {SECURE_ENFORCEMENT_TABLE} WHERE guild_id = $1 AND user_lookup_hash = ANY($2::text[])",
+                guild_id,
+                lookup_hashes,
+            )
+            if secure_row is not None:
+                return _enforcement_from_secure_row(secure_row, self._privacy)
             row = await conn.fetchrow(
                 "SELECT * FROM confession_enforcement_states WHERE guild_id = $1 AND user_id = $2",
                 guild_id,
                 user_id,
             )
-        return _enforcement_from_row(row)
+        return _enforcement_from_legacy_row(row)
 
     async def upsert_enforcement_state(self, record: dict[str, Any]):
         normalized = normalize_enforcement_state(record)
         if normalized is None:
             return
+        row = self._encode_enforcement_state_row(normalized)
         async with self._io_lock:
             async with self._pool.acquire() as conn:
                 await conn.execute(
                     (
-                        "INSERT INTO confession_enforcement_states ("
-                        "guild_id, user_id, active_restriction, restricted_until, is_permanent_ban, strike_count, last_strike_at, cooldown_until, "
+                        f"INSERT INTO {SECURE_ENFORCEMENT_TABLE} ("
+                        "guild_id, user_lookup_hash, user_identity_ciphertext, active_restriction, restricted_until, is_permanent_ban, strike_count, last_strike_at, cooldown_until, "
                         "burst_count, burst_window_started_at, last_case_id, image_restriction_active, image_restricted_until, image_restriction_case_id, updated_at"
                         ") VALUES ("
-                        "$1, $2, $3, $4, $5, $6, $7, $8, "
-                        "$9, $10, $11, $12, $13, $14, $15"
+                        "$1, $2, $3, $4, $5, $6, $7, $8, $9, "
+                        "$10, $11, $12, $13, $14, $15, $16"
                         ") "
-                        "ON CONFLICT (guild_id, user_id) DO UPDATE SET "
+                        "ON CONFLICT (guild_id, user_lookup_hash) DO UPDATE SET "
+                        "user_identity_ciphertext = EXCLUDED.user_identity_ciphertext, "
                         "active_restriction = EXCLUDED.active_restriction, "
                         "restricted_until = EXCLUDED.restricted_until, "
                         "is_permanent_ban = EXCLUDED.is_permanent_ban, "
@@ -2069,21 +3004,27 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                         "image_restriction_case_id = EXCLUDED.image_restriction_case_id, "
                         "updated_at = EXCLUDED.updated_at"
                     ),
+                    row["guild_id"],
+                    row["user_lookup_hash"],
+                    row["user_identity_ciphertext"],
+                    row["active_restriction"],
+                    _parse_datetime(row["restricted_until"]),
+                    row["is_permanent_ban"],
+                    row["strike_count"],
+                    _parse_datetime(row["last_strike_at"]),
+                    _parse_datetime(row["cooldown_until"]),
+                    row["burst_count"],
+                    _parse_datetime(row["burst_window_started_at"]),
+                    row["last_case_id"],
+                    row["image_restriction_active"],
+                    _parse_datetime(row["image_restricted_until"]),
+                    row["image_restriction_case_id"],
+                    _parse_datetime(row["updated_at"]),
+                )
+                await conn.execute(
+                    "DELETE FROM confession_enforcement_states WHERE guild_id = $1 AND user_id = $2",
                     normalized["guild_id"],
                     normalized["user_id"],
-                    normalized["active_restriction"],
-                    _parse_datetime(normalized["restricted_until"]),
-                    normalized["is_permanent_ban"],
-                    normalized["strike_count"],
-                    _parse_datetime(normalized["last_strike_at"]),
-                    _parse_datetime(normalized["cooldown_until"]),
-                    normalized["burst_count"],
-                    _parse_datetime(normalized["burst_window_started_at"]),
-                    normalized["last_case_id"],
-                    normalized["image_restriction_active"],
-                    _parse_datetime(normalized["image_restricted_until"]),
-                    normalized["image_restriction_case_id"],
-                    _parse_datetime(normalized["updated_at"]),
                 )
 
     async def list_review_queues(self) -> list[dict[str, Any]]:
@@ -2105,7 +3046,8 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                 (
                     "SELECT "
                     "c.case_id, c.case_kind, c.status, c.review_version, "
-                    "s.confession_id, s.submission_kind, s.reply_flow, s.owner_reply_generation, s.parent_confession_id, s.staff_preview, s.flag_codes, s.attachment_meta, s.shared_link_url, s.created_at "
+                    "s.submission_id, s.guild_id, s.confession_id, s.submission_kind, s.reply_flow, s.owner_reply_generation, s.parent_confession_id, "
+                    "s.staff_preview, s.content_body, s.shared_link_url, s.content_ciphertext, s.flag_codes, s.attachment_meta, s.created_at "
                     "FROM confession_cases c "
                     "JOIN confession_submissions s ON s.submission_id = c.submission_id "
                     "WHERE c.guild_id = $1 AND c.status = 'open' AND c.case_kind = 'review' AND s.status = 'queued' "
@@ -2116,6 +3058,18 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
             )
         surfaces = []
         for row in rows:
+            payload = _decrypt_payload(
+                self._privacy,
+                label="review surface submission content",
+                domain="submission-content",
+                aad_fields={
+                    "guild_id": row["guild_id"],
+                    "submission_id": row["submission_id"],
+                    "confession_id": row["confession_id"],
+                },
+                envelope=row.get("content_ciphertext"),
+                key_domain="content",
+            ) or {}
             surfaces.append(
                 {
                     "case_id": row["case_id"],
@@ -2127,10 +3081,10 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                     "reply_flow": row.get("reply_flow"),
                     "owner_reply_generation": row.get("owner_reply_generation"),
                     "parent_confession_id": row["parent_confession_id"],
-                    "staff_preview": row["staff_preview"],
+                    "staff_preview": payload.get("staff_preview", row["staff_preview"]),
                     "flag_codes": decode_postgres_json_array(row["flag_codes"], label="confession_submissions.flag_codes"),
                     "attachment_meta": decode_postgres_json_array(row["attachment_meta"], label="confession_submissions.attachment_meta"),
-                    "shared_link_url": row["shared_link_url"],
+                    "shared_link_url": payload.get("shared_link_url", row["shared_link_url"]),
                     "created_at": _serialize_datetime(row["created_at"]),
                 }
             )
@@ -2186,6 +3140,237 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
             "open_moderation_cases": open_case_counts.get("published_moderation", 0),
         }
 
+    async def fetch_privacy_status(self, guild_id: int | None = None) -> dict[str, Any]:
+        status = _empty_privacy_status(scope="guild" if guild_id is not None else "global", guild_id=guild_id)
+        where_clause = " WHERE guild_id = $1" if guild_id is not None else ""
+        params: tuple[Any, ...] = (guild_id,) if guild_id is not None else ()
+        async with self._pool.acquire() as conn:
+            submission_rows = await conn.fetch(
+                (
+                    "SELECT guild_id, staff_preview, content_body, shared_link_url, content_ciphertext, "
+                    "content_fingerprint, similarity_key, fuzzy_signature "
+                    "FROM confession_submissions"
+                    f"{where_clause}"
+                ),
+                *params,
+            )
+            private_media_rows = await conn.fetch(
+                (
+                    "SELECT guild_id, attachment_urls, attachment_payload "
+                    "FROM confession_private_media"
+                    f"{where_clause}"
+                ),
+                *params,
+            )
+            secure_author_rows = await conn.fetch(
+                (
+                    f"SELECT guild_id, author_lookup_hash, author_identity_ciphertext FROM {SECURE_AUTHOR_LINK_TABLE}"
+                    f"{where_clause}"
+                ),
+                *params,
+            )
+            legacy_author_rows = await conn.fetch(
+                f"SELECT guild_id FROM confession_author_links{where_clause}",
+                *params,
+            )
+            owner_reply_rows = await conn.fetch(
+                (
+                    "SELECT guild_id, source_author_user_id, source_author_lookup_hash, source_author_name, "
+                    "source_preview, source_message_fingerprint, private_payload "
+                    "FROM confession_owner_reply_opportunities"
+                    f"{where_clause}"
+                ),
+                *params,
+            )
+            secure_enforcement_rows = await conn.fetch(
+                (
+                    f"SELECT guild_id, user_lookup_hash, user_identity_ciphertext FROM {SECURE_ENFORCEMENT_TABLE}"
+                    f"{where_clause}"
+                ),
+                *params,
+            )
+            legacy_enforcement_rows = await conn.fetch(
+                f"SELECT guild_id FROM confession_enforcement_states{where_clause}",
+                *params,
+            )
+        for row in submission_rows:
+            _apply_privacy_categories(status, _submission_privacy_categories(row, self._privacy))
+        for row in private_media_rows:
+            _apply_privacy_categories(status, _private_media_privacy_categories(row, self._privacy))
+        for row in secure_author_rows:
+            _apply_privacy_categories(status, _author_link_privacy_categories(row, self._privacy))
+        for _ in legacy_author_rows:
+            _apply_privacy_categories(status, {"legacy_author_links"})
+        for row in owner_reply_rows:
+            _apply_privacy_categories(status, _owner_reply_privacy_categories(row, self._privacy))
+        for row in secure_enforcement_rows:
+            _apply_privacy_categories(status, _enforcement_privacy_categories(row, self._privacy))
+        for _ in legacy_enforcement_rows:
+            _apply_privacy_categories(status, {"legacy_enforcement_rows"})
+        return _finalize_privacy_status(status)
+
+    async def run_privacy_backfill(self, *, apply: bool, batch_size: int = 100) -> dict[str, Any]:
+        summary = {
+            "mode": "apply" if apply else "dry-run",
+            "submissions": 0,
+            "private_media": 0,
+            "author_links": 0,
+            "owner_reply_opportunities": 0,
+            "enforcement_states": 0,
+            "batch_size": batch_size,
+        }
+        active_content_prefix = self._privacy.active_envelope_prefix(key_domain="content")
+        active_identity_prefix = self._privacy.active_envelope_prefix(key_domain="identity")
+        active_blind_prefix = self._privacy.active_blind_index_prefix()
+        active_exact_prefix = self._privacy.active_exact_duplicate_hash_prefix()
+        active_fuzzy_prefix = self._privacy.active_fuzzy_signature_prefix()
+        async with self._pool.acquire() as conn:
+            submission_rows = await conn.fetch(
+                (
+                    "SELECT * FROM confession_submissions "
+                    "WHERE staff_preview IS NOT NULL OR content_body IS NOT NULL OR shared_link_url IS NOT NULL OR similarity_key IS NOT NULL "
+                    "OR (content_ciphertext IS NOT NULL AND content_ciphertext NOT LIKE $1) "
+                    "OR (content_fingerprint IS NOT NULL AND content_fingerprint NOT LIKE $2) "
+                    "OR (fuzzy_signature IS NOT NULL AND fuzzy_signature NOT LIKE $3) "
+                    "ORDER BY created_at ASC LIMIT $4"
+                ),
+                active_content_prefix + "%",
+                active_exact_prefix + "%",
+                active_fuzzy_prefix + "%",
+                batch_size,
+            )
+            private_media_rows = await conn.fetch(
+                (
+                    "SELECT submission_id, guild_id, attachment_urls, attachment_payload, created_at, updated_at "
+                    "FROM confession_private_media "
+                    "WHERE attachment_urls <> '[]'::jsonb "
+                    "OR (attachment_payload IS NOT NULL AND attachment_payload NOT LIKE $1) "
+                    "ORDER BY updated_at ASC LIMIT $2"
+                ),
+                active_content_prefix + "%",
+                batch_size,
+            )
+            author_link_rows = await conn.fetch(
+                (
+                    "SELECT submission_id, guild_id, author_user_id, created_at "
+                    "FROM confession_author_links legacy "
+                    f"WHERE NOT EXISTS (SELECT 1 FROM {SECURE_AUTHOR_LINK_TABLE} secure WHERE secure.submission_id = legacy.submission_id) "
+                    "ORDER BY created_at ASC LIMIT $1"
+                ),
+                batch_size,
+            )
+            secure_author_rows = await conn.fetch(
+                (
+                    f"SELECT submission_id, guild_id, author_lookup_hash, author_identity_ciphertext, created_at "
+                    f"FROM {SECURE_AUTHOR_LINK_TABLE} "
+                    "WHERE author_lookup_hash NOT LIKE $1 OR author_identity_ciphertext NOT LIKE $2 "
+                    "ORDER BY created_at ASC LIMIT $3"
+                ),
+                active_blind_prefix + "%",
+                active_identity_prefix + "%",
+                batch_size,
+            )
+            owner_reply_rows = await conn.fetch(
+                (
+                    "SELECT * FROM confession_owner_reply_opportunities "
+                    "WHERE source_author_user_id IS NOT NULL "
+                    "OR source_message_fingerprint IS NOT NULL "
+                    "OR source_author_name IS DISTINCT FROM $1 "
+                    "OR source_preview IS DISTINCT FROM $2 "
+                    "OR private_payload IS NULL "
+                    "OR (source_author_lookup_hash IS NOT NULL AND source_author_lookup_hash NOT LIKE $3) "
+                    "OR (private_payload IS NOT NULL AND private_payload NOT LIKE $4) "
+                    "ORDER BY created_at ASC LIMIT $5"
+                ),
+                PROTECTED_OWNER_REPLY_NAME,
+                PROTECTED_OWNER_REPLY_PREVIEW,
+                active_blind_prefix + "%",
+                active_content_prefix + "%",
+                batch_size,
+            )
+            enforcement_rows = await conn.fetch(
+                (
+                    "SELECT * FROM confession_enforcement_states "
+                    "ORDER BY COALESCE(updated_at, timezone('utc', now())) ASC LIMIT $1"
+                ),
+                batch_size,
+            )
+            secure_enforcement_rows = await conn.fetch(
+                (
+                    f"SELECT * FROM {SECURE_ENFORCEMENT_TABLE} "
+                    "WHERE user_lookup_hash NOT LIKE $1 OR user_identity_ciphertext NOT LIKE $2 "
+                    "ORDER BY COALESCE(updated_at, timezone('utc', now())) ASC LIMIT $3"
+                ),
+                active_blind_prefix + "%",
+                active_identity_prefix + "%",
+                batch_size,
+            )
+        summary["submissions"] = len(submission_rows)
+        summary["private_media"] = len(private_media_rows)
+        summary["author_links"] = len(author_link_rows) + len(secure_author_rows)
+        summary["owner_reply_opportunities"] = len(owner_reply_rows)
+        summary["enforcement_states"] = len(enforcement_rows) + len(secure_enforcement_rows)
+        if not apply:
+            summary["privacy_status"] = await self.fetch_privacy_status()
+            return summary
+
+        for row in submission_rows:
+            normalized = _submission_from_row(row, self._privacy)
+            if normalized is None:
+                continue
+            if _submission_requires_sensitive_payload(normalized):
+                await self.upsert_submission(_backfill_submission_duplicate_fields(self._privacy, normalized))
+            else:
+                terminal = _backfill_submission_duplicate_fields(self._privacy, normalized)
+                terminal["staff_preview"] = None
+                terminal["content_body"] = None
+                terminal["shared_link_url"] = None
+                terminal["attachment_meta"] = []
+                await self.upsert_submission(terminal)
+                await self.delete_private_media(terminal["submission_id"])
+
+        for row in private_media_rows:
+            normalized = _private_media_from_row(row, self._privacy)
+            if normalized is None:
+                continue
+            submission = await self.fetch_submission(normalized["submission_id"])
+            if submission is not None and not _submission_requires_sensitive_payload(submission):
+                await self.delete_private_media(normalized["submission_id"])
+                continue
+            await self.upsert_private_media(normalized)
+
+        for row in author_link_rows:
+            normalized = normalize_author_link(
+                {
+                    "submission_id": row["submission_id"],
+                    "guild_id": row["guild_id"],
+                    "author_user_id": row["author_user_id"],
+                    "created_at": row["created_at"],
+                }
+            )
+            if normalized is not None:
+                await self.upsert_author_link(normalized)
+        for row in secure_author_rows:
+            normalized = _author_link_from_secure_row(row, self._privacy)
+            if normalized is not None:
+                await self.upsert_author_link(normalized)
+
+        for row in owner_reply_rows:
+            normalized = _owner_reply_opportunity_from_row(row, self._privacy)
+            if normalized is not None:
+                await self.upsert_owner_reply_opportunity(normalized)
+
+        for row in enforcement_rows:
+            normalized = _enforcement_from_legacy_row(row)
+            if normalized is not None:
+                await self.upsert_enforcement_state(normalized)
+        for row in secure_enforcement_rows:
+            normalized = _enforcement_from_secure_row(row, self._privacy)
+            if normalized is not None:
+                await self.upsert_enforcement_state(normalized)
+        summary["privacy_status"] = await self.fetch_privacy_status()
+        return summary
+
 
 class ConfessionsStore:
     def __init__(self, *, backend: str | None = None, database_url: str | None = None):
@@ -2193,6 +3378,10 @@ class ConfessionsStore:
         self.database_url, self.database_url_source = _resolve_database_url(database_url)
         self.backend_preference = requested_backend
         self.backend_name = requested_backend
+        try:
+            self.privacy = ConfessionsCrypto.from_environment(backend_name=requested_backend)
+        except ConfessionsKeyConfigError as exc:
+            raise ConfessionsStorageUnavailable(str(exc)) from exc
         self._store: _BaseConfessionsStore | None = None
         self._construct_store(requested_backend)
 
@@ -2201,16 +3390,17 @@ class ConfessionsStore:
             "Confessions storage init: "
             f"backend_preference={requested_backend}, "
             f"database_url_configured={'yes' if self.database_url else 'no'}, "
-            f"database_url_source={self.database_url_source or 'none'}"
+            f"database_url_source={self.database_url_source or 'none'}, "
+            f"privacy_source={'ephemeral' if self.privacy.status.ephemeral else 'environment'}"
         )
         if requested_backend in {"memory", "test", "dev"}:
-            self._store = _MemoryConfessionsStore()
+            self._store = _MemoryConfessionsStore(self.privacy)
         elif requested_backend in {"postgres", "postgresql", "supabase", "auto"}:
             if not self.database_url:
                 raise ConfessionsStorageUnavailable(
                     "No Postgres confessions database URL is configured. Set UTILITY_DATABASE_URL, SUPABASE_DB_URL, or DATABASE_URL."
                 )
-            self._store = _PostgresConfessionsStore(self.database_url)
+            self._store = _PostgresConfessionsStore(self.database_url, self.privacy)
         else:
             raise ConfessionsStorageUnavailable(f"Unsupported confessions storage backend '{requested_backend}'.")
         self.backend_name = self._store.backend_name
@@ -2386,6 +3576,12 @@ class ConfessionsStore:
 
     async def fetch_guild_counts(self, guild_id: int) -> dict[str, int]:
         return await self._store.fetch_guild_counts(guild_id)
+
+    async def fetch_privacy_status(self, guild_id: int | None = None) -> dict[str, Any]:
+        return await self._store.fetch_privacy_status(guild_id)
+
+    async def run_privacy_backfill(self, *, apply: bool, batch_size: int = 100) -> dict[str, Any]:
+        return await self._store.run_privacy_backfill(apply=apply, batch_size=batch_size)
 
     def redacted_database_url(self) -> str:
         return _redact_database_url(self.database_url)

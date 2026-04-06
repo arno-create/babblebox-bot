@@ -8,7 +8,6 @@ import secrets
 import time
 from dataclasses import dataclass
 from datetime import timedelta
-from difflib import SequenceMatcher
 from typing import Any, Iterable, Sequence
 from urllib.parse import urlsplit, urlunsplit
 
@@ -16,10 +15,16 @@ import discord
 from discord.ext import commands
 
 from babblebox import game_engine as ge
+from babblebox.confessions_privacy import (
+    build_duplicate_signals,
+    fuzzy_signature_ratio,
+    legacy_similarity_ratio,
+)
 from babblebox.confessions_store import (
     ConfessionsStorageUnavailable,
     ConfessionsStore,
     DISCORD_MEDIA_HOSTS,
+    PRIVACY_CATEGORY_LABELS,
     default_confession_config,
     default_enforcement_state,
     normalize_confession_config,
@@ -103,7 +108,6 @@ TRUSTED_MAINSTREAM_DOMAINS = {
     "mozilla.org",
 }
 
-TOKEN_RE = re.compile(r"[a-z0-9']+")
 RAW_MENTION_RE = re.compile(r"(?i)<\s*[@#][!&]?\s*\d+\s*>|@\s*(?:everyone|here)")
 LOW_SIGNAL_RE = re.compile(r"(?i)^(?:[a-z0-9]\s*){1,3}$")
 REPEATED_CHAR_RE = re.compile(r"(.)\1{7,}")
@@ -320,56 +324,6 @@ def _owner_reply_opportunity_age_text(iso_value: str | None) -> str:
     return f"{hours} {noun} ago"
 
 
-def _tokens(text: str) -> list[str]:
-    return TOKEN_RE.findall(text.casefold())
-
-
-def _canonical_duplicate_text(text: str, attachment_meta: Sequence[dict[str, Any]], shared_link_url: str | None = None) -> str:
-    lowered = normalize_plain_text(text).casefold()
-    shared_link = normalize_plain_text(shared_link_url).casefold() if shared_link_url else ""
-    attachment_signature = " ".join(str(item.get("kind") or "").casefold() for item in attachment_meta)
-    attachment_count = f"attachments:{len(attachment_meta)}" if attachment_meta else ""
-    return normalize_plain_text(f"{lowered} {shared_link} {attachment_signature} {attachment_count}").casefold()
-
-
-def _fingerprint_text(
-    text: str,
-    attachment_meta: Sequence[dict[str, Any]],
-    shared_link_url: str | None = None,
-) -> tuple[str | None, str | None, str | None]:
-    canonical = _canonical_duplicate_text(text, attachment_meta, shared_link_url)
-    if not canonical:
-        return None, None, None
-    fingerprint = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:32]
-    similarity = " ".join(_tokens(canonical)[:24])[:160] or canonical[:160]
-    signature_tokens = _tokens(canonical)
-    if len(signature_tokens) > 1:
-        signature_tokens.extend(f"{left}|{right}" for left, right in zip(signature_tokens, signature_tokens[1:]))
-    signature_tokens = signature_tokens[:64]
-    vector = [0] * 64
-    for token in signature_tokens:
-        bits = int.from_bytes(hashlib.sha256(token.encode("utf-8")).digest()[:8], "big")
-        for index in range(64):
-            weight = 1 if bits & (1 << index) else -1
-            vector[index] += weight
-    fuzzy_value = 0
-    for index, score in enumerate(vector):
-        if score >= 0:
-            fuzzy_value |= 1 << index
-    fuzzy_signature = f"{fuzzy_value:016x}" if signature_tokens else None
-    return fingerprint, similarity, fuzzy_signature
-
-
-def _fuzzy_signature_ratio(left: str, right: str) -> float:
-    try:
-        left_bits = int(left, 16)
-        right_bits = int(right, 16)
-    except ValueError:
-        return 0.0
-    distance = bin(left_bits ^ right_bits).count("1")
-    return 1.0 - (distance / 64.0)
-
-
 def _public_id(prefix: str) -> str:
     body = "".join(secrets.choice(PUBLIC_ID_ALPHABET) for _ in range(MAX_ID_BODY))
     return f"{prefix}-{body}"
@@ -521,6 +475,7 @@ class ConfessionsService:
         self.link_safety = ShieldLinkSafetyEngine()
         self._compiled_configs: dict[int, dict[str, Any]] = {}
         self._support_rate_limits: dict[tuple[int, int, str], float] = {}
+        self._privacy_status_global: dict[str, Any] | None = None
 
     async def start(self) -> bool:
         if self._startup_storage_error is not None:
@@ -538,6 +493,16 @@ class ConfessionsService:
         self.storage_ready = True
         self.storage_error = None
         await self._rebuild_config_cache()
+        self._privacy_status_global = await self.store.fetch_privacy_status()
+        if self._privacy_status_global.get("needs_backfill"):
+            print(
+                "Confessions privacy warning: hardening is partial. "
+                f"Categories: {', '.join(self._privacy_category_labels(self._privacy_status_global))}. "
+                "Run `python -m babblebox.confessions_backfill --dry-run` and then "
+                "`python -m babblebox.confessions_backfill --apply --batch-size 100`."
+            )
+        else:
+            print("Confessions privacy status: hardening is ready.")
         return True
 
     async def close(self):
@@ -717,13 +682,16 @@ class ConfessionsService:
             return False, message
         current = self.get_config(guild_id)
         ready = self.operability_message(guild_id)
+        privacy_status = await self._guild_privacy_status(guild_id)
+        privacy_message = self._privacy_admin_message(privacy_status, scoped=True)
         return (
             True,
             (
                 f"Confessions are {'enabled' if current['enabled'] else 'disabled'}. "
                 f"Review mode is {'on' if current['review_mode'] else 'off'}. "
                 f"Owner replies are {'on' if current['allow_owner_replies'] else 'off'}, "
-                f"owner-reply review is {'on' if current['owner_reply_review_mode'] else 'off'}. {ready}"
+                f"owner-reply review is {'on' if current['owner_reply_review_mode'] else 'off'}. "
+                f"{ready} {privacy_message}"
             ),
         )
 
@@ -935,6 +903,51 @@ class ConfessionsService:
             if config["review_channel_id"] == config["confession_channel_id"]:
                 return "Use different channels for public confessions and private review."
         return "Confessions are ready."
+
+    def _privacy_category_labels(self, status: dict[str, Any] | None) -> list[str]:
+        if not isinstance(status, dict):
+            return []
+        return [PRIVACY_CATEGORY_LABELS.get(name, str(name)) for name in list(status.get("categories") or ())]
+
+    async def _guild_privacy_status(self, guild_id: int) -> dict[str, Any] | None:
+        if not self.storage_ready:
+            return None
+        return await self.store.fetch_privacy_status(guild_id)
+
+    def _privacy_admin_message(self, status: dict[str, Any] | None, *, scoped: bool) -> str:
+        if not isinstance(status, dict):
+            return "Privacy hardening status is unavailable right now."
+        if not status.get("needs_backfill"):
+            return "Privacy hardening is ready."
+        scope_text = " for this server" if scoped else ""
+        categories = "; ".join(self._privacy_category_labels(status))
+        return (
+            f"Privacy hardening is partial{scope_text}. "
+            f"Backfill still needs to rewrite legacy or stale-key Confessions rows. Categories: {categories}."
+        )
+
+    def _privacy_dashboard_value(self, status: dict[str, Any] | None) -> str:
+        if not isinstance(status, dict):
+            return "State: **Unknown**\nStatus could not be loaded."
+        if not status.get("needs_backfill"):
+            return "State: **Ready**\nBackfill: **Complete for this server**"
+        category_lines = "\n".join(f"- {label}" for label in self._privacy_category_labels(status))
+        return (
+            "State: **Partial**\n"
+            "Backfill: **Still needed for this server**\n"
+            "Issues:\n"
+            f"{category_lines}"
+        )
+
+    @staticmethod
+    def _matching_fuzzy_duplicate_candidates(duplicate_signals: Any, previous_fuzzy_signature: str) -> list[str]:
+        if previous_fuzzy_signature.startswith("fh2:"):
+            return [item for item in duplicate_signals.keyed_fuzzy_candidates if str(item).startswith("fh2:")]
+        if previous_fuzzy_signature.startswith("fh1:"):
+            return [item for item in duplicate_signals.keyed_fuzzy_candidates if str(item).startswith("fh1:")]
+        if duplicate_signals.legacy_fuzzy_signature:
+            return [duplicate_signals.legacy_fuzzy_signature]
+        return []
 
     async def _generate_confession_id(self, guild_id: int) -> str:
         for _ in range(20):
@@ -1347,24 +1360,41 @@ class ConfessionsService:
         if has_links and not assessments and not compiled["allow_trusted_mainstream_links"] and not compiled["custom_allow_domains"]:
             return SafetyResult("blocked", ("link_unsafe",), True, "Links are disabled for confessions in this server.")
 
-        fingerprint, similarity_key, fuzzy_signature = _fingerprint_text(text, attachment_meta, shared_link_url)
+        duplicate_signals = build_duplicate_signals(self.store.privacy, int(compiled["guild_id"]), text, attachment_meta, shared_link_url)
         now = ge.now_utc()
         for row in recent_rows:
             created_at = deserialize_datetime(row.get("created_at"))
             if created_at is None:
                 continue
             age = (now - created_at).total_seconds()
-            if fingerprint and row.get("content_fingerprint") == fingerprint and age <= EXACT_DUPLICATE_WINDOW_SECONDS:
-                return SafetyResult("blocked", ("duplicate_spam",), False, "That looks like a duplicate confession.")
+            previous_fingerprint = str(row.get("content_fingerprint") or "")
+            if age <= EXACT_DUPLICATE_WINDOW_SECONDS and duplicate_signals.exact_hash:
+                if previous_fingerprint in duplicate_signals.keyed_exact_candidates:
+                    return SafetyResult("blocked", ("duplicate_spam",), False, "That looks like a duplicate confession.")
+                if duplicate_signals.legacy_exact_hash and previous_fingerprint == duplicate_signals.legacy_exact_hash:
+                    return SafetyResult("blocked", ("duplicate_spam",), False, "That looks like a duplicate confession.")
             previous_fuzzy_signature = str(row.get("fuzzy_signature") or "")
             previous_similarity = str(row.get("similarity_key") or "")
-            if fuzzy_signature and previous_fuzzy_signature:
-                ratio = _fuzzy_signature_ratio(fuzzy_signature, previous_fuzzy_signature)
-                if ratio >= FUZZY_DUPLICATE_RATIO and age <= EXACT_DUPLICATE_WINDOW_SECONDS:
+            if age > EXACT_DUPLICATE_WINDOW_SECONDS:
+                continue
+            ratio: float | None = None
+            if previous_fuzzy_signature:
+                fuzzy_candidates = self._matching_fuzzy_duplicate_candidates(duplicate_signals, previous_fuzzy_signature)
+                if fuzzy_candidates:
+                    ratio = max(
+                        fuzzy_signature_ratio(
+                            privacy=self.store.privacy,
+                            left=candidate,
+                            right=previous_fuzzy_signature,
+                        )
+                        for candidate in fuzzy_candidates
+                    )
+            if ratio is not None:
+                if ratio >= FUZZY_DUPLICATE_RATIO:
                     return SafetyResult("blocked", ("near_duplicate_spam",), False, "That looks too close to a recent confession.")
-            elif similarity_key and previous_similarity:
-                ratio = SequenceMatcher(None, similarity_key, previous_similarity).ratio()
-                if ratio >= NEAR_DUPLICATE_RATIO and age <= EXACT_DUPLICATE_WINDOW_SECONDS:
+            elif duplicate_signals.legacy_similarity_key and previous_similarity:
+                ratio = legacy_similarity_ratio(duplicate_signals.legacy_similarity_key, previous_similarity)
+                if ratio >= NEAR_DUPLICATE_RATIO:
                     return SafetyResult("blocked", ("near_duplicate_spam",), False, "That looks too close to a recent confession.")
 
         language_result = self._classify_language(compiled, text, squashed)
@@ -1529,7 +1559,13 @@ class ConfessionsService:
         confession_id = await self._generate_confession_id(guild.id)
         submission_id = secrets.token_hex(16)
         preview = _staff_preview_text(normalized, attachment_meta)
-        fingerprint, similarity_key, fuzzy_signature = _fingerprint_text(normalized, attachment_meta, shared_link_url)
+        duplicate_signals = build_duplicate_signals(
+            self.store.privacy,
+            guild.id,
+            normalized,
+            attachment_meta,
+            shared_link_url,
+        )
         now = ge.now_utc()
         now_iso = now.isoformat()
         if submission_kind == "reply" and normalized_reply_flow == REPLY_FLOW_OWNER_TO_USER and safety.outcome == "review" and not compiled.get("owner_reply_review_mode"):
@@ -1561,9 +1597,9 @@ class ConfessionsService:
             "staff_preview": preview,
             "content_body": normalized or None,
             "shared_link_url": shared_link_url,
-            "content_fingerprint": fingerprint,
-            "similarity_key": similarity_key,
-            "fuzzy_signature": fuzzy_signature,
+            "content_fingerprint": duplicate_signals.exact_hash,
+            "similarity_key": None,
+            "fuzzy_signature": duplicate_signals.fuzzy_signature,
             "flag_codes": list(safety.flag_codes),
             "attachment_meta": attachment_meta,
             "posted_channel_id": None,
@@ -2439,8 +2475,13 @@ class ConfessionsService:
     def _owner_reply_delivery_copy(self, guild_id: int) -> str:
         config = self.get_config(guild_id)
         if config.get("owner_reply_review_mode"):
-            return "Your reply posts publicly as an Anonymous Owner Reply, stays text-only, and may go through private review first."
-        return "Your reply posts publicly as an Anonymous Owner Reply, stays text-only, and Babblebox keeps your identity hidden."
+            return (
+                "Your reply posts publicly as an Anonymous Owner Reply, stays text-only, may go through private review first, "
+                "and Babblebox keeps your identity hidden from members and staff."
+            )
+        return (
+            "Your reply posts publicly as an Anonymous Owner Reply, stays text-only, and Babblebox keeps your identity hidden from members and staff."
+        )
 
     async def get_owned_submission_context(
         self,
@@ -2487,7 +2528,10 @@ class ConfessionsService:
         kind_label = self._submission_kind_label(submission)
         embed = discord.Embed(
             title=f"My Anonymous {kind_label}",
-            description="Babblebox verified ownership privately. Staff still do not see your account through this flow.",
+            description=(
+                "Babblebox verified ownership privately. Staff still do not see your account through this flow, "
+                "and the private ownership link stays protected in Confessions storage."
+            ),
             color=ge.EMBED_THEME["info"],
         )
         embed.add_field(
@@ -2698,13 +2742,19 @@ class ConfessionsService:
                 submission_kind=str(submission.get("submission_kind") or "confession"),
                 parent_confession_id=submission.get("parent_confession_id"),
             )
-        fingerprint, similarity_key, fuzzy_signature = _fingerprint_text(normalized, list(submission.get("attachment_meta") or []), shared_link_url)
+        duplicate_signals = build_duplicate_signals(
+            self.store.privacy,
+            guild.id,
+            normalized,
+            list(submission.get("attachment_meta") or []),
+            shared_link_url,
+        )
         submission["content_body"] = normalized or None
         submission["shared_link_url"] = shared_link_url
         submission["staff_preview"] = _staff_preview_text(normalized, list(submission.get("attachment_meta") or []))
-        submission["content_fingerprint"] = fingerprint
-        submission["similarity_key"] = similarity_key
-        submission["fuzzy_signature"] = fuzzy_signature
+        submission["content_fingerprint"] = duplicate_signals.exact_hash
+        submission["similarity_key"] = None
+        submission["fuzzy_signature"] = duplicate_signals.fuzzy_signature
         submission["flag_codes"] = list(safety.flag_codes)
         await self.store.upsert_submission(submission)
         if case is not None:
@@ -2934,7 +2984,8 @@ class ConfessionsService:
         role_access = self._member_role_access_label(guild)
         support_snapshot = self.support_channel_snapshot(guild)
         description = (
-            "Share something quietly through a private composer. Use `/confess create` or the panel button below. When admins enable Confessions, Babblebox keeps the author hidden from members and staff while still enforcing safety internally."
+            "Share something quietly through a private composer. Use `/confess create` or the panel button below. "
+            "When admins enable Confessions, Babblebox keeps the author hidden from members and staff in normal use while still enforcing safety internally."
             if ready
             else "Anonymous confessions are optional in Babblebox and are not ready in this server yet. The panel stays here so admins can finish setup without reposting it."
         )
@@ -2987,7 +3038,10 @@ class ConfessionsService:
         )
         embed.add_field(
             name="Stay Anonymous",
-            value="Babblebox hides your account from staff, but the words, link destination, and image contents you choose can still identify you.",
+            value=(
+                "Babblebox hides your account from members and staff, and private Confessions data is protected in storage. "
+                "The service still enforces safety internally, operators are still part of the trust model, and the words, link destination, or image contents you choose can still identify you."
+            ),
             inline=False,
         )
         if not ready:
@@ -3025,7 +3079,10 @@ class ConfessionsService:
         )
         embed.add_field(
             name="Privacy",
-            value="Members and server staff see confession IDs, not the author behind them. Babblebox still enforces safety internally.",
+            value=(
+                "Members and server staff see confession IDs, not the author behind them. "
+                "Babblebox protects private Confessions data in storage and still enforces safety internally, but it does not remove the service operator from the trust model."
+            ),
             inline=False,
         )
         embed.add_field(
@@ -3068,6 +3125,7 @@ class ConfessionsService:
         config = self.get_config(guild.id)
         role_snapshot = self._role_policy_snapshot(guild)
         support_snapshot = self.support_channel_snapshot(guild)
+        privacy_status = await self._guild_privacy_status(guild.id)
         role_value = (
             f"Allowlist: **{len(role_snapshot['active_allowed_ids'])}** active\n"
             f"{self._format_role_labels(role_snapshot['allow_labels'])}\n"
@@ -3208,6 +3266,7 @@ class ConfessionsService:
             embed.add_field(name="Role Eligibility", value=ge.safe_field_text(role_value, limit=1024), inline=False)
             embed.add_field(name="Support Channel", value=ge.safe_field_text(support_value, limit=1024), inline=False)
             embed.add_field(name="Operability", value=self.operability_message(guild.id), inline=False)
+        embed.add_field(name="Privacy Hardening", value=ge.safe_field_text(self._privacy_dashboard_value(privacy_status), limit=1024), inline=False)
         return ge.style_embed(embed, footer="Babblebox Confessions | Staff-blind moderation")
 
     async def _build_public_confession_embeds(self, submission: dict[str, Any]) -> list[discord.Embed]:
