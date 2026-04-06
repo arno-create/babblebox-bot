@@ -786,6 +786,132 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(other.ok)
         self.assertEqual(other.state, "published")
 
+    async def test_admin_exemption_skips_automatic_strikes_but_still_blocks_content(self):
+        await self._configure()
+        admin = self._member(556, manage_guild=True)
+
+        first = await self.service.submit_confession(self.guild, author_id=admin.id, member=admin, content="nigger", attachments=[])
+        second = await self.service.submit_confession(self.guild, author_id=admin.id, member=admin, content="nigger again", attachments=[])
+
+        self.assertFalse(first.ok)
+        self.assertFalse(second.ok)
+        self.assertEqual(first.state, "blocked")
+        self.assertEqual(second.state, "blocked")
+        state = await self.service.store.fetch_enforcement_state(self.guild.id, admin.id)
+        self.assertTrue(state is None or state["strike_count"] == 0)
+        if state is not None:
+            self.assertEqual(state["active_restriction"], "none")
+
+    async def test_exempt_role_skips_automatic_burst_suspend(self):
+        await self._configure()
+        ok, message = await self.service.configure_guild(
+            self.guild.id,
+            burst_limit=1,
+            cooldown_seconds=15,
+        )
+        self.assertTrue(ok, message)
+        ok, message = await self.service.update_automatic_moderation_role_exemption(
+            self.guild.id,
+            role_id=self.allowed_role.id,
+            enabled=True,
+        )
+        self.assertTrue(ok, message)
+        member = self._member(557, roles=[self.allowed_role])
+
+        first = await self.service.submit_confession(self.guild, author_id=member.id, member=member, content="first", attachments=[])
+        self.assertTrue(first.ok)
+        state = await self.service.store.fetch_enforcement_state(self.guild.id, member.id)
+        state["cooldown_until"] = None
+        await self.service.store.upsert_enforcement_state(state)
+
+        second = await self.service.submit_confession(self.guild, author_id=member.id, member=member, content="second", attachments=[])
+
+        self.assertTrue(second.ok)
+        refreshed = await self.service.store.fetch_enforcement_state(self.guild.id, member.id)
+        self.assertEqual(refreshed["active_restriction"], "none")
+        self.assertEqual(refreshed["strike_count"], 0)
+
+    async def test_preflight_submission_access_blocks_restricted_member_before_modal(self):
+        await self._configure()
+        member = self._member(558)
+        await self.service.store.upsert_enforcement_state(
+            {
+                "guild_id": self.guild.id,
+                "user_id": member.id,
+                "active_restriction": "suspended",
+                "restricted_until": "2999-01-01T00:00:00+00:00",
+                "is_permanent_ban": False,
+                "strike_count": 1,
+                "last_strike_at": None,
+                "cooldown_until": None,
+                "burst_count": 0,
+                "burst_window_started_at": None,
+                "last_case_id": "CS-LOCKED",
+                "image_restriction_active": False,
+                "image_restricted_until": None,
+                "image_restriction_case_id": None,
+                "updated_at": "2999-01-01T00:00:00+00:00",
+            }
+        )
+
+        gate = await self.service.preflight_submission_access(
+            self.guild,
+            author_id=member.id,
+            member=member,
+            submission_kind="confession",
+        )
+
+        self.assertFalse(gate.ok)
+        self.assertEqual(gate.title, "Confessions Paused")
+        self.assertEqual(gate.result.state, "restricted")
+        self.assertIn("temporarily restricted", gate.result.message)
+
+    async def test_preflight_image_restriction_allows_text_only_but_blocks_uploads(self):
+        await self._configure(review_channel=True, allow_images=True)
+        member = self._member(559)
+        await self.service.store.upsert_enforcement_state(
+            {
+                "guild_id": self.guild.id,
+                "user_id": member.id,
+                "active_restriction": "none",
+                "restricted_until": None,
+                "is_permanent_ban": False,
+                "strike_count": 0,
+                "last_strike_at": None,
+                "cooldown_until": None,
+                "burst_count": 0,
+                "burst_window_started_at": None,
+                "last_case_id": None,
+                "image_restriction_active": True,
+                "image_restricted_until": "2999-01-01T00:00:00+00:00",
+                "image_restriction_case_id": "CS-IMAGES",
+                "updated_at": "2999-01-01T00:00:00+00:00",
+            }
+        )
+
+        gate = await self.service.preflight_submission_access(
+            self.guild,
+            author_id=member.id,
+            member=member,
+            submission_kind="confession",
+            image_restriction_mode="advisory",
+        )
+        self.assertTrue(gate.ok)
+        self.assertIn("Image attachments are paused", gate.image_restriction_message)
+
+        text_only = await self.service.submit_confession(self.guild, author_id=member.id, member=member, content="text only", attachments=[])
+        blocked = await self.service.submit_confession(
+            self.guild,
+            author_id=member.id,
+            member=member,
+            content="with image",
+            attachments=[FakeAttachment("proof.png")],
+        )
+
+        self.assertTrue(text_only.ok)
+        self.assertEqual(blocked.state, "blocked")
+        self.assertIn("Image attachments are paused", blocked.message)
+
     async def test_review_approval_stale_version_and_raw_delete_reconciliation(self):
         await self._configure(review_mode=True, review_channel=True)
         result = await self.service.submit_confession(self.guild, author_id=700, content="needs approval", attachments=[])
@@ -932,6 +1058,22 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
         state = await self.service.store.fetch_enforcement_state(self.guild.id, 903)
         self.assertIsNotNone(state)
         self.assertIsNotNone(state["cooldown_until"])
+
+    async def test_dashboard_policy_surfaces_automatic_moderation_exemptions(self):
+        await self._configure()
+        ok, message = await self.service.update_automatic_moderation_role_exemption(
+            self.guild.id,
+            role_id=self.allowed_role.id,
+            enabled=True,
+        )
+        self.assertTrue(ok, message)
+
+        embed = await self.service.build_dashboard_embed(self.guild, section="policy")
+        rendered = json.dumps(embed.to_dict())
+
+        self.assertIn("Automatic Moderation", rendered)
+        self.assertIn("Admins exempt by default", rendered)
+        self.assertIn("Hard content blocking", rendered)
 
     async def test_member_panel_sync_keeps_one_message_and_disables_when_unavailable(self):
         await self._configure(panel=True)
@@ -1876,17 +2018,112 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ctx.send_calls[0]["embed"].title, "Confessions Status")
         self.assertIn("could not open", ctx.send_calls[0]["embed"].description.lower())
 
-    async def test_slash_confess_opens_modal_with_no_arguments(self):
+    async def test_slash_confess_create_command_opens_modal(self):
         await self.cog.service.configure_guild(self.guild.id, enabled=True, confession_channel_id=20, review_mode=False)
         member = self._member(11)
         ctx = FakeContext(guild=self.guild, author=member)
 
-        await ConfessionsCog.confess_group.callback(self.cog, ctx)
+        await ConfessionsCog.confess_create_command.callback(self.cog, ctx)
 
         self.assertEqual(len(ctx.interaction.response.modal_calls), 1)
         self.assertEqual(ctx.interaction.response.modal_calls[0].title, "Anonymous Confession")
 
-    def test_confess_create_slash_fallback_is_registered(self):
+    async def test_confess_create_blocks_restricted_members_before_modal(self):
+        await self.cog.service.configure_guild(self.guild.id, enabled=True, confession_channel_id=20, review_mode=False)
+        member = self._member(12)
+        ctx = FakeContext(guild=self.guild, author=member)
+        await self.cog.service.store.upsert_enforcement_state(
+            {
+                "guild_id": self.guild.id,
+                "user_id": member.id,
+                "active_restriction": "temp_ban",
+                "restricted_until": "2999-01-01T00:00:00+00:00",
+                "is_permanent_ban": False,
+                "strike_count": 3,
+                "last_strike_at": None,
+                "cooldown_until": None,
+                "burst_count": 0,
+                "burst_window_started_at": None,
+                "last_case_id": "CS-LOCKED",
+                "image_restriction_active": False,
+                "image_restricted_until": None,
+                "image_restriction_case_id": None,
+                "updated_at": "2999-01-01T00:00:00+00:00",
+            }
+        )
+
+        await ConfessionsCog.confess_create_command.callback(self.cog, ctx)
+
+        self.assertEqual(len(ctx.interaction.response.modal_calls), 0)
+        self.assertEqual(ctx.interaction.response.sent[0]["kwargs"]["embed"].title, "Confessions Paused")
+
+    async def test_confess_create_turns_image_restriction_into_text_only_modal(self):
+        await self.cog.service.configure_guild(
+            self.guild.id,
+            enabled=True,
+            confession_channel_id=20,
+            review_channel_id=30,
+            review_mode=False,
+            allow_images=True,
+        )
+        member = self._member(13)
+        ctx = FakeContext(guild=self.guild, author=member)
+        await self.cog.service.store.upsert_enforcement_state(
+            {
+                "guild_id": self.guild.id,
+                "user_id": member.id,
+                "active_restriction": "none",
+                "restricted_until": None,
+                "is_permanent_ban": False,
+                "strike_count": 0,
+                "last_strike_at": None,
+                "cooldown_until": None,
+                "burst_count": 0,
+                "burst_window_started_at": None,
+                "last_case_id": None,
+                "image_restriction_active": True,
+                "image_restricted_until": "2999-01-01T00:00:00+00:00",
+                "image_restriction_case_id": "CS-IMG",
+                "updated_at": "2999-01-01T00:00:00+00:00",
+            }
+        )
+
+        await ConfessionsCog.confess_create_command.callback(self.cog, ctx)
+
+        modal = ctx.interaction.response.modal_calls[0]
+        self.assertIsNone(modal.upload_input)
+        self.assertIn("Image attachments are paused", modal.body_input.placeholder)
+
+    async def test_confess_reply_to_user_blocks_restricted_owner_before_inbox(self):
+        await self.cog.service.configure_guild(self.guild.id, enabled=True, confession_channel_id=20, review_mode=False)
+        owner = self._member(14)
+        ctx = FakeContext(guild=self.guild, author=owner)
+        await self.cog.service.store.upsert_enforcement_state(
+            {
+                "guild_id": self.guild.id,
+                "user_id": owner.id,
+                "active_restriction": "suspended",
+                "restricted_until": "2999-01-01T00:00:00+00:00",
+                "is_permanent_ban": False,
+                "strike_count": 1,
+                "last_strike_at": None,
+                "cooldown_until": None,
+                "burst_count": 0,
+                "burst_window_started_at": None,
+                "last_case_id": "CS-OWNER",
+                "image_restriction_active": False,
+                "image_restricted_until": None,
+                "image_restriction_case_id": None,
+                "updated_at": "2999-01-01T00:00:00+00:00",
+            }
+        )
+
+        await ConfessionsCog.confess_reply_to_user_command.callback(self.cog, ctx)
+
+        self.assertEqual(len(ctx.interaction.response.sent), 1)
+        self.assertEqual(ctx.interaction.response.sent[0]["kwargs"]["embed"].title, "Owner Reply Paused")
+
+    def test_confess_create_slash_subcommand_is_registered(self):
         command_names = {command.name for command in self.cog.confess_group.app_command.commands}
 
         self.assertEqual(command_names, {"about", "appeal", "create", "manage", "reply-to-user", "report"})
@@ -2367,15 +2604,40 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(stale_interaction.response.modal_calls), 0)
         self.assertEqual(stale_interaction.response.sent[0]["kwargs"]["embed"].title, "Private Support Unavailable")
 
+    async def test_expired_private_support_view_returns_private_expired_notice(self):
+        await self.cog.service.configure_guild(self.guild.id, enabled=True, confession_channel_id=20, appeals_channel_id=50, review_mode=False)
+        entry_interaction = FakeInteraction(guild=self.guild, user=self._member(1291))
+
+        await self.cog._send_support_entry(entry_interaction, default_target="CF-123456")
+
+        support_view = entry_interaction.response.sent[0]["kwargs"]["view"]
+        await support_view.on_timeout()
+        stale_interaction = FakeInteraction(guild=self.guild, user=self._member(1292))
+
+        await support_view.appeal_button.callback(stale_interaction)
+
+        self.assertEqual(len(stale_interaction.response.modal_calls), 0)
+        self.assertEqual(stale_interaction.response.sent[0]["kwargs"]["embed"].title, "Private View Expired")
+
     async def test_confess_command_blocks_non_allowlisted_members_privately(self):
         await self.cog.service.configure_guild(self.guild.id, enabled=True, confession_channel_id=20, review_mode=False)
         await self.cog.service.update_role_policy(self.guild.id, bucket="allow", role_id=self.allowed_role.id, enabled=True)
         ctx = FakeContext(guild=self.guild, author=self._member(126))
 
-        await ConfessionsCog.confess_group.callback(self.cog, ctx)
+        await ConfessionsCog.confess_create_command.callback(self.cog, ctx)
 
         self.assertEqual(len(ctx.interaction.response.sent), 1)
         self.assertEqual(ctx.interaction.response.sent[0]["kwargs"]["embed"].title, "Confession Access")
+
+    async def test_panel_button_failure_is_caught_privately(self):
+        await self.cog.service.configure_guild(self.guild.id, enabled=True, confession_channel_id=20, review_mode=False)
+        view = self.cog.build_member_panel_view(guild_id=self.guild.id)
+        interaction = FakeInteraction(guild=self.guild, user=self._member(1261), client=self.bot)
+
+        with mock.patch.object(self.cog, "_open_confession_modal", side_effect=RuntimeError("open boom")):
+            await view.send_button.callback(interaction)
+
+        self.assertEqual(interaction.response.sent[0]["kwargs"]["embed"].title, "Confessions Unavailable")
 
     async def test_member_panel_no_longer_shows_generic_reply_button(self):
         await self.cog.service.configure_guild(self.guild.id, enabled=True, confession_channel_id=20, review_mode=False)

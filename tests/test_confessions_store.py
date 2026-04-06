@@ -143,6 +143,8 @@ class ConfessionsStoreNormalizationTests(unittest.TestCase):
         self.assertEqual(config["max_images"], 3)
         self.assertEqual(config["cooldown_seconds"], 300)
         self.assertEqual(config["burst_limit"], 3)
+        self.assertTrue(config["auto_moderation_exempt_admins"])
+        self.assertEqual(config["auto_moderation_exempt_role_ids"], [])
 
     def test_normalize_config_enforces_bounds_and_sorted_domains(self):
         config = normalize_confession_config(
@@ -160,6 +162,8 @@ class ConfessionsStoreNormalizationTests(unittest.TestCase):
                 "allow_owner_replies": False,
                 "owner_reply_review_mode": True,
                 "allow_self_edit": True,
+                "auto_moderation_exempt_admins": False,
+                "auto_moderation_exempt_role_ids": [1000, 999, 1000],
                 "max_images": 99,
                 "cooldown_seconds": 1,
                 "burst_limit": 20,
@@ -179,6 +183,8 @@ class ConfessionsStoreNormalizationTests(unittest.TestCase):
         self.assertFalse(config["allow_owner_replies"])
         self.assertFalse(config["owner_reply_review_mode"])
         self.assertTrue(config["allow_self_edit"])
+        self.assertFalse(config["auto_moderation_exempt_admins"])
+        self.assertEqual(config["auto_moderation_exempt_role_ids"], [999, 1000])
         self.assertEqual(config["max_images"], 3)
         self.assertEqual(config["cooldown_seconds"], 300)
         self.assertEqual(config["burst_limit"], 3)
@@ -785,6 +791,8 @@ class PostgresConfessionsStoreTests(unittest.IsolatedAsyncioTestCase):
                 "allow_owner_replies": True,
                 "owner_reply_review_mode": True,
                 "allow_self_edit": True,
+                "auto_moderation_exempt_admins": False,
+                "auto_moderation_exempt_role_ids": [901, 902],
                 "max_images": 2,
                 "cooldown_seconds": 600,
                 "burst_limit": 2,
@@ -812,6 +820,8 @@ class PostgresConfessionsStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(args[15])
         self.assertTrue(args[16])
         self.assertTrue(args[17])
+        self.assertFalse(args[19])
+        self.assertEqual(json.loads(args[20]), [901, 902])
 
     async def test_postgres_store_fetch_config_round_trips_admin_runtime_fields(self):
         self.connection.fetchrow_results.append(
@@ -835,6 +845,8 @@ class PostgresConfessionsStoreTests(unittest.IsolatedAsyncioTestCase):
                 "allow_owner_replies": True,
                 "owner_reply_review_mode": True,
                 "allow_self_edit": True,
+                "auto_moderation_exempt_admins": False,
+                "auto_moderation_exempt_role_ids": json.dumps([901, 902]),
                 "max_images": 2,
                 "cooldown_seconds": 600,
                 "burst_limit": 2,
@@ -858,6 +870,8 @@ class PostgresConfessionsStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(config["allow_owner_replies"])
         self.assertTrue(config["owner_reply_review_mode"])
         self.assertTrue(config["allow_self_edit"])
+        self.assertFalse(config["auto_moderation_exempt_admins"])
+        self.assertEqual(config["auto_moderation_exempt_role_ids"], [901, 902])
 
     async def test_postgres_store_fetch_all_configs_round_trips_admin_runtime_fields(self):
         self.connection.fetch_results.append(
@@ -882,6 +896,8 @@ class PostgresConfessionsStoreTests(unittest.IsolatedAsyncioTestCase):
                     "allow_owner_replies": True,
                     "owner_reply_review_mode": True,
                     "allow_self_edit": True,
+                    "auto_moderation_exempt_admins": False,
+                    "auto_moderation_exempt_role_ids": [901, 902],
                     "max_images": 2,
                     "cooldown_seconds": 600,
                     "burst_limit": 2,
@@ -1333,6 +1349,8 @@ class PostgresConfessionsStoreLiveSmokeTests(unittest.IsolatedAsyncioTestCase):
                     "allow_owner_replies": True,
                     "owner_reply_review_mode": True,
                     "allow_self_edit": True,
+                    "auto_moderation_exempt_admins": False,
+                    "auto_moderation_exempt_role_ids": [901, 902],
                     "max_images": 2,
                     "cooldown_seconds": 600,
                     "burst_limit": 2,
@@ -1357,6 +1375,8 @@ class PostgresConfessionsStoreLiveSmokeTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(stored["allow_owner_replies"])
             self.assertTrue(stored["owner_reply_review_mode"])
             self.assertTrue(stored["allow_self_edit"])
+            self.assertFalse(stored["auto_moderation_exempt_admins"])
+            self.assertEqual(stored["auto_moderation_exempt_role_ids"], [901, 902])
             self.assertEqual(stored["strike_perm_ban_threshold"], 5)
         finally:
             if store._pool is not None:
