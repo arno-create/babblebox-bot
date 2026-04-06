@@ -989,7 +989,7 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
             ["bb-confession-owner-reply:open", "bb-confession-owner-reply:dismiss"],
         )
 
-    async def test_reply_to_member_reply_creates_owner_opportunity_but_owner_reply_chain_does_not_retrigger(self):
+    async def test_responses_to_public_anonymous_replies_do_not_create_owner_opportunities(self):
         await self._configure(review_channel=True, allow_replies=True)
         owner = self._member(924)
         published = await self.service.submit_confession(self.guild, author_id=owner.id, member=owner, content="base confession", attachments=[])
@@ -1011,28 +1011,117 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         await self.service.handle_member_response_message(member_response)
         pending = await self.service.store.list_pending_owner_reply_opportunities_for_author(self.guild.id, owner.id, limit=5)
-        self.assertEqual(len(pending), 1)
-        await self.service._mark_owner_reply_opportunity_used_record(pending[0])
+        self.assertEqual(pending, [])
 
-        owner_reply = await self.service.submit_confession(
+    async def test_owner_reply_publishes_immediately_by_default_without_review_channel(self):
+        await self._configure()
+        owner = self._member(925)
+        published = await self.service.submit_confession(self.guild, author_id=owner.id, member=owner, content="public owner reply", attachments=[])
+        response = self._reply_message(
+            author=self._member(926),
+            reply_to_message_id=self.confession_channel.sent[0].id,
+            content="please reply publicly",
+        )
+        await self.service.handle_member_response_message(response)
+        pending = await self.service.store.list_pending_owner_reply_opportunities_for_author(self.guild.id, owner.id, limit=5)
+        self.assertEqual(len(pending), 1)
+
+        owner_reply = await self.service.submit_owner_reply(
             self.guild,
             author_id=owner.id,
             member=owner,
-            content="owner follow-up",
-            submission_kind="reply",
-            parent_confession_id=published.confession_id,
-            reply_flow="owner_reply_to_user",
+            opportunity_id=pending[0]["opportunity_id"],
+            content="Thanks for responding.",
         )
-        self.assertEqual(owner_reply.state, "queued")
-        ok, message = await self.service.handle_case_action(self.guild, case_id=owner_reply.case_id, action="approve", version=1)
-        self.assertTrue(ok, message)
+
+        self.assertTrue(owner_reply.ok)
+        self.assertEqual(owner_reply.state, "published")
+        self.assertEqual(owner_reply.reply_flow, "owner_reply_to_user")
+        self.assertEqual(len(self.confession_channel.sent), 2)
         stored_owner_reply = await self.service.store.fetch_submission_by_confession_id(self.guild.id, owner_reply.confession_id)
         self.assertEqual(stored_owner_reply["reply_flow"], "owner_reply_to_user")
+        self.assertEqual(stored_owner_reply["owner_reply_generation"], 1)
+        rendered = json.dumps([embed.to_dict() for embed in self.confession_channel.sent[1].embeds])
+        self.assertIn("Anonymous Owner Reply", rendered)
+        self.assertIn(published.confession_id, rendered)
+        self.assertNotIn("User 926", rendered)
+        used = await self.service.store.fetch_owner_reply_opportunity(pending[0]["opportunity_id"])
+        self.assertEqual(used["status"], "used")
+
+    async def test_owner_reply_queues_only_when_owner_reply_review_is_enabled(self):
+        await self._configure(review_channel=True)
+        ok, message = await self.service.configure_guild(self.guild.id, owner_reply_review_mode=True)
+        self.assertTrue(ok, message)
+        owner = self._member(927)
+        await self.service.submit_confession(self.guild, author_id=owner.id, member=owner, content="queued owner reply", attachments=[])
+        response = self._reply_message(
+            author=self._member(928),
+            reply_to_message_id=self.confession_channel.sent[0].id,
+            content="owner reply should queue",
+        )
+        await self.service.handle_member_response_message(response)
+        pending = await self.service.store.list_pending_owner_reply_opportunities_for_author(self.guild.id, owner.id, limit=5)
+
+        owner_reply = await self.service.submit_owner_reply(
+            self.guild,
+            author_id=owner.id,
+            member=owner,
+            opportunity_id=pending[0]["opportunity_id"],
+            content="Thanks for checking in. I appreciate it.",
+        )
+
+        self.assertTrue(owner_reply.ok)
+        self.assertEqual(owner_reply.state, "queued")
+        self.assertIsNotNone(owner_reply.case_id)
+        stored_owner_reply = await self.service.store.fetch_submission_by_confession_id(self.guild.id, owner_reply.confession_id)
+        self.assertEqual(stored_owner_reply["review_status"], "pending")
+        queue = self.service.build_review_queue_embed(self.guild, await self.service.list_review_targets(self.guild.id, limit=10))
+        self.assertIn("Owner Reply", json.dumps(queue.to_dict()))
+
+    async def test_owner_reply_to_first_owner_reply_creates_second_round_but_stops_at_generation_two(self):
+        await self._configure()
+        owner = self._member(929)
+        published = await self.service.submit_confession(self.guild, author_id=owner.id, member=owner, content="bounded thread", attachments=[])
+
+        first_response = self._reply_message(
+            author=self._member(930),
+            reply_to_message_id=self.confession_channel.sent[0].id,
+            content="first public response",
+        )
+        await self.service.handle_member_response_message(first_response)
+        pending = await self.service.store.list_pending_owner_reply_opportunities_for_author(self.guild.id, owner.id, limit=5)
+        first_owner_reply = await self.service.submit_owner_reply(
+            self.guild,
+            author_id=owner.id,
+            member=owner,
+            opportunity_id=pending[0]["opportunity_id"],
+            content="first owner reply",
+        )
+        self.assertEqual(first_owner_reply.state, "published")
+
+        second_response = self._reply_message(
+            author=self._member(931),
+            reply_to_message_id=self.confession_channel.sent[1].id,
+            content="replying to the owner reply",
+        )
+        await self.service.handle_member_response_message(second_response)
+        pending_round_two = await self.service.store.list_pending_owner_reply_opportunities_for_author(self.guild.id, owner.id, limit=5)
+        self.assertEqual(len(pending_round_two), 1)
+        second_owner_reply = await self.service.submit_owner_reply(
+            self.guild,
+            author_id=owner.id,
+            member=owner,
+            opportunity_id=pending_round_two[0]["opportunity_id"],
+            content="second owner reply",
+        )
+        self.assertEqual(second_owner_reply.state, "published")
+        stored_owner_reply = await self.service.store.fetch_submission_by_confession_id(self.guild.id, second_owner_reply.confession_id)
+        self.assertEqual(stored_owner_reply["owner_reply_generation"], 2)
 
         no_retrigger = self._reply_message(
-            author=self._member(927),
+            author=self._member(932),
             reply_to_message_id=self.confession_channel.sent[2].id,
-            content="this should not ping the owner again",
+            content="this should stop here",
         )
         await self.service.handle_member_response_message(no_retrigger)
         pending_after = await self.service.store.list_pending_owner_reply_opportunities_for_author(self.guild.id, owner.id, limit=5)
@@ -1040,12 +1129,12 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_owner_reply_prompts_dedupe_source_and_respect_dm_cooldown(self):
         await self._configure(review_channel=True)
-        owner = self._member(928)
+        owner = self._member(933)
         published = await self.service.submit_confession(self.guild, author_id=owner.id, member=owner, content="cooldown test", attachments=[])
         self.assertEqual(published.state, "published")
 
         first = self._reply_message(
-            author=self._member(929),
+            author=self._member(934),
             reply_to_message_id=self.confession_channel.sent[0].id,
             content="first response",
         )
@@ -1053,7 +1142,7 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
         await self.service.handle_member_response_message(first)
 
         second = self._reply_message(
-            author=self._member(930),
+            author=self._member(935),
             reply_to_message_id=self.confession_channel.sent[0].id,
             content="second response",
         )
@@ -1069,14 +1158,14 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_owner_reply_prompt_dm_failure_keeps_pending_fallback_context(self):
         await self._configure(review_channel=True)
-        owner = self._member(933)
+        owner = self._member(936)
         published = await self.service.submit_confession(self.guild, author_id=owner.id, member=owner, content="fallback owner reply", attachments=[])
         response = self._reply_message(
-            author=self._member(934),
+            author=self._member(937),
             reply_to_message_id=self.confession_channel.sent[0].id,
             content="dm fallback please",
         )
-        with mock.patch.object(self.service, "_send_owner_reply_notification", new=mock.AsyncMock(return_value=(False, None))):
+        with mock.patch.object(self.service, "_send_owner_reply_notification", new=mock.AsyncMock(return_value=(False, None, None))):
             await self.service.handle_member_response_message(response)
 
         self.assertEqual(published.state, "published")
@@ -1089,10 +1178,10 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_owner_reply_opportunity_expires_when_source_message_is_deleted(self):
         await self._configure(review_channel=True)
-        owner = self._member(931)
+        owner = self._member(938)
         published = await self.service.submit_confession(self.guild, author_id=owner.id, member=owner, content="source delete", attachments=[])
         response = self._reply_message(
-            author=self._member(932),
+            author=self._member(939),
             reply_to_message_id=self.confession_channel.sent[0].id,
             content="temporary response",
         )
@@ -1104,6 +1193,44 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
 
         expired = await self.service.store.fetch_owner_reply_opportunity(pending[0]["opportunity_id"])
         self.assertEqual(expired["status"], "expired")
+
+    async def test_owner_reply_opportunity_expires_when_source_message_is_edited(self):
+        await self._configure(review_channel=True)
+        owner = self._member(940)
+        await self.service.submit_confession(self.guild, author_id=owner.id, member=owner, content="source edit", attachments=[])
+        response = self._reply_message(
+            author=self._member(941),
+            reply_to_message_id=self.confession_channel.sent[0].id,
+            content="initial response",
+        )
+        await self.service.handle_member_response_message(response)
+        pending = await self.service.store.list_pending_owner_reply_opportunities_for_author(self.guild.id, owner.id, limit=5)
+        self.assertEqual(len(pending), 1)
+
+        response.content = "edited response"
+        await self.service.handle_message_edit(response)
+
+        expired = await self.service.store.fetch_owner_reply_opportunity(pending[0]["opportunity_id"])
+        self.assertEqual(expired["status"], "expired")
+
+    async def test_owner_reply_submit_rejects_arbitrary_owner_reply_flow_without_opportunity(self):
+        await self._configure()
+        owner = self._member(942)
+        published = await self.service.submit_confession(self.guild, author_id=owner.id, member=owner, content="arbitrary owner reply", attachments=[])
+
+        blocked = await self.service.submit_confession(
+            self.guild,
+            author_id=owner.id,
+            member=owner,
+            content="fake owner reply",
+            submission_kind="reply",
+            parent_confession_id=published.confession_id,
+            reply_flow="owner_reply_to_user",
+        )
+
+        self.assertFalse(blocked.ok)
+        self.assertEqual(blocked.state, "blocked")
+        self.assertIn("owner-reply opportunity", blocked.message.lower())
 
     async def test_role_allowlist_blocks_members_without_allowed_roles(self):
         await self._configure()

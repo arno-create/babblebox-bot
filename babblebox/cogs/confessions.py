@@ -342,7 +342,7 @@ class OwnerReplyComposerModal(discord.ui.Modal, title="Reply to Member Anonymous
         self.body_input = discord.ui.TextInput(
             label="Anonymous owner reply",
             style=discord.TextStyle.paragraph,
-            placeholder="Your reply stays anonymous. Babblebox may send it through private approval before posting.",
+            placeholder="Your reply posts publicly as an Anonymous Owner Reply. Babblebox keeps your identity hidden and only queues it if this server enables owner-reply review.",
             required=True,
             max_length=1800,
         )
@@ -386,14 +386,12 @@ class OwnerReplyComposerModal(discord.ui.Modal, title="Reply to Member Anonymous
             return
         try:
             member = guild.get_member(interaction.user.id) or interaction.user
-            result = await self.cog.service.submit_confession(
+            result = await self.cog.service.submit_owner_reply(
                 guild,
                 author_id=interaction.user.id,
                 member=member,
+                opportunity_id=self.opportunity_id,
                 content=self.body_input.value,
-                submission_kind="reply",
-                parent_confession_id=context["root_submission"]["confession_id"],
-                reply_flow="owner_reply_to_user",
             )
         except Exception as exc:
             self.cog.log_modal_diagnostic(
@@ -412,9 +410,6 @@ class OwnerReplyComposerModal(discord.ui.Modal, title="Reply to Member Anonymous
                 ),
             )
             return
-        if result.ok and result.state in {"queued", "published"}:
-            with contextlib.suppress(Exception):
-                await self.cog.service._mark_owner_reply_opportunity_used_record(context["opportunity"])
         embed = self.cog.service.build_member_result_embed(result)
         view = self.cog.service.build_member_result_view(result)
         await self.cog._send_private_interaction(interaction, embed=embed, view=view)
@@ -2058,11 +2053,11 @@ class ConfessionsCog(commands.Cog):
             return
         await self._open_report_modal(interaction)
 
-    @confess_group.command(name="reply-to-user", description="Review member responses to your confession and reply anonymously")
+    @confess_group.command(name="reply-to-user", description="Review member responses to your confession and post an anonymous owner reply")
     async def confess_reply_to_user_command(self, ctx: commands.Context):
         interaction = getattr(ctx, "interaction", None)
         if interaction is None:
-            await self._send_slash_only_notice(ctx, "Use `/confess reply-to-user` in a server to review private owner-reply prompts.")
+            await self._send_slash_only_notice(ctx, "Use `/confess reply-to-user` in a server to review private owner-reply opportunities.")
             return
         await self._send_owner_reply_inbox(interaction)
 
@@ -2167,6 +2162,8 @@ class ConfessionsCog(commands.Cog):
         allow_trusted_links="Allow Babblebox's trusted link families",
         allow_images="Enable image attachments for confessions",
         allow_replies="Enable anonymous replies",
+        allow_owner_replies="Enable owner-bound anonymous owner replies when members respond to a confession",
+        owner_reply_review="Send owner replies through private review before posting",
         allow_self_edit="Enable member self-edit for pending submissions",
         max_images="Maximum images per confession",
         cooldown_seconds="Minimum gap between submissions",
@@ -2185,6 +2182,8 @@ class ConfessionsCog(commands.Cog):
         allow_trusted_links: Optional[bool] = None,
         allow_images: Optional[bool] = None,
         allow_replies: Optional[bool] = None,
+        allow_owner_replies: Optional[bool] = None,
+        owner_reply_review: Optional[bool] = None,
         allow_self_edit: Optional[bool] = None,
         max_images: Optional[int] = None,
         cooldown_seconds: Optional[int] = None,
@@ -2203,6 +2202,8 @@ class ConfessionsCog(commands.Cog):
             "allow_trusted_mainstream_links": allow_trusted_links,
             "allow_images": allow_images,
             "allow_anonymous_replies": allow_replies,
+            "allow_owner_replies": allow_owner_replies,
+            "owner_reply_review_mode": owner_reply_review,
             "allow_self_edit": allow_self_edit,
             "max_images": max_images,
             "cooldown_seconds": cooldown_seconds,

@@ -108,7 +108,9 @@ Babblebox is intentionally compact:
 - self-edit is off by default and only applies to still-pending submissions when enabled
 - enabled image support stays bounded and always routes through private review, which requires a separate private review channel
 - enabled `Reply to confession anonymously` stays text-only, depth-1, appears on published confession posts instead of the launch panel, stays anonymous, and may go through private approval before posting
-- if someone explicitly replies to your confession discussion, Babblebox can DM a private owner reply prompt and `/confess reply-to-user` works as the fallback inbox
+- owner replies are a separate feature, are enabled by default, stay text-only, and publish publicly as `Anonymous Owner Reply` when used
+- owner-reply review is off by default; admins can enable it separately if they want owner replies queued before posting
+- if someone explicitly replies to your confession or your first public owner reply, Babblebox can DM a bot-private owner reply prompt and `/confess reply-to-user` works as the fallback inbox
 - private owner tools let a member delete their own confession or reply without exposing identity
 - admins can configure a dedicated appeals / reports channel so members can privately appeal restrictions or report confession problems
 - attachment filenames and Discord CDN URLs stay out of staff-visible surfaces
@@ -369,7 +371,7 @@ Daily visibility notes:
 | `/confess manage` | n/a | Open the private manage-my-confession flow |
 | `/confess appeal` | n/a | Open the private anonymous appeal flow |
 | `/confess report` | n/a | Open the private anonymous report flow |
-| `/confess reply-to-user` | n/a | Review member responses to your confession and reply anonymously |
+| `/confess reply-to-user` | n/a | Review member responses to your confession and post an anonymous owner reply |
 | `/confess about` | n/a | Show the private How It Works explanation |
 | `/confessions` | `bb!confessions` | Open the admin control panel for setup, review, and status |
 | `/confessions role` | `bb!confessions role` | View or change Confessions role allowlist / blacklist state |
@@ -390,7 +392,8 @@ Confession notes:
 - self-edit is off by default and only applies to pending submissions when enabled
 - enabled image confessions always enter the private review queue and require a separate private review channel
 - enabled `Reply to confession anonymously` stays text-only, depth-1, launches from published confession posts instead of the public panel, stays anonymous, and may go through private approval before posting
-- if someone explicitly replies to your confession discussion, Babblebox can DM a private owner prompt and `/confess reply-to-user` opens the same owner reply inbox privately
+- owner replies are separate from public anonymous replies, are enabled by default, stay text-only, and post publicly as `Anonymous Owner Reply`
+- owner replies only come from Babblebox-owned reply opportunities after someone explicitly replies to your confession or your first owner reply; the chain stops after that extra bounce
 - members can privately delete their own confessions and use a dedicated appeals / reports channel when admins configure one
 - Babblebox hides the sender's account identity, but a personal link or identifiable image can still reveal them if they include it
 - attachment filenames and raw Discord attachment URLs are kept out of staff-visible embeds
