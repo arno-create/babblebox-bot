@@ -82,6 +82,8 @@ class DummyChannel:
         can_view: bool = True,
         can_send: bool = True,
         can_embed: bool = True,
+        can_read_history: bool = True,
+        can_add_reactions: bool = True,
     ):
         self.id = channel_id
         self.mention = f"<#{channel_id}>"
@@ -90,6 +92,8 @@ class DummyChannel:
         self.can_view = can_view
         self.can_send = can_send
         self.can_embed = can_embed
+        self.can_read_history = can_read_history
+        self.can_add_reactions = can_add_reactions
 
     async def send(self, *args, **kwargs):
         if self.fail_send:
@@ -103,6 +107,8 @@ class DummyChannel:
             view_channel=self.can_view,
             send_messages=self.can_send,
             embed_links=self.can_embed,
+            read_message_history=self.can_read_history,
+            add_reactions=self.can_add_reactions,
         )
 
 
@@ -152,12 +158,23 @@ class DummyBot:
 
 
 class DummyMessage:
-    def __init__(self, *, guild: DummyGuild, channel: DummyChannel, author: DummyUser, content: str, reference=None):
+    _next_id = 9000
+
+    def __init__(self, *, guild: DummyGuild, channel: DummyChannel, author: DummyUser, content: str, reference=None, message_id: int | None = None):
         self.guild = guild
         self.channel = channel
         self.author = author
         self.content = content
         self.reference = reference
+        self.id = int(message_id) if isinstance(message_id, int) else DummyMessage._next_id
+        DummyMessage._next_id = max(DummyMessage._next_id + 1, self.id + 1)
+        self.reactions = []
+        self.add_reaction = AsyncMock(side_effect=self._add_reaction)
+
+    async def _add_reaction(self, emoji: str):
+        if any(str(getattr(reaction, "emoji", "")) == str(emoji) and bool(getattr(reaction, "me", False)) for reaction in self.reactions):
+            return
+        self.reactions.append(types.SimpleNamespace(emoji=emoji, me=True))
 
 
 class DummyDeletePayload:
@@ -354,13 +371,29 @@ class QuestionDropsContentTests(unittest.TestCase):
         self.assertTrue(is_answer_attempt(ordered, "green, blue, red"))
         self.assertFalse(is_answer_attempt(ordered, "it is true"))
 
+    def test_answer_attempt_gate_handles_hedged_payloads_without_grabbing_soft_chatter(self):
+        text_spec = {"type": "text", "accepted": ["mars"]}
+        self.assertTrue(is_answer_attempt(text_spec, "I think it's venus"))
+        self.assertTrue(is_answer_attempt(text_spec, "is it venus?"))
+        self.assertTrue(judge_answer(text_spec, "I think it's mars"))
+        self.assertFalse(is_answer_attempt(text_spec, "maybe later"))
+        self.assertFalse(is_answer_attempt(text_spec, "perhaps tomorrow"))
+
+        numeric_spec = {"type": "numeric", "value": 14}
+        self.assertTrue(is_answer_attempt(numeric_spec, "I think maybe 14?"))
+        self.assertTrue(judge_answer(numeric_spec, "I think maybe 14?"))
+
+        multiple_choice = {"type": "multiple_choice", "choices": ["red", "yellow", "green"], "answer": "green"}
+        self.assertTrue(is_answer_attempt(multiple_choice, "is it c?"))
+        self.assertTrue(judge_answer(multiple_choice, "is it c?"))
+
     def test_render_answer_instruction_matches_answer_type(self):
-        self.assertIn("Reply here or send", render_answer_instruction({"type": "numeric", "value": 12}))
+        self.assertIn("Reply to this drop or send", render_answer_instruction({"type": "numeric", "value": 12}))
         self.assertIn("option text", render_answer_instruction({"type": "multiple_choice", "choices": ["a"], "answer": "a"}))
         self.assertIn("number words", render_answer_instruction({"type": "numeric", "value": 12}))
         self.assertIn("true", render_answer_instruction({"type": "boolean", "value": True}))
         self.assertIn("full sequence", render_answer_instruction({"type": "ordered_tokens", "tokens": ["red", "blue"]}))
-        self.assertIn("short clean answer", render_answer_instruction({"type": "text", "accepted": ["mars"]}))
+        self.assertIn("short clean guess", render_answer_instruction({"type": "text", "accepted": ["mars"]}))
 
     def test_percent_change_generator_hits_exact_sale_price_regressions(self):
         expected = {
@@ -672,6 +705,27 @@ class QuestionDropsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.service._active_drops), 1)
         return next(iter(self.service._active_drops.values()))
 
+    def _correct_attempt_content(self, active: dict[str, object], *, prefer_letter: bool = False) -> str:
+        answer_spec = active["answer_spec"]
+        answer_type = str(answer_spec.get("type"))
+        if answer_type == "numeric":
+            value = answer_spec.get("value", 0)
+            if isinstance(value, float) and value.is_integer():
+                value = int(value)
+            return str(value)
+        if answer_type == "boolean":
+            return "true" if bool(answer_spec.get("value")) else "false"
+        if answer_type == "multiple_choice":
+            if prefer_letter:
+                answer = normalize_answer_text(answer_spec.get("answer"))
+                for index, choice in enumerate(answer_spec.get("choices", [])):
+                    if normalize_answer_text(choice) == answer:
+                        return chr(ord("A") + index)
+            return str(answer_spec.get("answer", ""))
+        if answer_type == "ordered_tokens":
+            return ", ".join(str(token) for token in answer_spec.get("tokens", []))
+        return str(answer_spec.get("accepted", [""])[0])
+
     def _wrong_attempt_content(self, active: dict[str, object]) -> str:
         answer_spec = active["answer_spec"]
         answer_type = str(answer_spec.get("type"))
@@ -695,6 +749,9 @@ class QuestionDropsServiceTests(unittest.IsolatedAsyncioTestCase):
             if normalize_answer_text(candidate) not in accepted:
                 return f"guess {candidate}"
         return "guess zebra"
+
+    def _reply_reference(self, message_id: int):
+        return types.SimpleNamespace(message_id=message_id)
 
     def _last_batch_results(self):
         return self.bot.profile_service.record_question_drop_results_batch.await_args.args[0]
@@ -994,13 +1051,13 @@ class QuestionDropsServiceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_scheduler_posts_single_active_drop_and_correct_answer_resolves(self):
         active = await self._post_one_drop()
-        answer = str(active["answer_spec"].get("value", active["answer_spec"].get("accepted", [""])[0]))
-        message = DummyMessage(guild=self.guild, channel=self.channel, author=DummyUser(44), content=answer)
+        message = DummyMessage(guild=self.guild, channel=self.channel, author=DummyUser(44), content=self._correct_attempt_content(active))
 
         handled = await self.service.handle_message(message)
 
         self.assertTrue(handled)
         self.assertEqual(len(self.service._active_drops), 0)
+        message.add_reaction.assert_awaited_once_with("\u2705")
         self.bot.profile_service.record_question_drop_results_batch.assert_awaited_once()
         self.assertEqual(
             self._last_batch_results(),
@@ -1014,6 +1071,22 @@ class QuestionDropsServiceTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
         self.assertIn("Solved", self.channel.sent[-1][1]["embed"].title)
+
+    async def test_direct_reply_correct_answer_resolves_and_reacts(self):
+        active = await self._post_one_drop()
+        message = DummyMessage(
+            guild=self.guild,
+            channel=self.channel,
+            author=DummyUser(144),
+            content=self._correct_attempt_content(active),
+            reference=self._reply_reference(active["message_id"]),
+        )
+
+        handled = await self.service.handle_message(message)
+
+        self.assertTrue(handled)
+        message.add_reaction.assert_awaited_once_with("\u2705")
+        self.bot.profile_service.record_question_drop_results_batch.assert_awaited_once()
 
     async def test_decimal_numeric_drop_accepts_equivalent_decimal_and_surfaces_clean_summary(self):
         variant = QuestionDropVariant(
@@ -1038,10 +1111,52 @@ class QuestionDropsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("**14.4**", self.channel.sent[-1][1]["embed"].description)
         self.bot.profile_service.record_question_drop_results_batch.assert_awaited_once()
 
+    async def test_numeric_hedged_guess_still_solves_without_a_reply(self):
+        variant = QuestionDropVariant(
+            concept_id="math:hedged-sale",
+            category="math",
+            difficulty=2,
+            source_type="generated",
+            generator_type="math_percent_change",
+            prompt="A $20 item is discounted by 30%. What is the sale price?",
+            answer_spec={"type": "numeric", "value": 14},
+            variant_hash="hedged-sale",
+        )
+        self.service._select_variant = lambda *args, **kwargs: variant
+        await self._post_one_drop()
+        message = DummyMessage(guild=self.guild, channel=self.channel, author=DummyUser(47), content="I think maybe 14?")
+
+        handled = await self.service.handle_message(message)
+
+        self.assertTrue(handled)
+        message.add_reaction.assert_awaited_once_with("\u2705")
+        self.bot.profile_service.record_question_drop_results_batch.assert_awaited_once()
+
+    async def test_multiple_choice_letter_answer_still_solves_without_a_reply(self):
+        variant = QuestionDropVariant(
+            concept_id="science:mc-react",
+            category="science",
+            difficulty=2,
+            source_type="curated",
+            generator_type="static",
+            prompt="Which is a chemical change? A) melting ice B) rusting iron C) cutting paper",
+            answer_spec={"type": "multiple_choice", "choices": ["melting ice", "rusting iron", "cutting paper"], "answer": "rusting iron"},
+            variant_hash="science-mc-react",
+        )
+        self.service._select_variant = lambda *args, **kwargs: variant
+        active = await self._post_one_drop()
+        message = DummyMessage(guild=self.guild, channel=self.channel, author=DummyUser(48), content=self._correct_attempt_content(active, prefer_letter=True))
+
+        handled = await self.service.handle_message(message)
+
+        self.assertTrue(handled)
+        message.add_reaction.assert_awaited_once_with("\u2705")
+        self.bot.profile_service.record_question_drop_results_batch.assert_awaited_once()
+
     async def test_first_try_correct_solve_skips_participant_persist_write(self):
         active = await self._post_one_drop()
         self.service.store.update_active_drop_participants = AsyncMock()
-        answer = str(active["answer_spec"].get("value", active["answer_spec"].get("accepted", [""])[0]))
+        answer = self._correct_attempt_content(active)
 
         handled = await self.service.handle_message(
             DummyMessage(guild=self.guild, channel=self.channel, author=DummyUser(45), content=answer)
@@ -1060,7 +1175,23 @@ class QuestionDropsServiceTests(unittest.IsolatedAsyncioTestCase):
         handled = await self.service.handle_message(wrong)
 
         self.assertFalse(handled)
+        wrong.add_reaction.assert_awaited_once_with("\u274c")
         self.service.store.update_active_drop_participants.assert_awaited_once_with(self.guild.id, self.channel.id, [54])
+
+    async def test_direct_reply_wrong_answer_reacts_cleanly(self):
+        active = await self._post_one_drop()
+        wrong = DummyMessage(
+            guild=self.guild,
+            channel=self.channel,
+            author=DummyUser(154),
+            content=self._wrong_attempt_content(active),
+            reference=self._reply_reference(active["message_id"]),
+        )
+
+        handled = await self.service.handle_message(wrong)
+
+        self.assertFalse(handled)
+        wrong.add_reaction.assert_awaited_once_with("\u274c")
 
     async def test_wrong_feedback_is_rate_limited_and_attempts_only_count_once_per_user(self):
         await self.service.update_config(self.guild.id, tone_mode="playful")
@@ -1075,7 +1206,7 @@ class QuestionDropsServiceTests(unittest.IsolatedAsyncioTestCase):
         exposure_id = int(active["exposure_id"])
         self.assertEqual(self.service._wrong_feedback_count[exposure_id], 1)
         self.assertEqual(self.service._attempted_users[exposure_id], {55})
-        self.assertEqual(self.channel.sent[-1][1]["embed"].title, "Not Yet")
+        self.assertIn("Not Yet", self.channel.sent[-1][1]["embed"].title)
 
     async def test_same_user_wrong_then_correct_counts_once_as_correct_participation(self):
         active = await self._post_one_drop()
@@ -1085,7 +1216,7 @@ class QuestionDropsServiceTests(unittest.IsolatedAsyncioTestCase):
             guild=self.guild,
             channel=self.channel,
             author=winner,
-            content=str(active["answer_spec"].get("value", active["answer_spec"].get("accepted", [""])[0])),
+            content=self._correct_attempt_content(active),
         )
 
         await self.service.handle_message(wrong)
@@ -1103,6 +1234,121 @@ class QuestionDropsServiceTests(unittest.IsolatedAsyncioTestCase):
                 }
             ],
         )
+
+    async def test_missing_reaction_permissions_fail_gracefully(self):
+        active = await self._post_one_drop()
+        self.channel.can_add_reactions = False
+        self.channel.can_read_history = False
+        message = DummyMessage(guild=self.guild, channel=self.channel, author=DummyUser(62), content=self._correct_attempt_content(active))
+
+        handled = await self.service.handle_message(message)
+
+        self.assertTrue(handled)
+        message.add_reaction.assert_not_awaited()
+        self.bot.profile_service.record_question_drop_results_batch.assert_awaited_once()
+
+    async def test_reaction_failure_does_not_break_correct_solve(self):
+        active = await self._post_one_drop()
+        message = DummyMessage(guild=self.guild, channel=self.channel, author=DummyUser(63), content=self._correct_attempt_content(active))
+        message.add_reaction.side_effect = discord.NotFound(types.SimpleNamespace(status=404, reason="missing"), "gone")
+
+        handled = await self.service.handle_message(message)
+
+        self.assertTrue(handled)
+        self.bot.profile_service.record_question_drop_results_batch.assert_awaited_once()
+
+    async def test_recently_solved_correct_answer_gets_late_ack_only(self):
+        active = await self._post_one_drop()
+        winner = DummyUser(70)
+        runner_up = DummyUser(71)
+        self.bot.profile_service.record_question_drop_results_batch = AsyncMock(
+            return_value={
+                winner.id: {
+                    "guild_id": self.guild.id,
+                    "user_id": winner.id,
+                    "points_awarded": answer_points_for_difficulty(int(active["difficulty"])),
+                    "guild_after": {},
+                    "guild_category_after": {},
+                }
+            }
+        )
+        self.service._grant_progression_rewards = AsyncMock(return_value=[])
+        winning_message = DummyMessage(guild=self.guild, channel=self.channel, author=winner, content=self._correct_attempt_content(active))
+        late_message = DummyMessage(guild=self.guild, channel=self.channel, author=runner_up, content=self._correct_attempt_content(active))
+
+        handled = await self.service.handle_message(winning_message)
+        late_handled = await self.service.handle_message(late_message)
+
+        self.assertTrue(handled)
+        self.assertFalse(late_handled)
+        self.bot.profile_service.record_question_drop_results_batch.assert_awaited_once()
+        self.service._grant_progression_rewards.assert_awaited_once()
+        self.assertEqual(self._last_batch_results()[0]["user_id"], winner.id)
+        late_message.add_reaction.assert_awaited_once_with("\u2705")
+        titles = [item[1]["embed"].title for item in self.channel.sent]
+        self.assertEqual(sum(1 for title in titles if "Solved" in title), 1)
+        self.assertEqual(sum(1 for title in titles if "Just Late" in title), 1)
+
+    async def test_late_correct_ack_is_bounded_by_user_and_cap(self):
+        active = await self._post_one_drop()
+        winner = DummyUser(80)
+        late_one = DummyUser(81)
+        late_two = DummyUser(82)
+        late_three = DummyUser(83)
+
+        await self.service.handle_message(
+            DummyMessage(guild=self.guild, channel=self.channel, author=winner, content=self._correct_attempt_content(active))
+        )
+        first_late = DummyMessage(guild=self.guild, channel=self.channel, author=late_one, content=self._correct_attempt_content(active))
+        repeat_late = DummyMessage(guild=self.guild, channel=self.channel, author=late_one, content=self._correct_attempt_content(active))
+        second_late = DummyMessage(guild=self.guild, channel=self.channel, author=late_two, content=self._correct_attempt_content(active))
+        capped_late = DummyMessage(guild=self.guild, channel=self.channel, author=late_three, content=self._correct_attempt_content(active))
+
+        await self.service.handle_message(first_late)
+        await self.service.handle_message(repeat_late)
+        await self.service.handle_message(second_late)
+        await self.service.handle_message(capped_late)
+
+        titles = [item[1]["embed"].title for item in self.channel.sent]
+        self.assertEqual(sum(1 for title in titles if "Just Late" in title), 2)
+        repeat_late.add_reaction.assert_not_awaited()
+        capped_late.add_reaction.assert_not_awaited()
+
+    async def test_late_correct_ack_expires_cleanly(self):
+        active = await self._post_one_drop()
+        winner = DummyUser(90)
+        await self.service.handle_message(
+            DummyMessage(guild=self.guild, channel=self.channel, author=winner, content=self._correct_attempt_content(active))
+        )
+        late = DummyMessage(guild=self.guild, channel=self.channel, author=DummyUser(91), content=self._correct_attempt_content(active))
+        future = ge.now_utc() + timedelta(seconds=9)
+
+        with patch("babblebox.question_drops_service.ge.now_utc", return_value=future):
+            handled = await self.service.handle_message(late)
+
+        self.assertFalse(handled)
+        late.add_reaction.assert_not_awaited()
+        self.assertEqual(sum(1 for item in self.channel.sent if "Just Late" in item[1]["embed"].title), 0)
+
+    async def test_near_simultaneous_correct_answers_keep_one_winner_and_one_late_ack(self):
+        active = await self._post_one_drop()
+        first = DummyUser(92)
+        second = DummyUser(93)
+        first_message = DummyMessage(guild=self.guild, channel=self.channel, author=first, content=self._correct_attempt_content(active))
+        second_message = DummyMessage(guild=self.guild, channel=self.channel, author=second, content=self._correct_attempt_content(active))
+
+        results = await asyncio.gather(
+            self.service.handle_message(first_message),
+            self.service.handle_message(second_message),
+        )
+
+        self.assertEqual(sorted(results), [False, True])
+        self.bot.profile_service.record_question_drop_results_batch.assert_awaited_once()
+        titles = [item[1]["embed"].title for item in self.channel.sent]
+        self.assertEqual(sum(1 for title in titles if "Solved" in title), 1)
+        self.assertEqual(sum(1 for title in titles if "Just Late" in title), 1)
+        exposures = await self.store.list_exposures_for_guild(self.guild.id)
+        self.assertIn(exposures[0]["winner_user_id"], {first.id, second.id})
 
     async def test_expiring_drop_records_first_wrong_attempt_once(self):
         active = await self._post_one_drop()
@@ -2246,6 +2492,7 @@ class QuestionDropsMemberRolePreferenceTests(QuestionDropsServiceTests):
         self.assertIn("announce off", mastery_roles)
         self.assertIn("custom default", scholar_field)
         self.assertIn("announce off", scholar_field)
+
     async def test_non_answer_chatter_does_not_count_as_attempt_or_feedback(self):
         active = await self._post_one_drop()
         author = DummyUser(56)
@@ -2257,7 +2504,49 @@ class QuestionDropsMemberRolePreferenceTests(QuestionDropsServiceTests):
         exposure_id = int(active["exposure_id"])
         self.assertEqual(self.service._wrong_feedback_count[exposure_id], 0)
         self.assertEqual(self.service._attempted_users[exposure_id], set())
+        chatter.add_reaction.assert_not_awaited()
         self.bot.profile_service.record_question_drop_results_batch.assert_not_awaited()
+
+    async def test_reply_to_another_user_chatter_is_ignored(self):
+        active = await self._post_one_drop()
+        other_message = DummyMessage(guild=self.guild, channel=self.channel, author=DummyUser(57), content="no clue")
+        chatter = DummyMessage(
+            guild=self.guild,
+            channel=self.channel,
+            author=DummyUser(58),
+            content="what",
+            reference=self._reply_reference(other_message.id),
+        )
+
+        handled = await self.service.handle_message(chatter)
+
+        self.assertFalse(handled)
+        self.assertEqual(self.service._attempted_users[int(active["exposure_id"])], set())
+        chatter.add_reaction.assert_not_awaited()
+
+    async def test_question_embed_uses_polished_layout(self):
+        variant = QuestionDropVariant(
+            concept_id="science:polish-layout",
+            category="science",
+            difficulty=2,
+            source_type="curated",
+            generator_type="static",
+            prompt="Name the planet nicknamed the Red Planet.",
+            answer_spec={"type": "text", "accepted": ["mars"]},
+            variant_hash="science-polish-layout",
+        )
+        self.service._select_variant = lambda *args, **kwargs: variant
+
+        await self._post_one_drop()
+
+        embed = self.channel.sent[-1][1]["embed"]
+        self.assertTrue(embed.title.endswith("Question Drop"))
+        self.assertIn("Science", embed.title)
+        self.assertIn("Round", embed.fields[0].name)
+        self.assertIn("Difficulty", embed.fields[0].value)
+        self.assertIn("Window", embed.fields[0].value)
+        self.assertIn("Answering", embed.fields[1].name)
+        self.assertIn("wins", embed.footer.text)
 
     async def test_status_embed_honestly_notes_idle_skip_and_high_frequency_reuse(self):
         await self.service.update_config(self.guild.id, drops_per_day=10, activity_gate="light")
@@ -2636,8 +2925,19 @@ class QuestionDropsMemberRolePreferenceTests(QuestionDropsServiceTests):
         await self.service._expire_drop(active, timed_out=True)
 
         self.assertEqual(len(self.service._active_drops), 0)
-        self.assertEqual(self.channel.sent[-1][1]["embed"].title, "Time's Up")
+        self.assertIn("Time's Up", self.channel.sent[-1][1]["embed"].title)
         self.assertIn("No clean solve this time.", self.channel.sent[-1][1]["embed"].description)
+
+    async def test_answer_after_timeout_stays_closed_without_reactions(self):
+        active = await self._post_one_drop()
+        await self.service._expire_drop(active, timed_out=True)
+        message = DummyMessage(guild=self.guild, channel=self.channel, author=DummyUser(97), content=self._correct_attempt_content(active))
+
+        handled = await self.service.handle_message(message)
+
+        self.assertFalse(handled)
+        message.add_reaction.assert_not_awaited()
+        self.assertEqual(sum(1 for item in self.channel.sent if "Just Late" in item[1]["embed"].title), 0)
 
     async def test_party_game_overlap_retires_live_drop_before_judging(self):
         active = await self._post_one_drop()

@@ -22,6 +22,27 @@ PROGRESSION_EMOJIS = {
     "scholar": "\U0001f393",
 }
 
+STATE_EMOJIS = {
+    "question": "\u2754",
+    "round": "\U0001f9ed",
+    "answering": "\u270d\ufe0f",
+    "window": "\u23f1\ufe0f",
+    "difficulty": "\U0001f4ca",
+    "correct": "\u2705",
+    "wrong": "\u274c",
+    "late": "\U0001f552",
+    "timeout": "\u23f3",
+    "result": "\U0001f3af",
+}
+
+ANSWER_TYPE_EMOJIS = {
+    "text": "\U0001f524",
+    "numeric": "\U0001f522",
+    "boolean": "\u2611\ufe0f",
+    "multiple_choice": "\U0001f518",
+    "ordered_tokens": "\U0001f9e9",
+}
+
 
 def category_label(category: str) -> str:
     normalized = str(category or "").strip().casefold()
@@ -38,6 +59,14 @@ def category_label_with_emoji(category: str) -> str:
 
 def progression_emoji(name: str, *, fallback: str = "\u2022") -> str:
     return PROGRESSION_EMOJIS.get(name, fallback)
+
+
+def state_emoji(name: str, *, fallback: str = "\u2022") -> str:
+    return STATE_EMOJIS.get(str(name or "").strip().casefold(), fallback)
+
+
+def answer_type_emoji(answer_type: str, *, fallback: str = "\u270d\ufe0f") -> str:
+    return ANSWER_TYPE_EMOJIS.get(str(answer_type or "").strip().casefold(), fallback)
 
 
 def tier_label(tier: int) -> str:

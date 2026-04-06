@@ -34,12 +34,14 @@ from babblebox.question_drops_content import (
 )
 from babblebox.question_drops_ai import build_question_drop_ai_provider
 from babblebox.question_drops_style import (
+    answer_type_emoji,
     category_emoji,
     category_label,
     category_label_with_emoji,
     leaderboard_marker,
     progression_emoji,
     scholar_label,
+    state_emoji,
     tier_label,
 )
 from babblebox.question_drops_store import (
@@ -71,6 +73,8 @@ QUESTION_DROP_ACTIVITY_WINDOW_SECONDS = 90 * 60
 QUESTION_DROP_SLOT_GRACE_SECONDS = 45 * 60
 QUESTION_DROP_SCHEDULER_INTERVAL_SECONDS = 45.0
 QUESTION_DROP_WRONG_FEEDBACK_GLOBAL_LIMIT = 2
+QUESTION_DROP_LATE_CORRECT_WINDOW_SECONDS = 8
+QUESTION_DROP_LATE_CORRECT_MAX_ACKS = 2
 QUESTION_DROP_PRUNE_INTERVAL_SECONDS = 6 * 60 * 60
 QUESTION_DROP_EXPOSURE_FETCH_LIMIT = 220
 QUESTION_DROP_GENERATED_VARIANTS_PER_SEED = 8
@@ -199,6 +203,18 @@ class QuestionDropDigestPeriod:
     timezone_name: str
 
 
+@dataclass
+class QuestionDropRecentSolveContext:
+    guild_id: int
+    channel_id: int
+    message_id: int
+    category: str
+    answer_spec: dict[str, Any]
+    winner_user_id: int
+    resolved_at: datetime
+    acknowledged_user_ids: set[int]
+
+
 class QuestionDropsService:
     def __init__(self, bot: commands.Bot, store: QuestionDropsStore | None = None):
         self.bot = bot
@@ -222,6 +238,7 @@ class QuestionDropsService:
         self._active_drops: dict[tuple[int, int], dict[str, Any]] = {}
         self._pending_posts: dict[tuple[int, str], dict[str, Any]] = {}
         self._recent_activity: dict[tuple[int, int], datetime] = {}
+        self._recently_resolved_drops: dict[tuple[int, int], QuestionDropRecentSolveContext] = {}
         self._wrong_feedback_users: dict[int, set[int]] = defaultdict(set)
         self._wrong_feedback_count: dict[int, int] = defaultdict(int)
         self._attempted_users: dict[int, set[int]] = defaultdict(set)
@@ -3072,78 +3089,200 @@ class QuestionDropsService:
             return
         self._recent_activity[(message.guild.id, message.channel.id)] = ge.now_utc()
 
+    def _recently_resolved_key(self, guild_id: int, channel_id: int) -> tuple[int, int]:
+        return (int(guild_id), int(channel_id))
+
+    def _clear_recently_resolved_drop(self, guild_id: int, channel_id: int):
+        self._recently_resolved_drops.pop(self._recently_resolved_key(guild_id, channel_id), None)
+
+    def _recently_resolved_drop(
+        self,
+        guild_id: int,
+        channel_id: int,
+        *,
+        now: datetime,
+    ) -> QuestionDropRecentSolveContext | None:
+        key = self._recently_resolved_key(guild_id, channel_id)
+        record = self._recently_resolved_drops.get(key)
+        if record is None:
+            return None
+        if (now - record.resolved_at).total_seconds() > QUESTION_DROP_LATE_CORRECT_WINDOW_SECONDS:
+            self._recently_resolved_drops.pop(key, None)
+            return None
+        return record
+
+    def _remember_recently_resolved_drop(
+        self,
+        record: dict[str, Any],
+        *,
+        winner_user_id: int,
+        resolved_at: datetime,
+    ):
+        self._recently_resolved_drops[self._recently_resolved_key(record["guild_id"], record["channel_id"])] = QuestionDropRecentSolveContext(
+            guild_id=int(record["guild_id"]),
+            channel_id=int(record["channel_id"]),
+            message_id=int(record["message_id"]),
+            category=str(record["category"]),
+            answer_spec=dict(record["answer_spec"]),
+            winner_user_id=int(winner_user_id),
+            resolved_at=resolved_at,
+            acknowledged_user_ids=set(),
+        )
+
+    def _can_add_answer_reaction(self, guild: discord.Guild | None, channel) -> bool:
+        if guild is None:
+            return True
+        permissions_for = getattr(channel, "permissions_for", None)
+        if not callable(permissions_for):
+            return True
+        bot_member = self._bot_member_for_guild(guild)
+        if bot_member is None:
+            return True
+        perms = permissions_for(bot_member)
+        return all(
+            bool(getattr(perms, field, True))
+            for field in ("view_channel", "read_message_history", "add_reactions")
+        )
+
+    async def _try_add_answer_reaction(self, message: discord.Message, emoji: str) -> bool:
+        if not emoji or not self._can_add_answer_reaction(getattr(message, "guild", None), getattr(message, "channel", None)):
+            return False
+        add_reaction = getattr(message, "add_reaction", None)
+        if not callable(add_reaction):
+            return False
+        existing_reactions = getattr(message, "reactions", None)
+        if isinstance(existing_reactions, list):
+            for reaction in existing_reactions:
+                if str(getattr(reaction, "emoji", "")) == emoji and bool(getattr(reaction, "me", False)):
+                    return False
+        try:
+            await add_reaction(emoji)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            return False
+        return True
+
+    async def _acknowledge_late_correct_answer(
+        self,
+        message: discord.Message,
+        *,
+        now: datetime,
+        reply_target_id: int | None,
+    ) -> bool:
+        if message.guild is None:
+            return False
+        recent = self._recently_resolved_drop(message.guild.id, message.channel.id, now=now)
+        if recent is None:
+            return False
+        author_id = int(getattr(message.author, "id", 0) or 0)
+        if author_id <= 0 or author_id == recent.winner_user_id:
+            return False
+        if author_id in recent.acknowledged_user_ids:
+            return False
+        if len(recent.acknowledged_user_ids) >= QUESTION_DROP_LATE_CORRECT_MAX_ACKS:
+            return False
+        direct_reply = reply_target_id == int(recent.message_id)
+        if not is_answer_attempt(recent.answer_spec, message.content, direct_reply=direct_reply):
+            return False
+        if not judge_answer(recent.answer_spec, message.content):
+            return False
+        recent.acknowledged_user_ids.add(author_id)
+        await self._try_add_answer_reaction(message, state_emoji("correct"))
+        with contextlib.suppress(discord.HTTPException):
+            await message.channel.send(
+                embed=ge.make_status_embed(
+                    f"{state_emoji('late')} Just Late",
+                    f"Nice catch. Correct, but <@{recent.winner_user_id}> locked this drop a moment earlier.",
+                    tone="info",
+                    footer=f"Babblebox Question Drops | {category_label(recent.category)}",
+                ),
+                delete_after=6.0,
+                allowed_mentions=discord.AllowedMentions.none(),
+            )
+        return False
+
     async def handle_message(self, message: discord.Message) -> bool:
         if not self.storage_ready or message.guild is None:
             return False
+        now = ge.now_utc()
+        reply_target_id = _extract_reply_target_id(message)
         active = self._active_drops.get((message.guild.id, message.channel.id))
         if active is None:
-            return False
+            return await self._acknowledge_late_correct_answer(message, now=now, reply_target_id=reply_target_id)
         if self._channel_has_live_party_session(message.guild.id, message.channel.id):
             await self._expire_drop(active, timed_out=False, announce=False, delete_post_message=True)
             return False
-        now = ge.now_utc()
         if not self._active_drop_is_live(active, now=now):
             await self._expire_drop(active, timed_out=True)
             return False
-        reply_target_id = _extract_reply_target_id(message)
         if not is_answer_attempt(active["answer_spec"], message.content, direct_reply=reply_target_id == int(active["message_id"])):
             return False
         result_payload: dict[str, Any] | None = None
+        attempt_reaction: str | None = None
         feedback_line: str | None = None
+        check_recent = False
         async with self._lock:
             current = self._active_drops.get((message.guild.id, message.channel.id))
             if current is None or int(current["message_id"]) != int(active["message_id"]):
-                return False
-            if self._channel_has_live_party_session(current["guild_id"], current["channel_id"]):
+                check_recent = True
+            elif self._channel_has_live_party_session(current["guild_id"], current["channel_id"]):
                 await self._expire_drop(current, timed_out=False, announce=False, delete_post_message=True)
                 return False
-            exposure_id = int(current["exposure_id"])
-            participants = self._attempted_users.setdefault(exposure_id, set(current.get("participant_user_ids", []) or []))
-            first_attempt = message.author.id not in participants
-            correct = judge_answer(current["answer_spec"], message.content)
-            persisted_participants = False
-            if first_attempt:
-                participants.add(message.author.id)
-                participant_ids = sorted(participants)
-                current["participant_user_ids"] = participant_ids
-                if not correct:
-                    await self.store.update_active_drop_participants(current["guild_id"], current["channel_id"], participant_ids)
-                    persisted_participants = True
-            if correct:
-                participant_ids = sorted(participants)
-                try:
-                    await self.store.resolve_exposure(exposure_id, resolved_at=now, winner_user_id=message.author.id)
-                    await self.store.delete_active_drop(current["guild_id"], current["channel_id"])
-                except Exception:
-                    if first_attempt and not persisted_participants:
-                        with contextlib.suppress(Exception):
-                            await self.store.update_active_drop_participants(
-                                current["guild_id"],
-                                current["channel_id"],
-                                participant_ids,
-                            )
-                    raise
-                self._active_drops.pop((current["guild_id"], current["channel_id"]), None)
-                self._clear_active_drop_runtime_state(exposure_id)
-                result_payload = {
-                    "guild_id": current["guild_id"],
-                    "channel_id": current["channel_id"],
-                    "exposure_id": exposure_id,
-                    "occurred_at": current["asked_at"],
-                    "category": current["category"],
-                    "difficulty": int(current["difficulty"]),
-                    "participant_ids": participant_ids,
-                    "winner_user_id": message.author.id,
-                    "answer_spec": current["answer_spec"],
-                }
-            elif (
-                message.author.id not in self._wrong_feedback_users[exposure_id]
-                and self._wrong_feedback_count[exposure_id] < QUESTION_DROP_WRONG_FEEDBACK_GLOBAL_LIMIT
-            ):
-                feedback_line = _tone_failure_line(current.get("tone_mode", "clean"))
-                if feedback_line:
-                    self._wrong_feedback_users[exposure_id].add(message.author.id)
-                    self._wrong_feedback_count[exposure_id] += 1
+            else:
+                exposure_id = int(current["exposure_id"])
+                participants = self._attempted_users.setdefault(exposure_id, set(current.get("participant_user_ids", []) or []))
+                first_attempt = message.author.id not in participants
+                correct = judge_answer(current["answer_spec"], message.content)
+                persisted_participants = False
+                if first_attempt:
+                    participants.add(message.author.id)
+                    participant_ids = sorted(participants)
+                    current["participant_user_ids"] = participant_ids
+                    if not correct:
+                        await self.store.update_active_drop_participants(current["guild_id"], current["channel_id"], participant_ids)
+                        persisted_participants = True
+                if correct:
+                    participant_ids = sorted(participants)
+                    try:
+                        await self.store.resolve_exposure(exposure_id, resolved_at=now, winner_user_id=message.author.id)
+                        await self.store.delete_active_drop(current["guild_id"], current["channel_id"])
+                    except Exception:
+                        if first_attempt and not persisted_participants:
+                            with contextlib.suppress(Exception):
+                                await self.store.update_active_drop_participants(
+                                    current["guild_id"],
+                                    current["channel_id"],
+                                    participant_ids,
+                                )
+                        raise
+                    self._active_drops.pop((current["guild_id"], current["channel_id"]), None)
+                    self._remember_recently_resolved_drop(current, winner_user_id=message.author.id, resolved_at=now)
+                    self._clear_active_drop_runtime_state(exposure_id)
+                    attempt_reaction = state_emoji("correct")
+                    result_payload = {
+                        "guild_id": current["guild_id"],
+                        "channel_id": current["channel_id"],
+                        "exposure_id": exposure_id,
+                        "occurred_at": current["asked_at"],
+                        "category": current["category"],
+                        "difficulty": int(current["difficulty"]),
+                        "participant_ids": participant_ids,
+                        "winner_user_id": message.author.id,
+                        "answer_spec": current["answer_spec"],
+                    }
+                else:
+                    attempt_reaction = state_emoji("wrong")
+                    if (
+                        message.author.id not in self._wrong_feedback_users[exposure_id]
+                        and self._wrong_feedback_count[exposure_id] < QUESTION_DROP_WRONG_FEEDBACK_GLOBAL_LIMIT
+                    ):
+                        feedback_line = _tone_failure_line(current.get("tone_mode", "clean"))
+                        if feedback_line:
+                            self._wrong_feedback_users[exposure_id].add(message.author.id)
+                            self._wrong_feedback_count[exposure_id] += 1
+        if check_recent:
+            return await self._acknowledge_late_correct_answer(message, now=ge.now_utc(), reply_target_id=reply_target_id)
+        if attempt_reaction:
+            await self._try_add_answer_reaction(message, attempt_reaction)
         if result_payload is not None:
             updates = await self._record_participation_batch(
                 guild_id=result_payload["guild_id"],
@@ -3182,7 +3321,7 @@ class QuestionDropsService:
             with contextlib.suppress(discord.HTTPException):
                 await message.channel.send(
                     embed=ge.make_status_embed(
-                        "Not Yet",
+                        f"{state_emoji('wrong')} Not Yet",
                         feedback_line,
                         tone="warning",
                         footer="Babblebox Question Drops",
@@ -3610,7 +3749,7 @@ class QuestionDropsService:
         flags = self._milestone_flags(update, role_events)
         guild_after = update.get("guild_after", {}) if isinstance(update, dict) else {}
         category_after = update.get("guild_category_after", {}) if isinstance(update, dict) else {}
-        title = f"{category_emoji(category_id)} Solved"
+        title = f"{state_emoji('correct')} {category_label(category_id)} Solved"
         if any(int(event.get("tier", 0) or 0) >= 3 for event in flags["category_role_events"]):
             title = f"{progression_emoji('mastery')} {category_label(category_id)} Mastery"
         elif flags["scholar_role_events"]:
@@ -3635,7 +3774,7 @@ class QuestionDropsService:
             description_lines.append(ai_highlight)
         else:
             description_lines.append(
-                f"{getattr(winner, 'mention', ge.display_name_of(winner))} solved **{answer}** for **{int(update.get('points_awarded', 0) or fallback_points)}** points."
+                f"{getattr(winner, 'mention', ge.display_name_of(winner))} locked in **{answer}** for **{int(update.get('points_awarded', 0) or fallback_points)}** points."
             )
         detail_bits = [category_label_with_emoji(category_id)]
         current_streak = int(guild_after.get("current_streak", 0) or 0)
@@ -3769,6 +3908,7 @@ class QuestionDropsService:
         delete_post_message: bool = False,
     ):
         exposure_id = int(record["exposure_id"])
+        self._clear_recently_resolved_drop(record["guild_id"], record["channel_id"])
         await self.store.resolve_exposure(exposure_id, resolved_at=ge.now_utc(), winner_user_id=None)
         await self.store.delete_active_drop(record["guild_id"], record["channel_id"])
         self._active_drops.pop((record["guild_id"], record["channel_id"]), None)
@@ -3792,7 +3932,7 @@ class QuestionDropsService:
         if channel is None:
             return
         answer = render_answer_summary(record["answer_spec"])
-        title = "Time's Up" if timed_out else "Drop Closed"
+        title = f"{state_emoji('timeout')} Time's Up" if timed_out else f"{state_emoji('result')} Drop Closed"
         with contextlib.suppress(discord.HTTPException):
             await channel.send(
                 embed=ge.make_status_embed(
@@ -3900,6 +4040,7 @@ class QuestionDropsService:
         if variant is None:
             return
         channel_id = getattr(channel, "id", 0)
+        self._clear_recently_resolved_drop(guild_id, channel_id)
         pending = await self.store.claim_pending_post(
             {
                 "guild_id": guild_id,
@@ -3917,23 +4058,26 @@ class QuestionDropsService:
         self._pending_posts[(guild_id, slot_key)] = pending
         prompt = variant.prompt
         embed = discord.Embed(
-            title="Question Drop",
+            title=f"{category_label_with_emoji(variant.category)} Question Drop",
             description=prompt,
             color=ge.EMBED_THEME["accent"],
             timestamp=asked_at,
         )
         embed.add_field(
-            name="Round",
+            name=f"{state_emoji('round')} Round",
             value=(
-                f"Category: **{QUESTION_DROP_CATEGORY_LABELS.get(variant.category, variant.category.title())}**\n"
-                f"Difficulty: **{QUESTION_DROP_DIFFICULTY_LABELS.get(variant.difficulty, 'Easy')}**\n"
-                f"Window: **{int(config.get('answer_window_seconds', 60))} seconds**"
+                f"{state_emoji('difficulty')} Difficulty: **{QUESTION_DROP_DIFFICULTY_LABELS.get(variant.difficulty, 'Easy')}**\n"
+                f"{state_emoji('window')} Window: **{int(config.get('answer_window_seconds', 60))} seconds**"
             ),
             inline=False,
         )
         answer_lane = render_answer_instruction(variant.answer_spec)
-        embed.add_field(name="Answering", value=answer_lane, inline=False)
-        embed = ge.style_embed(embed, footer="Babblebox Question Drops | First correct answer scores")
+        embed.add_field(
+            name=f"{answer_type_emoji(str(variant.answer_spec.get('type') or 'text'))} Answering",
+            value=answer_lane,
+            inline=False,
+        )
+        embed = ge.style_embed(embed, footer="Babblebox Question Drops | First correct answer wins")
         message = None
         try:
             message = await channel.send(embed=embed)
