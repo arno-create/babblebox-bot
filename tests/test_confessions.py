@@ -21,7 +21,8 @@ from babblebox.cogs.confessions import (
     StatelessPublishedConfessionReplyView,
 )
 from babblebox.confessions_service import CASE_ID_PREFIX, CONFESSION_ID_PREFIX, ConfessionSubmissionResult, ConfessionsService
-from babblebox.confessions_store import ConfessionsStore
+from babblebox.confessions_store import ConfessionsStore, _PostgresConfessionsStore
+from tests.test_confessions_store import _FakeConnection, _FakePool, _privacy
 
 
 class FakeGuildPermissions:
@@ -395,6 +396,21 @@ class ServiceCogStub:
                 types.SimpleNamespace(custom_id="bb-confession-owner-reply:dismiss"),
             ]
         )
+
+
+class _PostgresStoreFacade:
+    def __init__(self, inner_store):
+        self._inner_store = inner_store
+        self.backend_name = getattr(inner_store, "backend_name", "postgres")
+
+    async def load(self):
+        await self._inner_store.load()
+
+    async def close(self):
+        await self._inner_store.close()
+
+    def __getattr__(self, name: str):
+        return getattr(self._inner_store, name)
 
 
 class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
@@ -2140,6 +2156,75 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(config["appeals_channel_id"], 50)
         self.assertEqual(len(self.guild.get_channel(40).sent), 1)
         self.assertEqual(config["panel_message_id"], self.guild.get_channel(40).sent[0].id)
+
+    async def test_confessions_setup_persists_postgres_backed_config_with_runtime_fields(self):
+        guild = FakeGuild(110)
+        guild.add_channel(FakeChannel(20, name="confessions"))
+        guild.add_channel(FakeChannel(30, name="review"))
+        guild.add_channel(FakeChannel(40, name="panel"))
+        guild.add_channel(FakeChannel(50, name="appeals"))
+        bot = FakeBot([guild])
+        connection = _FakeConnection()
+        inner_store = _PostgresConfessionsStore("postgresql://example", _privacy())
+        inner_store._pool = _FakePool(connection)
+        service = ConfessionsService(bot, store=_PostgresStoreFacade(inner_store))
+        cog = ConfessionsCog(bot)
+        bot._cog = cog
+        bot.confessions_service = service
+        original_service = cog.service
+        ctx = FakeContext(guild=guild, author=FakeUser(933, manage_guild=True))
+
+        try:
+            cog.service = service
+            with mock.patch.object(inner_store, "_connect", new=mock.AsyncMock()):
+                started = await service.start()
+            self.assertTrue(started)
+
+            await ConfessionsCog.confessions_setup_command.callback(
+                cog,
+                ctx,
+                True,
+                guild.channels[20],
+                guild.channels[40],
+                guild.channels[30],
+                guild.channels[50],
+                True,
+                False,
+                False,
+                False,
+                False,
+            )
+
+            self.assertEqual(len(ctx.defer_calls), 1)
+            self.assertEqual(len(ctx.send_calls), 1)
+            self.assertEqual(ctx.send_calls[0]["embed"].title, "Confessions Setup")
+            self.assertNotIn("could not save", ctx.send_calls[0]["embed"].description.lower())
+            self.assertNotIn("could not finish", ctx.send_calls[0]["embed"].description.lower())
+            config = cog.service.get_config(guild.id)
+            self.assertTrue(config["enabled"])
+            self.assertEqual(config["confession_channel_id"], 20)
+            self.assertEqual(config["panel_channel_id"], 40)
+            self.assertEqual(config["review_channel_id"], 30)
+            self.assertEqual(config["appeals_channel_id"], 50)
+            self.assertEqual(len(guild.get_channel(40).sent), 1)
+            self.assertEqual(config["panel_message_id"], guild.get_channel(40).sent[0].id)
+
+            config_upserts = [
+                args
+                for statement, args in connection.execute_calls
+                if "INSERT INTO confession_guild_configs" in statement
+            ]
+            self.assertGreaterEqual(len(config_upserts), 2)
+            self.assertEqual(config_upserts[0][0], guild.id)
+            self.assertEqual(config_upserts[0][3], 40)
+            self.assertEqual(config_upserts[0][4], None)
+            self.assertEqual(config_upserts[0][6], 50)
+            self.assertEqual(config_upserts[-1][4], guild.get_channel(40).sent[0].id)
+            self.assertEqual(config_upserts[-1][-1], config["strike_perm_ban_threshold"])
+        finally:
+            await service.close()
+            cog.service = original_service
+            await original_service.close()
 
     async def test_confessions_setup_switches_to_alternate_channels_and_replaces_stale_panel(self):
         ok, message = await self.cog.service.configure_guild(

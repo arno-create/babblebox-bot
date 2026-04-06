@@ -1,4 +1,10 @@
+from __future__ import annotations
+
+import ast
 import json
+import os
+from pathlib import Path
+import re
 import unittest
 from unittest import mock
 
@@ -18,8 +24,53 @@ from babblebox.confessions_store import (
 )
 
 
+_PLACEHOLDER_RE = re.compile(r"\$(\d+)")
+
+
 def _privacy() -> ConfessionsCrypto:
     return ConfessionsCrypto.from_environment(backend_name="test")
+
+
+def _placeholder_numbers(statement: str) -> list[int]:
+    return [int(match.group(1)) for match in _PLACEHOLDER_RE.finditer(statement)]
+
+
+def _validate_statement_args(statement: str, args: tuple[object, ...]):
+    placeholders = _placeholder_numbers(statement)
+    if not placeholders:
+        if args:
+            raise AssertionError(f"SQL statement has no placeholders but received {len(args)} args: {statement}")
+        return
+    expected_numbers = list(range(1, max(placeholders) + 1))
+    missing = [number for number in expected_numbers if number not in placeholders]
+    if missing:
+        raise AssertionError(f"SQL statement skipped placeholders {missing}: {statement}")
+    if len(args) != expected_numbers[-1]:
+        raise AssertionError(
+            f"SQL statement expected {expected_numbers[-1]} args from placeholders but received {len(args)}: {statement}"
+        )
+
+
+def _literal_sql_text(node: ast.AST) -> str | None:
+    if isinstance(node, ast.Constant) and isinstance(node.value, str):
+        return node.value
+    if isinstance(node, ast.JoinedStr):
+        parts: list[str] = []
+        for value in node.values:
+            if isinstance(value, ast.Constant) and isinstance(value.value, str):
+                parts.append(value.value)
+            elif isinstance(value, ast.FormattedValue):
+                parts.append("{expr}")
+            else:
+                return None
+        return "".join(parts)
+    if isinstance(node, ast.BinOp) and isinstance(node.op, ast.Add):
+        left = _literal_sql_text(node.left)
+        right = _literal_sql_text(node.right)
+        if left is None or right is None:
+            return None
+        return left + right
+    return None
 
 
 class _FakeAcquire:
@@ -43,17 +94,20 @@ class _FakeConnection:
         self.fetchrow_results: list[object] = []
 
     async def execute(self, statement: str, *args):
+        _validate_statement_args(statement, args)
         self.executed.append(statement)
         self.execute_calls.append((statement, args))
         return "EXECUTE"
 
     async def fetch(self, statement: str, *args):
+        _validate_statement_args(statement, args)
         self.fetch_calls.append((statement, args))
         if self.fetch_results:
             return self.fetch_results.pop(0)
         return []
 
     async def fetchrow(self, statement: str, *args):
+        _validate_statement_args(statement, args)
         self.fetchrow_calls.append((statement, args))
         if self.fetchrow_results:
             return self.fetchrow_results.pop(0)
@@ -1015,3 +1069,297 @@ class PostgresConfessionsStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status["guild_id"], 10)
         self.assertEqual(status["state"], "ready")
         self.assertEqual(status["categories"], [])
+
+    async def test_fake_connection_validator_rejects_placeholder_arg_mismatches(self):
+        with self.assertRaises(AssertionError):
+            await self.connection.execute("SELECT $1, $2", 1)
+
+        with self.assertRaises(AssertionError):
+            await self.connection.fetch("SELECT 1", 1)
+
+        with self.assertRaises(AssertionError):
+            await self.connection.fetchrow("SELECT $1, $3", 1, 2, 3)
+
+    async def test_postgres_store_major_write_queries_validate_placeholder_arity(self):
+        await self.store.upsert_config(
+            {
+                "guild_id": 10,
+                "enabled": True,
+                "confession_channel_id": 20,
+                "panel_channel_id": 40,
+                "panel_message_id": 50,
+                "review_channel_id": 30,
+                "appeals_channel_id": 60,
+                "review_mode": True,
+                "block_adult_language": True,
+                "allow_trusted_mainstream_links": True,
+                "custom_allow_domains": ["google.com"],
+                "custom_block_domains": ["bad.example"],
+                "allowed_role_ids": [501],
+                "blocked_role_ids": [502],
+                "allow_images": True,
+                "allow_anonymous_replies": True,
+                "allow_owner_replies": True,
+                "owner_reply_review_mode": True,
+                "allow_self_edit": True,
+                "max_images": 2,
+                "cooldown_seconds": 600,
+                "burst_limit": 2,
+                "burst_window_seconds": 900,
+                "auto_suspend_hours": 24,
+                "strike_temp_ban_threshold": 3,
+                "temp_ban_days": 14,
+                "strike_perm_ban_threshold": 5,
+            }
+        )
+        await self.store.upsert_submission(
+            {
+                "submission_id": "sub-1",
+                "guild_id": 10,
+                "confession_id": "CF-AAAA1111",
+                "submission_kind": "confession",
+                "status": "queued",
+                "review_status": "pending",
+                "staff_preview": "Queued preview",
+                "content_body": "Queued body",
+                "shared_link_url": "https://www.google.com/search?q=babblebox",
+                "content_fingerprint": "h1:test",
+                "similarity_key": "sim:test",
+                "fuzzy_signature": "fh1:test",
+                "flag_codes": ["adult_language"],
+                "attachment_meta": [{"kind": "image", "size": 12, "width": 8, "height": 8, "spoiler": False}],
+                "created_at": "2026-04-03T00:00:00+00:00",
+            }
+        )
+        await self.store.upsert_case(
+            {
+                "case_id": "CS-AAAA1111",
+                "guild_id": 10,
+                "submission_id": "sub-1",
+                "confession_id": "CF-AAAA1111",
+                "case_kind": "review",
+                "status": "open",
+                "reason_codes": ["adult_language"],
+                "review_version": 1,
+                "review_message_channel_id": 30,
+                "review_message_id": 70,
+                "created_at": "2026-04-03T00:00:00+00:00",
+            }
+        )
+        await self.store.upsert_author_link(
+            {
+                "guild_id": 10,
+                "submission_id": "sub-1",
+                "author_user_id": 101,
+                "created_at": "2026-04-03T00:00:00+00:00",
+            }
+        )
+        await self.store.upsert_private_media(
+            {
+                "guild_id": 10,
+                "submission_id": "sub-1",
+                "attachment_urls": ["https://cdn.discordapp.com/attachments/1/2/image.png"],
+                "created_at": "2026-04-03T00:00:00+00:00",
+                "updated_at": "2026-04-03T00:01:00+00:00",
+            }
+        )
+        await self.store.upsert_owner_reply_opportunity(
+            {
+                "opportunity_id": "opp-1",
+                "guild_id": 10,
+                "root_submission_id": "sub-1",
+                "root_confession_id": "CF-AAAA1111",
+                "referenced_submission_id": "sub-2",
+                "source_channel_id": 20,
+                "source_message_id": 30,
+                "source_author_user_id": 102,
+                "source_author_name": "Responder",
+                "source_preview": "Helpful reply",
+                "source_message_fingerprint": "fp:test",
+                "status": "pending",
+                "notification_status": "sent",
+                "notification_channel_id": 40,
+                "notification_message_id": 50,
+                "created_at": "2026-04-03T00:00:00+00:00",
+                "expires_at": "2026-04-06T00:00:00+00:00",
+                "notified_at": "2026-04-03T00:05:00+00:00",
+            }
+        )
+        await self.store.upsert_enforcement_state(
+            {
+                "guild_id": 10,
+                "user_id": 101,
+                "active_restriction": "temp_ban",
+                "restricted_until": "2026-04-10T00:00:00+00:00",
+                "is_permanent_ban": False,
+                "strike_count": 3,
+                "last_strike_at": "2026-04-03T00:00:00+00:00",
+                "cooldown_until": "2026-04-03T01:00:00+00:00",
+                "burst_count": 1,
+                "burst_window_started_at": "2026-04-03T00:00:00+00:00",
+                "last_case_id": "CS-AAAA1111",
+                "image_restriction_active": True,
+                "image_restricted_until": "2026-04-04T00:00:00+00:00",
+                "image_restriction_case_id": "CS-IMG1111",
+                "updated_at": "2026-04-03T00:10:00+00:00",
+            }
+        )
+        await self.store.upsert_review_queue(
+            {
+                "guild_id": 10,
+                "channel_id": 30,
+                "message_id": 40,
+                "updated_at": "2026-04-03T00:00:00+00:00",
+            }
+        )
+        await self.store.delete_review_queue(10)
+
+        self.assertGreaterEqual(len(self.connection.execute_calls), 10)
+
+    async def test_postgres_store_major_fetch_queries_validate_parameter_arity(self):
+        await self.store.fetch_all_configs()
+        await self.store.fetch_config(10)
+        await self.store.fetch_submission("sub-1")
+        await self.store.fetch_submission_by_confession_id(10, "CF-AAAA1111")
+        await self.store.fetch_submission_by_message_id(10, 20)
+        await self.store.list_published_top_level_submissions(10)
+        await self.store.list_recent_submissions_for_author(10, 101, limit=5)
+        await self.store.list_review_cases(10, limit=25)
+        await self.store.fetch_case(10, "CS-AAAA1111")
+        await self.store.fetch_author_link("sub-1")
+        await self.store.fetch_private_media("sub-1")
+        await self.store.fetch_owner_reply_opportunity("opp-1")
+        await self.store.fetch_owner_reply_opportunity_by_source_message_id(10, 30)
+        await self.store.fetch_owner_reply_opportunity_by_notification_message_id(50)
+        await self.store.fetch_pending_owner_reply_opportunity_for_path(10, "sub-1", "sub-2", 102)
+        await self.store.list_pending_owner_reply_opportunities_for_author(10, 101, limit=5)
+        await self.store.list_owner_reply_opportunities_for_root_submission("sub-1", limit=25)
+        await self.store.list_owner_reply_opportunities_for_submission("sub-2", limit=25)
+        await self.store.list_owner_reply_opportunities_for_responder_path(10, "sub-1", "sub-2", 102, limit=25)
+        await self.store.fetch_enforcement_state(10, 101)
+        await self.store.list_review_queues()
+        await self.store.fetch_review_queue(10)
+        await self.store.list_review_surfaces(10, limit=25)
+        counts = await self.store.fetch_guild_counts(10)
+        global_status = await self.store.fetch_privacy_status()
+        guild_status = await self.store.fetch_privacy_status(10)
+
+        self.assertEqual(counts["queued_submissions"], 0)
+        self.assertEqual(global_status["scope"], "global")
+        self.assertEqual(guild_status["scope"], "guild")
+        self.assertEqual(guild_status["guild_id"], 10)
+
+    async def test_postgres_store_fetch_privacy_status_uses_expected_param_shape_for_global_and_guild_scopes(self):
+        await self.store.fetch_privacy_status()
+        global_calls = self.connection.fetch_calls[-7:]
+        self.assertEqual(len(global_calls), 7)
+        self.assertTrue(all(args == () for _, args in global_calls))
+
+        await self.store.fetch_privacy_status(10)
+        guild_calls = self.connection.fetch_calls[-7:]
+        self.assertEqual(len(guild_calls), 7)
+        self.assertTrue(all(args == (10,) for _, args in guild_calls))
+
+
+class ConfessionsStoreSqlAuditTests(unittest.TestCase):
+    def test_postgres_literal_sql_statements_match_placeholder_arity(self):
+        source_path = Path(__file__).resolve().parents[1] / "babblebox" / "confessions_store.py"
+        tree = ast.parse(source_path.read_text(encoding="utf-8"))
+        mismatches: list[str] = []
+        audited_calls = 0
+        target_class = next(
+            node for node in tree.body if isinstance(node, ast.ClassDef) and node.name == "_PostgresConfessionsStore"
+        )
+
+        class _Visitor(ast.NodeVisitor):
+            def __init__(self):
+                self.current_method = "<class>"
+
+            def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef):
+                previous = self.current_method
+                self.current_method = node.name
+                self.generic_visit(node)
+                self.current_method = previous
+
+            def visit_Call(self, node: ast.Call):
+                nonlocal audited_calls
+                func = node.func
+                if (
+                    isinstance(func, ast.Attribute)
+                    and func.attr in {"execute", "fetch", "fetchrow"}
+                    and node.args
+                    and not any(isinstance(arg, ast.Starred) for arg in node.args[1:])
+                ):
+                    statement = _literal_sql_text(node.args[0])
+                    if statement is not None:
+                        audited_calls += 1
+                        try:
+                            _validate_statement_args(statement, tuple(node.args[1:]))
+                        except AssertionError as exc:
+                            mismatches.append(f"{self.current_method}:{func.attr}:{exc}")
+                self.generic_visit(node)
+
+        _Visitor().visit(target_class)
+
+        self.assertGreater(audited_calls, 20)
+        self.assertEqual(mismatches, [])
+
+
+@unittest.skipUnless(os.getenv("CONFESSIONS_TEST_DATABASE_URL"), "requires CONFESSIONS_TEST_DATABASE_URL")
+class PostgresConfessionsStoreLiveSmokeTests(unittest.IsolatedAsyncioTestCase):
+    async def test_live_postgres_upsert_config_round_trips_new_admin_fields(self):
+        store = _PostgresConfessionsStore(os.environ["CONFESSIONS_TEST_DATABASE_URL"], _privacy())
+        guild_id = 800000000 + (int.from_bytes(os.urandom(4), "big") % 1000000)
+        try:
+            await store.load()
+            await store.upsert_config(
+                {
+                    "guild_id": guild_id,
+                    "enabled": True,
+                    "confession_channel_id": 20,
+                    "panel_channel_id": 40,
+                    "panel_message_id": 50,
+                    "review_channel_id": 30,
+                    "appeals_channel_id": 60,
+                    "review_mode": True,
+                    "block_adult_language": True,
+                    "allow_trusted_mainstream_links": True,
+                    "custom_allow_domains": ["google.com"],
+                    "custom_block_domains": ["bad.example"],
+                    "allowed_role_ids": [501],
+                    "blocked_role_ids": [502],
+                    "allow_images": True,
+                    "allow_anonymous_replies": True,
+                    "allow_owner_replies": True,
+                    "owner_reply_review_mode": True,
+                    "allow_self_edit": True,
+                    "max_images": 2,
+                    "cooldown_seconds": 600,
+                    "burst_limit": 2,
+                    "burst_window_seconds": 900,
+                    "auto_suspend_hours": 24,
+                    "strike_temp_ban_threshold": 3,
+                    "temp_ban_days": 14,
+                    "strike_perm_ban_threshold": 5,
+                }
+            )
+
+            stored = await store.fetch_config(guild_id)
+
+            self.assertIsNotNone(stored)
+            self.assertEqual(stored["panel_channel_id"], 40)
+            self.assertEqual(stored["panel_message_id"], 50)
+            self.assertEqual(stored["appeals_channel_id"], 60)
+            self.assertEqual(stored["allowed_role_ids"], [501])
+            self.assertEqual(stored["blocked_role_ids"], [502])
+            self.assertTrue(stored["allow_images"])
+            self.assertTrue(stored["allow_anonymous_replies"])
+            self.assertTrue(stored["allow_owner_replies"])
+            self.assertTrue(stored["owner_reply_review_mode"])
+            self.assertTrue(stored["allow_self_edit"])
+            self.assertEqual(stored["strike_perm_ban_threshold"], 5)
+        finally:
+            if store._pool is not None:
+                async with store._pool.acquire() as conn:
+                    await conn.execute("DELETE FROM confession_guild_configs WHERE guild_id = $1", guild_id)
+            await store.close()
