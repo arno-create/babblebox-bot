@@ -118,6 +118,11 @@ class WebsiteDocsTests(unittest.TestCase):
             "owner replies are a separate feature",
             "automatically suspend or confession-ban",
             "can still reveal who sent it",
+            "duplicate-abuse signals are keyed and guild-scoped",
+            "privacy hardening is `Ready` or `Partial`",
+            "CONFESSIONS_CONTENT_KEY_ID",
+            "CONFESSIONS_CONTENT_LEGACY_KEYS",
+            "Confessions Key Rotation",
         ):
             self.assertIn(text, readme)
 
@@ -160,6 +165,9 @@ class WebsiteDocsTests(unittest.TestCase):
             "self-identifying link destination or image content",
             "application-level encryption",
             "trust model",
+            "privacy-hardening readiness state",
+            "guild-scoped",
+            "operator-facing warnings",
         ):
             self.assertIn(text, privacy_md if text != "Resolved anonymous confession rows scrub previews" else privacy_html)
         self.assertIn("anonymous confession rows scrub previews", privacy_md.casefold())

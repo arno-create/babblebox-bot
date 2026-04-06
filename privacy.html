@@ -796,6 +796,7 @@
               <li>Later markers, reminders, anonymous confessions, and sensitive setup flows are designed to avoid unnecessary public exposure.</li>
               <li>Anonymous confessions are optional, keep the author hidden from staff, and are moderated by confession ID and case ID only while Babblebox still enforces safety internally.</li>
               <li>That privacy model is meant to reduce casual database readability and accidental exposure, not to claim that the service operator has been removed from the trust boundary.</li>
+              <li>Deploying the Confessions privacy code and keys is not enough by itself; Babblebox now tracks a privacy-hardening readiness state because legacy rows remain weaker until the Confessions backfill finishes.</li>
               <li><strong>Reply to confession anonymously</strong> is off by default, stays text-only when enabled, stays anonymous, and may go through private approval before posting.</li>
               <li>Owner reply opportunities are bot-private, only trigger from explicit Discord replies to a published confession or first public owner reply, and can be opened from a DM prompt or <code>/confess reply-to-user</code>.</li>
               <li>Public owner replies post as <code>Anonymous Owner Reply</code>, stay text-only, and do not expose the confession owner or the responding member in public or staff-facing moderation surfaces.</li>
@@ -831,6 +832,7 @@
               <li>Short-lived admin lifecycle records are kept only while they are operationally relevant, such as pending verification or active follow-up role management.</li>
               <li>Ban-return candidate records are intended to have a bounded purge window rather than indefinite retention.</li>
               <li>Resolved anonymous confession rows scrub previews, body text, trusted-link fields, and attachment metadata after the moderation workflow is complete while compact keyed duplicate signatures are retained for abuse prevention.</li>
+              <li>Keyed duplicate-abuse signals are guild-scoped instead of global across every server.</li>
               <li>Watch configuration, Later markers, reminders, AFK settings, and similar utility records remain until changed, cleared, expired, or removed.</li>
             </ul>
             <p>Deletion timing can depend on when a reminder expires, a schedule ends, a configuration is removed, or a short-lived moderation workflow finishes.</p>
@@ -844,6 +846,7 @@
               <li>High-volume or high-risk archive behavior is intentionally avoided where possible.</li>
               <li>Private-first flows are used for utilities and other sensitive feature surfaces when appropriate.</li>
               <li>Sensitive Confessions content and identity linkage use separate application-managed encryption domains and keyed lookup hashes.</li>
+              <li>Babblebox exposes operator-facing warnings when Confessions privacy hardening is only partial and the backfill or key rotation cleanup is still incomplete.</li>
               <li>Administrators remain responsible for the Discord permissions, channels, and server practices they configure around the bot.</li>
             </ul>
             <p>Babblebox does not claim to be zero-knowledge or operator-proof. Infrastructure operators with code, runtime, and key control are still part of the trust model even after these privacy hardening measures.</p>

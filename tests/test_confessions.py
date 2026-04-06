@@ -524,9 +524,9 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(raw_submission["staff_preview"])
         self.assertIsNone(raw_submission["shared_link_url"])
         self.assertIsNone(raw_submission["content_ciphertext"])
-        self.assertTrue(str(raw_submission["content_fingerprint"]).startswith("h1:"))
+        self.assertTrue(str(raw_submission["content_fingerprint"]).startswith("h2:ephemeral:"))
         self.assertNotIn("author_user_id", raw_author_link)
-        self.assertTrue(str(raw_author_link["author_lookup_hash"]).startswith("bi1:"))
+        self.assertTrue(str(raw_author_link["author_lookup_hash"]).startswith("bi2:ephemeral:"))
 
     async def test_text_link_and_images_queue_for_review_and_keep_private_media_out_of_staff_storage(self):
         await self._configure(review_channel=True, allow_images=True)
@@ -557,9 +557,9 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertIsNone(raw_submission["content_body"])
         self.assertIsNone(raw_submission["shared_link_url"])
-        self.assertTrue(str(raw_submission["content_ciphertext"]).startswith("bbx1:"))
+        self.assertTrue(str(raw_submission["content_ciphertext"]).startswith("bbx2:ephemeral:"))
         self.assertEqual(raw_private_media["attachment_urls"], [])
-        self.assertTrue(str(raw_private_media["attachment_payload"]).startswith("bbx1:"))
+        self.assertTrue(str(raw_private_media["attachment_payload"]).startswith("bbx2:ephemeral:"))
 
         ok, message = await self.service.handle_case_action(self.guild, case_id=result.case_id, action="approve", version=1)
 
@@ -1616,6 +1616,98 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
         near_duplicate = await self.service.submit_confession(self.guild, author_id=970, content="duplicate probe text!", attachments=[])
         self.assertFalse(near_duplicate.ok)
         self.assertIn("near_duplicate_spam", near_duplicate.flag_codes)
+
+    async def test_same_confession_text_hashes_differ_across_guilds(self):
+        await self._configure()
+        ok, message = await self.service.configure_guild(
+            self.other_guild.id,
+            enabled=True,
+            confession_channel_id=self.other_confession_channel.id,
+            review_mode=False,
+        )
+        self.assertTrue(ok, message)
+
+        first = await self.service.submit_confession(self.guild, author_id=971, content="same text across guilds", attachments=[])
+        second = await self.service.submit_confession(self.other_guild, author_id=971, content="same text across guilds", attachments=[])
+
+        self.assertTrue(first.ok)
+        self.assertTrue(second.ok)
+        first_submission = await self.service.store.fetch_submission_by_confession_id(self.guild.id, first.confession_id)
+        second_submission = await self.service.store.fetch_submission_by_confession_id(self.other_guild.id, second.confession_id)
+        self.assertNotEqual(first_submission["content_fingerprint"], second_submission["content_fingerprint"])
+        self.assertNotEqual(first_submission["fuzzy_signature"], second_submission["fuzzy_signature"])
+
+    async def test_dashboard_embed_reports_partial_privacy_hardening_status(self):
+        raw_store = self.service.store._store
+        raw_store.submissions["sub-legacy"] = {
+            "submission_id": "sub-legacy",
+            "guild_id": self.guild.id,
+            "confession_id": "CF-LEGACY1",
+            "submission_kind": "confession",
+            "reply_flow": None,
+            "owner_reply_generation": None,
+            "parent_confession_id": None,
+            "status": "queued",
+            "review_status": "pending",
+            "staff_preview": "Legacy preview",
+            "content_body": "Legacy body",
+            "shared_link_url": None,
+            "content_fingerprint": "legacy-fingerprint",
+            "similarity_key": "legacy similarity key",
+            "fuzzy_signature": "feedfacefeedface",
+            "flag_codes": [],
+            "attachment_meta": [],
+            "posted_channel_id": None,
+            "posted_message_id": None,
+            "current_case_id": None,
+            "created_at": "2026-04-03T00:00:00+00:00",
+            "published_at": None,
+            "resolved_at": None,
+        }
+
+        embed = await self.service.build_dashboard_embed(self.guild, section="overview")
+        rendered = json.dumps(embed.to_dict())
+
+        self.assertIn("Privacy Hardening", rendered)
+        self.assertIn("State: **Partial**", rendered)
+        self.assertIn("Backfill: **Still needed for this server**", rendered)
+
+    async def test_start_prints_privacy_warning_when_backfill_is_needed(self):
+        service = ConfessionsService(self.bot, store=ConfessionsStore(backend="memory"))
+        try:
+            with mock.patch.object(
+                service.store,
+                "fetch_privacy_status",
+                new=mock.AsyncMock(
+                    return_value={
+                        "state": "partial",
+                        "needs_backfill": True,
+                        "categories": ["plaintext_submission_content", "legacy_author_links"],
+                    }
+                ),
+            ), mock.patch("builtins.print") as print_mock:
+                started = await service.start()
+            self.assertTrue(started)
+            printed = " ".join(" ".join(str(arg) for arg in call.args) for call in print_mock.call_args_list)
+            self.assertIn("Confessions privacy warning: hardening is partial.", printed)
+            self.assertIn("python -m babblebox.confessions_backfill --dry-run", printed)
+        finally:
+            await service.close()
+
+    async def test_start_prints_ready_when_privacy_hardening_is_clean(self):
+        service = ConfessionsService(self.bot, store=ConfessionsStore(backend="memory"))
+        try:
+            with mock.patch.object(
+                service.store,
+                "fetch_privacy_status",
+                new=mock.AsyncMock(return_value={"state": "ready", "needs_backfill": False, "categories": []}),
+            ), mock.patch("builtins.print") as print_mock:
+                started = await service.start()
+            self.assertTrue(started)
+            printed = " ".join(" ".join(str(arg) for arg in call.args) for call in print_mock.call_args_list)
+            self.assertIn("Confessions privacy status: hardening is ready.", printed)
+        finally:
+            await service.close()
 
 
 class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):

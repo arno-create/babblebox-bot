@@ -99,6 +99,8 @@ Babblebox is intentionally compact:
 - staff-blind moderation by confession ID and case ID only while the bot still enforces safety internally
 - sensitive confession text, trusted-link fields, private media URLs, and owner/accountability linkages are protected with app-level encryption before they reach durable storage
 - author linkage and enforcement identity lookups use a separate protected identity domain plus keyed lookup hashes instead of ordinary plaintext user IDs in routine Confessions tables
+- duplicate-abuse signals are keyed and guild-scoped so raw database access does not needlessly correlate matching confession text across servers
+- Confessions privacy hardening has an operator-facing readiness state; Babblebox warns when legacy rows still need backfill and shows that status in the private Confessions admin dashboard
 - one trusted link total per confession
 - built-in safe families for mainstream social, docs, wiki, and developer links when trusted links are enabled
 - offensive, vulgar, derogatory, spammy, and private-info patterns are filtered before anything posts
@@ -118,6 +120,7 @@ Babblebox is intentionally compact:
 - attachment filenames and Discord CDN URLs stay out of staff-visible surfaces
 - Babblebox hides the Discord account, but a member-chosen link destination or image itself can still reveal who sent it
 - the service still relies on operator trust; privacy hardening reduces casual access and routine DB readability, but it is not a zero-knowledge system
+- deploying the Confessions privacy code and keys is not enough by itself; legacy rows remain weaker until the Confessions backfill completes
 - Babblebox can automatically suspend or confession-ban internally without exposing the author
 - moderation supports approve, deny, delete, pause, restrict-images, clear, and false-positive flows without revealing the author
 - terminal confession records scrub body text, previews, links, and attachment metadata while retaining compact keyed duplicate signatures for abuse prevention
@@ -386,6 +389,8 @@ Confession notes:
 - staff see confession IDs and case IDs, never the author
 - Babblebox still enforces safety internally and can automatically restrict repeat abuse without exposing identity
 - Confessions storage protects sensitive submission content, private media URLs, and author linkage with app-level encryption plus separate identity lookup hashes
+- startup and admin status surfaces now warn if Confessions privacy hardening is only partially migrated and the backfill still needs to run
+- duplicate-abuse signals are keyed and guild-scoped rather than global across every server
 - adult / 18+ language is blocked by default unless admins change that policy
 - trusted-link mode allows Babblebox's bundled safe families for mainstream social, docs, wiki, and developer domains
 - one trusted link total is allowed per confession
@@ -703,6 +708,8 @@ Environment variable notes:
 - `UTILITY_DATABASE_URL` is the preferred Postgres connection string
 - `SUPABASE_DB_URL` and `DATABASE_URL` are also accepted
 - `CONFESSIONS_CONTENT_KEY` and `CONFESSIONS_IDENTITY_KEY` are required for Postgres-backed Confessions and should be separate random secrets of at least 32 characters each
+- `CONFESSIONS_CONTENT_KEY_ID` and `CONFESSIONS_IDENTITY_KEY_ID` are optional active key labels; if omitted they default to `active`
+- `CONFESSIONS_CONTENT_LEGACY_KEYS` and `CONFESSIONS_IDENTITY_LEGACY_KEYS` are optional comma-separated `key_id=secret` lists that let Babblebox read old Confessions rows while writing with the new active key
 - `OPENAI_API_KEY` is optional and only needed for Shield AI assist
 - `SHIELD_AI_MODEL`, `SHIELD_AI_TIMEOUT_SECONDS`, and `SHIELD_AI_MAX_CHARS` are optional Shield AI tuning knobs
 - `UTILITY_STORAGE_BACKEND=memory` is for explicit local/test work only
@@ -719,7 +726,27 @@ python -m babblebox.confessions_backfill --dry-run
 python -m babblebox.confessions_backfill --apply --batch-size 100
 ```
 
-The backfill is idempotent, rewrites legacy plaintext-style Confessions rows into the protected model, and removes legacy plaintext fields where the current product no longer needs them.
+The backfill is idempotent, rewrites legacy plaintext-style Confessions rows into the protected model, rewrites stale-key rows onto the current active Confessions keys where Babblebox can do so safely, and removes legacy plaintext fields where the current product no longer needs them.
+
+Important operator note:
+
+- code deploy plus keys is not enough; old Confessions rows stay only partially hardened until this backfill finishes
+- Babblebox now warns on startup when Confessions privacy hardening is still partial
+- the private `/confessions` status/dashboard surfaces also show whether privacy hardening is `Ready` or `Partial` for that server
+
+### Confessions Key Rotation
+
+Babblebox keeps Confessions key rotation intentionally small and env-driven:
+
+1. Set new `CONFESSIONS_CONTENT_KEY` / `CONFESSIONS_IDENTITY_KEY` values.
+2. Set matching `CONFESSIONS_CONTENT_KEY_ID` / `CONFESSIONS_IDENTITY_KEY_ID` labels for the new active keys.
+3. Move the prior secrets into `CONFESSIONS_CONTENT_LEGACY_KEYS` / `CONFESSIONS_IDENTITY_LEGACY_KEYS`.
+4. Restart Babblebox so new writes use the new key IDs while old rows remain readable.
+5. Run `python -m babblebox.confessions_backfill --dry-run`.
+6. Run `python -m babblebox.confessions_backfill --apply --batch-size 100` until privacy status reports `Ready`.
+7. Remove the legacy key env vars only after the backfill is clean.
+
+This is a practical compatibility model for a small Python bot, not a claim of enterprise KMS-style key management.
 
 ### Discord Portal Settings
 

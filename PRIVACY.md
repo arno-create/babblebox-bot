@@ -68,6 +68,7 @@ Babblebox intentionally uses different visibility defaults depending on the feat
 - Later markers, reminders, and sensitive setup flows are private-first
 - anonymous confessions are optional, are submitted privately when enabled, keep the author hidden from staff, and let staff review by confession ID and case ID only while Babblebox still enforces safety internally
 - that privacy model is meant to make raw database browsing and accidental exposure materially harder, not to claim that the service operator has been removed from the trust boundary
+- deploying the Confessions privacy code and keys is not enough by itself; Babblebox now tracks a privacy-hardening readiness state because legacy rows remain weaker until the Confessions backfill finishes
 - `Reply to confession anonymously` is off by default, stays text-only when enabled, and any approval happens privately without exposing the author
 - owner reply opportunities are bot-private, only trigger from explicit Discord replies to a published confession or first public owner reply, and can be opened from a DM prompt or `/confess reply-to-user`
 - public owner replies post as `Anonymous Owner Reply`, stay text-only, and do not expose the confession owner or the responding member in public or staff-facing moderation surfaces
@@ -104,6 +105,7 @@ Examples:
 - short-lived admin lifecycle rows remain only while they are operationally relevant
 - ban-return candidate records are intended to have a bounded purge window
 - terminal anonymous confession rows scrub previews, body text, trusted-link fields, and attachment metadata after resolution while the bot-private author mapping and compact keyed duplicate signatures are retained only for moderation continuity and abuse prevention
+- keyed duplicate-abuse signals are guild-scoped instead of global across every server
 - Watch settings, reminders, AFK settings, and Later markers remain until changed, cleared, expired, or removed
 
 Deletion timing may depend on the feature. Some state expires naturally, some is replaced by newer state, and some is removed when a user or administrator clears it.
@@ -118,6 +120,7 @@ Babblebox is intended to:
 - avoid large archive behavior where possible
 - use private-first flows for sensitive utilities
 - protect sensitive Confessions content and identity linkage with separate application-managed encryption domains and keyed lookup hashes
+- expose operator-facing warnings when Confessions privacy hardening is only partial and the backfill or key rotation cleanup is still incomplete
 - rely on server administrators to configure Discord permissions and channels responsibly
 
 Babblebox does not claim to be zero-knowledge or operator-proof. Infrastructure operators with code, runtime, and key control are still part of the trust model even after these privacy hardening measures.

@@ -470,9 +470,12 @@ class ConfessionsStorePrivacyTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(dry_run["author_links"], 1)
             self.assertEqual(dry_run["owner_reply_opportunities"], 1)
             self.assertEqual(dry_run["enforcement_states"], 1)
+            self.assertEqual(dry_run["privacy_status"]["state"], "partial")
+            self.assertIn("plaintext_submission_content", dry_run["privacy_status"]["categories"])
 
             applied = await store.run_privacy_backfill(apply=True, batch_size=10)
             self.assertEqual(applied["mode"], "apply")
+            self.assertEqual(applied["privacy_status"]["state"], "ready")
 
             active_submission = await store.fetch_submission("sub-active")
             self.assertEqual(active_submission["content_body"], "Legacy queued confession body")
@@ -493,9 +496,9 @@ class ConfessionsStorePrivacyTests(unittest.IsolatedAsyncioTestCase):
             self.assertIsNone(raw_active_submission["content_body"])
             self.assertIsNone(raw_active_submission["shared_link_url"])
             self.assertIsNone(raw_active_submission["similarity_key"])
-            self.assertTrue(str(raw_active_submission["content_ciphertext"]).startswith("bbx1:"))
-            self.assertTrue(str(raw_active_submission["content_fingerprint"]).startswith("h1:"))
-            self.assertTrue(str(raw_active_submission["fuzzy_signature"]).startswith("fh1:"))
+            self.assertTrue(str(raw_active_submission["content_ciphertext"]).startswith("bbx2:ephemeral:"))
+            self.assertTrue(str(raw_active_submission["content_fingerprint"]).startswith("h2:ephemeral:"))
+            self.assertTrue(str(raw_active_submission["fuzzy_signature"]).startswith("fh2:ephemeral:"))
 
             raw_terminal_submission = raw_store.submissions["sub-terminal"]
             self.assertIsNone(raw_terminal_submission["staff_preview"])
@@ -508,25 +511,157 @@ class ConfessionsStorePrivacyTests(unittest.IsolatedAsyncioTestCase):
 
             raw_private_media = raw_store.private_media["sub-active"]
             self.assertEqual(raw_private_media["attachment_urls"], [])
-            self.assertTrue(str(raw_private_media["attachment_payload"]).startswith("bbx1:"))
+            self.assertTrue(str(raw_private_media["attachment_payload"]).startswith("bbx2:ephemeral:"))
 
             self.assertEqual(raw_store.author_links, {})
             secure_author_link = raw_store.secure_author_links["sub-active"]
             self.assertNotIn("author_user_id", secure_author_link)
-            self.assertTrue(str(secure_author_link["author_lookup_hash"]).startswith("bi1:"))
-            self.assertTrue(str(secure_author_link["author_identity_ciphertext"]).startswith("bbx1:"))
+            self.assertTrue(str(secure_author_link["author_lookup_hash"]).startswith("bi2:ephemeral:"))
+            self.assertTrue(str(secure_author_link["author_identity_ciphertext"]).startswith("bbx2:ephemeral:"))
 
             raw_owner_reply = raw_store.owner_reply_opportunities["opp-1"]
             self.assertIsNone(raw_owner_reply["source_author_user_id"])
             self.assertEqual(raw_owner_reply["source_preview"], PROTECTED_OWNER_REPLY_PREVIEW)
-            self.assertTrue(str(raw_owner_reply["source_author_lookup_hash"]).startswith("bi1:"))
-            self.assertTrue(str(raw_owner_reply["private_payload"]).startswith("bbx1:"))
+            self.assertTrue(str(raw_owner_reply["source_author_lookup_hash"]).startswith("bi2:ephemeral:"))
+            self.assertTrue(str(raw_owner_reply["private_payload"]).startswith("bbx2:ephemeral:"))
 
             self.assertEqual(raw_store.enforcement_states, {})
             secure_enforcement = next(iter(raw_store.secure_enforcement_states.values()))
             self.assertNotIn("user_id", secure_enforcement)
-            self.assertTrue(str(secure_enforcement["user_lookup_hash"]).startswith("bi1:"))
-            self.assertTrue(str(secure_enforcement["user_identity_ciphertext"]).startswith("bbx1:"))
+            self.assertTrue(str(secure_enforcement["user_lookup_hash"]).startswith("bi2:ephemeral:"))
+            self.assertTrue(str(secure_enforcement["user_identity_ciphertext"]).startswith("bbx2:ephemeral:"))
+        finally:
+            await store.close()
+
+    async def test_memory_store_privacy_status_reports_partial_then_ready(self):
+        store = ConfessionsStore(backend="memory")
+        await store.load()
+        try:
+            raw_store = store._store
+            raw_store.submissions["sub-legacy"] = {
+                "submission_id": "sub-legacy",
+                "guild_id": 77,
+                "confession_id": "CF-LEGACY1",
+                "submission_kind": "confession",
+                "reply_flow": None,
+                "owner_reply_generation": None,
+                "parent_confession_id": None,
+                "status": "queued",
+                "review_status": "pending",
+                "staff_preview": "Legacy preview",
+                "content_body": "Legacy body",
+                "shared_link_url": None,
+                "content_fingerprint": "legacy-fingerprint",
+                "similarity_key": "legacy similarity key",
+                "fuzzy_signature": "feedfacefeedface",
+                "flag_codes": [],
+                "attachment_meta": [],
+                "posted_channel_id": None,
+                "posted_message_id": None,
+                "current_case_id": None,
+                "created_at": "2026-04-03T00:00:00+00:00",
+                "published_at": None,
+                "resolved_at": None,
+            }
+            raw_store.author_links["sub-legacy"] = {
+                "submission_id": "sub-legacy",
+                "guild_id": 77,
+                "author_user_id": 400,
+                "created_at": "2026-04-03T00:00:00+00:00",
+            }
+
+            status = await store.fetch_privacy_status(77)
+            self.assertEqual(status["state"], "partial")
+            self.assertIn("plaintext_submission_content", status["categories"])
+            self.assertIn("legacy_author_links", status["categories"])
+
+            await store.run_privacy_backfill(apply=True, batch_size=10)
+
+            status = await store.fetch_privacy_status(77)
+            self.assertEqual(status["state"], "ready")
+            self.assertEqual(status["categories"], [])
+        finally:
+            await store.close()
+
+    async def test_memory_store_supports_legacy_key_lookup_then_rewrites_to_active_keys(self):
+        store = ConfessionsStore(backend="memory")
+        await store.load()
+        try:
+            old_only = ConfessionsCrypto(
+                content_keys=[("old", b"o" * 32)],
+                identity_keys=[("old", b"i" * 32)],
+                content_source="test",
+                identity_source="test",
+                ephemeral=False,
+            )
+            rotated = ConfessionsCrypto(
+                content_keys=[("current", b"c" * 32), ("old", b"o" * 32)],
+                identity_keys=[("current", b"n" * 32), ("old", b"i" * 32)],
+                content_source="test",
+                identity_source="test",
+                ephemeral=False,
+            )
+            raw_store = store._store
+            raw_store._privacy = rotated
+            store.privacy = rotated
+            raw_store.submissions["sub-rotated"] = {
+                "submission_id": "sub-rotated",
+                "guild_id": 10,
+                "confession_id": "CF-ROTATE1",
+                "submission_kind": "confession",
+                "reply_flow": None,
+                "owner_reply_generation": None,
+                "parent_confession_id": None,
+                "status": "published",
+                "review_status": "approved",
+                "staff_preview": None,
+                "content_body": None,
+                "shared_link_url": None,
+                "content_ciphertext": None,
+                "content_fingerprint": None,
+                "similarity_key": None,
+                "fuzzy_signature": None,
+                "flag_codes": [],
+                "attachment_meta": [],
+                "posted_channel_id": 20,
+                "posted_message_id": 30,
+                "current_case_id": None,
+                "created_at": "2026-04-03T00:00:00+00:00",
+                "published_at": "2026-04-03T00:05:00+00:00",
+                "resolved_at": None,
+            }
+            raw_store.secure_author_links["sub-rotated"] = {
+                "submission_id": "sub-rotated",
+                "guild_id": 10,
+                "author_lookup_hash": old_only.blind_index(label="author-link", guild_id=10, value=400),
+                "author_identity_ciphertext": old_only.encrypt_payload(
+                    domain="author-link",
+                    aad_fields={"guild_id": 10, "submission_id": "sub-rotated"},
+                    payload={"author_user_id": 400},
+                    key_domain="identity",
+                ),
+                "created_at": "2026-04-03T00:00:00+00:00",
+            }
+
+            link = await store.fetch_author_link("sub-rotated")
+            self.assertEqual(link["author_user_id"], 400)
+            recent = await store.list_recent_submissions_for_author(10, 400, limit=5)
+            self.assertEqual([row["submission_id"] for row in recent], ["sub-rotated"])
+
+            status = await store.fetch_privacy_status(10)
+            self.assertEqual(status["state"], "partial")
+            self.assertIn("stale_key_rows", status["categories"])
+
+            await store.run_privacy_backfill(apply=True, batch_size=10)
+
+            status = await store.fetch_privacy_status(10)
+            self.assertEqual(status["state"], "ready")
+            self.assertTrue(
+                str(raw_store.secure_author_links["sub-rotated"]["author_lookup_hash"]).startswith("bi2:current:")
+            )
+            self.assertTrue(
+                str(raw_store.secure_author_links["sub-rotated"]["author_identity_ciphertext"]).startswith("bbx2:current:")
+            )
         finally:
             await store.close()
 

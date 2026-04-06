@@ -17,6 +17,8 @@ TOKEN_RE = re.compile(r"[a-z0-9']+")
 class DuplicateSignals:
     exact_hash: str | None
     fuzzy_signature: str | None
+    keyed_exact_candidates: tuple[str, ...]
+    keyed_fuzzy_candidates: tuple[str, ...]
     legacy_exact_hash: str | None
     legacy_similarity_key: str | None
     legacy_fuzzy_signature: str | None
@@ -62,6 +64,7 @@ def _legacy_duplicate_signals(canonical: str) -> tuple[str | None, str | None, s
 
 def build_duplicate_signals(
     privacy: ConfessionsCrypto,
+    guild_id: int,
     text: str,
     attachment_meta: Sequence[dict[str, Any]],
     shared_link_url: str | None = None,
@@ -72,6 +75,8 @@ def build_duplicate_signals(
         return DuplicateSignals(
             exact_hash=None,
             fuzzy_signature=None,
+            keyed_exact_candidates=(),
+            keyed_fuzzy_candidates=(),
             legacy_exact_hash=legacy_exact_hash,
             legacy_similarity_key=legacy_similarity_key,
             legacy_fuzzy_signature=legacy_fuzzy_signature,
@@ -79,9 +84,31 @@ def build_duplicate_signals(
     signature_tokens = duplicate_tokens(canonical)
     if len(signature_tokens) > 1:
         signature_tokens.extend(f"{left}|{right}" for left, right in zip(signature_tokens, signature_tokens[1:]))
+    keyed_exact_values = list(privacy.exact_duplicate_hash_candidates(canonical, guild_id=guild_id))
+    keyed_fuzzy_values = list(privacy.fuzzy_duplicate_signature_candidates(signature_tokens[:64], guild_id=guild_id))
+    for legacy_value in keyed_exact_values[1:]:
+        transformed = privacy.transform_legacy_exact_hash(legacy_value, guild_id=guild_id)
+        if transformed is not None:
+            keyed_exact_values.append(transformed)
+    if legacy_exact_hash is not None:
+        transformed = privacy.transform_legacy_exact_hash(legacy_exact_hash, guild_id=guild_id)
+        if transformed is not None:
+            keyed_exact_values.append(transformed)
+    for legacy_value in keyed_fuzzy_values[1:]:
+        transformed = privacy.transform_legacy_fuzzy_signature(legacy_value, guild_id=guild_id)
+        if transformed is not None:
+            keyed_fuzzy_values.append(transformed)
+    if legacy_fuzzy_signature is not None:
+        transformed = privacy.transform_legacy_fuzzy_signature(legacy_fuzzy_signature, guild_id=guild_id)
+        if transformed is not None:
+            keyed_fuzzy_values.append(transformed)
+    keyed_exact_candidates = tuple(dict.fromkeys(keyed_exact_values))
+    keyed_fuzzy_candidates = tuple(dict.fromkeys(keyed_fuzzy_values))
     return DuplicateSignals(
-        exact_hash=privacy.exact_duplicate_hash(canonical),
-        fuzzy_signature=privacy.fuzzy_duplicate_signature(signature_tokens[:64]),
+        exact_hash=keyed_exact_candidates[0] if keyed_exact_candidates else None,
+        fuzzy_signature=keyed_fuzzy_candidates[0] if keyed_fuzzy_candidates else None,
+        keyed_exact_candidates=keyed_exact_candidates,
+        keyed_fuzzy_candidates=keyed_fuzzy_candidates,
         legacy_exact_hash=legacy_exact_hash,
         legacy_similarity_key=legacy_similarity_key,
         legacy_fuzzy_signature=legacy_fuzzy_signature,
