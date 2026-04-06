@@ -45,6 +45,7 @@ STAFF_ACTION_CHOICES = [
     app_commands.Choice(name="Clear Restriction", value="clear"),
     app_commands.Choice(name="False Positive", value="false_positive"),
 ]
+CONFESSIONS_ADMIN_PANEL_EXPIRED_MESSAGE = "This private confessions panel expired. Run `/confessions` again to open a fresh one."
 
 
 def _moderation_action_payload(action: str) -> tuple[str, int | None, bool]:
@@ -886,14 +887,33 @@ class RiskyConfigConfirmView(discord.ui.View):
         if interaction.user.id != payload["author_id"]:
             await interaction.response.send_message("Run the command yourself to confirm that policy change.", ephemeral=True)
             return
-        ok, message = await self.cog.service.configure_guild(payload["guild_id"], **payload["updates"])
-        if ok and interaction.guild is not None:
-            await self.cog._sync_runtime_surfaces(interaction.guild)
-        self.cog._pending_policy_updates.pop(self.token, None)
-        await interaction.response.edit_message(
-            embed=ge.make_status_embed("Confessions Policy", message, tone="success" if ok else "warning", footer="Babblebox Confessions"),
-            view=None,
-        )
+        try:
+            ok, message = await self.cog.service.configure_guild(payload["guild_id"], **payload["updates"])
+            runtime_issues: list[str] = []
+            if ok and interaction.guild is not None:
+                runtime_issues = await self.cog._sync_runtime_surfaces(interaction.guild, stage_prefix="policy_confirm")
+            self.cog._pending_policy_updates.pop(self.token, None)
+            result_message = self.cog._compose_admin_result(message, runtime_issues)
+            await interaction.response.edit_message(
+                embed=self.cog._admin_status_embed("Confessions Policy", result_message, ok=ok and not runtime_issues),
+                view=None,
+            )
+        except Exception as exc:
+            self.cog.log_admin_diagnostic(
+                code="policy_confirm_failed",
+                stage="policy_confirm",
+                guild_id=payload["guild_id"],
+                exc=exc,
+            )
+            self.cog._pending_policy_updates.pop(self.token, None)
+            await self.cog._send_private_interaction(
+                interaction,
+                embed=self.cog._admin_status_embed(
+                    "Confessions Policy",
+                    "Babblebox could not finish that Confessions policy update safely. Run the command again and review the warning before retrying.",
+                    ok=False,
+                ),
+            )
 
     @discord.ui.button(label="Cancel", style=discord.ButtonStyle.secondary, row=0)
     async def cancel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -1347,7 +1367,7 @@ class ConfessionReviewView(discord.ui.View):
 
 class ConfessionsAdminPanelView(discord.ui.View):
     def __init__(self, cog: "ConfessionsCog", *, guild_id: int, author_id: int, section: str = "overview"):
-        super().__init__(timeout=180)
+        super().__init__(timeout=None)
         self.cog = cog
         self.guild_id = guild_id
         self.author_id = author_id
@@ -1406,66 +1426,213 @@ class ConfessionsAdminPanelView(discord.ui.View):
             with contextlib.suppress(discord.HTTPException):
                 await self.message.edit(view=self)
 
-    async def _rerender(self, interaction: discord.Interaction, *, note: str | None = None):
+    async def _rerender(self, interaction: discord.Interaction, *, note: str | None = None, note_ok: bool = True):
         self._refresh_buttons()
         await interaction.response.edit_message(embed=await self.current_embed(), view=self)
         if note:
-            await interaction.followup.send(note, ephemeral=True)
+            await self.cog._send_private_interaction(
+                interaction,
+                embed=self.cog._admin_status_embed(
+                    "Confessions Panel",
+                    note,
+                    ok=note_ok,
+                ),
+            )
+
+    async def _safe_action(
+        self,
+        interaction: discord.Interaction,
+        *,
+        stage: str,
+        failure_message: str,
+        action,
+    ):
+        try:
+            return await action()
+        except Exception as exc:
+            self.cog.log_admin_diagnostic(
+                code=f"{stage}_failed",
+                stage=stage,
+                guild_id=self.guild_id,
+                note=f"section={self.section}",
+                exc=exc,
+            )
+            await self.cog._send_private_interaction(
+                interaction,
+                embed=self.cog._admin_status_embed(
+                    "Confessions Panel",
+                    failure_message,
+                    ok=False,
+                ),
+            )
+            return None
 
     async def _switch_section(self, interaction: discord.Interaction, section: str):
-        self.section = section
-        await self._rerender(interaction)
+        async def _action():
+            self.section = section
+            await self._rerender(interaction)
 
-    @discord.ui.button(label="Overview", style=discord.ButtonStyle.primary, row=0)
+        await self._safe_action(
+            interaction,
+            stage="panel_switch_section",
+            failure_message="Babblebox could not refresh that private confessions panel. Run `/confessions` again to open a fresh one.",
+            action=_action,
+        )
+
+    async def on_error(self, interaction: discord.Interaction, error: Exception, item: discord.ui.Item[Any]):
+        self.cog.log_admin_diagnostic(
+            code="panel_callback_unhandled",
+            stage="panel_callback",
+            guild_id=self.guild_id,
+            note=getattr(item, "custom_id", None),
+            exc=error,
+        )
+        await self.cog._send_private_interaction(
+            interaction,
+            embed=self.cog._admin_status_embed(
+                "Confessions Panel",
+                "Babblebox could not finish that panel action safely. Run `/confessions` again to open a fresh one.",
+                ok=False,
+            ),
+        )
+
+    @discord.ui.button(label="Overview", style=discord.ButtonStyle.primary, row=0, custom_id="bb-confession-admin:overview")
     async def overview_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._switch_section(interaction, "overview")
 
-    @discord.ui.button(label="Policy", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="Policy", style=discord.ButtonStyle.secondary, row=0, custom_id="bb-confession-admin:policy")
     async def policy_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._switch_section(interaction, "policy")
 
-    @discord.ui.button(label="Review", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="Review", style=discord.ButtonStyle.secondary, row=0, custom_id="bb-confession-admin:review")
     async def review_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._switch_section(interaction, "review")
 
-    @discord.ui.button(label="Launch", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="Launch", style=discord.ButtonStyle.secondary, row=0, custom_id="bb-confession-admin:launch")
     async def launch_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._switch_section(interaction, "launch")
 
-    @discord.ui.button(label="Publish Panel", style=discord.ButtonStyle.success, row=1)
+    @discord.ui.button(label="Publish Panel", style=discord.ButtonStyle.success, row=1, custom_id="bb-confession-admin:publish")
     async def publish_panel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         guild = interaction.guild
         if guild is None:
             await interaction.response.send_message("This panel only works inside a server.", ephemeral=True)
             return
-        ok, message = await self.cog.service.sync_member_panel(guild)
-        await self._rerender(interaction, note=message if ok else message)
+        async def _action():
+            ok, message = await self.cog.service.sync_member_panel(guild)
+            await self._rerender(interaction, note=message, note_ok=ok)
 
-    @discord.ui.button(label="Refresh Queue", style=discord.ButtonStyle.secondary, row=1)
+        await self._safe_action(
+            interaction,
+            stage="panel_publish",
+            failure_message="Babblebox could not publish the public confessions panel right now. Check the panel channel and try again.",
+            action=_action,
+        )
+
+    @discord.ui.button(label="Refresh Queue", style=discord.ButtonStyle.secondary, row=1, custom_id="bb-confession-admin:refresh-queue")
     async def refresh_queue_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         guild = interaction.guild
         if guild is None:
             await interaction.response.send_message("This panel only works inside a server.", ephemeral=True)
             return
-        await self.cog.service._sync_review_queue(guild, note="Confession review queue refreshed.")
-        await self._rerender(interaction, note="Confession review queue refreshed.")
+        async def _action():
+            ok, message = await self.cog.service.sync_review_queue(guild, note="Confession review queue refreshed.")
+            await self._rerender(interaction, note=message, note_ok=ok)
 
-    @discord.ui.button(label="Refresh", style=discord.ButtonStyle.secondary, row=1)
+        await self._safe_action(
+            interaction,
+            stage="panel_refresh_queue",
+            failure_message="Babblebox could not refresh the confession review queue right now. Check the review channel and try again.",
+            action=_action,
+        )
+
+    @discord.ui.button(label="Refresh", style=discord.ButtonStyle.secondary, row=1, custom_id="bb-confession-admin:refresh")
     async def refresh_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._rerender(interaction, note="Confessions panel refreshed.")
+        await self._safe_action(
+            interaction,
+            stage="panel_refresh",
+            failure_message="Babblebox could not refresh that private confessions panel. Run `/confessions` again to open a fresh one.",
+            action=lambda: self._rerender(interaction, note="Confessions panel refreshed.", note_ok=True),
+        )
 
-    @discord.ui.button(label="Enable", style=discord.ButtonStyle.success, row=1)
+    @discord.ui.button(label="Enable", style=discord.ButtonStyle.success, row=1, custom_id="bb-confession-admin:toggle")
     async def toggle_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         guild = interaction.guild
         if guild is None:
             await interaction.response.send_message("This panel only works inside a server.", ephemeral=True)
             return
-        current = self.cog.service.get_config(self.guild_id)
-        ok, message = await self.cog.service.configure_guild(self.guild_id, enabled=not current["enabled"])
-        if ok and (current.get("panel_message_id") or current.get("panel_channel_id")):
-            await self.cog.service.sync_member_panel(guild)
-        await self.cog.service._sync_review_queue(guild, note="Confessions runtime refreshed.")
-        await self._rerender(interaction, note=message)
+        async def _action():
+            current = self.cog.service.get_config(self.guild_id)
+            ok, message = await self.cog.service.configure_guild(self.guild_id, enabled=not current["enabled"])
+            runtime_issues: list[str] = []
+            if ok:
+                runtime_issues = await self.cog._sync_runtime_surfaces(
+                    guild,
+                    stage_prefix="panel_toggle",
+                    review_note="Confessions runtime refreshed.",
+                )
+            result_message = self.cog._compose_admin_result(message, runtime_issues)
+            await self._rerender(interaction, note=result_message, note_ok=ok and not runtime_issues)
+
+        await self._safe_action(
+            interaction,
+            stage="panel_toggle",
+            failure_message="Babblebox could not update those Confessions settings right now. Run `/confessions` again and try once more.",
+            action=_action,
+        )
+
+
+class StatelessConfessionsAdminPanelView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+
+    async def _send_expired_notice(self, interaction: discord.Interaction):
+        embed = ge.make_status_embed(
+            "Confessions Panel Expired",
+            CONFESSIONS_ADMIN_PANEL_EXPIRED_MESSAGE,
+            tone="info",
+            footer="Babblebox Confessions",
+        )
+        cog = _resolve_live_confessions_cog(interaction)
+        if cog is not None:
+            await cog._send_private_interaction(interaction, embed=embed)
+            return
+        if interaction.response.is_done():
+            await interaction.followup.send(embed=embed, ephemeral=True)
+        else:
+            await interaction.response.send_message(embed=embed, ephemeral=True)
+
+    @discord.ui.button(label="Overview", style=discord.ButtonStyle.secondary, row=0, custom_id="bb-confession-admin:overview")
+    async def overview_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._send_expired_notice(interaction)
+
+    @discord.ui.button(label="Policy", style=discord.ButtonStyle.secondary, row=0, custom_id="bb-confession-admin:policy")
+    async def policy_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._send_expired_notice(interaction)
+
+    @discord.ui.button(label="Review", style=discord.ButtonStyle.secondary, row=0, custom_id="bb-confession-admin:review")
+    async def review_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._send_expired_notice(interaction)
+
+    @discord.ui.button(label="Launch", style=discord.ButtonStyle.secondary, row=0, custom_id="bb-confession-admin:launch")
+    async def launch_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._send_expired_notice(interaction)
+
+    @discord.ui.button(label="Publish Panel", style=discord.ButtonStyle.secondary, row=1, custom_id="bb-confession-admin:publish")
+    async def publish_panel_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._send_expired_notice(interaction)
+
+    @discord.ui.button(label="Refresh Queue", style=discord.ButtonStyle.secondary, row=1, custom_id="bb-confession-admin:refresh-queue")
+    async def refresh_queue_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._send_expired_notice(interaction)
+
+    @discord.ui.button(label="Refresh", style=discord.ButtonStyle.secondary, row=1, custom_id="bb-confession-admin:refresh")
+    async def refresh_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._send_expired_notice(interaction)
+
+    @discord.ui.button(label="Enable / Disable", style=discord.ButtonStyle.secondary, row=1, custom_id="bb-confession-admin:toggle")
+    async def toggle_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._send_expired_notice(interaction)
 
 
 class ConfessionsCog(commands.Cog):
@@ -1500,6 +1667,8 @@ class ConfessionsCog(commands.Cog):
             self.bot.add_view(StatelessPublishedConfessionReplyView())
         with contextlib.suppress(Exception):
             self.bot.add_view(StatelessOwnerReplyPromptView())
+        with contextlib.suppress(Exception):
+            self.bot.add_view(StatelessConfessionsAdminPanelView())
 
     async def _restore_runtime_surfaces_once(self):
         if not self.service.storage_ready:
@@ -1536,6 +1705,64 @@ class ConfessionsCog(commands.Cog):
 
     def build_owner_reply_prompt_view(self) -> StatelessOwnerReplyPromptView:
         return StatelessOwnerReplyPromptView()
+
+    def build_admin_panel_view(self, *, guild_id: int, author_id: int, section: str = "overview") -> ConfessionsAdminPanelView:
+        return ConfessionsAdminPanelView(self, guild_id=guild_id, author_id=author_id, section=section)
+
+    def _admin_attention_needed(self, ok: bool, message: str | None) -> bool:
+        if not ok:
+            return True
+        if not message:
+            return False
+        lowered = message.casefold()
+        return (
+            "could not" in lowered
+            or "unavailable" in lowered
+            or "disabled until" in lowered
+            or "still needs attention" in lowered
+            or "rerun `/confessions`" in lowered
+        )
+
+    def _admin_status_embed(
+        self,
+        title: str,
+        message: str,
+        *,
+        ok: bool,
+        tone: str | None = None,
+    ) -> discord.Embed:
+        resolved_tone = tone or ("warning" if self._admin_attention_needed(ok, message) else "success")
+        return ge.make_status_embed(title, message, tone=resolved_tone, footer="Babblebox Confessions")
+
+    def _compose_admin_result(self, base_message: str, issues: list[str]) -> str:
+        cleaned_issues: list[str] = []
+        for issue in issues:
+            text = str(issue).strip()
+            if text and text not in cleaned_issues:
+                cleaned_issues.append(text)
+        if not cleaned_issues:
+            return base_message
+        return f"{base_message} Runtime follow-up still needs attention: {' '.join(cleaned_issues)}"
+
+    def log_admin_diagnostic(
+        self,
+        *,
+        code: str,
+        stage: str,
+        guild_id: int | None,
+        note: str | None = None,
+        exc: Exception | None = None,
+    ):
+        parts = [
+            f"code={code}",
+            f"stage={stage}",
+            f"guild_id={guild_id if guild_id is not None else 'none'}",
+        ]
+        if note:
+            parts.append(f"note={str(note)[:160]}")
+        if exc is not None:
+            parts.append(f"exception={type(exc).__name__}")
+        print(f"Confessions admin diagnostic: {', '.join(parts)}")
 
     def modal_file_upload_available(self) -> bool:
         file_upload = getattr(discord.ui, "FileUpload", None)
@@ -1959,21 +2186,33 @@ class ConfessionsCog(commands.Cog):
         embed = ge.style_embed(embed, footer="Babblebox Confessions | Admin warning")
         await send_hybrid_response(ctx, embed=embed, view=RiskyConfigConfirmView(self, token=token), ephemeral=True)
 
-    async def _delete_stored_panel_message(self, guild: discord.Guild, config: dict[str, object]):
+    async def _delete_stored_panel_message(self, guild: discord.Guild, config: dict[str, object]) -> str | None:
         channel_id = config.get("panel_channel_id")
         message_id = config.get("panel_message_id")
         if not isinstance(channel_id, int) or not isinstance(message_id, int):
-            return
+            return None
         channel = guild.get_channel(channel_id) or self.bot.get_channel(channel_id)
         if channel is None:
-            return
+            return None
         message = await self.service._queue_message(channel, message_id=message_id)
         if message is not None:
-            with contextlib.suppress(discord.Forbidden, discord.HTTPException, Exception):
+            try:
                 await message.delete()
+            except (discord.Forbidden, discord.HTTPException):
+                return "Babblebox could not remove the previous public confessions panel message."
+            except Exception as exc:
+                self.log_admin_diagnostic(
+                    code="setup_delete_stale_panel_failed",
+                    stage="setup_delete_stale_panel",
+                    guild_id=guild.id,
+                    note=f"message_id={message_id}",
+                    exc=exc,
+                )
+                return "Babblebox could not remove the previous public confessions panel message."
+        return None
 
     async def _send_admin_panel(self, ctx: commands.Context, *, section: str = "overview"):
-        view = ConfessionsAdminPanelView(self, guild_id=ctx.guild.id, author_id=ctx.author.id, section=section)
+        view = self.build_admin_panel_view(guild_id=ctx.guild.id, author_id=ctx.author.id, section=section)
         message = await send_hybrid_response(ctx, embed=await view.current_embed(), view=view, ephemeral=True)
         if message is not None:
             view.message = message
@@ -2008,12 +2247,92 @@ class ConfessionsCog(commands.Cog):
             return False
         return True
 
-    async def _sync_runtime_surfaces(self, guild: discord.Guild):
+    async def _run_admin_command(
+        self,
+        ctx: commands.Context,
+        *,
+        title: str,
+        stage: str,
+        failure_message: str,
+        action,
+    ):
+        try:
+            if not await self._require_admin(ctx):
+                return None
+            return await action()
+        except Exception as exc:
+            self.log_admin_diagnostic(
+                code=f"{stage}_failed",
+                stage=stage,
+                guild_id=getattr(getattr(ctx, "guild", None), "id", None),
+                exc=exc,
+            )
+            await send_hybrid_response(
+                ctx,
+                embed=self._admin_status_embed(title, failure_message, ok=False),
+                ephemeral=True,
+            )
+            return None
+
+    async def _sync_runtime_surfaces(
+        self,
+        guild: discord.Guild,
+        *,
+        stage_prefix: str = "runtime_sync",
+        review_note: str = "Confessions runtime refreshed.",
+    ) -> list[str]:
+        issues: list[str] = []
         config = self.service.get_config(guild.id)
         if config.get("panel_channel_id") or config.get("panel_message_id"):
-            await self.service.sync_member_panel(guild)
-        await self.service.sync_published_confession_views(guild)
-        await self.service._sync_review_queue(guild)
+            try:
+                panel_ok, panel_message = await self.service.sync_member_panel(guild)
+            except Exception as exc:
+                self.log_admin_diagnostic(
+                    code=f"{stage_prefix}_panel_failed",
+                    stage=f"{stage_prefix}_panel",
+                    guild_id=guild.id,
+                    exc=exc,
+                )
+                issues.append("Babblebox could not refresh the public confessions panel right now.")
+            else:
+                if self._admin_attention_needed(panel_ok, panel_message):
+                    self.log_admin_diagnostic(
+                        code=f"{stage_prefix}_panel_attention",
+                        stage=f"{stage_prefix}_panel",
+                        guild_id=guild.id,
+                        note=panel_message,
+                    )
+                    issues.append(panel_message)
+        try:
+            await self.service.sync_published_confession_views(guild)
+        except Exception as exc:
+            self.log_admin_diagnostic(
+                code=f"{stage_prefix}_views_failed",
+                stage=f"{stage_prefix}_views",
+                guild_id=guild.id,
+                exc=exc,
+            )
+            issues.append("Babblebox could not refresh one or more live confession reply buttons.")
+        try:
+            review_ok, review_message = await self.service.sync_review_queue(guild, note=review_note)
+        except Exception as exc:
+            self.log_admin_diagnostic(
+                code=f"{stage_prefix}_review_failed",
+                stage=f"{stage_prefix}_review",
+                guild_id=guild.id,
+                exc=exc,
+            )
+            issues.append("Babblebox could not refresh the confession review queue right now.")
+        else:
+            if self._admin_attention_needed(review_ok, review_message):
+                self.log_admin_diagnostic(
+                    code=f"{stage_prefix}_review_attention",
+                    stage=f"{stage_prefix}_review",
+                    guild_id=guild.id,
+                    note=review_message,
+                )
+                issues.append(review_message)
+        return issues
 
     @commands.hybrid_group(
         name="confess",
@@ -2077,18 +2396,32 @@ class ConfessionsCog(commands.Cog):
     @app_commands.default_permissions(manage_guild=True)
     @commands.hybrid_group(name="confessions", with_app_command=True, description="Admin controls for the optional Confessions feature", invoke_without_command=True)
     async def confessions_group(self, ctx: commands.Context):
-        if not await self._require_admin(ctx):
-            return
-        await self._send_admin_panel(ctx, section="overview")
+        async def _action():
+            await self._send_admin_panel(ctx, section="overview")
+
+        await self._run_admin_command(
+            ctx,
+            title="Confessions Panel",
+            stage="panel_open",
+            failure_message="Babblebox could not open the private confessions panel right now. Run `/confessions` again in a moment.",
+            action=_action,
+        )
 
     @confessions_group.command(name="status", description="Open the Confessions dashboard or inspect one confession/case")
     async def confessions_status_command(self, ctx: commands.Context, target_id: Optional[str] = None):
-        if not await self._require_admin(ctx):
-            return
-        if not target_id:
-            await self._send_admin_panel(ctx, section="overview")
-            return
-        await send_hybrid_response(ctx, embed=await self.service.build_target_status_embed(ctx.guild, target_id), ephemeral=True)
+        async def _action():
+            if not target_id:
+                await self._send_admin_panel(ctx, section="overview")
+                return
+            await send_hybrid_response(ctx, embed=await self.service.build_target_status_embed(ctx.guild, target_id), ephemeral=True)
+
+        await self._run_admin_command(
+            ctx,
+            title="Confessions Status",
+            stage="status_command",
+            failure_message="Babblebox could not open that private Confessions status view right now. Run `/confessions` again in a moment.",
+            action=_action,
+        )
 
     @app_commands.describe(
         enabled="Turn confessions on or off",
@@ -2117,44 +2450,71 @@ class ConfessionsCog(commands.Cog):
         clear_review_channel: bool = False,
         clear_appeals_channel: bool = False,
     ):
-        if not await self._require_admin(ctx):
-            return
-        if appeals_channel is not None:
-            support_snapshot = self.service.support_channel_snapshot(ctx.guild, channel_id=appeals_channel.id)
-            if not support_snapshot["ok"]:
-                await send_hybrid_response(
-                    ctx,
-                    embed=ge.make_status_embed(
-                        "Confessions Setup",
-                        str(support_snapshot["message"]),
-                        tone="warning",
-                        footer="Babblebox Confessions",
-                    ),
-                    ephemeral=True,
+        async def _action():
+            if appeals_channel is not None:
+                support_snapshot = self.service.support_channel_snapshot(ctx.guild, channel_id=appeals_channel.id)
+                if not support_snapshot["ok"]:
+                    self.log_admin_diagnostic(
+                        code="setup_validate_rejected",
+                        stage="setup_validate",
+                        guild_id=ctx.guild.id,
+                        note=str(support_snapshot["message"]),
+                    )
+                    await send_hybrid_response(
+                        ctx,
+                        embed=self._admin_status_embed("Confessions Setup", str(support_snapshot["message"]), ok=False),
+                        ephemeral=True,
+                    )
+                    return
+            previous_config = self.service.get_config(ctx.guild.id)
+            try:
+                ok, message = await self.service.configure_guild(
+                    ctx.guild.id,
+                    enabled=enabled,
+                    confession_channel_id=getattr(confession_channel, "id", None),
+                    panel_channel_id=getattr(panel_channel, "id", None),
+                    review_channel_id=getattr(review_channel, "id", None),
+                    appeals_channel_id=getattr(appeals_channel, "id", None),
+                    review_mode=review_mode,
+                    clear_confession_channel=clear_confession_channel,
+                    clear_panel=clear_panel,
+                    clear_review_channel=clear_review_channel,
+                    clear_appeals_channel=clear_appeals_channel,
                 )
-                return
-        previous_config = self.service.get_config(ctx.guild.id)
-        ok, message = await self.service.configure_guild(
-            ctx.guild.id,
-            enabled=enabled,
-            confession_channel_id=getattr(confession_channel, "id", None),
-            panel_channel_id=getattr(panel_channel, "id", None),
-            review_channel_id=getattr(review_channel, "id", None),
-            appeals_channel_id=getattr(appeals_channel, "id", None),
-            review_mode=review_mode,
-            clear_confession_channel=clear_confession_channel,
-            clear_panel=clear_panel,
-            clear_review_channel=clear_review_channel,
-            clear_appeals_channel=clear_appeals_channel,
-        )
-        if ok:
-            if clear_panel:
-                await self._delete_stored_panel_message(ctx.guild, previous_config)
-            await self._sync_runtime_surfaces(ctx.guild)
-        await send_hybrid_response(
+            except Exception as exc:
+                self.log_admin_diagnostic(
+                    code="setup_configure_failed",
+                    stage="setup_configure",
+                    guild_id=ctx.guild.id,
+                    exc=exc,
+                )
+                raise
+            issues: list[str] = []
+            if ok:
+                if clear_panel:
+                    stale_panel_issue = await self._delete_stored_panel_message(ctx.guild, previous_config)
+                    if stale_panel_issue:
+                        issues.append(stale_panel_issue)
+                issues.extend(
+                    await self._sync_runtime_surfaces(
+                        ctx.guild,
+                        stage_prefix="setup_sync",
+                        review_note="Confessions runtime refreshed.",
+                    )
+                )
+            result_message = self._compose_admin_result(message, issues)
+            await send_hybrid_response(
+                ctx,
+                embed=self._admin_status_embed("Confessions Setup", result_message, ok=ok and not issues),
+                ephemeral=True,
+            )
+
+        await self._run_admin_command(
             ctx,
-            embed=ge.make_status_embed("Confessions Setup", message, tone="success" if ok else "warning", footer="Babblebox Confessions"),
-            ephemeral=True,
+            title="Confessions Setup",
+            stage="setup_command",
+            failure_message="Babblebox could not finish that Confessions setup update safely. Review the selected channels and run `/confessions setup` again.",
+            action=_action,
         )
 
     @app_commands.describe(
@@ -2194,55 +2554,71 @@ class ConfessionsCog(commands.Cog):
         temp_ban_days: Optional[int] = None,
         strike_perm_ban_threshold: Optional[int] = None,
     ):
-        if not await self._require_admin(ctx):
-            return
-        current = self.service.get_config(ctx.guild.id)
-        updates = {
-            "block_adult_language": block_adult_language,
-            "allow_trusted_mainstream_links": allow_trusted_links,
-            "allow_images": allow_images,
-            "allow_anonymous_replies": allow_replies,
-            "allow_owner_replies": allow_owner_replies,
-            "owner_reply_review_mode": owner_reply_review,
-            "allow_self_edit": allow_self_edit,
-            "max_images": max_images,
-            "cooldown_seconds": cooldown_seconds,
-            "burst_limit": burst_limit,
-            "burst_window_seconds": burst_window_seconds,
-            "auto_suspend_hours": auto_suspend_hours,
-            "strike_temp_ban_threshold": strike_temp_ban_threshold,
-            "temp_ban_days": temp_ban_days,
-            "strike_perm_ban_threshold": strike_perm_ban_threshold,
-        }
-        warning_fields: list[tuple[str, str]] = []
-        if allow_images and not current["allow_images"]:
-            warning_fields.append(("Images", RISKY_POLICY_WARNINGS["allow_images"]))
-        if allow_replies and not current["allow_anonymous_replies"]:
-            warning_fields.append(("Anonymous Replies", RISKY_POLICY_WARNINGS["allow_replies"]))
-        if allow_self_edit and not current["allow_self_edit"]:
-            warning_fields.append(("Self-Edit", RISKY_POLICY_WARNINGS["allow_self_edit"]))
-        if warning_fields:
-            await self._send_policy_warning(ctx, updates=updates, warning_fields=warning_fields)
-            return
-        ok, message = await self.service.configure_guild(ctx.guild.id, **updates)
-        if ok:
-            await self._sync_runtime_surfaces(ctx.guild)
-        await send_hybrid_response(
+        async def _action():
+            current = self.service.get_config(ctx.guild.id)
+            updates = {
+                "block_adult_language": block_adult_language,
+                "allow_trusted_mainstream_links": allow_trusted_links,
+                "allow_images": allow_images,
+                "allow_anonymous_replies": allow_replies,
+                "allow_owner_replies": allow_owner_replies,
+                "owner_reply_review_mode": owner_reply_review,
+                "allow_self_edit": allow_self_edit,
+                "max_images": max_images,
+                "cooldown_seconds": cooldown_seconds,
+                "burst_limit": burst_limit,
+                "burst_window_seconds": burst_window_seconds,
+                "auto_suspend_hours": auto_suspend_hours,
+                "strike_temp_ban_threshold": strike_temp_ban_threshold,
+                "temp_ban_days": temp_ban_days,
+                "strike_perm_ban_threshold": strike_perm_ban_threshold,
+            }
+            warning_fields: list[tuple[str, str]] = []
+            if allow_images and not current["allow_images"]:
+                warning_fields.append(("Images", RISKY_POLICY_WARNINGS["allow_images"]))
+            if allow_replies and not current["allow_anonymous_replies"]:
+                warning_fields.append(("Anonymous Replies", RISKY_POLICY_WARNINGS["allow_replies"]))
+            if allow_self_edit and not current["allow_self_edit"]:
+                warning_fields.append(("Self-Edit", RISKY_POLICY_WARNINGS["allow_self_edit"]))
+            if warning_fields:
+                await self._send_policy_warning(ctx, updates=updates, warning_fields=warning_fields)
+                return
+            ok, message = await self.service.configure_guild(ctx.guild.id, **updates)
+            runtime_issues: list[str] = []
+            if ok:
+                runtime_issues = await self._sync_runtime_surfaces(ctx.guild, stage_prefix="policy_update")
+            result_message = self._compose_admin_result(message, runtime_issues)
+            await send_hybrid_response(
+                ctx,
+                embed=self._admin_status_embed("Confessions Policy", result_message, ok=ok and not runtime_issues),
+                ephemeral=True,
+            )
+
+        await self._run_admin_command(
             ctx,
-            embed=ge.make_status_embed("Confessions Policy", message, tone="success" if ok else "warning", footer="Babblebox Confessions"),
-            ephemeral=True,
+            title="Confessions Policy",
+            stage="policy_command",
+            failure_message="Babblebox could not finish that Confessions policy update safely. Review the policy values and try again.",
+            action=_action,
         )
 
     @app_commands.choices(bucket=DOMAIN_BUCKET_CHOICES, mode=DOMAIN_MODE_CHOICES)
     @confessions_group.command(name="domains", description="Update the Confessions domain allowlist or blocklist")
     async def confessions_domains_command(self, ctx: commands.Context, bucket: str, mode: str, domain: str):
-        if not await self._require_admin(ctx):
-            return
-        ok, message = await self.service.update_domain_policy(ctx.guild.id, bucket=bucket, domain=domain, enabled=mode == "add")
-        await send_hybrid_response(
+        async def _action():
+            ok, message = await self.service.update_domain_policy(ctx.guild.id, bucket=bucket, domain=domain, enabled=mode == "add")
+            await send_hybrid_response(
+                ctx,
+                embed=self._admin_status_embed("Confessions Domains", message, ok=ok),
+                ephemeral=True,
+            )
+
+        await self._run_admin_command(
             ctx,
-            embed=ge.make_status_embed("Confessions Domains", message, tone="success" if ok else "warning", footer="Babblebox Confessions"),
-            ephemeral=True,
+            title="Confessions Domains",
+            stage="domains_command",
+            failure_message="Babblebox could not update that Confessions domain rule right now. Try again in a moment.",
+            action=_action,
         )
 
     @confessions_group.group(
@@ -2252,88 +2628,127 @@ class ConfessionsCog(commands.Cog):
         description="Manage which roles can submit anonymous confessions",
     )
     async def confessions_role_group(self, ctx: commands.Context):
-        if not await self._require_admin(ctx):
-            return
-        await send_hybrid_response(ctx, embed=self.service.build_role_policy_embed(ctx.guild), ephemeral=True)
+        async def _action():
+            await send_hybrid_response(ctx, embed=self.service.build_role_policy_embed(ctx.guild), ephemeral=True)
+
+        await self._run_admin_command(
+            ctx,
+            title="Confessions Role Eligibility",
+            stage="role_group",
+            failure_message="Babblebox could not open the Confessions role policy view right now. Try `/confessions role` again in a moment.",
+            action=_action,
+        )
 
     @app_commands.describe(role="Role to add or remove from the Confessions allowlist", state="Turn this allowlist entry on or off")
     @app_commands.choices(state=ROLE_STATE_CHOICES)
     @confessions_role_group.command(name="allowlist", description="Add or remove a role from the Confessions allowlist")
     async def confessions_role_allowlist_command(self, ctx: commands.Context, role: discord.Role, state: str = "on"):
-        if not await self._require_admin(ctx):
-            return
-        if self._is_default_role(role):
+        async def _action():
+            if self._is_default_role(role):
+                await send_hybrid_response(
+                    ctx,
+                    embed=self._admin_status_embed(
+                        "Confessions Role Eligibility",
+                        "Babblebox does not allow `@everyone` in the Confessions role allowlist.",
+                        ok=False,
+                    ),
+                    ephemeral=True,
+                )
+                return
+            ok, message = await self.service.update_role_policy(ctx.guild.id, bucket="allow", role_id=role.id, enabled=state == "on")
+            runtime_issues: list[str] = []
+            if ok:
+                runtime_issues = await self._sync_runtime_surfaces(ctx.guild, stage_prefix="role_allowlist")
+            result_message = self._compose_admin_result(message, runtime_issues)
             await send_hybrid_response(
                 ctx,
-                embed=ge.make_status_embed(
-                    "Confessions Role Eligibility",
-                    "Babblebox does not allow `@everyone` in the Confessions role allowlist.",
-                    tone="warning",
-                    footer="Babblebox Confessions",
-                ),
+                embed=self._admin_status_embed("Confessions Role Eligibility", result_message, ok=ok and not runtime_issues),
                 ephemeral=True,
             )
-            return
-        ok, message = await self.service.update_role_policy(ctx.guild.id, bucket="allow", role_id=role.id, enabled=state == "on")
-        if ok:
-            await self._sync_runtime_surfaces(ctx.guild)
-        await send_hybrid_response(
+
+        await self._run_admin_command(
             ctx,
-            embed=ge.make_status_embed("Confessions Role Eligibility", message, tone="success" if ok else "warning", footer="Babblebox Confessions"),
-            ephemeral=True,
+            title="Confessions Role Eligibility",
+            stage="role_allowlist_command",
+            failure_message="Babblebox could not update that Confessions allowlist entry right now. Try again in a moment.",
+            action=_action,
         )
 
     @app_commands.describe(role="Role to add or remove from the Confessions blacklist", state="Turn this blacklist entry on or off")
     @app_commands.choices(state=ROLE_STATE_CHOICES)
     @confessions_role_group.command(name="blacklist", description="Add or remove a role from the Confessions blacklist")
     async def confessions_role_blacklist_command(self, ctx: commands.Context, role: discord.Role, state: str = "on"):
-        if not await self._require_admin(ctx):
-            return
-        if self._is_default_role(role):
+        async def _action():
+            if self._is_default_role(role):
+                await send_hybrid_response(
+                    ctx,
+                    embed=self._admin_status_embed(
+                        "Confessions Role Eligibility",
+                        "Babblebox does not allow `@everyone` in the Confessions role blacklist.",
+                        ok=False,
+                    ),
+                    ephemeral=True,
+                )
+                return
+            ok, message = await self.service.update_role_policy(ctx.guild.id, bucket="block", role_id=role.id, enabled=state == "on")
+            runtime_issues: list[str] = []
+            if ok:
+                runtime_issues = await self._sync_runtime_surfaces(ctx.guild, stage_prefix="role_blacklist")
+            result_message = self._compose_admin_result(message, runtime_issues)
             await send_hybrid_response(
                 ctx,
-                embed=ge.make_status_embed(
-                    "Confessions Role Eligibility",
-                    "Babblebox does not allow `@everyone` in the Confessions role blacklist.",
-                    tone="warning",
-                    footer="Babblebox Confessions",
-                ),
+                embed=self._admin_status_embed("Confessions Role Eligibility", result_message, ok=ok and not runtime_issues),
                 ephemeral=True,
             )
-            return
-        ok, message = await self.service.update_role_policy(ctx.guild.id, bucket="block", role_id=role.id, enabled=state == "on")
-        if ok:
-            await self._sync_runtime_surfaces(ctx.guild)
-        await send_hybrid_response(
+
+        await self._run_admin_command(
             ctx,
-            embed=ge.make_status_embed("Confessions Role Eligibility", message, tone="success" if ok else "warning", footer="Babblebox Confessions"),
-            ephemeral=True,
+            title="Confessions Role Eligibility",
+            stage="role_blacklist_command",
+            failure_message="Babblebox could not update that Confessions blacklist entry right now. Try again in a moment.",
+            action=_action,
         )
 
     @app_commands.describe(target="Reset the allowlist, blacklist, or both")
     @app_commands.choices(target=ROLE_RESET_CHOICES)
     @confessions_role_group.command(name="reset", description="Reset Confessions role allowlist or blacklist state")
     async def confessions_role_reset_command(self, ctx: commands.Context, target: str):
-        if not await self._require_admin(ctx):
-            return
-        ok, message = await self.service.reset_role_policy(ctx.guild.id, target=target)
-        if ok:
-            await self._sync_runtime_surfaces(ctx.guild)
-        await send_hybrid_response(
+        async def _action():
+            ok, message = await self.service.reset_role_policy(ctx.guild.id, target=target)
+            runtime_issues: list[str] = []
+            if ok:
+                runtime_issues = await self._sync_runtime_surfaces(ctx.guild, stage_prefix="role_reset")
+            result_message = self._compose_admin_result(message, runtime_issues)
+            await send_hybrid_response(
+                ctx,
+                embed=self._admin_status_embed("Confessions Role Eligibility", result_message, ok=ok and not runtime_issues),
+                ephemeral=True,
+            )
+
+        await self._run_admin_command(
             ctx,
-            embed=ge.make_status_embed("Confessions Role Eligibility", message, tone="success" if ok else "warning", footer="Babblebox Confessions"),
-            ephemeral=True,
+            title="Confessions Role Eligibility",
+            stage="role_reset_command",
+            failure_message="Babblebox could not reset that Confessions role policy right now. Try again in a moment.",
+            action=_action,
         )
 
     @confessions_group.command(name="panel", description="Publish or refresh the public Confessions panel")
     async def confessions_panel_command(self, ctx: commands.Context, channel: Optional[discord.TextChannel] = None):
-        if not await self._require_admin(ctx):
-            return
-        ok, message = await self.service.sync_member_panel(ctx.guild, channel_id=getattr(channel, "id", None))
-        await send_hybrid_response(
+        async def _action():
+            ok, message = await self.service.sync_member_panel(ctx.guild, channel_id=getattr(channel, "id", None))
+            await send_hybrid_response(
+                ctx,
+                embed=self._admin_status_embed("Confessions Panel", message, ok=ok),
+                ephemeral=True,
+            )
+
+        await self._run_admin_command(
             ctx,
-            embed=ge.make_status_embed("Confessions Panel", message, tone="success" if ok else "warning", footer="Babblebox Confessions"),
-            ephemeral=True,
+            title="Confessions Panel",
+            stage="panel_command",
+            failure_message="Babblebox could not publish the Confessions panel right now. Check the panel channel and try again.",
+            action=_action,
         )
 
     @app_commands.choices(action=STAFF_ACTION_CHOICES)
@@ -2349,21 +2764,28 @@ class ConfessionsCog(commands.Cog):
         action: str,
         clear_strikes: bool = False,
     ):
-        if not await self._require_admin(ctx):
-            return
-        service_action, duration_seconds, action_clears_strikes = _moderation_action_payload(action)
-        ok, message = await self.service.handle_staff_action(
-            ctx.guild,
-            target_id=target_id,
-            action=service_action,
-            actor=ctx.author,
-            duration_seconds=duration_seconds,
-            clear_strikes=clear_strikes or action_clears_strikes,
-        )
-        await send_hybrid_response(
+        async def _action():
+            service_action, duration_seconds, action_clears_strikes = _moderation_action_payload(action)
+            ok, message = await self.service.handle_staff_action(
+                ctx.guild,
+                target_id=target_id,
+                action=service_action,
+                actor=ctx.author,
+                duration_seconds=duration_seconds,
+                clear_strikes=clear_strikes or action_clears_strikes,
+            )
+            await send_hybrid_response(
+                ctx,
+                embed=self._admin_status_embed("Confessions Moderation", message, ok=ok),
+                ephemeral=True,
+            )
+
+        await self._run_admin_command(
             ctx,
-            embed=ge.make_status_embed("Confessions Moderation", message, tone="success" if ok else "warning", footer="Babblebox Confessions"),
-            ephemeral=True,
+            title="Confessions Moderation",
+            stage="moderate_command",
+            failure_message="Babblebox could not finish that Confessions moderation action right now. Refresh the status view and try again.",
+            action=_action,
         )
 
 

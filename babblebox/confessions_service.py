@@ -211,6 +211,15 @@ STAFF_REASON_LABELS = {
     "vulgar_language_context": "Quoted harsh language",
 }
 MANUAL_CASE_ACTIONS = {"delete", "clear", "false_positive", "perm_ban", "suspend", "temp_ban", "restrict_images"}
+DASHBOARD_EMPTY_COUNTS = {
+    "queued_submissions": 0,
+    "published_submissions": 0,
+    "blocked_submissions": 0,
+    "open_cases_total": 0,
+    "open_review_cases": 0,
+    "open_safety_cases": 0,
+    "open_moderation_cases": 0,
+}
 
 
 @dataclass(frozen=True)
@@ -509,6 +518,34 @@ class ConfessionsService:
         await self.link_safety.close()
         await self.store.close()
 
+    def log_admin_diagnostic(
+        self,
+        *,
+        code: str,
+        stage: str,
+        guild_id: int | None,
+        channel_id: int | None = None,
+        message_id: int | None = None,
+        note: str | None = None,
+        exc: Exception | None = None,
+    ):
+        parts = [
+            f"code={code}",
+            f"stage={stage}",
+            f"guild_id={guild_id if guild_id is not None else 'none'}",
+        ]
+        if channel_id is not None:
+            parts.append(f"channel_id={channel_id}")
+        if message_id is not None:
+            parts.append(f"message_id={message_id}")
+        if note:
+            cleaned_note = normalize_plain_text(note)
+            if cleaned_note:
+                parts.append(f"note={cleaned_note[:160]}")
+        if exc is not None:
+            parts.append(f"exception={type(exc).__name__}")
+        print(f"Confessions admin diagnostic: {', '.join(parts)}")
+
     def storage_message(self, feature_name: str = "Confessions") -> str:
         return f"{feature_name} are temporarily unavailable because Babblebox could not reach the confessions database."
 
@@ -682,7 +719,7 @@ class ConfessionsService:
             return False, message
         current = self.get_config(guild_id)
         ready = self.operability_message(guild_id)
-        privacy_status = await self._guild_privacy_status(guild_id)
+        privacy_status = await self._guild_privacy_status(guild_id, stage="configure_guild_privacy")
         privacy_message = self._privacy_admin_message(privacy_status, scoped=True)
         return (
             True,
@@ -909,10 +946,19 @@ class ConfessionsService:
             return []
         return [PRIVACY_CATEGORY_LABELS.get(name, str(name)) for name in list(status.get("categories") or ())]
 
-    async def _guild_privacy_status(self, guild_id: int) -> dict[str, Any] | None:
+    async def _guild_privacy_status(self, guild_id: int, *, stage: str = "privacy_status") -> dict[str, Any] | None:
         if not self.storage_ready:
             return None
-        return await self.store.fetch_privacy_status(guild_id)
+        try:
+            return await self.store.fetch_privacy_status(guild_id)
+        except Exception as exc:
+            self.log_admin_diagnostic(
+                code="privacy_status_failed",
+                stage=stage,
+                guild_id=guild_id,
+                exc=exc,
+            )
+            return None
 
     def _privacy_admin_message(self, status: dict[str, Any] | None, *, scoped: bool) -> str:
         if not isinstance(status, dict):
@@ -3125,7 +3171,7 @@ class ConfessionsService:
         config = self.get_config(guild.id)
         role_snapshot = self._role_policy_snapshot(guild)
         support_snapshot = self.support_channel_snapshot(guild)
-        privacy_status = await self._guild_privacy_status(guild.id)
+        privacy_status = await self._guild_privacy_status(guild.id, stage="build_dashboard_privacy")
         role_value = (
             f"Allowlist: **{len(role_snapshot['active_allowed_ids'])}** active\n"
             f"{self._format_role_labels(role_snapshot['allow_labels'])}\n"
@@ -3143,15 +3189,17 @@ class ConfessionsService:
             f"Status: **{support_snapshot['status_label']}**\n"
             f"{support_snapshot['detail']}"
         )
-        counts = await self.store.fetch_guild_counts(guild.id) if self.storage_ready else {
-            "queued_submissions": 0,
-            "published_submissions": 0,
-            "blocked_submissions": 0,
-            "open_cases_total": 0,
-            "open_review_cases": 0,
-            "open_safety_cases": 0,
-            "open_moderation_cases": 0,
-        }
+        counts = dict(DASHBOARD_EMPTY_COUNTS)
+        if self.storage_ready:
+            try:
+                counts = await self.store.fetch_guild_counts(guild.id)
+            except Exception as exc:
+                self.log_admin_diagnostic(
+                    code="dashboard_counts_failed",
+                    stage="build_dashboard_counts",
+                    guild_id=guild.id,
+                    exc=exc,
+                )
         embed = discord.Embed(
             title="Confessions Control Panel",
             description="Staff work by confession ID and case ID only. Author identity remains bot-private.",
@@ -3417,8 +3465,19 @@ class ConfessionsService:
         fetch_message = getattr(channel, "fetch_message", None)
         if not callable(fetch_message):
             return None
-        with contextlib.suppress(discord.NotFound, discord.Forbidden, discord.HTTPException, Exception):
+        try:
             return await fetch_message(message_id)
+        except (discord.NotFound, discord.Forbidden, discord.HTTPException):
+            return None
+        except Exception as exc:
+            self.log_admin_diagnostic(
+                code="queue_message_fetch_failed",
+                stage="queue_message_fetch",
+                guild_id=getattr(getattr(channel, "guild", None), "id", None),
+                channel_id=getattr(channel, "id", None),
+                message_id=message_id,
+                exc=exc,
+            )
         return None
 
     async def _sync_published_confession_views(self, guild: discord.Guild):
@@ -3464,8 +3523,19 @@ class ConfessionsService:
             if previous_channel is not None:
                 previous_message = await self._queue_message(previous_channel, message_id=previous_message_id)
                 if previous_message is not None:
-                    with contextlib.suppress(discord.Forbidden, discord.HTTPException, Exception):
+                    try:
                         await previous_message.delete()
+                    except (discord.Forbidden, discord.HTTPException):
+                        pass
+                    except Exception as exc:
+                        self.log_admin_diagnostic(
+                            code="panel_previous_delete_failed",
+                            stage="sync_member_panel_previous_delete",
+                            guild_id=guild.id,
+                            channel_id=getattr(previous_channel, "id", None),
+                            message_id=previous_message_id,
+                            exc=exc,
+                        )
         message = await self._queue_message(channel, message_id=previous_message_id if previous_channel_id == target_channel_id else None)
         embed = self.build_member_panel_embed(guild)
         view = None
@@ -3474,18 +3544,48 @@ class ConfessionsService:
             build_view = getattr(cog, "build_member_panel_view", None)
             if callable(build_view):
                 view = build_view(guild_id=guild.id)
-        if message is None:
-            with contextlib.suppress(discord.Forbidden, discord.HTTPException):
-                message = await channel.send(embed=embed, view=view, allowed_mentions=discord.AllowedMentions.none())
-        else:
-            with contextlib.suppress(discord.Forbidden, discord.HTTPException):
+        if message is not None:
+            try:
                 await message.edit(embed=embed, view=view)
+            except discord.NotFound:
+                message = None
+            except (discord.Forbidden, discord.HTTPException):
+                return False, "Babblebox could not refresh the confession panel in that channel."
+        if message is None:
+            try:
+                message = await channel.send(embed=embed, view=view, allowed_mentions=discord.AllowedMentions.none())
+            except (discord.Forbidden, discord.HTTPException):
+                return False, "Babblebox could not publish the confession panel in that channel."
         if message is None:
             return False, "Babblebox could not publish the confession panel in that channel."
-        await self.update_panel_record(guild.id, channel_id=getattr(channel, "id", None), message_id=getattr(message, "id", None))
+        try:
+            await self.update_panel_record(guild.id, channel_id=getattr(channel, "id", None), message_id=getattr(message, "id", None))
+        except Exception as exc:
+            self.log_admin_diagnostic(
+                code="panel_record_update_failed",
+                stage="sync_member_panel_record",
+                guild_id=guild.id,
+                channel_id=getattr(channel, "id", None),
+                message_id=getattr(message, "id", None),
+                exc=exc,
+            )
+            return (
+                True,
+                f"Confession panel is live in <#{channel.id}>. "
+                "Babblebox could not save the updated panel location, so rerun `/confessions panel` if it looks stale after a restart.",
+            )
         if view is not None:
-            with contextlib.suppress(Exception):
+            try:
                 self.bot.add_view(view, message_id=message.id)
+            except Exception as exc:
+                self.log_admin_diagnostic(
+                    code="panel_view_register_failed",
+                    stage="sync_member_panel_register_view",
+                    guild_id=guild.id,
+                    channel_id=getattr(channel, "id", None),
+                    message_id=getattr(message, "id", None),
+                    exc=exc,
+                )
         return True, f"Confession panel is live in <#{channel.id}>."
 
     async def resume_member_panels(self):
@@ -3512,21 +3612,21 @@ class ConfessionsService:
                     await message.edit(embed=self.build_review_queue_embed(guild, [], note=note), view=None)
         await self.store.delete_review_queue(guild.id)
 
-    async def _sync_review_queue(self, guild: discord.Guild, *, note: str | None = None):
+    async def _sync_review_queue(self, guild: discord.Guild, *, note: str | None = None) -> tuple[bool, str]:
         compiled = self.get_compiled_config(guild.id)
         if not compiled["enabled"] or compiled["review_channel_id"] is None:
             await self._retire_review_queue(guild, note=note or "Confession review is inactive.")
-            return
+            return True, note or "Confession review queue is inactive."
         if compiled["confession_channel_id"] == compiled["review_channel_id"]:
             await self._retire_review_queue(guild, note="Confession review is disabled until the public and private channels differ.")
-            return
+            return False, "Confession review is disabled until the public and private channels differ."
         pending_rows = await self.list_review_targets(guild.id, limit=25)
         if not pending_rows:
             await self._retire_review_queue(guild, note=note)
-            return
+            return True, note or "Confession review queue is clear."
         channel = guild.get_channel(compiled["review_channel_id"]) or self.bot.get_channel(compiled["review_channel_id"])
         if channel is None:
-            return
+            return False, "That review channel is unavailable."
         current = pending_rows[0]
         queue_record = await self.store.fetch_review_queue(guild.id)
         view = None
@@ -3534,28 +3634,59 @@ class ConfessionsService:
         if cog is not None:
             build_view = getattr(cog, "build_review_view", None)
             if callable(build_view):
-                view = build_view(case_id=current["case_id"], version=current["review_version"])
+                    view = build_view(case_id=current["case_id"], version=current["review_version"])
         embed = self.build_review_queue_embed(guild, pending_rows, note=note)
         message = await self._queue_message(channel, message_id=queue_record.get("message_id") if queue_record else None)
-        if message is None:
-            with contextlib.suppress(discord.Forbidden, discord.HTTPException):
-                message = await channel.send(embed=embed, view=view, allowed_mentions=discord.AllowedMentions.none())
-        else:
-            with contextlib.suppress(discord.Forbidden, discord.HTTPException):
+        if message is not None:
+            try:
                 await message.edit(embed=embed, view=view)
+            except discord.NotFound:
+                message = None
+            except (discord.Forbidden, discord.HTTPException):
+                return False, "Babblebox could not refresh the confession review queue in that channel."
         if message is None:
-            return
+            try:
+                message = await channel.send(embed=embed, view=view, allowed_mentions=discord.AllowedMentions.none())
+            except (discord.Forbidden, discord.HTTPException):
+                return False, "Babblebox could not refresh the confession review queue in that channel."
+        if message is None:
+            return False, "Babblebox could not refresh the confession review queue in that channel."
         if view is not None:
-            with contextlib.suppress(Exception):
+            try:
                 self.bot.add_view(view, message_id=message.id)
-        await self.store.upsert_review_queue(
-            {
-                "guild_id": guild.id,
-                "channel_id": getattr(channel, "id", None),
-                "message_id": getattr(message, "id", None),
-                "updated_at": ge.now_utc().isoformat(),
-            }
-        )
+            except Exception as exc:
+                self.log_admin_diagnostic(
+                    code="review_queue_view_register_failed",
+                    stage="sync_review_queue_register_view",
+                    guild_id=guild.id,
+                    channel_id=getattr(channel, "id", None),
+                    message_id=getattr(message, "id", None),
+                    exc=exc,
+                )
+        try:
+            await self.store.upsert_review_queue(
+                {
+                    "guild_id": guild.id,
+                    "channel_id": getattr(channel, "id", None),
+                    "message_id": getattr(message, "id", None),
+                    "updated_at": ge.now_utc().isoformat(),
+                }
+            )
+        except Exception as exc:
+            self.log_admin_diagnostic(
+                code="review_queue_record_update_failed",
+                stage="sync_review_queue_record",
+                guild_id=guild.id,
+                channel_id=getattr(channel, "id", None),
+                message_id=getattr(message, "id", None),
+                exc=exc,
+            )
+            refresh_message = note or f"Confession review queue is live in <#{channel.id}>."
+            return (
+                True,
+                f"{refresh_message} Babblebox could not save the refreshed review queue state, so rerun `/confessions` if it looks stale.",
+            )
+        return True, note or f"Confession review queue is live in <#{channel.id}>."
 
     async def resume_review_queues(self):
         guild_ids = {guild_id for guild_id, config in self._compiled_configs.items() if config["enabled"] and config.get("review_channel_id")}
@@ -3566,6 +3697,9 @@ class ConfessionsService:
             if guild is None:
                 continue
             await self._sync_review_queue(guild)
+
+    async def sync_review_queue(self, guild: discord.Guild, *, note: str | None = None) -> tuple[bool, str]:
+        return await self._sync_review_queue(guild, note=note)
 
     async def _detail_payload_for_target(self, guild_id: int, target_id: str) -> tuple[dict[str, Any] | None, str | None]:
         cleaned_target = normalize_plain_text(target_id).upper()
