@@ -24,11 +24,24 @@ from babblebox.profile_store import ProfileStore
 
 
 class FakeMessage:
-    pass
+    def __init__(self, **kwargs):
+        self.embed = kwargs.get("embed")
+        self.view = kwargs.get("view")
+        self.ephemeral = kwargs.get("ephemeral")
+        self.edit_calls = []
+
+    async def edit(self, **kwargs):
+        self.edit_calls.append(kwargs)
+        if "embed" in kwargs:
+            self.embed = kwargs["embed"]
+        if "view" in kwargs:
+            self.view = kwargs["view"]
+        return self
 
 
 class FakeResponse:
-    def __init__(self):
+    def __init__(self, interaction=None):
+        self._interaction = interaction
         self._done = False
         self.send_calls = []
         self.edit_calls = []
@@ -44,6 +57,8 @@ class FakeResponse:
     async def edit_message(self, *args, **kwargs):
         self._done = True
         self.edit_calls.append((args, kwargs))
+        if self._interaction is not None and getattr(self._interaction, "message", None) is not None:
+            await self._interaction.message.edit(**kwargs)
 
     async def send_modal(self, modal):
         self._done = True
@@ -51,15 +66,29 @@ class FakeResponse:
 
 
 class FakeInteraction:
-    def __init__(self, *, expired: bool = False, user=None, guild=None, client=None):
-        self.response = FakeResponse()
+    def __init__(self, *, expired: bool = False, user=None, guild=None, client=None, message=None):
+        self.message = message
+        self.response = FakeResponse(self)
         self._expired = expired
         self.user = user or FakeAuthor()
         self.guild = guild
         self.client = client or types.SimpleNamespace(get_guild=lambda guild_id: guild)
+        self.followup_calls = []
+        self.edit_original_response_calls = []
+        self.followup = types.SimpleNamespace(send=self._followup_send)
 
     def is_expired(self):
         return self._expired
+
+    async def _followup_send(self, *args, **kwargs):
+        self.followup_calls.append((args, kwargs))
+        return None
+
+    async def edit_original_response(self, **kwargs):
+        self.edit_original_response_calls.append(kwargs)
+        if self.message is not None:
+            await self.message.edit(**kwargs)
+        return self.message
 
 
 class FakeGuildPermissions:
@@ -173,7 +202,7 @@ class FakeContext:
 
     async def send(self, **kwargs):
         self.send_calls.append(kwargs)
-        return FakeMessage()
+        return FakeMessage(**kwargs)
 
     async def defer(self, **kwargs):
         self.defer_calls.append(kwargs)
@@ -208,6 +237,20 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             for child in getattr(view, "children", [])
             if getattr(child, "style", None) == discord.ButtonStyle.link
         }
+
+    def _assert_embed_within_discord_limits(self, embed: discord.Embed):
+        self.assertLessEqual(len(embed.title or ""), 256)
+        self.assertLessEqual(len(embed.description or ""), 4096)
+        self.assertLessEqual(len(embed.fields), 25)
+        self.assertLessEqual(len(embed.footer.text or ""), 2048)
+
+        total = len(embed.title or "") + len(embed.description or "") + len(embed.footer.text or "")
+        for field in embed.fields:
+            self.assertLessEqual(len(field.name), 256)
+            self.assertLessEqual(len(field.value), 1024)
+            total += len(field.name) + len(field.value)
+
+        self.assertLessEqual(total, 6000)
 
     def test_help_pages_reflect_five_game_party_copy(self):
         party_page = next(page for page in HELP_PAGES if page["title"] == "Party Games")
@@ -254,6 +297,22 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("GitHub Repository", fields["Links"])
         self.assertIn("Support Server", fields["Links"])
         self.assertIn("Official Website", fields["Links"])
+
+    def test_help_embeds_stay_within_discord_limits(self):
+        for index, _page in enumerate(HELP_PAGES):
+            with self.subTest(page=index):
+                self._assert_embed_within_discord_limits(build_help_page_embed(index))
+
+    def test_question_drops_help_page_is_split_across_multiple_fields(self):
+        page_index = next(index for index, page in enumerate(HELP_PAGES) if page["title"] == "Question Drops")
+
+        embed = build_help_page_embed(page_index)
+        content_fields = [field for field in embed.fields if field.name not in {"Try", "Page", "Visibility", "Links"}]
+
+        self.assertGreaterEqual(len(content_fields), 2)
+        self.assertTrue(any(field.name == "Guild Lane" for field in content_fields))
+        self.assertTrue(any(field.name == "Mastery / Scholar" for field in content_fields))
+        self.assertTrue(all(len(field.value) <= 1024 for field in content_fields))
 
     def test_dropsadmin_config_slash_choices_include_difficulty_profiles(self):
         bot = commands.Bot(command_prefix="!", intents=discord.Intents.none())
@@ -860,6 +919,8 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(ctx.send_calls), 1)
         self.assertFalse(ctx.send_calls[0]["ephemeral"])
         self.assertIsNotNone(ctx.send_calls[0]["view"])
+        self.assertEqual(ctx.send_calls[0]["view"].timeout, 900)
+        self.assertTrue(any(isinstance(child, discord.ui.Select) for child in ctx.send_calls[0]["view"].children))
         self.assertEqual(
             self._link_buttons(ctx.send_calls[0]["view"]),
             {
@@ -868,6 +929,104 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
                 "Official Website": "https://arno-create.github.io/babblebox-bot/",
             },
         )
+
+    async def test_help_select_navigation_updates_page_index(self):
+        cog = MetaCog(types.SimpleNamespace(loop=asyncio.get_running_loop()))
+        author = FakeAuthor()
+        ctx = FakeContext(interaction=FakeInteraction(), guild=FakeGuild(), channel=FakeChannel(), author=author)
+
+        with patch("babblebox.cogs.meta.require_channel_permissions", new=AsyncMock(return_value=True)):
+            await MetaCog.help_command.callback(cog, ctx, visibility="public")
+
+        view = ctx.send_calls[0]["view"]
+        select = next(child for child in view.children if isinstance(child, discord.ui.Select))
+        interaction = FakeInteraction(user=author, guild=ctx.guild, message=view.message)
+        select._values = ["2"]
+
+        await select.callback(interaction)
+
+        self.assertEqual(view.page_index, 2)
+        self.assertEqual(len(interaction.response.edit_calls), 1)
+        self.assertIn("Question Drops", interaction.response.edit_calls[0][1]["embed"].title)
+
+    async def test_help_button_navigation_updates_page_index(self):
+        cog = MetaCog(types.SimpleNamespace(loop=asyncio.get_running_loop()))
+        author = FakeAuthor()
+        ctx = FakeContext(interaction=FakeInteraction(), guild=FakeGuild(), channel=FakeChannel(), author=author)
+
+        with patch("babblebox.cogs.meta.require_channel_permissions", new=AsyncMock(return_value=True)):
+            await MetaCog.help_command.callback(cog, ctx, visibility="public")
+
+        view = ctx.send_calls[0]["view"]
+        interaction = FakeInteraction(user=author, guild=ctx.guild, message=view.message)
+
+        await view.next_button.callback(interaction)
+        self.assertEqual(view.page_index, 1)
+        self.assertEqual(len(interaction.response.edit_calls), 1)
+
+        interaction = FakeInteraction(user=author, guild=ctx.guild, message=view.message)
+        await view.home_button.callback(interaction)
+        self.assertEqual(view.page_index, 0)
+        self.assertEqual(len(interaction.response.edit_calls), 1)
+
+    async def test_help_panel_rejects_other_users_with_locked_message(self):
+        cog = MetaCog(types.SimpleNamespace(loop=asyncio.get_running_loop()))
+        ctx = FakeContext(interaction=FakeInteraction(), guild=FakeGuild(), channel=FakeChannel(), author=FakeAuthor(user_id=1))
+
+        with patch("babblebox.cogs.meta.require_channel_permissions", new=AsyncMock(return_value=True)):
+            await MetaCog.help_command.callback(cog, ctx, visibility="public")
+
+        view = ctx.send_calls[0]["view"]
+        interaction = FakeInteraction(user=FakeAuthor(user_id=2), guild=ctx.guild, message=view.message)
+
+        allowed = await view.interaction_check(interaction)
+
+        self.assertFalse(allowed)
+        self.assertEqual(len(interaction.response.send_calls), 1)
+        self.assertEqual(interaction.response.send_calls[0][1]["embed"].title, "This Panel Is Locked")
+
+    async def test_help_panel_falls_back_to_refresh_hint_when_edit_fails(self):
+        cog = MetaCog(types.SimpleNamespace(loop=asyncio.get_running_loop()))
+        author = FakeAuthor()
+        ctx = FakeContext(interaction=FakeInteraction(), guild=FakeGuild(), channel=FakeChannel(), author=author)
+
+        with patch("babblebox.cogs.meta.require_channel_permissions", new=AsyncMock(return_value=True)):
+            await MetaCog.help_command.callback(cog, ctx, visibility="public")
+
+        view = ctx.send_calls[0]["view"]
+        interaction = FakeInteraction(user=author, guild=ctx.guild, message=view.message)
+
+        with patch("babblebox.cogs.meta.ge.safe_edit_interaction_message", new=AsyncMock(return_value=False)):
+            await view.next_button.callback(interaction)
+
+        self.assertEqual(len(interaction.response.send_calls), 1)
+        self.assertEqual(interaction.response.send_calls[0][1]["embed"].title, "Help Panel Expired")
+
+    async def test_help_panel_timeout_disables_navigation_but_keeps_links_active(self):
+        cog = MetaCog(types.SimpleNamespace(loop=asyncio.get_running_loop()))
+        ctx = FakeContext(interaction=FakeInteraction(), guild=FakeGuild(), channel=FakeChannel(), author=FakeAuthor())
+
+        with patch("babblebox.cogs.meta.require_channel_permissions", new=AsyncMock(return_value=True)):
+            await MetaCog.help_command.callback(cog, ctx, visibility="public")
+
+        view = ctx.send_calls[0]["view"]
+        message = view.message
+
+        await view.on_timeout()
+
+        self.assertTrue(view.previous_button.disabled)
+        self.assertTrue(view.home_button.disabled)
+        self.assertTrue(view.next_button.disabled)
+        self.assertTrue(view.page_select.disabled)
+        self.assertEqual(
+            {label: child.disabled for label, child in ((child.label, child) for child in view.children if getattr(child, "style", None) == discord.ButtonStyle.link)},
+            {
+                "Support Server": False,
+                "GitHub Repository": False,
+                "Official Website": False,
+            },
+        )
+        self.assertEqual(len(message.edit_calls), 1)
 
     async def test_support_public_uses_view_and_public_visibility(self):
         cog = MetaCog(types.SimpleNamespace(loop=asyncio.get_running_loop()))
