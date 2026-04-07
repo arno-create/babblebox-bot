@@ -6,7 +6,7 @@ from typing import Optional
 from unittest.mock import AsyncMock, patch
 
 from babblebox.shield_ai import SHIELD_AI_ALLOWED_GUILD_ID, ShieldAIReviewResult
-from babblebox.shield_service import ShieldDecision, ShieldMatch, ShieldService
+from babblebox.shield_service import ShieldDecision, ShieldMatch, ShieldService, _alert_content_fingerprint, _build_snapshot
 from babblebox.shield_store import SHIELD_META_GLOBAL_AI_OVERRIDE_KEY, ShieldStateStore, _MemoryShieldStore, _PostgresShieldStore
 
 
@@ -263,6 +263,9 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.service = ShieldService(self.bot, store=self.store)
         started = await self.service.start()
         self.assertTrue(started)
+
+    def _content_fingerprint(self, content: str, *, attachments=None) -> str:
+        return _alert_content_fingerprint(_build_snapshot(content, attachments))
 
     async def test_privacy_pack_matches_email(self):
         ok, _ = await self.service.set_pack_config(10, "privacy", enabled=True, action="log", sensitivity="normal")
@@ -896,9 +899,10 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
                 ),
             ),
         )
+        fingerprint = self._content_fingerprint(message.content)
 
-        await self.service._send_alert(message, compiled, decision)
-        await self.service._send_alert(message, compiled, decision)
+        await self.service._send_alert(message, compiled, decision, content_fingerprint=fingerprint)
+        await self.service._send_alert(message, compiled, decision, content_fingerprint=fingerprint)
 
         self.assertEqual(len(log_channel.sent), 1)
         embed = log_channel.sent[0]["embed"]
@@ -906,6 +910,125 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Possible email address", embed.fields[0].value)
         self.assertIn("Class:", embed.fields[0].value)
         self.assertIn("Resolved action:", embed.fields[0].value)
+
+    async def test_alert_signature_dedupes_near_identical_different_messages(self):
+        guild = FakeGuild(10)
+        public_channel = FakeChannel(20)
+        log_channel = FakeChannel(99, name="shield-log")
+        self.bot.register_channel(log_channel)
+        author = FakeAuthor(42, roles=[FakeRole(11, position=1)])
+        first = FakeMessage(guild=guild, channel=public_channel, author=author, content="Email me at friend@example.com")
+        second = FakeMessage(guild=guild, channel=public_channel, author=author, content="Email me at friend@example.com")
+
+        ok, _ = await self.service.set_log_channel(10, log_channel.id)
+        self.assertTrue(ok)
+        compiled = self.service._compiled_configs[10]
+        decision = ShieldDecision(
+            matched=True,
+            action="log",
+            pack="privacy",
+            reasons=(
+                ShieldMatch(
+                    pack="privacy",
+                    label="Possible email address",
+                    reason="Looks like an email address was posted in chat.",
+                    action="log",
+                    confidence="high",
+                    heuristic=False,
+                    match_class="privacy_email",
+                ),
+            ),
+        )
+        fingerprint = self._content_fingerprint(first.content)
+
+        await self.service._send_alert(first, compiled, decision, content_fingerprint=fingerprint)
+        await self.service._send_alert(second, compiled, decision, content_fingerprint=fingerprint)
+
+        self.assertEqual(len(log_channel.sent), 1)
+
+    async def test_alert_signature_allows_material_outcome_change(self):
+        guild = FakeGuild(10)
+        public_channel = FakeChannel(20)
+        log_channel = FakeChannel(99, name="shield-log")
+        self.bot.register_channel(log_channel)
+        author = FakeAuthor(42, roles=[FakeRole(11, position=1)])
+        first = FakeMessage(guild=guild, channel=public_channel, author=author, content="Free nitro claim now https://bit.ly/bait")
+        second = FakeMessage(guild=guild, channel=public_channel, author=author, content="Free nitro claim now https://bit.ly/bait")
+
+        ok, _ = await self.service.set_log_channel(10, log_channel.id)
+        self.assertTrue(ok)
+        compiled = self.service._compiled_configs[10]
+        base_reason = ShieldMatch(
+            pack="scam",
+            label="Scam bait wording",
+            reason="A high-risk scam lure appeared next to a suspicious link.",
+            action="delete_escalate",
+            confidence="high",
+            heuristic=True,
+            match_class="known_malicious_domain",
+        )
+        first_decision = ShieldDecision(
+            matched=True,
+            action="delete_escalate",
+            pack="scam",
+            reasons=(base_reason,),
+            deleted=True,
+        )
+        second_decision = ShieldDecision(
+            matched=True,
+            action="delete_escalate",
+            pack="scam",
+            reasons=(base_reason,),
+            deleted=True,
+            timed_out=True,
+            escalated=True,
+            action_note="Repeated-hit escalation triggered after 3 strikes in 10 minutes.",
+        )
+        fingerprint = self._content_fingerprint(first.content)
+
+        await self.service._send_alert(first, compiled, first_decision, content_fingerprint=fingerprint)
+        await self.service._send_alert(second, compiled, second_decision, content_fingerprint=fingerprint)
+
+        self.assertEqual(len(log_channel.sent), 2)
+
+    async def test_alert_signature_can_send_again_after_short_window(self):
+        guild = FakeGuild(10)
+        public_channel = FakeChannel(20)
+        log_channel = FakeChannel(99, name="shield-log")
+        self.bot.register_channel(log_channel)
+        author = FakeAuthor(42, roles=[FakeRole(11, position=1)])
+        first = FakeMessage(guild=guild, channel=public_channel, author=author, content="Email me at friend@example.com")
+        second = FakeMessage(guild=guild, channel=public_channel, author=author, content="Email me at friend@example.com")
+
+        ok, _ = await self.service.set_log_channel(10, log_channel.id)
+        self.assertTrue(ok)
+        compiled = self.service._compiled_configs[10]
+        decision = ShieldDecision(
+            matched=True,
+            action="log",
+            pack="privacy",
+            reasons=(
+                ShieldMatch(
+                    pack="privacy",
+                    label="Possible email address",
+                    reason="Looks like an email address was posted in chat.",
+                    action="log",
+                    confidence="high",
+                    heuristic=False,
+                    match_class="privacy_email",
+                ),
+            ),
+        )
+        fingerprint = self._content_fingerprint(first.content)
+        clock = {"now": 100.0}
+        fake_loop = types.SimpleNamespace(time=lambda: clock["now"])
+
+        with patch("babblebox.shield_service.asyncio.get_running_loop", return_value=fake_loop):
+            await self.service._send_alert(first, compiled, decision, content_fingerprint=fingerprint)
+            clock["now"] = 106.0
+            await self.service._send_alert(second, compiled, decision, content_fingerprint=fingerprint)
+
+        self.assertEqual(len(log_channel.sent), 2)
 
     async def test_ai_config_is_restricted_to_allowed_guild(self):
         ok, message = await self.service.set_ai_config(10, enabled=True)

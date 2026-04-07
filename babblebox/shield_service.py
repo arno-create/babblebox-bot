@@ -79,6 +79,7 @@ CUSTOM_PATTERN_MAX_LEN = 80
 CUSTOM_PATTERN_WILDCARD_LIMIT = 4
 MAX_MESSAGE_PREVIEW = 220
 ALERT_DEDUP_SECONDS = 30.0
+ALERT_SIGNATURE_DEDUP_SECONDS = 5.0
 REPETITION_WINDOW_SECONDS = 10 * 60.0
 DIRECT_PROMO_REPEAT_THRESHOLD = 3
 GENERIC_LINK_NOISE_THRESHOLD = 4
@@ -420,6 +421,20 @@ def _canonical_repetition_fingerprint(snapshot: ShieldSnapshot) -> str | None:
     return hashlib.sha1(canonical_text.encode("utf-8")).hexdigest()
 
 
+def _alert_content_fingerprint(snapshot: ShieldSnapshot) -> str:
+    fingerprint = _canonical_repetition_fingerprint(snapshot)
+    if fingerprint is not None:
+        return fingerprint
+    content = "|".join(
+        (
+            snapshot.text,
+            " ".join(snapshot.canonical_links),
+            " ".join(snapshot.attachment_names),
+        )
+    )
+    return hashlib.sha1(content.encode("utf-8")).hexdigest()
+
+
 def _confidence_rank(confidence: str) -> int:
     return CONFIDENCE_STRENGTH.get(confidence, 0)
 
@@ -610,6 +625,7 @@ class ShieldService:
         self.link_safety = ShieldLinkSafetyEngine()
         self._compiled_configs: dict[int, CompiledShieldConfig] = {}
         self._alert_dedup: dict[tuple[int, int], float] = {}
+        self._alert_signature_dedup: dict[tuple[Any, ...], float] = {}
         self._strike_windows: dict[tuple[int, int, str], list[float]] = {}
         self._recent_promos: dict[tuple[int, int, str], list[float]] = {}
         self._last_runtime_prune = 0.0
@@ -1054,6 +1070,7 @@ class ShieldService:
         now = asyncio.get_running_loop().time()
         self._prune_runtime_state(now)
         snapshot = _build_snapshot(message.content, message.attachments)
+        alert_content_fingerprint = _alert_content_fingerprint(snapshot)
         if self._allow_phrase_bypass(compiled, snapshot):
             return None
 
@@ -1118,7 +1135,7 @@ class ShieldService:
                 decision.ai_review = await self.ai_provider.review(request)
 
         if best.action not in {"disabled", "detect"}:
-            await self._send_alert(message, compiled, decision)
+            await self._send_alert(message, compiled, decision, content_fingerprint=alert_content_fingerprint)
 
         return decision
 
@@ -1855,6 +1872,9 @@ class ShieldService:
             return
         self._last_runtime_prune = now
         self._alert_dedup = {key: value for key, value in self._alert_dedup.items() if now - value <= ALERT_DEDUP_SECONDS}
+        self._alert_signature_dedup = {
+            key: value for key, value in self._alert_signature_dedup.items() if now - value <= ALERT_SIGNATURE_DEDUP_SECONDS
+        }
         self._recent_promos = {
             key: [value for value in values if now - value <= REPETITION_WINDOW_SECONDS]
             for key, values in self._recent_promos.items()
@@ -1899,14 +1919,37 @@ class ShieldService:
             return True
         return False
 
-    async def _send_alert(self, message: discord.Message, compiled: CompiledShieldConfig, decision: ShieldDecision):
+    async def _send_alert(
+        self,
+        message: discord.Message,
+        compiled: CompiledShieldConfig,
+        decision: ShieldDecision,
+        *,
+        content_fingerprint: str,
+    ):
         if compiled.log_channel_id is None:
             return
         dedupe_key = (message.guild.id, message.id)
         now = asyncio.get_running_loop().time()
         if now - self._alert_dedup.get(dedupe_key, 0.0) < ALERT_DEDUP_SECONDS:
             return
+        top_reason = decision.reasons[0] if decision.reasons else None
+        signature_key = (
+            message.guild.id,
+            getattr(message.channel, "id", 0),
+            getattr(message.author, "id", 0),
+            decision.pack or "",
+            decision.action,
+            bool(decision.deleted),
+            bool(decision.timed_out),
+            bool(decision.escalated),
+            top_reason.match_class if top_reason is not None else "",
+            content_fingerprint,
+        )
+        if now - self._alert_signature_dedup.get(signature_key, 0.0) < ALERT_SIGNATURE_DEDUP_SECONDS:
+            return
         self._alert_dedup[dedupe_key] = now
+        self._alert_signature_dedup[signature_key] = now
 
         channel = self.bot.get_channel(compiled.log_channel_id)
         if channel is None and hasattr(self.bot, "fetch_channel"):
@@ -1917,7 +1960,6 @@ class ShieldService:
 
         preview = make_message_preview(message.content, attachments=message.attachments, limit=MAX_MESSAGE_PREVIEW)
         attachment_summary = make_attachment_labels(message, include_urls=False)
-        top_reason = decision.reasons[0] if decision.reasons else None
         alert_title = f"Shield Alert | {PACK_LABELS.get(decision.pack or '', 'Shield')}"
         embed = discord.Embed(
             title=alert_title,
