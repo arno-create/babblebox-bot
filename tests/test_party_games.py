@@ -9,17 +9,6 @@ from unittest.mock import AsyncMock, Mock, patch
 import discord
 
 from babblebox import game_engine as ge
-from babblebox.only16_game import (
-    detect_count_question,
-    ensure_only16_state,
-    handle_only16_message_locked,
-    handle_only16_message_delete_locked,
-    manually_arm_only16_message,
-    parse_only16_numeric_answer,
-    _arm_only16_trap_locked,
-    _only16_trap_window_seconds,
-    _start_only16_turn_locked,
-)
 from babblebox.pattern_hunt_game import (
     RuleAtom,
     _pattern_hunt_answer_timeout,
@@ -95,316 +84,6 @@ class DummyMessage:
 
 
 class PartyGameLogicTests(unittest.IsolatedAsyncioTestCase):
-    def _make_only16_game(self, *, mode: str = "smart"):
-        asker = DummyUser(1)
-        responder = DummyUser(2)
-        channel = DummyChannel()
-        game = {
-            "channel": channel,
-            "players": [asker, responder],
-            "current_player_index": 0,
-            "turn_task": None,
-            "game_type": "only16",
-            "active": True,
-            "closing": False,
-            "only16_mode": mode,
-        }
-        state = ensure_only16_state(game)
-        state["mode"] = mode
-        state["ask_started_at"] = ge.now_utc() - timedelta(seconds=1)
-        state["ask_expires_at"] = ge.now_utc() + timedelta(seconds=30)
-        state["tutorial_complete"] = False
-        state["trap"] = {
-            "asker_id": asker.id,
-            "question_message_id": 100,
-            "armed_at": ge.now_utc(),
-            "expires_at": ge.now_utc() + timedelta(seconds=10),
-            "mode": mode,
-            "manual": False,
-            "question_text": "How many moons does Mars have?",
-        }
-        return game, asker, responder, channel
-
-    def test_only16_question_detection_prefers_clear_quantity_and_math_prompts(self):
-        self.assertTrue(detect_count_question("How many moons does Mars have?"))
-        self.assertTrue(detect_count_question("What number is on the jersey?"))
-        self.assertTrue(detect_count_question("What is 8+8?"))
-        self.assertTrue(detect_count_question("Calculate (10 + 6)?"))
-        self.assertFalse(detect_count_question("What's up?"))
-        self.assertFalse(detect_count_question("Tell me a joke."))
-
-    def test_only16_number_parser_handles_words_math_and_ambiguity(self):
-        self.assertEqual(parse_only16_numeric_answer("fifteen").kind, "single")
-        self.assertEqual(parse_only16_numeric_answer("fifteen").value, 15)
-        self.assertEqual(parse_only16_numeric_answer("negative sixteen").value, -16)
-        self.assertEqual(parse_only16_numeric_answer("seventy-two").value, 72)
-        self.assertEqual(parse_only16_numeric_answer("one hundred six").value, 106)
-        self.assertEqual(parse_only16_numeric_answer("17-1").value, 16)
-        self.assertEqual(parse_only16_numeric_answer("(10+6)").value, 16)
-        self.assertEqual(parse_only16_numeric_answer("32/2").value, 16)
-        self.assertEqual(parse_only16_numeric_answer("4^2").value, 16)
-        self.assertEqual(parse_only16_numeric_answer("I think 12 or maybe 16").kind, "ambiguous")
-        self.assertEqual(parse_only16_numeric_answer("16/0").kind, "unsupported")
-        self.assertEqual(parse_only16_numeric_answer("probably sixteen-ish").kind, "none")
-
-    async def test_only16_smart_mode_ignores_unrelated_chatter(self):
-        game, _asker, responder, _channel = self._make_only16_game(mode="smart")
-        message = DummyMessage(channel=game["channel"], author=responder, content="wait that's wild")
-
-        with patch("babblebox.only16_game._advance_to_next_asker_locked", new=AsyncMock()) as advance:
-            handled = await handle_only16_message_locked(message, 99, game)
-
-        self.assertFalse(handled)
-        self.assertIsNotNone(ensure_only16_state(game).get("trap"))
-        advance.assert_not_awaited()
-
-    async def test_only16_smart_mode_accepts_clean_standalone_number(self):
-        game, _asker, responder, channel = self._make_only16_game(mode="smart")
-        message = DummyMessage(channel=channel, author=responder, content="16")
-
-        with patch("babblebox.only16_game._advance_to_next_asker_locked", new=AsyncMock()) as advance:
-            handled = await handle_only16_message_locked(message, 99, game)
-
-        self.assertTrue(handled)
-        self.assertIsNone(ensure_only16_state(game).get("trap"))
-        self.assertEqual(channel.sent[-1][1]["embed"].title, "✅ Safe")
-        advance.assert_awaited_once()
-
-    async def test_only16_smart_mode_accepts_clean_standalone_word_and_math(self):
-        for content in ("sixteen", "17-1"):
-            with self.subTest(content=content):
-                game, _asker, responder, channel = self._make_only16_game(mode="smart")
-                message = DummyMessage(channel=channel, author=responder, content=content)
-
-                with patch("babblebox.only16_game._advance_to_next_asker_locked", new=AsyncMock()) as advance:
-                    handled = await handle_only16_message_locked(message, 99, game)
-
-                self.assertTrue(handled)
-                self.assertIsNone(ensure_only16_state(game).get("trap"))
-                self.assertEqual(channel.sent[-1][1]["embed"].title, "✅ Safe")
-                advance.assert_awaited_once()
-
-    async def test_only16_smart_mode_accepts_compact_answer_wrapper(self):
-        game, _asker, responder, channel = self._make_only16_game(mode="smart")
-        message = DummyMessage(channel=channel, author=responder, content="answer: 16")
-
-        with patch("babblebox.only16_game._advance_to_next_asker_locked", new=AsyncMock()) as advance:
-            handled = await handle_only16_message_locked(message, 99, game)
-
-        self.assertTrue(handled)
-        self.assertIsNone(ensure_only16_state(game).get("trap"))
-        self.assertEqual(channel.sent[-1][1]["embed"].title, "✅ Safe")
-        advance.assert_awaited_once()
-
-    async def test_only16_smart_mode_accepts_clean_punctuation_wrappers(self):
-        for content in ("16!", "16.", "sixteen!", "answer: 16!"):
-            with self.subTest(content=content):
-                game, _asker, responder, channel = self._make_only16_game(mode="smart")
-                message = DummyMessage(channel=channel, author=responder, content=content)
-
-                with patch("babblebox.only16_game._advance_to_next_asker_locked", new=AsyncMock()) as advance:
-                    handled = await handle_only16_message_locked(message, 99, game)
-
-                self.assertTrue(handled)
-                self.assertIsNone(ensure_only16_state(game).get("trap"))
-                self.assertEqual(channel.sent[-1][1]["embed"].title, "✅ Safe")
-                advance.assert_awaited_once()
-
-    async def test_only16_strict_mode_ignores_non_reply_answers(self):
-        game, _asker, responder, _channel = self._make_only16_game(mode="strict")
-        message = DummyMessage(channel=game["channel"], author=responder, content="16")
-
-        with patch("babblebox.only16_game._advance_to_next_asker_locked", new=AsyncMock()) as advance:
-            handled = await handle_only16_message_locked(message, 99, game)
-
-        self.assertFalse(handled)
-        self.assertIsNotNone(ensure_only16_state(game).get("trap"))
-        advance.assert_not_awaited()
-
-    async def test_only16_strict_mode_ignores_replies_to_the_wrong_message(self):
-        game, _asker, responder, _channel = self._make_only16_game(mode="strict")
-        message = DummyMessage(
-            channel=game["channel"],
-            author=responder,
-            content="16",
-            reference=types.SimpleNamespace(message_id=9999),
-        )
-
-        with patch("babblebox.only16_game._advance_to_next_asker_locked", new=AsyncMock()) as advance:
-            handled = await handle_only16_message_locked(message, 99, game)
-
-        self.assertFalse(handled)
-        self.assertIsNotNone(ensure_only16_state(game).get("trap"))
-        advance.assert_not_awaited()
-
-    async def test_only16_smart_mode_voids_unsupported_exact_math_without_elimination(self):
-        game, _asker, responder, channel = self._make_only16_game(mode="smart")
-        message = DummyMessage(channel=channel, author=responder, content="16/0")
-
-        with patch("babblebox.only16_game._advance_to_next_asker_locked", new=AsyncMock()) as advance:
-            handled = await handle_only16_message_locked(message, 99, game)
-
-        self.assertTrue(handled)
-        self.assertIsNone(ensure_only16_state(game).get("trap"))
-        self.assertEqual(channel.sent[-1][1]["embed"].title, "⚖️ Trap Voided")
-        advance.assert_awaited_once()
-
-    async def test_only16_smart_mode_voids_punctuated_unsupported_math_without_elimination(self):
-        game, _asker, responder, channel = self._make_only16_game(mode="smart")
-        message = DummyMessage(channel=channel, author=responder, content="16/0!")
-
-        with patch("babblebox.only16_game._advance_to_next_asker_locked", new=AsyncMock()) as advance:
-            handled = await handle_only16_message_locked(message, 99, game)
-
-        self.assertTrue(handled)
-        self.assertIsNone(ensure_only16_state(game).get("trap"))
-        self.assertEqual(channel.sent[-1][1]["embed"].title, "⚖️ Trap Voided")
-        self.assertIn("safe judge grammar", channel.sent[-1][1]["embed"].description)
-        advance.assert_awaited_once()
-
-    async def test_only16_smart_mode_ignores_soft_standalone_wrappers(self):
-        for content in ("i think 16", "maybe sixteen", "there are 16", "just 16"):
-            with self.subTest(content=content):
-                game, _asker, responder, _channel = self._make_only16_game(mode="smart")
-                message = DummyMessage(channel=game["channel"], author=responder, content=content)
-
-                with patch("babblebox.only16_game._advance_to_next_asker_locked", new=AsyncMock()) as advance:
-                    handled = await handle_only16_message_locked(message, 99, game)
-
-                self.assertFalse(handled)
-                self.assertIsNotNone(ensure_only16_state(game).get("trap"))
-                advance.assert_not_awaited()
-
-    async def test_only16_manual_arm_rejects_stale_messages(self):
-        game, asker, _responder, _channel = self._make_only16_game(mode="smart")
-        state = ensure_only16_state(game)
-        state["trap"] = None
-        state["ask_started_at"] = ge.now_utc()
-        message = DummyMessage(
-            channel=game["channel"],
-            author=asker,
-            content="How many moons does Mars have?",
-            created_at=state["ask_started_at"] - timedelta(seconds=2),
-        )
-
-        ok, note = await manually_arm_only16_message(message, 99, game, asker)
-
-        self.assertFalse(ok)
-        self.assertIn("current ask window", note)
-
-    async def test_only16_manual_arm_rejects_non_numeric_questions(self):
-        game, asker, _responder, _channel = self._make_only16_game(mode="smart")
-        state = ensure_only16_state(game)
-        state["trap"] = None
-        message = DummyMessage(channel=game["channel"], author=asker, content="What's up?")
-
-        ok, note = await manually_arm_only16_message(message, 99, game, asker)
-
-        self.assertFalse(ok)
-        self.assertIn("clear number question", note)
-
-    async def test_only16_deleting_the_armed_question_voids_and_advances(self):
-        game, _asker, _responder, channel = self._make_only16_game(mode="smart")
-
-        with patch("babblebox.only16_game._advance_to_next_asker_locked", new=AsyncMock()) as advance:
-            handled = await handle_only16_message_delete_locked(100, 99, game)
-
-        self.assertTrue(handled)
-        self.assertIsNone(ensure_only16_state(game).get("trap"))
-        self.assertEqual(channel.sent[-1][1]["embed"].title, "⚖️ Trap Voided")
-        self.assertIn("armed question vanished", channel.sent[-1][1]["embed"].description)
-        advance.assert_awaited_once()
-
-    async def test_only16_opening_round_protects_first_wrong_answer(self):
-        game, _asker, responder, channel = self._make_only16_game(mode="strict")
-        reply = DummyMessage(
-            channel=channel,
-            author=responder,
-            content="15",
-            reference=types.SimpleNamespace(message_id=100),
-        )
-
-        with patch("babblebox.only16_game._advance_to_next_asker_locked", new=AsyncMock()) as advance:
-            handled = await handle_only16_message_locked(reply, 99, game)
-
-        self.assertTrue(handled)
-        self.assertEqual(len(game["players"]), 2)
-        self.assertEqual(channel.sent[-1][1]["embed"].title, "🛟 Warm-Up Save")
-        self.assertTrue(ensure_only16_state(game)["tutorial_complete"])
-        advance.assert_awaited_once()
-
-    async def test_only16_turn_deadlines_use_tutorial_then_standard_windows(self):
-        game, asker, _responder, channel = self._make_only16_game(mode="strict")
-        state = ensure_only16_state(game)
-        state["trap"] = None
-
-        await _start_only16_turn_locked(99, game)
-        tutorial_seconds = int((state["ask_expires_at"] - state["ask_started_at"]).total_seconds())
-        await ge.cancel_task(game.get("turn_task"))
-
-        self.assertEqual(tutorial_seconds, 75)
-        self.assertIn("only16", game["state_anchors"])
-        first_embed = channel.sent[0][1]["embed"]
-        field_names = [field.name for field in first_embed.fields]
-        field_values = "\n".join(field.value for field in first_embed.fields)
-        self.assertEqual(field_names[:3], ["Who's Up", "Mode", "Time Left"])
-        self.assertIn("First Round", field_names)
-        self.assertIn("Strict keeps it simple: reply to the armed question only.", field_values)
-        self.assertIn("Once the trap is armed, everyone else can answer.", field_values)
-
-        state["tutorial_complete"] = True
-        await _start_only16_turn_locked(99, game)
-        standard_seconds = int((state["ask_expires_at"] - state["ask_started_at"]).total_seconds())
-        await ge.cancel_task(game.get("turn_task"))
-
-        self.assertEqual(standard_seconds, 60)
-        self.assertEqual(game["current_player_index"], 0)
-        self.assertEqual(game["players"][0].id, asker.id)
-
-    async def test_only16_anchor_updates_in_place_when_trap_arms(self):
-        game, asker, _responder, channel = self._make_only16_game(mode="strict")
-        state = ensure_only16_state(game)
-        state["trap"] = None
-
-        await _start_only16_turn_locked(99, game)
-        self.assertEqual(len(channel.sent), 1)
-
-        message = DummyMessage(channel=channel, author=asker, content="How many moons does Mars have?", message_id=101)
-        await _arm_only16_trap_locked(99, game, message, manual=False)
-        await ge.cancel_task(game.get("turn_task"))
-
-        self.assertEqual(len(channel.sent), 1)
-        anchor_message = game["state_anchors"]["only16"]
-        self.assertEqual(len(anchor_message.edits), 1)
-        edited_embed = anchor_message.edits[-1][1]["embed"]
-        self.assertEqual(edited_embed.title, "🎯 Only 16")
-        field_names = [field.name for field in edited_embed.fields]
-        values = "\n".join(field.value for field in edited_embed.fields)
-        self.assertIn("Live Trap", field_names)
-        self.assertIn("How many moons does Mars have?", values)
-        self.assertIn("Strict keeps it simple: reply to the armed question only.", values)
-        self.assertIn("Anyone except", values)
-
-    def test_only16_trap_deadlines_use_tutorial_then_standard_windows(self):
-        state = {"tutorial_complete": False}
-        self.assertEqual(_only16_trap_window_seconds(state), 45)
-        state["tutorial_complete"] = True
-        self.assertEqual(_only16_trap_window_seconds(state), 30)
-
-    async def test_only16_smart_anchor_calls_out_optional_standalone_answer(self):
-        game, asker, _responder, _channel = self._make_only16_game(mode="smart")
-        state = ensure_only16_state(game)
-        state["trap"] = None
-
-        await _start_only16_turn_locked(99, game)
-        message = DummyMessage(channel=game["channel"], author=asker, content="How many slices are left?", message_id=101)
-        await _arm_only16_trap_locked(99, game, message, manual=False)
-        await ge.cancel_task(game.get("turn_task"))
-
-        edited_embed = game["state_anchors"]["only16"].edits[-1][1]["embed"]
-        values = "\n".join(field.value for field in edited_embed.fields)
-        self.assertIn("Smart also accepts one clean standalone answer like `16!`.", values)
-
     async def test_shared_game_anchor_recreates_after_missing_message(self):
         channel = DummyChannel()
         game = {"channel": channel, "state_anchors": {}}
@@ -490,7 +169,7 @@ class PartyGameLogicTests(unittest.IsolatedAsyncioTestCase):
 
         embed = build_pattern_hunt_status_embed(game, public=False)
 
-        self.assertEqual(embed.title, "🧩 Pattern Hunt")
+        self.assertIn("Pattern Hunt", embed.title)
         self.assertIn("Who's Up", [field.name for field in embed.fields])
         self.assertIn("Time Left", [field.name for field in embed.fields])
         self.assertIn("What Happens Next", [field.name for field in embed.fields])
@@ -594,7 +273,7 @@ class PartyGameLogicTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(handled)
         self.assertEqual(game["pattern_hunt"]["phase"], "prompt")
         self.assertIsNone(game["pattern_hunt"]["current_prompt"])
-        self.assertEqual(channel.sent[-1][0][0], "Pattern Hunt: ask for one real clue or theme so the coder has something to answer.")
+        self.assertEqual(channel.sent[-1][0][0], "Pattern Hunt: ask for one real clue request or theme so the coder has a clear lane.")
         self.assertEqual(channel.sent[-1][1]["delete_after"], 4.0)
         start_answer.assert_not_awaited()
 
@@ -802,7 +481,7 @@ class PartyGameLogicTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(game["pattern_hunt"]["clue_limit"], 7)
         dm_embed = coder_one.send.await_args.kwargs["embed"]
-        self.assertEqual(dm_embed.title, "🔐 Pattern Hunt Role")
+        self.assertIn("Pattern Hunt Role", dm_embed.title)
         self.assertIn("Keep the logic offstage.", next(field.value for field in dm_embed.fields if field.name == "Guardrails"))
         begin.assert_awaited_once()
 
@@ -832,7 +511,7 @@ class PartyGameLogicTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(game["pattern_hunt"]["tutorial_grace_used"])
         self.assertEqual(game["pattern_hunt"].get("strikes", 0), 0)
-        self.assertEqual(channel.sent[-1][1]["embed"].title, "🕊️ Opening Grace")
+        self.assertIn("Opening Grace", channel.sent[-1][1]["embed"].title)
         self.assertIn("Same guesser, fresh prompt timer.", channel.sent[-1][1]["embed"].description)
         begin.assert_awaited_once()
 

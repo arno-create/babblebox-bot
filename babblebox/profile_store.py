@@ -41,8 +41,6 @@ PROFILE_COLUMNS = (
     "spyfall_wins",
     "bomb_rounds",
     "bomb_wins",
-    "only16_rounds",
-    "only16_wins",
     "pattern_hunt_rounds",
     "pattern_hunt_wins",
     "question_drop_attempts",
@@ -565,8 +563,6 @@ class _PostgresProfileStore(_BaseProfileStore):
                 "spyfall_wins INTEGER NOT NULL DEFAULT 0, "
                 "bomb_rounds INTEGER NOT NULL DEFAULT 0, "
                 "bomb_wins INTEGER NOT NULL DEFAULT 0, "
-                "only16_rounds INTEGER NOT NULL DEFAULT 0, "
-                "only16_wins INTEGER NOT NULL DEFAULT 0, "
                 "pattern_hunt_rounds INTEGER NOT NULL DEFAULT 0, "
                 "pattern_hunt_wins INTEGER NOT NULL DEFAULT 0, "
                 "question_drop_attempts INTEGER NOT NULL DEFAULT 0, "
@@ -658,8 +654,6 @@ class _PostgresProfileStore(_BaseProfileStore):
             ),
         ]
         profile_column_migrations = (
-            "ADD COLUMN IF NOT EXISTS only16_rounds INTEGER NOT NULL DEFAULT 0",
-            "ADD COLUMN IF NOT EXISTS only16_wins INTEGER NOT NULL DEFAULT 0",
             "ADD COLUMN IF NOT EXISTS pattern_hunt_rounds INTEGER NOT NULL DEFAULT 0",
             "ADD COLUMN IF NOT EXISTS pattern_hunt_wins INTEGER NOT NULL DEFAULT 0",
             "ADD COLUMN IF NOT EXISTS question_drop_attempts INTEGER NOT NULL DEFAULT 0",

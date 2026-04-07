@@ -136,7 +136,6 @@ GAME_TYPE_FIELDS = {
     "corpse": "corpse_rounds",
     "spyfall": "spyfall_rounds",
     "bomb": "bomb_rounds",
-    "only16": "only16_rounds",
     "pattern_hunt": "pattern_hunt_rounds",
 }
 
@@ -177,8 +176,6 @@ def _profile_default(user_id: int) -> dict[str, Any]:
         "spyfall_wins": 0,
         "bomb_rounds": 0,
         "bomb_wins": 0,
-        "only16_rounds": 0,
-        "only16_wins": 0,
         "pattern_hunt_rounds": 0,
         "pattern_hunt_wins": 0,
         "question_drop_attempts": 0,
@@ -1037,19 +1034,6 @@ class ProfileService:
             self._sync_identity_fields(profile, today)
             await self.store.save_profile(profile)
 
-    async def record_only16_win(self, winner_id: int):
-        if not self.storage_ready:
-            return
-        async with self._lock:
-            today = ge.now_utc().date()
-            profile = await self._ensure_profile(winner_id)
-            profile["games_won"] = int(profile.get("games_won", 0) or 0) + 1
-            profile["only16_wins"] = int(profile.get("only16_wins", 0) or 0) + 1
-            self._grant_xp(profile, bucket="game", amount=GAME_WIN_XP, today=today)
-            self._touch_profile(profile, mood="celebrating")
-            self._sync_identity_fields(profile, today)
-            await self.store.save_profile(profile)
-
     async def record_pattern_hunt_win(self, winner_id: int):
         if not self.storage_ready:
             return
@@ -1622,12 +1606,11 @@ class ProfileService:
             (
                 f"Rounds: telephone **{profile['telephone_rounds']}**, corpse **{profile['corpse_rounds']}**, "
                 f"spyfall **{profile['spyfall_rounds']}**, bomb **{profile['bomb_rounds']}**, "
-                f"only 16 **{profile['only16_rounds']}**, pattern hunt **{profile['pattern_hunt_rounds']}**"
+                f"pattern hunt **{profile['pattern_hunt_rounds']}**"
             ),
             (
                 f"Highlights: telephone clears **{profile['telephone_completions']}**, corpse masterpieces **{profile['corpse_masterpieces']}**, "
-                f"bomb wins **{profile['bomb_wins']}**, only 16 wins **{profile['only16_wins']}**, "
-                f"pattern hunt wins **{profile['pattern_hunt_wins']}**"
+                f"bomb wins **{profile['bomb_wins']}**, pattern hunt wins **{profile['pattern_hunt_wins']}**"
             ),
         ]
         if session_stats is not None:

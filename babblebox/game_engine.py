@@ -394,9 +394,6 @@ def build_chaos_headline(game):
         survivors = len(game.get("starting_players", []))
         winner = game.get("winner_name", "The winner")
         return f"Encore headline: {winner} outlasted a {survivors}-player blast wave."
-    if game_type == "only16":
-        winner = game.get("winner_name", "The winner")
-        return f"Encore headline: {winner} survived the number trap and kept it locked to 16."
     if game_type == "pattern_hunt":
         return "Encore headline: the hidden pattern stayed private until the final reveal."
     return "Encore headline: the lobby somehow got even louder."
@@ -456,7 +453,6 @@ def create_game_state(host, channel):
         "dm_turn_timeout": TURN_TIMEOUT_SECONDS,
         "spyfall_vote_timeout": SPYFALL_VOTE_TIMEOUT_SECONDS,
         "bomb_time_modifier": 0.0,
-        "only16_mode": "strict",
     }
 
 
@@ -531,8 +527,6 @@ def get_player_stats(user):
             "bomb_words": 0,
             "bomb_fastest_word_time": None,
             "bomb_fastest_word": "",
-            "only16_games": 0,
-            "only16_wins": 0,
             "pattern_hunt_games": 0,
             "pattern_hunt_wins": 0,
         },
@@ -561,8 +555,6 @@ def mark_game_started(game):
             stats["spyfall_games"] += 1
         elif game_type == "bomb":
             stats["bomb_games"] += 1
-        elif game_type == "only16":
-            stats["only16_games"] += 1
         elif game_type == "pattern_hunt":
             stats["pattern_hunt_games"] += 1
 
@@ -834,14 +826,29 @@ def build_bomb_turn_message(game, player):
 
 
 def build_bomb_turn_embed(game, player):
+    config = get_bomb_mode_config(game.get("bomb_mode", "classic"))
+    speed_every = max(1, int(game.get("bomb_speed_every", 5) or 5))
+    minimum_time = float(game.get("bomb_minimum_time", 3.0) or 3.0)
+    current_time_limit = float(game.get("bomb_current_turn_time_limit", game["time_limit"]) or game["time_limit"])
+    if float(game.get("time_limit", current_time_limit) or current_time_limit) > minimum_time:
+        turns_until_speed = speed_every - (int(game.get("turn_count", 0) or 0) % speed_every)
+        tempo_copy = f"Speed-up in **{turns_until_speed}** accepted word(s). Minimum fuse: **{minimum_time:.1f}s**."
+    else:
+        tempo_copy = f"Fuse is already at the floor: **{minimum_time:.1f}s**."
     embed = discord.Embed(
         title="Word Bomb Turn",
-        description=f"{player.mention}, you are live. Send one valid English word before the timer expires.",
+        description=f"{player.mention}, you are live. Send one real English word before the fuse runs out.",
         color=EMBED_THEME["danger"],
     )
     embed.add_field(name="Syllable", value=f"**{game['syllable']}**", inline=True)
-    embed.add_field(name="Timer", value=f"**{game['bomb_current_turn_time_limit']:.1f}s**", inline=True)
-    embed.add_field(name="Mode", value=get_bomb_mode_config(game.get("bomb_mode", "classic"))["label"], inline=True)
+    embed.add_field(name="Fuse", value=f"**{current_time_limit:.1f}s**", inline=True)
+    embed.add_field(name="Mode", value=config["label"], inline=True)
+    embed.add_field(
+        name="Rules",
+        value="One word only. It must contain the syllable, be real English, and not repeat a previous solve.",
+        inline=False,
+    )
+    embed.add_field(name="Tempo", value=tempo_copy, inline=False)
 
     modifier = game.get("bomb_current_rule")
     if modifier and modifier.get("type") != "none":
@@ -851,7 +858,7 @@ def build_bomb_turn_embed(game, player):
             inline=False,
         )
 
-    return style_embed(embed, footer="Babblebox Word Bomb | One word only")
+    return style_embed(embed, footer="Babblebox Word Bomb | One clean word keeps you alive")
 
 
 def validate_bomb_modifier(game, word):
@@ -903,11 +910,11 @@ def build_stats_embed(target, stats):
     )
     embed.add_field(name="Word Bomb", value=bomb, inline=False)
 
-    social = (
-        f"Only 16: **{stats.get('only16_games', 0)}** played / **{stats.get('only16_wins', 0)}** wins\n"
-        f"Pattern Hunt: **{stats.get('pattern_hunt_games', 0)}** played / **{stats.get('pattern_hunt_wins', 0)}** wins"
+    pattern_hunt = (
+        f"Games: **{stats.get('pattern_hunt_games', 0)}**\n"
+        f"Wins: **{stats.get('pattern_hunt_wins', 0)}**"
     )
-    embed.add_field(name="New Rooms", value=social, inline=False)
+    embed.add_field(name="Pattern Hunt", value=pattern_hunt, inline=False)
     return style_embed(embed, footer=f"Babblebox Session Stats | {SESSION_NOTE}")
 
 
@@ -1207,13 +1214,58 @@ def get_lobby_embed(guild_id):
         "corpse": ("📝 Exquisite Corpse", "Blind collaborative nonsense for 3+ players.", discord.Color.purple()),
         "spyfall": ("🕵️ Spyfall", "Find the spy before the room turns on itself. 3+ players.", discord.Color.dark_gray()),
         "bomb": ("💣 Word Bomb", "Fast typing survival for 2+ players.", discord.Color.red()),
-        "only16": ("Only 16", "Funny number trap. Ask one clean number question; the first clear answer decides it. 2+ players.", discord.Color.orange()),
         "pattern_hunt": ("Pattern Hunt", "One public clue loop, private rule guesses. 3+ players.", discord.Color.dark_teal()),
     }
 
     title, desc, color = titles.get(gt, titles["none"])
     embed = discord.Embed(title=title, description=desc, color=color)
     embed.add_field(name="Chaos Card", value=build_chaos_card_line(game), inline=False)
+
+    if gt == "telephone":
+        embed.add_field(
+            name="Telephone Setup",
+            value=(
+                "Everyone gets a private DM turn.\n"
+                "Player 1 records the original clip, each middle player mimics what they hear, and the final player listens once before typing the guess."
+            ),
+            inline=False,
+        )
+    elif gt == "corpse":
+        embed.add_field(
+            name="Corpse Setup",
+            value=(
+                "Each player gets one hidden DM prompt in sequence.\n"
+                "Babblebox stitches the six answers into one polished disaster at the end."
+            ),
+            inline=False,
+        )
+    elif gt == "spyfall":
+        embed.add_field(
+            name="Spyfall Setup",
+            value=(
+                "Everyone gets a secret DM role before the round opens.\n"
+                "The active player picks who answers next, and anyone in the room can call the vote when suspicion peaks."
+            ),
+            inline=False,
+        )
+    elif gt == "bomb":
+        embed.add_field(
+            name="Word Bomb Setup",
+            value=(
+                "Type one real English word that contains the live syllable.\n"
+                "No repeats, no spaces, and the fuse keeps shrinking as the room survives."
+            ),
+            inline=False,
+        )
+    elif gt == "pattern_hunt":
+        embed.add_field(
+            name="Pattern Hunt Setup",
+            value=(
+                "Coders need server DMs open before the room starts.\n"
+                "The guesser asks for one real clue in chat, and private rule theories stay in `/hunt guess`."
+            ),
+            inline=False,
+        )
 
     if gt == "bomb":
         config = get_bomb_mode_config(game.get("bomb_mode", "classic"))
@@ -1222,29 +1274,9 @@ def get_lobby_embed(guild_id):
             value=f"**{config['label']}** | {config['description']}",
             inline=False,
         )
-    if gt == "only16":
-        embed.add_field(
-            name="Only 16 Mode",
-            value=(
-                f"**{'Strict (Recommended)' if str(game.get('only16_mode', 'strict')).casefold() == 'strict' else 'Smart (Visible chaos mode)'}**\n"
-                "Strict = reply to the armed question only. Best for first-time rooms.\n"
-                "Smart = also counts one clean standalone answer like `16!`.\n"
-                "Start with Strict, then switch to Smart if the room wants extra chaos."
-            ),
-            inline=False,
-        )
-    if gt == "pattern_hunt":
-        embed.add_field(
-            name="Pattern Hunt Setup",
-            value=(
-                "Coders need server DMs open before the room starts.\n"
-                "The guesser asks for one real clue or theme in chat, and private rule theories stay in `/hunt guess`."
-            ),
-            inline=False,
-        )
 
     if gt != "none":
-        min_players = 2 if gt in {"bomb", "only16"} else 3
+        min_players = 2 if gt == "bomb" else 3
         if not players:
             lobby_value = (
                 "No players yet. Tap **Join** to open the room.\n"
@@ -1310,7 +1342,6 @@ class GameSelect(discord.ui.Select):
             discord.SelectOption(label="Exquisite Corpse", description="Absurd collaborative story", emoji="📝", value="corpse"),
             discord.SelectOption(label="Spyfall", description="Find the spy among you", emoji="🕵️", value="spyfall"),
             discord.SelectOption(label="Word Bomb", description="Battle Royale typing game", emoji="💣", value="bomb"),
-            discord.SelectOption(label="Only 16", description="Quantity trap elimination", emoji="🔢", value="only16"),
             discord.SelectOption(label="Pattern Hunt", description="Guess the hidden rule", emoji="🧩", value="pattern_hunt"),
         ]
         super().__init__(placeholder="Host, choose a game...", min_values=1, max_values=1, options=options)
@@ -1387,40 +1418,6 @@ class BombModeButton(discord.ui.Button):
             )
 
 
-class Only16ModeButton(discord.ui.Button):
-    def __init__(self, guild_id):
-        super().__init__(label="Only 16: Strict (Recommended)", style=discord.ButtonStyle.secondary, row=2)
-        self.guild_id = guild_id
-        self.refresh()
-
-    def refresh(self):
-        game = games.get(self.guild_id)
-        mode = "Strict (Recommended)" if not game or str(game.get("only16_mode", "strict")).casefold() == "strict" else "Smart (Visible)"
-        self.label = f"Only 16: {mode}"
-        self.disabled = not game or game.get("game_type") != "only16" or game.get("active") or game.get("closing")
-
-    async def callback(self, interaction):
-        game = games.get(self.guild_id)
-        if not game or game.get("closing") or game.get("active"):
-            return await safe_send_interaction(interaction, "This lobby is closed.", ephemeral=True)
-
-        async with game["lock"]:
-            game = games.get(self.guild_id)
-            if not game or game.get("closing") or game.get("active"):
-                return await safe_send_interaction(interaction, "This lobby is closed.", ephemeral=True)
-            if interaction.user.id != game["host"].id:
-                return await safe_send_interaction(interaction, "Only the host can change the Only 16 mode.", ephemeral=True)
-            if game.get("game_type") != "only16":
-                return await safe_send_interaction(interaction, "Select Only 16 first, then choose a mode.", ephemeral=True)
-            game["only16_mode"] = "smart" if str(game.get("only16_mode", "strict")).casefold() == "strict" else "strict"
-            if isinstance(self.view, LobbyView):
-                self.view.refresh_components()
-            ok = await safe_edit_interaction_message(interaction, embed=get_lobby_embed(self.guild_id), view=self.view)
-            if not ok:
-                await cleanup_game(self.guild_id)
-                return
-
-
 class ChaosCardButton(discord.ui.Button):
     def __init__(self, guild_id):
         super().__init__(label="Chaos Card: Off", style=discord.ButtonStyle.secondary, row=2)
@@ -1466,17 +1463,14 @@ class LobbyView(TrackedView):
         super().__init__(guild_id, timeout=900)
         self.game_select = GameSelect(guild_id)
         self.bomb_mode_button = BombModeButton(guild_id)
-        self.only16_mode_button = Only16ModeButton(guild_id)
         self.chaos_card_button = ChaosCardButton(guild_id)
         self.add_item(self.game_select)
         self.add_item(self.bomb_mode_button)
-        self.add_item(self.only16_mode_button)
         self.add_item(self.chaos_card_button)
         self.refresh_components()
 
     def refresh_components(self):
         self.bomb_mode_button.refresh()
-        self.only16_mode_button.refresh()
         self.chaos_card_button.refresh()
 
     async def on_timeout(self):
@@ -1544,7 +1538,7 @@ class LobbyView(TrackedView):
             if game["game_type"] == "bomb" and (runtime_bot is None or not getattr(runtime_bot, "dictionary_ready", False)):
                 return await safe_send_interaction(interaction, "Word Bomb is unavailable right now because the dictionary did not finish loading.", ephemeral=True)
 
-            min_players = 2 if game["game_type"] in {"bomb", "only16"} else 3
+            min_players = 2 if game["game_type"] == "bomb" else 3
             if len(game["players"]) < min_players:
                 return await safe_send_interaction(
                     interaction,
@@ -1596,16 +1590,17 @@ class LobbyView(TrackedView):
                     try:
                         if player.id == game["spy"].id:
                             await player.send(
-                                "🕵️ **YOU ARE THE SPY!**\n"
-                                "Blend in by answering vaguely.\n"
-                                f"**Locations:**\n{loc_list_str}"
+                                "🕵️ **You are the Spy.**\n"
+                                "Blend in, stay calm, and keep your answers plausible.\n"
+                                "If the room turns on you, survive the vote.\n\n"
+                                f"**Possible locations:**\n{loc_list_str}"
                             )
                         else:
                             await player.send(
                                 f"📍 **Location:** {game['location']}\n"
-                                "🕵️ **Goal:** Find the spy!\n"
-                                "💡 **Tip:** Ask questions like: *'Are we wearing uniforms?'* or *'Is it hot here?'*\n"
-                                f"**Locations:**\n{loc_list_str}"
+                                "🕵️ **Goal:** Find the spy without making the location obvious.\n"
+                                "💡 Ask focused questions like *'Are we wearing uniforms?'* or *'Is it loud here?'*.\n\n"
+                                f"**Possible locations:**\n{loc_list_str}"
                             )
                     except Exception:
                         with contextlib.suppress(discord.HTTPException):
@@ -1614,10 +1609,19 @@ class LobbyView(TrackedView):
                         return
 
                 first_player = game["players"][0]
-                embed = discord.Embed(title="🕵️ Spyfall Started!", color=discord.Color.dark_gray())
+                embed = discord.Embed(
+                    title="🕵️ Spyfall Started",
+                    description="Roles are out. Use the panel to keep the interrogation moving or call the vote when the room is ready.",
+                    color=discord.Color.dark_gray(),
+                )
                 embed.add_field(
-                    name="Waiting on:",
-                    value=f"⚠️ **{first_player.mention}**, start the game by selecting a target below!",
+                    name="First Move",
+                    value=f"**{first_player.mention}** opens the round by choosing who answers first.",
+                    inline=False,
+                )
+                embed.add_field(
+                    name="How to Win",
+                    value="Villagers catch the spy by vote. The spy survives by dodging suspicion or forcing a bad execution.",
                     inline=False,
                 )
                 dashboard = SpyfallDashboard(self.guild_id)
@@ -1638,24 +1642,23 @@ class LobbyView(TrackedView):
                 game["turn_count"] = 0
 
                 start_embed = discord.Embed(
-                    title="💣 BATTLE ROYALE BOMB STARTED!",
+                    title="💣 Word Bomb Started",
                     description=(
-                        "Type a single, real English word containing the syllable to survive.\n"
+                        "Type a single real English word containing the live syllable to survive.\n"
                         f"Mode: **{config['label']}** — {config['description']}"
                     ),
                     color=discord.Color.red(),
+                )
+                start_embed.add_field(
+                    name="Rules",
+                    value="No spaces, no repeats, and the fuse speeds up as the room survives.",
+                    inline=False,
                 )
                 if game.get("chaos_card") != "none":
                     start_embed.add_field(name="Chaos Card", value=build_chaos_card_line(game), inline=False)
                 await game["channel"].send(embed=start_embed)
                 mark_game_started(game)
                 await _start_bomb_turn_locked(self.guild_id, game)
-                return
-
-            if gt == "only16":
-                from babblebox.only16_game import start_only16_game_locked
-
-                await start_only16_game_locked(self.guild_id, game)
                 return
 
             if gt == "pattern_hunt":
@@ -1665,7 +1668,11 @@ class LobbyView(TrackedView):
                 return
 
             shuffled_list = "\n".join(f"**{i + 1}.** {player.display_name}" for i, player in enumerate(game["players"]))
-            start_embed = discord.Embed(title="🚀 Game Started!", description="Check your DMs.", color=discord.Color.gold())
+            if gt == "telephone":
+                start_description = "Check your DMs. The relay starts with an original clip and ends with one typed guess."
+            else:
+                start_description = "Check your DMs. Hidden prompts stay private until the final reveal."
+            start_embed = discord.Embed(title="🚀 Game Started!", description=start_description, color=discord.Color.gold())
             start_embed.add_field(name="Turn Order:", value=shuffled_list, inline=False)
             if game.get("chaos_card") != "none":
                 start_embed.add_field(name="Chaos Card", value=build_chaos_card_line(game), inline=False)
@@ -1724,10 +1731,19 @@ class SpyfallTargetSelect(discord.ui.Select):
             new_dashboard = SpyfallDashboard(self.guild_id)
             old_view = self.view if isinstance(self.view, SpyfallDashboard) else None
 
-            embed = discord.Embed(title="🕵️ Spyfall: Interrogation Phase", color=discord.Color.dark_gray())
+            embed = discord.Embed(
+                title="🕵️ Spyfall: Interrogation Phase",
+                description=f"**{previous_player.display_name}** passed the spotlight to **{target_player.display_name}**.",
+                color=discord.Color.dark_gray(),
+            )
             embed.add_field(
-                name="Waiting on:",
-                value=f"⚠️ **{target_player.mention}**, it is YOUR turn! Answer the question, then use the menu to pick the next target.",
+                name="Do This Now",
+                value=f"**{target_player.mention}** answers in chat, then uses the panel to pick the next target.",
+                inline=False,
+            )
+            embed.add_field(
+                name="Vote Option",
+                value="Anyone playing can hit **Call Vote** when the room wants to lock in a suspect.",
                 inline=False,
             )
             ok = await safe_edit_interaction_message(interaction, embed=embed, view=new_dashboard)
@@ -1743,8 +1759,7 @@ class SpyfallTargetSelect(discord.ui.Select):
 
             with contextlib.suppress(discord.HTTPException):
                 await interaction.channel.send(
-                    f"🗣️ **{target_player.mention}**, you are being interrogated by **{previous_player.mention}**!\n"
-                    "Answer, then pick your target in the panel above."
+                    f"🗣️ **{target_player.mention}**, answer **{previous_player.mention}** and then pick who goes next in the panel above."
                 )
 
 class SpyfallVoteButton(discord.ui.Button):
@@ -1804,7 +1819,7 @@ class SpyfallVoteSelect(discord.ui.Select):
             await safe_send_interaction(interaction, "✅ Your vote is locked.", ephemeral=True)
             with contextlib.suppress(discord.HTTPException):
                 await interaction.channel.send(
-                    f"🗳️ **{interaction.user.display_name}** has cast their vote! ({vote_count}/{total_players})"
+                    f"🗳️ **{interaction.user.display_name}** locked a vote. **{vote_count}/{total_players}** ballots are in."
                 )
 
             if vote_count >= total_players:
@@ -1890,7 +1905,7 @@ async def spyfall_vote_timeout(guild_id, vote_token, game_ref):
         if game_ref.get("vote_token") != vote_token:
             return
         with contextlib.suppress(discord.HTTPException):
-            await game_ref["channel"].send("🚨 **Voting Time is UP! Tallying votes...**")
+            await game_ref["channel"].send("🚨 **Voting closed. Tallying now...**")
         await _process_spyfall_votes_locked(guild_id, game_ref["channel"], game_ref)
 
 
@@ -2037,11 +2052,17 @@ async def _prompt_telephone_first_player_locked(guild_id, game, player):
     game["waiting_for_guess"] = False
     game["current_player_index"] = 0
     timeout = game.get("dm_turn_timeout", TURN_TIMEOUT_SECONDS)
+    total_players = len(game.get("players", []))
     return await _prompt_dm_player_locked(
         guild_id,
         game,
         player,
-        f"You are the **FIRST** player! 🎙️\nRecord a VOICE message. You have {timeout}s!",
+        (
+            f"🎙️ **Broken Telephone**\n"
+            f"You are **Player 1/{total_players}** and you create the original clip.\n"
+            f"Record one voice message in this DM. Keep it under **8 MB**.\n"
+            f"You have **{timeout}s**."
+        ),
     )
 
 
@@ -2054,9 +2075,12 @@ async def _prompt_corpse_player_locked(guild_id, game, player):
         guild_id,
         game,
         player,
-        f"🎭 **Exquisite Corpse** started!\n🎬 **Theme:** {game['theme']}\n\n"
-        f"**Step {step + 1} of 6**\n{CORPSE_PROMPTS[step]}\n"
-        f"*({timeout}s to reply - any word works, but follow the prompt for best results!)*",
+        (
+            f"🎭 **Exquisite Corpse**\n"
+            f"🎬 **Theme:** {game['theme']}\n\n"
+            f"**Step {step + 1} of 6**\n{CORPSE_PROMPTS[step]}\n"
+            f"Reply with one short text answer. You have **{timeout}s**."
+        ),
     )
 
 
@@ -2073,8 +2097,12 @@ async def _finish_telephone_locked(guild_id, game, guess_text):
         files.append(discord.File(io.BytesIO(game["final_audio"]), filename="2_Final_Mimic.ogg"))
 
     safe_guess = guess_text[:1000] + "..." if len(guess_text) > 1000 else guess_text
-    embed = discord.Embed(title="🏁 The Broken Telephone has finished!", color=discord.Color.green())
-    embed.add_field(name="🧠 The Final Guess", value=f"**{safe_guess}**", inline=False)
+    embed = discord.Embed(
+        title="🏁 Broken Telephone Complete",
+        description="Original clip in, final mimic out, last guess locked.",
+        color=discord.Color.green(),
+    )
+    embed.add_field(name="Final Guess", value=f"**{safe_guess}**", inline=False)
 
     mark_telephone_completion(game)
     recap_embed = build_telephone_recap_embed(game, safe_guess)
@@ -2108,7 +2136,11 @@ async def _finish_corpse_locked(guild_id, game):
         return
 
     final_sentence = f"The **{ans[0]}** **{ans[1]}** **{ans[2]}** the **{ans[3]}** **{ans[4]}** — **{ans[5]}**."
-    embed = discord.Embed(title="📝 Exquisite Corpse: The Masterpiece!", color=discord.Color.purple())
+    embed = discord.Embed(
+        title="📝 Exquisite Corpse Complete",
+        description="Six private prompts, one public masterpiece.",
+        color=discord.Color.purple(),
+    )
     embed.add_field(name=f"Theme: {game['theme']}", value=final_sentence, inline=False)
 
     mark_corpse_completion(game)
@@ -2181,7 +2213,7 @@ async def _process_spyfall_votes_locked(guild_id, channel, game):
         mark_spyfall_result(game, village_won=False)
         try:
             with contextlib.suppress(discord.HTTPException):
-                await channel.send("⏳ Time is up! Nobody voted. The Spy escapes!")
+                await channel.send("⏳ Voting closed with no ballots. The spy slips out clean.")
                 await channel.send(embed=build_spyfall_recap_embed(game))
         finally:
             await cleanup_game(guild_id)
@@ -2278,10 +2310,15 @@ async def trigger_spyfall_vote(interaction):
         embed = discord.Embed(
             title="🚨 EMERGENCY MEETING",
             description=(
-                f"{interaction.user.mention} called a vote!\n"
-                f"Select who you think the spy is. You have **{vote_timeout} seconds**."
+                f"{interaction.user.mention} called the vote.\n"
+                f"Pick the spy before **{vote_timeout} seconds** run out."
             ),
             color=discord.Color.red(),
+        )
+        embed.add_field(
+            name="How This Ends",
+            value="Most votes decides it. A tie means the spy slips away.",
+            inline=False,
         )
         content = f"Attention {build_ping_string(game['players'])}!"
 
@@ -2306,13 +2343,16 @@ async def handle_bomb_turn_locked(message, guild_id, game):
     if len(message.content.split()) > 1:
         if can_emit_notice(game, "last_bomb_notice_at"):
             with contextlib.suppress(discord.HTTPException):
-                await message.channel.send("❌ Single words only!", delete_after=3.0)
+                await message.channel.send("❌ One word only. No spaces, no commentary.", delete_after=3.0)
         return
 
     word = message.content.strip().lower()
     syllable = game["syllable"].lower()
 
     if not word or syllable not in word:
+        if can_emit_notice(game, "last_bomb_notice_at"):
+            with contextlib.suppress(discord.HTTPException):
+                await message.channel.send(f"❌ Your word has to include **{game['syllable']}**.", delete_after=3.0)
         return
 
     modifier_error = validate_bomb_modifier(game, word)
@@ -2325,13 +2365,13 @@ async def handle_bomb_turn_locked(message, guild_id, game):
     if word not in VALID_WORDS:
         if can_emit_notice(game, "last_bomb_notice_at"):
             with contextlib.suppress(discord.HTTPException):
-                await message.channel.send(f"❌ '{word}' is not a valid English word!", delete_after=3.0)
+                await message.channel.send(f"❌ `{word}` is not in the live dictionary.", delete_after=3.0)
         return
 
     if word in game["used_words"]:
         if can_emit_notice(game, "last_bomb_notice_at"):
             with contextlib.suppress(discord.HTTPException):
-                await message.channel.send(f"❌ '{word}' was already used!", delete_after=3.0)
+                await message.channel.send(f"❌ `{word}` was already used this round.", delete_after=3.0)
         return
 
     elapsed = max(0.0, asyncio.get_running_loop().time() - game.get("bomb_turn_started_at", asyncio.get_running_loop().time()))
@@ -2363,13 +2403,13 @@ async def handle_bomb_turn_locked(message, guild_id, game):
 async def handle_corpse_turn_locked(message, guild_id, game):
     if not message.content or message.attachments:
         with contextlib.suppress(discord.HTTPException):
-            await message.channel.send("❌ Please send TEXT!")
+            await message.channel.send("❌ Send a short text answer for this prompt. Attachments do not count here.")
         return
 
     safe_text = message.content.strip()[:100]
     if not safe_text:
         with contextlib.suppress(discord.HTTPException):
-            await message.channel.send("❌ Please send TEXT!")
+            await message.channel.send("❌ Send a short text answer for this prompt. Attachments do not count here.")
         return
 
     current_player = get_current_player(game)
@@ -2378,7 +2418,7 @@ async def handle_corpse_turn_locked(message, guild_id, game):
 
     await cancel_task(game.get("turn_task"))
     with contextlib.suppress(discord.HTTPException):
-        await message.channel.send("✅ Saved!")
+        await message.channel.send("✅ Saved. Passing the next hidden prompt.")
 
     game["corpse_contributions"].append({
         "player_id": current_player.id if current_player else message.author.id,
@@ -2403,13 +2443,13 @@ async def handle_telephone_turn_locked(message, guild_id, game):
     if game.get("waiting_for_guess"):
         if not message.content or message.attachments:
             with contextlib.suppress(discord.HTTPException):
-                await message.channel.send("❌ Please TYPE your guess in text!")
+                await message.channel.send("❌ Type your final guess in plain text. No attachments for the last step.")
             return
 
         guess = message.content.strip()
         if not guess:
             with contextlib.suppress(discord.HTTPException):
-                await message.channel.send("❌ Please TYPE your guess in text!")
+                await message.channel.send("❌ Type your final guess in plain text. No attachments for the last step.")
             return
 
         if current_player:
@@ -2420,7 +2460,7 @@ async def handle_telephone_turn_locked(message, guild_id, game):
 
     if not message.attachments:
         with contextlib.suppress(discord.HTTPException):
-            await message.channel.send("❌ Please send a VOICE message!")
+            await message.channel.send("❌ Send one voice message or audio file to keep the relay moving.")
         return
 
     attachment = message.attachments[0]
@@ -2429,12 +2469,12 @@ async def handle_telephone_turn_locked(message, guild_id, game):
     )
     if not is_audio:
         with contextlib.suppress(discord.HTTPException):
-            await message.channel.send("❌ Send a VOICE message!")
+            await message.channel.send("❌ That file is not audio. Send a voice message or audio clip.")
         return
 
     if attachment.size > MAX_VOICE_BYTES:
         with contextlib.suppress(discord.HTTPException):
-            await message.channel.send("❌ Voice file too large. Keep it under 8 MB.")
+            await message.channel.send("❌ Voice file too large. Keep it under 8 MB so the next player can load it fast.")
         return
 
     try:
@@ -2448,7 +2488,7 @@ async def handle_telephone_turn_locked(message, guild_id, game):
         release_dm_route(current_player.id, guild_id)
     await cancel_task(game.get("turn_task"))
     with contextlib.suppress(discord.HTTPException):
-        await message.channel.send("✅ Voice message received!")
+        await message.channel.send("✅ Clip locked. Passing it down the line.")
 
     if game["current_player_index"] == 0:
         game["first_audio"] = audio_bytes
@@ -2464,7 +2504,12 @@ async def handle_telephone_turn_locked(message, guild_id, game):
             guild_id,
             game,
             last_player,
-            "You are the **FINAL** player! 🎧\nListen and **TYPE your guess**!\n*(Audio self-destructs in 15s)*",
+            (
+                f"🎧 **Broken Telephone Finale**\n"
+                f"You are **Player {len(game['players'])}/{len(game['players'])}**.\n"
+                "Listen once, then type your best clean guess in plain text.\n"
+                "The clip disappears in **15s**."
+            ),
             file=audio_file,
             view=resign_view,
             delete_after=15.0,
@@ -2476,7 +2521,12 @@ async def handle_telephone_turn_locked(message, guild_id, game):
             guild_id,
             game,
             next_player,
-            "Your turn (Mimic)! 🎙️\nRECORD your best mimic!\n*(Audio self-destructs in 15s)*",
+            (
+                f"🎙️ **Broken Telephone Relay**\n"
+                f"You are **Player {game['current_player_index'] + 1}/{len(game['players'])}**.\n"
+                "Listen once, then record your best mimic in this DM.\n"
+                "The clip disappears in **15s**."
+            ),
             file=audio_file,
             delete_after=15.0,
         )

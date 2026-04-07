@@ -202,13 +202,16 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
                     await service.close()
             await bot.close()
 
-    def test_help_pages_reflect_hardened_only16_and_pattern_hunt_copy(self):
+    def test_help_pages_reflect_five_game_party_copy(self):
         party_page = next(page for page in HELP_PAGES if page["title"] == "Party Games")
-        self.assertIn("ask one clean number question, then wait for the first clear answer", party_page["body"])
-        self.assertIn("Strict = reply to the armed question only", party_page["body"])
+        self.assertIn("Broken Telephone", party_page["body"])
+        self.assertIn("Exquisite Corpse", party_page["body"])
+        self.assertIn("Spyfall", party_page["body"])
+        self.assertIn("Word Bomb stays fast", party_page["body"])
         self.assertIn("private guesses with `/hunt guess`", party_page["body"])
         self.assertIn("Coders need server DMs open before start", party_page["body"])
         self.assertIn("digits `0-9` only", party_page["body"])
+        self.assertNotIn("Only 16", party_page["body"])
 
     def test_help_pages_reflect_question_drop_option_copy(self):
         question_drops_page = next(page for page in HELP_PAGES if page["title"] == "Question Drops")
@@ -324,15 +327,14 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(hardened_payload["integration_types"], [0])
         self.assertTrue(hardened_command.guild_only)
 
-    def test_only16_lobby_copy_stays_aligned_with_manual(self):
+    def test_telephone_lobby_copy_stays_aligned_with_manual(self):
         saved_games = ge.games
         host = FakeAuthor(1)
         ge.games = {
             55: {
                 "host": host,
-                "players": [host, FakeAuthor(2)],
-                "game_type": "only16",
-                "only16_mode": "smart",
+                "players": [host, FakeAuthor(2), FakeAuthor(3)],
+                "game_type": "telephone",
             }
         }
         try:
@@ -340,10 +342,32 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         finally:
             ge.games = saved_games
 
-        mode_field = next(field.value for field in embed.fields if field.name == "Only 16 Mode")
-        self.assertIn("Strict = reply to the armed question only. Best for first-time rooms.", mode_field)
-        self.assertIn("Smart = also counts one clean standalone answer like `16!`.", mode_field)
-        self.assertIn("Start with Strict, then switch to Smart if the room wants extra chaos.", mode_field)
+        setup_field = next(field.value for field in embed.fields if field.name == "Telephone Setup")
+        self.assertIn("Everyone gets a private DM turn.", setup_field)
+        self.assertIn("Player 1 records the original clip", setup_field)
+        self.assertIn("final player listens once before typing the guess", setup_field)
+
+    def test_word_bomb_lobby_copy_surfaces_mode_and_speed_pressure(self):
+        saved_games = ge.games
+        host = FakeAuthor(1)
+        ge.games = {
+            56: {
+                "host": host,
+                "players": [host, FakeAuthor(2)],
+                "game_type": "bomb",
+                "bomb_mode": "classic",
+            }
+        }
+        try:
+            embed = ge.get_lobby_embed(56)
+        finally:
+            ge.games = saved_games
+
+        setup_field = next(field.value for field in embed.fields if field.name == "Word Bomb Setup")
+        mode_field = next(field.value for field in embed.fields if field.name == "Bomb Mode")
+        self.assertIn("Type one real English word that contains the live syllable.", setup_field)
+        self.assertIn("fuse keeps shrinking", setup_field)
+        self.assertIn("Classic", mode_field)
 
     def test_pattern_hunt_lobby_copy_surfaces_dm_requirement_and_private_guess_flow(self):
         saved_games = ge.games

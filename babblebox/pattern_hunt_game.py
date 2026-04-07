@@ -582,7 +582,7 @@ async def start_pattern_hunt_game_locked(guild_id: int, game: dict[str, Any]):
                 embed=ge.style_embed(
                     discord.Embed(
                         title="🔐 Pattern Hunt Role",
-                        description="Keep this private. Give one public clue that fits the rule, and never explain the logic out loud.",
+                        description="Keep this private. Give one public clue that fits the rule, keep the logic offstage, and never explain the pattern aloud.",
                         color=ge.EMBED_THEME["accent"],
                     ).add_field(name="Secret Rule", value=render_rule(rule_atoms), inline=False).add_field(
                         name="Good Clue Examples",
@@ -594,7 +594,7 @@ async def start_pattern_hunt_game_locked(guild_id: int, game: dict[str, Any]):
                         inline=False,
                     ).add_field(
                         name="Guardrails",
-                        value="One clue per turn. Keep the logic offstage. If Babblebox rejects a clue, send a fresh one.",
+                        value="One clue per turn. Keep the logic offstage. If Babblebox rejects a clue, send one fresh replacement and move on.",
                         inline=False,
                     ),
                     footer="Babblebox Pattern Hunt | The guesser never sees this DM",
@@ -653,7 +653,7 @@ def build_pattern_hunt_status_embed(game: dict[str, Any], *, public: bool) -> di
     coder = ge.get_snapshot_player(game, current_pattern_hunt_coder_id(game))
     description = "One public clue loop. One hidden rule. Private guesses stay in `/hunt guess`."
     if state.get("tutorial_cycle_active"):
-        description += "\nFirst round is slower and forgiving on purpose so everyone can catch the rhythm first."
+        description += "\nFirst round is intentionally slower and more forgiving so the room can catch the rhythm."
     if public and state.get("hint_text"):
         description += f"\nShared hint: {state['hint_text']}"
     if not public:
@@ -722,7 +722,7 @@ async def handle_pattern_hunt_message_locked(message: discord.Message, guild_id:
             if ge.can_emit_notice(game, "last_pattern_prompt_notice_at", interval=4.0):
                 with contextlib.suppress(discord.HTTPException):
                     await message.channel.send(
-                        "Pattern Hunt: ask for one real clue or theme so the coder has something to answer.",
+                        "Pattern Hunt: ask for one real clue request or theme so the coder has a clear lane.",
                         delete_after=4.0,
                     )
             return True
@@ -746,7 +746,7 @@ async def handle_pattern_hunt_message_locked(message: discord.Message, guild_id:
         await game["channel"].send(
             embed=ge.make_status_embed(
                 "🔁 Fresh Clue",
-                f"{message.author.mention}, that one does not fit. Send one fresh clue without explaining the pattern.",
+                f"{message.author.mention}, that clue does not fit. Send one fresh clue without explaining the pattern.",
                 tone="warning",
                 footer="Babblebox Pattern Hunt",
             ),

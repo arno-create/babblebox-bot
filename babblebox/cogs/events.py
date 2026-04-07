@@ -143,25 +143,18 @@ class EventsCog(commands.Cog):
                 game
                 and not game.get("closing")
                 and game.get("active")
-                and game.get("game_type") in {"only16", "pattern_hunt"}
+                and game.get("game_type") == "pattern_hunt"
                 and message.channel.id == game["channel"].id
             ):
                 async with game["lock"]:
                     game = ge.games.get(guild_id)
                     if not game or game.get("closing") or not game.get("active") or message.channel.id != game["channel"].id:
                         return
-                    if game.get("game_type") == "only16":
-                        from babblebox.only16_game import handle_only16_message_locked
+                    from babblebox.pattern_hunt_game import handle_pattern_hunt_message_locked
 
-                        handled = await handle_only16_message_locked(message, guild_id, game)
-                        if handled:
-                            return
-                    if game.get("game_type") == "pattern_hunt":
-                        from babblebox.pattern_hunt_game import handle_pattern_hunt_message_locked
-
-                        handled = await handle_pattern_hunt_message_locked(message, guild_id, game)
-                        if handled:
-                            return
+                    handled = await handle_pattern_hunt_message_locked(message, guild_id, game)
+                    if handled:
+                        return
             if (
                 game
                 and not game.get("closing")
@@ -262,15 +255,6 @@ class EventsCog(commands.Cog):
             await question_drops_service.handle_raw_message_delete(payload)
 
         game = ge.games.get(payload.guild_id)
-        if game and not game.get("closing") and game.get("active") and game.get("game_type") == "only16":
-            async with game["lock"]:
-                game = ge.games.get(payload.guild_id)
-                if game and not game.get("closing") and game.get("active") and game.get("game_type") == "only16":
-                    from babblebox.only16_game import handle_only16_message_delete_locked
-
-                    handled = await handle_only16_message_delete_locked(payload.message_id, payload.guild_id, game)
-                    if handled:
-                        return
         if not game or game.get("closing"):
             return
 
