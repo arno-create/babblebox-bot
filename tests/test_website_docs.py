@@ -32,7 +32,7 @@ class WebsiteDocsTests(unittest.TestCase):
             'id="faq"',
         ):
             self.assertIn(anchor, help_html)
-        for command in ("/daily", "/buddy", "/profile", "/vault", "/watch", "/later", "/capture", "/remind", "/afk", "/shield panel", "/confess", "/confessions moderate"):
+        for command in ("/support", "/daily", "/buddy", "/profile", "/vault", "/watch", "/later", "/capture", "/remind", "/afk", "/shield panel", "/confess", "/confessions moderate"):
             self.assertIn(command, help_html)
         self.assertIn("Broken Telephone, Exquisite Corpse, Spyfall, Word Bomb, and Pattern Hunt", help_html)
         self.assertIn("1-10 drops per day", help_html)
@@ -110,6 +110,7 @@ class WebsiteDocsTests(unittest.TestCase):
             "/confess",
             "/confess reply-to-user",
             "/confessions moderate",
+            "/support",
             "PYTHONPATH=. pytest -q",
             "optional feature that only works after admins enable and configure it",
             "adult / 18+ language is blocked by default",

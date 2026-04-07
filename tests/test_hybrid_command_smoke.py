@@ -15,7 +15,7 @@ from babblebox.cogs.admin import AdminCog
 from babblebox.cogs.confessions import ConfessionsCog
 from babblebox.cogs.gameplay import GameplayCog
 from babblebox.cogs.identity import IdentityCog
-from babblebox.cogs.meta import HELP_PAGES, MetaCog
+from babblebox.cogs.meta import HELP_PAGES, MetaCog, build_help_page_embed
 from babblebox.cogs.question_drops import QuestionDropsCog
 from babblebox.cogs.shield import ShieldCog
 from babblebox.cogs.utilities import AfkReturnWatchDurationSelect, UtilityCog
@@ -202,6 +202,13 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
                     await service.close()
             await bot.close()
 
+    def _link_buttons(self, view) -> dict[str, str]:
+        return {
+            child.label: child.url
+            for child in getattr(view, "children", [])
+            if getattr(child, "style", None) == discord.ButtonStyle.link
+        }
+
     def test_help_pages_reflect_five_game_party_copy(self):
         party_page = next(page for page in HELP_PAGES if page["title"] == "Party Games")
         self.assertIn("Broken Telephone", party_page["body"])
@@ -229,6 +236,24 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("scholar ladder", question_drops_page["body"])
         daily_page = next(page for page in HELP_PAGES if page["title"] == "Daily Arcade")
         self.assertIn("Question Drops stay separate as the guild knowledge lane", daily_page["body"])
+
+    def test_help_pages_include_support_links_page(self):
+        support_index, support_page = next(
+            (index, page) for index, page in enumerate(HELP_PAGES) if page["title"] == "Support / Links"
+        )
+
+        self.assertIn("/support", support_page["body"])
+        self.assertIn("genuinely appreciated", support_page["body"])
+        self.assertIn("discord.com/servers/inevitable-friendship-1322933864360050688", support_page["links"])
+        self.assertIn("github.com/arno-create/babblebox-bot", support_page["links"])
+        self.assertIn("arno-create.github.io/babblebox-bot/", support_page["links"])
+
+        embed = build_help_page_embed(support_index)
+        fields = {field.name: field.value for field in embed.fields}
+        self.assertIn("Links", fields)
+        self.assertIn("GitHub Repository", fields["Links"])
+        self.assertIn("Support Server", fields["Links"])
+        self.assertIn("Official Website", fields["Links"])
 
     def test_dropsadmin_config_slash_choices_include_difficulty_profiles(self):
         bot = commands.Bot(command_prefix="!", intents=discord.Intents.none())
@@ -835,6 +860,58 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(ctx.send_calls), 1)
         self.assertFalse(ctx.send_calls[0]["ephemeral"])
         self.assertIsNotNone(ctx.send_calls[0]["view"])
+        self.assertEqual(
+            self._link_buttons(ctx.send_calls[0]["view"]),
+            {
+                "Support Server": "https://discord.com/servers/inevitable-friendship-1322933864360050688",
+                "GitHub Repository": "https://github.com/arno-create/babblebox-bot",
+                "Official Website": "https://arno-create.github.io/babblebox-bot/",
+            },
+        )
+
+    async def test_support_public_uses_view_and_public_visibility(self):
+        cog = MetaCog(types.SimpleNamespace(loop=asyncio.get_running_loop()))
+        ctx = FakeContext(interaction=FakeInteraction(), guild=FakeGuild(), channel=FakeChannel(), author=FakeAuthor())
+
+        with patch("babblebox.cogs.meta.require_channel_permissions", new=AsyncMock(return_value=True)):
+            await MetaCog.support_command.callback(cog, ctx, visibility="public")
+
+        self.assertEqual(len(ctx.send_calls), 1)
+        self.assertFalse(ctx.send_calls[0]["ephemeral"])
+        self.assertIn("Babblebox Support", ctx.send_calls[0]["embed"].title)
+        self.assertEqual(
+            self._link_buttons(ctx.send_calls[0]["view"]),
+            {
+                "Support Server": "https://discord.com/servers/inevitable-friendship-1322933864360050688",
+                "GitHub Repository": "https://github.com/arno-create/babblebox-bot",
+                "Official Website": "https://arno-create.github.io/babblebox-bot/",
+            },
+        )
+
+    async def test_support_private_stays_ephemeral(self):
+        cog = MetaCog(types.SimpleNamespace(loop=asyncio.get_running_loop()))
+        ctx = FakeContext(interaction=FakeInteraction(), guild=FakeGuild(), channel=FakeChannel(), author=FakeAuthor())
+
+        with patch("babblebox.cogs.meta.require_channel_permissions", new=AsyncMock(return_value=True)):
+            await MetaCog.support_command.callback(cog, ctx, visibility="private")
+
+        self.assertEqual(len(ctx.send_calls), 1)
+        self.assertTrue(ctx.send_calls[0]["ephemeral"])
+        self.assertIn("Babblebox Support", ctx.send_calls[0]["embed"].title)
+
+    async def test_support_public_uses_separate_cooldown_from_help(self):
+        cog = MetaCog(types.SimpleNamespace(loop=asyncio.get_running_loop()))
+        help_ctx = FakeContext(interaction=FakeInteraction(), guild=FakeGuild(), channel=FakeChannel(), author=FakeAuthor())
+        support_ctx = FakeContext(interaction=FakeInteraction(), guild=help_ctx.guild, channel=help_ctx.channel, author=help_ctx.author)
+
+        with patch("babblebox.cogs.meta.require_channel_permissions", new=AsyncMock(return_value=True)):
+            await MetaCog.help_command.callback(cog, help_ctx, visibility="public")
+            await MetaCog.support_command.callback(cog, support_ctx, visibility="public")
+
+        self.assertEqual(len(help_ctx.send_calls), 1)
+        self.assertEqual(len(support_ctx.send_calls), 1)
+        self.assertFalse(support_ctx.send_calls[0]["ephemeral"])
+        self.assertIn("Babblebox Support", support_ctx.send_calls[0]["embed"].title)
 
     async def test_shield_status_is_private_for_admins(self):
         bot = types.SimpleNamespace(loop=asyncio.get_running_loop())

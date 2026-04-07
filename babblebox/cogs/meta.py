@@ -21,6 +21,17 @@ VISIBILITY_CHOICES = [
     app_commands.Choice(name="Public", value="public"),
     app_commands.Choice(name="Only me", value="private"),
 ]
+OFFICIAL_LINKS: tuple[tuple[str, str], ...] = (
+    ("Support Server", "https://discord.com/servers/inevitable-friendship-1322933864360050688"),
+    ("GitHub Repository", "https://github.com/arno-create/babblebox-bot"),
+    ("Official Website", "https://arno-create.github.io/babblebox-bot/"),
+)
+
+
+def official_links_markdown() -> str:
+    return "\n".join(f"[{label}]({url})" for label, url in OFFICIAL_LINKS)
+
+
 HELP_PAGES: list[dict[str, str]] = [
     {
         "title": "Babblebox Guide",
@@ -106,6 +117,17 @@ HELP_PAGES: list[dict[str, str]] = [
         "try": "`/buddy`, `/profile`, `/vault`",
     },
     {
+        "title": "Support / Links",
+        "emoji": "\U0001f6df\ufe0f",
+        "description": "Official places to get help, report issues, and inspect the product.",
+        "body": (
+            "Use `/support` for the standalone support card whenever you need the official links quickly.\n"
+            "If something breaks, feels confusing, or could be better, reporting it is genuinely appreciated and helps shape the next fix or polish pass."
+        ),
+        "links": official_links_markdown(),
+        "try": "`/support`, `bb!support`, or use the link buttons below.",
+    },
+    {
         "title": "Shield / Admin Safety",
         "emoji": "\U0001f6e1\ufe0f",
         "description": "Optional server-side protection and compact admin automations with conservative defaults.",
@@ -144,15 +166,50 @@ def build_help_page_embed(page_index: int) -> discord.Embed:
         color=ge.EMBED_THEME["accent"] if page_index else discord.Color.gold(),
     )
     embed.add_field(name="Overview", value=page["body"], inline=False)
+    if page.get("links"):
+        embed.add_field(name="Links", value=page["links"], inline=False)
     embed.add_field(name="Try", value=page.get("try", "`/help`"), inline=False)
     embed.add_field(name="Page", value=f"{page_index + 1}/{len(HELP_PAGES)}", inline=True)
     embed.add_field(name="Visibility", value="Showable cards default public. Sensitive utilities stay private.", inline=True)
     return ge.style_embed(embed, footer="Babblebox Manual | Use the arrows to browse")
 
 
-class HelpPanelView(discord.ui.View):
+def build_support_embed() -> discord.Embed:
+    embed = discord.Embed(
+        title="\U0001f6df\ufe0f Babblebox Support",
+        description=(
+            "If something breaks, feels confusing, or could be better, please report it. "
+            "Bug reports and issue notes directly help shape fixes and polish, and they are always appreciated."
+        ),
+        color=discord.Color.gold(),
+    )
+    embed.add_field(name="Official Links", value=official_links_markdown(), inline=False)
+    embed.add_field(
+        name="Best Route",
+        value=(
+            "`Support Server` for live help and quick triage.\n"
+            "`GitHub Repository` for bugs, issues, and open-source code.\n"
+            "`Official Website` for docs, policies, and public product info."
+        ),
+        inline=False,
+    )
+    return ge.style_embed(embed, footer="Babblebox Support | Thanks for helping improve the bot")
+
+
+def add_official_link_buttons(view: discord.ui.View, *, row: int):
+    for label, url in OFFICIAL_LINKS:
+        view.add_item(discord.ui.Button(label=label, style=discord.ButtonStyle.link, url=url, row=row))
+
+
+class SupportLinksView(discord.ui.View):
+    def __init__(self, *, timeout: float | None = None, button_row: int = 0):
+        super().__init__(timeout=timeout)
+        add_official_link_buttons(self, row=button_row)
+
+
+class HelpPanelView(SupportLinksView):
     def __init__(self, *, author_id: int, start_index: int = 0):
-        super().__init__(timeout=180)
+        super().__init__(timeout=180, button_row=1)
         self.author_id = author_id
         self.page_index = start_index
         self.message: discord.Message | None = None
@@ -186,7 +243,8 @@ class HelpPanelView(discord.ui.View):
 
     async def on_timeout(self):
         for child in self.children:
-            child.disabled = True
+            if getattr(child, "style", None) != discord.ButtonStyle.link:
+                child.disabled = True
         if self.message is not None:
             with contextlib.suppress(discord.HTTPException):
                 await self.message.edit(view=self)
@@ -212,24 +270,52 @@ class MetaCog(commands.Cog):
         self.bot = bot
         self._help_user_cooldowns: dict[int, float] = {}
         self._help_channel_cooldowns: dict[int, float] = {}
+        self._support_user_cooldowns: dict[int, float] = {}
+        self._support_channel_cooldowns: dict[int, float] = {}
 
     def _is_private(self, visibility: str) -> bool:
         return visibility == "private"
 
-    def _help_cooldown_error(self, ctx: commands.Context, *, visibility: str) -> str | None:
+    def _public_panel_cooldown_error(
+        self,
+        ctx: commands.Context,
+        *,
+        visibility: str,
+        user_cooldowns: dict[int, float],
+        channel_cooldowns: dict[int, float],
+        panel_label: str,
+    ) -> str | None:
         if self._is_private(visibility):
             return None
         now = self.bot.loop.time()
-        user_remaining = 15.0 - (now - self._help_user_cooldowns.get(ctx.author.id, 0.0))
+        user_remaining = 15.0 - (now - user_cooldowns.get(ctx.author.id, 0.0))
         channel_key = ctx.channel.id if ctx.channel is not None else 0
-        channel_remaining = 8.0 - (now - self._help_channel_cooldowns.get(channel_key, 0.0))
+        channel_remaining = 8.0 - (now - channel_cooldowns.get(channel_key, 0.0))
         if user_remaining > 0 or channel_remaining > 0:
             wait_for = int(max(user_remaining, channel_remaining)) + 1
-            return f"The public manual is on cooldown. Try again in about {wait_for} seconds, or switch visibility to private."
-        self._help_user_cooldowns[ctx.author.id] = now
+            return f"The public {panel_label} is on cooldown. Try again in about {wait_for} seconds, or switch visibility to private."
+        user_cooldowns[ctx.author.id] = now
         if channel_key:
-            self._help_channel_cooldowns[channel_key] = now
+            channel_cooldowns[channel_key] = now
         return None
+
+    def _help_cooldown_error(self, ctx: commands.Context, *, visibility: str) -> str | None:
+        return self._public_panel_cooldown_error(
+            ctx,
+            visibility=visibility,
+            user_cooldowns=self._help_user_cooldowns,
+            channel_cooldowns=self._help_channel_cooldowns,
+            panel_label="manual",
+        )
+
+    def _support_cooldown_error(self, ctx: commands.Context, *, visibility: str) -> str | None:
+        return self._public_panel_cooldown_error(
+            ctx,
+            visibility=visibility,
+            user_cooldowns=self._support_user_cooldowns,
+            channel_cooldowns=self._support_channel_cooldowns,
+            panel_label="support panel",
+        )
 
     @commands.hybrid_command(name="help", with_app_command=True, description="View the Babblebox manual, categories, and command guide")
     @app_commands.describe(visibility="Show the manual publicly or only to you")
@@ -254,6 +340,27 @@ class MetaCog(commands.Cog):
         )
         if message is not None:
             view.message = message
+
+    @commands.hybrid_command(name="support", with_app_command=True, description="Open Babblebox support links and bug-report info")
+    @app_commands.describe(visibility="Show support links publicly or only to you")
+    @app_commands.choices(visibility=VISIBILITY_CHOICES)
+    async def support_command(self, ctx: commands.Context, visibility: str = "public"):
+        if not await require_channel_permissions(ctx, ge.HELP_REQUIRED_PERMS, "/support"):
+            return
+        cooldown_error = self._support_cooldown_error(ctx, visibility=visibility)
+        if cooldown_error is not None:
+            await send_hybrid_response(
+                ctx,
+                embed=ge.make_status_embed("Support Cooldown", cooldown_error, tone="warning", footer="Babblebox Support"),
+                ephemeral=True,
+            )
+            return
+        await send_hybrid_response(
+            ctx,
+            embed=build_support_embed(),
+            view=SupportLinksView(),
+            ephemeral=self._is_private(visibility),
+        )
 
     @commands.hybrid_command(name="ping", with_app_command=True, description="Check if the bot is online and responsive")
     async def ping_command(self, ctx: commands.Context):
