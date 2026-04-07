@@ -266,6 +266,68 @@ def build_help_page_embed(page_index: int) -> discord.Embed:
     return ge.style_embed(embed, footer="Babblebox Manual | Use the arrows to browse")
 
 
+def build_help_embed() -> discord.Embed:
+    embed = discord.Embed(
+        title="\U0001f3e0 Babblebox Help",
+        description=(
+            "Babblebox is organized into clear lanes so it stays easy to learn in a live server. "
+            "Start with the lane you need, then use `/support` any time you want the official links or bug-report routes."
+        ),
+        color=discord.Color.gold(),
+    )
+    embed.add_field(
+        name="Party Games",
+        value=(
+            "`/play` opens Broken Telephone, Exquisite Corpse, Spyfall, Word Bomb, and Pattern Hunt. "
+            "Use `/hunt status` for the private Pattern Hunt state card."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Question Drops",
+        value=(
+            "`/drops status`, `/drops stats`, `/drops leaderboard`, and `/drops roles ...` cover the guild knowledge lane. "
+            "Admin setup and mastery configuration live under `/dropsadmin`."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Daily / Utilities",
+        value=(
+            "`/daily` handles Shuffle, Emoji, and Signal. Personal tools include `/watch`, `/later`, `/capture`, "
+            "`/remind`, `/afk`, and `/moment`."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Buddy / Profile / Vault",
+        value=(
+            "`/buddy`, `/profile`, and `/vault` show identity, streaks, and highlights without turning the bot "
+            "into a giant economy system."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Shield / Admin",
+        value=(
+            "`/shield panel`, `/shield rules`, `/shield ai`, `/admin panel`, `/admin verification`, and `/admin sync` "
+            "cover safety setup and compact admin automation."
+        ),
+        inline=False,
+    )
+    embed.add_field(
+        name="Support / Links",
+        value=f"Use `/support` for the official support card.\n{official_links_markdown()}",
+        inline=False,
+    )
+    embed.add_field(
+        name="Visibility",
+        value="Public is best for showable cards. Private is better for personal utilities and setup flows.",
+        inline=False,
+    )
+    return ge.style_embed(embed, footer="Babblebox Help | Start here, then open the lane you need")
+
+
 def build_support_embed() -> discord.Embed:
     embed = discord.Embed(
         title="\U0001f6df\ufe0f Babblebox Support",
@@ -479,6 +541,10 @@ class MetaCog(commands.Cog):
     def _is_private(self, visibility: str) -> bool:
         return visibility == "private"
 
+    def _should_require_channel_permissions(self, ctx: commands.Context, *, visibility: str) -> bool:
+        interaction = getattr(ctx, "interaction", None)
+        return not (self._is_private(visibility) and interaction is not None and not interaction.is_expired())
+
     def _public_panel_cooldown_error(
         self,
         ctx: commands.Context,
@@ -590,6 +656,28 @@ class MetaCog(commands.Cog):
             type(result.error).__name__ if result.error is not None else "UnknownError",
         )
 
+    def _log_panel_delivery_fallback(
+        self,
+        *,
+        event: str,
+        command_name: str,
+        visibility: str,
+        ctx: commands.Context,
+        primary_result: HybridPanelSendResult,
+        fallback_result: HybridPanelSendResult,
+    ):
+        LOGGER.info(
+            "%s command=%s visibility=%s primary_path=%s fallback_path=%s guild_id=%s channel_id=%s exc_class=%s",
+            event,
+            command_name,
+            visibility,
+            primary_result.path,
+            fallback_result.path,
+            getattr(getattr(ctx, "guild", None), "id", None),
+            getattr(getattr(ctx, "channel", None), "id", None),
+            type(primary_result.error).__name__ if primary_result.error is not None else "UnknownError",
+        )
+
     async def _send_panel_response(
         self,
         ctx: commands.Context,
@@ -607,9 +695,12 @@ class MetaCog(commands.Cog):
         record_cooldown,
         send_failure_event: str,
         success_without_message_event: str,
+        retry_without_view_on_failure: bool = False,
+        fallback_success_event: str | None = None,
     ) -> HybridPanelSendResult:
-        if not await require_channel_permissions(ctx, ge.HELP_REQUIRED_PERMS, command_name):
-            return HybridPanelSendResult(delivered=False)
+        if self._should_require_channel_permissions(ctx, visibility=visibility):
+            if not await require_channel_permissions(ctx, ge.HELP_REQUIRED_PERMS, command_name):
+                return HybridPanelSendResult(delivered=False, path="permission_gate")
         if cooldown_error is not None:
             await send_hybrid_response(
                 ctx,
@@ -624,6 +715,37 @@ class MetaCog(commands.Cog):
             view=view,
             ephemeral=self._is_private(visibility),
         )
+        if not result.delivered and retry_without_view_on_failure and view is not None:
+            fallback_result = await send_hybrid_panel_response(
+                ctx,
+                embed=embed,
+                ephemeral=self._is_private(visibility),
+            )
+            if fallback_result.delivered:
+                record_cooldown(ctx, visibility=visibility)
+                if fallback_success_event is not None:
+                    self._log_panel_delivery_fallback(
+                        event=fallback_success_event,
+                        command_name=command_name,
+                        visibility=visibility,
+                        ctx=ctx,
+                        primary_result=result,
+                        fallback_result=fallback_result,
+                    )
+                if fallback_result.message is None:
+                    self._log_panel_delivery_without_message_handle(
+                        event=success_without_message_event,
+                        command_name=command_name,
+                        visibility=visibility,
+                        ctx=ctx,
+                        result=fallback_result,
+                    )
+                return fallback_result
+            result = HybridPanelSendResult(
+                delivered=False,
+                path=fallback_result.path,
+                error=fallback_result.error or result.error,
+            )
         if result.delivered:
             record_cooldown(ctx, visibility=visibility)
             if result.message is None:
@@ -650,43 +772,29 @@ class MetaCog(commands.Cog):
             tone="warning",
             footer=recovery_footer,
         )
-        interaction = getattr(ctx, "interaction", None)
-        if interaction is not None:
-            await ge.safe_send_interaction(interaction, embed=recovery_embed, ephemeral=True)
-            return result
-        with contextlib.suppress(discord.HTTPException):
-            await ctx.send(embed=recovery_embed)
+        with contextlib.suppress(discord.ClientException, discord.HTTPException, discord.NotFound, TypeError, ValueError):
+            await send_hybrid_response(ctx, embed=recovery_embed, ephemeral=True)
         return result
 
     @commands.hybrid_command(name="help", with_app_command=True, description="View the Babblebox manual, categories, and command guide")
     @app_commands.describe(visibility="Show the manual publicly or only to you")
     @app_commands.choices(visibility=VISIBILITY_CHOICES)
     async def help_command(self, ctx: commands.Context, visibility: str = "public"):
-        view = HelpPanelView(author_id=ctx.author.id)
-        result = await self._send_panel_response(
+        await self._send_panel_response(
             ctx,
             command_name="/help",
             visibility=visibility,
             cooldown_error=self._help_cooldown_error(ctx, visibility=visibility),
             cooldown_title="Help Cooldown",
             cooldown_footer="Babblebox Manual",
-            embed=view.current_embed(),
-            view=view,
-            recovery_title="Help Panel Unavailable",
-            recovery_description="Babblebox could not open the help panel just now. Please try `/help` again in a moment.",
+            embed=build_help_embed(),
+            recovery_title="Help Unavailable",
+            recovery_description="Babblebox could not open help just now. Please try `/help` again in a moment.",
             recovery_footer="Babblebox Manual",
             record_cooldown=self._record_help_cooldown,
             send_failure_event="help_panel_send_failure",
             success_without_message_event="help_panel_send_success_without_message_handle",
         )
-        if result.delivered:
-            view.bind_delivery(
-                bot=self.bot,
-                channel=ctx.channel,
-                interaction=getattr(ctx, "interaction", None),
-                visibility=visibility,
-                result=result,
-            )
 
     @commands.hybrid_command(name="support", with_app_command=True, description="Open Babblebox support links and bug-report info")
     @app_commands.describe(visibility="Show support links publicly or only to you")
@@ -707,6 +815,8 @@ class MetaCog(commands.Cog):
             record_cooldown=self._record_support_cooldown,
             send_failure_event="support_panel_send_failure",
             success_without_message_event="support_panel_send_success_without_message_handle",
+            retry_without_view_on_failure=True,
+            fallback_success_event="support_panel_send_fallback_without_view",
         )
 
     @commands.hybrid_command(name="ping", with_app_command=True, description="Check if the bot is online and responsive")
