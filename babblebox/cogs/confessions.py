@@ -73,6 +73,102 @@ RISKY_POLICY_WARNINGS: dict[str, str] = {
     "allow_replies": "Anonymous replies can increase abuse, drama, and moderation complexity. Babblebox keeps them text-only and depth-1, but admins still need to choose whether those replies always enter review.",
     "allow_self_edit": "Editing can create bait-and-switch moderation problems. Babblebox limits it to pending submissions only.",
 }
+MODAL_TITLE_LIMIT = 45
+MODAL_TEXT_INPUT_LABEL_LIMIT = 45
+MODAL_TEXT_INPUT_PLACEHOLDER_LIMIT = 100
+MODAL_CUSTOM_ID_LIMIT = 100
+MODAL_COMPONENT_LIMIT = 5
+
+
+class ModalPayloadValidationError(ValueError):
+    def __init__(
+        self,
+        *,
+        field: str,
+        detail: str | None = None,
+        actual: int | None = None,
+        limit: int | None = None,
+    ):
+        self.field = field
+        self.detail = detail
+        self.actual = actual
+        self.limit = limit
+        parts = [f"field={field}"]
+        if detail:
+            parts.append(f"detail={detail}")
+        if actual is not None:
+            parts.append(f"actual={actual}")
+        if limit is not None:
+            parts.append(f"limit={limit}")
+        super().__init__(", ".join(parts))
+
+    def diagnostic_note(self) -> str:
+        return str(self)
+
+
+def _validate_modal_text_length(field: str, value: object | None, limit: int):
+    if value in (None, ""):
+        return
+    length = len(str(value))
+    if length > limit:
+        raise ModalPayloadValidationError(field=field, actual=length, limit=limit)
+
+
+def _validate_modal_text_input_component(component: dict[str, Any], *, path: str):
+    _validate_modal_text_length(f"{path}.label", component.get("label"), MODAL_TEXT_INPUT_LABEL_LIMIT)
+    _validate_modal_text_length(f"{path}.placeholder", component.get("placeholder"), MODAL_TEXT_INPUT_PLACEHOLDER_LIMIT)
+    _validate_modal_text_length(f"{path}.custom_id", component.get("custom_id"), MODAL_CUSTOM_ID_LIMIT)
+
+
+def _validate_discord_modal_component(component: object, *, path: str, top_level: bool = False):
+    if not isinstance(component, dict):
+        raise ModalPayloadValidationError(field=path, detail="component_not_dict")
+    component_type = int(component.get("type") or 0)
+    if top_level:
+        if component_type == 1:
+            children = component.get("components")
+            if not isinstance(children, list) or len(children) != 1:
+                actual = len(children) if isinstance(children, list) else None
+                raise ModalPayloadValidationError(field=f"{path}.components", detail="action_row_children", actual=actual, limit=1)
+            _validate_discord_modal_component(children[0], path=f"{path}.components[0]")
+            return
+        if component_type == 4:
+            _validate_modal_text_input_component(component, path=path)
+            return
+        if component_type == 18:
+            nested = component.get("component")
+            if not isinstance(nested, dict):
+                raise ModalPayloadValidationError(field=f"{path}.component", detail="missing_label_component")
+            if int(nested.get("type") or 0) != 19:
+                raise ModalPayloadValidationError(field=f"{path}.component", detail=f"unsupported_label_type_{int(nested.get('type') or 0)}")
+            _validate_modal_text_length(f"{path}.component.custom_id", nested.get("custom_id"), MODAL_CUSTOM_ID_LIMIT)
+            return
+        if component_type == 19:
+            raise ModalPayloadValidationError(field=path, detail="top_level_file_upload")
+        raise ModalPayloadValidationError(field=path, detail=f"unsupported_top_level_type_{component_type}")
+    if component_type == 4:
+        _validate_modal_text_input_component(component, path=path)
+        return
+    if component_type == 19:
+        _validate_modal_text_length(f"{path}.custom_id", component.get("custom_id"), MODAL_CUSTOM_ID_LIMIT)
+        return
+    raise ModalPayloadValidationError(field=path, detail=f"unsupported_nested_type_{component_type}")
+
+
+def _validate_discord_modal_payload(payload: object):
+    if not isinstance(payload, dict):
+        raise ModalPayloadValidationError(field="payload", detail="payload_not_dict")
+    _validate_modal_text_length("title", payload.get("title"), MODAL_TITLE_LIMIT)
+    _validate_modal_text_length("custom_id", payload.get("custom_id"), MODAL_CUSTOM_ID_LIMIT)
+    components = payload.get("components")
+    if not isinstance(components, list):
+        raise ModalPayloadValidationError(field="components", detail="missing_components")
+    if not components:
+        raise ModalPayloadValidationError(field="components", detail="empty_components")
+    if len(components) > MODAL_COMPONENT_LIMIT:
+        raise ModalPayloadValidationError(field="components", actual=len(components), limit=MODAL_COMPONENT_LIMIT)
+    for index, component in enumerate(components):
+        _validate_discord_modal_component(component, path=f"components[{index}]", top_level=True)
 
 
 def _resolve_live_confessions_cog(interaction: discord.Interaction, fallback: object | None = None):
@@ -153,7 +249,10 @@ class ConfessionComposerModal(discord.ui.Modal, title="Anonymous Confession"):
         self.upload_input: discord.ui.FileUpload | None = None
         self.upload_label: discord.ui.Label | None = None
         if self.image_upload_notice:
-            self.body_input.placeholder = f"{self.image_upload_notice} You can still send text and one trusted link."
+            self.body_input.placeholder = ge.safe_field_text(
+                f"{self.image_upload_notice} You can still send text and one trusted link.",
+                limit=MODAL_TEXT_INPUT_PLACEHOLDER_LIMIT,
+            )
             self.link_input.placeholder = "Text and one trusted link only right now."
         elif self.image_upload_requested:
             if not self.cog.modal_file_upload_available():
@@ -396,7 +495,7 @@ class OwnerReplyComposerModal(discord.ui.Modal, title="Reply to Member Anonymous
         self.body_input = discord.ui.TextInput(
             label="Anonymous owner reply",
             style=discord.TextStyle.paragraph,
-            placeholder="Your reply posts publicly as an Anonymous Owner Reply. Babblebox keeps your identity hidden and only queues it if this server enables owner-reply review.",
+            placeholder="Posts publicly as an Anonymous Owner Reply. Babblebox keeps you hidden. Private review may apply.",
             required=True,
             max_length=1800,
         )
@@ -941,6 +1040,8 @@ class MemberManageActionView(TimedMemberPrivateView):
                 failure_message="Babblebox could not reopen that private edit flow right now. Run `/confess manage` again in a moment.",
                 construct_code="edit_modal_construct_failed",
                 construct_stage="edit_modal_construct",
+                payload_code="edit_modal_payload_invalid",
+                payload_stage="edit_send_modal",
                 send_code="edit_send_modal_failed",
                 send_stage="edit_send_modal",
             )
@@ -1435,35 +1536,11 @@ class OwnerReplyOpportunityActionView(TimedMemberPrivateView):
             if interaction.user.id != self.author_id:
                 await self.cog._send_private_interaction(interaction, content="Run the command yourself to open your private owner-reply flow.")
                 return
-            context, error = await self.cog.service.get_owner_reply_opportunity_context(
-                interaction.guild,
-                author_id=interaction.user.id,
-                opportunity_id=self.opportunity_id,
-            )
-            if context is None:
-                await interaction.response.edit_message(
-                    embed=ge.make_status_embed(
-                        "Owner Reply Unavailable",
-                        error or "That owner-reply prompt is no longer available.",
-                        tone="warning",
-                        footer="Babblebox Confessions",
-                    ),
-                    view=None,
-                )
-                return
-            await self.cog._safe_open_member_modal(
+            await self.cog._open_owner_reply_modal(
                 interaction,
-                modal_factory=lambda: OwnerReplyComposerModal(
-                    self.cog,
-                    guild_id=interaction.guild.id,
-                    opportunity_id=context["opportunity"]["opportunity_id"],
-                ),
-                failure_title="Owner Reply Unavailable",
+                opportunity_id=self.opportunity_id,
                 failure_message="Babblebox could not reopen that private owner-reply composer right now. Run `/confess reply-to-user` again in a moment.",
-                construct_code="owner_reply_modal_construct_failed",
-                construct_stage="owner_reply_modal_construct",
-                send_code="owner_reply_send_modal_failed",
-                send_stage="owner_reply_send_modal",
+                edit_missing_context=True,
             )
 
         await self.cog._run_member_interaction(
@@ -2531,6 +2608,8 @@ class ConfessionsCog(commands.Cog):
             failure_message=failure_message,
             construct_code="confess_create_modal_construct_failed",
             construct_stage="confess_create_modal_construct",
+            payload_code="confess_create_modal_payload_invalid",
+            payload_stage="confess_create_send_modal",
             send_code="confess_create_send_modal_failed",
             send_stage="confess_create_send_modal",
             construct_logger=lambda *, exc: self.log_create_diagnostic(
@@ -2538,6 +2617,15 @@ class ConfessionsCog(commands.Cog):
                 stage="confess_create_modal_construct",
                 interaction=interaction,
                 exc=exc,
+            ),
+            payload_logger=lambda *, error, modal: self.log_create_diagnostic(
+                code="confess_create_modal_payload_invalid",
+                stage="confess_create_send_modal",
+                interaction=interaction,
+                allow_images=getattr(modal, "image_upload_requested", None),
+                upload_present=getattr(modal, "upload_input", None) is not None,
+                note=error.diagnostic_note() if isinstance(error, ModalPayloadValidationError) else None,
+                exc=None if isinstance(error, ModalPayloadValidationError) else error,
             ),
             send_logger=lambda *, exc, modal: self.log_create_diagnostic(
                 code="confess_create_send_modal_failed",
@@ -2593,6 +2681,8 @@ class ConfessionsCog(commands.Cog):
             failure_message="Babblebox could not open that anonymous reply flow right now. Run `/confess create` again in a moment.",
             construct_code="reply_modal_construct_failed",
             construct_stage="reply_modal_construct",
+            payload_code="reply_modal_payload_invalid",
+            payload_stage="reply_send_modal",
             send_code="reply_send_modal_failed",
             send_stage="reply_send_modal",
         )
@@ -2687,94 +2777,13 @@ class ConfessionsCog(commands.Cog):
     async def _handle_owner_reply_prompt_open(self, interaction: discord.Interaction):
         message = getattr(interaction, "message", None)
         message_id = getattr(message, "id", None)
-        author = getattr(interaction, "user", None)
-        if not isinstance(message_id, int) or author is None:
+        if not isinstance(message_id, int):
             await self._send_private_interaction(interaction, content="That owner-reply prompt is no longer available.")
             return
-        try:
-            context, error = await self.service.get_owner_reply_opportunity_context_from_notification_message(
-                notification_message_id=message_id,
-                author_id=author.id,
-            )
-        except Exception as exc:
-            self.log_member_diagnostic(
-                code="owner_reply_prompt_open_context_failed",
-                stage="owner_reply_prompt_open",
-                interaction=interaction,
-                exc=exc,
-            )
-            await self._send_private_interaction(
-                interaction,
-                embed=self._member_status_embed(
-                    "Owner Reply Unavailable",
-                    "Babblebox could not reopen that private owner-reply prompt right now. Run `/confess reply-to-user` again in a moment.",
-                ),
-            )
-            return
-        if context is None:
-            await self._send_private_interaction(
-                interaction,
-                embed=ge.make_status_embed(
-                    "Owner Reply Unavailable",
-                    error or "That owner-reply prompt is no longer available.",
-                    tone="warning",
-                    footer="Babblebox Confessions",
-                ),
-            )
-            return
-        try:
-            gate = await self.service.preflight_submission_access(
-                context["guild"],
-                author_id=author.id,
-                member=context["guild"].get_member(author.id) or author,
-                submission_kind="reply",
-                reply_flow="owner_reply_to_user",
-                owner_reply_context_required=True,
-                owner_reply_context=context,
-            )
-        except Exception as exc:
-            self.log_member_diagnostic(
-                code="owner_reply_prompt_open_gate_failed",
-                stage="owner_reply_prompt_open",
-                interaction=interaction,
-                exc=exc,
-            )
-            await self._send_private_interaction(
-                interaction,
-                embed=self._member_status_embed(
-                    "Owner Reply Unavailable",
-                    "Babblebox could not reopen that private owner-reply prompt right now. Run `/confess reply-to-user` again in a moment.",
-                ),
-            )
-            return
-        if not gate.ok or gate.result is not None:
-            await self._send_private_interaction(
-                interaction,
-                embed=self._member_gate_embed(
-                    gate.result or ConfessionSubmissionResult(
-                        False,
-                        "unavailable",
-                        "Confessions are unavailable.",
-                        submission_kind="reply",
-                        reply_flow="owner_reply_to_user",
-                    ),
-                    title=gate.title,
-                ),
-            )
-            return
-        await self._safe_open_member_modal(
+        await self._open_owner_reply_modal(
             interaction,
-            modal_factory=lambda: OwnerReplyComposerModal(
-                self,
-                guild_id=context["guild"].id,
-                opportunity_id=context["opportunity"]["opportunity_id"],
-            ),
-            failure_title="Owner Reply Unavailable",
+            notification_message_id=message_id,
             failure_message="Babblebox could not reopen that private owner-reply prompt right now. Run `/confess reply-to-user` again in a moment.",
-            construct_code="owner_reply_modal_construct_failed",
-            construct_stage="owner_reply_modal_construct",
-            send_code="owner_reply_send_modal_failed",
-            send_stage="owner_reply_send_modal",
         )
 
     async def _handle_owner_reply_prompt_dismiss(self, interaction: discord.Interaction):
@@ -2809,6 +2818,8 @@ class ConfessionsCog(commands.Cog):
             failure_message="Babblebox could not open that private manage flow right now. Run `/confess manage` again in a moment.",
             construct_code="manage_modal_construct_failed",
             construct_stage="manage_modal_construct",
+            payload_code="manage_modal_payload_invalid",
+            payload_stage="manage_send_modal",
             send_code="manage_send_modal_failed",
             send_stage="manage_send_modal",
         )
@@ -2839,6 +2850,8 @@ class ConfessionsCog(commands.Cog):
             failure_message="Babblebox could not open that private appeal flow right now. Run `/confess appeal` again in a moment.",
             construct_code="appeal_modal_construct_failed",
             construct_stage="appeal_modal_construct",
+            payload_code="appeal_modal_payload_invalid",
+            payload_stage="appeal_send_modal",
             send_code="appeal_send_modal_failed",
             send_stage="appeal_send_modal",
         )
@@ -2854,6 +2867,8 @@ class ConfessionsCog(commands.Cog):
             failure_message="Babblebox could not open that private report flow right now. Run `/confess report` again in a moment.",
             construct_code="report_modal_construct_failed",
             construct_stage="report_modal_construct",
+            payload_code="report_modal_payload_invalid",
+            payload_stage="report_send_modal",
             send_code="report_send_modal_failed",
             send_stage="report_send_modal",
         )
@@ -2966,9 +2981,12 @@ class ConfessionsCog(commands.Cog):
         failure_message: str,
         construct_code: str,
         construct_stage: str,
+        payload_code: str | None = None,
+        payload_stage: str | None = None,
         send_code: str,
         send_stage: str,
         construct_logger=None,
+        payload_logger=None,
         send_logger=None,
     ) -> bool:
         try:
@@ -2982,6 +3000,24 @@ class ConfessionsCog(commands.Cog):
                     stage=construct_stage,
                     interaction=interaction,
                     exc=exc,
+                )
+            await self._send_private_interaction(
+                interaction,
+                embed=self._member_status_embed(failure_title, failure_message),
+            )
+            return False
+        try:
+            _validate_discord_modal_payload(modal.to_dict())
+        except Exception as error:
+            if callable(payload_logger):
+                payload_logger(error=error, modal=modal)
+            else:
+                self.log_member_diagnostic(
+                    code=payload_code or send_code,
+                    stage=payload_stage or send_stage,
+                    interaction=interaction,
+                    note=error.diagnostic_note() if isinstance(error, ModalPayloadValidationError) else None,
+                    exc=None if isinstance(error, ModalPayloadValidationError) else error,
                 )
             await self._send_private_interaction(
                 interaction,
@@ -3006,6 +3042,133 @@ class ConfessionsCog(commands.Cog):
                 embed=self._member_status_embed(failure_title, failure_message),
             )
             return False
+
+    async def _open_owner_reply_modal(
+        self,
+        interaction: discord.Interaction,
+        *,
+        failure_message: str,
+        notification_message_id: int | None = None,
+        opportunity_id: str | None = None,
+        edit_missing_context: bool = False,
+    ) -> bool:
+        author = getattr(interaction, "user", None)
+        if author is None:
+            await self._send_private_interaction(interaction, content="That owner-reply prompt is no longer available.")
+            return False
+        lookup_from_prompt = isinstance(notification_message_id, int)
+        if lookup_from_prompt:
+            context_stage = "owner_reply_prompt_open"
+            context_code = "owner_reply_prompt_open_context_failed"
+            gate_code = "owner_reply_prompt_open_gate_failed"
+            try:
+                context, error = await self.service.get_owner_reply_opportunity_context_from_notification_message(
+                    notification_message_id=notification_message_id,
+                    author_id=author.id,
+                )
+            except Exception as exc:
+                self.log_member_diagnostic(
+                    code=context_code,
+                    stage=context_stage,
+                    interaction=interaction,
+                    exc=exc,
+                )
+                await self._send_private_interaction(
+                    interaction,
+                    embed=self._member_status_embed("Owner Reply Unavailable", failure_message),
+                )
+                return False
+        else:
+            if interaction.guild is None or not opportunity_id:
+                await self._send_private_interaction(interaction, content="That owner-reply flow is no longer available.")
+                return False
+            context_stage = "owner_reply_select"
+            context_code = "owner_reply_select_context_failed"
+            gate_code = "owner_reply_select_gate_failed"
+            try:
+                context, error = await self.service.get_owner_reply_opportunity_context(
+                    interaction.guild,
+                    author_id=author.id,
+                    opportunity_id=opportunity_id,
+                )
+            except Exception as exc:
+                self.log_member_diagnostic(
+                    code=context_code,
+                    stage=context_stage,
+                    interaction=interaction,
+                    exc=exc,
+                )
+                await self._send_private_interaction(
+                    interaction,
+                    embed=self._member_status_embed("Owner Reply Unavailable", failure_message),
+                )
+                return False
+        if context is None:
+            embed = ge.make_status_embed(
+                "Owner Reply Unavailable",
+                error or "That owner-reply prompt is no longer available.",
+                tone="warning",
+                footer="Babblebox Confessions",
+            )
+            if edit_missing_context and not interaction.response.is_done():
+                with contextlib.suppress(discord.InteractionResponded, discord.NotFound, discord.HTTPException):
+                    await interaction.response.edit_message(embed=embed, view=None)
+                    return False
+            await self._send_private_interaction(interaction, embed=embed)
+            return False
+        try:
+            gate = await self.service.preflight_submission_access(
+                context["guild"],
+                author_id=author.id,
+                member=context["guild"].get_member(author.id) or author,
+                submission_kind="reply",
+                reply_flow="owner_reply_to_user",
+                owner_reply_context_required=True,
+                owner_reply_context=context,
+            )
+        except Exception as exc:
+            self.log_member_diagnostic(
+                code=gate_code,
+                stage=context_stage,
+                interaction=interaction,
+                exc=exc,
+            )
+            await self._send_private_interaction(
+                interaction,
+                embed=self._member_status_embed("Owner Reply Unavailable", failure_message),
+            )
+            return False
+        if not gate.ok or gate.result is not None:
+            await self._send_private_interaction(
+                interaction,
+                embed=self._member_gate_embed(
+                    gate.result or ConfessionSubmissionResult(
+                        False,
+                        "unavailable",
+                        "Confessions are unavailable.",
+                        submission_kind="reply",
+                        reply_flow="owner_reply_to_user",
+                    ),
+                    title=gate.title,
+                ),
+            )
+            return False
+        return await self._safe_open_member_modal(
+            interaction,
+            modal_factory=lambda: OwnerReplyComposerModal(
+                self,
+                guild_id=context["guild"].id,
+                opportunity_id=context["opportunity"]["opportunity_id"],
+            ),
+            failure_title="Owner Reply Unavailable",
+            failure_message=failure_message,
+            construct_code="owner_reply_modal_construct_failed",
+            construct_stage="owner_reply_modal_construct",
+            payload_code="owner_reply_modal_payload_invalid",
+            payload_stage="owner_reply_send_modal",
+            send_code="owner_reply_send_modal_failed",
+            send_stage="owner_reply_send_modal",
+        )
 
     async def _acknowledge_modal_submit(
         self,
