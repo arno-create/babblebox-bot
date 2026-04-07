@@ -192,6 +192,7 @@ Slash commands and the `bb!` prefix both work.
 | Slash | Prefix | Purpose |
 | --- | --- | --- |
 | `/help` | `bb!help` | Open the in-bot manual |
+| `/support` | `bb!support` | Open support links, bug-report info, and official resources |
 | `/confess` | n/a | Open the anonymous confession composer |
 | `/ping` | `bb!ping` | Health check |
 | `/play` | `bb!play` | Open a game lobby |
