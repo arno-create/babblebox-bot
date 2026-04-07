@@ -113,6 +113,18 @@ TRUSTED_MAINSTREAM_DOMAINS = {
     "mozilla.org",
 }
 
+
+def _moderation_action_payload(action: str) -> tuple[str, int | None, bool]:
+    if action == "pause_24h":
+        return "suspend", 24 * 3600, False
+    if action == "pause_7d":
+        return "temp_ban", 7 * 24 * 3600, False
+    if action == "pause_30d":
+        return "temp_ban", 30 * 24 * 3600, False
+    if action == "override":
+        return "approve", None, True
+    return action, None, False
+
 RAW_MENTION_RE = re.compile(r"(?i)<\s*[@#][!&]?\s*\d+\s*>|@\s*(?:everyone|here)")
 LOW_SIGNAL_RE = re.compile(r"(?i)^(?:[a-z0-9]\s*){1,3}$")
 REPEATED_CHAR_RE = re.compile(r"(.)\1{7,}")
@@ -709,19 +721,19 @@ class ConfessionsService:
                 mutate(config)
             except ValueError as exc:
                 return False, str(exc)
-            requested_allow_images = bool(config.get("allow_images"))
-            requested_allow_replies = bool(config.get("allow_anonymous_replies"))
+            requested_image_review = bool(config.get("image_review_required"))
+            requested_reply_review = bool(config.get("anonymous_reply_review_required"))
             requested_owner_reply_review = bool(config.get("owner_reply_review_mode"))
             requested_review_channel_id = config.get("review_channel_id")
             requested_confession_channel_id = config.get("confession_channel_id")
-            if requested_allow_images and requested_review_channel_id is None:
-                return False, "Image confessions require a separate private review channel before admins can enable them."
-            if requested_allow_images and requested_review_channel_id == requested_confession_channel_id:
-                return False, "Image confessions require a review channel that is separate from the public confession channel."
-            if requested_allow_replies and requested_review_channel_id is None:
-                return False, "Anonymous replies require a separate private review channel before admins can enable them."
-            if requested_allow_replies and requested_review_channel_id == requested_confession_channel_id:
-                return False, "Anonymous replies require a review channel that is separate from the public confession channel."
+            if requested_image_review and requested_review_channel_id is None:
+                return False, "Image review requires a separate private review channel before admins can enable it."
+            if requested_image_review and requested_review_channel_id == requested_confession_channel_id:
+                return False, "Image review requires a review channel that is separate from the public confession channel."
+            if requested_reply_review and requested_review_channel_id is None:
+                return False, "Anonymous-reply review requires a separate private review channel before admins can enable it."
+            if requested_reply_review and requested_review_channel_id == requested_confession_channel_id:
+                return False, "Anonymous-reply review requires a review channel that is separate from the public confession channel."
             if requested_owner_reply_review and requested_review_channel_id is None:
                 return False, "Owner-reply review requires a separate private review channel before admins can enable it."
             if requested_owner_reply_review and requested_review_channel_id == requested_confession_channel_id:
@@ -763,7 +775,9 @@ class ConfessionsService:
         allowed_role_ids: list[int] | None = None,
         blocked_role_ids: list[int] | None = None,
         allow_images: bool | None = None,
+        image_review_required: bool | None = None,
         allow_anonymous_replies: bool | None = None,
+        anonymous_reply_review_required: bool | None = None,
         allow_owner_replies: bool | None = None,
         owner_reply_review_mode: bool | None = None,
         allow_self_edit: bool | None = None,
@@ -817,8 +831,16 @@ class ConfessionsService:
                 config["blocked_role_ids"] = list(blocked_role_ids)
             if allow_images is not None:
                 config["allow_images"] = bool(allow_images)
+                if not config["allow_images"]:
+                    config["image_review_required"] = False
+            if image_review_required is not None:
+                config["image_review_required"] = bool(image_review_required)
             if allow_anonymous_replies is not None:
                 config["allow_anonymous_replies"] = bool(allow_anonymous_replies)
+                if not config["allow_anonymous_replies"]:
+                    config["anonymous_reply_review_required"] = False
+            if anonymous_reply_review_required is not None:
+                config["anonymous_reply_review_required"] = bool(anonymous_reply_review_required)
             if allow_owner_replies is not None:
                 config["allow_owner_replies"] = bool(allow_owner_replies)
             if owner_reply_review_mode is not None:
@@ -1567,7 +1589,40 @@ class ConfessionsService:
         safety: SafetyResult,
         attachment_meta: Sequence[dict[str, Any]],
     ) -> bool:
-        return bool(attachment_meta or compiled["review_mode"] or safety.outcome == "review")
+        return bool(compiled["review_mode"] or safety.outcome == "review")
+
+    def _policy_review_required(
+        self,
+        compiled: dict[str, Any],
+        *,
+        submission_kind: str,
+        reply_flow: str | None = None,
+        attachment_meta: Sequence[dict[str, Any]] = (),
+    ) -> bool:
+        if submission_kind == "reply":
+            if reply_flow == REPLY_FLOW_OWNER_TO_USER:
+                return bool(compiled.get("owner_reply_review_mode"))
+            return bool(compiled.get("anonymous_reply_review_required"))
+        return bool(attachment_meta and compiled.get("image_review_required"))
+
+    def _submission_requires_review(
+        self,
+        compiled: dict[str, Any],
+        *,
+        submission_kind: str,
+        reply_flow: str | None = None,
+        safety: SafetyResult,
+        attachment_meta: Sequence[dict[str, Any]] = (),
+    ) -> bool:
+        return bool(
+            self._policy_review_required(
+                compiled,
+                submission_kind=submission_kind,
+                reply_flow=reply_flow,
+                attachment_meta=attachment_meta,
+            )
+            or self._needs_review(compiled, safety=safety, attachment_meta=attachment_meta)
+        )
 
     def _has_review_channel(self, guild_id: int) -> bool:
         compiled = self.get_compiled_config(guild_id)
@@ -1576,7 +1631,7 @@ class ConfessionsService:
 
     def _review_channel_requirement_message(self, *, for_images: bool = False) -> str:
         if for_images:
-            return "Image confessions always go through private review, and this server still needs a separate review channel configured."
+            return "This image flow still needs a separate private review channel before Babblebox can review it safely."
         return "This confession needs moderator review, but the server has not configured a separate private review channel yet."
 
     async def _upsert_private_media(self, guild_id: int, submission_id: str, attachments: Sequence[Any], *, now_iso: str):
@@ -2089,10 +2144,21 @@ class ConfessionsService:
                 reply_flow=normalized_reply_flow,
                 parent_confession_id=normalized_parent_confession_id,
             )
-        requires_review = (
-            bool(compiled.get("owner_reply_review_mode"))
-            if submission_kind == "reply" and normalized_reply_flow == REPLY_FLOW_OWNER_TO_USER
-            else submission_kind == "reply" or self._needs_review(compiled, safety=safety, attachment_meta=attachment_meta)
+        image_policy_review = bool(
+            attachment_meta
+            and self._policy_review_required(
+                compiled,
+                submission_kind=submission_kind,
+                reply_flow=normalized_reply_flow,
+                attachment_meta=attachment_meta,
+            )
+        )
+        requires_review = self._submission_requires_review(
+            compiled,
+            submission_kind=submission_kind,
+            reply_flow=normalized_reply_flow,
+            safety=safety,
+            attachment_meta=attachment_meta,
         )
         ignore_existing_cooldown = submission_kind == "reply" and normalized_reply_flow == REPLY_FLOW_OWNER_TO_USER
 
@@ -2191,21 +2257,11 @@ class ConfessionsService:
                 parent_confession_id=normalized_parent_confession_id,
             )
 
-        if attachment_meta and not self._has_review_channel(guild.id):
-            return ConfessionSubmissionResult(
-                False,
-                "blocked",
-                self._review_channel_requirement_message(for_images=True),
-                submission_kind=submission_kind,
-                reply_flow=normalized_reply_flow,
-                parent_confession_id=normalized_parent_confession_id,
-            )
-
         if requires_review and not self._has_review_channel(guild.id):
             return ConfessionSubmissionResult(
                 False,
                 "blocked",
-                self._review_channel_requirement_message(),
+                self._review_channel_requirement_message(for_images=image_policy_review),
                 submission_kind=submission_kind,
                 reply_flow=normalized_reply_flow,
                 parent_confession_id=normalized_parent_confession_id,
@@ -3300,29 +3356,222 @@ class ConfessionsService:
     def _mark_support_rate_limit(self, guild_id: int, author_id: int, kind: str):
         self._support_rate_limits[(guild_id, author_id, kind)] = time.monotonic() + SUPPORT_RATE_LIMIT_SECONDS
 
-    async def _post_support_ticket(
+    def _support_ticket_target_id(self, ticket: dict[str, Any]) -> str | None:
+        for key in ("action_target_id", "reference_case_id", "reference_confession_id"):
+            cleaned = normalize_plain_text(ticket.get(key)).upper() if ticket.get(key) else None
+            if cleaned:
+                return cleaned
+        return None
+
+    def _support_ticket_actions(self, ticket: dict[str, Any]) -> tuple[str, ...]:
+        base = ("resolve",)
+        target_id = self._support_ticket_target_id(ticket)
+        if str(ticket.get("kind") or "") == "appeal":
+            actionable = ("false_positive", "clear", "restrict_images", "pause_24h", "pause_7d", "perm_ban")
+        else:
+            actionable = ("delete", "restrict_images", "pause_24h", "pause_7d", "perm_ban")
+        if not target_id:
+            actionable = ()
+        return (*base, *actionable, "details", "refresh")
+
+    def _support_ticket_action_label(self, action: str) -> str:
+        labels = {
+            "resolve": "Resolve",
+            "false_positive": "False Positive",
+            "clear": "Clear Restriction",
+            "restrict_images": "Restrict Images",
+            "pause_24h": "Pause 24h",
+            "pause_7d": "Pause 7d",
+            "perm_ban": "Permanent Ban",
+            "delete": "Delete",
+            "details": "Details",
+            "refresh": "Refresh",
+        }
+        return labels.get(action, action.replace("_", " ").title())
+
+    def _support_ticket_status_label(self, ticket: dict[str, Any]) -> str:
+        status = str(ticket.get("status") or "open")
+        if status == "resolved":
+            action = normalize_plain_text(ticket.get("resolution_action"))
+            if action:
+                return f"Resolved via {self._support_ticket_action_label(action)}"
+            return "Resolved"
+        return "Open"
+
+    def _support_ticket_reference_value(self, ticket: dict[str, Any]) -> str:
+        rows = []
+        confession_id = normalize_plain_text(ticket.get("reference_confession_id")).upper() if ticket.get("reference_confession_id") else None
+        case_id = normalize_plain_text(ticket.get("reference_case_id")).upper() if ticket.get("reference_case_id") else None
+        target_id = self._support_ticket_target_id(ticket)
+        if confession_id:
+            rows.append(f"Confession: `{confession_id}`")
+        if case_id:
+            rows.append(f"Case: `{case_id}`")
+        if target_id and target_id not in {confession_id, case_id}:
+            rows.append(f"Action Target: `{target_id}`")
+        return "\n".join(rows) or "No public reference attached."
+
+    def build_support_ticket_embed(self, ticket: dict[str, Any], *, note: str | None = None) -> discord.Embed:
+        kind = str(ticket.get("kind") or "report")
+        ticket_id = normalize_plain_text(ticket.get("ticket_id")) or "CT-UNKNOWN"
+        title = "Anonymous Appeal" if kind == "appeal" else "Anonymous Report"
+        embed = discord.Embed(
+            title=f"{title} `{ticket_id}`",
+            description="Staff-blind support ticket. Use confession IDs, case IDs, or this ticket only; the author identity stays hidden.",
+            color=ge.EMBED_THEME["info"] if ticket.get("status") == "open" else ge.EMBED_THEME["success"],
+        )
+        embed.add_field(name="Status", value=self._support_ticket_status_label(ticket), inline=True)
+        embed.add_field(
+            name="Opened",
+            value=_rounded_age_text(ticket.get("created_at")),
+            inline=True,
+        )
+        embed.add_field(name="Reference", value=ge.safe_field_text(self._support_ticket_reference_value(ticket), limit=1024), inline=False)
+        context_label = normalize_plain_text(ticket.get("context_label"))
+        if context_label:
+            embed.add_field(name="Context", value=ge.safe_field_text(context_label, limit=1024), inline=False)
+        embed.add_field(
+            name="Details",
+            value=ge.safe_field_text(normalize_plain_text(ticket.get("details")) or "No details supplied.", limit=1024),
+            inline=False,
+        )
+        actions = ", ".join(self._support_ticket_action_label(action) for action in self._support_ticket_actions(ticket) if action not in {"details", "refresh"})
+        if actions:
+            embed.add_field(name="Quick Actions", value=ge.safe_field_text(actions, limit=1024), inline=False)
+        if note:
+            embed.add_field(name="Last Update", value=ge.safe_field_text(note, limit=1024), inline=False)
+        if not self._support_ticket_target_id(ticket):
+            embed.add_field(
+                name="Actionability",
+                value="This ticket has no live confession or case target attached, so only resolve/refresh/detail actions stay available.",
+                inline=False,
+            )
+        return ge.style_embed(embed, footer="Babblebox Confessions | Staff-blind support")
+
+    def build_support_ticket_detail_embed(self, ticket: dict[str, Any], *, message: str | None = None) -> discord.Embed:
+        embed = discord.Embed(
+            title="Support Ticket Detail",
+            description="Staff-blind support snapshot. This view stays limited to ticket metadata and public IDs.",
+            color=ge.EMBED_THEME["info"],
+        )
+        embed.add_field(name="Ticket", value=f"`{normalize_plain_text(ticket.get('ticket_id')) or 'CT-UNKNOWN'}`", inline=True)
+        embed.add_field(name="Kind", value=str(ticket.get("kind") or "unknown").title(), inline=True)
+        embed.add_field(name="Status", value=self._support_ticket_status_label(ticket), inline=True)
+        embed.add_field(name="Reference", value=ge.safe_field_text(self._support_ticket_reference_value(ticket), limit=1024), inline=False)
+        context_label = normalize_plain_text(ticket.get("context_label"))
+        if context_label:
+            embed.add_field(name="Context", value=ge.safe_field_text(context_label, limit=1024), inline=False)
+        embed.add_field(
+            name="Details",
+            value=ge.safe_field_text(normalize_plain_text(ticket.get("details")) or "No details supplied.", limit=1024),
+            inline=False,
+        )
+        if message:
+            embed.add_field(name="Note", value=ge.safe_field_text(message, limit=1024), inline=False)
+        return ge.style_embed(embed, footer="Babblebox Confessions | Staff-blind detail")
+
+    async def _sync_support_ticket_message(
         self,
         guild: discord.Guild,
+        ticket: dict[str, Any],
         *,
-        title: str,
-        description: str,
-        fields: Sequence[tuple[str, str]],
-    ) -> tuple[bool, str]:
-        support_snapshot = self.support_channel_snapshot(guild)
+        note: str | None = None,
+    ) -> tuple[bool, str, dict[str, Any]]:
+        configured_channel_id = self.get_config(guild.id).get("appeals_channel_id")
+        support_snapshot = self.support_channel_snapshot(
+            guild,
+            channel_id=ticket.get("message_channel_id") or configured_channel_id,
+        )
+        if (
+            not support_snapshot["ok"]
+            and ticket.get("message_channel_id")
+            and configured_channel_id
+            and configured_channel_id != ticket.get("message_channel_id")
+        ):
+            support_snapshot = self.support_channel_snapshot(guild, channel_id=configured_channel_id)
         if not support_snapshot["ok"]:
-            return False, str(support_snapshot["message"])
-        channel = support_snapshot["channel"]
+            self.log_admin_diagnostic(
+                code="support_ticket_render_unavailable",
+                stage="support_ticket_render",
+                guild_id=guild.id,
+                note=f"ticket_id={ticket.get('ticket_id')}",
+            )
+            return False, str(support_snapshot["message"]), ticket
+        channel_id = ticket.get("message_channel_id") or support_snapshot["channel_id"]
+        channel = guild.get_channel(channel_id) or self.bot.get_channel(channel_id)
         if channel is None:
-            return False, "The configured appeals/report channel is unavailable."
-        ticket_id = _public_id(SUPPORT_TICKET_ID_PREFIX)
-        embed = discord.Embed(title=f"{title} `{ticket_id}`", description=description, color=ge.EMBED_THEME["info"])
-        for name, value in fields:
-            embed.add_field(name=name, value=ge.safe_field_text(value, limit=1024), inline=False)
-        embed = ge.style_embed(embed, footer="Babblebox Confessions | Staff-blind support")
-        with contextlib.suppress(discord.Forbidden, discord.HTTPException):
-            await channel.send(embed=embed, allowed_mentions=discord.AllowedMentions.none())
-            return True, ticket_id
-        return False, "Babblebox could not deliver that support request right now."
+            self.log_admin_diagnostic(
+                code="support_ticket_render_channel_missing",
+                stage="support_ticket_render",
+                guild_id=guild.id,
+                channel_id=channel_id,
+                note=f"ticket_id={ticket.get('ticket_id')}",
+            )
+            return False, "The configured appeals/report channel is unavailable.", ticket
+        embed = self.build_support_ticket_embed(ticket, note=note)
+        view = None
+        if ticket.get("status") == "open":
+            cog = self.bot.get_cog("ConfessionsCog")
+            if cog is not None:
+                build_view = getattr(cog, "build_support_ticket_view", None)
+                if callable(build_view):
+                    view = build_view(
+                        ticket_id=str(ticket["ticket_id"]),
+                        kind=str(ticket.get("kind") or "report"),
+                        actionable=bool(self._support_ticket_target_id(ticket)),
+                    )
+        message = await self._queue_message(channel, message_id=ticket.get("message_id"))
+        try:
+            if message is not None:
+                await message.edit(embed=embed, view=view)
+            else:
+                message = await channel.send(embed=embed, view=view, allowed_mentions=discord.AllowedMentions.none())
+        except (discord.Forbidden, discord.HTTPException) as exc:
+            self.log_admin_diagnostic(
+                code="support_ticket_render_send_failed",
+                stage="support_ticket_render",
+                guild_id=guild.id,
+                channel_id=getattr(channel, "id", None),
+                message_id=ticket.get("message_id"),
+                note=f"ticket_id={ticket.get('ticket_id')}",
+                exc=exc,
+            )
+            return False, "Babblebox could not deliver that support ticket right now.", ticket
+        updated_ticket = dict(ticket)
+        updated_ticket["message_channel_id"] = getattr(channel, "id", None)
+        updated_ticket["message_id"] = getattr(message, "id", None)
+        await self.store.upsert_support_ticket(updated_ticket)
+        if view is not None and message is not None:
+            try:
+                self.bot.add_view(view, message_id=message.id)
+            except Exception as exc:
+                self.log_admin_diagnostic(
+                    code="support_ticket_render_register_failed",
+                    stage="support_ticket_render",
+                    guild_id=guild.id,
+                    channel_id=getattr(channel, "id", None),
+                    message_id=getattr(message, "id", None),
+                    note=f"ticket_id={ticket.get('ticket_id')}",
+                    exc=exc,
+                )
+        return True, f"Support ticket `{ticket['ticket_id']}` is live in <#{channel.id}>.", updated_ticket
+
+    async def resume_support_tickets(self):
+        guild_ids = set(self._compiled_configs)
+        guild_ids.update(getattr(guild, "id", None) for guild in getattr(self.bot, "guilds", []) if getattr(guild, "id", None) is not None)
+        for guild_id in sorted(guild_ids):
+            guild = self.bot.get_guild(guild_id)
+            if guild is None:
+                continue
+            for ticket in await self.store.list_support_tickets(guild_id, status="open", limit=200):
+                await self._sync_support_ticket_message(guild, ticket)
+
+    async def sync_support_ticket(self, guild: discord.Guild, ticket_id: str, *, note: str | None = None) -> tuple[bool, str]:
+        ticket = await self.store.fetch_support_ticket(guild.id, ticket_id)
+        if ticket is None:
+            return False, "That support ticket no longer exists."
+        ok, message, _ = await self._sync_support_ticket_message(guild, ticket, note=note)
+        return ok, message
 
     def _sanitize_support_body(self, raw_text: str | None) -> tuple[bool, str]:
         normalized = normalize_plain_text(raw_text)
@@ -3352,7 +3601,11 @@ class ConfessionsService:
         if not valid_details:
             return False, cleaned_details
         cleaned_target = normalize_plain_text(target_id).upper() if target_id else None
-        fields: list[tuple[str, str]] = []
+        ticket_kind = kind
+        action_target_id: str | None = None
+        reference_confession_id: str | None = None
+        reference_case_id: str | None = None
+        context_parts: list[str] = []
         if kind == "appeal":
             state = self._normalize_restriction_state(await self._enforcement_state(guild.id, author_id))
             restriction_label = self._restriction_label(state)
@@ -3362,12 +3615,18 @@ class ConfessionsService:
                     return False, error or "That confession or case could not be verified for appeal."
                 submission = context["submission"]
                 case = context.get("case")
-                fields.append(("Reference", f"{submission['confession_id']}" if case is None else f"{submission['confession_id']} / {case['case_id']}"))
-                fields.append(("Submission State", f"{submission.get('status', 'unknown').replace('_', ' ').title()} / {submission.get('review_status', 'none').replace('_', ' ').title()}"))
+                reference_confession_id = submission["confession_id"]
+                reference_case_id = case["case_id"] if case is not None else None
+                action_target_id = reference_case_id or reference_confession_id
+                context_parts.append(
+                    f"Submission state: {submission.get('status', 'unknown').replace('_', ' ').title()} / "
+                    f"{submission.get('review_status', 'none').replace('_', ' ').title()}"
+                )
             elif restriction_label != "None":
-                fields.append(("Restriction", restriction_label))
+                context_parts.append(f"Restriction: {restriction_label}")
                 if state.get("last_case_id"):
-                    fields.append(("Reference", str(state["last_case_id"])))
+                    reference_case_id = str(state["last_case_id"])
+                    action_target_id = reference_case_id
             else:
                 return False, "Reference your own confession or case ID, or send the appeal while the restriction is still active."
             title = "Anonymous Appeal"
@@ -3378,31 +3637,46 @@ class ConfessionsService:
                 case = await self.store.fetch_case(guild.id, cleaned_target)
                 if case is None:
                     return False, "That case ID was not found."
-                fields.append(("Reference", f"{case['confession_id']} / {case['case_id']}"))
-                fields.append(("Case Kind", str(case.get("case_kind") or "unknown").replace("_", " ").title()))
+                reference_confession_id = case["confession_id"]
+                reference_case_id = case["case_id"]
+                action_target_id = case["case_id"]
+                context_parts.append(f"Case kind: {str(case.get('case_kind') or 'unknown').replace('_', ' ').title()}")
             elif cleaned_target.startswith(f"{CONFESSION_ID_PREFIX}-"):
                 submission = await self.store.fetch_submission_by_confession_id(guild.id, cleaned_target)
                 if submission is None:
                     return False, "That confession ID was not found."
-                fields.append(("Reference", submission["confession_id"]))
-                fields.append(("Submission State", str(submission.get("status") or "unknown").replace("_", " ").title()))
+                reference_confession_id = submission["confession_id"]
+                action_target_id = submission["confession_id"]
+                context_parts.append(f"Submission state: {str(submission.get('status') or 'unknown').replace('_', ' ').title()}")
             else:
                 return False, "Reports should reference a confession ID like `CF-XXXXXX` or a case ID like `CS-XXXXXX`."
             title = "Anonymous Report"
         rate_limit_message = self._support_rate_limit_message(guild.id, author_id, kind)
         if rate_limit_message is not None:
             return False, rate_limit_message
-        fields.append(("Details", cleaned_details))
-        ok, support_result = await self._post_support_ticket(
-            guild,
-            title=title,
-            description="The author identity remains hidden from staff. Use the public IDs below for follow-up.",
-            fields=fields,
-        )
+        ticket_id = _public_id(SUPPORT_TICKET_ID_PREFIX)
+        ticket = {
+            "ticket_id": ticket_id,
+            "guild_id": guild.id,
+            "kind": ticket_kind,
+            "action_target_id": action_target_id,
+            "reference_confession_id": reference_confession_id,
+            "reference_case_id": reference_case_id,
+            "context_label": " | ".join(context_parts) if context_parts else None,
+            "details": cleaned_details,
+            "status": "open",
+            "resolution_action": None,
+            "message_channel_id": None,
+            "message_id": None,
+            "created_at": ge.now_utc().isoformat(),
+            "resolved_at": None,
+        }
+        await self.store.upsert_support_ticket(ticket)
+        ok, support_result, _ = await self._sync_support_ticket_message(guild, ticket)
         if not ok:
             return False, support_result
         self._mark_support_rate_limit(guild.id, author_id, kind)
-        return True, f"{title} `{support_result}` was sent privately."
+        return True, f"{title} `{ticket_id}` was sent privately."
 
     def _member_reason_message(self, result: ConfessionSubmissionResult) -> str:
         flags = set(result.flag_codes)
@@ -3484,15 +3758,25 @@ class ConfessionsService:
         view.add_item(discord.ui.Button(label="Open Post", style=discord.ButtonStyle.link, url=result.jump_url))
         return view
 
+    def _image_policy_label(self, config: dict[str, Any]) -> str:
+        if not config["allow_images"]:
+            return "Off by default"
+        if config.get("image_review_required"):
+            return f"Enabled (max {config['max_images']}, private review)"
+        return f"Enabled (max {config['max_images']}, no forced review)"
+
+    def _reply_policy_label(self, config: dict[str, Any]) -> str:
+        if not config["allow_anonymous_replies"]:
+            return "Off by default"
+        if config.get("anonymous_reply_review_required"):
+            return "Enabled with private review"
+        return "Enabled without forced review"
+
     def build_member_panel_embed(self, guild: discord.Guild) -> discord.Embed:
         config = self.get_config(guild.id)
         ready = self.operability_message(guild.id) == "Confessions are ready."
-        image_policy = (
-            f"Enabled (max {config['max_images']}, private review)"
-            if config["allow_images"]
-            else "Off by default"
-        )
-        reply_policy = "Enabled with warning" if config["allow_anonymous_replies"] else "Off by default"
+        image_policy = self._image_policy_label(config)
+        reply_policy = self._reply_policy_label(config)
         owner_reply_policy = "Enabled by default" if config["allow_owner_replies"] else "Off"
         owner_reply_review = "Private review" if config["owner_reply_review_mode"] else "Direct publish"
         edit_policy = "Enabled with warning" if config["allow_self_edit"] else "Off by default"
@@ -3568,12 +3852,22 @@ class ConfessionsService:
         role_snapshot = self._role_policy_snapshot(guild)
         support_snapshot = self.support_channel_snapshot(guild)
         image_line = (
-            f"Text, one trusted link total, and up to {config['max_images']} images only if admins explicitly enable them. Enabled images always enter private review."
+            f"Text, one trusted link total, and up to {config['max_images']} images only if admins explicitly enable them. "
+            + (
+                "This server routes enabled images through private review before posting."
+                if config.get("image_review_required")
+                else "Enabled images can post directly unless another review rule still catches them."
+            )
             if config["allow_images"]
             else "Text and one trusted link total. Images are off by default unless admins explicitly enable them."
         )
         reply_line = (
-            "Reply to confession anonymously is enabled with extra moderation burden, so every reply stays anonymous, text-only, launches from a live confession post, and may go through private approval before posting."
+            "Reply to confession anonymously is enabled with extra moderation burden, so every reply stays anonymous, text-only, and launches from a live confession post. "
+            + (
+                "This server routes those replies through private review before posting."
+                if config.get("anonymous_reply_review_required")
+                else "They can post directly unless another review rule still catches them."
+            )
             if config["allow_anonymous_replies"]
             else "Anonymous replies are off by default unless admins explicitly enable them."
         )
@@ -3688,8 +3982,8 @@ class ConfessionsService:
             embed.add_field(
                 name="Risky Features",
                 value=(
-                    f"Images: **{'Enabled with warning' if config['allow_images'] else 'Off by default'}**\n"
-                    f"Public anonymous replies: **{'Enabled with warning' if config['allow_anonymous_replies'] else 'Off by default'}**\n"
+                    f"Images: **{self._image_policy_label(config)}**\n"
+                    f"Public anonymous replies: **{self._reply_policy_label(config)}**\n"
                     f"Owner replies: **{'Enabled by default' if config['allow_owner_replies'] else 'Off'}**\n"
                     f"Owner-reply review: **{'On' if config['owner_reply_review_mode'] else 'Off by default'}**\n"
                     f"Self-edit: **{'Enabled with warning' if config['allow_self_edit'] else 'Off by default'}**\n"
@@ -3700,8 +3994,8 @@ class ConfessionsService:
             embed.add_field(
                 name="Warnings",
                 value=(
-                    "Images can increase moderation burden and abuse risk.\n"
-                    "Public anonymous replies can increase abuse, drama, and moderation complexity.\n"
+                    "Images can increase moderation burden and abuse risk, so admins should decide whether they always enter private review.\n"
+                    "Public anonymous replies can increase abuse, drama, and moderation complexity, so admins should decide whether they always enter private review.\n"
                     "Owner replies stay owner-bound, text-only, and limited to one extra bounce.\n"
                     "Editing can create bait-and-switch moderation problems."
                 ),
@@ -3892,6 +4186,7 @@ class ConfessionsService:
             "flag_codes": tuple(row.get("flag_codes") or ()),
             "reason_labels": tuple(_staff_reason_labels(row.get("flag_codes") or ())),
             "attachment_summary": _attachment_summary_from_meta(row.get("attachment_meta", [])),
+            "attachment_urls": tuple(normalize_plain_text(url) for url in row.get("attachment_urls") or () if normalize_plain_text(url)),
             "shared_link_url": row.get("shared_link_url"),
             "age": _rounded_age_text(row.get("created_at")),
         }
@@ -3905,7 +4200,7 @@ class ConfessionsService:
     async def list_review_targets(self, guild_id: int, *, limit: int = REVIEW_PREVIEW_LIMIT) -> list[dict[str, Any]]:
         return [self._safe_case_surface(record) for record in await self.store.list_review_surfaces(guild_id, limit=limit)]
 
-    def build_review_queue_embed(self, guild: discord.Guild, pending_rows: list[dict[str, Any]], *, note: str | None = None) -> discord.Embed:
+    def build_review_queue_embeds(self, guild: discord.Guild, pending_rows: list[dict[str, Any]], *, note: str | None = None) -> list[discord.Embed]:
         embed = discord.Embed(
             title="Confession Review Queue",
             description="The oldest anonymous case is shown first." if pending_rows else "No anonymous confessions are waiting for review right now.",
@@ -3915,7 +4210,7 @@ class ConfessionsService:
         if not pending_rows:
             if note:
                 embed.add_field(name="Last Update", value=ge.safe_field_text(note), inline=False)
-            return ge.style_embed(embed, footer="Babblebox Confessions | Staff-blind review")
+            return [ge.style_embed(embed, footer="Babblebox Confessions | Staff-blind review")]
         current = pending_rows[0]
         current_label = self._submission_kind_label(current)
         current_value = f"Case `{current['case_id']}` | {current_label} `{current['confession_id']}`"
@@ -3928,7 +4223,18 @@ class ConfessionsService:
         if current.get("shared_link_url"):
             embed.add_field(name="Link", value=str(current["shared_link_url"]), inline=False)
         if current.get("attachment_summary"):
-            embed.add_field(name="Attachments", value=current["attachment_summary"], inline=False)
+            attachment_urls = list(current.get("attachment_urls") or ())
+            if attachment_urls:
+                embed.add_field(
+                    name="Attachments",
+                    value=ge.safe_field_text(
+                        f"{current['attachment_summary']}\nShowing {min(len(attachment_urls), 3)} image preview(s) below.",
+                        limit=1024,
+                    ),
+                    inline=False,
+                )
+            else:
+                embed.add_field(name="Attachments", value=current["attachment_summary"], inline=False)
         backlog = []
         for row in pending_rows[:REVIEW_PREVIEW_LIMIT]:
             backlog.append(f"`{row['case_id']}` / `{row['confession_id']}` ({self._submission_kind_label(row)})")
@@ -3937,7 +4243,28 @@ class ConfessionsService:
         embed.add_field(name="Backlog", value=ge.safe_field_text("\n".join(backlog), limit=1024), inline=False)
         if note:
             embed.add_field(name="Last Update", value=ge.safe_field_text(note), inline=False)
-        return ge.style_embed(embed, footer="Babblebox Confessions | Staff-blind review")
+        embeds = [ge.style_embed(embed, footer="Babblebox Confessions | Staff-blind review")]
+        for index, url in enumerate(list(current.get("attachment_urls") or ())[:3], start=1):
+            try:
+                image_embed = discord.Embed(
+                    title=f"Review Media `{current['confession_id']}`",
+                    description=f"Image {index}",
+                    color=ge.EMBED_THEME["info"],
+                )
+                image_embed.set_image(url=url)
+                embeds.append(ge.style_embed(image_embed, footer="Babblebox Confessions | Staff-blind review"))
+            except Exception as exc:
+                self.log_admin_diagnostic(
+                    code="review_queue_media_render_failed",
+                    stage="review_queue_media_render",
+                    guild_id=guild.id,
+                    note=f"case_id={current['case_id']}, image_index={index}",
+                    exc=exc,
+                )
+        return embeds
+
+    def build_review_queue_embed(self, guild: discord.Guild, pending_rows: list[dict[str, Any]], *, note: str | None = None) -> discord.Embed:
+        return self.build_review_queue_embeds(guild, pending_rows, note=note)[0]
 
     async def _queue_message(self, channel: Any, *, message_id: int | None):
         if not isinstance(message_id, int):
@@ -4138,7 +4465,7 @@ class ConfessionsService:
             message = await self._queue_message(channel, message_id=record.get("message_id"))
             if message is not None:
                 with contextlib.suppress(discord.Forbidden, discord.HTTPException):
-                    await message.edit(embed=self.build_review_queue_embed(guild, [], note=note), view=None)
+                    await message.edit(embeds=self.build_review_queue_embeds(guild, [], note=note), view=None)
         await self.store.delete_review_queue(guild.id)
 
     async def _sync_review_queue(self, guild: discord.Guild, *, note: str | None = None) -> tuple[bool, str]:
@@ -4164,18 +4491,25 @@ class ConfessionsService:
             build_view = getattr(cog, "build_review_view", None)
             if callable(build_view):
                 view = build_view(case_id=current["case_id"], version=current["review_version"])
-        embed = self.build_review_queue_embed(guild, pending_rows, note=note)
+        embeds = self.build_review_queue_embeds(guild, pending_rows, note=note)
+        if current.get("attachment_urls"):
+            self.log_admin_diagnostic(
+                code="review_queue_refresh_media_ready",
+                stage="review_queue_refresh_media",
+                guild_id=guild.id,
+                note=f"case_id={current['case_id']}, attachments={len(current.get('attachment_urls') or ())}",
+            )
         message = await self._queue_message(channel, message_id=queue_record.get("message_id") if queue_record else None)
         if message is not None:
             try:
-                await message.edit(embed=embed, view=view)
+                await message.edit(embeds=embeds, view=view)
             except discord.NotFound:
                 message = None
             except (discord.Forbidden, discord.HTTPException):
                 return False, "Babblebox could not refresh the confession review queue in that channel."
         if message is None:
             try:
-                message = await channel.send(embed=embed, view=view, allowed_mentions=discord.AllowedMentions.none())
+                message = await channel.send(embeds=embeds, view=view, allowed_mentions=discord.AllowedMentions.none())
             except (discord.Forbidden, discord.HTTPException):
                 return False, "Babblebox could not refresh the confession review queue in that channel."
         if message is None:
@@ -4489,7 +4823,13 @@ class ConfessionsService:
         if action in {"approve", "false_positive"} and case.get("case_kind") == "safety_block":
             compiled = self.get_compiled_config(guild.id)
             attachment_meta = list(submission.get("attachment_meta") or [])
-            requires_review = bool(submission.get("submission_kind") == "reply" or attachment_meta or compiled["review_mode"])
+            requires_review = self._submission_requires_review(
+                compiled,
+                submission_kind=str(submission.get("submission_kind") or "confession"),
+                reply_flow=submission.get("reply_flow"),
+                safety=SafetyResult(outcome="publish", reason="", flag_codes=(), strike_worthy=False),
+                attachment_meta=attachment_meta,
+            )
             relaxed_state = self._relax_case_penalty(state, case_id=case_id, now_iso=now_iso, clear_strikes=clear_strikes)
             resolution_status = "approved" if action == "approve" else "overridden"
             submission["flag_codes"] = []
@@ -4649,6 +4989,77 @@ class ConfessionsService:
             return True, f"Case `{case_id}` was resolved with `{action_label}`."
 
         return False, "That moderation action is not supported."
+
+    async def handle_support_ticket_action(
+        self,
+        guild: discord.Guild,
+        *,
+        ticket_id: str,
+        action: str,
+        actor: object | None = None,
+    ) -> tuple[bool, str, dict[str, Any] | None]:
+        ticket = await self.store.fetch_support_ticket(guild.id, ticket_id)
+        if ticket is None:
+            return False, "That support ticket no longer exists.", None
+        if action == "refresh":
+            ok, message, updated_ticket = await self._sync_support_ticket_message(
+                guild,
+                ticket,
+                note="Support ticket refreshed.",
+            )
+            return ok, ("Support ticket refreshed." if ok else message), updated_ticket
+        if action == "details":
+            return True, "Support ticket detail ready.", ticket
+        if ticket.get("status") != "open":
+            return False, "That support ticket is already closed.", ticket
+        if action not in self._support_ticket_actions(ticket):
+            return False, "That support action is not available for this ticket.", ticket
+        updated_ticket = dict(ticket)
+        if action == "resolve":
+            updated_ticket["status"] = "resolved"
+            updated_ticket["resolution_action"] = "resolve"
+            updated_ticket["resolved_at"] = ge.now_utc().isoformat()
+            await self.store.upsert_support_ticket(updated_ticket)
+            await self._sync_support_ticket_message(guild, updated_ticket, note="Support ticket resolved.")
+            return True, f"Support ticket `{ticket_id}` was resolved.", updated_ticket
+        target_id = self._support_ticket_target_id(ticket)
+        if not target_id:
+            return False, "That ticket has no live confession or case target left to moderate.", ticket
+        service_action, duration_seconds, clear_strikes = _moderation_action_payload(action)
+        try:
+            ok, message = await self.handle_staff_action(
+                guild,
+                target_id=target_id,
+                action=service_action,
+                actor=actor,
+                duration_seconds=duration_seconds,
+                clear_strikes=clear_strikes or action == "false_positive",
+            )
+        except Exception as exc:
+            self.log_admin_diagnostic(
+                code="support_ticket_action_failed",
+                stage="support_ticket_action",
+                guild_id=guild.id,
+                note=f"ticket_id={ticket_id}, action={action}",
+                exc=exc,
+            )
+            return False, "Babblebox could not finish that support action safely right now.", ticket
+        if not ok:
+            stale_signals = ("no longer exists", "already closed", "not found", "mapping is unavailable")
+            if any(signal in message.lower() for signal in stale_signals):
+                updated_ticket["status"] = "resolved"
+                updated_ticket["resolution_action"] = "stale"
+                updated_ticket["resolved_at"] = ge.now_utc().isoformat()
+                await self.store.upsert_support_ticket(updated_ticket)
+                await self._sync_support_ticket_message(guild, updated_ticket, note=message)
+                return True, f"Support ticket `{ticket_id}` was closed because its target is no longer actionable.", updated_ticket
+            return False, message, ticket
+        updated_ticket["status"] = "resolved"
+        updated_ticket["resolution_action"] = action
+        updated_ticket["resolved_at"] = ge.now_utc().isoformat()
+        await self.store.upsert_support_ticket(updated_ticket)
+        await self._sync_support_ticket_message(guild, updated_ticket, note=message)
+        return True, message, updated_ticket
 
     async def handle_staff_action(
         self,

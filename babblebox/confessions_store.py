@@ -29,6 +29,8 @@ VALID_SUBMISSION_KINDS = {"confession", "reply"}
 VALID_REPLY_FLOWS = {"reply_to_confession", "owner_reply_to_user"}
 VALID_CASE_KINDS = {"review", "safety_block", "published_moderation"}
 VALID_CASE_STATUSES = {"open", "resolved"}
+VALID_SUPPORT_TICKET_KINDS = {"appeal", "report"}
+VALID_SUPPORT_TICKET_STATUSES = {"open", "resolved"}
 VALID_OWNER_REPLY_OPPORTUNITY_STATUSES = {"pending", "locked", "used", "dismissed", "expired"}
 VALID_OWNER_REPLY_NOTIFICATION_STATUSES = {"none", "sent", "failed", "cooldown"}
 PROTECTED_OWNER_REPLY_NAME = "Protected member"
@@ -68,7 +70,9 @@ def default_confession_config(guild_id: int | None = None) -> dict[str, Any]:
         "allowed_role_ids": [],
         "blocked_role_ids": [],
         "allow_images": False,
+        "image_review_required": False,
         "allow_anonymous_replies": False,
+        "anonymous_reply_review_required": False,
         "allow_owner_replies": True,
         "owner_reply_review_mode": False,
         "allow_self_edit": False,
@@ -269,10 +273,24 @@ def normalize_confession_config(guild_id: int, payload: Any) -> dict[str, Any]:
     cleaned["allowed_role_ids"] = _clean_int_list(payload.get("allowed_role_ids"))
     cleaned["blocked_role_ids"] = _clean_int_list(payload.get("blocked_role_ids"))
     cleaned["allow_images"] = bool(payload.get("allow_images", False))
+    if "image_review_required" in payload:
+        cleaned["image_review_required"] = bool(payload.get("image_review_required"))
+    else:
+        cleaned["image_review_required"] = cleaned["allow_images"]
     cleaned["allow_anonymous_replies"] = bool(payload.get("allow_anonymous_replies", False))
+    if "anonymous_reply_review_required" in payload:
+        cleaned["anonymous_reply_review_required"] = bool(payload.get("anonymous_reply_review_required"))
+    else:
+        cleaned["anonymous_reply_review_required"] = cleaned["allow_anonymous_replies"]
     cleaned["allow_owner_replies"] = bool(payload.get("allow_owner_replies", True))
     cleaned["owner_reply_review_mode"] = bool(payload.get("owner_reply_review_mode", False))
     cleaned["allow_self_edit"] = bool(payload.get("allow_self_edit", False))
+    if not cleaned["allow_images"]:
+        cleaned["image_review_required"] = False
+    if not cleaned["allow_anonymous_replies"]:
+        cleaned["anonymous_reply_review_required"] = False
+    if not cleaned["allow_owner_replies"]:
+        cleaned["owner_reply_review_mode"] = False
     cleaned["auto_moderation_exempt_admins"] = bool(payload.get("auto_moderation_exempt_admins", True))
     cleaned["auto_moderation_exempt_role_ids"] = _clean_int_list(payload.get("auto_moderation_exempt_role_ids"))
     max_images = payload.get("max_images")
@@ -293,8 +311,8 @@ def normalize_confession_config(guild_id: int, payload: Any) -> dict[str, Any]:
     if cleaned["panel_channel_id"] is None:
         cleaned["panel_message_id"] = None
     if cleaned["review_channel_id"] is None or cleaned["review_channel_id"] == cleaned["confession_channel_id"]:
-        cleaned["allow_images"] = False
-        cleaned["allow_anonymous_replies"] = False
+        cleaned["image_review_required"] = False
+        cleaned["anonymous_reply_review_required"] = False
         cleaned["owner_reply_review_mode"] = False
     return cleaned
 
@@ -533,6 +551,36 @@ def normalize_review_queue(payload: Any) -> dict[str, Any] | None:
         "channel_id": _clean_int(payload.get("channel_id")),
         "message_id": _clean_int(payload.get("message_id")),
         "updated_at": _serialize_datetime(payload.get("updated_at")),
+    }
+
+
+def normalize_support_ticket(payload: Any) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    guild_id = _clean_int(payload.get("guild_id"))
+    ticket_id = _clean_optional_text(payload.get("ticket_id"), max_length=32)
+    kind = str(payload.get("kind") or "").strip().lower()
+    status = str(payload.get("status", "open")).strip().lower()
+    created_at = _serialize_datetime(payload.get("created_at"))
+    if guild_id is None or ticket_id is None or kind not in VALID_SUPPORT_TICKET_KINDS or status not in VALID_SUPPORT_TICKET_STATUSES:
+        return None
+    if created_at is None:
+        return None
+    return {
+        "ticket_id": ticket_id,
+        "guild_id": guild_id,
+        "kind": kind,
+        "action_target_id": _clean_optional_text(payload.get("action_target_id"), max_length=32),
+        "reference_confession_id": _clean_optional_text(payload.get("reference_confession_id"), max_length=32),
+        "reference_case_id": _clean_optional_text(payload.get("reference_case_id"), max_length=32),
+        "context_label": _clean_optional_text(payload.get("context_label"), max_length=240),
+        "details": _clean_optional_text(payload.get("details"), max_length=1800),
+        "status": status,
+        "resolution_action": _clean_optional_text(payload.get("resolution_action"), max_length=48),
+        "message_channel_id": _clean_int(payload.get("message_channel_id")),
+        "message_id": _clean_int(payload.get("message_id")),
+        "created_at": created_at,
+        "resolved_at": _serialize_datetime(payload.get("resolved_at")),
     }
 
 
@@ -861,7 +909,9 @@ def _config_from_row(row: Any) -> dict[str, Any] | None:
                 label="confession_guild_configs.blocked_role_ids",
             ),
             "allow_images": row["allow_images"],
+            "image_review_required": row.get("image_review_required"),
             "allow_anonymous_replies": row.get("allow_anonymous_replies"),
+            "anonymous_reply_review_required": row.get("anonymous_reply_review_required"),
             "allow_owner_replies": row.get("allow_owner_replies"),
             "owner_reply_review_mode": row.get("owner_reply_review_mode"),
             "allow_self_edit": row.get("allow_self_edit"),
@@ -987,6 +1037,29 @@ def _review_queue_from_row(row: Any) -> dict[str, Any] | None:
             "channel_id": row["channel_id"],
             "message_id": row["message_id"],
             "updated_at": row["updated_at"],
+        }
+    )
+
+
+def _support_ticket_from_row(row: Any) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    return normalize_support_ticket(
+        {
+            "ticket_id": row["ticket_id"],
+            "guild_id": row["guild_id"],
+            "kind": row["kind"],
+            "action_target_id": row.get("action_target_id"),
+            "reference_confession_id": row.get("reference_confession_id"),
+            "reference_case_id": row.get("reference_case_id"),
+            "context_label": row.get("context_label"),
+            "details": row.get("details"),
+            "status": row.get("status"),
+            "resolution_action": row.get("resolution_action"),
+            "message_channel_id": row.get("message_channel_id"),
+            "message_id": row.get("message_id"),
+            "created_at": row.get("created_at"),
+            "resolved_at": row.get("resolved_at"),
         }
     )
 
@@ -1215,6 +1288,15 @@ class _BaseConfessionsStore:
     async def delete_review_queue(self, guild_id: int):
         raise NotImplementedError
 
+    async def fetch_support_ticket(self, guild_id: int, ticket_id: str) -> dict[str, Any] | None:
+        raise NotImplementedError
+
+    async def list_support_tickets(self, guild_id: int, *, status: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    async def upsert_support_ticket(self, record: dict[str, Any]):
+        raise NotImplementedError
+
     async def fetch_guild_counts(self, guild_id: int) -> dict[str, int]:
         raise NotImplementedError
 
@@ -1240,6 +1322,7 @@ class _MemoryConfessionsStore(_BaseConfessionsStore):
         self.secure_enforcement_states: dict[tuple[int, str], dict[str, Any]] = {}
         self.cases: dict[tuple[int, str], dict[str, Any]] = {}
         self.review_queues: dict[int, dict[str, Any]] = {}
+        self.support_tickets: dict[tuple[int, str], dict[str, Any]] = {}
 
     async def load(self):
         self.configs = {}
@@ -1252,6 +1335,7 @@ class _MemoryConfessionsStore(_BaseConfessionsStore):
         self.secure_enforcement_states = {}
         self.cases = {}
         self.review_queues = {}
+        self.support_tickets = {}
 
     def _encode_submission_row(self, normalized: dict[str, Any]) -> dict[str, Any]:
         row = deepcopy(normalized)
@@ -1727,6 +1811,11 @@ class _MemoryConfessionsStore(_BaseConfessionsStore):
             submission = _submission_from_row(deepcopy(submission_row), self._privacy) if submission_row is not None else None
             if submission is None or submission.get("status") != "queued":
                 continue
+            private_media = self.private_media.get(record["submission_id"])
+            attachment_urls = []
+            if private_media is not None:
+                decoded_media = _private_media_from_row(deepcopy(private_media), self._privacy)
+                attachment_urls = list((decoded_media or {}).get("attachment_urls") or [])
             rows.append(
                 {
                     "case_id": record["case_id"],
@@ -1741,6 +1830,7 @@ class _MemoryConfessionsStore(_BaseConfessionsStore):
                     "staff_preview": submission.get("staff_preview"),
                     "flag_codes": list(submission.get("flag_codes") or ()),
                     "attachment_meta": deepcopy(submission.get("attachment_meta") or []),
+                    "attachment_urls": attachment_urls,
                     "shared_link_url": submission.get("shared_link_url"),
                     "created_at": submission.get("created_at"),
                 }
@@ -1755,6 +1845,27 @@ class _MemoryConfessionsStore(_BaseConfessionsStore):
 
     async def delete_review_queue(self, guild_id: int):
         self.review_queues.pop(guild_id, None)
+
+    async def fetch_support_ticket(self, guild_id: int, ticket_id: str) -> dict[str, Any] | None:
+        record = self.support_tickets.get((guild_id, ticket_id))
+        return deepcopy(record) if record is not None else None
+
+    async def list_support_tickets(self, guild_id: int, *, status: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+        cleaned_status = str(status).strip().lower() if status is not None else None
+        rows = []
+        for record in self.support_tickets.values():
+            if record["guild_id"] != guild_id:
+                continue
+            if cleaned_status is not None and record.get("status") != cleaned_status:
+                continue
+            rows.append(deepcopy(record))
+        rows.sort(key=lambda item: item.get("created_at") or "", reverse=True)
+        return rows[:limit]
+
+    async def upsert_support_ticket(self, record: dict[str, Any]):
+        normalized = normalize_support_ticket(record)
+        if normalized is not None:
+            self.support_tickets[(normalized["guild_id"], normalized["ticket_id"])] = normalized
 
     async def fetch_guild_counts(self, guild_id: int) -> dict[str, int]:
         submissions = [record for record in self.submissions.values() if record["guild_id"] == guild_id]
@@ -2125,7 +2236,9 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                 "allowed_role_ids JSONB NOT NULL DEFAULT '[]'::jsonb, "
                 "blocked_role_ids JSONB NOT NULL DEFAULT '[]'::jsonb, "
                 "allow_images BOOLEAN NOT NULL DEFAULT FALSE, "
+                "image_review_required BOOLEAN NOT NULL DEFAULT FALSE, "
                 "allow_anonymous_replies BOOLEAN NOT NULL DEFAULT FALSE, "
+                "anonymous_reply_review_required BOOLEAN NOT NULL DEFAULT FALSE, "
                 "allow_owner_replies BOOLEAN NOT NULL DEFAULT TRUE, "
                 "owner_reply_review_mode BOOLEAN NOT NULL DEFAULT FALSE, "
                 "allow_self_edit BOOLEAN NOT NULL DEFAULT FALSE, "
@@ -2286,6 +2399,25 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                 "updated_at TIMESTAMPTZ NULL"
                 ")"
             ),
+            (
+                "CREATE TABLE IF NOT EXISTS confession_support_tickets ("
+                "ticket_id TEXT NOT NULL, "
+                "guild_id BIGINT NOT NULL, "
+                "kind TEXT NOT NULL, "
+                "action_target_id TEXT NULL, "
+                "reference_confession_id TEXT NULL, "
+                "reference_case_id TEXT NULL, "
+                "context_label TEXT NULL, "
+                "details TEXT NULL, "
+                "status TEXT NOT NULL DEFAULT 'open', "
+                "resolution_action TEXT NULL, "
+                "message_channel_id BIGINT NULL, "
+                "message_id BIGINT NULL, "
+                "created_at TIMESTAMPTZ NOT NULL, "
+                "resolved_at TIMESTAMPTZ NULL, "
+                "PRIMARY KEY (guild_id, ticket_id)"
+                ")"
+            ),
         ]
         alter_statements = [
             "ALTER TABLE confession_guild_configs ADD COLUMN IF NOT EXISTS review_mode BOOLEAN NOT NULL DEFAULT TRUE",
@@ -2296,11 +2428,13 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
             "ALTER TABLE confession_guild_configs ADD COLUMN IF NOT EXISTS allowed_role_ids JSONB NOT NULL DEFAULT '[]'::jsonb",
             "ALTER TABLE confession_guild_configs ADD COLUMN IF NOT EXISTS blocked_role_ids JSONB NOT NULL DEFAULT '[]'::jsonb",
             "ALTER TABLE confession_guild_configs ADD COLUMN IF NOT EXISTS allow_images BOOLEAN NOT NULL DEFAULT FALSE",
+            "ALTER TABLE confession_guild_configs ADD COLUMN IF NOT EXISTS image_review_required BOOLEAN NULL",
             "ALTER TABLE confession_guild_configs ADD COLUMN IF NOT EXISTS max_images SMALLINT NOT NULL DEFAULT 3",
             "ALTER TABLE confession_guild_configs ADD COLUMN IF NOT EXISTS panel_channel_id BIGINT NULL",
             "ALTER TABLE confession_guild_configs ADD COLUMN IF NOT EXISTS panel_message_id BIGINT NULL",
             "ALTER TABLE confession_guild_configs ADD COLUMN IF NOT EXISTS appeals_channel_id BIGINT NULL",
             "ALTER TABLE confession_guild_configs ADD COLUMN IF NOT EXISTS allow_anonymous_replies BOOLEAN NOT NULL DEFAULT FALSE",
+            "ALTER TABLE confession_guild_configs ADD COLUMN IF NOT EXISTS anonymous_reply_review_required BOOLEAN NULL",
             "ALTER TABLE confession_guild_configs ADD COLUMN IF NOT EXISTS allow_owner_replies BOOLEAN NOT NULL DEFAULT TRUE",
             "ALTER TABLE confession_guild_configs ADD COLUMN IF NOT EXISTS owner_reply_review_mode BOOLEAN NOT NULL DEFAULT FALSE",
             "ALTER TABLE confession_guild_configs ADD COLUMN IF NOT EXISTS allow_self_edit BOOLEAN NOT NULL DEFAULT FALSE",
@@ -2339,19 +2473,27 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
             "ALTER TABLE confession_owner_reply_opportunities ADD COLUMN IF NOT EXISTS notification_message_id BIGINT NULL",
             "ALTER TABLE confession_owner_reply_opportunities ADD COLUMN IF NOT EXISTS notified_at TIMESTAMPTZ NULL",
             "ALTER TABLE confession_owner_reply_opportunities ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMPTZ NULL",
+            "ALTER TABLE confession_support_tickets ADD COLUMN IF NOT EXISTS action_target_id TEXT NULL",
+            "ALTER TABLE confession_support_tickets ADD COLUMN IF NOT EXISTS reference_confession_id TEXT NULL",
+            "ALTER TABLE confession_support_tickets ADD COLUMN IF NOT EXISTS reference_case_id TEXT NULL",
+            "ALTER TABLE confession_support_tickets ADD COLUMN IF NOT EXISTS context_label TEXT NULL",
+            "ALTER TABLE confession_support_tickets ADD COLUMN IF NOT EXISTS details TEXT NULL",
+            "ALTER TABLE confession_support_tickets ADD COLUMN IF NOT EXISTS status TEXT NOT NULL DEFAULT 'open'",
+            "ALTER TABLE confession_support_tickets ADD COLUMN IF NOT EXISTS resolution_action TEXT NULL",
+            "ALTER TABLE confession_support_tickets ADD COLUMN IF NOT EXISTS message_channel_id BIGINT NULL",
+            "ALTER TABLE confession_support_tickets ADD COLUMN IF NOT EXISTS message_id BIGINT NULL",
+            "ALTER TABLE confession_support_tickets ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMPTZ NULL",
             "ALTER TABLE confession_guild_configs ALTER COLUMN allow_images SET DEFAULT FALSE",
+            "UPDATE confession_guild_configs SET image_review_required = allow_images WHERE image_review_required IS NULL",
+            "UPDATE confession_guild_configs SET anonymous_reply_review_required = allow_anonymous_replies WHERE anonymous_reply_review_required IS NULL",
+            "ALTER TABLE confession_guild_configs ALTER COLUMN image_review_required SET DEFAULT FALSE",
+            "ALTER TABLE confession_guild_configs ALTER COLUMN anonymous_reply_review_required SET DEFAULT FALSE",
+            "UPDATE confession_guild_configs SET image_review_required = FALSE WHERE image_review_required IS NULL",
+            "UPDATE confession_guild_configs SET anonymous_reply_review_required = FALSE WHERE anonymous_reply_review_required IS NULL",
+            "ALTER TABLE confession_guild_configs ALTER COLUMN image_review_required SET NOT NULL",
+            "ALTER TABLE confession_guild_configs ALTER COLUMN anonymous_reply_review_required SET NOT NULL",
             "UPDATE confession_submissions SET reply_flow = 'reply_to_confession' WHERE submission_kind = 'reply' AND (reply_flow IS NULL OR reply_flow = '')",
             "UPDATE confession_submissions SET owner_reply_generation = 1 WHERE submission_kind = 'reply' AND reply_flow = 'owner_reply_to_user' AND owner_reply_generation IS NULL",
-            (
-                "UPDATE confession_guild_configs "
-                "SET allow_images = FALSE "
-                "WHERE allow_images = TRUE AND (review_channel_id IS NULL OR review_channel_id = confession_channel_id)"
-            ),
-            (
-                "UPDATE confession_guild_configs "
-                "SET allow_anonymous_replies = FALSE "
-                "WHERE allow_anonymous_replies = TRUE AND (review_channel_id IS NULL OR review_channel_id = confession_channel_id)"
-            ),
         ]
         index_statements = [
             "CREATE UNIQUE INDEX IF NOT EXISTS ix_confession_submissions_confession_id ON confession_submissions (guild_id, confession_id)",
@@ -2371,6 +2513,8 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
             "CREATE INDEX IF NOT EXISTS ix_confession_owner_reply_source_author_lookup_created ON confession_owner_reply_opportunities (guild_id, source_author_lookup_hash, created_at DESC)",
             "CREATE INDEX IF NOT EXISTS ix_confession_owner_reply_notification_message_id ON confession_owner_reply_opportunities (notification_message_id)",
             f"CREATE INDEX IF NOT EXISTS ix_confession_enforcement_states_secure_lookup ON {SECURE_ENFORCEMENT_TABLE} (guild_id, user_lookup_hash)",
+            "CREATE INDEX IF NOT EXISTS ix_confession_support_tickets_status_created ON confession_support_tickets (guild_id, status, created_at DESC)",
+            "CREATE INDEX IF NOT EXISTS ix_confession_support_tickets_message_id ON confession_support_tickets (message_id)",
         ]
         async with self._pool.acquire() as conn:
             for statement in table_statements:
@@ -2404,13 +2548,13 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                         "INSERT INTO confession_guild_configs ("
                         "guild_id, enabled, confession_channel_id, panel_channel_id, panel_message_id, review_channel_id, appeals_channel_id, review_mode, block_adult_language, "
                         "allow_trusted_mainstream_links, custom_allow_domains, custom_block_domains, allowed_role_ids, blocked_role_ids, "
-                        "allow_images, allow_anonymous_replies, allow_owner_replies, owner_reply_review_mode, allow_self_edit, "
+                        "allow_images, image_review_required, allow_anonymous_replies, anonymous_reply_review_required, allow_owner_replies, owner_reply_review_mode, allow_self_edit, "
                         "auto_moderation_exempt_admins, auto_moderation_exempt_role_ids, max_images, cooldown_seconds, "
                         "burst_limit, burst_window_seconds, auto_suspend_hours, strike_temp_ban_threshold, temp_ban_days, strike_perm_ban_threshold, updated_at"
                         ") VALUES ("
                         "$1, $2, $3, $4, $5, $6, $7, $8, $9, "
-                        "$10, $11::jsonb, $12::jsonb, $13::jsonb, $14::jsonb, $15, $16, $17, $18, $19, "
-                        "$20, $21::jsonb, $22, $23, $24, $25, $26, $27, $28, $29, timezone('utc', now())"
+                        "$10, $11::jsonb, $12::jsonb, $13::jsonb, $14::jsonb, $15, $16, $17, $18, $19, $20, $21, "
+                        "$22, $23::jsonb, $24, $25, $26, $27, $28, $29, $30, $31, timezone('utc', now())"
                         ") "
                         "ON CONFLICT (guild_id) DO UPDATE SET "
                         "enabled = EXCLUDED.enabled, "
@@ -2427,7 +2571,9 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                         "allowed_role_ids = EXCLUDED.allowed_role_ids, "
                         "blocked_role_ids = EXCLUDED.blocked_role_ids, "
                         "allow_images = EXCLUDED.allow_images, "
+                        "image_review_required = EXCLUDED.image_review_required, "
                         "allow_anonymous_replies = EXCLUDED.allow_anonymous_replies, "
+                        "anonymous_reply_review_required = EXCLUDED.anonymous_reply_review_required, "
                         "allow_owner_replies = EXCLUDED.allow_owner_replies, "
                         "owner_reply_review_mode = EXCLUDED.owner_reply_review_mode, "
                         "allow_self_edit = EXCLUDED.allow_self_edit, "
@@ -2458,7 +2604,9 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                     json.dumps(normalized["allowed_role_ids"]),
                     json.dumps(normalized["blocked_role_ids"]),
                     normalized["allow_images"],
+                    normalized["image_review_required"],
                     normalized["allow_anonymous_replies"],
+                    normalized["anonymous_reply_review_required"],
                     normalized["allow_owner_replies"],
                     normalized["owner_reply_review_mode"],
                     normalized["allow_self_edit"],
@@ -3159,6 +3307,17 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                 guild_id,
                 limit,
             )
+            submission_ids = [str(row["submission_id"]) for row in rows if row.get("submission_id")]
+            media_rows = []
+            if submission_ids:
+                media_rows = await conn.fetch(
+                    "SELECT submission_id, guild_id, attachment_urls, attachment_payload, created_at, updated_at "
+                    "FROM confession_private_media WHERE submission_id = ANY($1::text[])",
+                    submission_ids,
+                )
+        media_by_submission = {
+            str(record["submission_id"]): _private_media_from_row(record, self._privacy) for record in media_rows
+        }
         surfaces = []
         for row in rows:
             payload = _decrypt_payload(
@@ -3187,6 +3346,7 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                     "staff_preview": payload.get("staff_preview", row["staff_preview"]),
                     "flag_codes": decode_postgres_json_array(row["flag_codes"], label="confession_submissions.flag_codes"),
                     "attachment_meta": decode_postgres_json_array(row["attachment_meta"], label="confession_submissions.attachment_meta"),
+                    "attachment_urls": list((media_by_submission.get(str(row["submission_id"])) or {}).get("attachment_urls") or []),
                     "shared_link_url": payload.get("shared_link_url", row["shared_link_url"]),
                     "created_at": _serialize_datetime(row["created_at"]),
                 }
@@ -3216,6 +3376,76 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
         async with self._io_lock:
             async with self._pool.acquire() as conn:
                 await conn.execute("DELETE FROM confession_review_queues WHERE guild_id = $1", guild_id)
+
+    async def fetch_support_ticket(self, guild_id: int, ticket_id: str) -> dict[str, Any] | None:
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM confession_support_tickets WHERE guild_id = $1 AND ticket_id = $2",
+                guild_id,
+                ticket_id,
+            )
+        return _support_ticket_from_row(row)
+
+    async def list_support_tickets(self, guild_id: int, *, status: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+        cleaned_status = str(status).strip().lower() if status is not None else None
+        async with self._pool.acquire() as conn:
+            if cleaned_status is None:
+                rows = await conn.fetch(
+                    "SELECT * FROM confession_support_tickets WHERE guild_id = $1 ORDER BY created_at DESC LIMIT $2",
+                    guild_id,
+                    limit,
+                )
+            else:
+                rows = await conn.fetch(
+                    "SELECT * FROM confession_support_tickets WHERE guild_id = $1 AND status = $2 ORDER BY created_at DESC LIMIT $3",
+                    guild_id,
+                    cleaned_status,
+                    limit,
+                )
+        return [record for row in rows if (record := _support_ticket_from_row(row)) is not None]
+
+    async def upsert_support_ticket(self, record: dict[str, Any]):
+        normalized = normalize_support_ticket(record)
+        if normalized is None:
+            return
+        async with self._io_lock:
+            async with self._pool.acquire() as conn:
+                await conn.execute(
+                    (
+                        "INSERT INTO confession_support_tickets ("
+                        "ticket_id, guild_id, kind, action_target_id, reference_confession_id, reference_case_id, context_label, details, "
+                        "status, resolution_action, message_channel_id, message_id, created_at, resolved_at"
+                        ") VALUES ("
+                        "$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14"
+                        ") "
+                        "ON CONFLICT (guild_id, ticket_id) DO UPDATE SET "
+                        "kind = EXCLUDED.kind, "
+                        "action_target_id = EXCLUDED.action_target_id, "
+                        "reference_confession_id = EXCLUDED.reference_confession_id, "
+                        "reference_case_id = EXCLUDED.reference_case_id, "
+                        "context_label = EXCLUDED.context_label, "
+                        "details = EXCLUDED.details, "
+                        "status = EXCLUDED.status, "
+                        "resolution_action = EXCLUDED.resolution_action, "
+                        "message_channel_id = EXCLUDED.message_channel_id, "
+                        "message_id = EXCLUDED.message_id, "
+                        "resolved_at = EXCLUDED.resolved_at"
+                    ),
+                    normalized["ticket_id"],
+                    normalized["guild_id"],
+                    normalized["kind"],
+                    normalized["action_target_id"],
+                    normalized["reference_confession_id"],
+                    normalized["reference_case_id"],
+                    normalized["context_label"],
+                    normalized["details"],
+                    normalized["status"],
+                    normalized["resolution_action"],
+                    normalized["message_channel_id"],
+                    normalized["message_id"],
+                    _parse_datetime(normalized["created_at"]),
+                    _parse_datetime(normalized["resolved_at"]),
+                )
 
     async def fetch_guild_counts(self, guild_id: int) -> dict[str, int]:
         async with self._pool.acquire() as conn:
@@ -3679,6 +3909,15 @@ class ConfessionsStore:
 
     async def delete_review_queue(self, guild_id: int):
         await self._store.delete_review_queue(guild_id)
+
+    async def fetch_support_ticket(self, guild_id: int, ticket_id: str) -> dict[str, Any] | None:
+        return await self._store.fetch_support_ticket(guild_id, ticket_id)
+
+    async def list_support_tickets(self, guild_id: int, *, status: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
+        return await self._store.list_support_tickets(guild_id, status=status, limit=limit)
+
+    async def upsert_support_ticket(self, record: dict[str, Any]):
+        await self._store.upsert_support_ticket(record)
 
     async def fetch_guild_counts(self, guild_id: int) -> dict[str, int]:
         return await self._store.fetch_guild_counts(guild_id)
