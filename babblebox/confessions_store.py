@@ -358,6 +358,8 @@ def normalize_submission(payload: Any) -> dict[str, Any] | None:
         "reply_flow": reply_flow,
         "owner_reply_generation": owner_reply_generation,
         "parent_confession_id": _clean_optional_text(payload.get("parent_confession_id"), max_length=32),
+        "reply_target_label": _clean_optional_text(payload.get("reply_target_label"), max_length=160),
+        "reply_target_preview": _clean_optional_text(payload.get("reply_target_preview"), max_length=260),
         "status": status,
         "review_status": review_status,
         "staff_preview": _clean_optional_text(payload.get("staff_preview"), max_length=260),
@@ -612,7 +614,7 @@ def _raw_json_array_length(value: Any) -> int:
 def _has_sensitive_submission_plaintext(row: Any) -> bool:
     return any(
         _clean_optional_text(row.get(field), max_length=2000) is not None
-        for field in ("staff_preview", "content_body", "shared_link_url")
+        for field in ("staff_preview", "content_body", "shared_link_url", "reply_target_label", "reply_target_preview")
     )
 
 
@@ -834,6 +836,8 @@ def _submission_from_row(row: Any, privacy: ConfessionsCrypto) -> dict[str, Any]
             "reply_flow": row.get("reply_flow"),
             "owner_reply_generation": row.get("owner_reply_generation"),
             "parent_confession_id": row.get("parent_confession_id"),
+            "reply_target_label": payload.get("reply_target_label", row.get("reply_target_label")),
+            "reply_target_preview": payload.get("reply_target_preview", row.get("reply_target_preview")),
             "status": row["status"],
             "review_status": row["review_status"],
             "staff_preview": payload.get("staff_preview", row["staff_preview"]),
@@ -1340,6 +1344,8 @@ class _MemoryConfessionsStore(_BaseConfessionsStore):
     def _encode_submission_row(self, normalized: dict[str, Any]) -> dict[str, Any]:
         row = deepcopy(normalized)
         payload = {
+            "reply_target_label": normalized.get("reply_target_label"),
+            "reply_target_preview": normalized.get("reply_target_preview"),
             "staff_preview": normalized.get("staff_preview"),
             "content_body": normalized.get("content_body"),
             "shared_link_url": normalized.get("shared_link_url"),
@@ -1355,6 +1361,8 @@ class _MemoryConfessionsStore(_BaseConfessionsStore):
                 payload=payload,
                 key_domain="content",
             )
+            row["reply_target_label"] = None
+            row["reply_target_preview"] = None
             row["staff_preview"] = None
             row["content_body"] = None
             row["shared_link_url"] = None
@@ -1947,6 +1955,8 @@ class _MemoryConfessionsStore(_BaseConfessionsStore):
                 )
             else:
                 terminal = _backfill_submission_duplicate_fields(self._privacy, normalized)
+                terminal["reply_target_label"] = None
+                terminal["reply_target_preview"] = None
                 terminal["staff_preview"] = None
                 terminal["content_body"] = None
                 terminal["shared_link_url"] = None
@@ -2066,6 +2076,8 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
     def _encode_submission_row(self, normalized: dict[str, Any]) -> dict[str, Any]:
         row = deepcopy(normalized)
         payload = {
+            "reply_target_label": normalized.get("reply_target_label"),
+            "reply_target_preview": normalized.get("reply_target_preview"),
             "staff_preview": normalized.get("staff_preview"),
             "content_body": normalized.get("content_body"),
             "shared_link_url": normalized.get("shared_link_url"),
@@ -2081,6 +2093,8 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                 payload=payload,
                 key_domain="content",
             )
+            row["reply_target_label"] = None
+            row["reply_target_preview"] = None
             row["staff_preview"] = None
             row["content_body"] = None
             row["shared_link_url"] = None
@@ -2264,6 +2278,8 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                 "reply_flow TEXT NULL, "
                 "owner_reply_generation SMALLINT NULL, "
                 "parent_confession_id TEXT NULL, "
+                "reply_target_label TEXT NULL, "
+                "reply_target_preview TEXT NULL, "
                 "status TEXT NOT NULL, "
                 "review_status TEXT NOT NULL DEFAULT 'none', "
                 "staff_preview TEXT NULL, "
@@ -2445,6 +2461,8 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
             "ALTER TABLE confession_submissions ADD COLUMN IF NOT EXISTS reply_flow TEXT NULL",
             "ALTER TABLE confession_submissions ADD COLUMN IF NOT EXISTS owner_reply_generation SMALLINT NULL",
             "ALTER TABLE confession_submissions ADD COLUMN IF NOT EXISTS parent_confession_id TEXT NULL",
+            "ALTER TABLE confession_submissions ADD COLUMN IF NOT EXISTS reply_target_label TEXT NULL",
+            "ALTER TABLE confession_submissions ADD COLUMN IF NOT EXISTS reply_target_preview TEXT NULL",
             "ALTER TABLE confession_submissions ADD COLUMN IF NOT EXISTS content_body TEXT NULL",
             "ALTER TABLE confession_submissions ADD COLUMN IF NOT EXISTS shared_link_url TEXT NULL",
             "ALTER TABLE confession_submissions ADD COLUMN IF NOT EXISTS content_ciphertext TEXT NULL",
@@ -2632,17 +2650,19 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                 await conn.execute(
                     (
                         "INSERT INTO confession_submissions ("
-                        "submission_id, guild_id, confession_id, submission_kind, reply_flow, owner_reply_generation, parent_confession_id, status, review_status, staff_preview, content_body, shared_link_url, content_ciphertext, "
+                        "submission_id, guild_id, confession_id, submission_kind, reply_flow, owner_reply_generation, parent_confession_id, reply_target_label, reply_target_preview, status, review_status, staff_preview, content_body, shared_link_url, content_ciphertext, "
                         "content_fingerprint, similarity_key, fuzzy_signature, flag_codes, attachment_meta, posted_channel_id, posted_message_id, current_case_id, created_at, published_at, resolved_at"
                         ") VALUES ("
-                        "$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, "
-                        "$14, $15, $16, $17::jsonb, $18::jsonb, $19, $20, $21, $22, $23, $24"
+                        "$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, "
+                        "$16, $17, $18, $19::jsonb, $20::jsonb, $21, $22, $23, $24, $25, $26"
                         ") "
                         "ON CONFLICT (submission_id) DO UPDATE SET "
                         "submission_kind = EXCLUDED.submission_kind, "
                         "reply_flow = EXCLUDED.reply_flow, "
                         "owner_reply_generation = EXCLUDED.owner_reply_generation, "
                         "parent_confession_id = EXCLUDED.parent_confession_id, "
+                        "reply_target_label = EXCLUDED.reply_target_label, "
+                        "reply_target_preview = EXCLUDED.reply_target_preview, "
                         "status = EXCLUDED.status, "
                         "review_status = EXCLUDED.review_status, "
                         "staff_preview = EXCLUDED.staff_preview, "
@@ -2667,6 +2687,8 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                     row["reply_flow"],
                     row["owner_reply_generation"],
                     row["parent_confession_id"],
+                    row["reply_target_label"],
+                    row["reply_target_preview"],
                     row["status"],
                     row["review_status"],
                     row["staff_preview"],
@@ -3480,7 +3502,7 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
         async with self._pool.acquire() as conn:
             submission_rows = await conn.fetch(
                 (
-                    "SELECT guild_id, staff_preview, content_body, shared_link_url, content_ciphertext, "
+                    "SELECT guild_id, staff_preview, content_body, shared_link_url, reply_target_label, reply_target_preview, content_ciphertext, "
                     "content_fingerprint, similarity_key, fuzzy_signature "
                     "FROM confession_submissions"
                     f"{where_clause}"
@@ -3561,7 +3583,8 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
             submission_rows = await conn.fetch(
                 (
                     "SELECT * FROM confession_submissions "
-                    "WHERE staff_preview IS NOT NULL OR content_body IS NOT NULL OR shared_link_url IS NOT NULL OR similarity_key IS NOT NULL "
+                    "WHERE staff_preview IS NOT NULL OR content_body IS NOT NULL OR shared_link_url IS NOT NULL "
+                    "OR reply_target_label IS NOT NULL OR reply_target_preview IS NOT NULL OR similarity_key IS NOT NULL "
                     "OR (content_ciphertext IS NOT NULL AND content_ciphertext NOT LIKE $1) "
                     "OR (content_fingerprint IS NOT NULL AND content_fingerprint NOT LIKE $2) "
                     "OR (fuzzy_signature IS NOT NULL AND fuzzy_signature NOT LIKE $3) "
@@ -3655,6 +3678,8 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                 await self.upsert_submission(_backfill_submission_duplicate_fields(self._privacy, normalized))
             else:
                 terminal = _backfill_submission_duplicate_fields(self._privacy, normalized)
+                terminal["reply_target_label"] = None
+                terminal["reply_target_preview"] = None
                 terminal["staff_preview"] = None
                 terminal["content_body"] = None
                 terminal["shared_link_url"] = None

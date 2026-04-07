@@ -29,6 +29,10 @@ from babblebox.confessions_store import ConfessionsStore, _PostgresConfessionsSt
 from tests.test_confessions_store import _FakeConnection, _FakePool, _privacy
 
 
+def _embed_fields_by_name(embed: discord.Embed) -> dict[str, dict[str, object]]:
+    return {field["name"]: field for field in embed.to_dict().get("fields", [])}
+
+
 class FakeGuildPermissions:
     def __init__(self, *, administrator: bool = False, manage_guild: bool = False):
         self.administrator = administrator
@@ -1303,6 +1307,8 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stored["submission_kind"], "reply")
         self.assertEqual(stored["reply_flow"], "reply_to_confession")
         self.assertEqual(stored["parent_confession_id"], published.confession_id)
+        self.assertEqual(stored["reply_target_label"], published.confession_id)
+        self.assertEqual(stored["reply_target_preview"], "base confession")
 
     async def test_direct_member_reply_creates_owner_reply_opportunity_and_dm_prompt(self):
         await self._configure(review_channel=True)
@@ -1330,6 +1336,29 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
             [child.custom_id for child in owner.sent[0].view.children if getattr(child, "custom_id", None)],
             ["bb-confession-owner-reply:open", "bb-confession-owner-reply:dismiss"],
         )
+
+    async def test_published_anonymous_reply_embed_includes_parent_preview_context(self):
+        await self._configure(review_channel=True, allow_replies=True, anonymous_reply_review_required=True)
+        published = await self.service.submit_confession(self.guild, author_id=9230, content="base confession for preview", attachments=[])
+        self.assertEqual(published.state, "published")
+
+        reply = await self.service.submit_confession(
+            self.guild,
+            author_id=9231,
+            content="reply text",
+            submission_kind="reply",
+            parent_confession_id=published.confession_id,
+        )
+        self.assertEqual(reply.state, "queued")
+
+        ok, message = await self.service.handle_case_action(self.guild, case_id=reply.case_id, action="approve", version=1)
+        self.assertTrue(ok, message)
+
+        fields = _embed_fields_by_name(self.confession_channel.sent[1].embeds[0])
+        self.assertIn("Replying To", fields)
+        self.assertFalse(fields["Replying To"]["inline"])
+        self.assertIn(f"Confession `{published.confession_id}`", str(fields["Replying To"]["value"]))
+        self.assertIn("Preview: base confession for preview", str(fields["Replying To"]["value"]))
 
     async def test_responses_to_public_anonymous_replies_do_not_create_owner_opportunities(self):
         await self._configure(
@@ -1387,10 +1416,18 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
         stored_owner_reply = await self.service.store.fetch_submission_by_confession_id(self.guild.id, owner_reply.confession_id)
         self.assertEqual(stored_owner_reply["reply_flow"], "owner_reply_to_user")
         self.assertEqual(stored_owner_reply["owner_reply_generation"], 1)
+        fields = _embed_fields_by_name(self.confession_channel.sent[1].embeds[0])
+        self.assertIn("Replying To", fields)
+        self.assertFalse(fields["Replying To"]["inline"])
+        self.assertIn("**User 926**", str(fields["Replying To"]["value"]))
+        self.assertIn("Preview: please reply publicly", str(fields["Replying To"]["value"]))
+        self.assertEqual(fields["Confession"]["value"], f"`{published.confession_id}`")
+        self.assertEqual(fields["Flow"]["value"], "Owner reply")
         rendered = json.dumps([embed.to_dict() for embed in self.confession_channel.sent[1].embeds])
         self.assertIn("Anonymous Owner Reply", rendered)
         self.assertIn(published.confession_id, rendered)
-        self.assertNotIn("User 926", rendered)
+        self.assertIn("User 926", rendered)
+        self.assertNotIn("User 925", rendered)
         used = await self.service.store.fetch_owner_reply_opportunity(pending[0]["opportunity_id"])
         self.assertEqual(used["status"], "used")
 
@@ -1423,6 +1460,66 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stored_owner_reply["review_status"], "pending")
         queue = self.service.build_review_queue_embed(self.guild, await self.service.list_review_targets(self.guild.id, limit=10))
         self.assertIn("Owner Reply", json.dumps(queue.to_dict()))
+
+    async def test_approved_queued_owner_reply_uses_stored_responder_snapshot_in_public_embed(self):
+        await self._configure(review_channel=True)
+        ok, message = await self.service.configure_guild(self.guild.id, owner_reply_review_mode=True)
+        self.assertTrue(ok, message)
+        owner = self._member(9270)
+        published = await self.service.submit_confession(self.guild, author_id=owner.id, member=owner, content="queued owner reply snapshot", attachments=[])
+        self.assertEqual(published.state, "published")
+
+        response = self._reply_message(
+            author=self._member(9271),
+            reply_to_message_id=self.confession_channel.sent[0].id,
+            content="stored responder snapshot",
+        )
+        await self.service.handle_member_response_message(response)
+        pending = await self.service.store.list_pending_owner_reply_opportunities_for_author(self.guild.id, owner.id, limit=5)
+
+        owner_reply = await self.service.submit_owner_reply(
+            self.guild,
+            author_id=owner.id,
+            member=owner,
+            opportunity_id=pending[0]["opportunity_id"],
+            content="Thanks. Queue this first.",
+        )
+        self.assertEqual(owner_reply.state, "queued")
+
+        stored_owner_reply = await self.service.store.fetch_submission_by_confession_id(self.guild.id, owner_reply.confession_id)
+        self.assertEqual(stored_owner_reply["reply_target_label"], "User 9271")
+        self.assertEqual(stored_owner_reply["reply_target_preview"], "stored responder snapshot")
+
+        ok, message = await self.service.handle_case_action(self.guild, case_id=owner_reply.case_id, action="approve", version=1)
+        self.assertTrue(ok, message)
+
+        fields = _embed_fields_by_name(self.confession_channel.sent[1].embeds[0])
+        self.assertIn("Replying To", fields)
+        self.assertIn("**User 9271**", str(fields["Replying To"]["value"]))
+        self.assertIn("Preview: stored responder snapshot", str(fields["Replying To"]["value"]))
+        self.assertEqual(fields["Confession"]["value"], f"`{published.confession_id}`")
+
+    async def test_public_reply_embed_falls_back_to_id_only_when_target_preview_is_missing(self):
+        embeds = await self.service._build_public_confession_embeds(
+            {
+                "submission_id": "sub-fallback",
+                "guild_id": self.guild.id,
+                "confession_id": "CF-REPLY999",
+                "submission_kind": "reply",
+                "reply_flow": "owner_reply_to_user",
+                "owner_reply_generation": 1,
+                "parent_confession_id": "CF-ROOT999",
+                "reply_target_label": "Responder",
+                "reply_target_preview": None,
+                "content_body": "fallback body",
+                "shared_link_url": None,
+                "attachment_meta": [],
+            }
+        )
+        fields = _embed_fields_by_name(embeds[0])
+        self.assertEqual(fields["Replying To"]["value"], "`CF-ROOT999`")
+        self.assertTrue(fields["Replying To"]["inline"])
+        self.assertNotIn("Confession", fields)
 
     async def test_owner_reply_to_first_owner_reply_creates_second_round_but_stops_at_generation_two(self):
         await self._configure()
