@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 from typing import Optional
 
 import discord
@@ -8,7 +9,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from babblebox import game_engine as ge
-from babblebox.command_utils import defer_hybrid_response, require_channel_permissions, send_hybrid_response
+from babblebox.command_utils import HybridPanelSendResult, require_channel_permissions, send_hybrid_panel_response, send_hybrid_response
 
 
 LEADERBOARD_LABELS = {
@@ -29,6 +30,7 @@ OFFICIAL_LINKS: tuple[tuple[str, str], ...] = (
 HELP_VIEW_TIMEOUT_SECONDS = 900
 EMBED_FIELD_VALUE_LIMIT = 1024
 SELECT_DESCRIPTION_LIMIT = 100
+LOGGER = logging.getLogger(__name__)
 
 
 def official_links_markdown() -> str:
@@ -349,6 +351,12 @@ class HelpPanelView(SupportLinksView):
         self.author_id = author_id
         self.page_index = start_index
         self.message: discord.Message | None = None
+        self._delivery_bot: commands.Bot | None = None
+        self._delivery_channel = None
+        self._delivery_channel_id: int | None = None
+        self._delivery_message_id: int | None = None
+        self._delivery_interaction: discord.Interaction | None = None
+        self._delivery_private = False
         self.page_select = HelpPageSelect(self)
         self.add_item(self.page_select)
         self._refresh_controls()
@@ -361,6 +369,51 @@ class HelpPanelView(SupportLinksView):
         self.home_button.disabled = self.page_index == 0
         self.next_button.disabled = self.page_index >= len(HELP_PAGES) - 1
         self.page_select.refresh_state()
+
+    def bind_delivery(
+        self,
+        *,
+        bot: commands.Bot,
+        channel,
+        interaction: discord.Interaction | None,
+        visibility: str,
+        result: HybridPanelSendResult,
+    ):
+        if result.message is not None:
+            self.message = result.message
+        self._delivery_bot = bot
+        self._delivery_channel = channel
+        self._delivery_channel_id = getattr(channel, "id", None)
+        self._delivery_message_id = result.message_id or getattr(result.message, "id", None)
+        self._delivery_interaction = interaction
+        self._delivery_private = visibility == "private"
+
+    async def _timeout_edit_message(self) -> bool:
+        if self.message is not None:
+            with contextlib.suppress(discord.NotFound, discord.Forbidden, discord.HTTPException):
+                updated = await self.message.edit(view=self)
+                self.message = updated
+                return True
+
+        if not self._delivery_private and self._delivery_message_id is not None:
+            channel = self._delivery_channel
+            if channel is None and self._delivery_bot is not None and self._delivery_channel_id is not None:
+                channel = self._delivery_bot.get_channel(self._delivery_channel_id)
+            if channel is not None and hasattr(channel, "get_partial_message"):
+                partial_message = channel.get_partial_message(self._delivery_message_id)
+                with contextlib.suppress(discord.NotFound, discord.Forbidden, discord.HTTPException):
+                    updated = await partial_message.edit(view=self)
+                    self.message = updated
+                    return True
+
+        interaction = self._delivery_interaction
+        if interaction is not None and not interaction.is_expired():
+            with contextlib.suppress(discord.NotFound, discord.Forbidden, discord.HTTPException):
+                updated = await interaction.edit_original_response(view=self)
+                self.message = updated
+                return True
+
+        return False
 
     async def _render(self, interaction: discord.Interaction):
         self.message = self.message or getattr(interaction, "message", None)
@@ -397,9 +450,7 @@ class HelpPanelView(SupportLinksView):
         for child in self.children:
             if getattr(child, "style", None) != discord.ButtonStyle.link:
                 child.disabled = True
-        if self.message is not None:
-            with contextlib.suppress(discord.HTTPException):
-                await self.message.edit(view=self)
+        await self._timeout_edit_message()
 
     @discord.ui.button(label="Previous", style=discord.ButtonStyle.secondary, emoji="\u2b05\ufe0f", row=1)
     async def previous_button(self, interaction: discord.Interaction, button: discord.ui.Button):
@@ -498,6 +549,47 @@ class MetaCog(commands.Cog):
             channel_cooldowns=self._support_channel_cooldowns,
         )
 
+    def _log_panel_delivery_without_message_handle(
+        self,
+        *,
+        event: str,
+        command_name: str,
+        visibility: str,
+        ctx: commands.Context,
+        result: HybridPanelSendResult,
+    ):
+        LOGGER.info(
+            "%s command=%s visibility=%s path=%s handle_status=%s guild_id=%s channel_id=%s message_id=%s",
+            event,
+            command_name,
+            visibility,
+            result.path,
+            result.handle_status,
+            getattr(getattr(ctx, "guild", None), "id", None),
+            getattr(getattr(ctx, "channel", None), "id", None),
+            result.message_id,
+        )
+
+    def _log_panel_delivery_failure(
+        self,
+        *,
+        event: str,
+        command_name: str,
+        visibility: str,
+        ctx: commands.Context,
+        result: HybridPanelSendResult,
+    ):
+        LOGGER.warning(
+            "%s command=%s visibility=%s path=%s guild_id=%s channel_id=%s exc_class=%s",
+            event,
+            command_name,
+            visibility,
+            result.path,
+            getattr(getattr(ctx, "guild", None), "id", None),
+            getattr(getattr(ctx, "channel", None), "id", None),
+            type(result.error).__name__ if result.error is not None else "UnknownError",
+        )
+
     async def _send_panel_response(
         self,
         ctx: commands.Context,
@@ -513,33 +605,44 @@ class MetaCog(commands.Cog):
         recovery_description: str,
         recovery_footer: str,
         record_cooldown,
-    ) -> discord.Message | None:
+        send_failure_event: str,
+        success_without_message_event: str,
+    ) -> HybridPanelSendResult:
         if not await require_channel_permissions(ctx, ge.HELP_REQUIRED_PERMS, command_name):
-            return None
+            return HybridPanelSendResult(delivered=False)
         if cooldown_error is not None:
             await send_hybrid_response(
                 ctx,
                 embed=ge.make_status_embed(cooldown_title, cooldown_error, tone="warning", footer=cooldown_footer),
                 ephemeral=True,
             )
-            return None
+            return HybridPanelSendResult(delivered=False)
 
-        await defer_hybrid_response(ctx, ephemeral=self._is_private(visibility))
-
-        message: discord.Message | None = None
-        try:
-            message = await send_hybrid_response(
-                ctx,
-                embed=embed,
-                view=view,
-                ephemeral=self._is_private(visibility),
-            )
-        except (discord.HTTPException, discord.InteractionResponded, TypeError, ValueError):
-            message = None
-
-        if message is not None:
+        result = await send_hybrid_panel_response(
+            ctx,
+            embed=embed,
+            view=view,
+            ephemeral=self._is_private(visibility),
+        )
+        if result.delivered:
             record_cooldown(ctx, visibility=visibility)
-            return message
+            if result.message is None:
+                self._log_panel_delivery_without_message_handle(
+                    event=success_without_message_event,
+                    command_name=command_name,
+                    visibility=visibility,
+                    ctx=ctx,
+                    result=result,
+                )
+            return result
+
+        self._log_panel_delivery_failure(
+            event=send_failure_event,
+            command_name=command_name,
+            visibility=visibility,
+            ctx=ctx,
+            result=result,
+        )
 
         recovery_embed = ge.make_status_embed(
             recovery_title,
@@ -550,17 +653,17 @@ class MetaCog(commands.Cog):
         interaction = getattr(ctx, "interaction", None)
         if interaction is not None:
             await ge.safe_send_interaction(interaction, embed=recovery_embed, ephemeral=True)
-            return None
+            return result
         with contextlib.suppress(discord.HTTPException):
             await ctx.send(embed=recovery_embed)
-        return None
+        return result
 
     @commands.hybrid_command(name="help", with_app_command=True, description="View the Babblebox manual, categories, and command guide")
     @app_commands.describe(visibility="Show the manual publicly or only to you")
     @app_commands.choices(visibility=VISIBILITY_CHOICES)
     async def help_command(self, ctx: commands.Context, visibility: str = "public"):
         view = HelpPanelView(author_id=ctx.author.id)
-        message = await self._send_panel_response(
+        result = await self._send_panel_response(
             ctx,
             command_name="/help",
             visibility=visibility,
@@ -570,12 +673,20 @@ class MetaCog(commands.Cog):
             embed=view.current_embed(),
             view=view,
             recovery_title="Help Panel Unavailable",
-            recovery_description="The help panel could not be opened just now. Run `/help` again for a fresh panel.",
+            recovery_description="Babblebox could not open the help panel just now. Please try `/help` again in a moment.",
             recovery_footer="Babblebox Manual",
             record_cooldown=self._record_help_cooldown,
+            send_failure_event="help_panel_send_failure",
+            success_without_message_event="help_panel_send_success_without_message_handle",
         )
-        if message is not None:
-            view.message = message
+        if result.delivered:
+            view.bind_delivery(
+                bot=self.bot,
+                channel=ctx.channel,
+                interaction=getattr(ctx, "interaction", None),
+                visibility=visibility,
+                result=result,
+            )
 
     @commands.hybrid_command(name="support", with_app_command=True, description="Open Babblebox support links and bug-report info")
     @app_commands.describe(visibility="Show support links publicly or only to you")
@@ -591,9 +702,11 @@ class MetaCog(commands.Cog):
             embed=build_support_embed(),
             view=SupportLinksView(),
             recovery_title="Support Panel Unavailable",
-            recovery_description="The support panel could not be opened just now. Run `/support` again in a moment.",
+            recovery_description="Babblebox could not open the support panel just now. Please try `/support` again in a moment.",
             recovery_footer="Babblebox Support",
             record_cooldown=self._record_support_cooldown,
+            send_failure_event="support_panel_send_failure",
+            success_without_message_event="support_panel_send_success_without_message_handle",
         )
 
     @commands.hybrid_command(name="ping", with_app_command=True, description="Check if the bot is online and responsive")
