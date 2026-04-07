@@ -567,7 +567,11 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_provider_disabled_status_is_exposed_through_link_safety_runtime(self):
         status = self.service.get_link_safety_status()
 
-        self.assertEqual(status["intel_source"], "bundled")
+        self.assertIn("bundled", status["intel_source"])
+        self.assertGreaterEqual(status["bundled_malicious_domains"], 10)
+        self.assertGreaterEqual(status["effective_malicious_domains"], status["bundled_malicious_domains"])
+        self.assertIn("external_malicious_source_paths", status)
+        self.assertIn("external_malicious_skipped_lines", status)
         self.assertFalse(status["provider_available"])
         self.assertIn("local domain intelligence", status["provider_status"].lower())
 

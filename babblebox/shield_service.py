@@ -38,7 +38,9 @@ from babblebox.shield_link_safety import (
     ShieldLinkSafetyEngine,
     domain_in_set as link_domain_in_set,
     domain_matches as link_domain_matches,
+    extract_link_domain as link_extract_domain,
     merge_link_assessments,
+    normalize_link_host as link_normalize_link_host,
 )
 from babblebox.shield_store import (
     LOW_CONFIDENCE_ACTIONS,
@@ -145,7 +147,6 @@ SUSPICIOUS_FILE_RE = re.compile(r"(?i)\.(?:exe|scr|bat|cmd|msi|zip|rar|7z|iso)(?
 SCAM_WARNING_RE = re.compile(
     r"(?i)(?:\b(?:beware|warning|avoid|do not|don't|never|fake|malicious|phish(?:ing)?|report(?:ed|ing)?|blocked|blocklist(?:ed)?|heads up|for review|for triage|triage)\b|\b(?:example|sample)\b.{0,24}\b(?:link|site|domain|url)\b|\b(?:scam|phish(?:ing)?|malicious)\b.{0,24}\b(?:example|sample)\b)"
 )
-LINK_HOST_LABEL_RE = re.compile(r"[a-z0-9-]+")
 GENERIC_DIGIT_RE = re.compile(r"\b\d{4,12}\b")
 @dataclass(frozen=True)
 class PackSettings:
@@ -322,7 +323,7 @@ def _domain_matches(domain: str, candidate: str) -> bool:
     return link_domain_matches(domain, candidate)
 
 
-def _domain_in_set(domain: str, candidates: set[str]) -> bool:
+def _domain_in_set(domain: str, candidates: frozenset[str] | set[str]) -> bool:
     return link_domain_in_set(domain, candidates)
 
 
@@ -338,48 +339,11 @@ def _clean_url_candidate(raw_url: str) -> str | None:
 
 
 def _normalize_link_host(raw_host: str) -> str | None:
-    host = normalize_plain_text(raw_host).casefold().strip()
-    if not host:
-        return None
-    if "@" in host:
-        host = host.rsplit("@", 1)[1]
-    if host.startswith("[") or host.endswith("]"):
-        return None
-    if ":" in host:
-        host = host.split(":", 1)[0]
-    host = host.rstrip(".")
-    if host.startswith("www."):
-        host = host[4:]
-    if not host or host.startswith(".") or host.endswith(".") or ".." in host:
-        return None
-    try:
-        host = host.encode("idna").decode("ascii")
-    except UnicodeError:
-        return None
-    host = host.casefold().rstrip(".")
-    if host.startswith("www."):
-        host = host[4:]
-    if not host or host.startswith(".") or host.endswith(".") or ".." in host:
-        return None
-    labels = host.split(".")
-    if len(labels) < 2:
-        return None
-    for label in labels:
-        if not label or len(label) > 63:
-            return None
-        if label.startswith("-") or label.endswith("-"):
-            return None
-        if LINK_HOST_LABEL_RE.fullmatch(label) is None:
-            return None
-    return host
+    return link_normalize_link_host(raw_host)
 
 
 def _extract_domain(raw_url: str) -> str | None:
-    candidate = _clean_url_candidate(raw_url)
-    if candidate is None:
-        return None
-    parsed = urlsplit(candidate)
-    return _normalize_link_host(parsed.netloc)
+    return link_extract_domain(raw_url)
 
 
 def _extract_urls(text: str) -> tuple[str, ...]:
@@ -1228,7 +1192,7 @@ class ShieldService:
         )
 
     def _domain_is_allowlisted(self, domain: str, allow_domains: frozenset[str]) -> bool:
-        return any(_domain_matches(domain, candidate) for candidate in allow_domains)
+        return _domain_in_set(domain, allow_domains)
 
     def _collect_link_assessments(
         self,
@@ -1341,7 +1305,7 @@ class ShieldService:
                         pack="scam",
                         settings=compiled.scam,
                         label="Known malicious domain",
-                        reason="A linked domain matched Shield's bundled malicious-domain intelligence.",
+                        reason="A linked domain matched Shield's local malicious-domain intelligence.",
                         confidence="high",
                         heuristic=False,
                         match_class="known_malicious_domain",
@@ -2164,9 +2128,9 @@ class ShieldService:
             return False, "Provide a domain to allowlist."
         if "/" in cleaned or "://" in cleaned:
             cleaned = _extract_domain(cleaned) or ""
-        if cleaned.startswith("www."):
-            cleaned = cleaned[4:]
-        if not re.fullmatch(r"[a-z0-9.-]+\.[a-z]{2,}", cleaned):
+        else:
+            cleaned = _normalize_link_host(cleaned) or ""
+        if not cleaned:
             return False, "Allowlisted domains must look like `example.com`."
         return True, cleaned
 
