@@ -264,6 +264,8 @@ class ConfessionsStoreNormalizationTests(unittest.TestCase):
                 "confession_id": "CF-AAAA1111",
                 "submission_kind": "reply",
                 "parent_confession_id": "CF-ZZZZ9999",
+                "reply_target_label": "Responder",
+                "reply_target_preview": "Public preview",
                 "status": "queued",
                 "review_status": "pending",
                 "staff_preview": "hello",
@@ -286,6 +288,8 @@ class ConfessionsStoreNormalizationTests(unittest.TestCase):
         self.assertIsNotNone(record)
         self.assertEqual(record["submission_kind"], "reply")
         self.assertEqual(record["parent_confession_id"], "CF-ZZZZ9999")
+        self.assertEqual(record["reply_target_label"], "Responder")
+        self.assertEqual(record["reply_target_preview"], "Public preview")
         self.assertEqual(record["shared_link_url"], "https://www.google.com/search?q=hello")
         self.assertEqual(record["fuzzy_signature"], "fh1:abc123")
         self.assertNotIn("bytes", record["attachment_meta"][0])
@@ -386,6 +390,8 @@ class ConfessionsStorePrivacyTests(unittest.IsolatedAsyncioTestCase):
                 domain="submission-content",
                 aad_fields={"guild_id": 10, "submission_id": "sub-1", "confession_id": "CF-AAAA1111"},
                 payload={
+                    "reply_target_label": "Responder",
+                    "reply_target_preview": "Public preview",
                     "staff_preview": "queued preview",
                     "content_body": "full text",
                     "shared_link_url": "https://www.google.com/search?q=preview",
@@ -407,11 +413,48 @@ class ConfessionsStorePrivacyTests(unittest.IsolatedAsyncioTestCase):
             "resolved_at": None,
         }
         record = _submission_from_row(row, privacy)
+        self.assertEqual(record["reply_target_label"], "Responder")
+        self.assertEqual(record["reply_target_preview"], "Public preview")
         self.assertEqual(record["content_body"], "full text")
         self.assertEqual(record["shared_link_url"], "https://www.google.com/search?q=preview")
         self.assertEqual(record["fuzzy_signature"], "fh1:def")
         self.assertEqual(record["flag_codes"], ["adult_language", "link_unsafe"])
         self.assertEqual(record["attachment_meta"][0]["kind"], "image")
+
+    async def test_memory_store_round_trips_reply_target_snapshot_fields(self):
+        store = ConfessionsStore(backend="memory")
+        await store.load()
+        try:
+            await store.upsert_submission(
+                {
+                    "submission_id": "sub-snapshot",
+                    "guild_id": 10,
+                    "confession_id": "CF-SNAP001",
+                    "submission_kind": "reply",
+                    "reply_flow": "owner_reply_to_user",
+                    "owner_reply_generation": 1,
+                    "parent_confession_id": "CF-ROOT001",
+                    "reply_target_label": "Responder",
+                    "reply_target_preview": "Snapshot preview",
+                    "status": "queued",
+                    "review_status": "pending",
+                    "staff_preview": "Queued preview",
+                    "content_body": "Queued body",
+                    "shared_link_url": None,
+                    "content_fingerprint": "h1:snapshot",
+                    "similarity_key": "sim:snapshot",
+                    "fuzzy_signature": "fh1:snapshot",
+                    "flag_codes": [],
+                    "attachment_meta": [],
+                    "created_at": "2026-04-03T00:00:00+00:00",
+                }
+            )
+
+            record = await store.fetch_submission("sub-snapshot")
+            self.assertEqual(record["reply_target_label"], "Responder")
+            self.assertEqual(record["reply_target_preview"], "Snapshot preview")
+        finally:
+            await store.close()
 
     async def test_owner_reply_opportunity_row_decrypts_private_payload(self):
         privacy = _privacy()
@@ -463,6 +506,8 @@ class ConfessionsStorePrivacyTests(unittest.IsolatedAsyncioTestCase):
         executed = "\n".join(connection.executed)
         self.assertIn("CREATE TABLE IF NOT EXISTS confession_guild_configs", executed)
         self.assertIn("CREATE TABLE IF NOT EXISTS confession_submissions", executed)
+        self.assertIn("reply_target_label TEXT NULL", executed)
+        self.assertIn("reply_target_preview TEXT NULL", executed)
         self.assertIn("content_ciphertext TEXT NULL", executed)
         self.assertIn("CREATE TABLE IF NOT EXISTS confession_author_links", executed)
         self.assertIn("CREATE TABLE IF NOT EXISTS confession_author_identities", executed)
@@ -494,6 +539,8 @@ class ConfessionsStorePrivacyTests(unittest.IsolatedAsyncioTestCase):
                 "reply_flow": None,
                 "owner_reply_generation": None,
                 "parent_confession_id": None,
+                "reply_target_label": "Queued target",
+                "reply_target_preview": "Queued target preview",
                 "status": "queued",
                 "review_status": "pending",
                 "staff_preview": "Legacy preview",
@@ -519,6 +566,8 @@ class ConfessionsStorePrivacyTests(unittest.IsolatedAsyncioTestCase):
                 "reply_flow": None,
                 "owner_reply_generation": None,
                 "parent_confession_id": None,
+                "reply_target_label": "Published target",
+                "reply_target_preview": "Published target preview",
                 "status": "published",
                 "review_status": "approved",
                 "staff_preview": "Old published preview",
@@ -609,6 +658,8 @@ class ConfessionsStorePrivacyTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(applied["privacy_status"]["state"], "ready")
 
             active_submission = await store.fetch_submission("sub-active")
+            self.assertEqual(active_submission["reply_target_label"], "Queued target")
+            self.assertEqual(active_submission["reply_target_preview"], "Queued target preview")
             self.assertEqual(active_submission["content_body"], "Legacy queued confession body")
             self.assertEqual(active_submission["shared_link_url"], "https://www.google.com/search?q=queued")
             active_private_media = await store.fetch_private_media("sub-active")
@@ -623,6 +674,8 @@ class ConfessionsStorePrivacyTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual([row["submission_id"] for row in recent], ["sub-active"])
 
             raw_active_submission = raw_store.submissions["sub-active"]
+            self.assertIsNone(raw_active_submission["reply_target_label"])
+            self.assertIsNone(raw_active_submission["reply_target_preview"])
             self.assertIsNone(raw_active_submission["staff_preview"])
             self.assertIsNone(raw_active_submission["content_body"])
             self.assertIsNone(raw_active_submission["shared_link_url"])
@@ -632,6 +685,8 @@ class ConfessionsStorePrivacyTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(str(raw_active_submission["fuzzy_signature"]).startswith("fh2:ephemeral:"))
 
             raw_terminal_submission = raw_store.submissions["sub-terminal"]
+            self.assertIsNone(raw_terminal_submission["reply_target_label"])
+            self.assertIsNone(raw_terminal_submission["reply_target_preview"])
             self.assertIsNone(raw_terminal_submission["staff_preview"])
             self.assertIsNone(raw_terminal_submission["content_body"])
             self.assertIsNone(raw_terminal_submission["shared_link_url"])
@@ -1094,6 +1149,74 @@ class PostgresConfessionsStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(config["allow_self_edit"])
         self.assertFalse(config["auto_moderation_exempt_admins"])
         self.assertEqual(config["auto_moderation_exempt_role_ids"], [901, 902])
+
+    async def test_postgres_store_upsert_submission_includes_reply_target_snapshot_fields(self):
+        await self.store.upsert_submission(
+            {
+                "submission_id": "sub-1",
+                "guild_id": 10,
+                "confession_id": "CF-AAAA1111",
+                "submission_kind": "reply",
+                "reply_flow": "owner_reply_to_user",
+                "owner_reply_generation": 1,
+                "parent_confession_id": "CF-ROOT111",
+                "reply_target_label": "Responder",
+                "reply_target_preview": "Snapshot preview",
+                "status": "queued",
+                "review_status": "pending",
+                "staff_preview": "Queued preview",
+                "content_body": "Queued body",
+                "shared_link_url": None,
+                "content_fingerprint": "h1:test",
+                "similarity_key": "sim:test",
+                "fuzzy_signature": "fh1:test",
+                "flag_codes": ["adult_language"],
+                "attachment_meta": [],
+                "created_at": "2026-04-03T00:00:00+00:00",
+            }
+        )
+
+        statement, args = self.connection.execute_calls[-1]
+        self.assertIn("reply_target_label", statement)
+        self.assertIn("reply_target_preview", statement)
+        self.assertIsNone(args[7])
+        self.assertIsNone(args[8])
+        self.assertIsNotNone(args[14])
+
+        self.connection.fetchrow_results.append(
+            {
+                "submission_id": "sub-1",
+                "guild_id": 10,
+                "confession_id": "CF-AAAA1111",
+                "submission_kind": "reply",
+                "reply_flow": "owner_reply_to_user",
+                "owner_reply_generation": 1,
+                "parent_confession_id": "CF-ROOT111",
+                "reply_target_label": None,
+                "reply_target_preview": None,
+                "status": "queued",
+                "review_status": "pending",
+                "staff_preview": None,
+                "content_body": None,
+                "shared_link_url": None,
+                "content_ciphertext": args[14],
+                "content_fingerprint": "h1:test",
+                "similarity_key": "sim:test",
+                "fuzzy_signature": "fh1:test",
+                "flag_codes": json.dumps(["adult_language"]),
+                "attachment_meta": json.dumps([]),
+                "posted_channel_id": None,
+                "posted_message_id": None,
+                "current_case_id": None,
+                "created_at": "2026-04-03T00:00:00+00:00",
+                "published_at": None,
+                "resolved_at": None,
+            }
+        )
+
+        record = await self.store.fetch_submission("sub-1")
+        self.assertEqual(record["reply_target_label"], "Responder")
+        self.assertEqual(record["reply_target_preview"], "Snapshot preview")
 
     async def test_postgres_store_fetch_all_configs_round_trips_admin_runtime_fields(self):
         self.connection.fetch_results.append(

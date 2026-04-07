@@ -90,8 +90,10 @@ OWNER_REPLY_PATH_COOLDOWN_SECONDS = 20 * 60
 OWNER_REPLY_RESPONDER_WINDOW_SECONDS = 24 * 3600
 OWNER_REPLY_RESPONDER_CONFESSION_CAP = 3
 OWNER_REPLY_RESPONDER_GUILD_CAP = 8
+PUBLIC_REPLY_CONTEXT_PREVIEW_LIMIT = 120
 REPLY_FLOW_TO_CONFESSION = "reply_to_confession"
 REPLY_FLOW_OWNER_TO_USER = "owner_reply_to_user"
+PUBLIC_QUIET_POST_BODY = "Shared quietly through Babblebox."
 LINK_IN_BIO_DOMAINS = frozenset({"linktr.ee", "beacons.ai", "carrd.co"})
 SPAM_RATE_LIMIT_FLAGS = frozenset(
     {"duplicate_spam", "empty_content", "low_signal_spam", "near_duplicate_spam", "repetitive_spam"}
@@ -347,6 +349,17 @@ def _owner_reply_source_preview(content: str | None, attachments: Sequence[Any] 
         noun = "attachment" if attachment_count == 1 else "attachments"
         return f"[{attachment_count} {noun}]"
     return "[message unavailable]"
+
+
+def _reply_target_snapshot_text(text: str | None, *, limit: int = MAX_STAFF_PREVIEW) -> str | None:
+    preview = normalize_plain_text(text)
+    if not preview:
+        return None
+    return ge.safe_field_text(preview, limit=limit)
+
+
+def _reply_target_embed_preview(text: str | None) -> str | None:
+    return _reply_target_snapshot_text(text, limit=PUBLIC_REPLY_CONTEXT_PREVIEW_LIMIT)
 
 
 def _owner_reply_opportunity_age_text(iso_value: str | None) -> str:
@@ -1648,6 +1661,8 @@ class ConfessionsService:
             )
 
     async def _scrub_submission_for_terminal_state(self, submission: dict[str, Any]):
+        submission["reply_target_label"] = None
+        submission["reply_target_preview"] = None
         submission["staff_preview"] = None
         submission["content_body"] = None
         submission["shared_link_url"] = None
@@ -2055,6 +2070,8 @@ class ConfessionsService:
         if not preflight.ok and preflight.result is not None:
             return preflight.result
         compiled = self.get_compiled_config(guild.id)
+        reply_target_label = None
+        reply_target_preview = None
         if submission_kind == "reply":
             normalized_reply_flow = normalized_reply_flow or REPLY_FLOW_TO_CONFESSION
         else:
@@ -2088,6 +2105,9 @@ class ConfessionsService:
                     )
                 normalized_parent_confession_id = str(root_submission.get("confession_id") or normalized_parent_confession_id or "")
                 owner_reply_generation = 1 if referenced_submission.get("submission_kind") == "confession" else 2
+                opportunity = owner_context.get("opportunity") or {}
+                reply_target_label = normalize_plain_text(opportunity.get("source_author_name"))
+                reply_target_preview = _reply_target_snapshot_text(opportunity.get("source_preview"))
             else:
                 owner_reply_generation = None
                 if not normalized_parent_confession_id or not normalized_parent_confession_id.startswith(f"{CONFESSION_ID_PREFIX}-"):
@@ -2097,6 +2117,7 @@ class ConfessionsService:
                     return ConfessionSubmissionResult(False, "blocked", "That confession is not available for anonymous replies.", submission_kind=submission_kind, reply_flow=normalized_reply_flow)
                 if parent_submission.get("submission_kind") != "confession":
                     return ConfessionSubmissionResult(False, "blocked", "Anonymous replies only support one level of depth right now.", submission_kind=submission_kind, reply_flow=normalized_reply_flow)
+                reply_target_label, reply_target_preview = await self._snapshot_reply_target_for_confession(guild, parent_submission)
         else:
             owner_reply_generation = None
 
@@ -2170,6 +2191,8 @@ class ConfessionsService:
             "reply_flow": normalized_reply_flow,
             "owner_reply_generation": owner_reply_generation,
             "parent_confession_id": normalized_parent_confession_id,
+            "reply_target_label": reply_target_label,
+            "reply_target_preview": reply_target_preview,
             "status": "queued" if requires_review else "published",
             "review_status": "pending" if requires_review else "none",
             "staff_preview": preview,
@@ -2447,6 +2470,33 @@ class ConfessionsService:
         if not isinstance(channel_id, int) or not isinstance(message_id, int):
             return None
         return f"https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"
+
+    def _public_confession_preview_from_message(self, message: Any) -> str | None:
+        for embed in list(getattr(message, "embeds", None) or []):
+            description = normalize_plain_text(getattr(embed, "description", None))
+            if description and description != PUBLIC_QUIET_POST_BODY:
+                return ge.safe_field_text(description, limit=MAX_STAFF_PREVIEW)
+        return _reply_target_snapshot_text(getattr(message, "content", None))
+
+    async def _snapshot_reply_target_for_confession(
+        self,
+        guild: discord.Guild,
+        parent_submission: dict[str, Any],
+    ) -> tuple[str | None, str | None]:
+        label = normalize_plain_text(parent_submission.get("confession_id"))
+        preview = _reply_target_snapshot_text(parent_submission.get("content_body")) or _reply_target_snapshot_text(
+            parent_submission.get("staff_preview")
+        )
+        if preview is not None:
+            return label, preview
+        channel_id = parent_submission.get("posted_channel_id")
+        channel = guild.get_channel(channel_id) or self.bot.get_channel(channel_id)
+        if channel is None:
+            return label, None
+        message = await self._queue_message(channel, message_id=parent_submission.get("posted_message_id"))
+        if message is None:
+            return label, None
+        return label, self._public_confession_preview_from_message(message)
 
     async def _resolve_public_reply_target(
         self,
@@ -4106,11 +4156,32 @@ class ConfessionsService:
         )
         main = discord.Embed(
             title=title,
-            description=body or "Shared quietly through Babblebox.",
+            description=body or PUBLIC_QUIET_POST_BODY,
             color=ge.EMBED_THEME["accent"],
         )
-        if submission.get("parent_confession_id"):
-            main.add_field(name="Replying To", value=f"`{submission['parent_confession_id']}`", inline=True)
+        parent_confession_id = normalize_plain_text(submission.get("parent_confession_id"))
+        reply_target_label = normalize_plain_text(submission.get("reply_target_label"))
+        reply_target_preview = _reply_target_embed_preview(submission.get("reply_target_preview"))
+        if is_owner_reply:
+            if reply_target_label and reply_target_preview:
+                main.add_field(
+                    name="Replying To",
+                    value=f"**{discord.utils.escape_markdown(reply_target_label)}**\nPreview: {reply_target_preview}",
+                    inline=False,
+                )
+                if parent_confession_id:
+                    main.add_field(name="Confession", value=f"`{parent_confession_id}`", inline=True)
+            elif parent_confession_id:
+                main.add_field(name="Replying To", value=f"`{parent_confession_id}`", inline=True)
+        elif parent_confession_id and reply_target_preview:
+            target_confession_id = reply_target_label or parent_confession_id
+            main.add_field(
+                name="Replying To",
+                value=f"Confession `{target_confession_id}`\nPreview: {reply_target_preview}",
+                inline=False,
+            )
+        elif parent_confession_id:
+            main.add_field(name="Replying To", value=f"`{parent_confession_id}`", inline=True)
         if is_owner_reply:
             generation = int(submission.get("owner_reply_generation") or 1)
             main.add_field(name="Flow", value="Owner reply" if generation == 1 else f"Owner reply round {generation}", inline=True)
