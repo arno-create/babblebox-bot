@@ -2,9 +2,11 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Container, Sequence
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from urllib.parse import urlsplit
 
 from babblebox.text_safety import normalize_plain_text
 
@@ -12,6 +14,11 @@ from babblebox.text_safety import normalize_plain_text
 DEFAULT_LINK_CACHE_TTL_SECONDS = 30.0 * 60.0
 DEFAULT_LINK_CACHE_MAX_ENTRIES = 256
 DEFAULT_LINK_INTEL_PATH = Path(__file__).resolve().parent / "data" / "shield_link_intel.json"
+DEFAULT_EXTERNAL_MALICIOUS_PATHS = (
+    Path(__file__).resolve().parent.parent / "malicious_links.txt",
+    Path(__file__).resolve().parent.parent / "malicious_files",
+    Path(__file__).resolve().parent.parent / "malicious_files.txt",
+)
 
 SAFE_LINK_CATEGORY = "safe"
 MALICIOUS_LINK_CATEGORY = "malicious"
@@ -38,6 +45,7 @@ BRAND_BAIT_RE = re.compile(r"(?i)\b(?:discord|nitro|steam|epic|wallet|crypto|gif
 SUSPICIOUS_FILE_RE = re.compile(r"(?i)\.(?:exe|scr|bat|cmd|msi|zip|rar|7z|iso|apk)(?:$|[?#])")
 ENCODED_QUERY_RE = re.compile(r"(?i)(?:%[0-9a-f]{2}){3,}")
 TOKEN_RE = re.compile(r"[a-z0-9]+")
+LINK_HOST_LABEL_RE = re.compile(r"[a-z0-9-]+")
 HIGH_SEVERITY_CONTEXT_SIGNALS = frozenset({"suspicious_file_target", "message_scam_bait", "suspicious_attachment_link_combo"})
 LOOKUP_CONTEXT_SIGNALS = HIGH_SEVERITY_CONTEXT_SIGNALS | frozenset(
     {"message_social_engineering", "message_brand_bait", "encoded_or_long_query"}
@@ -48,8 +56,81 @@ def domain_matches(domain: str, candidate: str) -> bool:
     return domain == candidate or domain.endswith(f".{candidate}")
 
 
-def domain_in_set(domain: str, candidates: set[str] | frozenset[str]) -> bool:
-    return any(domain_matches(domain, candidate) for candidate in candidates)
+def iter_domain_candidates(domain: str) -> tuple[str, ...]:
+    normalized = normalize_plain_text(domain).casefold().strip().strip(".")
+    if not normalized:
+        return ()
+    labels = [label for label in normalized.split(".") if label]
+    if len(labels) < 2:
+        return (normalized,)
+    return tuple(".".join(labels[index:]) for index in range(len(labels) - 1))
+
+
+def matching_domain(domain: str, candidates: Container[str]) -> str | None:
+    for candidate in iter_domain_candidates(domain):
+        if candidate in candidates:
+            return candidate
+    return None
+
+
+def domain_in_set(domain: str, candidates: Container[str]) -> bool:
+    return matching_domain(domain, candidates) is not None
+
+
+def clean_url_candidate(raw_url: str) -> str | None:
+    if not raw_url:
+        return None
+    candidate = raw_url.strip().strip("()[]{}<>,.!?\"'")
+    if not candidate:
+        return None
+    if "://" not in candidate:
+        candidate = f"https://{candidate}"
+    return candidate
+
+
+def normalize_link_host(raw_host: str) -> str | None:
+    host = normalize_plain_text(raw_host).casefold().strip()
+    if not host:
+        return None
+    if "@" in host:
+        host = host.rsplit("@", 1)[1]
+    if host.startswith("[") or host.endswith("]"):
+        return None
+    if ":" in host:
+        host = host.split(":", 1)[0]
+    host = host.rstrip(".")
+    if host.startswith("www."):
+        host = host[4:]
+    if not host or host.startswith(".") or host.endswith(".") or ".." in host:
+        return None
+    try:
+        host = host.encode("idna").decode("ascii")
+    except UnicodeError:
+        return None
+    host = host.casefold().rstrip(".")
+    if host.startswith("www."):
+        host = host[4:]
+    if not host or host.startswith(".") or host.endswith(".") or ".." in host:
+        return None
+    labels = host.split(".")
+    if len(labels) < 2:
+        return None
+    for label in labels:
+        if not label or len(label) > 63:
+            return None
+        if label.startswith("-") or label.endswith("-"):
+            return None
+        if LINK_HOST_LABEL_RE.fullmatch(label) is None:
+            return None
+    return host
+
+
+def extract_link_domain(raw_url: str) -> str | None:
+    candidate = clean_url_candidate(raw_url)
+    if candidate is None:
+        return None
+    parsed = urlsplit(candidate)
+    return normalize_link_host(parsed.netloc)
 
 
 @dataclass(frozen=True)
@@ -72,6 +153,14 @@ class ShieldLinkProviderRequest:
 
 
 @dataclass(frozen=True)
+class _ExternalMaliciousFeed:
+    domains: frozenset[str]
+    source_paths: tuple[str, ...]
+    skipped_lines: int
+    load_errors: tuple[str, ...]
+
+
+@dataclass(frozen=True)
 class _BundledLinkIntel:
     intel_version: str
     source: str
@@ -80,8 +169,13 @@ class _BundledLinkIntel:
     media_embed_domains: frozenset[str]
     shortener_domains: frozenset[str]
     safe_families: dict[str, frozenset[str]]
+    bundled_malicious_domains: frozenset[str]
+    external_malicious_domains: frozenset[str]
     malicious_domains: frozenset[str]
     adult_domains: frozenset[str]
+    external_malicious_source_paths: tuple[str, ...]
+    external_malicious_skipped_lines: int
+    external_malicious_load_errors: tuple[str, ...]
     suspicious_tlds: frozenset[str]
     suspicious_host_tokens: frozenset[str]
     brand_tokens: frozenset[str]
@@ -92,7 +186,7 @@ class _BundledLinkIntel:
 
     def safe_family_for_domain(self, domain: str) -> str | None:
         for family, domains in self.safe_families.items():
-            if domain_in_set(domain, domains):
+            if matching_domain(domain, domains) is not None:
                 return family
         return None
 
@@ -117,7 +211,42 @@ def _clean_domain_list(values: Any) -> frozenset[str]:
     return frozenset(value for value in cleaned if value)
 
 
-def _load_bundled_intel(path: Path = DEFAULT_LINK_INTEL_PATH) -> _BundledLinkIntel:
+def _load_external_malicious_domains(paths: Sequence[Path] | None = None) -> _ExternalMaliciousFeed:
+    domains: set[str] = set()
+    source_paths: list[str] = []
+    load_errors: list[str] = []
+    skipped_lines = 0
+    for raw_path in paths or DEFAULT_EXTERNAL_MALICIOUS_PATHS:
+        path = Path(raw_path)
+        if not path.exists():
+            continue
+        try:
+            with path.open("r", encoding="utf-8", errors="replace") as handle:
+                source_paths.append(str(path.resolve()))
+                for raw_line in handle:
+                    line = raw_line.strip()
+                    if not line:
+                        continue
+                    domain = extract_link_domain(line)
+                    if domain is None:
+                        skipped_lines += 1
+                        continue
+                    domains.add(domain)
+        except OSError as exc:
+            load_errors.append(f"{path}: {exc}")
+    return _ExternalMaliciousFeed(
+        domains=frozenset(domains),
+        source_paths=tuple(source_paths),
+        skipped_lines=skipped_lines,
+        load_errors=tuple(load_errors),
+    )
+
+
+def _load_bundled_intel(
+    path: Path = DEFAULT_LINK_INTEL_PATH,
+    *,
+    external_malicious_paths: Sequence[Path] | None = None,
+) -> _BundledLinkIntel:
     with path.open("r", encoding="utf-8") as handle:
         payload = json.load(handle)
     if not isinstance(payload, dict):
@@ -133,17 +262,25 @@ def _load_bundled_intel(path: Path = DEFAULT_LINK_INTEL_PATH) -> _BundledLinkInt
     thresholds = payload.get("thresholds", {})
     suspicious_threshold = int(thresholds.get("suspicious", 2)) if isinstance(thresholds, dict) else 2
     provider_lookup_threshold = int(thresholds.get("provider_lookup", 3)) if isinstance(thresholds, dict) else 3
+    external_feed = _load_external_malicious_domains(external_malicious_paths)
+    bundled_malicious_domains = _clean_domain_list(payload.get("malicious_domains", []))
+    effective_malicious_domains = frozenset(set(bundled_malicious_domains) | set(external_feed.domains))
 
     return _BundledLinkIntel(
         intel_version=str(payload.get("intel_version", "unknown")).strip() or "unknown",
-        source=str(payload.get("source", "bundled")).strip() or "bundled",
+        source="bundled+external" if external_feed.domains else (str(payload.get("source", "bundled")).strip() or "bundled"),
         social_promo_domains=_clean_domain_list(payload.get("social_promo_domains", [])),
         storefront_domains=_clean_domain_list(payload.get("storefront_domains", [])),
         media_embed_domains=_clean_domain_list(payload.get("media_embed_domains", [])),
         shortener_domains=_clean_domain_list(payload.get("shortener_domains", [])),
         safe_families=safe_families,
-        malicious_domains=_clean_domain_list(payload.get("malicious_domains", [])),
+        bundled_malicious_domains=bundled_malicious_domains,
+        external_malicious_domains=external_feed.domains,
+        malicious_domains=effective_malicious_domains,
         adult_domains=_clean_domain_list(payload.get("adult_domains", [])),
+        external_malicious_source_paths=external_feed.source_paths,
+        external_malicious_skipped_lines=external_feed.skipped_lines,
+        external_malicious_load_errors=external_feed.load_errors,
         suspicious_tlds=_clean_domain_list(payload.get("suspicious_tlds", [])),
         suspicious_host_tokens=_clean_domain_list(payload.get("suspicious_host_tokens", [])),
         brand_tokens=_clean_domain_list(payload.get("brand_tokens", [])),
@@ -169,7 +306,7 @@ class ShieldLinkProvider:
             "provider": self.provider_name,
             "available": False,
             "configured": False,
-            "status": "Bundled local domain intelligence is active. External reputation lookup is inactive.",
+            "status": "Local domain intelligence is active. External reputation lookup is inactive.",
         }
 
     async def lookup(self, request: ShieldLinkProviderRequest) -> dict[str, Any] | None:
@@ -247,6 +384,12 @@ class ShieldLinkSafetyEngine:
         return {
             "intel_version": self.intel.intel_version,
             "intel_source": self.intel.source,
+            "bundled_malicious_domains": len(self.intel.bundled_malicious_domains),
+            "external_malicious_domains": len(self.intel.external_malicious_domains),
+            "effective_malicious_domains": len(self.intel.malicious_domains),
+            "external_malicious_source_paths": list(self.intel.external_malicious_source_paths),
+            "external_malicious_skipped_lines": self.intel.external_malicious_skipped_lines,
+            "external_malicious_load_errors": list(self.intel.external_malicious_load_errors),
             "provider": provider.get("provider"),
             "provider_available": bool(provider.get("available")),
             "provider_status": provider.get("status", "Unavailable."),
@@ -360,8 +503,9 @@ class ShieldLinkSafetyEngine:
                 host_signals=(f"safe_family:{safe_family}",),
                 suspicious_base_score=0,
             )
-        if domain_in_set(domain, self.intel.malicious_domains):
-            signal = "bundled_malicious_domain_exact" if domain in self.intel.malicious_domains else "bundled_malicious_domain_family"
+        bundled_malicious_match = matching_domain(domain, self.intel.bundled_malicious_domains)
+        if bundled_malicious_match is not None:
+            signal = "bundled_malicious_domain_exact" if bundled_malicious_match == domain else "bundled_malicious_domain_family"
             return _CachedDomainProfile(
                 domain=domain,
                 safe_family=None,
@@ -369,8 +513,19 @@ class ShieldLinkSafetyEngine:
                 host_signals=(signal,),
                 suspicious_base_score=0,
             )
-        if domain_in_set(domain, self.intel.adult_domains):
-            signal = "bundled_adult_domain_exact" if domain in self.intel.adult_domains else "bundled_adult_domain_family"
+        external_malicious_match = matching_domain(domain, self.intel.external_malicious_domains)
+        if external_malicious_match is not None:
+            signal = "external_malicious_domain_exact" if external_malicious_match == domain else "external_malicious_domain_family"
+            return _CachedDomainProfile(
+                domain=domain,
+                safe_family=None,
+                known_category=MALICIOUS_LINK_CATEGORY,
+                host_signals=(signal,),
+                suspicious_base_score=0,
+            )
+        adult_match = matching_domain(domain, self.intel.adult_domains)
+        if adult_match is not None:
+            signal = "bundled_adult_domain_exact" if adult_match == domain else "bundled_adult_domain_family"
             return _CachedDomainProfile(
                 domain=domain,
                 safe_family=None,
@@ -384,7 +539,7 @@ class ShieldLinkSafetyEngine:
         if "xn--" in domain:
             host_signals.append("punycode_host")
             suspicious_score += 2
-        if domain_in_set(domain, self.intel.shortener_domains):
+        if matching_domain(domain, self.intel.shortener_domains) is not None:
             host_signals.append("shortener_domain")
             suspicious_score += 1
 
