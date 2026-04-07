@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, cast
+from typing import Any
 
 import discord
 from discord.ext import commands
@@ -40,12 +40,6 @@ def _build_hybrid_send_kwargs(
     return kwargs
 
 
-def _coerce_message_handle(resource: object) -> discord.Message | None:
-    if resource is None or not hasattr(resource, "edit"):
-        return None
-    return cast(discord.Message, resource)
-
-
 def _successful_panel_send(
     *,
     path: str,
@@ -73,69 +67,21 @@ async def send_hybrid_panel_response(
     ephemeral: bool = False,
     delete_after: float | None = None,
 ) -> HybridPanelSendResult:
-    kwargs = _build_hybrid_send_kwargs(
-        content,
-        embed=embed,
-        view=view,
-        ephemeral=ephemeral,
-        delete_after=delete_after,
-    )
-    interaction = getattr(ctx, "interaction", None)
-    path = "prefix"
-
+    path = "context_send"
     try:
-        if interaction is None:
-            message = await ctx.send(**kwargs)
-            return _successful_panel_send(
-                path=path,
-                message=message,
-                handle_status="available" if message is not None else "missing",
-            )
-
-        if interaction.is_expired():
-            path = "expired_interaction"
-            message = await ctx.send(**kwargs)
-            return _successful_panel_send(
-                path=path,
-                message=message,
-                handle_status="available" if message is not None else "missing",
-            )
-
-        if interaction.response.is_done():
-            path = "interaction_followup"
-            message = await interaction.followup.send(**kwargs, wait=True)
-            return _successful_panel_send(
-                path=path,
-                message=_coerce_message_handle(message),
-                handle_status="available" if message is not None else "missing",
-            )
-
-        path = "interaction_response"
-        try:
-            response = await interaction.response.send_message(**kwargs)
-        except discord.InteractionResponded:
-            path = "interaction_followup"
-            message = await interaction.followup.send(**kwargs, wait=True)
-            return _successful_panel_send(
-                path=path,
-                message=_coerce_message_handle(message),
-                handle_status="available" if message is not None else "missing",
-            )
-
-        message_id = getattr(response, "message_id", None)
-        message = _coerce_message_handle(getattr(response, "resource", None))
-        if message is not None:
-            return _successful_panel_send(path=path, message=message, message_id=message_id, handle_status="available")
-
-        if message_id is None:
-            return _successful_panel_send(path=path, handle_status="missing")
-
-        try:
-            message = await interaction.original_response()
-        except (discord.ClientException, discord.HTTPException, discord.NotFound):
-            return _successful_panel_send(path=path, message_id=message_id, handle_status="unavailable")
-
-        return _successful_panel_send(path=path, message=message, message_id=message_id, handle_status="available")
+        message = await send_hybrid_response(
+            ctx,
+            content,
+            embed=embed,
+            view=view,
+            ephemeral=ephemeral,
+            delete_after=delete_after,
+        )
+        return _successful_panel_send(
+            path=path,
+            message=message,
+            handle_status="available" if message is not None else "missing",
+        )
     except (discord.ClientException, discord.HTTPException, discord.NotFound, TypeError, ValueError) as exc:
         return HybridPanelSendResult(delivered=False, path=path, error=exc)
 

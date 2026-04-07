@@ -16,7 +16,7 @@ from babblebox.cogs.admin import AdminCog
 from babblebox.cogs.confessions import ConfessionsCog
 from babblebox.cogs.gameplay import GameplayCog
 from babblebox.cogs.identity import IdentityCog
-from babblebox.cogs.meta import HELP_PAGES, MetaCog, build_help_page_embed
+from babblebox.cogs.meta import HELP_PAGES, MetaCog, build_help_embed, build_help_page_embed
 from babblebox.cogs.question_drops import QuestionDropsCog
 from babblebox.cogs.shield import ShieldCog
 from babblebox.cogs.utilities import AfkReturnWatchDurationSelect, UtilityCog
@@ -302,7 +302,17 @@ class ShieldAwareBot:
 
 
 class FakeContext:
-    def __init__(self, *, interaction=None, author=None, guild=None, channel=None, message=None):
+    def __init__(
+        self,
+        *,
+        interaction=None,
+        author=None,
+        guild=None,
+        channel=None,
+        message=None,
+        send_exception: Optional[Exception] = None,
+        send_exception_if_view: Optional[Exception] = None,
+    ):
         self.interaction = interaction
         self.author = author or FakeAuthor()
         self.guild = guild
@@ -310,6 +320,8 @@ class FakeContext:
         self.message = message
         self.send_calls = []
         self.defer_calls = []
+        self.send_exception = send_exception
+        self.send_exception_if_view = send_exception_if_view
         if self.interaction is not None:
             if getattr(self.interaction, "guild", None) is None:
                 self.interaction.guild = guild
@@ -318,6 +330,10 @@ class FakeContext:
 
     async def send(self, **kwargs):
         self.send_calls.append(kwargs)
+        if self.send_exception is not None:
+            raise self.send_exception
+        if self.send_exception_if_view is not None and kwargs.get("view") is not None:
+            raise self.send_exception_if_view
         if self.interaction is None or self.interaction.is_expired():
             message = FakeMessage(channel=self.channel, **kwargs)
             if self.channel is not None and hasattr(self.channel, "register_message"):
@@ -444,6 +460,15 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         for index, _page in enumerate(HELP_PAGES):
             with self.subTest(page=index):
                 self._assert_embed_within_discord_limits(build_help_page_embed(index))
+
+    def test_compact_help_embed_stays_within_discord_limits(self):
+        embed = build_help_embed()
+        self._assert_embed_within_discord_limits(embed)
+        fields = {field.name: field.value for field in embed.fields}
+        self.assertIn("Party Games", fields)
+        self.assertIn("Question Drops", fields)
+        self.assertIn("Support / Links", fields)
+        self.assertIn("/support", fields["Support / Links"])
 
     def test_question_drops_help_page_is_split_across_multiple_fields(self):
         page_index = next(index for index, page in enumerate(HELP_PAGES) if page["title"] == "Question Drops")
@@ -1051,7 +1076,7 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await cog.service.close()
 
-    async def test_help_public_uses_view_and_public_visibility(self):
+    async def test_help_public_sends_compact_embed_without_view(self):
         cog = MetaCog(types.SimpleNamespace(loop=asyncio.get_running_loop()))
         interaction = FakeInteraction()
         ctx = FakeContext(interaction=interaction, guild=FakeGuild(), channel=FakeChannel(), author=FakeAuthor())
@@ -1060,24 +1085,14 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             await MetaCog.help_command.callback(cog, ctx, visibility="public")
 
         payload = self._sent_kwargs(ctx)
-        view = self._sent_view(ctx)
         self.assertEqual(ctx.defer_calls, [])
         self.assertEqual(len(interaction.response.send_calls), 1)
         self.assertEqual(interaction.followup_calls, [])
         self.assertFalse(payload["ephemeral"])
-        self.assertEqual(view.timeout, 900)
-        self.assertIs(view.message, interaction._original_response_message)
-        self.assertTrue(any(isinstance(child, discord.ui.Select) for child in view.children))
-        self.assertEqual(
-            self._link_buttons(view),
-            {
-                "Support Server": "https://discord.com/servers/inevitable-friendship-1322933864360050688",
-                "GitHub Repository": "https://github.com/arno-create/babblebox-bot",
-                "Official Website": "https://arno-create.github.io/babblebox-bot/",
-            },
-        )
+        self.assertIn("Babblebox Help", payload["embed"].title)
+        self.assertNotIn("view", payload)
 
-    async def test_help_private_sends_ephemeral_panel_without_defer(self):
+    async def test_help_private_sends_ephemeral_compact_embed_without_defer(self):
         cog = MetaCog(types.SimpleNamespace(loop=asyncio.get_running_loop()))
         interaction = FakeInteraction()
         ctx = FakeContext(interaction=interaction, guild=FakeGuild(), channel=FakeChannel(), author=FakeAuthor())
@@ -1089,9 +1104,10 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ctx.defer_calls, [])
         self.assertEqual(len(interaction.response.send_calls), 1)
         self.assertTrue(payload["ephemeral"])
-        self.assertIsNotNone(payload["view"])
+        self.assertIn("Babblebox Help", payload["embed"].title)
+        self.assertNotIn("view", payload)
 
-    async def test_help_prefix_still_opens_panel(self):
+    async def test_help_prefix_still_works_without_view(self):
         cog = MetaCog(types.SimpleNamespace(loop=asyncio.get_running_loop()))
         ctx = FakeContext(interaction=None, guild=FakeGuild(), channel=FakeChannel(), author=FakeAuthor())
 
@@ -1100,45 +1116,24 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(ctx.send_calls), 1)
         self.assertFalse(ctx.send_calls[0]["ephemeral"])
-        self.assertIsNotNone(ctx.send_calls[0]["view"])
+        self.assertNotIn("view", ctx.send_calls[0])
+        self.assertIn("Babblebox Help", ctx.send_calls[0]["embed"].title)
 
-    async def test_help_deferred_followup_send_works(self):
+    async def test_help_private_interaction_skips_channel_permission_gate(self):
         cog = MetaCog(types.SimpleNamespace(loop=asyncio.get_running_loop()))
         interaction = FakeInteraction()
-        interaction.response._done = True
         ctx = FakeContext(interaction=interaction, guild=FakeGuild(), channel=FakeChannel(), author=FakeAuthor())
+        permission_check = AsyncMock(return_value=False)
 
-        with patch("babblebox.cogs.meta.require_channel_permissions", new=AsyncMock(return_value=True)):
-            await MetaCog.help_command.callback(cog, ctx, visibility="public")
+        with patch("babblebox.cogs.meta.require_channel_permissions", new=permission_check):
+            await MetaCog.help_command.callback(cog, ctx, visibility="private")
 
-        payload = self._sent_kwargs(ctx)
-        view = self._sent_view(ctx)
-        self.assertEqual(len(interaction.followup_calls), 1)
-        self.assertTrue(interaction.followup_calls[0][1]["wait"])
-        self.assertFalse(payload["ephemeral"])
-        self.assertIs(view.message, interaction._last_followup_message)
-
-    async def test_help_initial_response_without_resource_fetches_original_message(self):
-        cog = MetaCog(types.SimpleNamespace(loop=asyncio.get_running_loop()))
-        interaction = FakeInteraction(initial_response_mode="message_id_only")
-        ctx = FakeContext(interaction=interaction, guild=FakeGuild(), channel=FakeChannel(), author=FakeAuthor())
-
-        with patch("babblebox.cogs.meta.require_channel_permissions", new=AsyncMock(return_value=True)):
-            await MetaCog.help_command.callback(cog, ctx, visibility="public")
-
-        view = self._sent_view(ctx)
-        self.assertEqual(len(interaction.original_response_calls), 1)
-        self.assertIs(view.message, interaction._original_response_message)
-        self.assertEqual(interaction.followup_calls, [])
+        permission_check.assert_not_awaited()
+        self.assertTrue(self._sent_kwargs(ctx)["ephemeral"])
 
     async def test_help_success_without_message_handle_does_not_trigger_recovery_and_consumes_cooldown(self):
         cog = MetaCog(types.SimpleNamespace(loop=asyncio.get_running_loop()))
-        first_ctx = FakeContext(
-            interaction=FakeInteraction(initial_response_mode="resource_none_message_missing"),
-            guild=FakeGuild(),
-            channel=FakeChannel(),
-            author=FakeAuthor(),
-        )
+        first_ctx = FakeContext(interaction=FakeInteraction(), guild=FakeGuild(), channel=FakeChannel(), author=FakeAuthor())
         second_ctx = FakeContext(
             interaction=FakeInteraction(),
             guild=first_ctx.guild,
@@ -1146,88 +1141,18 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             author=first_ctx.author,
         )
 
-        with patch("babblebox.cogs.meta.require_channel_permissions", new=AsyncMock(return_value=True)):
+        with patch("babblebox.cogs.meta.require_channel_permissions", new=AsyncMock(return_value=True)), patch(
+            "babblebox.cogs.meta.send_hybrid_panel_response",
+            new=AsyncMock(return_value=HybridPanelSendResult(delivered=True, path="context_send", message=None, handle_status="missing")),
+        ):
             await MetaCog.help_command.callback(cog, first_ctx, visibility="public")
+
+        with patch("babblebox.cogs.meta.require_channel_permissions", new=AsyncMock(return_value=True)):
             await MetaCog.help_command.callback(cog, second_ctx, visibility="public")
 
-        view = self._sent_view(first_ctx)
         cooldown_payload = self._sent_kwargs(second_ctx)
-        self.assertIsNone(view.message)
-        self.assertEqual(first_ctx.interaction.followup_calls, [])
         self.assertEqual(cooldown_payload["embed"].title, "Help Cooldown")
         self.assertTrue(cooldown_payload["ephemeral"])
-
-    async def test_help_select_navigation_updates_page_index(self):
-        cog = MetaCog(types.SimpleNamespace(loop=asyncio.get_running_loop()))
-        author = FakeAuthor()
-        ctx = FakeContext(interaction=FakeInteraction(), guild=FakeGuild(), channel=FakeChannel(), author=author)
-
-        with patch("babblebox.cogs.meta.require_channel_permissions", new=AsyncMock(return_value=True)):
-            await MetaCog.help_command.callback(cog, ctx, visibility="public")
-
-        view = self._sent_view(ctx)
-        select = next(child for child in view.children if isinstance(child, discord.ui.Select))
-        interaction = FakeInteraction(user=author, guild=ctx.guild, message=view.message)
-        select._values = ["2"]
-
-        await select.callback(interaction)
-
-        self.assertEqual(view.page_index, 2)
-        self.assertEqual(len(interaction.response.edit_calls), 1)
-        self.assertIn("Question Drops", interaction.response.edit_calls[0][1]["embed"].title)
-
-    async def test_help_button_navigation_updates_page_index(self):
-        cog = MetaCog(types.SimpleNamespace(loop=asyncio.get_running_loop()))
-        author = FakeAuthor()
-        ctx = FakeContext(interaction=FakeInteraction(), guild=FakeGuild(), channel=FakeChannel(), author=author)
-
-        with patch("babblebox.cogs.meta.require_channel_permissions", new=AsyncMock(return_value=True)):
-            await MetaCog.help_command.callback(cog, ctx, visibility="public")
-
-        view = self._sent_view(ctx)
-        interaction = FakeInteraction(user=author, guild=ctx.guild, message=view.message)
-
-        await view.next_button.callback(interaction)
-        self.assertEqual(view.page_index, 1)
-        self.assertEqual(len(interaction.response.edit_calls), 1)
-
-        interaction = FakeInteraction(user=author, guild=ctx.guild, message=view.message)
-        await view.home_button.callback(interaction)
-        self.assertEqual(view.page_index, 0)
-        self.assertEqual(len(interaction.response.edit_calls), 1)
-
-    async def test_help_panel_rejects_other_users_with_locked_message(self):
-        cog = MetaCog(types.SimpleNamespace(loop=asyncio.get_running_loop()))
-        ctx = FakeContext(interaction=FakeInteraction(), guild=FakeGuild(), channel=FakeChannel(), author=FakeAuthor(user_id=1))
-
-        with patch("babblebox.cogs.meta.require_channel_permissions", new=AsyncMock(return_value=True)):
-            await MetaCog.help_command.callback(cog, ctx, visibility="public")
-
-        view = self._sent_view(ctx)
-        interaction = FakeInteraction(user=FakeAuthor(user_id=2), guild=ctx.guild, message=view.message)
-
-        allowed = await view.interaction_check(interaction)
-
-        self.assertFalse(allowed)
-        self.assertEqual(len(interaction.response.send_calls), 1)
-        self.assertEqual(interaction.response.send_calls[0][1]["embed"].title, "This Panel Is Locked")
-
-    async def test_help_panel_falls_back_to_refresh_hint_when_edit_fails(self):
-        cog = MetaCog(types.SimpleNamespace(loop=asyncio.get_running_loop()))
-        author = FakeAuthor()
-        ctx = FakeContext(interaction=FakeInteraction(), guild=FakeGuild(), channel=FakeChannel(), author=author)
-
-        with patch("babblebox.cogs.meta.require_channel_permissions", new=AsyncMock(return_value=True)):
-            await MetaCog.help_command.callback(cog, ctx, visibility="public")
-
-        view = self._sent_view(ctx)
-        interaction = FakeInteraction(user=author, guild=ctx.guild, message=view.message)
-
-        with patch("babblebox.cogs.meta.ge.safe_edit_interaction_message", new=AsyncMock(return_value=False)):
-            await view.next_button.callback(interaction)
-
-        self.assertEqual(len(interaction.response.send_calls), 1)
-        self.assertEqual(interaction.response.send_calls[0][1]["embed"].title, "Help Panel Expired")
 
     async def test_help_true_send_failure_returns_recovery_without_consuming_public_cooldown(self):
         cog = MetaCog(types.SimpleNamespace(loop=asyncio.get_running_loop()))
@@ -1241,46 +1166,18 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
 
         with patch("babblebox.cogs.meta.require_channel_permissions", new=AsyncMock(return_value=True)), patch(
             "babblebox.cogs.meta.send_hybrid_panel_response",
-            new=AsyncMock(return_value=HybridPanelSendResult(delivered=False, path="interaction_response", error=TypeError("broken"))),
+            new=AsyncMock(return_value=HybridPanelSendResult(delivered=False, path="context_send", error=TypeError("broken"))),
         ):
             await MetaCog.help_command.callback(cog, first_ctx, visibility="public")
 
-        self.assertEqual(len(first_ctx.interaction.response.send_calls), 1)
-        self.assertEqual(first_ctx.interaction.response.send_calls[0][1]["embed"].title, "Help Panel Unavailable")
+        self.assertEqual(self._sent_kwargs(first_ctx)["embed"].title, "Help Unavailable")
+        self.assertTrue(self._sent_kwargs(first_ctx)["ephemeral"])
 
         with patch("babblebox.cogs.meta.require_channel_permissions", new=AsyncMock(return_value=True)):
             await MetaCog.help_command.callback(cog, second_ctx, visibility="public")
 
         self.assertFalse(self._sent_kwargs(second_ctx)["ephemeral"])
-
-    async def test_help_panel_timeout_disables_navigation_but_keeps_links_active_without_tracked_message(self):
-        cog = MetaCog(types.SimpleNamespace(loop=asyncio.get_running_loop()))
-        interaction = FakeInteraction(initial_response_mode="resource_none_message_missing")
-        channel = FakeChannel()
-        ctx = FakeContext(interaction=interaction, guild=FakeGuild(), channel=channel, author=FakeAuthor())
-
-        with patch("babblebox.cogs.meta.require_channel_permissions", new=AsyncMock(return_value=True)):
-            await MetaCog.help_command.callback(cog, ctx, visibility="public")
-
-        view = self._sent_view(ctx)
-        partial_message = channel.get_partial_message(view._delivery_message_id)
-
-        self.assertIsNone(view.message)
-        await view.on_timeout()
-
-        self.assertTrue(view.previous_button.disabled)
-        self.assertTrue(view.home_button.disabled)
-        self.assertTrue(view.next_button.disabled)
-        self.assertTrue(view.page_select.disabled)
-        self.assertEqual(
-            {label: child.disabled for label, child in ((child.label, child) for child in view.children if getattr(child, "style", None) == discord.ButtonStyle.link)},
-            {
-                "Support Server": False,
-                "GitHub Repository": False,
-                "Official Website": False,
-            },
-        )
-        self.assertEqual(len(partial_message.edit_calls), 1)
+        self.assertIn("Babblebox Help", self._sent_kwargs(second_ctx)["embed"].title)
 
     async def test_support_public_uses_view_and_public_visibility(self):
         cog = MetaCog(types.SimpleNamespace(loop=asyncio.get_running_loop()))
@@ -1327,13 +1224,26 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(ctx.send_calls), 1)
         self.assertFalse(ctx.send_calls[0]["ephemeral"])
 
-    async def test_support_success_without_message_handle_does_not_trigger_recovery_and_consumes_cooldown(self):
+    async def test_support_private_interaction_skips_channel_permission_gate(self):
+        cog = MetaCog(types.SimpleNamespace(loop=asyncio.get_running_loop()))
+        interaction = FakeInteraction()
+        ctx = FakeContext(interaction=interaction, guild=FakeGuild(), channel=FakeChannel(), author=FakeAuthor())
+        permission_check = AsyncMock(return_value=False)
+
+        with patch("babblebox.cogs.meta.require_channel_permissions", new=permission_check):
+            await MetaCog.support_command.callback(cog, ctx, visibility="private")
+
+        permission_check.assert_not_awaited()
+        self.assertTrue(self._sent_kwargs(ctx)["ephemeral"])
+
+    async def test_support_view_failure_falls_back_to_embed_without_view_and_consumes_cooldown(self):
         cog = MetaCog(types.SimpleNamespace(loop=asyncio.get_running_loop()))
         first_ctx = FakeContext(
-            interaction=FakeInteraction(initial_response_mode="resource_none_message_missing"),
+            interaction=FakeInteraction(),
             guild=FakeGuild(),
             channel=FakeChannel(),
             author=FakeAuthor(),
+            send_exception_if_view=TypeError("view broke"),
         )
         second_ctx = FakeContext(
             interaction=FakeInteraction(),
@@ -1346,8 +1256,57 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             await MetaCog.support_command.callback(cog, first_ctx, visibility="public")
             await MetaCog.support_command.callback(cog, second_ctx, visibility="public")
 
-        self.assertEqual(first_ctx.interaction.followup_calls, [])
+        self.assertEqual(len(first_ctx.send_calls), 2)
+        self.assertIsNotNone(first_ctx.send_calls[0]["view"])
+        self.assertIsNone(first_ctx.send_calls[1].get("view"))
+        self.assertIn("Babblebox Support", first_ctx.send_calls[1]["embed"].title)
         self.assertEqual(self._sent_kwargs(second_ctx)["embed"].title, "Support Cooldown")
+
+    async def test_support_success_without_message_handle_does_not_trigger_recovery_and_consumes_cooldown(self):
+        cog = MetaCog(types.SimpleNamespace(loop=asyncio.get_running_loop()))
+        first_ctx = FakeContext(interaction=FakeInteraction(), guild=FakeGuild(), channel=FakeChannel(), author=FakeAuthor())
+        second_ctx = FakeContext(
+            interaction=FakeInteraction(),
+            guild=first_ctx.guild,
+            channel=first_ctx.channel,
+            author=first_ctx.author,
+        )
+
+        with patch("babblebox.cogs.meta.require_channel_permissions", new=AsyncMock(return_value=True)), patch(
+            "babblebox.cogs.meta.send_hybrid_panel_response",
+            new=AsyncMock(return_value=HybridPanelSendResult(delivered=True, path="context_send", message=None, handle_status="missing")),
+        ):
+            await MetaCog.support_command.callback(cog, first_ctx, visibility="public")
+
+        with patch("babblebox.cogs.meta.require_channel_permissions", new=AsyncMock(return_value=True)):
+            await MetaCog.support_command.callback(cog, second_ctx, visibility="public")
+
+        self.assertEqual(self._sent_kwargs(second_ctx)["embed"].title, "Support Cooldown")
+
+    async def test_support_true_send_failure_returns_recovery_without_consuming_public_cooldown(self):
+        cog = MetaCog(types.SimpleNamespace(loop=asyncio.get_running_loop()))
+        first_ctx = FakeContext(interaction=FakeInteraction(), guild=FakeGuild(), channel=FakeChannel(), author=FakeAuthor())
+        second_ctx = FakeContext(
+            interaction=FakeInteraction(),
+            guild=first_ctx.guild,
+            channel=first_ctx.channel,
+            author=first_ctx.author,
+        )
+
+        with patch("babblebox.cogs.meta.require_channel_permissions", new=AsyncMock(return_value=True)), patch(
+            "babblebox.cogs.meta.send_hybrid_panel_response",
+            new=AsyncMock(return_value=HybridPanelSendResult(delivered=False, path="context_send", error=TypeError("broken"))),
+        ):
+            await MetaCog.support_command.callback(cog, first_ctx, visibility="public")
+
+        self.assertEqual(self._sent_kwargs(first_ctx)["embed"].title, "Support Panel Unavailable")
+        self.assertTrue(self._sent_kwargs(first_ctx)["ephemeral"])
+
+        with patch("babblebox.cogs.meta.require_channel_permissions", new=AsyncMock(return_value=True)):
+            await MetaCog.support_command.callback(cog, second_ctx, visibility="public")
+
+        self.assertFalse(self._sent_kwargs(second_ctx)["ephemeral"])
+        self.assertIn("Babblebox Support", self._sent_kwargs(second_ctx)["embed"].title)
 
     async def test_support_public_uses_separate_cooldown_from_help(self):
         cog = MetaCog(types.SimpleNamespace(loop=asyncio.get_running_loop()))
@@ -1360,6 +1319,7 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(self._sent_kwargs(help_ctx)["ephemeral"])
         self.assertFalse(self._sent_kwargs(support_ctx)["ephemeral"])
+        self.assertIn("Babblebox Help", self._sent_kwargs(help_ctx)["embed"].title)
         self.assertIn("Babblebox Support", self._sent_kwargs(support_ctx)["embed"].title)
 
     async def test_shield_status_is_private_for_admins(self):
