@@ -8,17 +8,21 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+import discord
+
 from babblebox.cogs.confessions import (
     AppealModal,
     ConfessionComposerModal,
     ConfessionsCog,
     EditConfessionModal,
+    OwnerReplyComposerModal,
     ReplyComposerModal,
     ReportModal,
     StatelessConfessionMemberPanelView,
     StatelessConfessionsAdminPanelView,
     StatelessOwnerReplyPromptView,
     StatelessPublishedConfessionReplyView,
+    _validate_discord_modal_payload,
 )
 from babblebox.confessions_service import CASE_ID_PREFIX, CONFESSION_ID_PREFIX, ConfessionSubmissionResult, ConfessionsService
 from babblebox.confessions_store import ConfessionsStore, _PostgresConfessionsStore
@@ -263,14 +267,7 @@ class FakeRawDeletePayload:
 
 
 def _validate_modal_payload(payload: dict[str, object]):
-    components = payload.get("components")
-    if not isinstance(components, list):
-        raise AssertionError("Modal payload is missing components.")
-    for component in components:
-        if not isinstance(component, dict):
-            raise AssertionError("Modal component must be a dict.")
-        if int(component.get("type") or 0) == 19:
-            raise AssertionError("Modal payload cannot contain a top-level FileUpload component.")
+    _validate_discord_modal_payload(payload)
 
 
 class FakeResponse:
@@ -2580,6 +2577,48 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(interaction.response.sent[0]["kwargs"]["embed"].title, "Owner Reply Unavailable")
         self.assertIn("does not belong to you", interaction.response.sent[0]["kwargs"]["embed"].description)
 
+    async def test_owner_reply_inbox_action_reply_opens_modal_when_payload_is_valid(self):
+        await self.cog.service.configure_guild(
+            self.guild.id,
+            enabled=True,
+            confession_channel_id=20,
+            review_channel_id=30,
+            review_mode=False,
+        )
+        owner = self._member(208)
+        await self.cog.service.submit_confession(
+            self.guild,
+            author_id=owner.id,
+            member=owner,
+            content="open the inbox",
+            attachments=[],
+        )
+        response = self._reply_message(
+            author=self._member(209),
+            reply_to_message_id=self.guild.get_channel(20).sent[0].id,
+            content="please reply privately",
+        )
+        await self.cog.service.handle_member_response_message(response)
+
+        ctx = FakeContext(guild=self.guild, author=owner)
+        await ConfessionsCog.confess_reply_to_user_command.callback(self.cog, ctx)
+
+        inbox_view = ctx.interaction.response.sent[0]["kwargs"]["view"]
+        select = inbox_view.children[0]
+        select._values = [select.options[0].value]
+        select_interaction = FakeInteraction(guild=self.guild, user=owner)
+
+        await select.callback(select_interaction)
+
+        action_view = select_interaction.response.edits[0]["view"]
+        reply_interaction = FakeInteraction(guild=self.guild, user=owner)
+
+        await action_view.reply_button.callback(reply_interaction)
+
+        self.assertEqual(len(reply_interaction.response.modal_calls), 1)
+        self.assertEqual(reply_interaction.response.modal_calls[0].title, "Reply to Member Anonymously")
+        self.assertEqual(len(reply_interaction.response.sent), 0)
+
     async def test_owner_reply_inbox_select_opens_detail_and_action_reply_handles_modal_failure_privately(self):
         await self.cog.service.configure_guild(
             self.guild.id,
@@ -2624,6 +2663,115 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(reply_interaction.response.modal_calls), 0)
         self.assertEqual(reply_interaction.response.sent[0]["kwargs"]["embed"].title, "Owner Reply Unavailable")
 
+    async def test_owner_reply_inbox_action_reply_handles_payload_validation_failure_privately(self):
+        await self.cog.service.configure_guild(
+            self.guild.id,
+            enabled=True,
+            confession_channel_id=20,
+            review_channel_id=30,
+            review_mode=False,
+        )
+        owner = self._member(214)
+        await self.cog.service.submit_confession(
+            self.guild,
+            author_id=owner.id,
+            member=owner,
+            content="payload invalid",
+            attachments=[],
+        )
+        response = self._reply_message(
+            author=self._member(215),
+            reply_to_message_id=self.guild.get_channel(20).sent[0].id,
+            content="please answer this one",
+        )
+        await self.cog.service.handle_member_response_message(response)
+
+        ctx = FakeContext(guild=self.guild, author=owner)
+        await ConfessionsCog.confess_reply_to_user_command.callback(self.cog, ctx)
+
+        inbox_view = ctx.interaction.response.sent[0]["kwargs"]["view"]
+        select = inbox_view.children[0]
+        select._values = [select.options[0].value]
+        select_interaction = FakeInteraction(guild=self.guild, user=owner)
+
+        await select.callback(select_interaction)
+
+        action_view = select_interaction.response.edits[0]["view"]
+        reply_interaction = FakeInteraction(guild=self.guild, user=owner)
+        original_init = OwnerReplyComposerModal.__init__
+
+        def broken_init(modal_self, *args, **kwargs):
+            original_init(modal_self, *args, **kwargs)
+            modal_self.body_input.placeholder = "x" * 101
+
+        with mock.patch.object(OwnerReplyComposerModal, "__init__", new=broken_init):
+            await action_view.reply_button.callback(reply_interaction)
+
+        self.assertEqual(len(reply_interaction.response.modal_calls), 0)
+        self.assertEqual(reply_interaction.response.sent[0]["kwargs"]["embed"].title, "Owner Reply Unavailable")
+        self.assertIn("private owner-reply composer", reply_interaction.response.sent[0]["kwargs"]["embed"].description.lower())
+
+    async def test_owner_reply_inbox_action_reply_rechecks_preflight_before_opening_modal(self):
+        await self.cog.service.configure_guild(
+            self.guild.id,
+            enabled=True,
+            confession_channel_id=20,
+            review_channel_id=30,
+            review_mode=False,
+        )
+        owner = self._member(216)
+        await self.cog.service.submit_confession(
+            self.guild,
+            author_id=owner.id,
+            member=owner,
+            content="stale owner reply",
+            attachments=[],
+        )
+        response = self._reply_message(
+            author=self._member(217),
+            reply_to_message_id=self.guild.get_channel(20).sent[0].id,
+            content="reply after inbox opens",
+        )
+        await self.cog.service.handle_member_response_message(response)
+
+        ctx = FakeContext(guild=self.guild, author=owner)
+        await ConfessionsCog.confess_reply_to_user_command.callback(self.cog, ctx)
+
+        inbox_view = ctx.interaction.response.sent[0]["kwargs"]["view"]
+        select = inbox_view.children[0]
+        select._values = [select.options[0].value]
+        select_interaction = FakeInteraction(guild=self.guild, user=owner)
+
+        await select.callback(select_interaction)
+
+        action_view = select_interaction.response.edits[0]["view"]
+        await self.cog.service.store.upsert_enforcement_state(
+            {
+                "guild_id": self.guild.id,
+                "user_id": owner.id,
+                "active_restriction": "temp_ban",
+                "restricted_until": "2999-01-01T00:00:00+00:00",
+                "is_permanent_ban": False,
+                "strike_count": 3,
+                "last_strike_at": None,
+                "cooldown_until": None,
+                "burst_count": 0,
+                "burst_window_started_at": None,
+                "last_case_id": "CS-LOCKED",
+                "image_restriction_active": False,
+                "image_restricted_until": None,
+                "image_restriction_case_id": None,
+                "updated_at": "2999-01-01T00:00:00+00:00",
+            }
+        )
+        self.cog.service._cache_enforcement_state(await self.cog.service.store.fetch_enforcement_state(self.guild.id, owner.id))
+        reply_interaction = FakeInteraction(guild=self.guild, user=owner)
+
+        await action_view.reply_button.callback(reply_interaction)
+
+        self.assertEqual(len(reply_interaction.response.modal_calls), 0)
+        self.assertEqual(reply_interaction.response.sent[0]["kwargs"]["embed"].title, "Owner Reply Paused")
+
     async def test_owner_reply_prompt_open_handles_modal_construction_failure_privately(self):
         await self.cog.service.configure_guild(
             self.guild.id,
@@ -2665,6 +2813,32 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(interaction.response.modal_calls), 0)
         self.assertEqual(interaction.response.sent[0]["kwargs"]["embed"].title, "Owner Reply Unavailable")
+
+    async def test_safe_open_member_modal_rejects_invalid_payload_before_send_modal(self):
+        interaction = FakeInteraction(guild=self.guild, user=self._member(218))
+        interaction.response.send_modal = mock.AsyncMock()
+
+        class OversizedPlaceholderModal(discord.ui.Modal, title="Test Modal"):
+            def __init__(self):
+                super().__init__(timeout=60)
+                self.add_item(discord.ui.TextInput(label="Reason", placeholder="x" * 101))
+
+        opened = await self.cog._safe_open_member_modal(
+            interaction,
+            modal_factory=OversizedPlaceholderModal,
+            failure_title="Composer Unavailable",
+            failure_message="Babblebox blocked that private composer before it reached Discord.",
+            construct_code="test_modal_construct_failed",
+            construct_stage="test_modal_construct",
+            payload_code="test_modal_payload_invalid",
+            payload_stage="test_send_modal",
+            send_code="test_send_modal_failed",
+            send_stage="test_send_modal",
+        )
+
+        self.assertFalse(opened)
+        interaction.response.send_modal.assert_not_awaited()
+        self.assertEqual(interaction.response.sent[0]["kwargs"]["embed"].title, "Composer Unavailable")
 
     async def test_member_panel_button_opens_modal(self):
         await self.cog.service.configure_guild(self.guild.id, enabled=True, confession_channel_id=20, review_mode=False)
