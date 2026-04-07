@@ -26,6 +26,9 @@ OFFICIAL_LINKS: tuple[tuple[str, str], ...] = (
     ("GitHub Repository", "https://github.com/arno-create/babblebox-bot"),
     ("Official Website", "https://arno-create.github.io/babblebox-bot/"),
 )
+HELP_VIEW_TIMEOUT_SECONDS = 900
+EMBED_FIELD_VALUE_LIMIT = 1024
+SELECT_DESCRIPTION_LIMIT = 100
 
 
 def official_links_markdown() -> str:
@@ -73,6 +76,31 @@ HELP_PAGES: list[dict[str, str]] = [
             "Category tokens: `{user.mention}` `{user.name}` `{user.display_name}` `{role.name}` `{tier.label}` `{threshold}` `{category.name}`. Scholar tokens: `{user.mention}` `{user.name}` `{user.display_name}` `{role.name}` `{tier.label}` `{threshold}`.\n"
             "Admins can use `/dropsadmin` to run 1-10 drops a day, pick channels and categories, and opt into rare AI celebration copy without turning the lane into spam."
         ),
+        "fields": [
+            (
+                "Guild Lane",
+                (
+                    "`/drops status` shows the guild knowledge lane clearly.\n"
+                    "`/drops stats` and `/drops leaderboard` stay guild-first, while Buddy and Profile surfaces fold the knowledge lane into identity cleanly.\n"
+                    "`/drops roles status`, `/drops roles remove`, and `/drops roles preference` give members a private way to remove current Babblebox roles or stop future grants without touching achievement history."
+                ),
+            ),
+            (
+                "Config / Cadence",
+                (
+                    "`/dropsadmin config` also controls the difficulty profile: Standard stays welcoming, Smart leans medium/hard, and Hard makes the lane noticeably tougher without changing point values.\n"
+                    "Admins can use `/dropsadmin` to run 1-10 drops a day, pick channels and categories, and opt into rare AI celebration copy without turning the lane into spam."
+                ),
+            ),
+            (
+                "Mastery / Scholar",
+                (
+                    "`/dropsadmin mastery category ...` and `/dropsadmin mastery scholar ...` configure category mastery roles, the guild scholar ladder, and custom mastery announcement copy in one place.\n"
+                    "Template editing stays inside those mastery commands with `template_action`, supports a default template plus optional tier overrides, and falls back as: tier override -> scope default -> Babblebox default.\n"
+                    "Category tokens: `{user.mention}` `{user.name}` `{user.display_name}` `{role.name}` `{tier.label}` `{threshold}` `{category.name}`. Scholar tokens: `{user.mention}` `{user.name}` `{user.display_name}` `{role.name}` `{tier.label}` `{threshold}`."
+                ),
+            ),
+        ],
         "try": "`/drops status`, `/dropsadmin mastery category`, `/drops leaderboard`",
     },
     {
@@ -158,6 +186,66 @@ HELP_PAGES: list[dict[str, str]] = [
 ]
 
 
+def _truncate_select_description(text: str) -> str:
+    if len(text) <= SELECT_DESCRIPTION_LIMIT:
+        return text
+    return text[: SELECT_DESCRIPTION_LIMIT - 3].rstrip() + "..."
+
+
+def _split_help_field(name: str, value: str) -> list[tuple[str, str]]:
+    text = value.strip()
+    if len(text) <= EMBED_FIELD_VALUE_LIMIT:
+        return [(name, text)]
+
+    chunks: list[str] = []
+    current_lines: list[str] = []
+    current_length = 0
+
+    def flush():
+        nonlocal current_lines, current_length
+        if current_lines:
+            chunks.append("\n".join(current_lines))
+            current_lines = []
+            current_length = 0
+
+    for line in text.split("\n"):
+        line = line.strip()
+        if not line:
+            continue
+        line_length = len(line)
+        projected = line_length if not current_lines else current_length + 1 + line_length
+        if projected <= EMBED_FIELD_VALUE_LIMIT:
+            current_lines.append(line)
+            current_length = projected
+            continue
+
+        flush()
+        while line:
+            chunk = line[:EMBED_FIELD_VALUE_LIMIT]
+            chunks.append(chunk)
+            line = line[EMBED_FIELD_VALUE_LIMIT:]
+
+    flush()
+    if not chunks:
+        return [(name, text[:EMBED_FIELD_VALUE_LIMIT])]
+    if len(chunks) == 1:
+        return [(name, chunks[0])]
+    return [
+        (name if index == 0 else f"{name} (cont. {index + 1})", chunk)
+        for index, chunk in enumerate(chunks)
+    ]
+
+
+def _help_content_fields(page: dict[str, str]) -> list[tuple[str, str]]:
+    raw_fields = page.get("fields")
+    if raw_fields:
+        fields: list[tuple[str, str]] = []
+        for field_name, field_value in raw_fields:
+            fields.extend(_split_help_field(field_name, field_value))
+        return fields
+    return _split_help_field("Overview", page["body"])
+
+
 def build_help_page_embed(page_index: int) -> discord.Embed:
     page = HELP_PAGES[page_index]
     embed = discord.Embed(
@@ -165,9 +253,11 @@ def build_help_page_embed(page_index: int) -> discord.Embed:
         description=page["description"],
         color=ge.EMBED_THEME["accent"] if page_index else discord.Color.gold(),
     )
-    embed.add_field(name="Overview", value=page["body"], inline=False)
+    for field_name, field_value in _help_content_fields(page):
+        embed.add_field(name=field_name, value=field_value, inline=False)
     if page.get("links"):
-        embed.add_field(name="Links", value=page["links"], inline=False)
+        for field_name, field_value in _split_help_field("Links", page["links"]):
+            embed.add_field(name=field_name, value=field_value, inline=False)
     embed.add_field(name="Try", value=page.get("try", "`/help`"), inline=False)
     embed.add_field(name="Page", value=f"{page_index + 1}/{len(HELP_PAGES)}", inline=True)
     embed.add_field(name="Visibility", value="Showable cards default public. Sensitive utilities stay private.", inline=True)
@@ -207,25 +297,87 @@ class SupportLinksView(discord.ui.View):
         add_official_link_buttons(self, row=button_row)
 
 
+class HelpPageSelect(discord.ui.Select):
+    def __init__(self, view: "HelpPanelView"):
+        self.help_view = view
+        options = [
+            discord.SelectOption(
+                label=page["title"],
+                description=_truncate_select_description(page["description"]),
+                emoji=page["emoji"],
+                value=str(index),
+                default=index == view.page_index,
+            )
+            for index, page in enumerate(HELP_PAGES)
+        ]
+        super().__init__(
+            placeholder="Jump to a help section...",
+            min_values=1,
+            max_values=1,
+            options=options,
+            row=0,
+        )
+
+    def refresh_state(self):
+        self.placeholder = f"Jump to: {HELP_PAGES[self.help_view.page_index]['title']}"
+        current_value = str(self.help_view.page_index)
+        for option in self.options:
+            option.default = option.value == current_value
+
+    async def callback(self, interaction: discord.Interaction):
+        try:
+            page_index = int(self.values[0])
+        except (TypeError, ValueError, IndexError):
+            await ge.safe_send_interaction(
+                interaction,
+                embed=ge.make_status_embed(
+                    "Help Panel Error",
+                    "That help section could not be opened. Run `/help` again if this keeps happening.",
+                    tone="warning",
+                    footer="Babblebox Manual",
+                ),
+                ephemeral=True,
+            )
+            return
+        self.help_view.page_index = max(0, min(len(HELP_PAGES) - 1, page_index))
+        await self.help_view._render(interaction)
+
+
 class HelpPanelView(SupportLinksView):
     def __init__(self, *, author_id: int, start_index: int = 0):
-        super().__init__(timeout=180, button_row=1)
+        super().__init__(timeout=HELP_VIEW_TIMEOUT_SECONDS, button_row=2)
         self.author_id = author_id
         self.page_index = start_index
         self.message: discord.Message | None = None
-        self._refresh_buttons()
+        self.page_select = HelpPageSelect(self)
+        self.add_item(self.page_select)
+        self._refresh_controls()
 
     def current_embed(self) -> discord.Embed:
         return build_help_page_embed(self.page_index)
 
-    def _refresh_buttons(self):
+    def _refresh_controls(self):
         self.previous_button.disabled = self.page_index <= 0
         self.home_button.disabled = self.page_index == 0
         self.next_button.disabled = self.page_index >= len(HELP_PAGES) - 1
+        self.page_select.refresh_state()
 
     async def _render(self, interaction: discord.Interaction):
-        self._refresh_buttons()
-        await interaction.response.edit_message(embed=self.current_embed(), view=self)
+        self.message = self.message or getattr(interaction, "message", None)
+        self._refresh_controls()
+        edited = await ge.safe_edit_interaction_message(interaction, embed=self.current_embed(), view=self)
+        if edited:
+            return
+        await ge.safe_send_interaction(
+            interaction,
+            embed=ge.make_status_embed(
+                "Help Panel Expired",
+                "This help panel expired or could not be refreshed. Run `/help` again for a fresh panel.",
+                tone="warning",
+                footer="Babblebox Manual",
+            ),
+            ephemeral=True,
+        )
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id == self.author_id:
@@ -249,17 +401,17 @@ class HelpPanelView(SupportLinksView):
             with contextlib.suppress(discord.HTTPException):
                 await self.message.edit(view=self)
 
-    @discord.ui.button(label="Previous", style=discord.ButtonStyle.secondary, emoji="\u2b05\ufe0f")
+    @discord.ui.button(label="Previous", style=discord.ButtonStyle.secondary, emoji="\u2b05\ufe0f", row=1)
     async def previous_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.page_index = max(0, self.page_index - 1)
         await self._render(interaction)
 
-    @discord.ui.button(label="Home", style=discord.ButtonStyle.primary, emoji="\U0001f3e0")
+    @discord.ui.button(label="Home", style=discord.ButtonStyle.primary, emoji="\U0001f3e0", row=1)
     async def home_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.page_index = 0
         await self._render(interaction)
 
-    @discord.ui.button(label="Next", style=discord.ButtonStyle.secondary, emoji="\u27a1\ufe0f")
+    @discord.ui.button(label="Next", style=discord.ButtonStyle.secondary, emoji="\u27a1\ufe0f", row=1)
     async def next_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.page_index = min(len(HELP_PAGES) - 1, self.page_index + 1)
         await self._render(interaction)
