@@ -16,6 +16,9 @@ DEFAULT_LINK_CACHE_MAX_ENTRIES = 256
 DEFAULT_LINK_INTEL_PATH = Path(__file__).resolve().parent / "data" / "shield_link_intel.json"
 DEFAULT_EXTERNAL_MALICIOUS_PATHS = (
     Path(__file__).resolve().parent.parent / "malicious_links.txt",
+    Path(__file__).resolve().parent.parent / "full-domains-aa.txt",
+    Path(__file__).resolve().parent.parent / "full-domains-ab.txt",
+    Path(__file__).resolve().parent.parent / "full-domains-ac.txt",
     Path(__file__).resolve().parent.parent / "malicious_files",
     Path(__file__).resolve().parent.parent / "malicious_files.txt",
 )

@@ -3,7 +3,12 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from babblebox.shield_link_safety import ShieldLinkSafetyEngine, _load_bundled_intel, domain_in_set
+from babblebox.shield_link_safety import (
+    DEFAULT_EXTERNAL_MALICIOUS_PATHS,
+    ShieldLinkSafetyEngine,
+    _load_bundled_intel,
+    domain_in_set,
+)
 
 
 class _CountingContainer:
@@ -17,6 +22,19 @@ class _CountingContainer:
 
 
 class ShieldLinkSafetyLookupTests(unittest.TestCase):
+    def test_default_external_feed_paths_include_explicit_large_feed_chunks(self):
+        self.assertEqual(
+            tuple(path.name for path in DEFAULT_EXTERNAL_MALICIOUS_PATHS),
+            (
+                "malicious_links.txt",
+                "full-domains-aa.txt",
+                "full-domains-ab.txt",
+                "full-domains-ac.txt",
+                "malicious_files",
+                "malicious_files.txt",
+            ),
+        )
+
     def test_domain_in_set_checks_only_domain_candidate_chain(self):
         hit = _CountingContainer({"bad.example.com"})
 
@@ -127,4 +145,3 @@ class ShieldLinkSafetyLookupTests(unittest.TestCase):
         self.assertIn("external_malicious_domain_family", descendant.matched_signals)
         self.assertEqual(parent.category, "unknown")
         self.assertFalse(parent.provider_lookup_warranted)
-
