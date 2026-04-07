@@ -133,7 +133,9 @@ class ConfessionsStoreNormalizationTests(unittest.TestCase):
         self.assertTrue(config["block_adult_language"])
         self.assertTrue(config["allow_trusted_mainstream_links"])
         self.assertFalse(config["allow_images"])
+        self.assertFalse(config["image_review_required"])
         self.assertFalse(config["allow_anonymous_replies"])
+        self.assertFalse(config["anonymous_reply_review_required"])
         self.assertTrue(config["allow_owner_replies"])
         self.assertFalse(config["owner_reply_review_mode"])
         self.assertFalse(config["allow_self_edit"])
@@ -178,8 +180,10 @@ class ConfessionsStoreNormalizationTests(unittest.TestCase):
         self.assertEqual(config["appeals_channel_id"], 666)
         self.assertEqual(config["custom_allow_domains"], ["google.com", "youtube.com"])
         self.assertEqual(config["custom_block_domains"], ["bad.example"])
-        self.assertFalse(config["allow_images"])
-        self.assertFalse(config["allow_anonymous_replies"])
+        self.assertTrue(config["allow_images"])
+        self.assertFalse(config["image_review_required"])
+        self.assertTrue(config["allow_anonymous_replies"])
+        self.assertFalse(config["anonymous_reply_review_required"])
         self.assertFalse(config["allow_owner_replies"])
         self.assertFalse(config["owner_reply_review_mode"])
         self.assertTrue(config["allow_self_edit"])
@@ -205,7 +209,52 @@ class ConfessionsStoreNormalizationTests(unittest.TestCase):
             },
         )
         self.assertTrue(config["allow_images"])
+        self.assertTrue(config["image_review_required"])
         self.assertEqual(config["max_images"], 2)
+
+    def test_normalize_config_keeps_risky_features_enabled_but_disables_review_requirement_without_private_review_channel(self):
+        config = normalize_confession_config(
+            10,
+            {
+                "enabled": True,
+                "confession_channel_id": 111,
+                "allow_images": True,
+                "image_review_required": True,
+                "allow_anonymous_replies": True,
+                "anonymous_reply_review_required": True,
+            },
+        )
+        self.assertTrue(config["allow_images"])
+        self.assertFalse(config["image_review_required"])
+        self.assertTrue(config["allow_anonymous_replies"])
+        self.assertFalse(config["anonymous_reply_review_required"])
+
+    def test_normalize_config_legacy_enablement_defaults_review_flags_on(self):
+        config = normalize_confession_config(
+            10,
+            {
+                "enabled": True,
+                "confession_channel_id": 111,
+                "review_channel_id": 222,
+                "allow_images": True,
+                "allow_anonymous_replies": True,
+            },
+        )
+        self.assertTrue(config["image_review_required"])
+        self.assertTrue(config["anonymous_reply_review_required"])
+
+    def test_normalize_config_clears_review_flags_when_feature_is_off(self):
+        config = normalize_confession_config(
+            10,
+            {
+                "allow_images": False,
+                "image_review_required": True,
+                "allow_anonymous_replies": False,
+                "anonymous_reply_review_required": True,
+            },
+        )
+        self.assertFalse(config["image_review_required"])
+        self.assertFalse(config["anonymous_reply_review_required"])
 
     def test_normalize_submission_drops_binary_bloat_from_attachment_meta(self):
         record = normalize_submission(
@@ -733,6 +782,102 @@ class ConfessionsStorePrivacyTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await store.close()
 
+    async def test_memory_store_list_review_surfaces_includes_private_attachment_urls(self):
+        store = ConfessionsStore(backend="memory")
+        await store.load()
+        try:
+            await store.upsert_submission(
+                {
+                    "submission_id": "sub-review",
+                    "guild_id": 10,
+                    "confession_id": "CF-REVIEW01",
+                    "submission_kind": "confession",
+                    "status": "queued",
+                    "review_status": "pending",
+                    "staff_preview": "Queued preview",
+                    "content_body": "Queued body",
+                    "shared_link_url": None,
+                    "content_fingerprint": "h1:review",
+                    "similarity_key": "sim:review",
+                    "fuzzy_signature": "fh1:review",
+                    "flag_codes": [],
+                    "attachment_meta": [{"kind": "image", "size": 12, "width": 8, "height": 8, "spoiler": False}],
+                    "created_at": "2026-04-03T00:00:00+00:00",
+                }
+            )
+            await store.upsert_case(
+                {
+                    "case_id": "CS-REVIEW01",
+                    "guild_id": 10,
+                    "submission_id": "sub-review",
+                    "confession_id": "CF-REVIEW01",
+                    "case_kind": "review",
+                    "status": "open",
+                    "reason_codes": ["images"],
+                    "review_version": 1,
+                    "created_at": "2026-04-03T00:00:00+00:00",
+                }
+            )
+            await store.upsert_private_media(
+                {
+                    "guild_id": 10,
+                    "submission_id": "sub-review",
+                    "attachment_urls": [
+                        "https://cdn.discordapp.com/attachments/1/2/one.png",
+                        "https://cdn.discordapp.com/attachments/1/2/two.png",
+                    ],
+                    "created_at": "2026-04-03T00:00:00+00:00",
+                    "updated_at": "2026-04-03T00:01:00+00:00",
+                }
+            )
+
+            surfaces = await store.list_review_surfaces(10, limit=5)
+
+            self.assertEqual(len(surfaces), 1)
+            self.assertEqual(
+                surfaces[0]["attachment_urls"],
+                [
+                    "https://cdn.discordapp.com/attachments/1/2/one.png",
+                    "https://cdn.discordapp.com/attachments/1/2/two.png",
+                ],
+            )
+        finally:
+            await store.close()
+
+    async def test_memory_store_support_ticket_round_trip(self):
+        store = ConfessionsStore(backend="memory")
+        await store.load()
+        try:
+            await store.upsert_support_ticket(
+                {
+                    "ticket_id": "CT-APPEAL1",
+                    "guild_id": 10,
+                    "kind": "appeal",
+                    "action_target_id": "CS-AAAA1111",
+                    "reference_confession_id": "CF-AAAA1111",
+                    "reference_case_id": "CS-AAAA1111",
+                    "context_label": "Appeal against automatic restriction",
+                    "details": "Please review the full context.",
+                    "status": "open",
+                    "resolution_action": None,
+                    "message_channel_id": 50,
+                    "message_id": 60,
+                    "created_at": "2026-04-03T00:00:00+00:00",
+                    "resolved_at": None,
+                }
+            )
+
+            record = await store.fetch_support_ticket(10, "CT-APPEAL1")
+            rows = await store.list_support_tickets(10, status="open", limit=5)
+
+            self.assertIsNotNone(record)
+            self.assertEqual(record["kind"], "appeal")
+            self.assertEqual(record["action_target_id"], "CS-AAAA1111")
+            self.assertEqual(record["message_channel_id"], 50)
+            self.assertEqual([row["ticket_id"] for row in rows], ["CT-APPEAL1"])
+        finally:
+            await store.close()
+
     async def test_memory_store_supports_legacy_key_lookup_then_rewrites_to_active_keys(self):
         store = ConfessionsStore(backend="memory")
         await store.load()
@@ -855,7 +1000,9 @@ class PostgresConfessionsStoreTests(unittest.IsolatedAsyncioTestCase):
                 "allowed_role_ids": [501],
                 "blocked_role_ids": [502],
                 "allow_images": True,
+                "image_review_required": True,
                 "allow_anonymous_replies": True,
+                "anonymous_reply_review_required": False,
                 "allow_owner_replies": True,
                 "owner_reply_review_mode": True,
                 "allow_self_edit": True,
@@ -887,9 +1034,12 @@ class PostgresConfessionsStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(args[14])
         self.assertTrue(args[15])
         self.assertTrue(args[16])
-        self.assertTrue(args[17])
-        self.assertFalse(args[19])
-        self.assertEqual(json.loads(args[20]), [901, 902])
+        self.assertFalse(args[17])
+        self.assertTrue(args[18])
+        self.assertTrue(args[19])
+        self.assertTrue(args[20])
+        self.assertFalse(args[21])
+        self.assertEqual(json.loads(args[22]), [901, 902])
 
     async def test_postgres_store_fetch_config_round_trips_admin_runtime_fields(self):
         self.connection.fetchrow_results.append(
@@ -909,7 +1059,9 @@ class PostgresConfessionsStoreTests(unittest.IsolatedAsyncioTestCase):
                 "allowed_role_ids": json.dumps([501]),
                 "blocked_role_ids": json.dumps([502]),
                 "allow_images": True,
+                "image_review_required": True,
                 "allow_anonymous_replies": True,
+                "anonymous_reply_review_required": False,
                 "allow_owner_replies": True,
                 "owner_reply_review_mode": True,
                 "allow_self_edit": True,
@@ -934,7 +1086,9 @@ class PostgresConfessionsStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(config["allowed_role_ids"], [501])
         self.assertEqual(config["blocked_role_ids"], [502])
         self.assertTrue(config["allow_images"])
+        self.assertTrue(config["image_review_required"])
         self.assertTrue(config["allow_anonymous_replies"])
+        self.assertFalse(config["anonymous_reply_review_required"])
         self.assertTrue(config["allow_owner_replies"])
         self.assertTrue(config["owner_reply_review_mode"])
         self.assertTrue(config["allow_self_edit"])
@@ -960,7 +1114,9 @@ class PostgresConfessionsStoreTests(unittest.IsolatedAsyncioTestCase):
                     "allowed_role_ids": json.dumps([501]),
                     "blocked_role_ids": json.dumps([502]),
                     "allow_images": True,
+                    "image_review_required": True,
                     "allow_anonymous_replies": True,
+                    "anonymous_reply_review_required": False,
                     "allow_owner_replies": True,
                     "owner_reply_review_mode": True,
                     "allow_self_edit": True,
@@ -991,7 +1147,9 @@ class PostgresConfessionsStoreTests(unittest.IsolatedAsyncioTestCase):
                     "allowed_role_ids": json.dumps([]),
                     "blocked_role_ids": json.dumps([]),
                     "allow_images": False,
+                    "image_review_required": False,
                     "allow_anonymous_replies": False,
+                    "anonymous_reply_review_required": False,
                     "allow_owner_replies": True,
                     "owner_reply_review_mode": False,
                     "allow_self_edit": False,
@@ -1012,8 +1170,152 @@ class PostgresConfessionsStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sorted(configs), [10, 11])
         self.assertEqual(configs[10]["panel_message_id"], 50)
         self.assertEqual(configs[10]["appeals_channel_id"], 60)
+        self.assertTrue(configs[10]["image_review_required"])
+        self.assertFalse(configs[10]["anonymous_reply_review_required"])
         self.assertEqual(configs[11]["confession_channel_id"], 21)
         self.assertEqual(configs[11]["allowed_role_ids"], [])
+        self.assertFalse(configs[11]["image_review_required"])
+        self.assertFalse(configs[11]["anonymous_reply_review_required"])
+
+    async def test_postgres_store_support_ticket_round_trip_methods(self):
+        await self.store.upsert_support_ticket(
+            {
+                "ticket_id": "CT-REPORT1",
+                "guild_id": 10,
+                "kind": "report",
+                "action_target_id": "CF-AAAA1111",
+                "reference_confession_id": "CF-AAAA1111",
+                "reference_case_id": None,
+                "context_label": "Report against published confession",
+                "details": "This confession needs moderation.",
+                "status": "open",
+                "resolution_action": None,
+                "message_channel_id": 50,
+                "message_id": 60,
+                "created_at": "2026-04-03T00:00:00+00:00",
+                "resolved_at": None,
+            }
+        )
+
+        statement, args = self.connection.execute_calls[-1]
+        self.assertIn("confession_support_tickets", statement)
+        self.assertEqual(args[0], "CT-REPORT1")
+        self.assertEqual(args[1], 10)
+        self.assertEqual(args[2], "report")
+        self.assertEqual(args[3], "CF-AAAA1111")
+        self.assertEqual(args[10], 50)
+        self.assertEqual(args[11], 60)
+
+        self.connection.fetchrow_results.append(
+            {
+                "ticket_id": "CT-REPORT1",
+                "guild_id": 10,
+                "kind": "report",
+                "action_target_id": "CF-AAAA1111",
+                "reference_confession_id": "CF-AAAA1111",
+                "reference_case_id": None,
+                "context_label": "Report against published confession",
+                "details": "This confession needs moderation.",
+                "status": "open",
+                "resolution_action": None,
+                "message_channel_id": 50,
+                "message_id": 60,
+                "created_at": "2026-04-03T00:00:00+00:00",
+                "resolved_at": None,
+            }
+        )
+        record = await self.store.fetch_support_ticket(10, "CT-REPORT1")
+        self.assertEqual(record["ticket_id"], "CT-REPORT1")
+        self.assertEqual(record["details"], "This confession needs moderation.")
+
+        self.connection.fetch_results.append(
+            [
+                {
+                    "ticket_id": "CT-REPORT1",
+                    "guild_id": 10,
+                    "kind": "report",
+                    "action_target_id": "CF-AAAA1111",
+                    "reference_confession_id": "CF-AAAA1111",
+                    "reference_case_id": None,
+                    "context_label": "Report against published confession",
+                    "details": "This confession needs moderation.",
+                    "status": "open",
+                    "resolution_action": None,
+                    "message_channel_id": 50,
+                    "message_id": 60,
+                    "created_at": "2026-04-03T00:00:00+00:00",
+                    "resolved_at": None,
+                }
+            ]
+        )
+        rows = await self.store.list_support_tickets(10, status="open", limit=5)
+        self.assertEqual([row["ticket_id"] for row in rows], ["CT-REPORT1"])
+
+    async def test_postgres_store_list_review_surfaces_includes_private_attachment_urls(self):
+        self.connection.fetch_results.append(
+            [
+                {
+                    "case_id": "CS-AAAA1111",
+                    "case_kind": "review",
+                    "status": "open",
+                    "review_version": 3,
+                    "submission_id": "sub-1",
+                    "guild_id": 10,
+                    "confession_id": "CF-AAAA1111",
+                    "submission_kind": "confession",
+                    "reply_flow": None,
+                    "owner_reply_generation": None,
+                    "parent_confession_id": None,
+                    "staff_preview": None,
+                    "content_body": None,
+                    "shared_link_url": None,
+                    "content_ciphertext": self.store._privacy.encrypt_payload(
+                        domain="submission-content",
+                        aad_fields={"guild_id": 10, "submission_id": "sub-1", "confession_id": "CF-AAAA1111"},
+                        payload={"staff_preview": "Queued preview", "content_body": "Queued body", "shared_link_url": None},
+                        key_domain="content",
+                    ),
+                    "flag_codes": json.dumps(["images"]),
+                    "attachment_meta": json.dumps(
+                        [{"kind": "image", "size": 12, "width": 8, "height": 8, "spoiler": False}]
+                    ),
+                    "created_at": "2026-04-03T00:00:00+00:00",
+                }
+            ]
+        )
+        self.connection.fetch_results.append(
+            [
+                {
+                    "submission_id": "sub-1",
+                    "guild_id": 10,
+                    "attachment_urls": [],
+                    "attachment_payload": self.store._privacy.encrypt_payload(
+                        domain="private-media",
+                        aad_fields={"guild_id": 10, "submission_id": "sub-1"},
+                        payload={
+                            "attachment_urls": [
+                                "https://cdn.discordapp.com/attachments/1/2/image.png",
+                                "https://cdn.discordapp.com/attachments/1/2/extra.png",
+                            ]
+                        },
+                        key_domain="content",
+                    ),
+                    "created_at": "2026-04-03T00:00:00+00:00",
+                    "updated_at": "2026-04-03T00:01:00+00:00",
+                }
+            ]
+        )
+
+        surfaces = await self.store.list_review_surfaces(10, limit=25)
+
+        self.assertEqual(len(surfaces), 1)
+        self.assertEqual(
+            surfaces[0]["attachment_urls"],
+            [
+                "https://cdn.discordapp.com/attachments/1/2/image.png",
+                "https://cdn.discordapp.com/attachments/1/2/extra.png",
+            ],
+        )
 
     async def test_postgres_store_review_queue_round_trip_methods(self):
         await self.store.upsert_review_queue(
@@ -1182,7 +1484,9 @@ class PostgresConfessionsStoreTests(unittest.IsolatedAsyncioTestCase):
                 "allowed_role_ids": [501],
                 "blocked_role_ids": [502],
                 "allow_images": True,
+                "image_review_required": True,
                 "allow_anonymous_replies": True,
+                "anonymous_reply_review_required": False,
                 "allow_owner_replies": True,
                 "owner_reply_review_mode": True,
                 "allow_self_edit": True,
@@ -1296,9 +1600,27 @@ class PostgresConfessionsStoreTests(unittest.IsolatedAsyncioTestCase):
                 "updated_at": "2026-04-03T00:00:00+00:00",
             }
         )
+        await self.store.upsert_support_ticket(
+            {
+                "ticket_id": "CT-AAAA1111",
+                "guild_id": 10,
+                "kind": "appeal",
+                "action_target_id": "CS-AAAA1111",
+                "reference_confession_id": "CF-AAAA1111",
+                "reference_case_id": "CS-AAAA1111",
+                "context_label": "Appeal against a queued case",
+                "details": "Please review the context.",
+                "status": "open",
+                "resolution_action": None,
+                "message_channel_id": 50,
+                "message_id": 60,
+                "created_at": "2026-04-03T00:00:00+00:00",
+                "resolved_at": None,
+            }
+        )
         await self.store.delete_review_queue(10)
 
-        self.assertGreaterEqual(len(self.connection.execute_calls), 10)
+        self.assertGreaterEqual(len(self.connection.execute_calls), 11)
 
     async def test_postgres_store_major_fetch_queries_validate_parameter_arity(self):
         await self.store.fetch_all_configs()
@@ -1326,6 +1648,9 @@ class PostgresConfessionsStoreTests(unittest.IsolatedAsyncioTestCase):
         await self.store.list_review_queues()
         await self.store.fetch_review_queue(10)
         await self.store.list_review_surfaces(10, limit=25)
+        await self.store.fetch_support_ticket(10, "CT-AAAA1111")
+        await self.store.list_support_tickets(10, limit=25)
+        await self.store.list_support_tickets(10, status="open", limit=25)
         counts = await self.store.fetch_guild_counts(10)
         global_status = await self.store.fetch_privacy_status()
         guild_status = await self.store.fetch_privacy_status(10)
@@ -1433,7 +1758,9 @@ class PostgresConfessionsStoreLiveSmokeTests(unittest.IsolatedAsyncioTestCase):
                     "allowed_role_ids": [501],
                     "blocked_role_ids": [502],
                     "allow_images": True,
+                    "image_review_required": True,
                     "allow_anonymous_replies": True,
+                    "anonymous_reply_review_required": False,
                     "allow_owner_replies": True,
                     "owner_reply_review_mode": True,
                     "allow_self_edit": True,
@@ -1459,7 +1786,9 @@ class PostgresConfessionsStoreLiveSmokeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(stored["allowed_role_ids"], [501])
             self.assertEqual(stored["blocked_role_ids"], [502])
             self.assertTrue(stored["allow_images"])
+            self.assertTrue(stored["image_review_required"])
             self.assertTrue(stored["allow_anonymous_replies"])
+            self.assertFalse(stored["anonymous_reply_review_required"])
             self.assertTrue(stored["allow_owner_replies"])
             self.assertTrue(stored["owner_reply_review_mode"])
             self.assertTrue(stored["allow_self_edit"])
