@@ -661,7 +661,7 @@ Babblebox is designed for constrained hosting:
 
 ### Requirements
 
-- Python 3.9+
+- Python 3.11+
 - a Discord bot token
 - a `.env` file in the project root
 - Postgres for durable storage-backed features
