@@ -324,6 +324,15 @@ class QuestionDropsContentTests(unittest.TestCase):
         self.assertFalse(judge_answer({"type": "ordered_tokens", "tokens": ["red", "blue", "green"]}, "green, blue, red"))
         self.assertEqual(normalize_answer_text("  Hello,  World! "), "hello world")
 
+    def test_text_answer_judging_allows_bounded_typos_and_quote_normalization_only(self):
+        self.assertEqual(normalize_answer_text("Newton’s law"), "newtons law")
+        self.assertTrue(judge_answer({"type": "text", "accepted": ["Mercury"]}, "mercuri"))
+        self.assertTrue(judge_answer({"type": "text", "accepted": ["Mercury"]}, "mrecury"))
+        self.assertTrue(judge_answer({"type": "text", "accepted": ["Newton's law"]}, "newtons law"))
+        self.assertTrue(judge_answer({"type": "text", "accepted": ["the moon"]}, "moon"))
+        self.assertFalse(judge_answer({"type": "text", "accepted": ["Mercury"]}, "planet mercury"))
+        self.assertFalse(judge_answer({"type": "text", "accepted": ["Mercury"]}, "venus"))
+
     def test_decimal_numeric_judging_accepts_equivalent_clean_inputs_only(self):
         answer_spec = {"type": "numeric", "value": 14.4}
 
@@ -388,12 +397,13 @@ class QuestionDropsContentTests(unittest.TestCase):
         self.assertTrue(judge_answer(multiple_choice, "is it c?"))
 
     def test_render_answer_instruction_matches_answer_type(self):
-        self.assertIn("Reply to this drop or send", render_answer_instruction({"type": "numeric", "value": 12}))
+        self.assertIn("Reply is optional", render_answer_instruction({"type": "numeric", "value": 12}))
+        self.assertIn("same-channel", render_answer_instruction({"type": "numeric", "value": 12}))
         self.assertIn("option text", render_answer_instruction({"type": "multiple_choice", "choices": ["a"], "answer": "a"}))
         self.assertIn("number words", render_answer_instruction({"type": "numeric", "value": 12}))
         self.assertIn("true", render_answer_instruction({"type": "boolean", "value": True}))
         self.assertIn("full sequence", render_answer_instruction({"type": "ordered_tokens", "tokens": ["red", "blue"]}))
-        self.assertIn("short clean guess", render_answer_instruction({"type": "text", "accepted": ["mars"]}))
+        self.assertIn("short clean same-channel guess", render_answer_instruction({"type": "text", "accepted": ["mars"]}))
 
     def test_percent_change_generator_hits_exact_sale_price_regressions(self):
         expected = {
@@ -1132,6 +1142,27 @@ class QuestionDropsServiceTests(unittest.IsolatedAsyncioTestCase):
         message.add_reaction.assert_awaited_once_with("\u2705")
         self.bot.profile_service.record_question_drop_results_batch.assert_awaited_once()
 
+    async def test_text_drop_accepts_same_channel_non_reply_with_small_typo(self):
+        variant = QuestionDropVariant(
+            concept_id="science:planet-mercury",
+            category="science",
+            difficulty=2,
+            source_type="curated",
+            generator_type="static",
+            prompt="Which planet is closest to the Sun?",
+            answer_spec={"type": "text", "accepted": ["Mercury"]},
+            variant_hash="science-mercury",
+        )
+        self.service._select_variant = lambda *args, **kwargs: variant
+        await self._post_one_drop()
+        message = DummyMessage(guild=self.guild, channel=self.channel, author=DummyUser(47), content="mercuri")
+
+        handled = await self.service.handle_message(message)
+
+        self.assertTrue(handled)
+        message.add_reaction.assert_awaited_once_with("\u2705")
+        self.bot.profile_service.record_question_drop_results_batch.assert_awaited_once()
+
     async def test_multiple_choice_letter_answer_still_solves_without_a_reply(self):
         variant = QuestionDropVariant(
             concept_id="science:mc-react",
@@ -1284,6 +1315,35 @@ class QuestionDropsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.bot.profile_service.record_question_drop_results_batch.assert_awaited_once()
         self.service._grant_progression_rewards.assert_awaited_once()
         self.assertEqual(self._last_batch_results()[0]["user_id"], winner.id)
+        late_message.add_reaction.assert_awaited_once_with("\u2705")
+        titles = [item[1]["embed"].title for item in self.channel.sent]
+        self.assertEqual(sum(1 for title in titles if "Solved" in title), 1)
+        self.assertEqual(sum(1 for title in titles if "Just Late" in title), 1)
+
+    async def test_recently_solved_text_non_reply_gets_late_ack_with_fuzzy_match(self):
+        variant = QuestionDropVariant(
+            concept_id="science:planet-mercury-late",
+            category="science",
+            difficulty=2,
+            source_type="curated",
+            generator_type="static",
+            prompt="Which planet is closest to the Sun?",
+            answer_spec={"type": "text", "accepted": ["Mercury"]},
+            variant_hash="science-mercury-late",
+        )
+        self.service._select_variant = lambda *args, **kwargs: variant
+        await self._post_one_drop()
+        winner = DummyUser(170)
+        runner_up = DummyUser(171)
+        self.service._grant_progression_rewards = AsyncMock(return_value=[])
+        winning_message = DummyMessage(guild=self.guild, channel=self.channel, author=winner, content="mercury")
+        late_message = DummyMessage(guild=self.guild, channel=self.channel, author=runner_up, content="mercuri")
+
+        handled = await self.service.handle_message(winning_message)
+        late_handled = await self.service.handle_message(late_message)
+
+        self.assertTrue(handled)
+        self.assertFalse(late_handled)
         late_message.add_reaction.assert_awaited_once_with("\u2705")
         titles = [item[1]["embed"].title for item in self.channel.sent]
         self.assertEqual(sum(1 for title in titles if "Solved" in title), 1)

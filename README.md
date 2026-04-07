@@ -37,10 +37,6 @@ Babblebox is intentionally compact:
 - Exquisite Corpse
 - Spyfall
 - Word Bomb
-- Only 16
-  - social number trap with Strict and Smart modes
-  - safe arithmetic, number words, and ambiguity protection
-  - slower warm-up round and anchor-first live state
 - Pattern Hunt
   - one public clue loop with private rule guesses
   - hidden-rule coder DMs and machine-checkable rule families
@@ -213,7 +209,6 @@ Party game flow still starts from `/play`.
 - Exquisite Corpse: 3+ players
 - Spyfall: 3+ players
 - Word Bomb: 2+ players
-- Only 16: 2+ players, anchor-first number trap, Strict recommended, Smart visible for extra chaos
 - Pattern Hunt: 3+ players, public clue loop, private rule guesses, and coder role DMs that stay hidden from the room
 
 Babblebox now nudges solo users toward Daily Arcade, Buddy, Profile, and utilities instead of leaving them at dead ends.
@@ -586,7 +581,6 @@ Moment Cards do not introduce a durable archive table.
 |   |-- command_utils.py
 |   |-- daily_challenges.py
 |   |-- game_engine.py
-|   |-- only16_game.py
 |   |-- pattern_hunt_game.py
 |   |-- profile_service.py
 |   |-- profile_store.py
@@ -626,7 +620,6 @@ Moment Cards do not introduce a durable archive table.
 
 - `babblebox/bot.py`: bot bootstrap, extension loading, dictionary setup, sync
 - `babblebox/game_engine.py`: lobby state, gameplay flow, recaps, help/manual, session stats
-- `babblebox/only16_game.py`: Only 16 number-trap parsing, anchor flow, and fairness rules
 - `babblebox/pattern_hunt_game.py`: Pattern Hunt hidden-rule engine, DM onboarding, and anchor flow
 - `babblebox/utility_store.py`: Postgres-first utility persistence, including Watch V2 schema
 - `babblebox/utility_service.py`: Watch, Later, Capture, Moment, Remind, AFK orchestration

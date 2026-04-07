@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import random
 import re
+import unicodedata
 from collections import Counter
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
@@ -63,6 +64,23 @@ _MEDIAN_PROMPT_RE = re.compile(r"^Find the median: ([\d,\s]+)$")
 _PERCENT_CHANGE_PROMPT_RE = re.compile(r"^A \$(\d+) item is discounted by (\d+)%\. What is the sale price\?$")
 _ANAGRAM_PROMPT_RE = re.compile(r"^Unscramble the clue-backed word\. Clue: (.+?) Letters: \*\*([A-Z]+)\*\*$")
 QUESTION_DROP_VALIDATION_VARIANTS_PER_GENERATOR = 24
+_SMART_PUNCT_TRANSLATION = str.maketrans(
+    {
+        "\u2018": "'",
+        "\u2019": "'",
+        "\u201a": "'",
+        "\u201b": "'",
+        "\u2032": "'",
+        "\u2035": "'",
+        "\u201c": '"',
+        "\u201d": '"',
+        "\u201e": '"',
+        "\u201f": '"',
+        "\xab": '"',
+        "\xbb": '"',
+        "\u02bc": "'",
+    }
+)
 _CHATTER_LEAD_TOKENS = {
     "and",
     "because",
@@ -166,6 +184,7 @@ _TENS_WORDS = {
 }
 _SIGN_WORDS = {"minus", "negative"}
 _NUMBER_WORD_VOCAB = set(_NUMBER_WORDS) | set(_TENS_WORDS) | {"hundred"} | _SIGN_WORDS
+_TEXT_MATCH_OPTIONAL_TOKENS = {"a", "an", "the"}
 
 
 @dataclass(frozen=True)
@@ -184,9 +203,12 @@ class QuestionDropVariant:
 
 
 def normalize_answer_text(raw: str | None) -> str:
-    text = str(raw or "").casefold().strip()
-    text = text.replace("ƒ?T", "'")
+    text = unicodedata.normalize("NFKC", str(raw or "")).casefold().strip()
+    text = text.translate(_SMART_PUNCT_TRANSLATION)
+    text = text.replace("ƒ?t", "'")
     text = text.replace("ƒ?o", '"').replace("ƒ??", '"')
+    text = text.replace("'", "")
+    text = text.replace('"', " ")
     text = _PUNCT_RE.sub(" ", text)
     text = _SPACE_RE.sub(" ", text)
     return text.strip()
@@ -398,6 +420,74 @@ def _starts_with_soft_hedge(raw_answer: str | None) -> bool:
     return content.startswith("maybe ") or content.startswith("maybe:") or content.startswith("perhaps ")
 
 
+def _normalized_text_match_tokens(raw: str | None) -> tuple[str, ...]:
+    return tuple(token for token in _normalize_token_sequence(raw) if token not in _TEXT_MATCH_OPTIONAL_TOKENS)
+
+
+def _adjacent_transposition(left: str, right: str) -> bool:
+    if len(left) != len(right):
+        return False
+    diffs = [index for index, (a, b) in enumerate(zip(left, right)) if a != b]
+    if len(diffs) != 2 or diffs[1] != diffs[0] + 1:
+        return False
+    first = diffs[0]
+    second = diffs[1]
+    return left[first] == right[second] and left[second] == right[first]
+
+
+def _limited_edit_distance(left: str, right: str, *, max_distance: int) -> int:
+    if abs(len(left) - len(right)) > max_distance:
+        return max_distance + 1
+    if left == right:
+        return 0
+    previous = list(range(len(right) + 1))
+    for left_index, left_char in enumerate(left, start=1):
+        current = [left_index]
+        row_min = current[0]
+        for right_index, right_char in enumerate(right, start=1):
+            cost = 0 if left_char == right_char else 1
+            current_value = min(
+                previous[right_index] + 1,
+                current[right_index - 1] + 1,
+                previous[right_index - 1] + cost,
+            )
+            current.append(current_value)
+            row_min = min(row_min, current_value)
+        if row_min > max_distance:
+            return max_distance + 1
+        previous = current
+    return previous[-1]
+
+
+def _small_token_typo(expected: str, observed: str) -> bool:
+    if expected == observed:
+        return True
+    if min(len(expected), len(observed)) < 4:
+        return False
+    return _adjacent_transposition(expected, observed) or _limited_edit_distance(expected, observed, max_distance=1) <= 1
+
+
+def _fuzzy_text_match(expected: str, observed: str) -> bool:
+    expected_tokens = _normalized_text_match_tokens(expected)
+    observed_tokens = _normalized_text_match_tokens(observed)
+    if not expected_tokens or not observed_tokens:
+        return False
+    if expected_tokens == observed_tokens:
+        return True
+    if len(expected_tokens) != len(observed_tokens):
+        return False
+    mismatches = 0
+    for expected_token, observed_token in zip(expected_tokens, observed_tokens):
+        if expected_token == observed_token:
+            continue
+        if not _small_token_typo(expected_token, observed_token):
+            return False
+        mismatches += 1
+        if mismatches > 1:
+            return False
+    return mismatches > 0
+
+
 def validate_answer_spec(spec: dict[str, Any]) -> tuple[bool, str | None]:
     if not isinstance(spec, dict):
         return False, "Answer spec must be a dictionary."
@@ -443,8 +533,15 @@ def judge_answer(answer_spec: dict[str, Any], raw_answer: str | None) -> bool:
     candidates = _answer_payload_candidates(raw_answer)
     answer_type = answer_spec.get("type")
     if answer_type == "text":
-        accepted = {normalize_answer_text(item) for item in answer_spec.get("accepted", []) if isinstance(item, str)}
-        return any(bool(normalize_answer_text(candidate)) and normalize_answer_text(candidate) in accepted for candidate in candidates)
+        accepted = [item for item in answer_spec.get("accepted", []) if isinstance(item, str)]
+        normalized_accepted = {normalize_answer_text(item) for item in accepted}
+        for candidate in candidates:
+            normalized = normalize_answer_text(candidate)
+            if normalized and normalized in normalized_accepted:
+                return True
+            if any(_fuzzy_text_match(alias, candidate) for alias in accepted):
+                return True
+        return False
     if answer_type == "numeric":
         expected = _decimal_from_numeric_value(answer_spec.get("value"))
         if expected is None:
@@ -514,7 +611,7 @@ def is_answer_attempt(answer_spec: dict[str, Any], raw_answer: str | None, *, di
     if answer_type == "text":
         accepted = {normalize_answer_text(item) for item in answer_spec.get("accepted", []) if isinstance(item, str)}
         max_alias_tokens = max((len(_normalize_token_sequence(item)) for item in accepted), default=1)
-        standalone_max_tokens = max(3, max_alias_tokens + 1)
+        standalone_max_tokens = max(4, max_alias_tokens + 2)
         for candidate in candidates:
             normalized = normalize_answer_text(candidate)
             if normalized and normalized in accepted:
@@ -555,16 +652,16 @@ def render_answer_summary(answer_spec: dict[str, Any]) -> str:
 def render_answer_instruction(answer_spec: dict[str, Any]) -> str:
     answer_type = answer_spec.get("type")
     if answer_type == "multiple_choice":
-        return "Reply to this drop or send the option text. The letter also works: `C` or `option c`."
+        return "Reply is optional. Send a clean same-channel answer with the option text, or use the letter: `C` or `option c`."
     if answer_type == "numeric":
         if _numeric_words_allowed(answer_spec):
-            return "Reply to this drop or send just the number. Clean digits work, and simple number words count for whole-number answers."
-        return "Reply to this drop or send just the number. Use digits for decimals, like `14.4`."
+            return "Reply is optional. Send a clean same-channel answer with just the number. Digits work, and simple number words count for whole-number answers."
+        return "Reply is optional. Send a clean same-channel answer with just the number. Use digits for decimals, like `14.4`."
     if answer_type == "boolean":
-        return "Reply to this drop or send `true` / `false` or `yes` / `no`."
+        return "Reply is optional. Send a clean same-channel answer like `true` / `false` or `yes` / `no`."
     if answer_type == "ordered_tokens":
-        return "Reply to this drop or send the full sequence in order, like `red, blue, green`."
-    return "Reply to this drop or send a short clean guess."
+        return "Reply is optional. Send a clean same-channel answer with the full sequence in order, like `red, blue, green`."
+    return "Reply is optional. Send a short clean same-channel guess."
 
 
 def answer_points_for_difficulty(difficulty: int) -> int:

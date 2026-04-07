@@ -34,7 +34,7 @@ class WebsiteDocsTests(unittest.TestCase):
             self.assertIn(anchor, help_html)
         for command in ("/daily", "/buddy", "/profile", "/vault", "/watch", "/later", "/capture", "/remind", "/afk", "/shield panel", "/confess", "/confessions moderate"):
             self.assertIn(command, help_html)
-        self.assertIn("Strict = reply to the armed question only", help_html)
+        self.assertIn("Broken Telephone, Exquisite Corpse, Spyfall, Word Bomb, and Pattern Hunt", help_html)
         self.assertIn("1-10 drops per day", help_html)
         self.assertIn("/drops leaderboard", help_html)
         self.assertIn("/drops roles status", help_html)
@@ -50,6 +50,7 @@ class WebsiteDocsTests(unittest.TestCase):
         self.assertIn("scholar ladder", help_html)
         self.assertIn("Pattern Hunt", help_html)
         self.assertIn("Coders need server DMs open before the room starts.", help_html)
+        self.assertNotIn("Only 16", help_html)
         self.assertNotIn("shieldaiglobal", help_html.casefold())
         self.assertNotIn("dropscelebaiglobal", help_html.casefold())
         self.assertIn("staff-blind", help_html)
@@ -88,7 +89,8 @@ class WebsiteDocsTests(unittest.TestCase):
         index_html = (ROOT / "index.html").read_text(encoding="utf-8")
 
         for text in (
-            "Only 16",
+            "Broken Telephone",
+            "Word Bomb",
             "Pattern Hunt",
             "Question Drops",
             "category mastery roles",
@@ -127,7 +129,8 @@ class WebsiteDocsTests(unittest.TestCase):
             self.assertIn(text, readme)
 
         for text in (
-            "Only 16",
+            "Broken Telephone",
+            "Word Bomb",
             "Pattern Hunt",
             "Question Drops",
             "mastery",
@@ -145,6 +148,8 @@ class WebsiteDocsTests(unittest.TestCase):
         ):
             self.assertIn(text, index_html)
 
+        self.assertNotIn("Only 16", readme)
+        self.assertNotIn("Only 16", index_html)
         self.assertNotIn("dropscelebaiglobal", readme.casefold())
         self.assertNotIn("dropscelebaiglobal", index_html.casefold())
         self.assertNotIn("/drops panel", readme)

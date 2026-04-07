@@ -38,8 +38,11 @@ HELP_PAGES: list[dict[str, str]] = [
         "emoji": "\U0001f389",
         "description": "Short multiplayer rooms for live server energy.",
         "body": (
-            "`/play` opens the lobby for Broken Telephone, Exquisite Corpse, Spyfall, Word Bomb, Only 16, and Pattern Hunt.\n"
-            "Only 16: ask one clean number question, then wait for the first clear answer. Strict = reply to the armed question only. Smart = also counts one clean standalone answer like `16!`.\n"
+            "`/play` opens the lobby for Broken Telephone, Exquisite Corpse, Spyfall, Word Bomb, and Pattern Hunt.\n"
+            "Broken Telephone runs as a DM relay: original clip, panic mimics, then one final typed guess.\n"
+            "Exquisite Corpse keeps every prompt hidden until the room gets one stitched-together masterpiece.\n"
+            "Spyfall gives everyone a secret DM role, rotates the spotlight through the room, and lets any player call the vote.\n"
+            "Word Bomb stays fast: one real word, live syllable, no repeats, and the fuse keeps shrinking.\n"
             "Pattern Hunt: one public clue loop, one hidden rule, and private guesses with `/hunt guess`. Coders need server DMs open before start. `Contains Digits` means digits `0-9` only.\n"
             "`/hunt status` mirrors the live state card privately, and `/hunt guess` stays quiet until a Pattern Hunt room is live."
         ),

@@ -8,7 +8,6 @@ from discord.ext import commands
 
 from babblebox import game_engine as ge
 from babblebox.command_utils import send_hybrid_response
-from babblebox.only16_game import manually_arm_only16_message
 from babblebox.pattern_hunt_game import (
     PATTERN_HUNT_RULE_FAMILIES,
     build_pattern_hunt_status_embed,
@@ -23,13 +22,6 @@ ATOM_FAMILY_CHOICES = [app_commands.Choice(name=rule_family_label(family), value
 class PartyGamesCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
-        self._arm_16_menu = app_commands.ContextMenu(name="Arm 16 Trap", callback=self.arm_only16_context_menu)
-
-    async def cog_load(self):
-        self.bot.tree.add_command(self._arm_16_menu)
-
-    def cog_unload(self):
-        self.bot.tree.remove_command(self._arm_16_menu.name, type=self._arm_16_menu.type)
 
     @commands.hybrid_group(name="hunt", with_app_command=True, description="Private Pattern Hunt card and private rule guesses", invoke_without_command=True)
     async def hunt_group(self, ctx: commands.Context):
@@ -110,22 +102,6 @@ class PartyGamesCog(commands.Cog):
             ),
             ephemeral=True,
         )
-
-    async def arm_only16_context_menu(self, interaction: discord.Interaction, message: discord.Message):
-        if interaction.guild is None:
-            await interaction.response.send_message("Only 16 traps can only be armed inside a server.", ephemeral=True)
-            return
-        game = ge.games.get(interaction.guild.id)
-        if not game or game.get("closing") or not game.get("active") or game.get("game_type") != "only16":
-            await interaction.response.send_message("There is no active Only 16 round here.", ephemeral=True)
-            return
-        async with game["lock"]:
-            game = ge.games.get(interaction.guild.id)
-            if not game or game.get("closing") or not game.get("active") or game.get("game_type") != "only16":
-                await interaction.response.send_message("That Only 16 round is already closed.", ephemeral=True)
-                return
-            ok, reply = await manually_arm_only16_message(message, interaction.guild.id, game, interaction.user)
-        await interaction.response.send_message(reply, ephemeral=True)
 
 
 async def setup(bot: commands.Bot):

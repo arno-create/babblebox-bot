@@ -354,19 +354,19 @@ class ProfileServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual([entry["user_id"] for entry in leaderboard[:2]], [2, 1])
 
     async def test_new_party_game_round_and_win_fields_are_recorded(self):
-        await self.service.record_game_started(game_type="only16", host_id=70, player_ids=[70, 71])
+        await self.service.record_game_started(game_type="bomb", host_id=70, player_ids=[70, 71])
         await self.service.record_game_started(game_type="pattern_hunt", host_id=70, player_ids=[70, 71, 72])
-        await self.service.record_only16_win(71)
+        await self.service.record_bomb_win(71)
         await self.service.record_pattern_hunt_win(72)
 
         host = await self.service.get_profile(70)
-        only16_winner = await self.service.get_profile(71)
+        bomb_winner = await self.service.get_profile(71)
         hunt_winner = await self.service.get_profile(72)
 
-        self.assertEqual(host["only16_rounds"], 1)
+        self.assertEqual(host["bomb_rounds"], 1)
         self.assertEqual(host["pattern_hunt_rounds"], 1)
         self.assertEqual(host["games_hosted"], 2)
-        self.assertEqual(only16_winner["only16_wins"], 1)
-        self.assertEqual(only16_winner["games_won"], 1)
+        self.assertEqual(bomb_winner["bomb_wins"], 1)
+        self.assertEqual(bomb_winner["games_won"], 1)
         self.assertEqual(hunt_winner["pattern_hunt_wins"], 1)
         self.assertEqual(hunt_winner["games_won"], 1)
