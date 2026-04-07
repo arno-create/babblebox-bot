@@ -916,6 +916,7 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         with patch("babblebox.cogs.meta.require_channel_permissions", new=AsyncMock(return_value=True)):
             await MetaCog.help_command.callback(cog, ctx, visibility="public")
 
+        self.assertEqual(ctx.defer_calls, [{"ephemeral": False}])
         self.assertEqual(len(ctx.send_calls), 1)
         self.assertFalse(ctx.send_calls[0]["ephemeral"])
         self.assertIsNotNone(ctx.send_calls[0]["view"])
@@ -929,6 +930,18 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
                 "Official Website": "https://arno-create.github.io/babblebox-bot/",
             },
         )
+
+    async def test_help_private_defers_before_sending_ephemeral_panel(self):
+        cog = MetaCog(types.SimpleNamespace(loop=asyncio.get_running_loop()))
+        ctx = FakeContext(interaction=FakeInteraction(), guild=FakeGuild(), channel=FakeChannel(), author=FakeAuthor())
+
+        with patch("babblebox.cogs.meta.require_channel_permissions", new=AsyncMock(return_value=True)):
+            await MetaCog.help_command.callback(cog, ctx, visibility="private")
+
+        self.assertEqual(ctx.defer_calls, [{"ephemeral": True}])
+        self.assertEqual(len(ctx.send_calls), 1)
+        self.assertTrue(ctx.send_calls[0]["ephemeral"])
+        self.assertIsNotNone(ctx.send_calls[0]["view"])
 
     async def test_help_select_navigation_updates_page_index(self):
         cog = MetaCog(types.SimpleNamespace(loop=asyncio.get_running_loop()))
@@ -1002,6 +1015,33 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(interaction.response.send_calls), 1)
         self.assertEqual(interaction.response.send_calls[0][1]["embed"].title, "Help Panel Expired")
 
+    async def test_help_send_failure_returns_recovery_message_without_consuming_public_cooldown(self):
+        cog = MetaCog(types.SimpleNamespace(loop=asyncio.get_running_loop()))
+        first_ctx = FakeContext(interaction=FakeInteraction(), guild=FakeGuild(), channel=FakeChannel(), author=FakeAuthor())
+        second_ctx = FakeContext(
+            interaction=FakeInteraction(),
+            guild=first_ctx.guild,
+            channel=first_ctx.channel,
+            author=first_ctx.author,
+        )
+
+        with patch("babblebox.cogs.meta.require_channel_permissions", new=AsyncMock(return_value=True)), patch(
+            "babblebox.cogs.meta.send_hybrid_response",
+            new=AsyncMock(return_value=None),
+        ):
+            await MetaCog.help_command.callback(cog, first_ctx, visibility="public")
+
+        self.assertEqual(first_ctx.defer_calls, [{"ephemeral": False}])
+        self.assertEqual(first_ctx.send_calls, [])
+        self.assertEqual(len(first_ctx.interaction.followup_calls), 1)
+        self.assertEqual(first_ctx.interaction.followup_calls[0][1]["embed"].title, "Help Panel Unavailable")
+
+        with patch("babblebox.cogs.meta.require_channel_permissions", new=AsyncMock(return_value=True)):
+            await MetaCog.help_command.callback(cog, second_ctx, visibility="public")
+
+        self.assertEqual(len(second_ctx.send_calls), 1)
+        self.assertFalse(second_ctx.send_calls[0]["ephemeral"])
+
     async def test_help_panel_timeout_disables_navigation_but_keeps_links_active(self):
         cog = MetaCog(types.SimpleNamespace(loop=asyncio.get_running_loop()))
         ctx = FakeContext(interaction=FakeInteraction(), guild=FakeGuild(), channel=FakeChannel(), author=FakeAuthor())
@@ -1035,6 +1075,7 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         with patch("babblebox.cogs.meta.require_channel_permissions", new=AsyncMock(return_value=True)):
             await MetaCog.support_command.callback(cog, ctx, visibility="public")
 
+        self.assertEqual(ctx.defer_calls, [{"ephemeral": False}])
         self.assertEqual(len(ctx.send_calls), 1)
         self.assertFalse(ctx.send_calls[0]["ephemeral"])
         self.assertIn("Babblebox Support", ctx.send_calls[0]["embed"].title)
@@ -1054,6 +1095,7 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         with patch("babblebox.cogs.meta.require_channel_permissions", new=AsyncMock(return_value=True)):
             await MetaCog.support_command.callback(cog, ctx, visibility="private")
 
+        self.assertEqual(ctx.defer_calls, [{"ephemeral": True}])
         self.assertEqual(len(ctx.send_calls), 1)
         self.assertTrue(ctx.send_calls[0]["ephemeral"])
         self.assertIn("Babblebox Support", ctx.send_calls[0]["embed"].title)

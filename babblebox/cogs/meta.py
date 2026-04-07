@@ -8,7 +8,7 @@ from discord import app_commands
 from discord.ext import commands
 
 from babblebox import game_engine as ge
-from babblebox.command_utils import require_channel_permissions, send_hybrid_response
+from babblebox.command_utils import defer_hybrid_response, require_channel_permissions, send_hybrid_response
 
 
 LEADERBOARD_LABELS = {
@@ -446,10 +446,23 @@ class MetaCog(commands.Cog):
         if user_remaining > 0 or channel_remaining > 0:
             wait_for = int(max(user_remaining, channel_remaining)) + 1
             return f"The public {panel_label} is on cooldown. Try again in about {wait_for} seconds, or switch visibility to private."
+        return None
+
+    def _record_public_panel_cooldown(
+        self,
+        ctx: commands.Context,
+        *,
+        visibility: str,
+        user_cooldowns: dict[int, float],
+        channel_cooldowns: dict[int, float],
+    ):
+        if self._is_private(visibility):
+            return
+        now = self.bot.loop.time()
         user_cooldowns[ctx.author.id] = now
+        channel_key = ctx.channel.id if ctx.channel is not None else 0
         if channel_key:
             channel_cooldowns[channel_key] = now
-        return None
 
     def _help_cooldown_error(self, ctx: commands.Context, *, visibility: str) -> str | None:
         return self._public_panel_cooldown_error(
@@ -469,26 +482,97 @@ class MetaCog(commands.Cog):
             panel_label="support panel",
         )
 
+    def _record_help_cooldown(self, ctx: commands.Context, *, visibility: str):
+        self._record_public_panel_cooldown(
+            ctx,
+            visibility=visibility,
+            user_cooldowns=self._help_user_cooldowns,
+            channel_cooldowns=self._help_channel_cooldowns,
+        )
+
+    def _record_support_cooldown(self, ctx: commands.Context, *, visibility: str):
+        self._record_public_panel_cooldown(
+            ctx,
+            visibility=visibility,
+            user_cooldowns=self._support_user_cooldowns,
+            channel_cooldowns=self._support_channel_cooldowns,
+        )
+
+    async def _send_panel_response(
+        self,
+        ctx: commands.Context,
+        *,
+        command_name: str,
+        visibility: str,
+        cooldown_error: str | None,
+        cooldown_title: str,
+        cooldown_footer: str,
+        embed: discord.Embed,
+        view: discord.ui.View | None = None,
+        recovery_title: str,
+        recovery_description: str,
+        recovery_footer: str,
+        record_cooldown,
+    ) -> discord.Message | None:
+        if not await require_channel_permissions(ctx, ge.HELP_REQUIRED_PERMS, command_name):
+            return None
+        if cooldown_error is not None:
+            await send_hybrid_response(
+                ctx,
+                embed=ge.make_status_embed(cooldown_title, cooldown_error, tone="warning", footer=cooldown_footer),
+                ephemeral=True,
+            )
+            return None
+
+        await defer_hybrid_response(ctx, ephemeral=self._is_private(visibility))
+
+        message: discord.Message | None = None
+        try:
+            message = await send_hybrid_response(
+                ctx,
+                embed=embed,
+                view=view,
+                ephemeral=self._is_private(visibility),
+            )
+        except (discord.HTTPException, discord.InteractionResponded, TypeError, ValueError):
+            message = None
+
+        if message is not None:
+            record_cooldown(ctx, visibility=visibility)
+            return message
+
+        recovery_embed = ge.make_status_embed(
+            recovery_title,
+            recovery_description,
+            tone="warning",
+            footer=recovery_footer,
+        )
+        interaction = getattr(ctx, "interaction", None)
+        if interaction is not None:
+            await ge.safe_send_interaction(interaction, embed=recovery_embed, ephemeral=True)
+            return None
+        with contextlib.suppress(discord.HTTPException):
+            await ctx.send(embed=recovery_embed)
+        return None
+
     @commands.hybrid_command(name="help", with_app_command=True, description="View the Babblebox manual, categories, and command guide")
     @app_commands.describe(visibility="Show the manual publicly or only to you")
     @app_commands.choices(visibility=VISIBILITY_CHOICES)
     async def help_command(self, ctx: commands.Context, visibility: str = "public"):
-        if not await require_channel_permissions(ctx, ge.HELP_REQUIRED_PERMS, "/help"):
-            return
-        cooldown_error = self._help_cooldown_error(ctx, visibility=visibility)
-        if cooldown_error is not None:
-            await send_hybrid_response(
-                ctx,
-                embed=ge.make_status_embed("Help Cooldown", cooldown_error, tone="warning", footer="Babblebox Manual"),
-                ephemeral=True,
-            )
-            return
         view = HelpPanelView(author_id=ctx.author.id)
-        message = await send_hybrid_response(
+        message = await self._send_panel_response(
             ctx,
+            command_name="/help",
+            visibility=visibility,
+            cooldown_error=self._help_cooldown_error(ctx, visibility=visibility),
+            cooldown_title="Help Cooldown",
+            cooldown_footer="Babblebox Manual",
             embed=view.current_embed(),
             view=view,
-            ephemeral=self._is_private(visibility),
+            recovery_title="Help Panel Unavailable",
+            recovery_description="The help panel could not be opened just now. Run `/help` again for a fresh panel.",
+            recovery_footer="Babblebox Manual",
+            record_cooldown=self._record_help_cooldown,
         )
         if message is not None:
             view.message = message
@@ -497,21 +581,19 @@ class MetaCog(commands.Cog):
     @app_commands.describe(visibility="Show support links publicly or only to you")
     @app_commands.choices(visibility=VISIBILITY_CHOICES)
     async def support_command(self, ctx: commands.Context, visibility: str = "public"):
-        if not await require_channel_permissions(ctx, ge.HELP_REQUIRED_PERMS, "/support"):
-            return
-        cooldown_error = self._support_cooldown_error(ctx, visibility=visibility)
-        if cooldown_error is not None:
-            await send_hybrid_response(
-                ctx,
-                embed=ge.make_status_embed("Support Cooldown", cooldown_error, tone="warning", footer="Babblebox Support"),
-                ephemeral=True,
-            )
-            return
-        await send_hybrid_response(
+        await self._send_panel_response(
             ctx,
+            command_name="/support",
+            visibility=visibility,
+            cooldown_error=self._support_cooldown_error(ctx, visibility=visibility),
+            cooldown_title="Support Cooldown",
+            cooldown_footer="Babblebox Support",
             embed=build_support_embed(),
             view=SupportLinksView(),
-            ephemeral=self._is_private(visibility),
+            recovery_title="Support Panel Unavailable",
+            recovery_description="The support panel could not be opened just now. Run `/support` again in a moment.",
+            recovery_footer="Babblebox Support",
+            record_cooldown=self._record_support_cooldown,
         )
 
     @commands.hybrid_command(name="ping", with_app_command=True, description="Check if the bot is online and responsive")
