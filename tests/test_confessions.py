@@ -274,6 +274,69 @@ def _validate_modal_payload(payload: dict[str, object]):
     _validate_discord_modal_payload(payload)
 
 
+def _validate_embed_payload(embed: discord.Embed | None):
+    if embed is None:
+        return
+    payload = embed.to_dict()
+    title = payload.get("title")
+    if title and len(str(title)) > 256:
+        raise ValueError("embed title exceeds Discord limit")
+    description = payload.get("description")
+    if description and len(str(description)) > 4096:
+        raise ValueError("embed description exceeds Discord limit")
+    footer = payload.get("footer") or {}
+    footer_text = footer.get("text")
+    if footer_text and len(str(footer_text)) > 2048:
+        raise ValueError("embed footer exceeds Discord limit")
+    fields = payload.get("fields") or []
+    if len(fields) > 25:
+        raise ValueError("embed field count exceeds Discord limit")
+    for field in fields:
+        name = field.get("name")
+        value = field.get("value")
+        if name and len(str(name)) > 256:
+            raise ValueError("embed field name exceeds Discord limit")
+        if value and len(str(value)) > 1024:
+            raise ValueError("embed field value exceeds Discord limit")
+
+
+def _validate_view_payload(view):
+    if view is None:
+        return
+    children = list(getattr(view, "children", []) or [])
+    if len(children) > 25:
+        raise ValueError("view child count exceeds Discord limit")
+    for child in children:
+        custom_id = getattr(child, "custom_id", None)
+        if custom_id and len(str(custom_id)) > 100:
+            raise ValueError("component custom_id exceeds Discord limit")
+        label = getattr(child, "label", None)
+        if label and len(str(label)) > 80:
+            raise ValueError("button label exceeds Discord limit")
+        placeholder = getattr(child, "placeholder", None)
+        if placeholder and len(str(placeholder)) > 150:
+            raise ValueError("select placeholder exceeds Discord limit")
+        options = list(getattr(child, "options", []) or [])
+        if len(options) > 25:
+            raise ValueError("select option count exceeds Discord limit")
+        for option in options:
+            if option.label and len(str(option.label)) > 100:
+                raise ValueError("select option label exceeds Discord limit")
+            if option.description and len(str(option.description)) > 100:
+                raise ValueError("select option description exceeds Discord limit")
+            if option.value and len(str(option.value)) > 100:
+                raise ValueError("select option value exceeds Discord limit")
+
+
+def _validate_message_payload(*, embed=None, embeds=None, view=None):
+    embed_list = list(embeds or ([] if embed is None else [embed]))
+    if len(embed_list) > 10:
+        raise ValueError("embed count exceeds Discord limit")
+    for item in embed_list:
+        _validate_embed_payload(item)
+    _validate_view_payload(view)
+
+
 class FakeResponse:
     def __init__(self):
         self._done = False
@@ -291,6 +354,7 @@ class FakeResponse:
         self.defer_calls.append({"ephemeral": ephemeral, "thinking": thinking})
 
     async def send_message(self, *args, **kwargs):
+        _validate_message_payload(embed=kwargs.get("embed"), embeds=kwargs.get("embeds"), view=kwargs.get("view"))
         self._done = True
         self.sent.append({"args": args, "kwargs": kwargs})
         return FakeMessage(
@@ -303,6 +367,7 @@ class FakeResponse:
         )
 
     async def edit_message(self, **kwargs):
+        _validate_message_payload(embed=kwargs.get("embed"), embeds=kwargs.get("embeds"), view=kwargs.get("view"))
         self._done = True
         self.edits.append(kwargs)
 
@@ -325,6 +390,7 @@ class FakeInteraction:
         self.followup_calls = []
 
     async def _followup_send(self, *args, **kwargs):
+        _validate_message_payload(embed=kwargs.get("embed"), embeds=kwargs.get("embeds"), view=kwargs.get("view"))
         self.followup_calls.append({"args": args, "kwargs": kwargs})
         return FakeMessage(
             content=kwargs.get("content"),
@@ -2319,6 +2385,37 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
         channel._messages[message.id] = message
         return message
 
+    async def _seed_owner_reply_inbox(
+        self,
+        *,
+        owner_id: int,
+        pending_count: int = 1,
+        name_length: int = 12,
+        preview_length: int = 24,
+    ) -> FakeUser:
+        owner = self._member(owner_id)
+        await self.cog.service.submit_confession(
+            self.guild,
+            author_id=owner.id,
+            member=owner,
+            content="owner reply inbox seed",
+            attachments=[],
+        )
+        confession_message_id = self.guild.get_channel(20).sent[-1].id
+        for offset in range(pending_count):
+            responder = self._member(owner_id + 100 + offset)
+            responder.display_name = f"Responder {offset} " + ("X" * name_length)
+            content_parts = [f"public-response-{offset}"]
+            while len(" ".join(content_parts)) < preview_length:
+                content_parts.append(f"detail-{offset}-{len(content_parts)}")
+            response = self._reply_message(
+                author=responder,
+                reply_to_message_id=confession_message_id,
+                content=" ".join(content_parts),
+            )
+            await self.cog.service.handle_member_response_message(response)
+        return owner
+
     async def test_status_command_opens_private_dashboard(self):
         ctx = FakeContext(guild=self.guild, author=FakeUser(1, manage_guild=True))
 
@@ -2626,6 +2723,85 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["embed"].title, "Owner Reply Inbox")
         self.assertIsNotNone(payload["view"])
         self.assertEqual(payload["view"].children[0].placeholder, "Choose a member response to review privately")
+
+    async def test_reply_to_user_command_opens_private_owner_reply_inbox_with_long_pending_summaries(self):
+        await self.cog.service.configure_guild(
+            self.guild.id,
+            enabled=True,
+            confession_channel_id=20,
+            review_channel_id=30,
+            review_mode=False,
+        )
+        owner = await self._seed_owner_reply_inbox(
+            owner_id=320,
+            pending_count=5,
+            name_length=120,
+            preview_length=220,
+        )
+
+        ctx = FakeContext(guild=self.guild, author=owner)
+        await ConfessionsCog.confess_reply_to_user_command.callback(self.cog, ctx)
+
+        payload = ctx.interaction.response.sent[0]["kwargs"]
+        pending_value = _embed_fields_by_name(payload["embed"])["Pending Responses"]["value"]
+        self.assertLessEqual(len(pending_value), 1024)
+        self.assertTrue(payload["ephemeral"])
+        self.assertIsNotNone(payload["view"])
+        self.assertEqual(len(payload["view"].children[0].options), 5)
+
+    async def test_owner_reply_inbox_embed_condenses_long_pending_summaries_with_overflow_note(self):
+        await self.cog.service.configure_guild(
+            self.guild.id,
+            enabled=True,
+            confession_channel_id=20,
+            review_channel_id=30,
+            review_mode=False,
+        )
+        owner = await self._seed_owner_reply_inbox(
+            owner_id=330,
+            pending_count=5,
+            name_length=120,
+            preview_length=220,
+        )
+        contexts = await self.cog.service.list_pending_owner_reply_contexts(
+            self.guild,
+            author_id=owner.id,
+            limit=5,
+        )
+        for context in contexts:
+            context["opportunity"]["source_author_name"] = "*" * 120
+
+        embed = self.cog.service.build_owner_reply_inbox_embed(self.guild, contexts)
+        pending_value = _embed_fields_by_name(embed)["Pending Responses"]["value"]
+
+        self.assertLessEqual(len(pending_value), 1024)
+        self.assertIn("more pending response(s) in the selector below.", pending_value)
+
+    async def test_reply_to_user_command_falls_back_to_simple_inbox_when_rich_payload_send_fails(self):
+        await self.cog.service.configure_guild(
+            self.guild.id,
+            enabled=True,
+            confession_channel_id=20,
+            review_channel_id=30,
+            review_mode=False,
+        )
+        owner = await self._seed_owner_reply_inbox(owner_id=340, pending_count=1, name_length=24, preview_length=48)
+        invalid_embed = discord.Embed(
+            title="Owner Reply Inbox",
+            description="invalid rich inbox",
+            color=discord.Color.blurple(),
+        )
+        invalid_embed.add_field(name="Pending Responses", value="x" * 1025, inline=False)
+
+        ctx = FakeContext(guild=self.guild, author=owner)
+        with mock.patch.object(self.cog.service, "build_owner_reply_inbox_embed", return_value=invalid_embed):
+            await ConfessionsCog.confess_reply_to_user_command.callback(self.cog, ctx)
+
+        payload = ctx.interaction.response.sent[0]["kwargs"]
+        self.assertEqual(payload["embed"].title, "Owner Reply Inbox")
+        self.assertIn("pending member response", payload["embed"].description.casefold())
+        self.assertIsNotNone(payload["view"])
+        self.assertNotIn("could not open your private owner-reply inbox", payload["embed"].description.casefold())
 
     async def test_owner_reply_prompt_open_and_dismiss_resolve_private_context(self):
         await self.cog.service.configure_guild(

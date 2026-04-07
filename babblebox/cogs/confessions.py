@@ -2769,10 +2769,40 @@ class ConfessionsCog(commands.Cog):
                 ),
             )
             return
-        if edit_existing:
-            await interaction.response.edit_message(embed=embed, view=view)
+        fallback_embed = self._member_status_embed(
+            "Owner Reply Inbox",
+            (
+                "No current member responses are waiting for an owner reply."
+                if not contexts
+                else f"You still have {len(contexts)} pending member response(s). Use the selector below to review one privately."
+            ),
+            tone="info",
+        )
+        try:
+            if edit_existing:
+                await interaction.response.edit_message(embed=embed, view=view)
+                return
+            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
             return
-        await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+        except Exception as exc:
+            self.log_member_diagnostic(
+                code="owner_reply_inbox_send_failed",
+                stage="owner_reply_inbox_open",
+                interaction=interaction,
+                note=f"edit_existing={edit_existing}, contexts={len(contexts)}, has_view={view is not None}",
+                exc=exc,
+            )
+        fallback_sent = await self._send_private_interaction(interaction, embed=fallback_embed, view=view)
+        if fallback_sent is not None:
+            return
+        await self._send_private_interaction(
+            interaction,
+            embed=self._member_status_embed(
+                "Owner Reply Inbox",
+                "You still have pending member responses, but Babblebox could not reopen the richer private inbox view right now. Run `/confess reply-to-user` again in a moment.",
+                tone="info",
+            ),
+        )
 
     async def _handle_owner_reply_prompt_open(self, interaction: discord.Interaction):
         message = getattr(interaction, "message", None)

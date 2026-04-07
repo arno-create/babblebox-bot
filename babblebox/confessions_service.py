@@ -86,6 +86,9 @@ OWNER_REPLY_NOTIFICATION_COOLDOWN_SECONDS = 10 * 60
 OWNER_REPLY_OPPORTUNITY_TTL_SECONDS = 72 * 3600
 OWNER_REPLY_INBOX_LIMIT = 5
 OWNER_REPLY_PREVIEW_LIMIT = 220
+OWNER_REPLY_INBOX_FIELD_LIMIT = 1024
+OWNER_REPLY_INBOX_NAME_LIMIT = 60
+OWNER_REPLY_INBOX_ROW_PREVIEW_LIMIT = 90
 OWNER_REPLY_PATH_COOLDOWN_SECONDS = 20 * 60
 OWNER_REPLY_RESPONDER_WINDOW_SECONDS = 24 * 3600
 OWNER_REPLY_RESPONDER_CONFESSION_CAP = 3
@@ -3185,6 +3188,60 @@ class ConfessionsService:
             return "your earlier owner reply"
         return "your confession discussion"
 
+    def _owner_reply_inbox_summary_line(
+        self,
+        index: int,
+        context: dict[str, Any],
+        *,
+        include_preview: bool = True,
+        name_limit: int = OWNER_REPLY_INBOX_NAME_LIMIT,
+        preview_limit: int = OWNER_REPLY_INBOX_ROW_PREVIEW_LIMIT,
+    ) -> str:
+        opportunity = context["opportunity"]
+        target_label = self._owner_reply_target_label(context["referenced_submission"])
+        source_name = normalize_plain_text(opportunity.get("source_author_name")) or "Someone"
+        source_name = discord.utils.escape_markdown(ge.safe_field_text(source_name, limit=name_limit))
+        line = f"**{index}. {source_name}** replied to {target_label}\n`{opportunity['root_confession_id']}`"
+        if include_preview:
+            preview = normalize_plain_text(opportunity.get("source_preview")) or "[message unavailable]"
+            preview = discord.utils.escape_markdown(ge.safe_field_text(preview, limit=preview_limit))
+            line = f"{line} - {preview}"
+        return line
+
+    def _build_owner_reply_inbox_summary(self, contexts: Sequence[dict[str, Any]]) -> str:
+        limited_contexts = list(contexts[:OWNER_REPLY_INBOX_LIMIT])
+        visible_lines: list[str] = []
+        visible_count = 0
+        for index, context in enumerate(limited_contexts, start=1):
+            line = self._owner_reply_inbox_summary_line(index, context)
+            remaining = len(limited_contexts) - index
+            overflow_line = (
+                f"... and {remaining} more pending response(s) in the selector below."
+                if remaining > 0
+                else None
+            )
+            candidate_lines = [*visible_lines, line]
+            candidate_text = "\n\n".join(candidate_lines + ([overflow_line] if overflow_line else []))
+            if len(candidate_text) > OWNER_REPLY_INBOX_FIELD_LIMIT:
+                break
+            visible_lines.append(line)
+            visible_count = index
+        if not visible_lines and limited_contexts:
+            visible_lines.append(
+                self._owner_reply_inbox_summary_line(
+                    1,
+                    limited_contexts[0],
+                    include_preview=False,
+                    name_limit=32,
+                )
+            )
+            visible_count = 1
+        hidden_count = len(limited_contexts) - visible_count
+        if hidden_count > 0:
+            visible_lines.append(f"... and {hidden_count} more pending response(s) in the selector below.")
+        summary = "\n\n".join(visible_lines)
+        return ge.safe_field_text(summary, limit=OWNER_REPLY_INBOX_FIELD_LIMIT)
+
     def build_owner_reply_notification_embed(
         self,
         guild: discord.Guild,
@@ -3221,20 +3278,12 @@ class ConfessionsService:
                 tone="info",
                 footer="Babblebox Confessions",
             )
-        lines = []
-        for index, context in enumerate(contexts[:OWNER_REPLY_INBOX_LIMIT], start=1):
-            opportunity = context["opportunity"]
-            target_label = self._owner_reply_target_label(context["referenced_submission"])
-            lines.append(
-                f"**{index}. {opportunity['source_author_name']}** replied to {target_label} about `{opportunity['root_confession_id']}`.\n"
-                f"{ge.safe_field_text(opportunity['source_preview'], limit=120)}"
-            )
         embed = discord.Embed(
             title="Owner Reply Inbox",
             description="Choose a member response below to review it privately and decide whether to post an anonymous owner reply publicly.",
             color=ge.EMBED_THEME["info"],
         )
-        embed.add_field(name="Pending Responses", value="\n\n".join(lines), inline=False)
+        embed.add_field(name="Pending Responses", value=self._build_owner_reply_inbox_summary(contexts), inline=False)
         embed.add_field(
             name="Privacy",
             value=self._owner_reply_delivery_copy(guild.id),
