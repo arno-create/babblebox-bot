@@ -155,6 +155,15 @@ class WebsiteDocsTests(unittest.TestCase):
         self.assertNotIn("dropscelebaiglobal", index_html.casefold())
         self.assertNotIn("/drops panel", readme)
 
+    def test_shield_docs_keep_local_malicious_domain_feed_copy_grounded(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        index_html = (ROOT / "index.html").read_text(encoding="utf-8")
+        help_html = (ROOT / "help.html").read_text(encoding="utf-8")
+
+        self.assertIn("~200k known malicious domains", readme)
+        self.assertIn("about 200k known malicious domains", index_html)
+        self.assertIn("about 200k known malicious domains", help_html)
+
     def test_privacy_docs_cover_confessions_storage_and_staff_blind_behavior(self):
         privacy_md = (ROOT / "PRIVACY.md").read_text(encoding="utf-8")
         privacy_html = (ROOT / "privacy.html").read_text(encoding="utf-8")

@@ -128,12 +128,13 @@ Babblebox is intentionally compact:
   - admin-only configuration for administrators or Manage Server users
   - privacy leak pack
   - promo / invite pack
-  - scam / malicious-link pack
-  - separate adult / 18+ link pack
-  - bundled local link safety with safe-domain families, suspicious-domain gating, and no external provider requirement
-  - optional AI-assisted second-pass review for moderator context only
-  - AI stays off by default and is currently limited to guild `1322933864360050688`
-  - log-first defaults
+- scam / malicious-link pack
+- separate adult / 18+ link pack
+- bundled local link safety with safe-domain families, suspicious-domain gating, and no external provider requirement
+- local-first malicious-link blocking with a feed of ~200k known malicious domains
+- optional AI-assisted second-pass review for moderator context only
+- AI stays off by default and is currently limited to guild `1322933864360050688`
+- log-first defaults
   - trusted-role bypass
   - included / excluded scope controls
   - allowlists for domains, invite codes, and phrases
@@ -661,7 +662,7 @@ Babblebox is designed for constrained hosting:
 
 ### Requirements
 
-- Python 3.9+
+- Python 3.11+
 - a Discord bot token
 - a `.env` file in the project root
 - Postgres for durable storage-backed features
