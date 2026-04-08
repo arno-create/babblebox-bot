@@ -3895,13 +3895,13 @@ class ConfessionsService:
         embed.add_field(
             name="How It Works",
             value=(
-                "Run `/confess create` or tap **Create a confession**.\n"
-                "Add text and at most one trusted link.\n"
-                "Use **Reply to confession anonymously** from a live confession post when replies are enabled.\n"
-                "If someone explicitly replies to your confession or first owner reply, Babblebox can privately offer you a public anonymous owner reply.\n"
-                "Use **Manage My Confession** to delete your own submission privately.\n"
-                "Use **Appeal / Report** for false positives, restrictions, or problem reports when this server has private support configured.\n"
-                "Images and public anonymous replies stay off by default unless admins explicitly enable them."
+                "📝 Run `/confess create` or tap **Create a confession**.\n"
+                "🔗 Add text and at most one trusted link.\n"
+                "💬 Use **Reply to confession anonymously** from a live confession post when replies are enabled.\n"
+                "📣 If someone explicitly replies to your confession or first owner reply, Babblebox can privately offer you a public anonymous owner reply.\n"
+                "🧹 Use **Manage My Confession** to delete your own submission privately.\n"
+                "🛟 Use **Appeal / Report** for false positives, restrictions, or problem reports when this server has private support configured.\n"
+                "🛡️ Images and public anonymous replies stay off by default unless admins explicitly enable them."
             ),
             inline=False,
         )

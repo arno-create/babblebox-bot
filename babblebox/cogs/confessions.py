@@ -1164,6 +1164,15 @@ class RiskyConfigConfirmView(discord.ui.View):
         if interaction.user.id != payload["author_id"]:
             await interaction.response.send_message("Run the command yourself to confirm that policy change.", ephemeral=True)
             return
+        if not await self.cog._defer_component_interaction(
+            interaction,
+            stage="policy_confirm",
+            failure_title="Confessions Policy",
+            failure_message="Babblebox could not finish that Confessions policy update safely. Run the command again and review the warning before retrying.",
+            guild_id=payload["guild_id"],
+        ):
+            self.cog._pending_policy_updates.pop(self.token, None)
+            return
         try:
             updates = self._resolved_updates(payload, choice)
             self.cog.log_admin_diagnostic(
@@ -1173,16 +1182,29 @@ class RiskyConfigConfirmView(discord.ui.View):
                 note=f"choice={choice}, reviewable={len(payload.get('reviewable_updates') or ())}",
             )
             ok, message = await self.cog.service.configure_guild(payload["guild_id"], **updates)
-            runtime_issues: tuple[str, ...] = ()
-            if ok and interaction.guild is not None:
-                runtime_result = await self.cog.service.sync_runtime_surfaces(interaction.guild, stage_prefix="policy_confirm")
-                runtime_issues = runtime_result.issues
             self.cog._pending_policy_updates.pop(self.token, None)
-            result_message = self.cog._compose_admin_result(message, list(runtime_issues))
-            await interaction.response.edit_message(
-                embed=self.cog._admin_status_embed("Confessions Policy", result_message, ok=ok and not runtime_issues),
+            if ok and interaction.guild is not None:
+                result_message = self.cog._admin_background_refresh_message(message)
+            else:
+                result_message = message
+            updated = await self.cog._edit_interaction_message(
+                interaction,
+                embed=self.cog._admin_status_embed("Confessions Policy", result_message, ok=ok),
                 view=None,
             )
+            if not updated:
+                await self.cog._send_private_interaction(
+                    interaction,
+                    embed=self.cog._admin_status_embed("Confessions Policy", result_message, ok=ok),
+                )
+            if ok and interaction.guild is not None:
+                self.cog._start_admin_runtime_sync_followup(
+                    interaction=interaction,
+                    guild=interaction.guild,
+                    stage_prefix="policy_confirm",
+                    title="Confessions Policy",
+                    saved_message=message,
+                )
         except Exception as exc:
             self.cog.log_admin_diagnostic(
                 code="policy_confirm_failed",
@@ -1931,7 +1953,17 @@ class ConfessionsAdminPanelView(discord.ui.View):
 
     async def _rerender(self, interaction: discord.Interaction, *, note: str | None = None, note_ok: bool = True):
         self._refresh_buttons()
-        await interaction.response.edit_message(embed=await self.current_embed(), view=self)
+        updated = await self.cog._edit_interaction_message(interaction, embed=await self.current_embed(), view=self)
+        if not updated:
+            await self.cog._send_private_interaction(
+                interaction,
+                embed=self.cog._admin_status_embed(
+                    "Confessions Panel",
+                    "Babblebox could not refresh that private confessions panel. Run `/confessions` again to open a fresh one.",
+                    ok=False,
+                ),
+            )
+            return
         if note:
             await self.cog._send_private_interaction(
                 interaction,
@@ -1951,6 +1983,14 @@ class ConfessionsAdminPanelView(discord.ui.View):
         action,
     ):
         try:
+            if not await self.cog._defer_component_interaction(
+                interaction,
+                stage=stage,
+                failure_title="Confessions Panel",
+                failure_message=failure_message,
+                guild_id=self.guild_id,
+            ):
+                return None
             return await action()
         except Exception as exc:
             self.cog.log_admin_diagnostic(
@@ -2067,16 +2107,16 @@ class ConfessionsAdminPanelView(discord.ui.View):
         async def _action():
             current = self.cog.service.get_config(self.guild_id)
             ok, message = await self.cog.service.configure_guild(self.guild_id, enabled=not current["enabled"])
-            runtime_issues: tuple[str, ...] = ()
             if ok:
-                runtime_result = await self.cog.service.sync_runtime_surfaces(
-                    guild,
+                self.cog._start_admin_runtime_sync_followup(
+                    interaction=interaction,
+                    guild=guild,
                     stage_prefix="panel_toggle",
-                    review_note="Confessions runtime refreshed.",
+                    title="Confessions Panel",
+                    saved_message=message,
                 )
-                runtime_issues = runtime_result.issues
-            result_message = self.cog._compose_admin_result(message, list(runtime_issues))
-            await self._rerender(interaction, note=result_message, note_ok=ok and not runtime_issues)
+            note = self.cog._admin_background_refresh_message(message) if ok else message
+            await self._rerender(interaction, note=note, note_ok=ok)
 
         await self._safe_action(
             interaction,
@@ -2144,6 +2184,7 @@ class ConfessionsCog(commands.Cog):
         self.bot = bot
         self.service = ConfessionsService(bot)
         self._pending_policy_updates: dict[str, dict[str, Any]] = {}
+        self._background_tasks: set[asyncio.Task[Any]] = set()
         self._persistent_restore_lock = asyncio.Lock()
         self._persistent_views_restored = False
         self._persistent_surface_restore_status = {
@@ -2165,6 +2206,8 @@ class ConfessionsCog(commands.Cog):
     def cog_unload(self):
         if getattr(self.bot, "confessions_service", None) is self.service:
             delattr(self.bot, "confessions_service")
+        for task in tuple(self._background_tasks):
+            task.cancel()
         self.bot.loop.create_task(self.service.close())
 
     def _bot_is_ready(self) -> bool:
@@ -2282,6 +2325,249 @@ class ConfessionsCog(commands.Cog):
         if not cleaned_issues:
             return base_message
         return f"{base_message} Runtime follow-up still needs attention: {' '.join(cleaned_issues)}"
+
+    def _admin_background_refresh_message(self, base_message: str) -> str:
+        return (
+            f"{base_message} Babblebox is refreshing the live Confessions panel, reply buttons, and review queue in the background."
+        )
+
+    def _track_background_task(self, task: asyncio.Task[Any]):
+        self._background_tasks.add(task)
+
+        def _cleanup(completed: asyncio.Task[Any]):
+            self._background_tasks.discard(completed)
+            with contextlib.suppress(asyncio.CancelledError):
+                completed.result()
+
+        task.add_done_callback(_cleanup)
+
+    async def _edit_interaction_message(self, interaction: discord.Interaction, **kwargs) -> bool:
+        if not interaction.response.is_done():
+            await interaction.response.edit_message(**kwargs)
+            return True
+        edit_original_response = getattr(interaction, "edit_original_response", None)
+        if callable(edit_original_response):
+            with contextlib.suppress(discord.NotFound, discord.HTTPException, discord.ClientException):
+                await edit_original_response(**kwargs)
+                return True
+        message = getattr(interaction, "message", None)
+        edit_message = getattr(message, "edit", None)
+        if callable(edit_message):
+            with contextlib.suppress(discord.NotFound, discord.HTTPException):
+                await edit_message(**kwargs)
+                return True
+        return False
+
+    async def _defer_component_interaction(
+        self,
+        interaction: discord.Interaction,
+        *,
+        stage: str,
+        failure_title: str,
+        failure_message: str,
+        guild_id: int | None = None,
+    ) -> bool:
+        if interaction.response.is_done():
+            return True
+        try:
+            await interaction.response.defer(ephemeral=interaction.guild is not None, thinking=False)
+            return True
+        except Exception as exc:
+            self.log_admin_diagnostic(
+                code=f"{stage}_defer_failed",
+                stage=f"{stage}_defer",
+                guild_id=guild_id,
+                exc=exc,
+            )
+            await self._send_private_interaction(
+                interaction,
+                embed=self._admin_status_embed(failure_title, failure_message, ok=False),
+            )
+            return False
+
+    def _start_admin_runtime_sync_followup(
+        self,
+        *,
+        interaction: discord.Interaction | None,
+        guild: discord.Guild,
+        stage_prefix: str,
+        title: str,
+        saved_message: str,
+        review_note: str = "Confessions runtime refreshed.",
+    ):
+        if interaction is None:
+            return
+
+        async def _runner():
+            try:
+                runtime_result = await self.service.sync_runtime_surfaces(
+                    guild,
+                    stage_prefix=stage_prefix,
+                    review_note=review_note,
+                )
+            except Exception as exc:
+                self.log_admin_diagnostic(
+                    code=f"{stage_prefix}_background_failed",
+                    stage=f"{stage_prefix}_background",
+                    guild_id=guild.id,
+                    exc=exc,
+                )
+                await self._send_private_interaction(
+                    interaction,
+                    embed=self._admin_status_embed(
+                        title,
+                        (
+                            f"{saved_message} Babblebox saved the change, but could not finish refreshing live Confessions surfaces. "
+                            "Run `/confessions` again to verify the panel and queue."
+                        ),
+                        ok=False,
+                    ),
+                )
+                return
+            if not runtime_result.issues:
+                return
+            await self._send_private_interaction(
+                interaction,
+                embed=self._admin_status_embed(
+                    title,
+                    self._compose_admin_result(saved_message, list(runtime_result.issues)),
+                    ok=False,
+                ),
+            )
+
+        self._track_background_task(self.bot.loop.create_task(_runner()))
+
+    async def _collect_setup_runtime_issues(
+        self,
+        guild: discord.Guild,
+        previous_config: Mapping[str, Any],
+        *,
+        clear_panel: bool,
+        stage_prefix: str = "setup_sync",
+        review_note: str = "Confessions runtime refreshed.",
+    ) -> list[str]:
+        issues: list[str] = []
+        if clear_panel:
+            stale_panel_issue = await self._delete_stored_panel_message(guild, previous_config)
+            if stale_panel_issue:
+                issues.append(stale_panel_issue)
+        runtime_result = await self.service.sync_runtime_surfaces(
+            guild,
+            stage_prefix=stage_prefix,
+            review_note=review_note,
+        )
+        issues.extend(runtime_result.issues)
+        current_config = self.service.get_config(guild.id)
+        previous_panel_channel_id = previous_config.get("panel_channel_id")
+        previous_panel_message_id = previous_config.get("panel_message_id")
+        if (
+            not clear_panel
+            and isinstance(previous_panel_channel_id, int)
+            and isinstance(previous_panel_message_id, int)
+            and previous_panel_channel_id != current_config.get("panel_channel_id")
+            and current_config.get("panel_message_id") != previous_panel_message_id
+        ):
+            stale_panel_issue = await self._delete_stored_panel_message(guild, previous_config)
+            if stale_panel_issue:
+                issues.append(stale_panel_issue)
+        return issues
+
+    def _start_setup_runtime_followup(
+        self,
+        *,
+        interaction: discord.Interaction | None,
+        guild: discord.Guild,
+        previous_config: Mapping[str, Any],
+        clear_panel: bool,
+        title: str,
+        saved_message: str,
+    ):
+        if interaction is None:
+            return
+
+        async def _runner():
+            try:
+                issues = await self._collect_setup_runtime_issues(
+                    guild,
+                    previous_config,
+                    clear_panel=clear_panel,
+                )
+            except Exception as exc:
+                self.log_admin_diagnostic(
+                    code="setup_sync_background_failed",
+                    stage="setup_sync_background",
+                    guild_id=guild.id,
+                    exc=exc,
+                )
+                await self._send_private_interaction(
+                    interaction,
+                    embed=self._admin_status_embed(
+                        title,
+                        (
+                            f"{saved_message} Babblebox saved the setup changes, but could not finish refreshing live Confessions surfaces. "
+                            "Run `/confessions` again to verify the panel and review queue."
+                        ),
+                        ok=False,
+                    ),
+                )
+                return
+            if not issues:
+                return
+            await self._send_private_interaction(
+                interaction,
+                embed=self._admin_status_embed(
+                    title,
+                    self._compose_admin_result(saved_message, issues),
+                    ok=False,
+                ),
+            )
+
+        self._track_background_task(self.bot.loop.create_task(_runner()))
+
+    async def _send_admin_runtime_save_result(
+        self,
+        ctx: commands.Context,
+        *,
+        title: str,
+        ok: bool,
+        message: str,
+        stage_prefix: str,
+        review_note: str = "Confessions runtime refreshed.",
+    ):
+        if not ok:
+            await send_hybrid_response(
+                ctx,
+                embed=self._admin_status_embed(title, message, ok=False),
+                ephemeral=True,
+            )
+            return
+        interaction = getattr(ctx, "interaction", None)
+        if interaction is not None:
+            await send_hybrid_response(
+                ctx,
+                embed=self._admin_status_embed(title, self._admin_background_refresh_message(message), ok=True),
+                ephemeral=True,
+            )
+            self._start_admin_runtime_sync_followup(
+                interaction=interaction,
+                guild=ctx.guild,
+                stage_prefix=stage_prefix,
+                title=title,
+                saved_message=message,
+                review_note=review_note,
+            )
+            return
+        runtime_result = await self.service.sync_runtime_surfaces(
+            ctx.guild,
+            stage_prefix=stage_prefix,
+            review_note=review_note,
+        )
+        runtime_issues = list(runtime_result.issues)
+        await send_hybrid_response(
+            ctx,
+            embed=self._admin_status_embed(title, self._compose_admin_result(message, runtime_issues), ok=not runtime_issues),
+            ephemeral=True,
+        )
 
     def log_admin_diagnostic(
         self,
@@ -3627,35 +3913,42 @@ class ConfessionsCog(commands.Cog):
                     exc=exc,
                 )
                 raise
-            issues: list[str] = []
             if ok:
-                if clear_panel:
-                    stale_panel_issue = await self._delete_stored_panel_message(ctx.guild, previous_config)
-                    if stale_panel_issue:
-                        issues.append(stale_panel_issue)
-                runtime_result = await self.service.sync_runtime_surfaces(
+                interaction = getattr(ctx, "interaction", None)
+                if interaction is not None:
+                    await send_hybrid_response(
+                        ctx,
+                        embed=self._admin_status_embed(
+                            "Confessions Setup",
+                            self._admin_background_refresh_message(message),
+                            ok=True,
+                        ),
+                        ephemeral=True,
+                    )
+                    self._start_setup_runtime_followup(
+                        interaction=interaction,
+                        guild=ctx.guild,
+                        previous_config=previous_config,
+                        clear_panel=clear_panel,
+                        title="Confessions Setup",
+                        saved_message=message,
+                    )
+                    return
+                issues = await self._collect_setup_runtime_issues(
                     ctx.guild,
-                    stage_prefix="setup_sync",
-                    review_note="Confessions runtime refreshed.",
+                    previous_config,
+                    clear_panel=clear_panel,
                 )
-                issues.extend(runtime_result.issues)
-                current_config = self.service.get_config(ctx.guild.id)
-                previous_panel_channel_id = previous_config.get("panel_channel_id")
-                previous_panel_message_id = previous_config.get("panel_message_id")
-                if (
-                    not clear_panel
-                    and isinstance(previous_panel_channel_id, int)
-                    and isinstance(previous_panel_message_id, int)
-                    and previous_panel_channel_id != current_config.get("panel_channel_id")
-                    and current_config.get("panel_message_id") != previous_panel_message_id
-                ):
-                    stale_panel_issue = await self._delete_stored_panel_message(ctx.guild, previous_config)
-                    if stale_panel_issue:
-                        issues.append(stale_panel_issue)
-            result_message = self._compose_admin_result(message, issues)
+                result_message = self._compose_admin_result(message, issues)
+                await send_hybrid_response(
+                    ctx,
+                    embed=self._admin_status_embed("Confessions Setup", result_message, ok=not issues),
+                    ephemeral=True,
+                )
+                return
             await send_hybrid_response(
                 ctx,
-                embed=self._admin_status_embed("Confessions Setup", result_message, ok=ok and not issues),
+                embed=self._admin_status_embed("Confessions Setup", message, ok=False),
                 ephemeral=True,
             )
 
@@ -3742,15 +4035,12 @@ class ConfessionsCog(commands.Cog):
                 )
                 return
             ok, message = await self.service.configure_guild(ctx.guild.id, **updates)
-            runtime_issues: list[str] = []
-            if ok:
-                runtime_result = await self.service.sync_runtime_surfaces(ctx.guild, stage_prefix="policy_update")
-                runtime_issues = list(runtime_result.issues)
-            result_message = self._compose_admin_result(message, runtime_issues)
-            await send_hybrid_response(
+            await self._send_admin_runtime_save_result(
                 ctx,
-                embed=self._admin_status_embed("Confessions Policy", result_message, ok=ok and not runtime_issues),
-                ephemeral=True,
+                title="Confessions Policy",
+                ok=ok,
+                message=message,
+                stage_prefix="policy_update",
             )
 
         await self._run_admin_command(
@@ -3815,15 +4105,12 @@ class ConfessionsCog(commands.Cog):
                 )
                 return
             ok, message = await self.service.update_role_policy(ctx.guild.id, bucket="allow", role_id=role.id, enabled=state == "on")
-            runtime_issues: list[str] = []
-            if ok:
-                runtime_result = await self.service.sync_runtime_surfaces(ctx.guild, stage_prefix="role_allowlist")
-                runtime_issues = list(runtime_result.issues)
-            result_message = self._compose_admin_result(message, runtime_issues)
-            await send_hybrid_response(
+            await self._send_admin_runtime_save_result(
                 ctx,
-                embed=self._admin_status_embed("Confessions Role Eligibility", result_message, ok=ok and not runtime_issues),
-                ephemeral=True,
+                title="Confessions Role Eligibility",
+                ok=ok,
+                message=message,
+                stage_prefix="role_allowlist",
             )
 
         await self._run_admin_command(
@@ -3851,15 +4138,12 @@ class ConfessionsCog(commands.Cog):
                 )
                 return
             ok, message = await self.service.update_role_policy(ctx.guild.id, bucket="block", role_id=role.id, enabled=state == "on")
-            runtime_issues: list[str] = []
-            if ok:
-                runtime_result = await self.service.sync_runtime_surfaces(ctx.guild, stage_prefix="role_blacklist")
-                runtime_issues = list(runtime_result.issues)
-            result_message = self._compose_admin_result(message, runtime_issues)
-            await send_hybrid_response(
+            await self._send_admin_runtime_save_result(
                 ctx,
-                embed=self._admin_status_embed("Confessions Role Eligibility", result_message, ok=ok and not runtime_issues),
-                ephemeral=True,
+                title="Confessions Role Eligibility",
+                ok=ok,
+                message=message,
+                stage_prefix="role_blacklist",
             )
 
         await self._run_admin_command(
@@ -3876,15 +4160,12 @@ class ConfessionsCog(commands.Cog):
     async def confessions_role_reset_command(self, ctx: commands.Context, target: str):
         async def _action():
             ok, message = await self.service.reset_role_policy(ctx.guild.id, target=target)
-            runtime_issues: list[str] = []
-            if ok:
-                runtime_result = await self.service.sync_runtime_surfaces(ctx.guild, stage_prefix="role_reset")
-                runtime_issues = list(runtime_result.issues)
-            result_message = self._compose_admin_result(message, runtime_issues)
-            await send_hybrid_response(
+            await self._send_admin_runtime_save_result(
                 ctx,
-                embed=self._admin_status_embed("Confessions Role Eligibility", result_message, ok=ok and not runtime_issues),
-                ephemeral=True,
+                title="Confessions Role Eligibility",
+                ok=ok,
+                message=message,
+                stage_prefix="role_reset",
             )
 
         await self._run_admin_command(
