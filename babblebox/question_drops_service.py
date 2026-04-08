@@ -3204,6 +3204,7 @@ class QuestionDropsService:
         if not self.storage_ready or message.guild is None:
             return False
         now = ge.now_utc()
+        message_created_at = self._message_created_at_utc(message, fallback=now)
         reply_target_id = _extract_reply_target_id(message)
         active = self._active_drops.get((message.guild.id, message.channel.id))
         if active is None:
@@ -3211,10 +3212,12 @@ class QuestionDropsService:
         if self._channel_has_live_party_session(message.guild.id, message.channel.id):
             await self._expire_drop(active, timed_out=False, announce=False, delete_post_message=True)
             return False
-        if not self._active_drop_is_live(active, now=now):
-            await self._expire_drop(active, timed_out=True)
-            return False
         if not is_answer_attempt(active["answer_spec"], message.content, direct_reply=reply_target_id == int(active["message_id"])):
+            if not self._active_drop_is_live(active, now=now):
+                await self._expire_drop(active, timed_out=True)
+            return False
+        if not self._message_is_within_answer_window(active, message_created_at=message_created_at):
+            await self._expire_drop(active, timed_out=True)
             return False
         result_payload: dict[str, Any] | None = None
         attempt_reaction: str | None = None
@@ -3226,6 +3229,9 @@ class QuestionDropsService:
                 check_recent = True
             elif self._channel_has_live_party_session(current["guild_id"], current["channel_id"]):
                 await self._expire_drop(current, timed_out=False, announce=False, delete_post_message=True)
+                return False
+            elif not self._message_is_within_answer_window(current, message_created_at=message_created_at):
+                await self._expire_drop(current, timed_out=True)
                 return False
             else:
                 exposure_id = int(current["exposure_id"])
@@ -3243,8 +3249,11 @@ class QuestionDropsService:
                 if correct:
                     participant_ids = sorted(participants)
                     try:
-                        await self.store.resolve_exposure(exposure_id, resolved_at=now, winner_user_id=message.author.id)
-                        await self.store.delete_active_drop(current["guild_id"], current["channel_id"])
+                        claimed = await self._claim_and_close_active_drop(
+                            current,
+                            resolved_at=now,
+                            winner_user_id=message.author.id,
+                        )
                     except Exception:
                         if first_attempt and not persisted_participants:
                             with contextlib.suppress(Exception):
@@ -3254,21 +3263,23 @@ class QuestionDropsService:
                                     participant_ids,
                                 )
                         raise
-                    self._active_drops.pop((current["guild_id"], current["channel_id"]), None)
-                    self._remember_recently_resolved_drop(current, winner_user_id=message.author.id, resolved_at=now)
-                    self._clear_active_drop_runtime_state(exposure_id)
-                    attempt_reaction = state_emoji("correct")
-                    result_payload = {
-                        "guild_id": current["guild_id"],
-                        "channel_id": current["channel_id"],
-                        "exposure_id": exposure_id,
-                        "occurred_at": current["asked_at"],
-                        "category": current["category"],
-                        "difficulty": int(current["difficulty"]),
-                        "participant_ids": participant_ids,
-                        "winner_user_id": message.author.id,
-                        "answer_spec": current["answer_spec"],
-                    }
+                    if claimed is None:
+                        check_recent = True
+                    else:
+                        self._remember_recently_resolved_drop(claimed, winner_user_id=message.author.id, resolved_at=now)
+                        self._clear_active_drop_runtime_state(exposure_id)
+                        attempt_reaction = state_emoji("correct")
+                        result_payload = {
+                            "guild_id": claimed["guild_id"],
+                            "channel_id": claimed["channel_id"],
+                            "occurred_at": claimed["asked_at"],
+                            "category": claimed["category"],
+                            "difficulty": int(claimed["difficulty"]),
+                            "answer_spec": claimed["answer_spec"],
+                            "exposure_id": exposure_id,
+                            "participant_ids": participant_ids,
+                            "winner_user_id": message.author.id,
+                        }
                 else:
                     attempt_reaction = state_emoji("wrong")
                     if (
@@ -3883,14 +3894,45 @@ class QuestionDropsService:
         self._next_prune_at = now + timedelta(seconds=QUESTION_DROP_PRUNE_INTERVAL_SECONDS)
 
     def _active_drop_is_live(self, record: dict[str, Any], *, now: datetime) -> bool:
+        return self._active_drop_expires_at(record) > now
+
+    def _active_drop_expires_at(self, record: dict[str, Any]) -> datetime:
         expires_raw = record.get("expires_at")
         if isinstance(expires_raw, datetime):
-            expires_at = expires_raw.astimezone(timezone.utc) if expires_raw.tzinfo else expires_raw.replace(tzinfo=timezone.utc)
+            return expires_raw.astimezone(timezone.utc) if expires_raw.tzinfo else expires_raw.replace(tzinfo=timezone.utc)
         else:
             expires_at = datetime.fromisoformat(str(expires_raw))
             if expires_at.tzinfo is None:
                 expires_at = expires_at.replace(tzinfo=timezone.utc)
-        return expires_at > now
+            return expires_at
+
+    def _message_created_at_utc(self, message: discord.Message, *, fallback: datetime) -> datetime:
+        created_at = getattr(message, "created_at", None)
+        if isinstance(created_at, datetime):
+            return created_at.astimezone(timezone.utc) if created_at.tzinfo else created_at.replace(tzinfo=timezone.utc)
+        return fallback
+
+    def _message_is_within_answer_window(self, record: dict[str, Any], *, message_created_at: datetime) -> bool:
+        return message_created_at <= self._active_drop_expires_at(record)
+
+    async def _claim_and_close_active_drop(
+        self,
+        record: dict[str, Any],
+        *,
+        resolved_at: datetime,
+        winner_user_id: int | None,
+    ) -> dict[str, Any] | None:
+        claimed = await self.store.claim_active_drop_resolution(
+            int(record["guild_id"]),
+            int(record["channel_id"]),
+            int(record["message_id"]),
+            resolved_at=resolved_at,
+            winner_user_id=winner_user_id,
+        )
+        if claimed is None:
+            return None
+        self._active_drops.pop((claimed["guild_id"], claimed["channel_id"]), None)
+        return claimed
 
     async def _expire_due_drops(self):
         now = ge.now_utc()
@@ -3907,31 +3949,31 @@ class QuestionDropsService:
         announce: bool = True,
         delete_post_message: bool = False,
     ):
-        exposure_id = int(record["exposure_id"])
-        self._clear_recently_resolved_drop(record["guild_id"], record["channel_id"])
-        await self.store.resolve_exposure(exposure_id, resolved_at=ge.now_utc(), winner_user_id=None)
-        await self.store.delete_active_drop(record["guild_id"], record["channel_id"])
-        self._active_drops.pop((record["guild_id"], record["channel_id"]), None)
-        participant_ids = sorted(self._attempted_users.get(exposure_id, set(record.get("participant_user_ids", []) or [])))
+        claimed = await self._claim_and_close_active_drop(record, resolved_at=ge.now_utc(), winner_user_id=None)
+        if claimed is None:
+            return
+        exposure_id = int(claimed["exposure_id"])
+        self._clear_recently_resolved_drop(claimed["guild_id"], claimed["channel_id"])
+        participant_ids = sorted(self._attempted_users.get(exposure_id, set(claimed.get("participant_user_ids", []) or [])))
         self._clear_active_drop_runtime_state(exposure_id)
         if delete_post_message:
-            await self._delete_message_if_exists(record["channel_id"], record.get("message_id"))
+            await self._delete_message_if_exists(claimed["channel_id"], claimed.get("message_id"))
         if participant_ids:
             await self._record_participation_batch(
-                guild_id=record["guild_id"],
+                guild_id=claimed["guild_id"],
                 exposure_id=exposure_id,
-                occurred_at=record["asked_at"],
-                category=record["category"],
-                difficulty=int(record["difficulty"]),
+                occurred_at=claimed["asked_at"],
+                category=claimed["category"],
+                difficulty=int(claimed["difficulty"]),
                 participant_ids=participant_ids,
                 winner_user_id=None,
             )
         if not announce:
             return
-        channel = self.bot.get_channel(record["channel_id"]) if hasattr(self.bot, "get_channel") else None
+        channel = self.bot.get_channel(claimed["channel_id"]) if hasattr(self.bot, "get_channel") else None
         if channel is None:
             return
-        answer = render_answer_summary(record["answer_spec"])
+        answer = render_answer_summary(claimed["answer_spec"])
         title = f"{state_emoji('timeout')} Time's Up" if timed_out else f"{state_emoji('result')} Drop Closed"
         with contextlib.suppress(discord.HTTPException):
             await channel.send(

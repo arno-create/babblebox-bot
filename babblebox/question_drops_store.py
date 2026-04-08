@@ -523,6 +523,17 @@ class _BaseQuestionDropsStore:
     async def delete_active_drop(self, guild_id: int, channel_id: int):
         raise NotImplementedError
 
+    async def claim_active_drop_resolution(
+        self,
+        guild_id: int,
+        channel_id: int,
+        message_id: int,
+        *,
+        resolved_at: datetime,
+        winner_user_id: int | None,
+    ) -> dict[str, Any] | None:
+        raise NotImplementedError
+
     async def insert_exposure(self, record: dict[str, Any]) -> dict[str, Any]:
         raise NotImplementedError
 
@@ -715,6 +726,26 @@ class _MemoryQuestionDropsStore(_BaseQuestionDropsStore):
 
     async def delete_active_drop(self, guild_id: int, channel_id: int):
         self.active_drops.pop((guild_id, channel_id), None)
+
+    async def claim_active_drop_resolution(
+        self,
+        guild_id: int,
+        channel_id: int,
+        message_id: int,
+        *,
+        resolved_at: datetime,
+        winner_user_id: int | None,
+    ) -> dict[str, Any] | None:
+        record = self.active_drops.get((guild_id, channel_id))
+        if record is None or int(record.get("message_id", 0) or 0) != int(message_id):
+            return None
+        claimed = deepcopy(record)
+        self.active_drops.pop((guild_id, channel_id), None)
+        exposure = self.exposures.get(int(claimed["exposure_id"]))
+        if exposure is not None:
+            exposure["resolved_at"] = _serialize_datetime(resolved_at)
+            exposure["winner_user_id"] = winner_user_id if isinstance(winner_user_id, int) and winner_user_id > 0 else None
+        return claimed
 
     async def insert_exposure(self, record: dict[str, Any]) -> dict[str, Any]:
         normalized = normalize_exposure(record)
@@ -1537,6 +1568,45 @@ class _PostgresQuestionDropsStore(_BaseQuestionDropsStore):
             async with self._pool.acquire() as conn:
                 await conn.execute("DELETE FROM question_drop_active WHERE guild_id = $1 AND channel_id = $2", guild_id, channel_id)
 
+    async def claim_active_drop_resolution(
+        self,
+        guild_id: int,
+        channel_id: int,
+        message_id: int,
+        *,
+        resolved_at: datetime,
+        winner_user_id: int | None,
+    ) -> dict[str, Any] | None:
+        async with self._io_lock:
+            async with self._pool.acquire() as conn:
+                async with conn.transaction():
+                    row = await conn.fetchrow(
+                        (
+                            "SELECT guild_id, channel_id, message_id, author_user_id, exposure_id, concept_id, variant_hash, category, "
+                            "difficulty, prompt, answer_spec, asked_at, expires_at, slot_key, tone_mode, participant_user_ids "
+                            "FROM question_drop_active WHERE guild_id = $1 AND channel_id = $2 AND message_id = $3 FOR UPDATE"
+                        ),
+                        guild_id,
+                        channel_id,
+                        message_id,
+                    )
+                    claimed = _active_drop_from_row(row) if row is not None else None
+                    if claimed is None:
+                        return None
+                    await conn.execute(
+                        "DELETE FROM question_drop_active WHERE guild_id = $1 AND channel_id = $2 AND message_id = $3",
+                        guild_id,
+                        channel_id,
+                        message_id,
+                    )
+                    await conn.execute(
+                        "UPDATE question_drop_exposures SET resolved_at = $2, winner_user_id = $3 WHERE id = $1",
+                        int(claimed["exposure_id"]),
+                        resolved_at,
+                        winner_user_id if isinstance(winner_user_id, int) and winner_user_id > 0 else None,
+                    )
+        return claimed
+
     async def insert_exposure(self, record: dict[str, Any]) -> dict[str, Any]:
         normalized = normalize_exposure(record)
         if normalized is None:
@@ -1858,6 +1928,23 @@ class QuestionDropsStore:
 
     async def delete_active_drop(self, guild_id: int, channel_id: int):
         await self._store.delete_active_drop(guild_id, channel_id)
+
+    async def claim_active_drop_resolution(
+        self,
+        guild_id: int,
+        channel_id: int,
+        message_id: int,
+        *,
+        resolved_at: datetime,
+        winner_user_id: int | None,
+    ) -> dict[str, Any] | None:
+        return await self._store.claim_active_drop_resolution(
+            guild_id,
+            channel_id,
+            message_id,
+            resolved_at=resolved_at,
+            winner_user_id=winner_user_id,
+        )
 
     async def insert_exposure(self, record: dict[str, Any]) -> dict[str, Any]:
         return await self._store.insert_exposure(record)
