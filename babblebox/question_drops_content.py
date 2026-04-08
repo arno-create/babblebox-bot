@@ -655,7 +655,7 @@ def render_answer_instruction(answer_spec: dict[str, Any]) -> str:
         return "Reply is optional. Send a clean same-channel answer with the option text, or use the letter: `C` or `option c`."
     if answer_type == "numeric":
         if _numeric_words_allowed(answer_spec):
-            return "Reply is optional. Send a clean same-channel answer with just the number. Digits work, and simple number words count for whole-number answers."
+            return "Reply is optional. Send a clean same-channel answer with just the number."
         return "Reply is optional. Send a clean same-channel answer with just the number. Use digits for decimals, like `14.4`."
     if answer_type == "boolean":
         return "Reply is optional. Send a clean same-channel answer like `true` / `false` or `yes` / `no`."
