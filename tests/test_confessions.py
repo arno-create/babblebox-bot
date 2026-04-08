@@ -388,6 +388,7 @@ class FakeInteraction:
         self.response = FakeResponse()
         self.followup = types.SimpleNamespace(send=self._followup_send)
         self.followup_calls = []
+        self.original_response_edits = []
 
     async def _followup_send(self, *args, **kwargs):
         _validate_message_payload(embed=kwargs.get("embed"), embeds=kwargs.get("embeds"), view=kwargs.get("view"))
@@ -398,6 +399,18 @@ class FakeInteraction:
             embeds=kwargs.get("embeds"),
             view=kwargs.get("view"),
             ephemeral=kwargs.get("ephemeral"),
+            allowed_mentions=kwargs.get("allowed_mentions"),
+        )
+
+    async def edit_original_response(self, **kwargs):
+        _validate_message_payload(embed=kwargs.get("embed"), embeds=kwargs.get("embeds"), view=kwargs.get("view"))
+        self.original_response_edits.append(kwargs)
+        return FakeMessage(
+            content=kwargs.get("content"),
+            embed=kwargs.get("embed"),
+            embeds=kwargs.get("embeds"),
+            view=kwargs.get("view"),
+            ephemeral=True if self.guild is not None else None,
             allowed_mentions=kwargs.get("allowed_mentions"),
         )
 
@@ -2364,7 +2377,18 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
         self.bot.confessions_service = self.cog.service
         self._original_service = original
 
+    async def _flush_background_tasks(self, cog: ConfessionsCog | None = None):
+        target = cog or self.cog
+        tasks = tuple(target._background_tasks)
+        if tasks:
+            await asyncio.gather(*tasks)
+
     async def asyncTearDown(self):
+        tasks = tuple(self.cog._background_tasks)
+        for task in tasks:
+            task.cancel()
+        if tasks:
+            await asyncio.gather(*tasks, return_exceptions=True)
         await self.cog.service.close()
         await self._original_service.close()
 
@@ -3223,6 +3247,7 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
             False,
             False,
         )
+        await self._flush_background_tasks()
 
         self.assertEqual(len(ctx.send_calls), 1)
         self.assertEqual(ctx.send_calls[0]["embed"].title, "Confessions Setup")
@@ -3250,12 +3275,13 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
                 False,
                 False,
             )
+            await self._flush_background_tasks()
 
         self.assertEqual(len(ctx.defer_calls), 1)
         self.assertEqual(sync_runtime.await_count, 1)
         self.assertEqual(len(ctx.send_calls), 1)
         self.assertEqual(ctx.send_calls[0]["embed"].title, "Confessions Setup")
-        self.assertNotIn("could not finish", ctx.send_calls[0]["embed"].description.lower())
+        self.assertIn("refreshing the live confessions panel", ctx.send_calls[0]["embed"].description.lower())
         self.assertNotIn("runtime follow-up still needs attention", ctx.send_calls[0]["embed"].description.lower())
         config = self.cog.service.get_config(self.guild.id)
         self.assertEqual(config["confession_channel_id"], 20)
@@ -3302,12 +3328,13 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
                 False,
                 False,
             )
+            await self._flush_background_tasks(cog)
 
             self.assertEqual(len(ctx.defer_calls), 1)
             self.assertEqual(len(ctx.send_calls), 1)
             self.assertEqual(ctx.send_calls[0]["embed"].title, "Confessions Setup")
             self.assertNotIn("could not save", ctx.send_calls[0]["embed"].description.lower())
-            self.assertNotIn("could not finish", ctx.send_calls[0]["embed"].description.lower())
+            self.assertIn("refreshing the live confessions panel", ctx.send_calls[0]["embed"].description.lower())
             config = cog.service.get_config(guild.id)
             self.assertTrue(config["enabled"])
             self.assertEqual(config["confession_channel_id"], 20)
@@ -3367,6 +3394,7 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
             False,
             False,
         )
+        await self._flush_background_tasks()
 
         self.assertEqual(len(ctx.send_calls), 1)
         config = self.cog.service.get_config(self.guild.id)
@@ -3423,11 +3451,14 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
                 False,
                 False,
             )
+            await self._flush_background_tasks()
 
         self.assertEqual(len(ctx.send_calls), 1)
         self.assertEqual(ctx.send_calls[0]["embed"].title, "Confessions Setup")
-        self.assertIn("runtime follow-up still needs attention", ctx.send_calls[0]["embed"].description.lower())
-        self.assertIn("panel channel is unavailable", ctx.send_calls[0]["embed"].description.lower())
+        self.assertIn("refreshing the live confessions panel", ctx.send_calls[0]["embed"].description.lower())
+        self.assertEqual(len(ctx.interaction.followup_calls), 1)
+        self.assertIn("runtime follow-up still needs attention", ctx.interaction.followup_calls[0]["kwargs"]["embed"].description.lower())
+        self.assertIn("panel channel is unavailable", ctx.interaction.followup_calls[0]["kwargs"]["embed"].description.lower())
 
     async def test_confess_manage_appeal_report_and_about_commands_open_private_flows(self):
         await self.cog.service.configure_guild(self.guild.id, enabled=True, confession_channel_id=20, appeals_channel_id=50, review_mode=False)
@@ -3631,13 +3662,15 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
         interaction = FakeInteraction(guild=self.guild, user=admin)
 
         await without_review.callback(interaction)
+        await self._flush_background_tasks()
 
         config = self.cog.service.get_config(self.guild.id)
         self.assertTrue(config["allow_images"])
         self.assertFalse(config["image_review_required"])
         self.assertTrue(config["allow_anonymous_replies"])
         self.assertFalse(config["anonymous_reply_review_required"])
-        self.assertEqual(interaction.response.edits[0]["embed"].title, "Confessions Policy")
+        self.assertEqual(len(interaction.response.defer_calls), 1)
+        self.assertEqual(interaction.original_response_edits[0]["embed"].title, "Confessions Policy")
 
     async def test_modal_submission_text_only_defers_and_posts_privately(self):
         await self.cog.service.configure_guild(self.guild.id, enabled=True, confession_channel_id=20, review_mode=False)
@@ -3960,17 +3993,46 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(ctx.send_calls[0]["embed"].title, "Confessions Panel")
         self.assertIn("could not publish", ctx.send_calls[0]["embed"].description.lower())
 
-    async def test_role_allowlist_command_returns_private_failure_when_runtime_sync_raises(self):
+    async def test_role_allowlist_command_reports_background_refresh_failure_privately(self):
         await self.cog.service.configure_guild(self.guild.id, enabled=True, confession_channel_id=20, review_mode=False)
         ctx = FakeContext(guild=self.guild, author=FakeUser(7, manage_guild=True))
 
         with mock.patch.object(self.cog.service, "sync_runtime_surfaces", side_effect=RuntimeError("runtime boom")):
             await ConfessionsCog.confessions_role_allowlist_command.callback(self.cog, ctx, self.allowed_role, "on")
+            await self._flush_background_tasks()
 
         self.assertEqual(len(ctx.defer_calls), 1)
         self.assertEqual(len(ctx.send_calls), 1)
         self.assertEqual(ctx.send_calls[0]["embed"].title, "Confessions Role Eligibility")
-        self.assertIn("could not update", ctx.send_calls[0]["embed"].description.lower())
+        self.assertIn("refreshing the live confessions panel", ctx.send_calls[0]["embed"].description.lower())
+        self.assertEqual(len(ctx.interaction.followup_calls), 1)
+        self.assertIn("could not finish refreshing live confessions surfaces", ctx.interaction.followup_calls[0]["kwargs"]["embed"].description.lower())
+
+    async def test_role_blacklist_command_returns_before_slow_runtime_sync_finishes(self):
+        await self.cog.service.configure_guild(self.guild.id, enabled=True, confession_channel_id=20, review_mode=False)
+        ctx = FakeContext(guild=self.guild, author=FakeUser(70, manage_guild=True))
+        started = asyncio.Event()
+        release = asyncio.Event()
+        original_sync = self.cog.service.sync_runtime_surfaces
+
+        async def slow_sync(*args, **kwargs):
+            started.set()
+            await release.wait()
+            return await original_sync(*args, **kwargs)
+
+        with mock.patch.object(self.cog.service, "sync_runtime_surfaces", side_effect=slow_sync):
+            task = asyncio.create_task(
+                ConfessionsCog.confessions_role_blacklist_command.callback(self.cog, ctx, self.blocked_role, "on")
+            )
+            await started.wait()
+            await asyncio.sleep(0)
+            self.assertTrue(task.done())
+            self.assertEqual(len(ctx.send_calls), 1)
+            self.assertIn("refreshing the live confessions panel", ctx.send_calls[0]["embed"].description.lower())
+            self.assertEqual(len(ctx.interaction.followup_calls), 0)
+            release.set()
+            await task
+            await self._flush_background_tasks()
 
     async def test_live_admin_panel_refresh_still_works_and_sends_private_note(self):
         ctx = FakeContext(guild=self.guild, author=FakeUser(8, manage_guild=True))
@@ -3981,7 +4043,8 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
         interaction = FakeInteraction(guild=self.guild, user=ctx.author)
         await view.refresh_button.callback(interaction)
 
-        self.assertEqual(len(interaction.response.edits), 1)
+        self.assertEqual(len(interaction.response.defer_calls), 1)
+        self.assertEqual(len(interaction.original_response_edits), 1)
         self.assertEqual(len(interaction.followup_calls), 1)
         self.assertEqual(interaction.followup_calls[0]["kwargs"]["embed"].title, "Confessions Panel")
 
@@ -4000,8 +4063,10 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
         interaction = FakeInteraction(guild=self.guild, user=admin)
 
         await view.toggle_button.callback(interaction)
+        await self._flush_background_tasks()
 
-        self.assertEqual(len(interaction.response.edits), 1)
+        self.assertEqual(len(interaction.response.defer_calls), 1)
+        self.assertEqual(len(interaction.original_response_edits), 1)
         self.assertEqual(len(interaction.followup_calls), 1)
         self.assertTrue(self.cog.service.get_config(self.guild.id)["enabled"])
         self.assertIn("enabled", interaction.followup_calls[0]["kwargs"]["embed"].description.lower())
@@ -4023,7 +4088,8 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
 
         await view.publish_panel_button.callback(interaction)
 
-        self.assertEqual(len(interaction.response.edits), 1)
+        self.assertEqual(len(interaction.response.defer_calls), 1)
+        self.assertEqual(len(interaction.original_response_edits), 1)
         self.assertEqual(len(interaction.followup_calls), 1)
         self.assertEqual(len(self.guild.get_channel(40).sent), 1)
         self.assertEqual(
@@ -4050,7 +4116,8 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
 
         await view.refresh_queue_button.callback(interaction)
 
-        self.assertEqual(len(interaction.response.edits), 1)
+        self.assertEqual(len(interaction.response.defer_calls), 1)
+        self.assertEqual(len(interaction.original_response_edits), 1)
         self.assertEqual(len(interaction.followup_calls), 1)
         self.assertEqual(len(self.guild.get_channel(30).sent), 1)
         self.assertIn("review queue is live", interaction.followup_calls[0]["kwargs"]["embed"].description.lower())
@@ -4064,9 +4131,10 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
         with mock.patch.object(self.cog.service, "configure_guild", side_effect=RuntimeError("toggle boom")):
             await view.toggle_button.callback(interaction)
 
-        self.assertEqual(len(interaction.response.sent), 1)
-        self.assertEqual(interaction.response.sent[0]["kwargs"]["embed"].title, "Confessions Panel")
-        self.assertIn("could not update", interaction.response.sent[0]["kwargs"]["embed"].description.lower())
+        self.assertEqual(len(interaction.response.defer_calls), 1)
+        self.assertEqual(len(interaction.followup_calls), 1)
+        self.assertEqual(interaction.followup_calls[0]["kwargs"]["embed"].title, "Confessions Panel")
+        self.assertIn("could not update", interaction.followup_calls[0]["kwargs"]["embed"].description.lower())
 
     async def test_admin_panel_publish_failure_is_handled_privately(self):
         admin = FakeUser(11, manage_guild=True)
@@ -4077,8 +4145,9 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
         with mock.patch.object(self.cog.service, "sync_member_panel", side_effect=RuntimeError("publish boom")):
             await view.publish_panel_button.callback(interaction)
 
-        self.assertEqual(len(interaction.response.sent), 1)
-        self.assertIn("could not publish", interaction.response.sent[0]["kwargs"]["embed"].description.lower())
+        self.assertEqual(len(interaction.response.defer_calls), 1)
+        self.assertEqual(len(interaction.followup_calls), 1)
+        self.assertIn("could not publish", interaction.followup_calls[0]["kwargs"]["embed"].description.lower())
 
     async def test_admin_panel_refresh_queue_failure_is_handled_privately(self):
         admin = FakeUser(12, manage_guild=True)
@@ -4089,8 +4158,9 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
         with mock.patch.object(self.cog.service, "sync_review_queue", side_effect=RuntimeError("queue boom")):
             await view.refresh_queue_button.callback(interaction)
 
-        self.assertEqual(len(interaction.response.sent), 1)
-        self.assertIn("could not refresh the confession review queue", interaction.response.sent[0]["kwargs"]["embed"].description.lower())
+        self.assertEqual(len(interaction.response.defer_calls), 1)
+        self.assertEqual(len(interaction.followup_calls), 1)
+        self.assertIn("could not refresh the confession review queue", interaction.followup_calls[0]["kwargs"]["embed"].description.lower())
 
     async def test_admin_panel_section_switch_failure_is_handled_privately(self):
         admin = FakeUser(13, manage_guild=True)
@@ -4101,8 +4171,9 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
         with mock.patch.object(self.cog.service, "build_dashboard_embed", side_effect=RuntimeError("render boom")):
             await view.policy_button.callback(interaction)
 
-        self.assertEqual(len(interaction.response.sent), 1)
-        self.assertIn("could not refresh that private confessions panel", interaction.response.sent[0]["kwargs"]["embed"].description.lower())
+        self.assertEqual(len(interaction.response.defer_calls), 1)
+        self.assertEqual(len(interaction.followup_calls), 1)
+        self.assertIn("could not refresh that private confessions panel", interaction.followup_calls[0]["kwargs"]["embed"].description.lower())
 
     async def test_stateless_admin_panel_fallback_warns_privately_when_panel_is_expired(self):
         interaction = FakeInteraction(guild=self.guild, user=self._member(300), client=self.bot)
@@ -4125,6 +4196,7 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
         allow_config = self.cog.service.get_config(self.guild.id)
         await ConfessionsCog.confessions_role_blacklist_command.callback(self.cog, reject_ctx, self.guild.default_role, "on")
         await ConfessionsCog.confessions_role_reset_command.callback(self.cog, reset_ctx, "allowlist")
+        await self._flush_background_tasks()
 
         self.assertEqual(status_ctx.send_calls[0]["embed"].title, "Confessions Role Eligibility")
         self.assertIn(self.allowed_role.id, allow_config["allowed_role_ids"])
