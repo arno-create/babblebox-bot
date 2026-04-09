@@ -285,6 +285,11 @@ def normalize_active_drop(payload: Any, *, allow_missing_exposure_id: bool = Fal
     expires_at = _serialize_datetime(_parse_datetime(payload.get("expires_at")))
     if asked_at is None or expires_at is None:
         return None
+    close_after_at = None
+    if payload.get("close_after_at") is not None:
+        close_after_at = _serialize_datetime(_parse_datetime(payload.get("close_after_at")))
+        if close_after_at is None:
+            return None
     answer_spec = payload.get("answer_spec")
     if not isinstance(answer_spec, dict):
         return None
@@ -306,6 +311,7 @@ def normalize_active_drop(payload: Any, *, allow_missing_exposure_id: bool = Fal
         "answer_spec": deepcopy(answer_spec),
         "asked_at": asked_at,
         "expires_at": expires_at,
+        "close_after_at": close_after_at,
         "slot_key": payload["slot_key"].strip(),
         "tone_mode": tone_mode if tone_mode in {"clean", "playful", "roast-light"} else "clean",
         "participant_user_ids": _normalize_participant_ids(payload.get("participant_user_ids", [])),
@@ -534,6 +540,15 @@ class _BaseQuestionDropsStore:
     ) -> dict[str, Any] | None:
         raise NotImplementedError
 
+    async def claim_timed_out_exposure_winner(
+        self,
+        exposure_id: int,
+        *,
+        resolved_at: datetime,
+        winner_user_id: int,
+    ) -> dict[str, Any] | None:
+        raise NotImplementedError
+
     async def insert_exposure(self, record: dict[str, Any]) -> dict[str, Any]:
         raise NotImplementedError
 
@@ -747,6 +762,28 @@ class _MemoryQuestionDropsStore(_BaseQuestionDropsStore):
             exposure["winner_user_id"] = winner_user_id if isinstance(winner_user_id, int) and winner_user_id > 0 else None
         return claimed
 
+    async def claim_timed_out_exposure_winner(
+        self,
+        exposure_id: int,
+        *,
+        resolved_at: datetime,
+        winner_user_id: int,
+    ) -> dict[str, Any] | None:
+        if not isinstance(exposure_id, int) or exposure_id <= 0:
+            return None
+        if not isinstance(winner_user_id, int) or winner_user_id <= 0:
+            return None
+        exposure = self.exposures.get(exposure_id)
+        if exposure is None:
+            return None
+        if exposure.get("winner_user_id") is not None:
+            return None
+        if _parse_datetime(exposure.get("resolved_at")) is None:
+            return None
+        exposure["resolved_at"] = _serialize_datetime(resolved_at)
+        exposure["winner_user_id"] = winner_user_id
+        return deepcopy(exposure)
+
     async def insert_exposure(self, record: dict[str, Any]) -> dict[str, Any]:
         normalized = normalize_exposure(record)
         if normalized is None:
@@ -953,6 +990,7 @@ def _active_drop_from_row(row) -> dict[str, Any] | None:
             ),
             "asked_at": _serialize_datetime(row["asked_at"]),
             "expires_at": _serialize_datetime(row["expires_at"]),
+            "close_after_at": _serialize_datetime(row["close_after_at"]) if "close_after_at" in row else None,
             "slot_key": row["slot_key"],
             "tone_mode": row["tone_mode"],
             "participant_user_ids": decode_postgres_json_array(
@@ -1164,13 +1202,16 @@ class _PostgresQuestionDropsStore(_BaseQuestionDropsStore):
                 "answer_spec JSONB NOT NULL, "
                 "asked_at TIMESTAMPTZ NOT NULL, "
                 "expires_at TIMESTAMPTZ NOT NULL, "
+                "close_after_at TIMESTAMPTZ NULL, "
                 "slot_key TEXT NOT NULL, "
                 "tone_mode TEXT NOT NULL DEFAULT 'clean', "
                 "participant_user_ids JSONB NOT NULL DEFAULT '[]'::jsonb, "
                 "PRIMARY KEY (guild_id, channel_id)"
                 ")"
             ),
+            "ALTER TABLE question_drop_active ADD COLUMN IF NOT EXISTS close_after_at TIMESTAMPTZ",
             "ALTER TABLE question_drop_active ADD COLUMN IF NOT EXISTS participant_user_ids JSONB NOT NULL DEFAULT '[]'::jsonb",
+            "CREATE INDEX IF NOT EXISTS ix_question_drop_active_close_after ON question_drop_active (close_after_at)",
             "CREATE INDEX IF NOT EXISTS ix_question_drop_active_expires ON question_drop_active (expires_at)",
             (
                 "CREATE TABLE IF NOT EXISTS question_drop_participation_events ("
@@ -1313,8 +1354,8 @@ class _PostgresQuestionDropsStore(_BaseQuestionDropsStore):
             rows = await conn.fetch(
                 (
                     "SELECT guild_id, channel_id, message_id, author_user_id, exposure_id, concept_id, variant_hash, category, "
-                    "difficulty, prompt, answer_spec, asked_at, expires_at, slot_key, tone_mode, participant_user_ids "
-                    "FROM question_drop_active ORDER BY expires_at ASC"
+                    "difficulty, prompt, answer_spec, asked_at, expires_at, close_after_at, slot_key, tone_mode, participant_user_ids "
+                    "FROM question_drop_active ORDER BY COALESCE(close_after_at, expires_at) ASC"
                 )
             )
         return [record for row in rows if (record := _active_drop_from_row(row)) is not None]
@@ -1334,7 +1375,7 @@ class _PostgresQuestionDropsStore(_BaseQuestionDropsStore):
             row = await conn.fetchrow(
                 (
                     "SELECT guild_id, channel_id, message_id, author_user_id, exposure_id, concept_id, variant_hash, category, "
-                    "difficulty, prompt, answer_spec, asked_at, expires_at, slot_key, tone_mode, participant_user_ids "
+                    "difficulty, prompt, answer_spec, asked_at, expires_at, close_after_at, slot_key, tone_mode, participant_user_ids "
                     "FROM question_drop_active WHERE guild_id = $1 AND channel_id = $2"
                 ),
                 guild_id,
@@ -1475,9 +1516,9 @@ class _PostgresQuestionDropsStore(_BaseQuestionDropsStore):
             (
                 "INSERT INTO question_drop_active ("
                 "guild_id, channel_id, message_id, author_user_id, exposure_id, concept_id, variant_hash, category, difficulty, "
-                "prompt, answer_spec, asked_at, expires_at, slot_key, tone_mode, participant_user_ids"
+                "prompt, answer_spec, asked_at, expires_at, close_after_at, slot_key, tone_mode, participant_user_ids"
                 ") VALUES ("
-                "$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12, $13, $14, $15, $16::jsonb"
+                "$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12, $13, $14, $15, $16, $17::jsonb"
                 ") ON CONFLICT (guild_id, channel_id) DO UPDATE SET "
                 "message_id = EXCLUDED.message_id, "
                 "author_user_id = EXCLUDED.author_user_id, "
@@ -1490,6 +1531,7 @@ class _PostgresQuestionDropsStore(_BaseQuestionDropsStore):
                 "answer_spec = EXCLUDED.answer_spec, "
                 "asked_at = EXCLUDED.asked_at, "
                 "expires_at = EXCLUDED.expires_at, "
+                "close_after_at = EXCLUDED.close_after_at, "
                 "slot_key = EXCLUDED.slot_key, "
                 "tone_mode = EXCLUDED.tone_mode, "
                 "participant_user_ids = EXCLUDED.participant_user_ids"
@@ -1507,6 +1549,7 @@ class _PostgresQuestionDropsStore(_BaseQuestionDropsStore):
             json.dumps(normalized["answer_spec"]),
             _parse_datetime(normalized["asked_at"]),
             _parse_datetime(normalized["expires_at"]),
+            _parse_datetime(normalized.get("close_after_at")),
             normalized["slot_key"],
             normalized["tone_mode"],
             json.dumps(normalized["participant_user_ids"]),
@@ -1583,7 +1626,7 @@ class _PostgresQuestionDropsStore(_BaseQuestionDropsStore):
                     row = await conn.fetchrow(
                         (
                             "SELECT guild_id, channel_id, message_id, author_user_id, exposure_id, concept_id, variant_hash, category, "
-                            "difficulty, prompt, answer_spec, asked_at, expires_at, slot_key, tone_mode, participant_user_ids "
+                            "difficulty, prompt, answer_spec, asked_at, expires_at, close_after_at, slot_key, tone_mode, participant_user_ids "
                             "FROM question_drop_active WHERE guild_id = $1 AND channel_id = $2 AND message_id = $3 FOR UPDATE"
                         ),
                         guild_id,
@@ -1606,6 +1649,32 @@ class _PostgresQuestionDropsStore(_BaseQuestionDropsStore):
                         winner_user_id if isinstance(winner_user_id, int) and winner_user_id > 0 else None,
                     )
         return claimed
+
+    async def claim_timed_out_exposure_winner(
+        self,
+        exposure_id: int,
+        *,
+        resolved_at: datetime,
+        winner_user_id: int,
+    ) -> dict[str, Any] | None:
+        if not isinstance(exposure_id, int) or exposure_id <= 0:
+            return None
+        if not isinstance(winner_user_id, int) or winner_user_id <= 0:
+            return None
+        async with self._io_lock:
+            async with self._pool.acquire() as conn:
+                async with conn.transaction():
+                    row = await conn.fetchrow(
+                        (
+                            "UPDATE question_drop_exposures SET resolved_at = $2, winner_user_id = $3 "
+                            "WHERE id = $1 AND resolved_at IS NOT NULL AND winner_user_id IS NULL "
+                            "RETURNING id, guild_id, channel_id, concept_id, variant_hash, category, difficulty, asked_at, resolved_at, winner_user_id, slot_key"
+                        ),
+                        exposure_id,
+                        resolved_at,
+                        winner_user_id,
+                    )
+        return _exposure_from_row(row) if row is not None else None
 
     async def insert_exposure(self, record: dict[str, Any]) -> dict[str, Any]:
         normalized = normalize_exposure(record)
@@ -1942,6 +2011,19 @@ class QuestionDropsStore:
             guild_id,
             channel_id,
             message_id,
+            resolved_at=resolved_at,
+            winner_user_id=winner_user_id,
+        )
+
+    async def claim_timed_out_exposure_winner(
+        self,
+        exposure_id: int,
+        *,
+        resolved_at: datetime,
+        winner_user_id: int,
+    ) -> dict[str, Any] | None:
+        return await self._store.claim_timed_out_exposure_winner(
+            exposure_id,
             resolved_at=resolved_at,
             winner_user_id=winner_user_id,
         )
