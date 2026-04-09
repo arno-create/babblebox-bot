@@ -3173,6 +3173,7 @@ class QuestionDropsService:
         recent = self._recently_resolved_drop(message.guild.id, message.channel.id, now=now)
         if recent is None:
             return False
+        candidate_content = self._sanitize_answer_candidate(message.content)
         author_id = int(getattr(message.author, "id", 0) or 0)
         if author_id <= 0 or author_id == recent.winner_user_id:
             return False
@@ -3181,9 +3182,9 @@ class QuestionDropsService:
         if len(recent.acknowledged_user_ids) >= QUESTION_DROP_LATE_CORRECT_MAX_ACKS:
             return False
         direct_reply = reply_target_id == int(recent.message_id)
-        if not is_answer_attempt(recent.answer_spec, message.content, direct_reply=direct_reply):
+        if not is_answer_attempt(recent.answer_spec, candidate_content, direct_reply=direct_reply):
             return False
-        if not judge_answer(recent.answer_spec, message.content):
+        if not judge_answer(recent.answer_spec, candidate_content):
             return False
         recent.acknowledged_user_ids.add(author_id)
         await self._try_add_answer_reaction(message, state_emoji("correct"))
@@ -3206,13 +3207,14 @@ class QuestionDropsService:
         now = ge.now_utc()
         message_created_at = self._message_created_at_utc(message, fallback=now)
         reply_target_id = _extract_reply_target_id(message)
+        candidate_content = self._sanitize_answer_candidate(message.content)
         active = self._active_drops.get((message.guild.id, message.channel.id))
         if active is None:
             return await self._acknowledge_late_correct_answer(message, now=now, reply_target_id=reply_target_id)
         if self._channel_has_live_party_session(message.guild.id, message.channel.id):
             await self._expire_drop(active, timed_out=False, announce=False, delete_post_message=True)
             return False
-        if not is_answer_attempt(active["answer_spec"], message.content, direct_reply=reply_target_id == int(active["message_id"])):
+        if not is_answer_attempt(active["answer_spec"], candidate_content, direct_reply=reply_target_id == int(active["message_id"])):
             if not self._active_drop_is_live(active, now=now):
                 await self._expire_drop(active, timed_out=True)
             return False
@@ -3237,7 +3239,7 @@ class QuestionDropsService:
                 exposure_id = int(current["exposure_id"])
                 participants = self._attempted_users.setdefault(exposure_id, set(current.get("participant_user_ids", []) or []))
                 first_attempt = message.author.id not in participants
-                correct = judge_answer(current["answer_spec"], message.content)
+                correct = judge_answer(current["answer_spec"], candidate_content)
                 persisted_participants = False
                 if first_attempt:
                     participants.add(message.author.id)
@@ -3911,6 +3913,22 @@ class QuestionDropsService:
         if isinstance(created_at, datetime):
             return created_at.astimezone(timezone.utc) if created_at.tzinfo else created_at.replace(tzinfo=timezone.utc)
         return fallback
+
+    def _sanitize_answer_candidate(self, raw_content: str | None) -> str:
+        content = str(raw_content or "")
+        bot_id = int(getattr(getattr(self.bot, "user", None), "id", 0) or 0)
+        if bot_id <= 0:
+            return content
+        candidate = content.lstrip()
+        changed = False
+        bot_mentions = (f"<@{bot_id}>", f"<@!{bot_id}>")
+        while True:
+            matched = next((mention for mention in bot_mentions if candidate.startswith(mention)), None)
+            if matched is None:
+                break
+            candidate = candidate[len(matched) :].lstrip(" \t\r\n,.:;-")
+            changed = True
+        return candidate if changed else content
 
     def _message_is_within_answer_window(self, record: dict[str, Any], *, message_created_at: datetime) -> bool:
         return message_created_at <= self._active_drop_expires_at(record)
