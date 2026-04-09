@@ -407,6 +407,12 @@ class QuestionDropsContentTests(unittest.TestCase):
         self.assertTrue(is_answer_attempt(multiple_choice, "is it c?"))
         self.assertTrue(judge_answer(multiple_choice, "is it c?"))
 
+    def test_answer_attempt_gate_rejects_both_user_mention_token_forms(self):
+        text_spec = {"type": "text", "accepted": ["moon"]}
+        self.assertFalse(is_answer_attempt(text_spec, "<@123> moon", direct_reply=True))
+        self.assertFalse(is_answer_attempt(text_spec, "<@!123> moon", direct_reply=True))
+        self.assertFalse(judge_answer(text_spec, "<@!123> moon"))
+
     def test_render_answer_instruction_matches_answer_type(self):
         self.assertIn("Reply is optional", render_answer_instruction({"type": "numeric", "value": 12}))
         self.assertIn("same-channel", render_answer_instruction({"type": "numeric", "value": 12}))
@@ -1153,6 +1159,114 @@ class QuestionDropsServiceTests(unittest.IsolatedAsyncioTestCase):
         message.add_reaction.assert_awaited_once_with("\u2705")
         self.bot.profile_service.record_question_drop_results_batch.assert_awaited_once()
 
+    async def test_text_drop_accepts_bot_mention_prefix_reply_noise(self):
+        variant = QuestionDropVariant(
+            concept_id="science:moon-bot-mention",
+            category="science",
+            difficulty=1,
+            source_type="curated",
+            generator_type="static",
+            prompt="What is Earth's natural satellite?",
+            answer_spec={"type": "text", "accepted": ["moon", "the moon"]},
+            variant_hash="science-moon-bot-mention",
+        )
+        self.service._select_variant = lambda *args, **kwargs: variant
+        active = await self._post_one_drop()
+        message = DummyMessage(
+            guild=self.guild,
+            channel=self.channel,
+            author=DummyUser(47),
+            content=f"<@{self.bot.user.id}> The moon",
+            reference=self._reply_reference(active["message_id"]),
+        )
+
+        handled = await self.service.handle_message(message)
+
+        self.assertTrue(handled)
+        message.add_reaction.assert_awaited_once_with("\u2705")
+        self.bot.profile_service.record_question_drop_results_batch.assert_awaited_once()
+
+    async def test_text_drop_accepts_bang_bot_mention_prefix_with_separator(self):
+        variant = QuestionDropVariant(
+            concept_id="science:moon-bang-bot-mention",
+            category="science",
+            difficulty=1,
+            source_type="curated",
+            generator_type="static",
+            prompt="What is Earth's natural satellite?",
+            answer_spec={"type": "text", "accepted": ["moon", "the moon"]},
+            variant_hash="science-moon-bang-bot-mention",
+        )
+        self.service._select_variant = lambda *args, **kwargs: variant
+        active = await self._post_one_drop()
+        message = DummyMessage(
+            guild=self.guild,
+            channel=self.channel,
+            author=DummyUser(48),
+            content=f"<@!{self.bot.user.id}>: The moon",
+            reference=self._reply_reference(active["message_id"]),
+        )
+
+        handled = await self.service.handle_message(message)
+
+        self.assertTrue(handled)
+        message.add_reaction.assert_awaited_once_with("\u2705")
+        self.bot.profile_service.record_question_drop_results_batch.assert_awaited_once()
+
+    async def test_numeric_drop_accepts_bot_mention_prefix_reply_noise(self):
+        variant = QuestionDropVariant(
+            concept_id="math:remainder-bot-mention",
+            category="math",
+            difficulty=3,
+            source_type="generated",
+            generator_type="math_remainder",
+            prompt="What is the remainder when 85 is divided by 8?",
+            answer_spec={"type": "numeric", "value": 5},
+            variant_hash="math-remainder-bot-mention",
+        )
+        self.service._select_variant = lambda *args, **kwargs: variant
+        active = await self._post_one_drop()
+        message = DummyMessage(
+            guild=self.guild,
+            channel=self.channel,
+            author=DummyUser(49),
+            content=f"<@{self.bot.user.id}>, 5",
+            reference=self._reply_reference(active["message_id"]),
+        )
+
+        handled = await self.service.handle_message(message)
+
+        self.assertTrue(handled)
+        message.add_reaction.assert_awaited_once_with("\u2705")
+        self.bot.profile_service.record_question_drop_results_batch.assert_awaited_once()
+
+    async def test_numeric_drop_accepts_bang_bot_mention_prefix_reply_noise(self):
+        variant = QuestionDropVariant(
+            concept_id="math:remainder-bang-bot-mention",
+            category="math",
+            difficulty=3,
+            source_type="generated",
+            generator_type="math_remainder",
+            prompt="What is the remainder when 85 is divided by 8?",
+            answer_spec={"type": "numeric", "value": 5},
+            variant_hash="math-remainder-bang-bot-mention",
+        )
+        self.service._select_variant = lambda *args, **kwargs: variant
+        active = await self._post_one_drop()
+        message = DummyMessage(
+            guild=self.guild,
+            channel=self.channel,
+            author=DummyUser(50),
+            content=f"<@!{self.bot.user.id}>: 5",
+            reference=self._reply_reference(active["message_id"]),
+        )
+
+        handled = await self.service.handle_message(message)
+
+        self.assertTrue(handled)
+        message.add_reaction.assert_awaited_once_with("\u2705")
+        self.bot.profile_service.record_question_drop_results_batch.assert_awaited_once()
+
     async def test_text_drop_accepts_same_channel_non_reply_with_small_typo(self):
         variant = QuestionDropVariant(
             concept_id="science:planet-mercury",
@@ -1173,6 +1287,34 @@ class QuestionDropsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(handled)
         message.add_reaction.assert_awaited_once_with("\u2705")
         self.bot.profile_service.record_question_drop_results_batch.assert_awaited_once()
+
+    async def test_non_bot_mentions_remain_rejected_even_in_reply_format(self):
+        variant = QuestionDropVariant(
+            concept_id="science:moon-non-bot-mention",
+            category="science",
+            difficulty=1,
+            source_type="curated",
+            generator_type="static",
+            prompt="What is Earth's natural satellite?",
+            answer_spec={"type": "text", "accepted": ["moon", "the moon"]},
+            variant_hash="science-moon-non-bot-mention",
+        )
+        self.service._select_variant = lambda *args, **kwargs: variant
+        active = await self._post_one_drop()
+        message = DummyMessage(
+            guild=self.guild,
+            channel=self.channel,
+            author=DummyUser(51),
+            content="<@!123> The moon",
+            reference=self._reply_reference(active["message_id"]),
+        )
+
+        handled = await self.service.handle_message(message)
+
+        self.assertFalse(handled)
+        message.add_reaction.assert_not_awaited()
+        self.bot.profile_service.record_question_drop_results_batch.assert_not_awaited()
+        self.assertEqual(len(self.service._active_drops), 1)
 
     async def test_multiple_choice_letter_answer_still_solves_without_a_reply(self):
         variant = QuestionDropVariant(
@@ -1384,6 +1526,46 @@ class QuestionDropsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sum(1 for title in titles if "Just Late" in title), 2)
         repeat_late.add_reaction.assert_not_awaited()
         capped_late.add_reaction.assert_not_awaited()
+
+    async def test_late_correct_ack_accepts_bot_mention_reply_noise(self):
+        variant = QuestionDropVariant(
+            concept_id="science:moon-late-bot-mention",
+            category="science",
+            difficulty=1,
+            source_type="curated",
+            generator_type="static",
+            prompt="What is Earth's natural satellite?",
+            answer_spec={"type": "text", "accepted": ["moon", "the moon"]},
+            variant_hash="science-moon-late-bot-mention",
+        )
+        self.service._select_variant = lambda *args, **kwargs: variant
+        active = await self._post_one_drop()
+        winner = DummyUser(84)
+        runner_up = DummyUser(85)
+        winning_message = DummyMessage(
+            guild=self.guild,
+            channel=self.channel,
+            author=winner,
+            content="moon",
+            reference=self._reply_reference(active["message_id"]),
+        )
+        late_message = DummyMessage(
+            guild=self.guild,
+            channel=self.channel,
+            author=runner_up,
+            content=f"<@!{self.bot.user.id}>: the moon",
+            reference=self._reply_reference(active["message_id"]),
+        )
+
+        handled = await self.service.handle_message(winning_message)
+        late_handled = await self.service.handle_message(late_message)
+
+        self.assertTrue(handled)
+        self.assertFalse(late_handled)
+        late_message.add_reaction.assert_awaited_once_with("\u2705")
+        titles = [item[1]["embed"].title for item in self.channel.sent]
+        self.assertEqual(sum(1 for title in titles if "Solved" in title), 1)
+        self.assertEqual(sum(1 for title in titles if "Just Late" in title), 1)
 
     async def test_late_correct_ack_expires_cleanly(self):
         active = await self._post_one_drop()
