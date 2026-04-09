@@ -28,7 +28,7 @@ Depending on the feature being used, Babblebox may process or store:
 
 - Discord identifiers such as user IDs, guild IDs, channel IDs, message IDs, role IDs, and timestamps
 - compact feature configuration and state, including Watch preferences, ignored channels or users, Later markers, reminders, AFK state, AFK schedules, Daily Arcade results, Buddy or profile state, and Shield or admin configuration
-- limited message or attachment context needed to respond to commands, build Moment Cards from visible messages, deliver Watch alerts, process Capture requests, or evaluate locally flagged Shield events
+- limited message or attachment context needed to respond to commands, build Moment Cards from visible messages, deliver Watch alerts, process Capture requests, or evaluate locally flagged Shield events, including visible message text, embed text, forwarded message snapshots, and attachment labels
 - anonymous confession or reply submission text, trusted-link fields, compact review metadata, bot-private author mappings, bot-private owner reply opportunities, and limited private appeals or reports needed to run staff-blind confession moderation when a server has Confessions enabled
 - for Confessions, Babblebox now protects sensitive content and identity linkage with application-level encryption and separate lookup domains before those fields reach durable Postgres storage
 
@@ -91,7 +91,7 @@ Babblebox may rely on necessary service providers to operate, including:
 
 Babblebox does not perform always-on AI scanning by default.
 
-If optional AI-assisted Shield review is enabled where available, it only runs after local Shield logic has already flagged content. In that flow, only minimal, sanitized, and truncated flagged content intended for that review should be sent to the configured AI provider.
+If optional AI-assisted Shield review is enabled where available, it only runs after local Shield logic has already flagged content. In that flow, only minimal, sanitized, and truncated flagged text intended for that review should be sent to the configured AI provider, even when the flagged signal came from scanned embed text, attachment labels, or forwarded message snapshots instead of the raw message body alone.
 
 Babblebox is not designed to sell personal information.
 

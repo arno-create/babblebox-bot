@@ -37,14 +37,33 @@ LINK_CATEGORY_STRENGTH = {
     MALICIOUS_LINK_CATEGORY: 4,
 }
 
-WARNING_DISCUSSION_RE = re.compile(
-    r"(?i)(?:\b(?:beware|warning|avoid|do not|don't|never|fake|malicious|phish(?:ing)?|report(?:ed|ing)?|blocked|blocklist(?:ed)?|heads up|scam|for review|for triage|triage)\b|\b(?:example|sample)\b.{0,24}\b(?:link|site|domain|url)\b|\b(?:scam|phish(?:ing)?|malicious)\b.{0,24}\b(?:example|sample)\b)"
+EXPLICIT_WARNING_DISCUSSION_RE = re.compile(
+    r"(?ix)(?:"
+    r"\b(?:warning|beware|heads\ up|security\ alert|phishing\ alert|scam\ alert|security\ awareness|for\ review|for\ triage|incident\ review|training\ example|educational\ example)\b"
+    r"|"
+    r"\b(?:do\ not|don't|never|avoid)\s+(?:click|open|visit|install|run|claim|verify|connect|connect\ wallet|login|log\ in|mint)\b"
+    r"|"
+    r"\b(?:example|sample)\b.{0,24}\b(?:scam|phish(?:ing)?|malicious|fake|link|site|domain|url)\b"
+    r"|"
+    r"\b(?:reported\ as|flagged\ as|blocklist(?:ed)?\ as)\b.{0,24}\b(?:scam|phish(?:ing)?|malicious|fake|link|site|domain|url)\b"
+    r"|"
+    r"\b(?:is|was|looks)\s+(?:malicious|fake|phishing|a\ scam|a\ phish)\b"
+    r")"
 )
-SOCIAL_ENGINEERING_RE = re.compile(r"(?i)\b(?:download|run|install|open|verify|claim|login|log in|connect wallet|sync)\b")
+PAST_TENSE_DISCUSSION_RE = re.compile(
+    r"(?ix)(?:"
+    r"\b(?:we|staff|mods?|already)\s+(?:blocked|reported|flagged)\b"
+    r"|"
+    r"\b(?:blocked|reported|flagged)\b.{0,18}\b(?:yesterday|earlier|internally|during\ triage|for\ review)\b"
+    r")"
+)
+SOCIAL_ENGINEERING_RE = re.compile(
+    r"(?i)\b(?:download|run|install|open|visit|click(?: here)?|verify|claim|login|log in|sign in|connect wallet|wallet connect|sync|mint|minting|authenticate|authorize)\b"
+)
 SCAM_BAIT_RE = re.compile(
-    r"(?i)\b(?:free nitro|nitro gift|steam gift|claim reward|claim now|verify your account|wallet connect|seed phrase|airdrop|gift inventory|limited time claim)\b"
+    r"(?i)\b(?:free nitro|nitro gift|steam gift|claim reward|claim now|verify your account|wallet connect|seed phrase|airdrop|gift inventory|limited time claim|free mint|mint opportunity|minting page|whitelist spot)\b"
 )
-BRAND_BAIT_RE = re.compile(r"(?i)\b(?:discord|nitro|steam|epic|wallet|crypto|gift)\b")
+BRAND_BAIT_RE = re.compile(r"(?i)\b(?:discord|nitro|steam|epic|wallet|crypto|gift|opensea|metamask|coinbase|walletconnect)\b")
 SUSPICIOUS_FILE_RE = re.compile(r"(?i)\.(?:exe|scr|bat|cmd|msi|zip|rar|7z|iso|apk)(?:$|[?#])")
 ENCODED_QUERY_RE = re.compile(r"(?i)(?:%[0-9a-f]{2}){3,}")
 TOKEN_RE = re.compile(r"[a-z0-9]+")
@@ -53,6 +72,13 @@ HIGH_SEVERITY_CONTEXT_SIGNALS = frozenset({"suspicious_file_target", "message_sc
 LOOKUP_CONTEXT_SIGNALS = HIGH_SEVERITY_CONTEXT_SIGNALS | frozenset(
     {"message_social_engineering", "message_brand_bait", "encoded_or_long_query"}
 )
+
+
+def looks_like_warning_discussion(text: str) -> bool:
+    cleaned = normalize_plain_text(text)
+    if not cleaned:
+        return False
+    return bool(EXPLICIT_WARNING_DISCUSSION_RE.search(cleaned) or PAST_TENSE_DISCUSSION_RE.search(cleaned))
 
 
 def domain_matches(domain: str, candidate: str) -> bool:
@@ -468,19 +494,27 @@ class ShieldLinkSafetyEngine:
         )
         signals.extend(context_signals)
         context_score = self._score_context_signals(context_signals)
+        suspicious_score = cached.suspicious_base_score + context_score
         host_signal_set = set(cached.host_signals)
         shortener_only = host_signal_set == {"shortener_domain"}
-        host_risk = bool(host_signal_set) and not shortener_only
+        host_risk = cached.suspicious_base_score >= self.intel.suspicious_threshold and not shortener_only
         high_severity_context_count = sum(signal in HIGH_SEVERITY_CONTEXT_SIGNALS for signal in context_signals)
         lookup_context = any(signal in LOOKUP_CONTEXT_SIGNALS for signal in context_signals)
-        suspicious_context = high_severity_context_count > 0
-        suspicious_enough = host_risk or suspicious_context or (shortener_only and lookup_context)
-        if warning_context and not host_risk and high_severity_context_count == 0:
+        suspicious_enough = (
+            host_risk
+            or (cached.suspicious_base_score > 0 and suspicious_score >= self.intel.suspicious_threshold)
+            or high_severity_context_count > 0
+            or (shortener_only and lookup_context)
+        )
+        if warning_context and suspicious_score < self.intel.provider_lookup_threshold and high_severity_context_count == 0:
             suspicious_enough = False
         provider_lookup_warranted = (
             not warning_context
             and (
-                (host_risk and (lookup_context or context_score >= 2))
+                (
+                    cached.suspicious_base_score > 0
+                    and suspicious_score >= self.intel.provider_lookup_threshold
+                )
                 or (shortener_only and lookup_context)
                 or high_severity_context_count >= 2
             )
@@ -603,7 +637,7 @@ class ShieldLinkSafetyEngine:
             signals.append("message_social_engineering")
         if has_suspicious_attachment:
             signals.append("suspicious_attachment_link_combo")
-        warning_context = bool(WARNING_DISCUSSION_RE.search(message_text))
+        warning_context = looks_like_warning_discussion(message_text)
         if warning_context:
             signals.append("warning_or_discussion_context")
         return tuple(dict.fromkeys(signals)), warning_context

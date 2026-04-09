@@ -1,6 +1,7 @@
 import types
 import unittest
 import asyncio
+from typing import Optional
 from unittest.mock import AsyncMock, Mock, patch
 
 from babblebox import game_engine as ge
@@ -10,9 +11,9 @@ from babblebox.utility_helpers import serialize_datetime
 
 
 class FakeAuthor:
-    def __init__(self, user_id: int = 1):
+    def __init__(self, user_id: int = 1, *, bot: bool = False):
         self.id = user_id
-        self.bot = False
+        self.bot = bot
         self.display_name = f"User {user_id}"
         self.mention = f"<@{user_id}>"
 
@@ -36,12 +37,20 @@ class FakeGuild:
 
 
 class FakeMessage:
-    def __init__(self):
-        self.author = FakeAuthor()
-        self.webhook_id = None
-        self.content = "hello there"
-        self.channel = FakeChannel()
-        self.guild = FakeGuild()
+    def __init__(
+        self,
+        *,
+        author: Optional[FakeAuthor] = None,
+        webhook_id: Optional[int] = None,
+        content: str = "hello there",
+        channel: Optional[FakeChannel] = None,
+        guild: Optional[FakeGuild] = None,
+    ):
+        self.author = author or FakeAuthor()
+        self.webhook_id = webhook_id
+        self.content = content
+        self.channel = channel or FakeChannel()
+        self.guild = guild or FakeGuild()
         self.mentions = []
         self.reference = None
 
@@ -215,3 +224,74 @@ class EventsCogTests(unittest.IsolatedAsyncioTestCase):
             await cog.on_message(message)
 
         confessions_service.handle_member_response_message.assert_awaited_once_with(message)
+
+    async def test_webhook_messages_route_only_to_shield(self):
+        utility_service = types.SimpleNamespace(
+            clear_afk_on_activity=AsyncMock(return_value=None),
+            collect_afk_notice_targets=lambda **kwargs: [],
+            handle_watch_message=AsyncMock(),
+            handle_return_watch_message=AsyncMock(),
+        )
+        shield_service = types.SimpleNamespace(handle_message=AsyncMock(return_value=None))
+        confessions_service = types.SimpleNamespace(handle_member_response_message=AsyncMock())
+        question_drops_service = types.SimpleNamespace(observe_message_activity=Mock(), handle_message=AsyncMock(return_value=False))
+        bot = types.SimpleNamespace(
+            utility_service=utility_service,
+            shield_service=shield_service,
+            confessions_service=confessions_service,
+            question_drops_service=question_drops_service,
+            get_cog=lambda name: None,
+        )
+        cog = EventsCog(bot)
+        message = FakeMessage(author=FakeAuthor(bot=True), webhook_id=991)
+
+        await cog.on_message(message)
+
+        shield_service.handle_message.assert_awaited_once_with(message, scan_source="webhook_message")
+        utility_service.clear_afk_on_activity.assert_not_awaited()
+        utility_service.handle_watch_message.assert_not_awaited()
+        utility_service.handle_return_watch_message.assert_not_awaited()
+        confessions_service.handle_member_response_message.assert_not_awaited()
+        question_drops_service.observe_message_activity.assert_not_called()
+        question_drops_service.handle_message.assert_not_awaited()
+
+    async def test_message_edit_short_circuits_confessions_when_shield_matches(self):
+        shield_service = types.SimpleNamespace(
+            handle_message_edit=AsyncMock(return_value=ShieldDecision(matched=True, action="delete_log", pack="scam", reasons=()))
+        )
+        confessions_service = types.SimpleNamespace(handle_message_edit=AsyncMock())
+        bot = types.SimpleNamespace(shield_service=shield_service, confessions_service=confessions_service)
+        cog = EventsCog(bot)
+        before = FakeMessage(content="before")
+        after = FakeMessage(content="after")
+
+        await cog.on_message_edit(before, after)
+
+        shield_service.handle_message_edit.assert_awaited_once_with(before, after)
+        confessions_service.handle_message_edit.assert_not_awaited()
+
+    async def test_message_edit_falls_through_to_confessions_when_shield_does_not_match(self):
+        shield_service = types.SimpleNamespace(handle_message_edit=AsyncMock(return_value=None))
+        confessions_service = types.SimpleNamespace(handle_message_edit=AsyncMock())
+        bot = types.SimpleNamespace(shield_service=shield_service, confessions_service=confessions_service)
+        cog = EventsCog(bot)
+        before = FakeMessage(content="before")
+        after = FakeMessage(content="after")
+
+        await cog.on_message_edit(before, after)
+
+        shield_service.handle_message_edit.assert_awaited_once_with(before, after)
+        confessions_service.handle_message_edit.assert_awaited_once_with(after)
+
+    async def test_webhook_edit_routes_through_shield_before_confessions(self):
+        shield_service = types.SimpleNamespace(handle_message_edit=AsyncMock(return_value=None))
+        confessions_service = types.SimpleNamespace(handle_message_edit=AsyncMock())
+        bot = types.SimpleNamespace(shield_service=shield_service, confessions_service=confessions_service)
+        cog = EventsCog(bot)
+        before = FakeMessage(author=FakeAuthor(bot=True), webhook_id=550, content="before")
+        after = FakeMessage(author=FakeAuthor(bot=True), webhook_id=550, content="after")
+
+        await cog.on_message_edit(before, after)
+
+        shield_service.handle_message_edit.assert_awaited_once_with(before, after)
+        confessions_service.handle_message_edit.assert_awaited_once_with(after)

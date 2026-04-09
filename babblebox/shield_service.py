@@ -39,6 +39,7 @@ from babblebox.shield_link_safety import (
     domain_in_set as link_domain_in_set,
     domain_matches as link_domain_matches,
     extract_link_domain as link_extract_domain,
+    looks_like_warning_discussion,
     merge_link_assessments,
     normalize_link_host as link_normalize_link_host,
 )
@@ -101,6 +102,9 @@ MATCH_CLASS_LABELS = {
     "repetitive_link_noise": "Repetitive link noise",
     "known_malicious_domain": "Known malicious domain",
     "adult_domain": "Known adult domain",
+    "scam_campaign_lure": "Weighted scam campaign lure",
+    "scam_brand_impersonation": "Brand impersonation lure",
+    "scam_mint_wallet_lure": "Mint or wallet lure",
 }
 ESCALATION_BLOCKED_MATCH_CLASSES = {"repetitive_link_noise"}
 ACTION_LABELS = {
@@ -117,6 +121,11 @@ CONFIDENCE_STRENGTH = {"low": 1, "medium": 2, "high": 3, "custom": 4}
 PACK_STRENGTH = {"privacy": 1, "promo": 2, "scam": 3, "adult": 3, "advanced": 4}
 AI_PRIORITY_LABELS = {"low": "Low", "normal": "Normal", "high": "High"}
 AI_REVIEW_PACK_SET = frozenset(SHIELD_AI_REVIEW_PACKS)
+SCAN_SOURCE_LABELS = {
+    "new_message": "New message",
+    "message_edit": "Edited message",
+    "webhook_message": "Webhook or community post",
+}
 
 INVITE_RE = re.compile(r"(?i)(?:https?://)?(?:www\.)?(?:discord(?:app)?\.com/invite|discord\.gg)/([a-z0-9-]{2,32})")
 ETH_WALLET_RE = re.compile(r"\b0x[a-fA-F0-9]{40}\b")
@@ -139,15 +148,26 @@ PROMO_CONTEXT_RE = re.compile(r"(?i)\b(?:server|community|channel|stream|shop|st
 MONETIZED_PROMO_RE = re.compile(
     r"(?i)\b(?:commission(?:s)? open|patreon|ko-fi|gumroad|etsy|shop|store|prices|paid promo|sponsored)\b"
 )
-SOCIAL_ENGINEERING_RE = re.compile(r"(?i)\b(?:download|run|install|open|verify|claim|login|log in|connect wallet|sync)\b")
+SOCIAL_ENGINEERING_RE = re.compile(
+    r"(?i)\b(?:download|run|install|open|visit|click(?: here)?|verify|claim|login|log in|sign in|connect wallet|wallet connect|sync|mint|minting|authenticate|authorize)\b"
+)
 SCAM_BAIT_RE = re.compile(
-    r"(?i)\b(?:free nitro|nitro gift|steam gift|claim reward|claim now|verify your account|wallet connect|seed phrase|airdrop|gift inventory|limited time claim)\b"
+    r"(?i)\b(?:free nitro|nitro gift|steam gift|claim reward|claim now|verify your account|wallet connect|seed phrase|airdrop|gift inventory|limited time claim|free mint|mint opportunity|minting page|whitelist spot)\b"
 )
-BRAND_BAIT_RE = re.compile(r"(?i)\b(?:discord|nitro|steam|epic|wallet|crypto|gift)\b")
+BRAND_BAIT_RE = re.compile(r"(?i)\b(?:discord|nitro|steam|epic|wallet|crypto|gift|opensea|metamask|coinbase|walletconnect)\b")
+SCAM_CTA_RE = re.compile(
+    r"(?i)\b(?:visit|open|click(?: here)?|go to|claim|verify|secure|connect wallet|wallet connect|login|log in|sign in|sync|mint|minting|authorize|authenticate)\b"
+)
+SCAM_URGENCY_RE = re.compile(
+    r"(?i)\b(?:limited|limited spots|spots are limited|selection is limited|soon|act now|ending soon|expires|while it lasts|last chance|today only|secure your spot|first come)\b"
+)
+SCAM_LEGITIMACY_RE = re.compile(
+    r"(?i)\b(?:official|partnership|partnered|community post|announcement|members? (?:are )?invited|verified|trusted|minting page|claim page|verification page)\b"
+)
+SCAM_CRYPTO_MINT_RE = re.compile(
+    r"(?i)\b(?:mint|minting|wallet|wallet connect|connect wallet|airdrop|nft|token|whitelist|wl|opensea|seed phrase)\b"
+)
 SUSPICIOUS_FILE_RE = re.compile(r"(?i)\.(?:exe|scr|bat|cmd|msi|zip|rar|7z|iso)(?:$|[?#])")
-SCAM_WARNING_RE = re.compile(
-    r"(?i)(?:\b(?:beware|warning|avoid|do not|don't|never|fake|malicious|phish(?:ing)?|report(?:ed|ing)?|blocked|blocklist(?:ed)?|heads up|for review|for triage|triage)\b|\b(?:example|sample)\b.{0,24}\b(?:link|site|domain|url)\b|\b(?:scam|phish(?:ing)?|malicious)\b.{0,24}\b(?:example|sample)\b)"
-)
 GENERIC_DIGIT_RE = re.compile(r"\b\d{4,12}\b")
 @dataclass(frozen=True)
 class PackSettings:
@@ -243,6 +263,7 @@ class ShieldLink:
 
 @dataclass(frozen=True)
 class ShieldSnapshot:
+    scan_text: str
     text: str
     squashed: str
     context_text: str
@@ -256,6 +277,7 @@ class ShieldSnapshot:
     attachment_names: tuple[str, ...]
     has_links: bool
     has_suspicious_attachment: bool
+    surface_labels: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -282,6 +304,8 @@ class ShieldDecision:
     action_note: str | None = None
     ai_review: ShieldAIReviewResult | None = None
     link_assessments: tuple[ShieldLinkAssessment, ...] = ()
+    scan_source: str = "new_message"
+    scan_surface_labels: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -465,6 +489,44 @@ def _link_assessment_summary(assessment: ShieldLinkAssessment) -> str:
     return "safe or allowlisted"
 
 
+def _scan_source_for_message(message: discord.Message, *, default: str = "new_message") -> str:
+    if default == "new_message" and getattr(message, "webhook_id", None) is not None:
+        return "webhook_message"
+    return default
+
+
+def _score_link_assessment_for_scam(assessment: ShieldLinkAssessment) -> int:
+    if assessment.category == MALICIOUS_LINK_CATEGORY:
+        return 5
+    if assessment.category != UNKNOWN_SUSPICIOUS_LINK_CATEGORY:
+        return 0
+    score = 3
+    signals = assessment.matched_signals
+    if any(signal in {"punycode_host", "hyphen_heavy_host", "shortener_domain"} for signal in signals):
+        score += 1
+    if any(signal.startswith("suspicious_tld:") or signal.startswith("host_token:") or signal.startswith("brand_token:") for signal in signals):
+        score += 1
+    if any(signal.startswith("path_token:") or signal.startswith("query_token:") or signal == "encoded_or_long_query" for signal in signals):
+        score += 1
+    if assessment.provider_lookup_warranted:
+        score += 1
+    return score
+
+
+def _strongest_link_risk_signals(link_assessments: Sequence[ShieldLinkAssessment], *, limit: int = 4) -> tuple[str, ...]:
+    signals: list[str] = []
+    ranked = sorted(link_assessments, key=_score_link_assessment_for_scam, reverse=True)
+    for assessment in ranked:
+        for signal in assessment.matched_signals:
+            if signal.startswith("safe_family:") or signal == "guild_allow_domain":
+                continue
+            if signal not in signals:
+                signals.append(signal)
+            if len(signals) >= limit:
+                return tuple(signals)
+    return tuple(signals)
+
+
 def _legacy_action_policy(action: str) -> tuple[str, str, str]:
     cleaned = str(action).strip().lower()
     if cleaned == "detect":
@@ -480,8 +542,111 @@ def _legacy_action_policy(action: str) -> tuple[str, str, str]:
     return ("log", "log", "log")
 
 
-def _build_snapshot(text: str | None, attachments: Sequence[Any] | None = None) -> ShieldSnapshot:
-    normalized = normalize_plain_text(text)
+def _surface_text_or_none(value: Any) -> str | None:
+    cleaned = normalize_plain_text(str(value or ""))
+    return cleaned or None
+
+
+def _append_surface_text(parts: list[str], value: Any):
+    cleaned = _surface_text_or_none(value)
+    if cleaned:
+        parts.append(cleaned)
+
+
+def _collect_attachment_surface_texts(attachments: Sequence[Any] | None) -> tuple[str, ...]:
+    parts: list[str] = []
+    for attachment in attachments or ():
+        _append_surface_text(parts, getattr(attachment, "filename", ""))
+        _append_surface_text(parts, getattr(attachment, "title", ""))
+        _append_surface_text(parts, getattr(attachment, "description", ""))
+    return tuple(parts)
+
+
+def _collect_embed_surface_texts(embeds: Sequence[Any] | None) -> tuple[str, ...]:
+    parts: list[str] = []
+    for embed in embeds or ():
+        payload = None
+        to_dict = getattr(embed, "to_dict", None)
+        if callable(to_dict):
+            with contextlib.suppress(TypeError):
+                payload = to_dict()
+        if isinstance(payload, dict):
+            for key in ("title", "description", "url"):
+                _append_surface_text(parts, payload.get(key))
+            footer = payload.get("footer")
+            if isinstance(footer, dict):
+                _append_surface_text(parts, footer.get("text"))
+            author = payload.get("author")
+            if isinstance(author, dict):
+                for key in ("name", "url"):
+                    _append_surface_text(parts, author.get(key))
+            for key in ("image", "thumbnail"):
+                asset = payload.get(key)
+                if isinstance(asset, dict):
+                    _append_surface_text(parts, asset.get("url"))
+            for field in payload.get("fields", []) if isinstance(payload.get("fields", []), list) else []:
+                if isinstance(field, dict):
+                    _append_surface_text(parts, field.get("name"))
+                    _append_surface_text(parts, field.get("value"))
+            continue
+
+        for key in ("title", "description", "url"):
+            _append_surface_text(parts, getattr(embed, key, ""))
+        footer = getattr(embed, "footer", None)
+        _append_surface_text(parts, getattr(footer, "text", ""))
+        author = getattr(embed, "author", None)
+        for key in ("name", "url"):
+            _append_surface_text(parts, getattr(author, key, ""))
+        for key in ("image", "thumbnail"):
+            asset = getattr(embed, key, None)
+            _append_surface_text(parts, getattr(asset, "url", ""))
+        for field in getattr(embed, "fields", []) or []:
+            _append_surface_text(parts, getattr(field, "name", ""))
+            _append_surface_text(parts, getattr(field, "value", ""))
+    return tuple(parts)
+
+
+def _collect_message_surface_texts(message: Any) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    extra_texts: list[str] = []
+    surface_labels: list[str] = []
+    normalized_content = normalize_plain_text(getattr(message, "content", ""))
+
+    system_content = _surface_text_or_none(getattr(message, "system_content", ""))
+    if system_content is not None and system_content.casefold() != normalized_content.casefold():
+        extra_texts.append(system_content)
+        surface_labels.append("system")
+
+    embed_texts = _collect_embed_surface_texts(getattr(message, "embeds", ()))
+    if embed_texts:
+        extra_texts.extend(embed_texts)
+        surface_labels.append("embeds")
+
+    attachment_texts = _collect_attachment_surface_texts(getattr(message, "attachments", ()))
+    if attachment_texts:
+        extra_texts.extend(attachment_texts)
+        surface_labels.append("attachment_meta")
+
+    snapshot_texts: list[str] = []
+    for forwarded in getattr(message, "message_snapshots", ()) or ():
+        _append_surface_text(snapshot_texts, getattr(forwarded, "content", ""))
+        snapshot_texts.extend(_collect_embed_surface_texts(getattr(forwarded, "embeds", ())))
+        snapshot_texts.extend(_collect_attachment_surface_texts(getattr(forwarded, "attachments", ())))
+    if snapshot_texts:
+        extra_texts.extend(snapshot_texts)
+        surface_labels.append("forwarded_snapshot")
+
+    return tuple(extra_texts), tuple(dict.fromkeys(surface_labels))
+
+
+def _build_snapshot(
+    text: str | None,
+    attachments: Sequence[Any] | None = None,
+    *,
+    extra_texts: Sequence[str] | None = None,
+    surface_labels: Sequence[str] | None = None,
+) -> ShieldSnapshot:
+    scan_text = normalize_plain_text(" ".join(part for part in (text or "", *(extra_texts or ())) if part))
+    normalized = scan_text
     squashed = squash_for_evasion_checks(normalized.casefold())
     lowered = normalized.casefold()
     urls = _extract_urls(lowered)
@@ -496,6 +661,7 @@ def _build_snapshot(text: str | None, attachments: Sequence[Any] | None = None) 
         if normalize_plain_text(getattr(attachment, "filename", ""))
     )
     return ShieldSnapshot(
+        scan_text=normalized,
         text=lowered,
         squashed=squashed,
         context_text=context_text,
@@ -509,6 +675,17 @@ def _build_snapshot(text: str | None, attachments: Sequence[Any] | None = None) 
         attachment_names=attachment_names,
         has_links=bool(urls),
         has_suspicious_attachment=any(SUSPICIOUS_FILE_RE.search(name) for name in attachment_names),
+        surface_labels=tuple(dict.fromkeys(surface_labels or ())),
+    )
+
+
+def _build_message_snapshot(message: discord.Message) -> ShieldSnapshot:
+    extra_texts, surface_labels = _collect_message_surface_texts(message)
+    return _build_snapshot(
+        getattr(message, "content", None),
+        getattr(message, "attachments", None),
+        extra_texts=extra_texts,
+        surface_labels=surface_labels,
     )
 
 
@@ -601,7 +778,7 @@ def _candidate_appears_in_url(candidate: str, urls: Sequence[str]) -> bool:
 
 
 def _looks_like_scam_warning(text: str) -> bool:
-    return bool(SCAM_WARNING_RE.search(text))
+    return looks_like_warning_discussion(text)
 
 
 class ShieldService:
@@ -624,7 +801,7 @@ class ShieldService:
         self.ai_provider = build_shield_ai_provider()
         self.link_safety = ShieldLinkSafetyEngine()
         self._compiled_configs: dict[int, CompiledShieldConfig] = {}
-        self._alert_dedup: dict[tuple[int, int], float] = {}
+        self._alert_dedup: dict[tuple[int, int], tuple[float, str]] = {}
         self._alert_signature_dedup: dict[tuple[Any, ...], float] = {}
         self._strike_windows: dict[tuple[int, int, str], list[float]] = {}
         self._recent_promos: dict[tuple[int, int, str], list[float]] = {}
@@ -730,12 +907,15 @@ class ShieldService:
         )
         return True, f"Global Shield AI override is now {'on' if enabled else 'off'}."
 
-    def test_message(self, guild_id: int, text: str, *, attachments: Sequence[str] | None = None) -> list[ShieldMatch]:
+    def test_message(self, guild_id: int, text: str, *, attachments: Sequence[Any] | None = None) -> list[ShieldMatch]:
         return list(self.test_message_details(guild_id, text, attachments=attachments).matches)
 
-    def test_message_details(self, guild_id: int, text: str, *, attachments: Sequence[str] | None = None) -> ShieldTestResult:
+    def test_message_details(self, guild_id: int, text: str, *, attachments: Sequence[Any] | None = None) -> ShieldTestResult:
         compiled = self._compiled_configs.get(guild_id) or self._compile_config(guild_id, self.get_config(guild_id))
-        fake_attachments = [type("Attachment", (), {"filename": value})() for value in (attachments or [])]
+        fake_attachments = [
+            type("Attachment", (), {"filename": value})() if isinstance(value, str) else value
+            for value in (attachments or [])
+        ]
         snapshot = _build_snapshot(text, fake_attachments)
         now = time.monotonic()
         if self._allow_phrase_bypass(compiled, snapshot):
@@ -1057,8 +1237,11 @@ class ShieldService:
             success_message=f"Advanced Shield pattern `{target_id}` was removed.",
         )
 
-    async def handle_message(self, message: discord.Message) -> ShieldDecision | None:
-        if not self.storage_ready or message.guild is None or message.webhook_id is not None or getattr(message.author, "bot", False):
+    async def handle_message(self, message: discord.Message, *, scan_source: str | None = None) -> ShieldDecision | None:
+        resolved_scan_source = _scan_source_for_message(message, default=scan_source or "new_message")
+        if not self.storage_ready or message.guild is None:
+            return None
+        if getattr(message.author, "bot", False) and resolved_scan_source != "webhook_message":
             return None
 
         compiled = self._compiled_configs.get(message.guild.id)
@@ -1069,14 +1252,64 @@ class ShieldService:
 
         now = asyncio.get_running_loop().time()
         self._prune_runtime_state(now)
-        snapshot = _build_snapshot(message.content, message.attachments)
+        snapshot = _build_message_snapshot(message)
+        return await self._scan_message(
+            message,
+            compiled,
+            snapshot,
+            now=now,
+            scan_source=resolved_scan_source,
+            track_repetition=resolved_scan_source != "message_edit",
+        )
+
+    async def handle_message_edit(self, before: discord.Message, after: discord.Message) -> ShieldDecision | None:
+        if not self.storage_ready or getattr(after, "guild", None) is None:
+            return None
+        if getattr(getattr(after, "author", None), "bot", False) and getattr(after, "webhook_id", None) is None:
+            return None
+
+        compiled = self._compiled_configs.get(after.guild.id)
+        if compiled is None or not compiled.module_enabled:
+            return None
+        if not self._message_in_scope(compiled, after):
+            return None
+
+        now = asyncio.get_running_loop().time()
+        self._prune_runtime_state(now)
+        before_snapshot = _build_message_snapshot(before)
+        after_snapshot = _build_message_snapshot(after)
+        if before_snapshot == after_snapshot:
+            return None
+        return await self._scan_message(
+            after,
+            compiled,
+            after_snapshot,
+            now=now,
+            scan_source="message_edit",
+            track_repetition=False,
+        )
+
+    async def _scan_message(
+        self,
+        message: discord.Message,
+        compiled: CompiledShieldConfig,
+        snapshot: ShieldSnapshot,
+        *,
+        now: float,
+        scan_source: str,
+        track_repetition: bool,
+    ) -> ShieldDecision | None:
         alert_content_fingerprint = _alert_content_fingerprint(snapshot)
         if self._allow_phrase_bypass(compiled, snapshot):
             return None
 
-        repetition = self._track_repetitive_promo(message, compiled, snapshot, now)
+        repetition = (
+            self._track_repetitive_promo(message, compiled, snapshot, now)
+            if track_repetition
+            else RepetitionSignals(None, 0, False, False)
+        )
         link_assessments = self._collect_link_assessments(compiled, snapshot, now=now)
-        matches = self._collect_matches(compiled, snapshot, repetitive_promo=repetition, link_assessments=link_assessments)
+        matches = self._collect_matches(compiled, snapshot, repetitive_promo=repetition, link_assessments=link_assessments, scan_source=scan_source)
         if not matches:
             return None
 
@@ -1094,6 +1327,8 @@ class ShieldService:
             pack=best.pack,
             reasons=tuple(matches[:3]),
             link_assessments=link_assessments,
+            scan_source=scan_source,
+            scan_surface_labels=snapshot.surface_labels,
         )
 
         if best.action.startswith("delete"):
@@ -1135,7 +1370,7 @@ class ShieldService:
                 decision.ai_review = await self.ai_provider.review(request)
 
         if best.action not in {"disabled", "detect"}:
-            await self._send_alert(message, compiled, decision, content_fingerprint=alert_content_fingerprint)
+            await self._send_alert(message, compiled, decision, content_fingerprint=alert_content_fingerprint, snapshot=snapshot)
 
         return decision
 
@@ -1167,7 +1402,7 @@ class ShieldService:
         if top_reason is None or decision.pack is None:
             return None
         max_chars = int(self.ai_provider.diagnostics().get("max_chars") or 340)
-        sanitized = sanitize_message_for_ai(message.content, max_chars=max_chars)
+        sanitized = sanitize_message_for_ai(snapshot.scan_text, max_chars=max_chars)
         return ShieldAIReviewRequest(
             guild_id=message.guild.id,
             pack=decision.pack,
@@ -1285,13 +1520,14 @@ class ShieldService:
         *,
         repetitive_promo: RepetitionSignals | None = None,
         link_assessments: Sequence[ShieldLinkAssessment] | None = None,
+        scan_source: str = "new_message",
     ) -> list[ShieldMatch]:
         active_link_assessments = tuple(link_assessments or ())
         matches: list[ShieldMatch] = []
         matches.extend(self._detect_privacy(compiled, snapshot))
         matches.extend(self._detect_promo(compiled, snapshot, repetitive_promo=repetitive_promo or RepetitionSignals(None, 0, False, False)))
         matches.extend(self._detect_link_safety_domains(compiled, snapshot, active_link_assessments))
-        matches.extend(self._detect_scam(compiled, snapshot, active_link_assessments))
+        matches.extend(self._detect_scam(compiled, snapshot, active_link_assessments, scan_source=scan_source))
         matches.extend(self._detect_custom_patterns(compiled, snapshot))
         matches.sort(
             key=lambda item: (
@@ -1738,6 +1974,8 @@ class ShieldService:
         compiled: CompiledShieldConfig,
         snapshot: ShieldSnapshot,
         link_assessments: Sequence[ShieldLinkAssessment],
+        *,
+        scan_source: str,
     ) -> list[ShieldMatch]:
         settings = compiled.scam
         if not settings.enabled:
@@ -1753,9 +1991,15 @@ class ShieldService:
         shortener = any(_domain_in_set(domain, SHORTENER_DOMAINS) or "xn--" in domain for domain in risky_domains)
         bait = bool(SCAM_BAIT_RE.search(snapshot.context_text) or SCAM_BAIT_RE.search(snapshot.context_squashed))
         social_engineering = bool(SOCIAL_ENGINEERING_RE.search(snapshot.context_text))
+        cta = bool(SCAM_CTA_RE.search(snapshot.context_text) or SCAM_CTA_RE.search(snapshot.context_squashed))
         brand_bait = bool(BRAND_BAIT_RE.search(snapshot.context_text))
+        urgency = bool(SCAM_URGENCY_RE.search(snapshot.context_text))
+        legitimacy = bool(SCAM_LEGITIMACY_RE.search(snapshot.context_text))
+        crypto_mint = bool(SCAM_CRYPTO_MINT_RE.search(snapshot.context_text) or SCAM_CRYPTO_MINT_RE.search(snapshot.context_squashed))
         dangerous_link = any(SUSPICIOUS_FILE_RE.search(url) for url in snapshot.urls)
-        risky_link_present = bool(risky_domains)
+        link_risk_score = max((_score_link_assessment_for_scam(item) for item in link_assessments), default=0)
+        risky_link_present = link_risk_score >= 3
+        suspicious_link_present = link_risk_score >= 2
 
         if bait and ((snapshot.has_links and risky_link_present) or snapshot.has_suspicious_attachment or dangerous_link):
             matches.append(
@@ -1805,30 +2049,74 @@ class ShieldService:
                     match_class="scam_download",
                 )
             )
-        if brand_bait and social_engineering and risky_domains:
-            matches.append(
-                ShieldMatch(
-                    pack="scam",
-                    label="Brand-linked lure",
-                    reason="Brand bait appeared with a link and coercive wording.",
-                    action=settings.action_for_confidence("medium"),
-                    confidence="medium",
-                    heuristic=True,
-                    match_class="scam_brand_lure",
+        if suspicious_link_present or snapshot.has_suspicious_attachment or dangerous_link:
+            weighted_score = link_risk_score
+            reason_bits: list[str] = []
+            if bait:
+                weighted_score += 2
+                reason_bits.append("claim or reward bait")
+            if social_engineering or cta:
+                weighted_score += 1
+                reason_bits.append("instructional CTA wording")
+            if brand_bait:
+                weighted_score += 1
+                reason_bits.append("trusted-brand bait")
+            if urgency:
+                weighted_score += 1
+                reason_bits.append("urgency or scarcity language")
+            if legitimacy:
+                weighted_score += 1
+                reason_bits.append("official-looking framing")
+            if crypto_mint:
+                weighted_score += 1
+                reason_bits.append("mint, wallet, or airdrop language")
+            if brand_bait and legitimacy and (urgency or social_engineering or cta):
+                weighted_score += 1
+            if scan_source == "webhook_message" and (brand_bait or legitimacy or urgency):
+                weighted_score += 1
+                reason_bits.append("webhook or community-post delivery")
+            if snapshot.has_suspicious_attachment:
+                weighted_score += 2
+                reason_bits.append("suspicious attachment metadata")
+            elif dangerous_link:
+                weighted_score += 2
+                reason_bits.append("download-style link target")
+
+            confidence: str | None = None
+            if weighted_score >= 7:
+                confidence = "high"
+            elif weighted_score >= 5:
+                confidence = "medium"
+            elif settings.sensitivity == "high" and weighted_score >= 4:
+                confidence = "low"
+
+            if confidence is not None:
+                label = "Scam social-engineering pattern"
+                match_class = "scam_campaign_lure"
+                if crypto_mint and (brand_bait or legitimacy):
+                    label = "Mint or wallet lure"
+                    match_class = "scam_mint_wallet_lure"
+                elif brand_bait and legitimacy:
+                    label = "Official-looking brand lure"
+                    match_class = "scam_brand_impersonation"
+                strongest_link_signals = _strongest_link_risk_signals(link_assessments)
+                if strongest_link_signals:
+                    reason_bits.append(f"risky link signals ({', '.join(strongest_link_signals[:3])})")
+                matches.append(
+                    ShieldMatch(
+                        pack="scam",
+                        label=label,
+                        reason=(
+                            "Multiple scam signals combined: "
+                            + ", ".join(reason_bits[:5])
+                            + "."
+                        ),
+                        action=settings.action_for_confidence(confidence),
+                        confidence=confidence,
+                        heuristic=True,
+                        match_class=match_class,
+                    )
                 )
-            )
-        if settings.sensitivity == "high" and bait and (social_engineering or brand_bait) and (risky_link_present or snapshot.has_suspicious_attachment):
-            matches.append(
-                ShieldMatch(
-                    pack="scam",
-                    label="Scam bait wording",
-                    reason="The message contains known claim or gift-bait wording reinforced by scam-style instructions or branding.",
-                    action=settings.action_for_confidence("low"),
-                    confidence="low",
-                    heuristic=True,
-                    match_class="scam_bait_wording",
-                )
-            )
         return self._dedupe_matches(matches)
 
     def _detect_custom_patterns(self, compiled: CompiledShieldConfig, snapshot: ShieldSnapshot) -> list[ShieldMatch]:
@@ -1871,7 +2159,9 @@ class ShieldService:
         if now - self._last_runtime_prune < RUNTIME_PRUNE_INTERVAL_SECONDS:
             return
         self._last_runtime_prune = now
-        self._alert_dedup = {key: value for key, value in self._alert_dedup.items() if now - value <= ALERT_DEDUP_SECONDS}
+        self._alert_dedup = {
+            key: value for key, value in self._alert_dedup.items() if now - value[0] <= ALERT_DEDUP_SECONDS
+        }
         self._alert_signature_dedup = {
             key: value for key, value in self._alert_signature_dedup.items() if now - value <= ALERT_SIGNATURE_DEDUP_SECONDS
         }
@@ -1926,12 +2216,14 @@ class ShieldService:
         decision: ShieldDecision,
         *,
         content_fingerprint: str,
+        snapshot: ShieldSnapshot | None = None,
     ):
         if compiled.log_channel_id is None:
             return
         dedupe_key = (message.guild.id, message.id)
         now = asyncio.get_running_loop().time()
-        if now - self._alert_dedup.get(dedupe_key, 0.0) < ALERT_DEDUP_SECONDS:
+        last_alert = self._alert_dedup.get(dedupe_key)
+        if last_alert is not None and now - last_alert[0] < ALERT_DEDUP_SECONDS and last_alert[1] == content_fingerprint:
             return
         top_reason = decision.reasons[0] if decision.reasons else None
         signature_key = (
@@ -1948,7 +2240,7 @@ class ShieldService:
         )
         if now - self._alert_signature_dedup.get(signature_key, 0.0) < ALERT_SIGNATURE_DEDUP_SECONDS:
             return
-        self._alert_dedup[dedupe_key] = now
+        self._alert_dedup[dedupe_key] = (now, content_fingerprint)
         self._alert_signature_dedup[signature_key] = now
 
         channel = self.bot.get_channel(compiled.log_channel_id)
@@ -1959,6 +2251,8 @@ class ShieldService:
             return
 
         preview = make_message_preview(message.content, attachments=message.attachments, limit=MAX_MESSAGE_PREVIEW)
+        if not preview and snapshot is not None:
+            preview = make_message_preview(snapshot.scan_text, limit=MAX_MESSAGE_PREVIEW)
         attachment_summary = make_attachment_labels(message, include_urls=False)
         alert_title = f"Shield Alert | {PACK_LABELS.get(decision.pack or '', 'Shield')}"
         embed = discord.Embed(
@@ -1978,6 +2272,10 @@ class ShieldService:
                 ),
                 inline=False,
             )
+        source_summary = SCAN_SOURCE_LABELS.get(decision.scan_source, decision.scan_source.replace("_", " ").title())
+        if decision.scan_surface_labels:
+            source_summary = f"{source_summary} | Surfaces: {', '.join(decision.scan_surface_labels)}"
+        embed.add_field(name="Scan Source", value=source_summary, inline=False)
         embed.add_field(name="Action", value=self._format_action_summary(decision), inline=False)
         embed.add_field(name="Reason", value="\n".join(f"- {item.reason}" for item in decision.reasons[:3]), inline=False)
         embed.add_field(name="Preview", value=preview or "[no text content]", inline=False)
@@ -1988,6 +2286,11 @@ class ShieldService:
                 name="Link Safety",
                 value="\n".join(
                     f"`{item.normalized_domain}` | {_link_assessment_summary(item)}"
+                    + (
+                        f" | signals: {', '.join(signal for signal in item.matched_signals[:3])}"
+                        if item.matched_signals
+                        else ""
+                    )
                     for item in decision.link_assessments[:3]
                 ),
                 inline=False,

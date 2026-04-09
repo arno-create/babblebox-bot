@@ -112,6 +112,15 @@
       "raw.githubusercontent.com",
       "githubusercontent.com",
       "ytimg.com"
+    ],
+    "platforms": [
+      "opensea.io",
+      "metamask.io",
+      "walletconnect.com",
+      "coinbase.com",
+      "steampowered.com",
+      "steamcommunity.com",
+      "epicgames.com"
     ]
   },
   "malicious_domains": [
@@ -158,6 +167,7 @@
     "drop",
     "gift",
     "login",
+    "mint",
     "nitro",
     "promo",
     "reward",
@@ -172,11 +182,15 @@
     "google",
     "instagram",
     "microsoft",
+    "metamask",
+    "coinbase",
+    "opensea",
     "paypal",
     "steam",
     "telegram",
     "tiktok",
-    "wallet"
+    "wallet",
+    "walletconnect"
   ],
   "suspicious_path_tokens": [
     "airdrop",

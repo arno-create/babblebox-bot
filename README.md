@@ -128,10 +128,11 @@ Babblebox is intentionally compact:
   - admin-only configuration for administrators or Manage Server users
   - privacy leak pack
   - promo / invite pack
-- scam / malicious-link pack
+- scam / malicious-link pack with local weighted scam-language scoring
 - separate adult / 18+ link pack
 - bundled local link safety with safe-domain families, suspicious-domain gating, and no external provider requirement
 - local-first malicious-link blocking with a feed of ~200k known malicious domains
+- in-scope Shield coverage for new messages, meaningful edits, and webhook/community-post style delivery
 - optional AI-assisted second-pass review for moderator context only
 - AI stays off by default and is currently limited to guild `1322933864360050688`
 - log-first defaults
@@ -442,11 +443,13 @@ Babblebox Shield is intentionally compact and conservative:
 - moderator context goes to a configured log channel instead of a heavy database log
 - repeated-hit escalation is in-memory and bounded
 - custom regex is intentionally not accepted; advanced mode uses safe text matching only
+- in-scope scans can cover new posts, meaningful edits, embed text, attachment labels, forwarded message snapshots, and webhook/community-post style delivery
+- local scam decisions combine host/path/query risk with brand bait, CTA wording, urgency, and explicit warning/education suppressors
 - optional AI review never becomes the primary moderation engine
 - AI review only runs after local Shield already flagged a message
 - AI review is currently limited to guild `1322933864360050688`
 - AI review is admin-only, off by default, and never punishes by itself
-- only minimal, sanitized, truncated flagged content is sent to the AI provider
+- only minimal, sanitized, truncated flagged text from the scanned surfaces is sent to the AI provider
 
 ## Capture and Later Media Handling
 

@@ -843,7 +843,8 @@
             <h2>Compact safety for moderators, with honest confidence.</h2>
             <p>
               Shield is optional and starts from local rules. It can look for likely privacy leaks, invite or promo abuse,
-              malicious or scam links, and optional adult or 18+ domains, but it is designed to stay conservative when the
+              malicious or scam links, and optional adult or 18+ domains. It can also rescan meaningful edits and
+              webhook or community-post style deliveries in scope, but it is designed to stay conservative when the
               signal is weak. Safe mainstream domains are bypassed before link suspicion, local malicious-link checks include
               a feed of about 200k known malicious domains, and phase 1 does not depend on any
               outside reputation provider.
@@ -851,8 +852,8 @@
             <div class="grid2">
               <article class="info"><strong>Main admin commands</strong><p><code>/shield panel</code>, <code>/shield rules</code>, <code>/shield allowlist</code>, <code>/shield ai</code>, and <code>/shield test</code>.</p></article>
               <article class="info"><strong>Graduated local policy</strong><p>Shield uses low, medium, and high confidence actions so broad heuristics can log while stronger matches can delete or escalate.</p></article>
-              <article class="info"><strong>Allowlist and scope controls</strong><p>Admins can carve out trusted roles, included or excluded scope, allowlisted domains, invite codes, and phrases.</p></article>
-              <article class="info"><strong>AI stays second-pass only</strong><p>AI review is optional, support-server limited by default, only sees already-flagged messages, and never decides punishment on its own.</p></article>
+              <article class="info"><strong>Allowlist and scope controls</strong><p>Admins can carve out trusted roles, included or excluded scope, allowlisted domains, invite codes, and phrases so weak or educational context stays bounded.</p></article>
+              <article class="info"><strong>AI stays second-pass only</strong><p>AI review is optional, support-server limited by default, only sees sanitized flagged text from the scanned surfaces, and never decides punishment on its own.</p></article>
             </div>
             <div class="command-list">
               <div class="command-row"><div><code>/shield panel</code></div><div><p>Open the compact Shield admin surface.</p><span>Use this first if you want the current state without memorizing command flags.</span></div></div>

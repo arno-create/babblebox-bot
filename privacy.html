@@ -741,7 +741,7 @@
             </ul>
             <h3>Limited message and attachment context</h3>
             <ul>
-              <li>Babblebox may read message content or metadata needed to respond to commands, deliver Watch alerts, build Moment Cards from visible messages, process Capture requests, or evaluate locally flagged Shield events.</li>
+              <li>Babblebox may read message content or metadata needed to respond to commands, deliver Watch alerts, build Moment Cards from visible messages, process Capture requests, or evaluate locally flagged Shield events, including visible message text, embed text, forwarded message snapshots, and attachment labels.</li>
               <li>Attachment names or URLs may be used at send time when needed for previews or private transcript delivery.</li>
               <li>For anonymous confessions, raw attachment filenames and raw Discord CDN URLs are kept out of staff-visible review surfaces.</li>
             </ul>
@@ -818,7 +818,9 @@
             <p>
               Babblebox does not perform always-on AI scanning by default. If optional AI-assisted Shield review is enabled
               where available, it only runs after local Shield logic has already flagged content. In that flow, only minimal,
-              sanitized, and truncated flagged content needed for that review is intended to be sent to the configured AI provider.
+              sanitized, and truncated flagged text needed for that review is intended to be sent to the configured AI provider,
+              even when the local signal came from embed text, attachment labels, or forwarded message snapshots instead of the
+              raw message body alone.
             </p>
             <h3>No sale of personal information</h3>
             <p>Babblebox is not designed to sell user data. Information is shared only when needed to operate the service, comply with law, protect the service, or deliver optional integrations that a specific feature requires.</p>

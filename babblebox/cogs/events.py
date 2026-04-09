@@ -37,14 +37,22 @@ class EventsCog(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
-        if message.author.bot or message.webhook_id is not None:
+        shield_service = getattr(self.bot, "shield_service", None)
+        is_webhook_message = message.guild is not None and getattr(message, "webhook_id", None) is not None
+        if is_webhook_message:
+            if shield_service is not None:
+                shield_decision = await shield_service.handle_message(message, scan_source="webhook_message")
+                if shield_decision is not None and shield_decision.matched:
+                    return
+            return
+
+        if message.author.bot:
             return
 
         if await is_command_message(self.bot, message):
             return
 
         utility_service = getattr(self.bot, "utility_service", None)
-        shield_service = getattr(self.bot, "shield_service", None)
         confessions_service = getattr(self.bot, "confessions_service", None)
         question_drops_service = getattr(self.bot, "question_drops_service", None)
         author_afk = None
@@ -181,10 +189,15 @@ class EventsCog(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message_edit(self, before: discord.Message, after: discord.Message):
-        if getattr(after, "guild", None) is None or getattr(getattr(after, "author", None), "bot", False):
+        if getattr(after, "guild", None) is None:
             return
-        if getattr(after, "webhook_id", None) is not None:
+        if getattr(getattr(after, "author", None), "bot", False) and getattr(after, "webhook_id", None) is None:
             return
+        shield_service = getattr(self.bot, "shield_service", None)
+        if shield_service is not None:
+            shield_decision = await shield_service.handle_message_edit(before, after)
+            if shield_decision is not None and shield_decision.matched:
+                return
         confessions_service = getattr(self.bot, "confessions_service", None)
         if confessions_service is not None:
             await confessions_service.handle_message_edit(after)
