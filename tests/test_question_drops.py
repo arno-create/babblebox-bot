@@ -73,6 +73,24 @@ class DummyUser:
         self.roles = [role for role in self.roles if int(getattr(role, "id", 0) or 0) not in remove_ids]
 
 
+class DummySentMessage:
+    def __init__(self, message_id: int, channel: "DummyChannel", *, args=(), kwargs=None):
+        self.id = message_id
+        self.channel = channel
+        self.args = args
+        self.kwargs = dict(kwargs or {})
+        self.deleted = False
+        self.delete = AsyncMock(side_effect=self._delete)
+        self.edit = AsyncMock(side_effect=self._edit)
+
+    async def _delete(self):
+        self.deleted = True
+
+    async def _edit(self, **kwargs):
+        self.kwargs.update(kwargs)
+        return self
+
+
 class DummyChannel:
     def __init__(
         self,
@@ -94,12 +112,21 @@ class DummyChannel:
         self.can_embed = can_embed
         self.can_read_history = can_read_history
         self.can_add_reactions = can_add_reactions
+        self._messages: dict[int, DummySentMessage] = {}
 
     async def send(self, *args, **kwargs):
         if self.fail_send:
             raise discord.HTTPException(types.SimpleNamespace(status=500, reason="fail"), "send failed")
-        message = types.SimpleNamespace(id=5000 + len(self.sent), channel=self, kwargs=kwargs, delete=AsyncMock())
-        self.sent.append((args, kwargs, message))
+        payload = dict(kwargs)
+        message = DummySentMessage(5000 + len(self.sent), self, args=args, kwargs=payload)
+        self.sent.append((args, payload, message))
+        self._messages[message.id] = message
+        return message
+
+    async def fetch_message(self, message_id: int):
+        message = self._messages.get(int(message_id))
+        if message is None or message.deleted:
+            raise discord.NotFound(types.SimpleNamespace(status=404, reason="missing"), "missing")
         return message
 
     def permissions_for(self, member):
@@ -725,9 +752,14 @@ class QuestionDropsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.bot.profile_service = profile_service
         return profile_service
 
-    async def _post_one_drop(self):
-        now = ge.now_utc().replace(second=0, microsecond=0)
-        with patch("babblebox.question_drops_service._daily_slot_datetimes", return_value=[now.astimezone(ge.now_utc().tzinfo)]):
+    async def _post_one_drop(self, *, now: datetime | None = None, round_to_minute: bool = True):
+        now = now or ge.now_utc()
+        if round_to_minute:
+            now = now.replace(second=0, microsecond=0)
+        with patch("babblebox.question_drops_service.ge.now_utc", return_value=now), patch(
+            "babblebox.question_drops_service._daily_slot_datetimes",
+            return_value=[now.astimezone(now.tzinfo or timezone.utc)],
+        ):
             await self.service._maybe_post_due_drops()
         self.assertEqual(len(self.service._active_drops), 1)
         return next(iter(self.service._active_drops.values()))
@@ -1288,6 +1320,27 @@ class QuestionDropsServiceTests(unittest.IsolatedAsyncioTestCase):
         message.add_reaction.assert_awaited_once_with("\u2705")
         self.bot.profile_service.record_question_drop_results_batch.assert_awaited_once()
 
+    async def test_text_drop_accepts_same_channel_non_reply_article_variant(self):
+        variant = QuestionDropVariant(
+            concept_id="logic:cockpit-article-variant",
+            category="logic",
+            difficulty=2,
+            source_type="curated",
+            generator_type="static",
+            prompt="A pilot sits in what section of an airplane?",
+            answer_spec={"type": "text", "accepted": ["cockpit", "the cockpit"]},
+            variant_hash="logic-cockpit-article-variant",
+        )
+        self.service._select_variant = lambda *args, **kwargs: variant
+        await self._post_one_drop()
+
+        handled = await self.service.handle_message(
+            DummyMessage(guild=self.guild, channel=self.channel, author=DummyUser(52), content="the cockpit")
+        )
+
+        self.assertTrue(handled)
+        self.bot.profile_service.record_question_drop_results_batch.assert_awaited_once()
+
     async def test_non_bot_mentions_remain_rejected_even_in_reply_format(self):
         variant = QuestionDropVariant(
             concept_id="science:moon-non-bot-mention",
@@ -1614,6 +1667,10 @@ class QuestionDropsServiceTests(unittest.IsolatedAsyncioTestCase):
             self.service._expire_drop(active, timed_out=True),
         )
 
+        future = self.service._active_drop_close_after_at(active) + timedelta(seconds=9)
+        with patch("babblebox.question_drops_service.ge.now_utc", return_value=future):
+            await self.service._finalize_due_recent_timeouts(now=future)
+
         self.bot.profile_service.record_question_drop_results_batch.assert_awaited_once()
         self.assertEqual(sum(1 for item in self.channel.sent if "Time's Up" in item[1]["embed"].title), 1)
         self.assertEqual(len(self.service._active_drops), 0)
@@ -1669,6 +1726,37 @@ class QuestionDropsServiceTests(unittest.IsolatedAsyncioTestCase):
         exposures = await self.store.list_exposures_for_guild(self.guild.id)
         self.assertEqual(exposures[0]["winner_user_id"], winner.id)
 
+    async def test_timeout_first_recovery_edits_timeout_result_and_awards_once(self):
+        base_now = datetime(2026, 4, 1, 12, 0, 0, 123456, tzinfo=timezone.utc)
+        active = await self._post_one_drop(now=base_now, round_to_minute=False)
+        expires_at = self.service._active_drop_expires_at(active)
+        close_after_at = self.service._active_drop_close_after_at(active)
+
+        with patch("babblebox.question_drops_service.ge.now_utc", return_value=close_after_at):
+            await self.service._expire_drop(active, timed_out=True)
+
+        timeout_message = self.channel.sent[-1][2]
+        winner = DummyUser(557)
+        recovery_message = DummyMessage(
+            guild=self.guild,
+            channel=self.channel,
+            author=winner,
+            content=self._correct_attempt_content(active),
+            created_at=expires_at,
+        )
+
+        with patch("babblebox.question_drops_service.ge.now_utc", return_value=close_after_at + timedelta(milliseconds=50)):
+            handled = await self.service.handle_message(recovery_message)
+
+        self.assertTrue(handled)
+        recovery_message.add_reaction.assert_awaited_once_with("\u2705")
+        timeout_message.edit.assert_awaited_once()
+        self.assertIn("Corrected Result", timeout_message.kwargs["embed"].title)
+        self.assertEqual(sum(1 for item in self.channel.sent if "Solved" in item[1]["embed"].title), 0)
+        self.bot.profile_service.record_question_drop_results_batch.assert_awaited_once()
+        exposures = await self.store.list_exposures_for_guild(self.guild.id)
+        self.assertEqual(exposures[0]["winner_user_id"], winner.id)
+
     async def test_expiring_drop_records_first_wrong_attempt_once(self):
         active = await self._post_one_drop()
         author = DummyUser(61)
@@ -1676,6 +1764,10 @@ class QuestionDropsServiceTests(unittest.IsolatedAsyncioTestCase):
         await self.service.handle_message(wrong)
 
         await self.service._expire_drop(active, timed_out=True)
+        future = self.service._active_drop_close_after_at(active) + timedelta(seconds=9)
+
+        with patch("babblebox.question_drops_service.ge.now_utc", return_value=future):
+            await self.service._finalize_due_recent_timeouts(now=future)
 
         self.bot.profile_service.record_question_drop_results_batch.assert_awaited_once()
         self.assertEqual(
@@ -3245,18 +3337,24 @@ class QuestionDropsMemberRolePreferenceTests(QuestionDropsServiceTests):
 
         self.assertEqual(len(self.service._active_drops), 0)
         self.assertIn("Time's Up", self.channel.sent[-1][1]["embed"].title)
-        self.assertIn("No clean solve this time.", self.channel.sent[-1][1]["embed"].description)
+        self.assertIn("No in-time solve.", self.channel.sent[-1][1]["embed"].description)
 
-    async def test_answer_after_timeout_stays_closed_without_reactions(self):
+    async def test_answer_after_timeout_gets_too_late_ack(self):
         active = await self._post_one_drop()
         await self.service._expire_drop(active, timed_out=True)
-        message = DummyMessage(guild=self.guild, channel=self.channel, author=DummyUser(97), content=self._correct_attempt_content(active))
+        message = DummyMessage(
+            guild=self.guild,
+            channel=self.channel,
+            author=DummyUser(97),
+            content=self._correct_attempt_content(active),
+            created_at=self.service._active_drop_expires_at(active) + timedelta(milliseconds=1),
+        )
 
         handled = await self.service.handle_message(message)
 
         self.assertFalse(handled)
-        message.add_reaction.assert_not_awaited()
-        self.assertEqual(sum(1 for item in self.channel.sent if "Just Late" in item[1]["embed"].title), 0)
+        message.add_reaction.assert_awaited_once_with("\u2705")
+        self.assertEqual(sum(1 for item in self.channel.sent if "Too Late" in item[1]["embed"].title), 1)
 
     async def test_message_at_deadline_still_solves_if_processed_late(self):
         active = await self._post_one_drop()
@@ -3277,9 +3375,30 @@ class QuestionDropsMemberRolePreferenceTests(QuestionDropsServiceTests):
         self.assertEqual(sum(1 for item in self.channel.sent if "Solved" in item[1]["embed"].title), 1)
         self.assertEqual(sum(1 for item in self.channel.sent if "Time's Up" in item[1]["embed"].title), 0)
 
+    async def test_timeout_sweep_at_score_deadline_keeps_exact_deadline_answer_live(self):
+        base_now = datetime(2026, 4, 2, 18, 15, 0, 432100, tzinfo=timezone.utc)
+        active = await self._post_one_drop(now=base_now, round_to_minute=False)
+        expires_at = self.service._active_drop_expires_at(active)
+        message = DummyMessage(
+            guild=self.guild,
+            channel=self.channel,
+            author=DummyUser(198),
+            content=self._correct_attempt_content(active),
+            created_at=expires_at,
+        )
+
+        with patch("babblebox.question_drops_service.ge.now_utc", return_value=expires_at):
+            await self.service._expire_due_drops()
+            handled = await self.service.handle_message(message)
+
+        self.assertTrue(handled)
+        self.assertEqual(sum(1 for item in self.channel.sent if "Time's Up" in item[1]["embed"].title), 0)
+        self.assertEqual(sum(1 for item in self.channel.sent if "Solved" in item[1]["embed"].title), 1)
+
     async def test_message_after_deadline_does_not_solve_and_closes_once(self):
         active = await self._post_one_drop()
         expires_at = self.service._active_drop_expires_at(active)
+        close_after_at = self.service._active_drop_close_after_at(active)
         message = DummyMessage(
             guild=self.guild,
             channel=self.channel,
@@ -3288,16 +3407,44 @@ class QuestionDropsMemberRolePreferenceTests(QuestionDropsServiceTests):
             created_at=expires_at + timedelta(microseconds=1),
         )
 
-        with patch("babblebox.question_drops_service.ge.now_utc", return_value=expires_at + timedelta(seconds=1)):
+        with patch("babblebox.question_drops_service.ge.now_utc", return_value=close_after_at + timedelta(seconds=1)):
             handled = await self.service.handle_message(message)
 
         self.assertFalse(handled)
-        message.add_reaction.assert_not_awaited()
+        message.add_reaction.assert_awaited_once_with("\u2705")
         self.bot.profile_service.record_question_drop_results_batch.assert_not_awaited()
         self.assertEqual(sum(1 for item in self.channel.sent if "Solved" in item[1]["embed"].title), 0)
         self.assertEqual(sum(1 for item in self.channel.sent if "Time's Up" in item[1]["embed"].title), 1)
+        self.assertEqual(sum(1 for item in self.channel.sent if "Too Late" in item[1]["embed"].title), 1)
         exposures = await self.store.list_exposures_for_guild(self.guild.id)
         self.assertIsNone(exposures[0]["winner_user_id"])
+
+    async def test_message_just_after_deadline_gets_too_late_ack_before_timeout_copy(self):
+        base_now = datetime(2026, 4, 1, 15, 30, 0, 987654, tzinfo=timezone.utc)
+        active = await self._post_one_drop(now=base_now, round_to_minute=False)
+        expires_at = self.service._active_drop_expires_at(active)
+        close_after_at = self.service._active_drop_close_after_at(active)
+        message = DummyMessage(
+            guild=self.guild,
+            channel=self.channel,
+            author=DummyUser(199),
+            content=self._correct_attempt_content(active),
+            created_at=expires_at + timedelta(milliseconds=1),
+        )
+
+        with patch("babblebox.question_drops_service.ge.now_utc", return_value=expires_at + timedelta(milliseconds=500)):
+            handled = await self.service.handle_message(message)
+
+        self.assertFalse(handled)
+        message.add_reaction.assert_awaited_once_with("\u2705")
+        self.assertEqual(sum(1 for item in self.channel.sent if "Too Late" in item[1]["embed"].title), 1)
+        self.assertEqual(sum(1 for item in self.channel.sent if "Time's Up" in item[1]["embed"].title), 0)
+        self.assertIn((self.guild.id, self.channel.id), self.service._active_drops)
+
+        with patch("babblebox.question_drops_service.ge.now_utc", return_value=close_after_at + timedelta(milliseconds=1)):
+            await self.service._expire_due_drops()
+
+        self.assertEqual(sum(1 for item in self.channel.sent if "Time's Up" in item[1]["embed"].title), 1)
 
     async def test_party_game_overlap_retires_live_drop_before_judging(self):
         active = await self._post_one_drop()
