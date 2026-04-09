@@ -13,6 +13,8 @@ from babblebox.app_command_hardening import harden_admin_root_group
 from babblebox import game_engine as ge
 from babblebox.admin_service import (
     FOLLOWUP_MODE_LABELS,
+    MEMBER_RISK_MODE_LABELS,
+    MEMBER_RISK_REVIEW_ACTION_LABELS,
     REVIEW_ACTION_LABELS,
     VERIFICATION_DEADLINE_ACTION_LABELS,
     VERIFICATION_REVIEW_ACTION_LABELS,
@@ -39,6 +41,11 @@ VERIFICATION_LOGIC_CHOICES = [
 VERIFICATION_DEADLINE_ACTION_CHOICES = [
     app_commands.Choice(name="Kick automatically", value="auto_kick"),
     app_commands.Choice(name="Moderator review", value="review"),
+]
+MEMBER_RISK_MODE_CHOICES = [
+    app_commands.Choice(name="Log only", value="log"),
+    app_commands.Choice(name="Private review", value="review"),
+    app_commands.Choice(name="Review or kick", value="review_or_kick"),
 ]
 STATE_CHOICES = [
     app_commands.Choice(name="On", value="on"),
@@ -219,6 +226,100 @@ class VerificationDeadlineReviewView(discord.ui.View):
         await self._refresh_queue_message(interaction, service, note=message)
 
 
+class MemberRiskReviewView(discord.ui.View):
+    def __init__(self, *, guild_id: int, user_id: int, version: int):
+        super().__init__(timeout=None)
+        self.guild_id = guild_id
+        self.user_id = user_id
+        self.version = version
+        self.add_item(self._make_button("kick", discord.ButtonStyle.danger))
+        self.add_item(self._make_button("delay", discord.ButtonStyle.secondary))
+        self.add_item(self._make_button("ignore", discord.ButtonStyle.success))
+        refresh = discord.ui.Button(
+            label="Refresh",
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"bb-admin-member-risk-review:refresh:{self.guild_id}:{self.user_id}:{self.version}",
+        )
+
+        async def _refresh_callback(interaction: discord.Interaction):
+            service = getattr(interaction.client, "admin_service", None)
+            if service is None:
+                await interaction.response.send_message("Babblebox admin systems are unavailable right now.", ephemeral=True)
+                return
+            await self._refresh_queue_message(interaction, service, note="Suspicious-member review queue refreshed.")
+
+        refresh.callback = _refresh_callback
+        self.add_item(refresh)
+
+    def _make_button(self, action: str, style: discord.ButtonStyle) -> discord.ui.Button:
+        button = discord.ui.Button(
+            label=MEMBER_RISK_REVIEW_ACTION_LABELS[action],
+            style=style,
+            custom_id=f"bb-admin-member-risk-review:{action}:{self.guild_id}:{self.user_id}:{self.version}",
+        )
+
+        async def _callback(interaction: discord.Interaction):
+            await self._handle_action(interaction, action)
+
+        button.callback = _callback
+        return button
+
+    async def _refresh_queue_message(self, interaction: discord.Interaction, service: AdminService, *, note: str | None = None):
+        guild = interaction.guild
+        if guild is None:
+            await interaction.response.send_message("This suspicious-member review action only works inside a server.", ephemeral=True)
+            return
+        current = await service.current_member_risk_review_target(self.guild_id)
+        compiled = service.get_compiled_config(self.guild_id)
+        if current is None:
+            embed = service.build_member_risk_review_queue_embed(guild, [], compiled=compiled, note=note)
+            await interaction.response.edit_message(embed=embed, view=None)
+            return
+        pending_rows = await service._active_member_risk_review_rows(guild, compiled)
+        embed = service.build_member_risk_review_queue_embed(guild, pending_rows, compiled=compiled, note=note)
+        next_view = MemberRiskReviewView(
+            guild_id=self.guild_id,
+            user_id=int(current["user_id"]),
+            version=int(current.get("review_version", 0) or 0),
+        )
+        await interaction.response.edit_message(embed=embed, view=next_view)
+
+    async def _handle_action(self, interaction: discord.Interaction, action: str):
+        if interaction.guild is None or interaction.user is None:
+            await interaction.response.send_message("This suspicious-member review action only works inside a server.", ephemeral=True)
+            return
+        perms = getattr(interaction.user, "guild_permissions", None)
+        if not (getattr(perms, "administrator", False) or getattr(perms, "manage_guild", False)):
+            await interaction.response.send_message(
+                embed=ge.make_status_embed(
+                    "Admin Only",
+                    "You need **Manage Server** or administrator access to use suspicious-member review actions.",
+                    tone="warning",
+                    footer="Babblebox Admin",
+                ),
+                ephemeral=True,
+            )
+            return
+        service = getattr(interaction.client, "admin_service", None)
+        if service is None:
+            await interaction.response.send_message("Babblebox admin systems are unavailable right now.", ephemeral=True)
+            return
+        ok, message, _record = await service.handle_member_risk_review_action(
+            guild_id=self.guild_id,
+            user_id=self.user_id,
+            version=self.version,
+            action=action,
+            actor=interaction.user,
+        )
+        if not ok:
+            if "stale" in message.lower() or "closed" in message.lower():
+                await self._refresh_queue_message(interaction, service, note=message)
+                return
+            await interaction.response.send_message(message, ephemeral=True)
+            return
+        await self._refresh_queue_message(interaction, service, note=message)
+
+
 class AdminPanelView(discord.ui.View):
     def __init__(self, cog: "AdminCog", *, guild_id: int, author_id: int, section: str = "overview"):
         super().__init__(timeout=180)
@@ -237,6 +338,7 @@ class AdminPanelView(discord.ui.View):
             "overview": self.overview_button,
             "followup": self.followup_button,
             "verification": self.verification_button,
+            "risk": self.risk_button,
             "exclusions": self.exclusions_button,
             "logs": self.logs_button,
             "templates": self.templates_button,
@@ -297,12 +399,17 @@ class AdminPanelView(discord.ui.View):
         self.section = "verification"
         await self._render(interaction)
 
-    @discord.ui.button(label="Exclusions", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="Risk", style=discord.ButtonStyle.secondary, row=0)
+    async def risk_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.section = "risk"
+        await self._render(interaction)
+
+    @discord.ui.button(label="Exclusions", style=discord.ButtonStyle.secondary, row=1)
     async def exclusions_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.section = "exclusions"
         await self._render(interaction)
 
-    @discord.ui.button(label="Logs", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="Logs", style=discord.ButtonStyle.secondary, row=1)
     async def logs_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.section = "logs"
         await self._render(interaction)
@@ -312,7 +419,7 @@ class AdminPanelView(discord.ui.View):
         self.section = "templates"
         await self._render(interaction)
 
-    @discord.ui.button(label="Refresh", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="Refresh", style=discord.ButtonStyle.secondary, row=2)
     async def refresh_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._render(interaction, note="Admin panel refreshed.")
 
@@ -487,6 +594,22 @@ class AdminCog(commands.Cog):
             with contextlib.suppress(Exception):
                 self.bot.add_view(
                     VerificationDeadlineReviewView(
+                        guild_id=int(record["guild_id"]),
+                        user_id=int(target["user_id"]),
+                        version=int(target.get("review_version", 0) or 0),
+                    ),
+                    message_id=message_id,
+                )
+        for record in await self.service.list_member_risk_review_queues():
+            message_id = record.get("message_id")
+            if not isinstance(message_id, int):
+                continue
+            target = await self.service.current_member_risk_review_target(int(record["guild_id"]))
+            if target is None:
+                continue
+            with contextlib.suppress(Exception):
+                self.bot.add_view(
+                    MemberRiskReviewView(
                         guild_id=int(record["guild_id"]),
                         user_id=int(target["user_id"]),
                         version=int(target.get("review_version", 0) or 0),
@@ -796,7 +919,7 @@ class AdminCog(commands.Cog):
         verification_rule = self._verification_rule_details(guild_id)
         embed = discord.Embed(
             title="Admin Systems Overview",
-            description="Compact server-lifecycle helpers for returned-after-ban follow-up roles and long-unverified cleanup.",
+            description="Compact server-lifecycle helpers for returned-after-ban follow-up, verification cleanup, and private suspicious-member review.",
             color=ge.EMBED_THEME["accent"],
         )
         embed.add_field(
@@ -822,13 +945,24 @@ class AdminCog(commands.Cog):
             inline=False,
         )
         embed.add_field(
+            name="Suspicious-Member Review",
+            value=(
+                f"Enabled: **{'Yes' if config['member_risk_enabled'] else 'No'}**\n"
+                f"Mode: **{MEMBER_RISK_MODE_LABELS.get(config['member_risk_mode'], config['member_risk_mode'].title())}**\n"
+                "Weak profile signals only add suspicion.\n"
+                "Review and kick decisions require risky message or campaign evidence."
+            ),
+            inline=False,
+        )
+        embed.add_field(
             name="Live Counts",
             value=(
                 f"Pending ban-return candidates: **{counts['ban_candidates']}**\n"
                 f"Active follow-up roles: **{counts['active_followups']}**\n"
                 f"Pending follow-up reviews: **{counts['pending_reviews']}**\n"
                 f"Tracked unverified members: **{counts['verification_pending']}**\n"
-                f"Warned and waiting: **{counts['verification_warned']}**"
+                f"Warned and waiting: **{counts['verification_warned']}**\n"
+                f"Pending suspicious-member reviews: **{counts['member_risk_pending']}**"
             ),
             inline=False,
         )
@@ -838,6 +972,48 @@ class AdminCog(commands.Cog):
                 f"Channel: {self._channel_mention(config['admin_log_channel_id'])}\n"
                 f"Alert role: {self._role_mention(config['admin_alert_role_id'])}"
             ),
+            inline=False,
+        )
+        return embed
+
+    async def _risk_embed(self, guild_id: int) -> discord.Embed:
+        config = self.service.get_config(guild_id)
+        counts = await self.service.get_counts(guild_id)
+        embed = discord.Embed(
+            title="Suspicious-Member Review",
+            description="Babblebox combines bounded account suspicion with locally flagged risky messages to create a private review lane for likely scammer accounts.",
+            color=ge.EMBED_THEME["warning"],
+        )
+        embed.add_field(
+            name="Current Policy",
+            value=(
+                f"Enabled: **{'Yes' if config['member_risk_enabled'] else 'No'}**\n"
+                f"Mode: **{MEMBER_RISK_MODE_LABELS.get(config['member_risk_mode'], config['member_risk_mode'].title())}**\n"
+                f"Pending reviews: **{counts['member_risk_pending']}**"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Signals",
+            value=(
+                "Uses compact account-age, avatar-state, and display-name risk hints only as suspicion multipliers.\n"
+                "Babblebox only escalates when those hints combine with risky link, scam-copy, newcomer, or fresh-campaign evidence."
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Behavior",
+            value=(
+                "No public reactions or reply warnings are posted in chat.\n"
+                "Log mode writes compact private notes only.\n"
+                "Review mode maintains one shared suspicious-member queue.\n"
+                "Review or kick mode can remove the strongest combined cases and include the optional rejoin link in the DM."
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Quick Use",
+            value="`/admin risk enabled:true mode:review`",
             inline=False,
         )
         return embed
@@ -1025,6 +1201,8 @@ class AdminCog(commands.Cog):
             embed = await self._followup_embed(guild_id)
         elif section == "verification":
             embed = await self._verification_embed(guild_id)
+        elif section == "risk":
+            embed = await self._risk_embed(guild_id)
         elif section == "exclusions":
             embed = await self._exclusions_embed(guild_id)
         elif section == "logs":
@@ -1036,7 +1214,7 @@ class AdminCog(commands.Cog):
         operability = self._operability_lines(guild_id)
         if operability:
             embed.add_field(name="Operability", value="\n".join(operability[:6]), inline=False)
-        return ge.style_embed(embed, footer="Babblebox Admin | /admin panel, status, followup, verification, logs, exclusions, templates, sync, or test")
+        return ge.style_embed(embed, footer="Babblebox Admin | /admin panel, status, followup, verification, risk, logs, exclusions, templates, sync, or test")
 
     async def _send_result(self, ctx: commands.Context, title: str, message: str, *, ok: bool):
         embed = ge.make_status_embed(title, message, tone="success" if ok else "warning", footer="Babblebox Admin")
@@ -1095,6 +1273,26 @@ class AdminCog(commands.Cog):
                 ]
             )
         embed.add_field(name="Verification", value="\n".join(verification_lines), inline=False)
+        risk_state = status["member_risk"]
+        risk_lines = [
+            f"Exempt: {status['member_risk_exempt_reason'] or 'No'}",
+        ]
+        if risk_state is None:
+            risk_lines.append("Tracked suspicious-member state: None")
+        else:
+            risk_lines.extend(
+                [
+                    f"Level: {str(risk_state.get('risk_level', 'review')).title()}",
+                    f"Review pending: {'Yes' if risk_state.get('review_pending') else 'No'}",
+                    f"Signals: {self.service._member_risk_signal_summary(list(risk_state.get('signal_codes', [])))}",
+                ]
+            )
+            if risk_state.get("primary_domain"):
+                risk_lines.append(f"Primary domain: `{risk_state['primary_domain']}`")
+            snooze_until = deserialize_datetime(risk_state.get("snooze_until"))
+            if snooze_until is not None:
+                risk_lines.append(f"Snoozed until: {ge.format_timestamp(snooze_until, 'R')}")
+        embed.add_field(name="Suspicious-Member Review", value="\n".join(risk_lines), inline=False)
         return ge.style_embed(embed, footer="Babblebox Admin | Member automation status")
 
     def _copy_embed(self, embed: discord.Embed) -> discord.Embed:
@@ -1229,6 +1427,30 @@ class AdminCog(commands.Cog):
             max_extensions=max_extensions,
         )
         await self._send_result(ctx, "Verification Cleanup", message, ok=ok)
+
+    @admin_group.command(name="risk", with_app_command=True, description="Configure suspicious-member review")
+    @app_commands.describe(
+        enabled="Turn suspicious-member review on or off",
+        mode="Log notes only, queue private reviews, or allow strong combined cases to kick",
+    )
+    @app_commands.choices(mode=MEMBER_RISK_MODE_CHOICES)
+    async def admin_risk_command(
+        self,
+        ctx: commands.Context,
+        enabled: Optional[bool] = None,
+        mode: Optional[str] = None,
+    ):
+        if not await self._guard(ctx):
+            return
+        if enabled is None and mode is None:
+            await send_hybrid_response(ctx, embed=await self.build_panel_embed(ctx.guild.id, "risk"), ephemeral=True)
+            return
+        ok, message = await self.service.set_member_risk_config(
+            ctx.guild.id,
+            enabled=enabled,
+            mode=mode,
+        )
+        await self._send_result(ctx, "Suspicious-Member Review", message, ok=ok)
 
     @admin_group.command(name="logs", with_app_command=True, description="Configure admin log delivery and alert pings")
     async def admin_logs_command(

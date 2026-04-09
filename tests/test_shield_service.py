@@ -1,9 +1,12 @@
+import json
 import types
 import unittest
-import json
+from datetime import timedelta
 from copy import deepcopy
 from typing import Optional
 from unittest.mock import AsyncMock, patch
+
+from babblebox import game_engine as ge
 
 from babblebox.shield_ai import SHIELD_AI_ALLOWED_GUILD_ID, ShieldAIReviewResult
 from babblebox.shield_service import ShieldDecision, ShieldMatch, ShieldService, _alert_content_fingerprint, _build_snapshot
@@ -27,13 +30,28 @@ class FakeGuildPermissions:
 
 
 class FakeAuthor:
-    def __init__(self, user_id: int, *, roles=None, administrator: bool = False, bot: bool = False):
+    def __init__(
+        self,
+        user_id: int,
+        *,
+        roles=None,
+        administrator: bool = False,
+        bot: bool = False,
+        created_at=None,
+        joined_at=None,
+        avatar=None,
+        display_name: Optional[str] = None,
+    ):
         self.id = user_id
         self.bot = bot
         self.roles = roles or []
         self.mention = f"<@{user_id}>"
-        self.display_name = f"User {user_id}"
+        self.display_name = display_name or f"User {user_id}"
         self.guild_permissions = FakeGuildPermissions(administrator=administrator)
+        self.created_at = created_at or ge.now_utc()
+        self.joined_at = joined_at or ge.now_utc()
+        self.avatar = avatar
+        self.default_avatar = object()
 
 
 class FakeBotMember(FakeAuthor):
@@ -1533,6 +1551,103 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(decision)
         self.assertIsNone(decision.ai_review)
         self.assertEqual(len(log_channel.sent), 1)
+
+    async def test_member_risk_handoff_runs_for_fresh_account_scam_message(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        author = FakeAuthor(
+            42,
+            created_at=ge.now_utc() - timedelta(hours=2),
+            joined_at=ge.now_utc() - timedelta(minutes=15),
+            avatar=None,
+            display_name="Official Support",
+        )
+        admin_service = types.SimpleNamespace(handle_member_risk_message=AsyncMock())
+        self.bot.admin_service = admin_service
+        message = FakeMessage(
+            guild=guild,
+            channel=channel,
+            author=author,
+            content=(
+                "Official community post: Members are invited to secure their spot in the OpenSea mint. "
+                "Visit https://opensea-mint-event.com/claim soon because selection is limited."
+            ),
+        )
+
+        ok, _ = await self.service.set_module_enabled(guild.id, True)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_pack_config(guild.id, "scam", enabled=True, action="delete_log", sensitivity="normal")
+        self.assertTrue(ok)
+
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            decision = await self.service.handle_message(message)
+
+        self.assertIsNotNone(decision)
+        self.assertIsNotNone(decision.member_risk_evidence)
+        self.assertIn("scam_high", decision.member_risk_evidence.signal_codes)
+        self.assertIn("newcomer_early_message", decision.member_risk_evidence.signal_codes)
+        admin_service.handle_member_risk_message.assert_awaited_once_with(message, decision)
+
+    async def test_member_risk_handoff_skips_webhook_messages(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        author = FakeAuthor(42, bot=True)
+        admin_service = types.SimpleNamespace(handle_member_risk_message=AsyncMock())
+        self.bot.admin_service = admin_service
+        message = FakeMessage(
+            guild=guild,
+            channel=channel,
+            author=author,
+            webhook_id=991,
+            content=(
+                "Official community post: Members are invited to participate in the mint. "
+                "Visit https://opensea-mint-event.com/claim soon because selection is limited."
+            ),
+        )
+
+        ok, _ = await self.service.set_module_enabled(guild.id, True)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_pack_config(guild.id, "scam", enabled=True, action="delete_log", sensitivity="normal")
+        self.assertTrue(ok)
+
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            decision = await self.service.handle_message(message, scan_source="webhook_message")
+
+        self.assertIsNotNone(decision)
+        self.assertIsNone(decision.member_risk_evidence)
+        admin_service.handle_member_risk_message.assert_not_awaited()
+
+    async def test_fresh_campaign_cluster_signal_accumulates_across_fresh_accounts(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        ok, _ = await self.service.set_module_enabled(guild.id, True)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_pack_config(guild.id, "scam", enabled=True, action="delete_log", sensitivity="normal")
+        self.assertTrue(ok)
+
+        decisions = []
+        for user_id in (200, 201, 202):
+            author = FakeAuthor(
+                user_id,
+                created_at=ge.now_utc() - timedelta(hours=3),
+                joined_at=ge.now_utc() - timedelta(minutes=25),
+                avatar=None,
+            )
+            message = FakeMessage(
+                guild=guild,
+                channel=channel,
+                author=author,
+                content=(
+                    "Official community post: Members are invited to verify their access and keep their member slot. "
+                    "Visit https://secure-auth-session.click/login now before the window closes."
+                ),
+            )
+            with patch.object(self.service, "_send_alert", new=AsyncMock()):
+                decisions.append(await self.service.handle_message(message))
+
+        self.assertTrue(all(decision is not None for decision in decisions))
+        self.assertIsNotNone(decisions[-1].member_risk_evidence)
+        self.assertIn("fresh_campaign_cluster_3", decisions[-1].member_risk_evidence.signal_codes)
 
 
 class ShieldStoreNormalizationTests(unittest.TestCase):

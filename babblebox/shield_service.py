@@ -63,7 +63,7 @@ from babblebox.text_safety import (
     sanitize_short_plain_text,
     squash_for_evasion_checks,
 )
-from babblebox.utility_helpers import make_attachment_labels, make_message_preview
+from babblebox.utility_helpers import deserialize_datetime, make_attachment_labels, make_message_preview
 
 
 RULE_PACKS = ("privacy", "promo", "scam", "adult")
@@ -86,6 +86,10 @@ DIRECT_PROMO_REPEAT_THRESHOLD = 3
 GENERIC_LINK_NOISE_THRESHOLD = 4
 MEDIA_LINK_NOISE_THRESHOLD = 5
 RUNTIME_PRUNE_INTERVAL_SECONDS = 60.0
+FRESH_CAMPAIGN_WINDOW_SECONDS = 30 * 60.0
+FRESH_CAMPAIGN_TIGHT_WINDOW_SECONDS = 20 * 60.0
+RECENT_ACCOUNT_WINDOW = timedelta(days=7)
+EARLY_MEMBER_WINDOW = timedelta(days=1)
 
 PACK_LABELS = {
     "privacy": "Privacy Leak",
@@ -306,6 +310,21 @@ class ShieldDecision:
     link_assessments: tuple[ShieldLinkAssessment, ...] = ()
     scan_source: str = "new_message"
     scan_surface_labels: tuple[str, ...] = ()
+    member_risk_evidence: "ShieldMemberRiskEvidence | None" = None
+
+
+@dataclass(frozen=True)
+class ShieldMemberRiskEvidence:
+    signal_codes: tuple[str, ...]
+    primary_domain: str | None = None
+
+
+@dataclass(frozen=True)
+class ShieldScamContext:
+    primary_domain: str | None = None
+    newcomer_early_message: bool = False
+    fresh_campaign_cluster_20m: int = 0
+    fresh_campaign_cluster_30m: int = 0
 
 
 @dataclass(frozen=True)
@@ -525,6 +544,17 @@ def _strongest_link_risk_signals(link_assessments: Sequence[ShieldLinkAssessment
             if len(signals) >= limit:
                 return tuple(signals)
     return tuple(signals)
+
+
+def _member_datetime(value: Any):
+    if value is None:
+        return None
+    if hasattr(value, "tzinfo"):
+        return value
+    try:
+        return deserialize_datetime(value)
+    except Exception:
+        return None
 
 
 def _legacy_action_policy(action: str) -> tuple[str, str, str]:
@@ -805,6 +835,7 @@ class ShieldService:
         self._alert_signature_dedup: dict[tuple[Any, ...], float] = {}
         self._strike_windows: dict[tuple[int, int, str], list[float]] = {}
         self._recent_promos: dict[tuple[int, int, str], list[float]] = {}
+        self._recent_scam_campaigns: dict[tuple[int, str], list[tuple[float, int]]] = {}
         self._last_runtime_prune = 0.0
 
     async def start(self) -> bool:
@@ -1309,7 +1340,15 @@ class ShieldService:
             else RepetitionSignals(None, 0, False, False)
         )
         link_assessments = self._collect_link_assessments(compiled, snapshot, now=now)
-        matches = self._collect_matches(compiled, snapshot, repetitive_promo=repetition, link_assessments=link_assessments, scan_source=scan_source)
+        scam_context = self._build_scam_context(message, link_assessments, now=now)
+        matches = self._collect_matches(
+            compiled,
+            snapshot,
+            repetitive_promo=repetition,
+            link_assessments=link_assessments,
+            scan_source=scan_source,
+            scam_context=scam_context,
+        )
         if not matches:
             return None
 
@@ -1368,9 +1407,20 @@ class ShieldService:
             )
             if request is not None:
                 decision.ai_review = await self.ai_provider.review(request)
+        decision.member_risk_evidence = self._build_member_risk_evidence(
+            message,
+            decision,
+            snapshot,
+            link_assessments,
+            scam_context=scam_context,
+        )
 
         if best.action not in {"disabled", "detect"}:
             await self._send_alert(message, compiled, decision, content_fingerprint=alert_content_fingerprint, snapshot=snapshot)
+        admin_service = getattr(self.bot, "admin_service", None)
+        if decision.member_risk_evidence is not None and admin_service is not None:
+            with contextlib.suppress(Exception):
+                await admin_service.handle_member_risk_message(message, decision)
 
         return decision
 
@@ -1473,6 +1523,113 @@ class ShieldService:
             by_domain[link.domain] = merge_link_assessments(by_domain.get(link.domain), assessment)
         return tuple(sorted(by_domain.values(), key=lambda item: item.normalized_domain))
 
+    def _primary_risky_domain(self, link_assessments: Sequence[ShieldLinkAssessment]) -> str | None:
+        risky = [
+            assessment
+            for assessment in link_assessments
+            if assessment.category in {MALICIOUS_LINK_CATEGORY, UNKNOWN_SUSPICIOUS_LINK_CATEGORY}
+        ]
+        if not risky:
+            return None
+        best = max(risky, key=_score_link_assessment_for_scam)
+        return best.normalized_domain
+
+    def _track_fresh_campaign(
+        self,
+        guild_id: int,
+        signature: str,
+        *,
+        user_id: int,
+        now: float,
+    ) -> tuple[int, int]:
+        key = (guild_id, signature)
+        active = {
+            int(existing_user_id): timestamp
+            for timestamp, existing_user_id in self._recent_scam_campaigns.get(key, [])
+            if now - timestamp <= FRESH_CAMPAIGN_WINDOW_SECONDS
+        }
+        active[int(user_id)] = now
+        rows = sorted(((timestamp, existing_user_id) for existing_user_id, timestamp in active.items()), key=lambda item: item[0])
+        self._recent_scam_campaigns[key] = rows
+        tight = sum(1 for timestamp, _existing_user_id in rows if now - timestamp <= FRESH_CAMPAIGN_TIGHT_WINDOW_SECONDS)
+        wide = len(rows)
+        return tight, wide
+
+    def _build_scam_context(
+        self,
+        message: discord.Message,
+        link_assessments: Sequence[ShieldLinkAssessment],
+        *,
+        now: float,
+    ) -> ShieldScamContext:
+        member = getattr(message, "author", None)
+        if member is None or getattr(member, "bot", False) or getattr(message, "webhook_id", None) is not None:
+            return ShieldScamContext(primary_domain=self._primary_risky_domain(link_assessments))
+        primary_domain = self._primary_risky_domain(link_assessments)
+        now_dt = ge.now_utc()
+        created_at = _member_datetime(getattr(member, "created_at", None))
+        joined_at = _member_datetime(getattr(member, "joined_at", None))
+        recent_account = created_at is not None and now_dt - created_at <= RECENT_ACCOUNT_WINDOW
+        early_member = joined_at is not None and now_dt - joined_at <= EARLY_MEMBER_WINDOW
+        newcomer_early_message = bool(recent_account or early_member)
+        fresh_campaign_cluster_20m = 0
+        fresh_campaign_cluster_30m = 0
+        if primary_domain is not None and newcomer_early_message:
+            fresh_campaign_cluster_20m, fresh_campaign_cluster_30m = self._track_fresh_campaign(
+                message.guild.id,
+                primary_domain,
+                user_id=int(getattr(member, "id", 0) or 0),
+                now=now,
+            )
+        return ShieldScamContext(
+            primary_domain=primary_domain,
+            newcomer_early_message=newcomer_early_message,
+            fresh_campaign_cluster_20m=fresh_campaign_cluster_20m,
+            fresh_campaign_cluster_30m=fresh_campaign_cluster_30m,
+        )
+
+    def _build_member_risk_evidence(
+        self,
+        message: discord.Message,
+        decision: ShieldDecision,
+        snapshot: ShieldSnapshot,
+        link_assessments: Sequence[ShieldLinkAssessment],
+        *,
+        scam_context: ShieldScamContext,
+    ) -> ShieldMemberRiskEvidence | None:
+        if getattr(message, "webhook_id", None) is not None or getattr(getattr(message, "author", None), "bot", False):
+            return None
+        signal_codes: list[str] = []
+        top_scam_reason = next((reason for reason in decision.reasons if reason.pack == "scam"), None)
+        if top_scam_reason is not None:
+            if top_scam_reason.confidence == "high":
+                signal_codes.append("scam_high")
+            elif top_scam_reason.confidence == "medium":
+                signal_codes.append("scam_medium")
+        if any(assessment.category == MALICIOUS_LINK_CATEGORY for assessment in link_assessments):
+            signal_codes.append("malicious_link")
+        elif any(assessment.category == UNKNOWN_SUSPICIOUS_LINK_CATEGORY for assessment in link_assessments):
+            signal_codes.append("unknown_suspicious_link")
+        if snapshot.has_suspicious_attachment:
+            signal_codes.append("suspicious_attachment")
+        if any(SUSPICIOUS_FILE_RE.search(url) for url in snapshot.urls):
+            signal_codes.append("cta_download")
+        if scam_context.newcomer_early_message:
+            signal_codes.append("newcomer_early_message")
+        if scam_context.fresh_campaign_cluster_30m >= 3:
+            signal_codes.append("fresh_campaign_cluster_3")
+        elif scam_context.fresh_campaign_cluster_20m >= 2:
+            signal_codes.append("fresh_campaign_cluster_2")
+        deduped = tuple(sorted(set(signal_codes)))
+        if not deduped:
+            return None
+        if not any(
+            code in {"scam_high", "scam_medium", "malicious_link", "unknown_suspicious_link", "suspicious_attachment", "cta_download"}
+            for code in deduped
+        ):
+            return None
+        return ShieldMemberRiskEvidence(signal_codes=deduped, primary_domain=scam_context.primary_domain)
+
     def _make_pack_match(
         self,
         *,
@@ -1521,13 +1678,14 @@ class ShieldService:
         repetitive_promo: RepetitionSignals | None = None,
         link_assessments: Sequence[ShieldLinkAssessment] | None = None,
         scan_source: str = "new_message",
+        scam_context: ShieldScamContext | None = None,
     ) -> list[ShieldMatch]:
         active_link_assessments = tuple(link_assessments or ())
         matches: list[ShieldMatch] = []
         matches.extend(self._detect_privacy(compiled, snapshot))
         matches.extend(self._detect_promo(compiled, snapshot, repetitive_promo=repetitive_promo or RepetitionSignals(None, 0, False, False)))
         matches.extend(self._detect_link_safety_domains(compiled, snapshot, active_link_assessments))
-        matches.extend(self._detect_scam(compiled, snapshot, active_link_assessments, scan_source=scan_source))
+        matches.extend(self._detect_scam(compiled, snapshot, active_link_assessments, scan_source=scan_source, scam_context=scam_context or ShieldScamContext()))
         matches.extend(self._detect_custom_patterns(compiled, snapshot))
         matches.sort(
             key=lambda item: (
@@ -1976,6 +2134,7 @@ class ShieldService:
         link_assessments: Sequence[ShieldLinkAssessment],
         *,
         scan_source: str,
+        scam_context: ShieldScamContext,
     ) -> list[ShieldMatch]:
         settings = compiled.scam
         if not settings.enabled:
@@ -2075,6 +2234,15 @@ class ShieldService:
             if scan_source == "webhook_message" and (brand_bait or legitimacy or urgency):
                 weighted_score += 1
                 reason_bits.append("webhook or community-post delivery")
+            if scam_context.newcomer_early_message and (brand_bait or legitimacy or cta or urgency or crypto_mint):
+                weighted_score += 1
+                reason_bits.append("newcomer early-message delivery")
+            if scam_context.fresh_campaign_cluster_30m >= 3:
+                weighted_score += 2
+                reason_bits.append("repeated fresh-account campaign cluster")
+            elif scam_context.fresh_campaign_cluster_20m >= 2:
+                weighted_score += 1
+                reason_bits.append("fresh-account repeat of the same risky domain")
             if snapshot.has_suspicious_attachment:
                 weighted_score += 2
                 reason_bits.append("suspicious attachment metadata")
@@ -2169,6 +2337,11 @@ class ShieldService:
             key: [value for value in values if now - value <= REPETITION_WINDOW_SECONDS]
             for key, values in self._recent_promos.items()
             if any(now - value <= REPETITION_WINDOW_SECONDS for value in values)
+        }
+        self._recent_scam_campaigns = {
+            key: [(timestamp, user_id) for timestamp, user_id in values if now - timestamp <= FRESH_CAMPAIGN_WINDOW_SECONDS]
+            for key, values in self._recent_scam_campaigns.items()
+            if any(now - timestamp <= FRESH_CAMPAIGN_WINDOW_SECONDS for timestamp, _user_id in values)
         }
         max_window_seconds = max([compiled.escalation_window_minutes * 60.0 for compiled in self._compiled_configs.values()] or [15 * 60.0])
         self._strike_windows = {

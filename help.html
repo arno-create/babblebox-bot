@@ -847,19 +847,22 @@
               webhook or community-post style deliveries in scope, but it is designed to stay conservative when the
               signal is weak. Safe mainstream domains are bypassed before link suspicion, local malicious-link checks include
               a feed of about 200k known malicious domains, and phase 1 does not depend on any
-              outside reputation provider.
+              outside reputation provider. The linked Admin lane also supports a private suspicious-member review flow that
+              only escalates when risky message signals combine with bounded account-age, avatar-state, or display-name
+              suspicion.
             </p>
             <div class="grid2">
-              <article class="info"><strong>Main admin commands</strong><p><code>/shield panel</code>, <code>/shield rules</code>, <code>/shield allowlist</code>, <code>/shield ai</code>, and <code>/shield test</code>.</p></article>
+              <article class="info"><strong>Main admin commands</strong><p><code>/shield panel</code>, <code>/shield rules</code>, <code>/shield allowlist</code>, <code>/shield ai</code>, <code>/shield test</code>, and <code>/admin risk</code>.</p></article>
               <article class="info"><strong>Graduated local policy</strong><p>Shield uses low, medium, and high confidence actions so broad heuristics can log while stronger matches can delete or escalate.</p></article>
               <article class="info"><strong>Allowlist and scope controls</strong><p>Admins can carve out trusted roles, included or excluded scope, allowlisted domains, invite codes, and phrases so weak or educational context stays bounded.</p></article>
-              <article class="info"><strong>AI stays second-pass only</strong><p>AI review is optional, support-server limited by default, only sees sanitized flagged text from the scanned surfaces, and never decides punishment on its own.</p></article>
+              <article class="info"><strong>No public shaming on weak evidence</strong><p>Babblebox keeps suspicious-member handling private. It does not post warning reactions or bot replies into chat for low-confidence cases.</p></article>
             </div>
             <div class="command-list">
               <div class="command-row"><div><code>/shield panel</code></div><div><p>Open the compact Shield admin surface.</p><span>Use this first if you want the current state without memorizing command flags.</span></div></div>
               <div class="command-row"><div><code>/shield rules</code></div><div><p>Set pack sensitivity, low/medium/high action policy, adult filtering, and escalation thresholds.</p><span>A safe starting point is log-first policy with deletes reserved for cleaner high-confidence matches.</span></div></div>
               <div class="command-row"><div><code>/shield allowlist</code> and <code>/shield filters</code></div><div><p>Teach Shield where it should back off.</p><span>This is especially important before moving beyond logging in busy community servers.</span></div></div>
               <div class="command-row"><div><code>/shield ai</code></div><div><p>Turn on optional second-pass AI review.</p><span>AI enriches moderator alerts only. It does not auto-delete, auto-timeout, or see broad server history.</span></div></div>
+              <div class="command-row"><div><code>/admin risk</code></div><div><p>Configure private suspicious-member notes, review, or review-or-kick handling.</p><span>This lane reuses the admin review queue, stays private, and does not inspect Discord profile bios or about-me text.</span></div></div>
             </div>
           </section>
 
