@@ -64,6 +64,7 @@ MEMBER_RISK_SIGNAL_PRIORITY = {
     "fresh_campaign_cluster_2": 40,
     "campaign_lure_reuse": 50,
     "campaign_path_shape": 60,
+    "campaign_host_family": 65,
     "unknown_suspicious_link": 70,
     "scam_medium": 80,
     "suspicious_attachment": 90,
@@ -331,6 +332,10 @@ def normalize_member_risk_state(payload: Any) -> dict[str, Any] | None:
     last_result_at = _serialize_datetime(_parse_datetime(payload.get("last_result_at")))
     last_notified_code = _clean_optional_text(payload.get("last_notified_code"))
     last_notified_at = _serialize_datetime(_parse_datetime(payload.get("last_notified_at")))
+    message_event_count = payload.get("message_event_count")
+    latest_message_basis = _clean_optional_text(payload.get("latest_message_basis"))
+    latest_message_confidence = _clean_optional_text(payload.get("latest_message_confidence"))
+    latest_scan_source = _clean_optional_text(payload.get("latest_scan_source"))
     signal_codes_raw = payload.get("signal_codes", [])
     if not all(isinstance(value, int) and value > 0 for value in (guild_id, user_id)):
         return None
@@ -356,6 +361,10 @@ def normalize_member_risk_state(payload: Any) -> dict[str, Any] | None:
         "last_result_at": last_result_at,
         "last_notified_code": last_notified_code,
         "last_notified_at": last_notified_at,
+        "message_event_count": message_event_count if isinstance(message_event_count, int) and message_event_count >= 0 else 0,
+        "latest_message_basis": latest_message_basis,
+        "latest_message_confidence": latest_message_confidence,
+        "latest_scan_source": latest_scan_source,
     }
 
 
@@ -883,6 +892,10 @@ def _member_risk_from_row(row) -> dict[str, Any] | None:
             "last_result_at": _serialize_datetime(row["last_result_at"]),
             "last_notified_code": row["last_notified_code"],
             "last_notified_at": _serialize_datetime(row["last_notified_at"]),
+            "message_event_count": int(row["message_event_count"]),
+            "latest_message_basis": row["latest_message_basis"],
+            "latest_message_confidence": row["latest_message_confidence"],
+            "latest_scan_source": row["latest_scan_source"],
         }
     )
 
@@ -1038,6 +1051,10 @@ class _PostgresAdminStore(_BaseAdminStore):
                 "last_result_at TIMESTAMPTZ NULL, "
                 "last_notified_code TEXT NULL, "
                 "last_notified_at TIMESTAMPTZ NULL, "
+                "message_event_count INTEGER NOT NULL DEFAULT 0, "
+                "latest_message_basis TEXT NULL, "
+                "latest_message_confidence TEXT NULL, "
+                "latest_scan_source TEXT NULL, "
                 "PRIMARY KEY (guild_id, user_id)"
                 ")"
             ),
@@ -1096,6 +1113,10 @@ class _PostgresAdminStore(_BaseAdminStore):
             "ALTER TABLE admin_member_risk_states ADD COLUMN IF NOT EXISTS last_result_at TIMESTAMPTZ NULL",
             "ALTER TABLE admin_member_risk_states ADD COLUMN IF NOT EXISTS last_notified_code TEXT NULL",
             "ALTER TABLE admin_member_risk_states ADD COLUMN IF NOT EXISTS last_notified_at TIMESTAMPTZ NULL",
+            "ALTER TABLE admin_member_risk_states ADD COLUMN IF NOT EXISTS message_event_count INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE admin_member_risk_states ADD COLUMN IF NOT EXISTS latest_message_basis TEXT NULL",
+            "ALTER TABLE admin_member_risk_states ADD COLUMN IF NOT EXISTS latest_message_confidence TEXT NULL",
+            "ALTER TABLE admin_member_risk_states ADD COLUMN IF NOT EXISTS latest_scan_source TEXT NULL",
         ]
         index_statements = [
             "CREATE INDEX IF NOT EXISTS ix_admin_ban_return_expires ON admin_ban_return_candidates (expires_at)",
@@ -1587,9 +1608,10 @@ class _PostgresAdminStore(_BaseAdminStore):
                         "INSERT INTO admin_member_risk_states ("
                         "guild_id, user_id, first_seen_at, last_seen_at, snooze_until, risk_level, signal_codes, "
                         "primary_domain, review_pending, review_version, review_message_channel_id, review_message_id, "
-                        "last_result_code, last_result_at, last_notified_code, last_notified_at"
+                        "last_result_code, last_result_at, last_notified_code, last_notified_at, "
+                        "message_event_count, latest_message_basis, latest_message_confidence, latest_scan_source"
                         ") VALUES ("
-                        "$1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12, $13, $14, $15, $16"
+                        "$1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20"
                         ") ON CONFLICT (guild_id, user_id) DO UPDATE SET "
                         "first_seen_at = EXCLUDED.first_seen_at, "
                         "last_seen_at = EXCLUDED.last_seen_at, "
@@ -1604,7 +1626,11 @@ class _PostgresAdminStore(_BaseAdminStore):
                         "last_result_code = EXCLUDED.last_result_code, "
                         "last_result_at = EXCLUDED.last_result_at, "
                         "last_notified_code = EXCLUDED.last_notified_code, "
-                        "last_notified_at = EXCLUDED.last_notified_at"
+                        "last_notified_at = EXCLUDED.last_notified_at, "
+                        "message_event_count = EXCLUDED.message_event_count, "
+                        "latest_message_basis = EXCLUDED.latest_message_basis, "
+                        "latest_message_confidence = EXCLUDED.latest_message_confidence, "
+                        "latest_scan_source = EXCLUDED.latest_scan_source"
                     ),
                     normalized["guild_id"],
                     normalized["user_id"],
@@ -1622,6 +1648,10 @@ class _PostgresAdminStore(_BaseAdminStore):
                     _parse_datetime(normalized["last_result_at"]),
                     normalized["last_notified_code"],
                     _parse_datetime(normalized["last_notified_at"]),
+                    normalized["message_event_count"],
+                    normalized["latest_message_basis"],
+                    normalized["latest_message_confidence"],
+                    normalized["latest_scan_source"],
                 )
 
     async def fetch_member_risk_state(self, guild_id: int, user_id: int) -> dict[str, Any] | None:
@@ -1630,7 +1660,8 @@ class _PostgresAdminStore(_BaseAdminStore):
                 (
                     "SELECT guild_id, user_id, first_seen_at, last_seen_at, snooze_until, risk_level, signal_codes, "
                     "primary_domain, review_pending, review_version, review_message_channel_id, review_message_id, "
-                    "last_result_code, last_result_at, last_notified_code, last_notified_at "
+                    "last_result_code, last_result_at, last_notified_code, last_notified_at, "
+                    "message_event_count, latest_message_basis, latest_message_confidence, latest_scan_source "
                     "FROM admin_member_risk_states WHERE guild_id = $1 AND user_id = $2"
                 ),
                 guild_id,
@@ -1649,7 +1680,8 @@ class _PostgresAdminStore(_BaseAdminStore):
                 (
                     "SELECT guild_id, user_id, first_seen_at, last_seen_at, snooze_until, risk_level, signal_codes, "
                     "primary_domain, review_pending, review_version, review_message_channel_id, review_message_id, "
-                    "last_result_code, last_result_at, last_notified_code, last_notified_at "
+                    "last_result_code, last_result_at, last_notified_code, last_notified_at, "
+                    "message_event_count, latest_message_basis, latest_message_confidence, latest_scan_source "
                     "FROM admin_member_risk_states WHERE guild_id = $1 ORDER BY first_seen_at ASC"
                 ),
                 guild_id,

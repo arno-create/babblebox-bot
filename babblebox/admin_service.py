@@ -130,6 +130,7 @@ MEMBER_RISK_MESSAGE_SIGNAL_CODES = frozenset(
         "fresh_campaign_cluster_2",
         "fresh_campaign_cluster_3",
         "campaign_path_shape",
+        "campaign_host_family",
         "campaign_lure_reuse",
     }
 )
@@ -163,6 +164,18 @@ MEMBER_RISK_STRONG_IDENTITY_HINT_CODES = frozenset(
         "name_unreadable",
         "name_impersonation",
         "name_mixed_script",
+    }
+)
+MEMBER_RISK_CRITICAL_MESSAGE_AMPLIFIER_CODES = frozenset(
+    {
+        "suspicious_attachment",
+        "cta_download",
+        "fresh_campaign_cluster_2",
+        "fresh_campaign_cluster_3",
+        "campaign_path_shape",
+        "campaign_host_family",
+        "campaign_lure_reuse",
+        "newcomer_first_messages_risky",
     }
 )
 
@@ -311,7 +324,11 @@ class MemberRiskAssessment:
     signal_codes: tuple[str, ...]
     identity_codes: tuple[str, ...] = ()
     message_codes: tuple[str, ...] = ()
+    context_codes: tuple[str, ...] = ()
     primary_domain: str | None = None
+    latest_message_basis: str | None = None
+    latest_message_confidence: str | None = None
+    latest_scan_source: str | None = None
 
 
 def _compile_config(raw: dict[str, Any]) -> CompiledAdminConfig:
@@ -1710,6 +1727,7 @@ class AdminService:
             "fresh_campaign_cluster_2": 1,
             "fresh_campaign_cluster_3": 2,
             "campaign_path_shape": 1,
+            "campaign_host_family": 1,
             "campaign_lure_reuse": 1,
         }
         return weights.get(code, 0)
@@ -1741,6 +1759,24 @@ class AdminService:
             return "Combined local message heuristics drove this case."
         return "This case is based on low-confidence member context only."
 
+    def _member_risk_message_basis(self, evidence: Any) -> str | None:
+        match_class = str(getattr(evidence, "message_match_class", "") or "").strip()
+        labels = {
+            "known_malicious_domain": "Known malicious domain",
+            "scam_attachment": "Executable or archive lure",
+            "scam_bait_link": "Scam bait + link",
+            "scam_brand_impersonation": "Official-looking brand lure",
+            "scam_campaign_lure": "Scam social-engineering pattern",
+            "scam_download": "Executable download link",
+            "scam_mint_wallet_lure": "Mint or wallet lure",
+            "scam_risky_unknown_link": "Risky unknown-link lure",
+            "scam_shortener": "Shortened or punycode lure",
+        }
+        if match_class:
+            return labels.get(match_class, match_class.replace("_", " ").title())
+        message_codes = getattr(evidence, "message_codes", ()) or getattr(evidence, "signal_codes", ())
+        return self._member_risk_basis_text(message_codes)
+
     def _assess_member_risk(
         self,
         member: discord.Member,
@@ -1749,10 +1785,19 @@ class AdminService:
         now: datetime,
     ) -> MemberRiskAssessment:
         identity_codes = self._member_identity_signal_codes(member, now=now)
-        message_codes = order_member_risk_signal_codes(getattr(evidence, "signal_codes", ()) or ())
+        raw_message_codes = getattr(evidence, "message_codes", ()) or ()
+        raw_context_codes = getattr(evidence, "context_codes", ()) or ()
+        if not raw_message_codes and not raw_context_codes:
+            fallback_message_codes, _identity_codes, _other_codes = self._split_member_risk_signal_codes(
+                getattr(evidence, "signal_codes", ()) or ()
+            )
+            raw_message_codes = [code for code in fallback_message_codes if code in MEMBER_RISK_CORE_MESSAGE_SIGNAL_CODES]
+            raw_context_codes = [code for code in fallback_message_codes if code not in MEMBER_RISK_CORE_MESSAGE_SIGNAL_CODES]
+        message_codes = tuple(order_member_risk_signal_codes(raw_message_codes))
+        context_codes = tuple(order_member_risk_signal_codes(raw_context_codes))
         identity_score = sum(self._member_risk_signal_weight(code) for code in identity_codes)
-        message_score = sum(self._member_risk_signal_weight(code) for code in message_codes)
-        signal_codes = tuple(order_member_risk_signal_codes([*message_codes, *identity_codes]))
+        message_score = sum(self._member_risk_signal_weight(code) for code in (*message_codes, *context_codes))
+        signal_codes = tuple(order_member_risk_signal_codes([*message_codes, *context_codes, *identity_codes]))
         level = "low"
         has_strong_message = any(code in {"scam_high", "malicious_link"} for code in message_codes)
         has_core_message = any(code in MEMBER_RISK_CORE_MESSAGE_SIGNAL_CODES for code in message_codes)
@@ -1760,12 +1805,16 @@ class AdminService:
             if identity_score >= 3 and any(code in MEMBER_RISK_STRONG_IDENTITY_HINT_CODES for code in identity_codes):
                 level = "note"
         else:
-            total = identity_score + message_score
-            if has_strong_message and total >= 7 and any(code not in {"scam_high", "malicious_link"} for code in signal_codes):
+            has_message_amplifier = any(
+                code in MEMBER_RISK_CRITICAL_MESSAGE_AMPLIFIER_CODES
+                for code in (*message_codes, *context_codes)
+            )
+            core_message_score = sum(self._member_risk_signal_weight(code) for code in message_codes)
+            if has_strong_message and has_message_amplifier and message_score >= 8:
                 level = "critical"
-            elif total >= 5 and message_score >= 3:
+            elif core_message_score >= 4 or message_score >= 5:
                 level = "review"
-            elif total >= 3:
+            elif message_score >= 3:
                 level = "note"
         return MemberRiskAssessment(
             level=level,
@@ -1773,8 +1822,12 @@ class AdminService:
             message_score=message_score,
             signal_codes=signal_codes,
             identity_codes=tuple(order_member_risk_signal_codes(identity_codes)),
-            message_codes=tuple(message_codes),
+            message_codes=message_codes,
+            context_codes=context_codes,
             primary_domain=getattr(evidence, "primary_domain", None),
+            latest_message_basis=self._member_risk_message_basis(evidence),
+            latest_message_confidence=str(getattr(evidence, "message_confidence", "") or "").strip() or None,
+            latest_scan_source=str(getattr(evidence, "scan_source", "") or "").strip() or None,
         )
 
     def _render_template(

@@ -174,6 +174,16 @@ SCAM_URGENCY_RE = re.compile(
 SCAM_OFFICIAL_FRAMING_RE = re.compile(r"(?i)\b(?:official|verified|trusted)\b")
 SCAM_ANNOUNCEMENT_RE = re.compile(r"(?i)\b(?:announcement|community post|server update|news update)\b")
 SCAM_PARTNERSHIP_RE = re.compile(r"(?i)\b(?:partnership|partnered|collaboration)\b")
+SCAM_SUPPORT_RE = re.compile(r"(?i)\b(?:support|help\s*desk|helpdesk|ticket|case(?:\s*#\d+)?|service\s*desk)\b")
+SCAM_SECURITY_NOTICE_RE = re.compile(
+    r"(?i)\b(?:security (?:alert|check|review|notice)|session (?:expired|review|check|validation)|unusual activity|suspicious activity|account (?:locked|recovery|suspension)|password reset|re-authenticate|reauthenticate|device verification)\b"
+)
+SCAM_FAKE_AUTHORITY_RE = re.compile(
+    r"(?i)\b(?:official bot|support bot|verification bot|security bot|system (?:message|notice)|staff(?: team)?|mod(?:erator)?(?: team)?|admin(?: team)?)\b"
+)
+SCAM_QR_SETUP_RE = re.compile(
+    r"(?i)\b(?:qr(?:\s*code)?|scan the qr|scan to verify|device auth|pair your device|captcha|setup|installer|installation package)\b"
+)
 SCAM_LEGITIMACY_RE = re.compile(
     r"(?i)\b(?:official|partnership|partnered|community post|announcement|members? (?:are )?invited|verified|trusted|minting page|claim page|verification page)\b"
 )
@@ -185,6 +195,18 @@ SCAM_LOGIN_FLOW_RE = re.compile(
 )
 SUSPICIOUS_FILE_RE = re.compile(r"(?i)\.(?:exe|scr|bat|cmd|msi|zip|rar|7z|iso)(?:$|[?#])")
 GENERIC_DIGIT_RE = re.compile(r"\b\d{4,12}\b")
+BARE_URL_NUMERIC_RE = re.compile(r"(?i)^v?\d+(?:\.\d+){1,5}(?:[-_/][a-z0-9._-]+)?$")
+BARE_URL_TLD_RE = re.compile(r"(?i)(?:xn--[a-z0-9-]{2,59}|[a-z]{2,24})$")
+BARE_URL_MAX_TOKENS = 64
+BARE_URL_MAX_LENGTH = 180
+BARE_URL_FILENAME_TLDS = frozenset({"7z", "apk", "bat", "cmd", "exe", "iso", "msi", "rar", "scr", "zip"})
+CAMPAIGN_HOST_FAMILY_MAP = {
+    "auth": frozenset({"auth", "login", "secure", "security", "session", "verify", "verification", "token"}),
+    "reward": frozenset({"bonus", "claim", "drop", "gift", "inventory", "promo", "reward"}),
+    "wallet": frozenset({"airdrop", "connect", "mint", "seed", "wallet"}),
+    "support": frozenset({"case", "help", "helpdesk", "support", "ticket"}),
+    "setup": frozenset({"captcha", "device", "download", "installer", "qr", "setup", "update"}),
+}
 @dataclass(frozen=True)
 class PackSettings:
     enabled: bool
@@ -327,7 +349,12 @@ class ShieldDecision:
 
 @dataclass(frozen=True)
 class ShieldMemberRiskEvidence:
+    message_codes: tuple[str, ...]
+    context_codes: tuple[str, ...]
     signal_codes: tuple[str, ...]
+    message_match_class: str | None = None
+    message_confidence: str | None = None
+    scan_source: str = "new_message"
     primary_domain: str | None = None
 
 
@@ -364,6 +391,10 @@ class ShieldScamFeatures:
     official_framing: bool
     announcement_framing: bool
     partnership_framing: bool
+    support_framing: bool
+    security_notice: bool
+    fake_authority: bool
+    qr_setup_lure: bool
     community_post_framing: bool
     urgency: bool
     wallet_or_mint: bool
@@ -381,7 +412,13 @@ class ShieldScamFeatures:
 
     @property
     def official_like_framing(self) -> bool:
-        return self.official_framing or self.announcement_framing or self.partnership_framing or self.community_post_framing
+        return (
+            self.official_framing
+            or self.announcement_framing
+            or self.partnership_framing
+            or self.fake_authority
+            or self.community_post_framing
+        )
 
 
 @dataclass(frozen=True)
@@ -447,10 +484,44 @@ def _extract_domain(raw_url: str) -> str | None:
     return link_extract_domain(raw_url)
 
 
+def _looks_like_bare_url_candidate(raw_token: str) -> str | None:
+    candidate = (raw_token or "").strip().strip("()[]{}<>,.!?\"'")
+    if not candidate or len(candidate) > BARE_URL_MAX_LENGTH:
+        return None
+    lowered = candidate.casefold()
+    if "://" in lowered or lowered.startswith("www.") or "@" in lowered or lowered.count(".") < 1:
+        return None
+    if BARE_URL_NUMERIC_RE.fullmatch(lowered):
+        return None
+    domain = _extract_domain(candidate)
+    if domain is None:
+        return None
+    labels = [label for label in domain.split(".") if label]
+    if len(labels) < 2:
+        return None
+    tld = labels[-1]
+    has_pathish_suffix = any(char in candidate for char in "/?#")
+    if not has_pathish_suffix and (tld in BARE_URL_FILENAME_TLDS or BARE_URL_TLD_RE.fullmatch(tld) is None):
+        return None
+    return candidate
+
+
 def _extract_urls(text: str) -> tuple[str, ...]:
     if not text:
         return ()
-    return tuple(match.group(0) for match in URL_RE.finditer(text))
+    extracted: list[str] = []
+    seen: set[str] = set()
+
+    def add_candidate(raw_value: str | None):
+        if raw_value and raw_value not in seen:
+            seen.add(raw_value)
+            extracted.append(raw_value)
+
+    for match in URL_RE.finditer(text):
+        add_candidate(match.group(0))
+    for token in text.split()[:BARE_URL_MAX_TOKENS]:
+        add_candidate(_looks_like_bare_url_candidate(token))
+    return tuple(extracted)
 
 
 def _strip_urls_from_text(text: str, urls: Sequence[str]) -> str:
@@ -596,9 +667,16 @@ def _score_link_assessment_for_scam(assessment: ShieldLinkAssessment) -> int:
         return 0
     score = 3
     signals = assessment.matched_signals
-    if any(signal in {"punycode_host", "hyphen_heavy_host", "shortener_domain"} for signal in signals):
+    if any(signal in {"punycode_host", "hyphen_heavy_host", "shortener_domain", "deep_subdomain_stack"} for signal in signals):
         score += 1
-    if any(signal.startswith("suspicious_tld:") or signal.startswith("host_token:") or signal.startswith("brand_token:") for signal in signals):
+    if any(
+        signal.startswith("suspicious_tld:")
+        or signal.startswith("host_token:")
+        or signal.startswith("brand_token:")
+        or signal.startswith("embedded_host_token:")
+        or signal.startswith("embedded_brand_token:")
+        for signal in signals
+    ):
         score += 1
     if any(signal.startswith("path_token:") or signal.startswith("query_token:") or signal == "encoded_or_long_query" for signal in signals):
         score += 1
@@ -636,6 +714,7 @@ def _campaign_kind_label(kind: str) -> str:
     labels = {
         "domain": "shared risky domain",
         "path_shape": "shared risky path shape",
+        "host_family": "rotated risky host family",
         "lure": "reused lure copy",
     }
     return labels.get(kind, kind.replace("_", " "))
@@ -665,6 +744,24 @@ def _path_query_shape_signature(assessment: ShieldLinkAssessment | None, *, doma
     if not deduped:
         return None
     return f"{domain}|{'|'.join(deduped[:4])}"
+
+
+def _host_family_signature(assessment: ShieldLinkAssessment | None, *, domain: str | None) -> str | None:
+    if assessment is None or not domain:
+        return None
+    tokens: set[str] = set()
+    for signal in assessment.matched_signals:
+        for prefix in ("host_token:", "embedded_host_token:", "path_token:", "query_token:"):
+            if signal.startswith(prefix):
+                tokens.add(signal.split(":", 1)[1])
+    families = [
+        family
+        for family, family_tokens in CAMPAIGN_HOST_FAMILY_MAP.items()
+        if tokens.intersection(family_tokens)
+    ]
+    if not families:
+        return None
+    return "|".join(sorted(families)[:3])
 
 
 def _scam_lure_fingerprint(text: str) -> str | None:
@@ -1792,6 +1889,9 @@ class ShieldService:
             path_shape_signature = _path_query_shape_signature(primary_assessment, domain=primary_domain)
             if path_shape_signature is not None:
                 signatures.append(("path_shape", path_shape_signature))
+            host_family_signature = _host_family_signature(primary_assessment, domain=primary_domain)
+            if host_family_signature is not None:
+                signatures.append(("host_family", host_family_signature))
             lure_signature = _scam_lure_fingerprint(snapshot.context_text)
             if lure_signature is not None:
                 signatures.append(("lure", lure_signature))
@@ -1823,38 +1923,50 @@ class ShieldService:
     ) -> ShieldMemberRiskEvidence | None:
         if getattr(message, "webhook_id", None) is not None or getattr(getattr(message, "author", None), "bot", False):
             return None
-        signal_codes: list[str] = []
+        message_codes: list[str] = []
+        context_codes: list[str] = []
+        message_match_class: str | None = None
+        message_confidence: str | None = None
         top_scam_reason = next((reason for reason in decision.reasons if reason.pack == "scam"), None)
         if top_scam_reason is not None:
             if top_scam_reason.confidence == "high":
-                signal_codes.append("scam_high")
+                message_codes.append("scam_high")
             elif top_scam_reason.confidence == "medium":
-                signal_codes.append("scam_medium")
+                message_codes.append("scam_medium")
+            message_match_class = top_scam_reason.match_class or None
+            message_confidence = top_scam_reason.confidence
         if any(assessment.category == MALICIOUS_LINK_CATEGORY for assessment in link_assessments):
-            signal_codes.append("malicious_link")
+            message_codes.append("malicious_link")
+            message_match_class = message_match_class or "known_malicious_domain"
+            message_confidence = message_confidence or "high"
         elif any(assessment.category == UNKNOWN_SUSPICIOUS_LINK_CATEGORY for assessment in link_assessments):
-            signal_codes.append("unknown_suspicious_link")
+            message_codes.append("unknown_suspicious_link")
+            message_confidence = message_confidence or "medium"
         if snapshot.has_suspicious_attachment:
-            signal_codes.append("suspicious_attachment")
+            message_codes.append("suspicious_attachment")
         if any(SUSPICIOUS_FILE_RE.search(url) for url in snapshot.urls):
-            signal_codes.append("cta_download")
+            message_codes.append("cta_download")
         if scam_context.newcomer_early_message:
-            signal_codes.append("newcomer_early_message")
+            context_codes.append("newcomer_early_message")
         if scam_context.first_message_with_link:
-            signal_codes.append("first_message_link")
+            context_codes.append("first_message_link")
         if scam_context.first_external_link:
-            signal_codes.append("first_external_link")
+            context_codes.append("first_external_link")
         if scam_context.early_risky_activity:
-            signal_codes.append("newcomer_first_messages_risky")
+            context_codes.append("newcomer_first_messages_risky")
         if scam_context.fresh_campaign_cluster_30m >= 3:
-            signal_codes.append("fresh_campaign_cluster_3")
+            context_codes.append("fresh_campaign_cluster_3")
         elif scam_context.fresh_campaign_cluster_20m >= 2:
-            signal_codes.append("fresh_campaign_cluster_2")
+            context_codes.append("fresh_campaign_cluster_2")
         if "path_shape" in scam_context.fresh_campaign_kinds:
-            signal_codes.append("campaign_path_shape")
+            context_codes.append("campaign_path_shape")
+        if "host_family" in scam_context.fresh_campaign_kinds:
+            context_codes.append("campaign_host_family")
         if "lure" in scam_context.fresh_campaign_kinds:
-            signal_codes.append("campaign_lure_reuse")
-        deduped = tuple(dict.fromkeys(signal_codes))
+            context_codes.append("campaign_lure_reuse")
+        ordered_message_codes = tuple(dict.fromkeys(message_codes))
+        ordered_context_codes = tuple(dict.fromkeys(context_codes))
+        deduped = tuple(dict.fromkeys((*ordered_message_codes, *ordered_context_codes)))
         if not deduped:
             return None
         if not any(
@@ -1862,7 +1974,15 @@ class ShieldService:
             for code in deduped
         ):
             return None
-        return ShieldMemberRiskEvidence(signal_codes=deduped, primary_domain=scam_context.primary_domain)
+        return ShieldMemberRiskEvidence(
+            message_codes=ordered_message_codes,
+            context_codes=ordered_context_codes,
+            signal_codes=deduped,
+            message_match_class=message_match_class,
+            message_confidence=message_confidence,
+            scan_source=decision.scan_source,
+            primary_domain=scam_context.primary_domain,
+        )
 
     def _make_pack_match(
         self,
@@ -2386,6 +2506,10 @@ class ShieldService:
         official_framing = bool(SCAM_OFFICIAL_FRAMING_RE.search(snapshot.context_text))
         announcement_framing = bool(SCAM_ANNOUNCEMENT_RE.search(snapshot.context_text))
         partnership_framing = bool(SCAM_PARTNERSHIP_RE.search(snapshot.context_text))
+        support_framing = bool(SCAM_SUPPORT_RE.search(snapshot.context_text))
+        security_notice = bool(SCAM_SECURITY_NOTICE_RE.search(snapshot.context_text))
+        fake_authority = bool(SCAM_FAKE_AUTHORITY_RE.search(snapshot.context_text))
+        qr_setup_lure = bool(SCAM_QR_SETUP_RE.search(snapshot.context_text) or SCAM_QR_SETUP_RE.search(snapshot.context_squashed))
         community_post_framing = "community post" in snapshot.context_text
         urgency = bool(SCAM_URGENCY_RE.search(snapshot.context_text))
         wallet_or_mint = bool(SCAM_CRYPTO_MINT_RE.search(snapshot.context_text) or SCAM_CRYPTO_MINT_RE.search(snapshot.context_squashed))
@@ -2404,6 +2528,10 @@ class ShieldService:
             official_framing=official_framing,
             announcement_framing=announcement_framing,
             partnership_framing=partnership_framing,
+            support_framing=support_framing,
+            security_notice=security_notice,
+            fake_authority=fake_authority,
+            qr_setup_lure=qr_setup_lure,
             community_post_framing=community_post_framing,
             urgency=urgency,
             wallet_or_mint=wallet_or_mint,
@@ -2426,6 +2554,10 @@ class ShieldService:
                 bool(features.bait),
                 bool(features.brand_bait),
                 bool(features.official_like_framing),
+                bool(features.support_framing),
+                bool(features.security_notice),
+                bool(features.fake_authority),
+                bool(features.qr_setup_lure),
                 bool(features.urgency),
                 bool(features.wallet_or_mint),
                 bool(features.login_or_auth_flow or features.social_engineering or features.cta),
@@ -2438,7 +2570,17 @@ class ShieldService:
                 bool(features.early_risky_activity),
                 bool(features.fresh_campaign_cluster_20m >= 2),
                 bool(features.scan_source == "webhook_message" and (features.brand_bait or features.official_like_framing)),
-                bool(features.newcomer_early_message and (features.brand_bait or features.official_like_framing or features.wallet_or_mint or features.login_or_auth_flow)),
+                bool(
+                    features.newcomer_early_message
+                    and (
+                        features.brand_bait
+                        or features.official_like_framing
+                        or features.wallet_or_mint
+                        or features.login_or_auth_flow
+                        or features.security_notice
+                        or features.fake_authority
+                    )
+                ),
             )
         )
         return features.suspicious_link_present and copy_signal_count >= 2 and context_signal_count >= 1
@@ -2524,6 +2666,18 @@ class ShieldService:
             if features.brand_bait:
                 weighted_score += 1
                 reason_bits.append("trusted-brand bait")
+            if features.support_framing:
+                weighted_score += 1
+                reason_bits.append("support or ticket framing")
+            if features.security_notice:
+                weighted_score += 1
+                reason_bits.append("security or session-warning framing")
+            if features.fake_authority:
+                weighted_score += 1
+                reason_bits.append("fake bot, staff, or system framing")
+            if features.qr_setup_lure:
+                weighted_score += 1
+                reason_bits.append("QR, setup, or device-auth lure")
             if features.announcement_framing:
                 weighted_score += 1
                 reason_bits.append("announcement framing")
@@ -2547,7 +2701,17 @@ class ShieldService:
             if features.scan_source == "webhook_message" and (features.brand_bait or features.official_like_framing or features.urgency):
                 weighted_score += 1
                 reason_bits.append("webhook or community-post delivery")
-            if features.newcomer_early_message and (features.brand_bait or features.official_like_framing or features.cta or features.urgency or features.wallet_or_mint or features.login_or_auth_flow):
+            if features.newcomer_early_message and (
+                features.brand_bait
+                or features.official_like_framing
+                or features.cta
+                or features.urgency
+                or features.wallet_or_mint
+                or features.login_or_auth_flow
+                or features.security_notice
+                or features.fake_authority
+                or features.support_framing
+            ):
                 weighted_score += 1
                 reason_bits.append("newcomer early-message delivery")
             if features.first_message_with_link:
@@ -2810,6 +2974,8 @@ class ShieldService:
                 context_bits.append("risky activity in the first newcomer messages")
             if "campaign_path_shape" in signal_codes:
                 context_bits.append("shared risky path shape")
+            if "campaign_host_family" in signal_codes:
+                context_bits.append("rotated risky host family")
             if "campaign_lure_reuse" in signal_codes:
                 context_bits.append("reused lure copy")
             if "fresh_campaign_cluster_2" in signal_codes or "fresh_campaign_cluster_3" in signal_codes:
