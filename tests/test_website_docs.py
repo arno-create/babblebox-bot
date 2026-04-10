@@ -164,6 +164,17 @@ class WebsiteDocsTests(unittest.TestCase):
         self.assertIn("about 200k known malicious domains", index_html)
         self.assertIn("about 200k known malicious domains", help_html)
 
+    def test_shield_docs_describe_private_newcomer_and_campaign_context(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        index_html = (ROOT / "index.html").read_text(encoding="utf-8")
+        help_html = (ROOT / "help.html").read_text(encoding="utf-8")
+
+        self.assertIn("newcomer first-link context", readme)
+        self.assertIn("fresh-campaign reuse", readme)
+        self.assertIn("unknown risky links only escalate after combined local scam evidence", help_html)
+        self.assertIn("newcomer first-link context", help_html)
+        self.assertIn("newcomer first-link context", index_html)
+
     def test_privacy_docs_cover_confessions_storage_and_staff_blind_behavior(self):
         privacy_md = (ROOT / "PRIVACY.md").read_text(encoding="utf-8")
         privacy_html = (ROOT / "privacy.html").read_text(encoding="utf-8")

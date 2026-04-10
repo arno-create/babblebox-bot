@@ -512,6 +512,51 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse([match for match in result.matches if match.pack == "scam"])
         self.assertEqual(result.link_assessments[0].category, "safe")
 
+    async def test_safe_mainstream_link_with_scary_words_but_helpful_context_stays_safe(self):
+        ok, _ = await self.service.set_pack_config(10, "scam", enabled=True, action="delete_log", sensitivity="high")
+        self.assertTrue(ok)
+
+        result = self.service.test_message_details(
+            10,
+            "Discord verify outage update: use https://discordstatus.com for the real status page before you log in again.",
+        )
+
+        self.assertFalse([match for match in result.matches if match.pack == "scam"])
+        self.assertEqual(result.link_assessments[0].category, "safe")
+
+    async def test_mixed_safe_and_suspicious_links_keep_primary_risky_domain(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        author = FakeAuthor(
+            142,
+            created_at=ge.now_utc() - timedelta(hours=2),
+            joined_at=ge.now_utc() - timedelta(minutes=10),
+            avatar=None,
+        )
+        message = FakeMessage(
+            guild=guild,
+            channel=channel,
+            author=author,
+            content=(
+                "Official note: read the docs at https://docs.google.com/document/d/abc123/edit "
+                "and verify your slot at https://mint-pass.live/opensea before the window closes."
+            ),
+        )
+
+        ok, _ = await self.service.set_module_enabled(guild.id, True)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_pack_config(guild.id, "scam", enabled=True, action="delete_log", sensitivity="normal")
+        self.assertTrue(ok)
+
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            decision = await self.service.handle_message(message)
+
+        self.assertIsNotNone(decision)
+        categories = {item.normalized_domain: item.category for item in decision.link_assessments}
+        self.assertEqual(categories["docs.google.com"], "safe")
+        self.assertEqual(categories["mint-pass.live"], "unknown_suspicious")
+        self.assertEqual(decision.member_risk_evidence.primary_domain, "mint-pass.live")
+
     async def test_polished_opensea_mint_lure_hits_scam_pack(self):
         ok, _ = await self.service.set_pack_config(10, "scam", enabled=True, action="delete_log", sensitivity="normal")
         self.assertTrue(ok)
@@ -543,6 +588,33 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue([match for match in result.matches if match.pack == "scam"])
         self.assertEqual(result.link_assessments[0].category, "unknown_suspicious")
+
+    async def test_unknown_suspicious_link_with_weak_copy_stays_link_only(self):
+        ok, _ = await self.service.set_pack_config(10, "scam", enabled=True, action="delete_log", sensitivity="normal")
+        self.assertTrue(ok)
+
+        result = self.service.test_message_details(
+            10,
+            "Reference guide mirror: https://secure-auth-session.click/guide",
+        )
+
+        self.assertEqual(result.link_assessments[0].category, "unknown_suspicious")
+        self.assertFalse([match for match in result.matches if match.pack == "scam"])
+
+    async def test_unknown_suspicious_link_can_emit_low_confidence_risky_unknown_link_lure(self):
+        ok, _ = await self.service.set_pack_config(10, "scam", enabled=True, action="delete_log", sensitivity="high")
+        self.assertTrue(ok)
+
+        result = self.service.test_message_details(
+            10,
+            "Community update: https://verify-hub.live/news",
+        )
+
+        scam_matches = [match for match in result.matches if match.pack == "scam"]
+        self.assertTrue(scam_matches)
+        self.assertEqual(scam_matches[0].match_class, "scam_risky_unknown_link")
+        self.assertEqual(scam_matches[0].confidence, "low")
+        self.assertEqual(scam_matches[0].action, "log")
 
     async def test_known_malicious_domain_matches_scam_pack(self):
         ok, _ = await self.service.set_pack_config(10, "scam", enabled=True, action="delete_log", sensitivity="normal")
@@ -1156,6 +1228,44 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(decision.deleted)
         self.assertIn("could not delete", decision.action_note.lower())
 
+    async def test_alert_embed_includes_evidence_basis_for_unknown_suspicious_lure(self):
+        guild = FakeGuild(10)
+        public_channel = FakeChannel(20)
+        log_channel = FakeChannel(99, name="shield-log")
+        self.bot.register_channel(log_channel)
+        author = FakeAuthor(
+            77,
+            created_at=ge.now_utc() - timedelta(hours=2),
+            joined_at=ge.now_utc() - timedelta(minutes=10),
+            avatar=None,
+            display_name="Support Desk",
+        )
+        message = FakeMessage(
+            guild=guild,
+            channel=public_channel,
+            author=author,
+            content=(
+                "Official community post: Discord members should verify access before the window closes. "
+                "Visit https://secure-auth-session.click/login now."
+            ),
+        )
+
+        ok, _ = await self.service.set_module_enabled(guild.id, True)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_log_channel(guild.id, log_channel.id)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_pack_config(guild.id, "scam", enabled=True, action="delete_log", sensitivity="normal")
+        self.assertTrue(ok)
+
+        decision = await self.service.handle_message(message)
+
+        self.assertIsNotNone(decision)
+        embed = log_channel.sent[0]["embed"]
+        evidence_field = next(field for field in embed.fields if field.name == "Evidence Basis")
+        self.assertIn("Combined suspicion around an unknown risky link.", evidence_field.value)
+        self.assertIn("Primary risky domain: `secure-auth-session.click`", evidence_field.value)
+        self.assertIn("Confidence rose with:", evidence_field.value)
+
     async def test_delete_escalate_triggers_timeout_after_threshold(self):
         guild = FakeGuild(10)
         channel = FakeChannel(20)
@@ -1648,6 +1758,104 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(all(decision is not None for decision in decisions))
         self.assertIsNotNone(decisions[-1].member_risk_evidence)
         self.assertIn("fresh_campaign_cluster_3", decisions[-1].member_risk_evidence.signal_codes)
+
+    async def test_newcomer_first_link_signals_only_fire_once_for_new_messages(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        author = FakeAuthor(
+            301,
+            created_at=ge.now_utc() - timedelta(hours=2),
+            joined_at=ge.now_utc() - timedelta(minutes=15),
+            avatar=None,
+            display_name="Support Desk",
+        )
+        ok, _ = await self.service.set_module_enabled(guild.id, True)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_pack_config(guild.id, "scam", enabled=True, action="delete_log", sensitivity="normal")
+        self.assertTrue(ok)
+        first = FakeMessage(
+            guild=guild,
+            channel=channel,
+            author=author,
+            content="Verify your slot at https://secure-auth-session.click/login before the window closes.",
+        )
+        second = FakeMessage(
+            guild=guild,
+            channel=channel,
+            author=author,
+            content="Members should still verify at https://secure-auth-session.click/login to keep access.",
+        )
+
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            first_decision = await self.service.handle_message(first)
+            second_decision = await self.service.handle_message(second)
+
+        self.assertIn("first_message_link", first_decision.member_risk_evidence.signal_codes)
+        self.assertIn("first_external_link", first_decision.member_risk_evidence.signal_codes)
+        self.assertNotIn("first_message_link", second_decision.member_risk_evidence.signal_codes)
+        self.assertNotIn("first_external_link", second_decision.member_risk_evidence.signal_codes)
+
+    async def test_campaign_lure_reuse_tracks_rotated_domains(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        ok, _ = await self.service.set_module_enabled(guild.id, True)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_pack_config(guild.id, "scam", enabled=True, action="delete_log", sensitivity="normal")
+        self.assertTrue(ok)
+
+        decisions = []
+        for user_id, domain in ((401, "secure-auth-session.click"), (402, "member-access-pass.live")):
+            author = FakeAuthor(
+                user_id,
+                created_at=ge.now_utc() - timedelta(hours=3),
+                joined_at=ge.now_utc() - timedelta(minutes=20),
+                avatar=None,
+            )
+            message = FakeMessage(
+                guild=guild,
+                channel=channel,
+                author=author,
+                content=(
+                    "Official community post: Discord members should verify access before the window closes. "
+                    f"Visit https://{domain}/login now."
+                ),
+            )
+            with patch.object(self.service, "_send_alert", new=AsyncMock()):
+                decisions.append(await self.service.handle_message(message))
+
+        self.assertIn("campaign_lure_reuse", decisions[-1].member_risk_evidence.signal_codes)
+        self.assertIn("fresh_campaign_cluster_2", decisions[-1].member_risk_evidence.signal_codes)
+
+    async def test_campaign_path_shape_tracks_same_domain_login_pattern(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        ok, _ = await self.service.set_module_enabled(guild.id, True)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_pack_config(guild.id, "scam", enabled=True, action="delete_log", sensitivity="normal")
+        self.assertTrue(ok)
+
+        decisions = []
+        for user_id, token in ((501, "abc123"), (502, "xyz789")):
+            author = FakeAuthor(
+                user_id,
+                created_at=ge.now_utc() - timedelta(hours=3),
+                joined_at=ge.now_utc() - timedelta(minutes=20),
+                avatar=None,
+            )
+            message = FakeMessage(
+                guild=guild,
+                channel=channel,
+                author=author,
+                content=(
+                    "Official community post: Members should verify access immediately. "
+                    f"Visit https://secure-auth-session.click/login?token={token} now."
+                ),
+            )
+            with patch.object(self.service, "_send_alert", new=AsyncMock()):
+                decisions.append(await self.service.handle_message(message))
+
+        self.assertIn("campaign_path_shape", decisions[-1].member_risk_evidence.signal_codes)
+        self.assertIn("fresh_campaign_cluster_2", decisions[-1].member_risk_evidence.signal_codes)
 
 
 class ShieldStoreNormalizationTests(unittest.TestCase):

@@ -57,6 +57,44 @@ def default_admin_config(guild_id: int | None = None) -> dict[str, Any]:
     }
 
 
+MEMBER_RISK_SIGNAL_PRIORITY = {
+    "malicious_link": 10,
+    "scam_high": 20,
+    "fresh_campaign_cluster_3": 30,
+    "fresh_campaign_cluster_2": 40,
+    "campaign_lure_reuse": 50,
+    "campaign_path_shape": 60,
+    "unknown_suspicious_link": 70,
+    "scam_medium": 80,
+    "suspicious_attachment": 90,
+    "cta_download": 100,
+    "newcomer_first_messages_risky": 110,
+    "first_external_link": 120,
+    "first_message_link": 130,
+    "newcomer_early_message": 140,
+    "name_impersonation": 150,
+    "name_mixed_script": 160,
+    "account_new_1d": 170,
+    "joined_recently": 180,
+    "account_new_7d": 190,
+    "default_avatar": 200,
+    "name_zero_width": 210,
+    "name_unreadable": 220,
+    "name_separator_heavy": 230,
+}
+
+
+def order_member_risk_signal_codes(values: Any) -> list[str]:
+    if not isinstance(values, (list, tuple, set)):
+        values = []
+    unique = {
+        str(value).strip()
+        for value in values
+        if isinstance(value, str) and str(value).strip()
+    }
+    return sorted(unique, key=lambda value: (MEMBER_RISK_SIGNAL_PRIORITY.get(value, 999), value))[:10]
+
+
 def _resolve_database_url(configured: str | None = None) -> tuple[str, str | None]:
     if configured is not None and configured.strip():
         return configured.strip(), "argument"
@@ -300,15 +338,7 @@ def normalize_member_risk_state(payload: Any) -> dict[str, Any] | None:
         return None
     if risk_level not in {"note", "review", "critical"}:
         return None
-    if not isinstance(signal_codes_raw, (list, tuple, set)):
-        signal_codes_raw = []
-    signal_codes = sorted(
-        {
-            str(value).strip()
-            for value in signal_codes_raw
-            if isinstance(value, str) and str(value).strip()
-        }
-    )[:10]
+    signal_codes = order_member_risk_signal_codes(signal_codes_raw)
     return {
         "guild_id": guild_id,
         "user_id": user_id,

@@ -16,6 +16,7 @@ from babblebox.admin_store import (
     _config_from_row as _admin_config_from_row,
     default_admin_config,
     normalize_admin_config,
+    normalize_member_risk_state,
     normalize_verification_state,
 )
 from babblebox.utility_helpers import deserialize_datetime, serialize_datetime
@@ -215,6 +216,49 @@ class AdminStoreNormalizationTests(unittest.TestCase):
         self.assertEqual(normalized["review_message_id"], 75)
         self.assertEqual(normalized["last_result_code"], "kick:blocked:missing_kick_members")
         self.assertEqual(normalized["last_notified_code"], "kick:blocked:missing_kick_members")
+
+    def test_member_risk_state_normalization_prioritizes_high_signal_codes(self):
+        normalized = normalize_member_risk_state(
+            {
+                "guild_id": 10,
+                "user_id": 20,
+                "first_seen_at": serialize_datetime(ge.now_utc() - timedelta(hours=3)),
+                "last_seen_at": serialize_datetime(ge.now_utc()),
+                "snooze_until": None,
+                "risk_level": "review",
+                "signal_codes": [
+                    "name_separator_heavy",
+                    "default_avatar",
+                    "account_new_7d",
+                    "campaign_path_shape",
+                    "campaign_lure_reuse",
+                    "scam_high",
+                    "malicious_link",
+                    "first_message_link",
+                    "first_external_link",
+                    "newcomer_first_messages_risky",
+                    "fresh_campaign_cluster_3",
+                    "name_zero_width",
+                ],
+                "primary_domain": "mint-pass.live",
+                "review_pending": True,
+                "review_version": 1,
+            }
+        )
+
+        self.assertIsNotNone(normalized)
+        self.assertEqual(
+            normalized["signal_codes"][:6],
+            [
+                "malicious_link",
+                "scam_high",
+                "fresh_campaign_cluster_3",
+                "campaign_lure_reuse",
+                "campaign_path_shape",
+                "newcomer_first_messages_risky",
+            ],
+        )
+        self.assertNotIn("name_separator_heavy", normalized["signal_codes"])
 
     def test_postgres_config_row_decodes_json_string_id_lists(self):
         config = _admin_config_from_row(
@@ -1610,6 +1654,72 @@ class AdminServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await self.store.fetch_member_risk_state(self.guild.id, member.id))
         self.assertEqual(self.log_channel.sent, [])
 
+    async def test_member_risk_recent_account_alone_does_not_punish(self):
+        member = FakeMember(
+            2021,
+            self.guild,
+            roles=[],
+            top_role=FakeRole(5, position=5),
+            created_at=ge.now_utc() - timedelta(hours=6),
+            joined_at=ge.now_utc() - timedelta(days=3),
+            avatar=object(),
+            display_name="normal-user",
+        )
+
+        assessment = self.service._assess_member_risk(
+            member,
+            types.SimpleNamespace(signal_codes=(), primary_domain=None),
+            now=ge.now_utc(),
+        )
+
+        self.assertEqual(assessment.level, "low")
+        self.assertIn("account_new_1d", assessment.signal_codes)
+        self.assertNotIn("joined_recently", assessment.signal_codes)
+
+    async def test_member_risk_mixed_script_name_alone_does_not_punish(self):
+        member = FakeMember(
+            2022,
+            self.guild,
+            roles=[],
+            top_role=FakeRole(5, position=5),
+            created_at=ge.now_utc() - timedelta(days=90),
+            joined_at=ge.now_utc() - timedelta(days=30),
+            avatar=object(),
+            display_name="Admіn",
+        )
+
+        assessment = self.service._assess_member_risk(
+            member,
+            types.SimpleNamespace(signal_codes=(), primary_domain=None),
+            now=ge.now_utc(),
+        )
+
+        self.assertEqual(assessment.level, "low")
+        self.assertIn("name_mixed_script", assessment.signal_codes)
+
+    async def test_member_risk_context_only_first_link_does_not_log_or_queue(self):
+        await self._configure_member_risk(with_logs=True, mode="review")
+        member = FakeMember(
+            2023,
+            self.guild,
+            roles=[],
+            top_role=FakeRole(5, position=5),
+            created_at=ge.now_utc() - timedelta(hours=4),
+            joined_at=ge.now_utc() - timedelta(minutes=15),
+            avatar=None,
+            display_name="new-user",
+        )
+        self.guild.members[member.id] = member
+        message = types.SimpleNamespace(guild=self.guild, author=member, webhook_id=None)
+
+        await self.service.handle_member_risk_message(
+            message,
+            self._member_risk_decision("newcomer_early_message", "first_message_link", "first_external_link", "newcomer_first_messages_risky"),
+        )
+
+        self.assertIsNone(await self.store.fetch_member_risk_state(self.guild.id, member.id))
+        self.assertEqual(self.log_channel.sent, [])
+
     async def test_member_risk_message_creates_review_for_new_account_and_risky_message(self):
         await self._configure_member_risk(with_logs=True, mode="review")
         member = FakeMember(
@@ -1637,6 +1747,40 @@ class AdminServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(record["risk_level"], "review")
         self.assertIsNotNone(queue)
         self.assertEqual(self.log_channel.sent[0]["embed"].title, "Member Risk Review Queue")
+
+    async def test_member_risk_mixed_script_name_with_risky_message_queues_review(self):
+        await self._configure_member_risk(with_logs=True, mode="review")
+        member = FakeMember(
+            2031,
+            self.guild,
+            roles=[],
+            top_role=FakeRole(5, position=5),
+            created_at=ge.now_utc() - timedelta(hours=4),
+            joined_at=ge.now_utc() - timedelta(minutes=20),
+            avatar=None,
+            display_name="Admіn Support",
+        )
+        self.guild.members[member.id] = member
+        message = types.SimpleNamespace(guild=self.guild, author=member, webhook_id=None)
+
+        await self.service.handle_member_risk_message(
+            message,
+            self._member_risk_decision(
+                "scam_medium",
+                "unknown_suspicious_link",
+                "first_external_link",
+                "newcomer_first_messages_risky",
+            ),
+        )
+
+        record = await self.store.fetch_member_risk_state(self.guild.id, member.id)
+        self.assertIsNotNone(record)
+        self.assertIn("name_mixed_script", record["signal_codes"])
+        queue_embed = self.log_channel.sent[0]["embed"]
+        field_names = [field.name for field in queue_embed.fields]
+        self.assertIn("Message Evidence", field_names)
+        self.assertIn("Identity Hints", field_names)
+        self.assertIn("Confidence Risers", field_names)
 
     async def test_member_risk_trusted_role_bypasses_message_lane(self):
         await self._configure_member_risk(with_logs=True, mode="review")
@@ -1720,6 +1864,64 @@ class AdminServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(record["review_pending"])
         self.assertEqual(self.log_channel.sent[0]["embed"].title, "Member Risk Review Queue")
 
+    async def test_member_risk_review_or_kick_permission_failure_falls_back_to_review(self):
+        await self._configure_member_risk(with_logs=True, mode="review_or_kick")
+        self.guild.me.guild_permissions = FakePermissions(
+            manage_roles=True,
+            kick_members=False,
+            view_channel=True,
+            send_messages=True,
+            embed_links=True,
+        )
+        member = FakeMember(
+            2061,
+            self.guild,
+            roles=[],
+            top_role=FakeRole(5, position=5),
+            created_at=ge.now_utc() - timedelta(hours=2),
+            joined_at=ge.now_utc() - timedelta(minutes=10),
+            avatar=None,
+            display_name="Official Support",
+        )
+        self.guild.members[member.id] = member
+        message = types.SimpleNamespace(guild=self.guild, author=member, webhook_id=None)
+
+        await self.service.handle_member_risk_message(
+            message,
+            self._member_risk_decision("scam_high", "malicious_link", "first_external_link", "fresh_campaign_cluster_2"),
+        )
+
+        record = await self.store.fetch_member_risk_state(self.guild.id, member.id)
+        self.assertFalse(member.kicked)
+        self.assertIsNotNone(record)
+        self.assertTrue(record["review_pending"])
+        self.assertEqual(self.log_channel.sent[0]["embed"].title, "Member Risk Review Queue")
+
+    async def test_member_risk_log_mode_keeps_strong_cases_private_and_non_destructive(self):
+        await self._configure_member_risk(with_logs=True, mode="log")
+        member = FakeMember(
+            2062,
+            self.guild,
+            roles=[],
+            top_role=FakeRole(5, position=5),
+            created_at=ge.now_utc() - timedelta(hours=2),
+            joined_at=ge.now_utc() - timedelta(minutes=10),
+            avatar=None,
+            display_name="Support Desk",
+        )
+        self.guild.members[member.id] = member
+        message = types.SimpleNamespace(guild=self.guild, author=member, webhook_id=None)
+
+        await self.service.handle_member_risk_message(
+            message,
+            self._member_risk_decision("scam_high", "malicious_link", "first_external_link", "fresh_campaign_cluster_2"),
+        )
+
+        self.assertFalse(member.kicked)
+        self.assertIsNone(await self.store.fetch_member_risk_state(self.guild.id, member.id))
+        self.assertEqual(self.log_channel.sent[-1]["embed"].title, "Member Risk Note")
+        self.assertIn("Known malicious-link intel", self.log_channel.sent[-1]["embed"].description)
+
     async def test_member_risk_review_action_delay_and_ignore(self):
         await self._configure_member_risk(with_logs=True, mode="review")
         member = FakeMember(
@@ -1786,3 +1988,54 @@ class AdminServiceTests(unittest.IsolatedAsyncioTestCase):
         await self.service.handle_member_join(member)
 
         self.assertIsNone(await self.store.fetch_member_risk_state(self.guild.id, member.id))
+
+    async def test_member_risk_note_dedupes_repeated_identity_only_noise(self):
+        await self._configure_member_risk(with_logs=True, mode="review")
+        member = FakeMember(
+            209,
+            self.guild,
+            roles=[],
+            top_role=FakeRole(5, position=5),
+            created_at=ge.now_utc() - timedelta(hours=2),
+            joined_at=ge.now_utc() - timedelta(minutes=30),
+            avatar=None,
+            display_name="Official Support",
+        )
+        self.guild.members[member.id] = member
+
+        await self.service.handle_member_join(member)
+        await self.service.handle_member_join(member)
+
+        self.assertEqual(len(self.log_channel.sent), 1)
+        field_names = [field.name for field in self.log_channel.sent[0]["embed"].fields]
+        self.assertIn("Message Evidence", field_names)
+        self.assertIn("Identity Hints", field_names)
+
+    async def test_member_risk_does_not_touch_profile_bio_surfaces(self):
+        class NoBioMember(FakeMember):
+            @property
+            def bio(self):
+                raise AssertionError("bio should not be inspected")
+
+            @property
+            def about_me(self):
+                raise AssertionError("about_me should not be inspected")
+
+        member = NoBioMember(
+            210,
+            self.guild,
+            roles=[],
+            top_role=FakeRole(5, position=5),
+            created_at=ge.now_utc() - timedelta(hours=2),
+            joined_at=ge.now_utc() - timedelta(minutes=30),
+            avatar=None,
+            display_name="Official Support",
+        )
+
+        assessment = self.service._assess_member_risk(
+            member,
+            types.SimpleNamespace(signal_codes=(), primary_domain=None),
+            now=ge.now_utc(),
+        )
+
+        self.assertEqual(assessment.level, "note")

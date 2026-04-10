@@ -6,6 +6,7 @@ import contextlib
 import hashlib
 import re
 import types
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
@@ -24,6 +25,7 @@ from babblebox.admin_store import (
     VALID_VERIFICATION_LOGIC,
     default_admin_config,
     normalize_admin_config,
+    order_member_risk_signal_codes,
 )
 from babblebox.text_safety import normalize_plain_text
 from babblebox.utility_helpers import deserialize_datetime, format_duration_brief, parse_duration_string, serialize_datetime
@@ -112,6 +114,57 @@ VERIFICATION_REVIEW_DELAY_SECONDS = 24 * 3600
 ZERO_WIDTH_NAME_RE = re.compile(r"[\u200b-\u200f\u2060\ufeff]")
 SEPARATOR_HEAVY_NAME_RE = re.compile(r"[_\-.]{3,}|[|/\\]{2,}")
 IMPERSIONATION_NAME_RE = re.compile(r"(?i)\b(?:admin|moderator|mod|support|official|staff|team)\b")
+MIXED_SCRIPT_CONFUSABLE_SCRIPTS = frozenset({"latin", "cyrillic", "greek"})
+MEMBER_RISK_MESSAGE_SIGNAL_CODES = frozenset(
+    {
+        "scam_high",
+        "scam_medium",
+        "malicious_link",
+        "unknown_suspicious_link",
+        "suspicious_attachment",
+        "cta_download",
+        "newcomer_early_message",
+        "first_message_link",
+        "first_external_link",
+        "newcomer_first_messages_risky",
+        "fresh_campaign_cluster_2",
+        "fresh_campaign_cluster_3",
+        "campaign_path_shape",
+        "campaign_lure_reuse",
+    }
+)
+MEMBER_RISK_CORE_MESSAGE_SIGNAL_CODES = frozenset(
+    {
+        "scam_high",
+        "scam_medium",
+        "malicious_link",
+        "unknown_suspicious_link",
+        "suspicious_attachment",
+        "cta_download",
+    }
+)
+MEMBER_RISK_IDENTITY_SIGNAL_CODES = frozenset(
+    {
+        "account_new_1d",
+        "account_new_7d",
+        "default_avatar",
+        "joined_recently",
+        "name_zero_width",
+        "name_separator_heavy",
+        "name_unreadable",
+        "name_impersonation",
+        "name_mixed_script",
+    }
+)
+MEMBER_RISK_STRONG_IDENTITY_HINT_CODES = frozenset(
+    {
+        "name_zero_width",
+        "name_separator_heavy",
+        "name_unreadable",
+        "name_impersonation",
+        "name_mixed_script",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -256,6 +309,8 @@ class MemberRiskAssessment:
     identity_score: int
     message_score: int
     signal_codes: tuple[str, ...]
+    identity_codes: tuple[str, ...] = ()
+    message_codes: tuple[str, ...] = ()
     primary_domain: str | None = None
 
 
@@ -1580,6 +1635,21 @@ class AdminService:
             return joined_at
         return deserialize_datetime(joined_at) if joined_at is not None else None
 
+    def _display_name_script_buckets(self, value: str) -> set[str]:
+        scripts: set[str] = set()
+        for character in value:
+            if not character.isalpha():
+                continue
+            try:
+                name = unicodedata.name(character)
+            except ValueError:
+                continue
+            for script in MIXED_SCRIPT_CONFUSABLE_SCRIPTS:
+                if script.upper() in name:
+                    scripts.add(script)
+                    break
+        return scripts
+
     def _member_name_signals(self, member: discord.Member) -> list[str]:
         display_name = str(getattr(member, "display_name", "") or "").strip()
         if not display_name:
@@ -1594,6 +1664,8 @@ class AdminService:
             signals.append("name_impersonation")
         if normalized and len(re.sub(r"[^a-z0-9]", "", normalized.lower())) <= 2 and len(normalized) >= 4:
             signals.append("name_unreadable")
+        if len(self._display_name_script_buckets(display_name)) >= 2:
+            signals.append("name_mixed_script")
         return signals
 
     def _member_identity_signal_codes(self, member: discord.Member, *, now: datetime) -> list[str]:
@@ -1624,6 +1696,7 @@ class AdminService:
             "name_separator_heavy": 1,
             "name_unreadable": 1,
             "name_impersonation": 2,
+            "name_mixed_script": 1,
             "scam_high": 4,
             "scam_medium": 3,
             "malicious_link": 4,
@@ -1631,10 +1704,42 @@ class AdminService:
             "suspicious_attachment": 2,
             "cta_download": 2,
             "newcomer_early_message": 1,
+            "first_message_link": 1,
+            "first_external_link": 1,
+            "newcomer_first_messages_risky": 1,
             "fresh_campaign_cluster_2": 1,
             "fresh_campaign_cluster_3": 2,
+            "campaign_path_shape": 1,
+            "campaign_lure_reuse": 1,
         }
         return weights.get(code, 0)
+
+    def _split_member_risk_signal_codes(
+        self,
+        signal_codes: list[str] | tuple[str, ...],
+    ) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+        ordered = order_member_risk_signal_codes(signal_codes)
+        message_codes: list[str] = []
+        identity_codes: list[str] = []
+        other_codes: list[str] = []
+        for code in ordered:
+            if code in MEMBER_RISK_MESSAGE_SIGNAL_CODES:
+                message_codes.append(code)
+            elif code in MEMBER_RISK_IDENTITY_SIGNAL_CODES:
+                identity_codes.append(code)
+            else:
+                other_codes.append(code)
+        return tuple(message_codes), tuple(identity_codes), tuple(other_codes)
+
+    def _member_risk_basis_text(self, message_codes: list[str] | tuple[str, ...]) -> str:
+        message_code_set = set(message_codes)
+        if "malicious_link" in message_code_set:
+            return "Known malicious-link intel contributed to this case."
+        if "unknown_suspicious_link" in message_code_set:
+            return "An unknown risky link only escalated after combined local scam evidence."
+        if message_code_set & {"scam_high", "scam_medium", "suspicious_attachment", "cta_download"}:
+            return "Combined local message heuristics drove this case."
+        return "This case is based on low-confidence member context only."
 
     def _assess_member_risk(
         self,
@@ -1644,14 +1749,15 @@ class AdminService:
         now: datetime,
     ) -> MemberRiskAssessment:
         identity_codes = self._member_identity_signal_codes(member, now=now)
-        message_codes = list(getattr(evidence, "signal_codes", ()) or ())
+        message_codes = order_member_risk_signal_codes(getattr(evidence, "signal_codes", ()) or ())
         identity_score = sum(self._member_risk_signal_weight(code) for code in identity_codes)
         message_score = sum(self._member_risk_signal_weight(code) for code in message_codes)
-        signal_codes = tuple(sorted(set(identity_codes + message_codes)))
+        signal_codes = tuple(order_member_risk_signal_codes([*message_codes, *identity_codes]))
         level = "low"
         has_strong_message = any(code in {"scam_high", "malicious_link"} for code in message_codes)
-        if message_score <= 0:
-            if identity_score >= 3:
+        has_core_message = any(code in MEMBER_RISK_CORE_MESSAGE_SIGNAL_CODES for code in message_codes)
+        if message_score <= 0 or not has_core_message:
+            if identity_score >= 3 and any(code in MEMBER_RISK_STRONG_IDENTITY_HINT_CODES for code in identity_codes):
                 level = "note"
         else:
             total = identity_score + message_score
@@ -1666,6 +1772,8 @@ class AdminService:
             identity_score=identity_score,
             message_score=message_score,
             signal_codes=signal_codes,
+            identity_codes=tuple(order_member_risk_signal_codes(identity_codes)),
+            message_codes=tuple(message_codes),
             primary_domain=getattr(evidence, "primary_domain", None),
         )
 
@@ -1917,20 +2025,61 @@ class AdminService:
             "name_separator_heavy": "separator-heavy name",
             "name_unreadable": "unreadable name pattern",
             "name_impersonation": "impersonation-like name",
+            "name_mixed_script": "mixed-script display name",
             "scam_high": "high-confidence scam message",
             "scam_medium": "medium-confidence scam message",
             "malicious_link": "known malicious link",
-            "unknown_suspicious_link": "unknown suspicious link",
+            "unknown_suspicious_link": "unknown risky link",
             "suspicious_attachment": "suspicious attachment + CTA",
             "cta_download": "download or login CTA",
-            "newcomer_early_message": "newcomer risky first activity",
+            "newcomer_early_message": "recent join or new account context",
+            "first_message_link": "first newcomer message carried a link",
+            "first_external_link": "first newcomer external link",
+            "newcomer_first_messages_risky": "risky activity in first newcomer messages",
             "fresh_campaign_cluster_2": "repeat fresh-account campaign",
             "fresh_campaign_cluster_3": "multi-account fresh campaign",
+            "campaign_path_shape": "shared risky path shape",
+            "campaign_lure_reuse": "reused lure copy",
         }
-        rendered = [labels.get(code, code.replace("_", " ")) for code in signal_codes[:5]]
-        if len(signal_codes) > 5:
-            rendered.append(f"+{len(signal_codes) - 5} more")
+        ordered = order_member_risk_signal_codes(signal_codes)
+        rendered = [labels.get(code, code.replace("_", " ")) for code in ordered[:5]]
+        if len(ordered) > 5:
+            rendered.append(f"+{len(ordered) - 5} more")
         return ", ".join(rendered) if rendered else "No evidence recorded."
+
+    def _member_risk_signal_field(self, signal_codes: list[str] | tuple[str, ...], *, empty_text: str) -> str:
+        ordered = order_member_risk_signal_codes(signal_codes)
+        if not ordered:
+            return empty_text
+        rendered = [f"- {self._member_risk_signal_summary([code])}" for code in ordered[:4]]
+        if len(ordered) > 4:
+            rendered.append(f"- +{len(ordered) - 4} more")
+        return "\n".join(rendered)
+
+    def _member_risk_context_field(self, signal_codes: list[str] | tuple[str, ...]) -> str:
+        ordered = order_member_risk_signal_codes(signal_codes)
+        if not ordered:
+            return "No extra confidence multipliers recorded."
+        rendered = [f"- {self._member_risk_signal_summary([code])}" for code in ordered[:3]]
+        if len(ordered) > 3:
+            rendered.append(f"- +{len(ordered) - 3} more")
+        return "\n".join(rendered)
+
+    def _member_risk_evidence_fields(self, signal_codes: list[str] | tuple[str, ...]) -> tuple[str, str, str]:
+        message_codes, identity_codes, other_codes = self._split_member_risk_signal_codes(signal_codes)
+        core_message_codes = [
+            code
+            for code in message_codes
+            if code in {"malicious_link", "unknown_suspicious_link", "scam_high", "scam_medium", "suspicious_attachment", "cta_download"}
+        ]
+        context_codes = [code for code in message_codes if code not in core_message_codes]
+        if other_codes:
+            context_codes.extend(other_codes)
+        return (
+            self._member_risk_signal_field(core_message_codes, empty_text="No message evidence recorded."),
+            self._member_risk_signal_field(identity_codes, empty_text="No identity hints recorded."),
+            self._member_risk_context_field(context_codes),
+        )
 
     def build_member_risk_removal_embed(
         self,
@@ -2032,16 +2181,20 @@ class AdminService:
             if member is not None
             else f"<@{current['user_id']}> (`{current['user_id']}`)"
         )
+        message_evidence, identity_hints, confidence_risers = self._member_risk_evidence_fields(list(current.get("signal_codes", [])))
         embed.add_field(name="Current Case", value=member_label, inline=False)
         embed.add_field(
             name="Risk",
             value=(
                 f"Level: **{str(current.get('risk_level', 'review')).title()}**\n"
                 f"Mode: **{MEMBER_RISK_MODE_LABELS.get(compiled.member_risk_mode, compiled.member_risk_mode.title())}**\n"
-                f"Signals: {self._member_risk_signal_summary(list(current.get('signal_codes', [])))}"
+                f"Basis: {self._member_risk_basis_text(list(current.get('signal_codes', [])))}"
             ),
             inline=False,
         )
+        embed.add_field(name="Message Evidence", value=message_evidence, inline=False)
+        embed.add_field(name="Identity Hints", value=identity_hints, inline=False)
+        embed.add_field(name="Confidence Risers", value=confidence_risers, inline=False)
         if current.get("primary_domain"):
             embed.add_field(name="Primary Domain", value=f"`{current['primary_domain']}`", inline=False)
         if member is not None:
@@ -3463,15 +3616,21 @@ class AdminService:
         if now - self._member_risk_note_dedup.get(dedup_key, 0.0) < MEMBER_RISK_NOTE_DEDUP_SECONDS:
             return
         self._member_risk_note_dedup[dedup_key] = now
+        message_evidence, identity_hints, confidence_risers = self._member_risk_evidence_fields(assessment.signal_codes)
         embed = ge.make_status_embed(
             "Member Risk Note",
             (
                 f"{member.mention} showed low-confidence suspicious-member signals, but Babblebox did not restrict them.\n"
-                f"Signals: {self._member_risk_signal_summary(list(assessment.signal_codes))}."
+                f"Basis: {self._member_risk_basis_text(assessment.message_codes or assessment.signal_codes)}"
             ),
             tone="info",
             footer="Babblebox Admin | Suspicious-member review",
         )
+        embed.add_field(name="Message Evidence", value=message_evidence, inline=False)
+        embed.add_field(name="Identity Hints", value=identity_hints, inline=False)
+        embed.add_field(name="Confidence Risers", value=confidence_risers, inline=False)
+        if assessment.primary_domain:
+            embed.add_field(name="Primary Domain", value=f"`{assessment.primary_domain}`", inline=False)
         await self.send_log(guild, compiled, embed=embed, alert=False)
 
     def _build_member_risk_state(

@@ -950,7 +950,7 @@ class AdminCog(commands.Cog):
                 f"Enabled: **{'Yes' if config['member_risk_enabled'] else 'No'}**\n"
                 f"Mode: **{MEMBER_RISK_MODE_LABELS.get(config['member_risk_mode'], config['member_risk_mode'].title())}**\n"
                 "Weak profile signals only add suspicion.\n"
-                "Review and kick decisions require risky message or campaign evidence."
+                "Review and kick decisions require risky message evidence, with newcomer first-link or campaign context acting only as private multipliers."
             ),
             inline=False,
         )
@@ -997,7 +997,8 @@ class AdminCog(commands.Cog):
             name="Signals",
             value=(
                 "Uses compact account-age, avatar-state, and display-name risk hints only as suspicion multipliers.\n"
-                "Babblebox only escalates when those hints combine with risky link, scam-copy, newcomer, or fresh-campaign evidence."
+                "Babblebox only escalates when those hints combine with risky link, scam-copy, newcomer first-link, or fresh-campaign evidence.\n"
+                "Discord profile bios or about-me text are not inspected in the current runtime."
             ),
             inline=False,
         )

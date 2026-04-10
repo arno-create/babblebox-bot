@@ -133,7 +133,7 @@ Babblebox is intentionally compact:
 - bundled local link safety with safe-domain families, suspicious-domain gating, and no external provider requirement
 - local-first malicious-link blocking with a feed of ~200k known malicious domains
 - in-scope Shield coverage for new messages, meaningful edits, and webhook/community-post style delivery
-- private suspicious-member review that only escalates when risky message signals combine with bounded account-age, avatar-state, or display-name suspicion
+- private suspicious-member review that only escalates when risky message signals combine with bounded account-age, avatar-state, display-name suspicion, newcomer first-link context, or fresh-campaign reuse
 - optional AI-assisted second-pass review for moderator context only
 - AI stays off by default and is currently limited to guild `1322933864360050688`
 - log-first defaults
@@ -447,7 +447,7 @@ Babblebox Shield is intentionally compact and conservative:
 - repeated-hit escalation is in-memory and bounded
 - custom regex is intentionally not accepted; advanced mode uses safe text matching only
 - in-scope scans can cover new posts, meaningful edits, embed text, attachment labels, forwarded message snapshots, and webhook/community-post style delivery
-- local scam decisions combine host/path/query risk with brand bait, CTA wording, urgency, and explicit warning/education suppressors
+- local scam decisions combine host/path/query risk with brand bait, official-looking framing, CTA wording, urgency, newcomer first-link context, fresh-campaign reuse, and explicit warning/education suppressors
 - suspicious-member review reuses Admin's compact review queues and only combines locally flagged message or link signals with bounded account creation time, avatar state, and display-name risk hints
 - profile bios or about-me text are not part of the suspicious-member lane in the current implementation
 - optional AI review never becomes the primary moderation engine
