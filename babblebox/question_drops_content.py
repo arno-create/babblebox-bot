@@ -38,6 +38,13 @@ QUESTION_DROP_DIFFICULTY_PROFILE_LABELS = {
     "smart": "More medium and hard, less farmable",
     "hard": "Noticeably tougher lane",
 }
+QUESTION_DROP_ANSWER_ATTEMPT_LIMITS = {
+    "multiple_choice": 1,
+    "boolean": 1,
+    "text": 3,
+    "numeric": 3,
+    "ordered_tokens": 3,
+}
 
 TRUE_ALIASES = {"true", "t", "yes", "y", "correct"}
 FALSE_ALIASES = {"false", "f", "no", "n", "incorrect"}
@@ -649,19 +656,45 @@ def render_answer_summary(answer_spec: dict[str, Any]) -> str:
     return "unknown"
 
 
+def answer_attempt_limit(answer_spec: dict[str, Any]) -> int:
+    answer_type = str(answer_spec.get("type") or "").strip().casefold()
+    return int(QUESTION_DROP_ANSWER_ATTEMPT_LIMITS.get(answer_type, 3))
+
+
+def _attempt_limit_instruction_prefix(answer_spec: dict[str, Any]) -> str:
+    limit = answer_attempt_limit(answer_spec)
+    label = "1 attempt" if limit == 1 else f"{limit} attempts"
+    return f"You get **{label}**."
+
+
 def render_answer_instruction(answer_spec: dict[str, Any]) -> str:
     answer_type = answer_spec.get("type")
     if answer_type == "multiple_choice":
-        return "Reply is optional. Send a clean same-channel answer with the option text, or use the letter: `C` or `option c`."
+        return (
+            f"{_attempt_limit_instruction_prefix(answer_spec)} "
+            "Reply is optional. Send a clean same-channel answer with the option text, or use the letter: `C` or `option c`."
+        )
     if answer_type == "numeric":
         if _numeric_words_allowed(answer_spec):
-            return "Reply is optional. Send a clean same-channel answer with just the number. Digits work, and simple number words count for whole-number answers."
-        return "Reply is optional. Send a clean same-channel answer with just the number. Use digits for decimals, like `14.4`."
+            return (
+                f"{_attempt_limit_instruction_prefix(answer_spec)} "
+                "Reply is optional. Send a clean same-channel answer with just the number. Digits work, and simple number words count for whole-number answers."
+            )
+        return (
+            f"{_attempt_limit_instruction_prefix(answer_spec)} "
+            "Reply is optional. Send a clean same-channel answer with just the number. Use digits for decimals, like `14.4`."
+        )
     if answer_type == "boolean":
-        return "Reply is optional. Send a clean same-channel answer like `true` / `false` or `yes` / `no`."
+        return (
+            f"{_attempt_limit_instruction_prefix(answer_spec)} "
+            "Reply is optional. Send a clean same-channel answer like `true` / `false` or `yes` / `no`."
+        )
     if answer_type == "ordered_tokens":
-        return "Reply is optional. Send a clean same-channel answer with the full sequence in order, like `red, blue, green`."
-    return "Reply is optional. Send a short clean same-channel guess."
+        return (
+            f"{_attempt_limit_instruction_prefix(answer_spec)} "
+            "Reply is optional. Send a clean same-channel answer with the full sequence in order, like `red, blue, green`."
+        )
+    return f"{_attempt_limit_instruction_prefix(answer_spec)} Reply is optional. Send a short clean same-channel guess."
 
 
 def answer_points_for_difficulty(difficulty: int) -> int:
