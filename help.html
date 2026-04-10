@@ -431,48 +431,6 @@
       color: var(--muted);
     }
 
-    footer {
-      padding: 26px 0 46px;
-    }
-
-    .footer-row {
-      display: flex;
-      justify-content: space-between;
-      gap: 18px;
-      align-items: flex-start;
-      padding-top: 24px;
-      border-top: 1px solid rgba(169, 190, 255, 0.1);
-    }
-
-    .footer-meta {
-      display: grid;
-      gap: 16px;
-      justify-items: end;
-    }
-
-    .footer-label {
-      color: rgba(226, 233, 255, 0.7);
-      font-size: 0.72rem;
-      font-weight: 800;
-      letter-spacing: 0.14em;
-      text-transform: uppercase;
-    }
-
-    .footer-links {
-      display: flex;
-      gap: 18px;
-      flex-wrap: wrap;
-      justify-content: flex-end;
-    }
-
-    .footer-links a {
-      color: var(--muted);
-    }
-
-    .footer-links a:hover {
-      color: var(--text);
-    }
-
     @media (max-width: 1180px) {
       .hero,
       .guide-band-top,
@@ -517,15 +475,6 @@
         width: 100%;
       }
 
-      .footer-row {
-        flex-direction: column;
-      }
-
-      .footer-meta,
-      .footer-links {
-        justify-items: start;
-        justify-content: flex-start;
-      }
     }
 
     @media (prefers-reduced-motion: reduce) {
@@ -882,23 +831,41 @@
       </div>
     </main>
 
-    <footer>
+    <footer class="site-footer">
       <div class="container">
-        <div class="footer-row">
-          <div>
+        <div class="site-footer-grid">
+          <div class="site-footer-brand">
+            <div class="site-footer-kicker">Compact Discord tooling</div>
             <strong>Babblebox</strong>
-            <div>Open-source Discord bot by Arno.</div>
+            <p>
+              Party games, everyday utilities, and private-first moderation for servers that want a calmer bot footprint.
+            </p>
+            <div class="site-footer-note">Open-source Discord bot by Arno.</div>
           </div>
-          <div class="footer-meta">
-            <div>
-              <div class="footer-label">Links</div>
-              <div class="footer-links">
+          <div class="site-footer-meta">
+            <div class="site-footer-column">
+              <div class="site-footer-label">Product</div>
+              <div class="site-footer-links">
                 <a href="index.html">Main Website</a>
                 <a href="help.html">Help</a>
                 <a href="privacy.html">Privacy Policy</a>
                 <a href="terms.html">Terms of Service</a>
-                <a href="https://github.com/arno-create/babblebox-bot" target="_blank" rel="noopener noreferrer">GitHub</a>
+              </div>
+            </div>
+            <div class="site-footer-column">
+              <div class="site-footer-label">Project</div>
+              <div class="site-footer-links">
+                <a href="https://discord.com/oauth2/authorize?client_id=1480903089518022739" target="_blank" rel="noopener noreferrer">Invite</a>
                 <a href="https://discord.com/servers/inevitable-friendship-1322933864360050688" target="_blank" rel="noopener noreferrer">Support Server</a>
+                <a href="https://github.com/arno-create/babblebox-bot" target="_blank" rel="noopener noreferrer">GitHub</a>
+                <a href="https://arno-create.github.io/Bdayblaze/" target="_blank" rel="noopener noreferrer">Bdayblaze</a>
+              </div>
+            </div>
+            <div class="site-footer-column">
+              <div class="site-footer-label">Social</div>
+              <div class="site-footer-links">
+                <a href="https://x.com/arno__if" target="_blank" rel="noopener noreferrer">X</a>
+                <a href="https://instagram.com/arno.if" target="_blank" rel="noopener noreferrer">Instagram</a>
               </div>
             </div>
           </div>

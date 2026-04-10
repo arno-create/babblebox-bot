@@ -1286,6 +1286,7 @@ class AdminCog(commands.Cog):
                     f"Level: {str(risk_state.get('risk_level', 'review')).title()}",
                     f"Review pending: {'Yes' if risk_state.get('review_pending') else 'No'}",
                     f"Signals: {self.service._member_risk_signal_summary(list(risk_state.get('signal_codes', [])))}",
+                    f"Activity:\n{self.service._member_risk_activity_field(risk_state)}",
                 ]
             )
             if risk_state.get("primary_domain"):

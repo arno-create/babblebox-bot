@@ -16,6 +16,8 @@ class WebsiteDocsTests(unittest.TestCase):
                 self.assertIn("data-nav-toggle", html)
                 self.assertIn("data-nav-panel", html)
                 self.assertIn("site-nav-shell", html)
+                self.assertIn("site-footer", html)
+                self.assertIn("site-footer-grid", html)
 
     def test_help_page_exists_and_covers_required_sections(self):
         help_html = (ROOT / "help.html").read_text(encoding="utf-8")
@@ -78,6 +80,19 @@ class WebsiteDocsTests(unittest.TestCase):
         self.assertIn('href="help.html"', index_html)
         self.assertIn('href="help.html"', privacy_html)
         self.assertIn('href="help.html"', terms_html)
+
+    def test_bday_project_link_target_stays_intentional(self):
+        target = 'href="https://arno-create.github.io/Bdayblaze/"'
+
+        index_html = (ROOT / "index.html").read_text(encoding="utf-8")
+        help_html = (ROOT / "help.html").read_text(encoding="utf-8")
+        privacy_html = (ROOT / "privacy.html").read_text(encoding="utf-8")
+        terms_html = (ROOT / "terms.html").read_text(encoding="utf-8")
+
+        self.assertIn(target, index_html)
+        self.assertIn(target, help_html)
+        self.assertIn(target, privacy_html)
+        self.assertIn(target, terms_html)
 
     def test_sitemap_includes_help_page(self):
         sitemap = (ROOT / "sitemap.xml").read_text(encoding="utf-8")

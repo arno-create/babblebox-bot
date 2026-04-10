@@ -272,6 +272,43 @@ class AdminCogSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(ctx.send_calls[0]["ephemeral"])
         self.assertIn("Manage Server", ctx.send_calls[0]["embed"].description)
 
+    async def test_member_status_embed_surfaces_member_risk_activity_context(self):
+        member = FakeMember(25, self.guild, roles=[])
+        self.guild.members[member.id] = member
+        now = ge.now_utc()
+        await self.cog.service.store.upsert_member_risk_state(
+            {
+                "guild_id": self.guild.id,
+                "user_id": member.id,
+                "first_seen_at": now,
+                "last_seen_at": now,
+                "snooze_until": None,
+                "risk_level": "review",
+                "signal_codes": ["scam_medium", "campaign_host_family"],
+                "primary_domain": "secure-auth-session.click",
+                "review_pending": True,
+                "review_version": 1,
+                "review_message_channel_id": self.log_channel.id,
+                "review_message_id": 1001,
+                "last_result_code": None,
+                "last_result_at": None,
+                "last_notified_code": None,
+                "last_notified_at": None,
+                "message_event_count": 2,
+                "latest_message_basis": "Official-looking brand lure",
+                "latest_message_confidence": "medium",
+                "latest_scan_source": "message_edit",
+            }
+        )
+
+        embed = await self.cog._member_status_embed(member)
+
+        risk_field = next(field for field in embed.fields if field.name == "Suspicious-Member Review")
+        self.assertIn("Activity:", risk_field.value)
+        self.assertIn("Message events: 2 hits", risk_field.value)
+        self.assertIn("Edited message | Medium confidence", risk_field.value)
+        self.assertIn("shared risky host pattern", risk_field.value)
+
     async def test_admin_followup_command_updates_config(self):
         ctx = FakeContext(
             interaction=FakeInteraction(),

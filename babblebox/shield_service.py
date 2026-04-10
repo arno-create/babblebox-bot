@@ -713,9 +713,9 @@ def _member_datetime(value: Any):
 def _campaign_kind_label(kind: str) -> str:
     labels = {
         "domain": "shared risky domain",
-        "path_shape": "shared risky path shape",
-        "host_family": "rotated risky host family",
-        "lure": "reused lure copy",
+        "path_shape": "shared risky link shape",
+        "host_family": "shared risky host pattern",
+        "lure": "reused lure wording",
     }
     return labels.get(kind, kind.replace("_", " "))
 
@@ -2973,11 +2973,11 @@ class ShieldService:
             if "newcomer_first_messages_risky" in signal_codes:
                 context_bits.append("risky activity in the first newcomer messages")
             if "campaign_path_shape" in signal_codes:
-                context_bits.append("shared risky path shape")
+                context_bits.append("shared risky link shape")
             if "campaign_host_family" in signal_codes:
-                context_bits.append("rotated risky host family")
+                context_bits.append("shared risky host pattern")
             if "campaign_lure_reuse" in signal_codes:
-                context_bits.append("reused lure copy")
+                context_bits.append("reused lure wording")
             if "fresh_campaign_cluster_2" in signal_codes or "fresh_campaign_cluster_3" in signal_codes:
                 context_bits.append("fresh-account campaign repetition")
             if context_bits:
