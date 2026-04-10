@@ -23,6 +23,7 @@ from babblebox.question_drops_content import (
     QUESTION_DROP_DIFFICULTY_PROFILES,
     QUESTION_DROP_TONES,
     QuestionDropVariant,
+    answer_attempt_limit,
     answer_points_for_difficulty,
     build_variant_hash,
     is_answer_attempt,
@@ -73,7 +74,6 @@ QUESTION_DROP_EXPOSURE_RETENTION_DAYS = 90
 QUESTION_DROP_ACTIVITY_WINDOW_SECONDS = 90 * 60
 QUESTION_DROP_SLOT_GRACE_SECONDS = 45 * 60
 QUESTION_DROP_SCHEDULER_INTERVAL_SECONDS = 45.0
-QUESTION_DROP_WRONG_FEEDBACK_GLOBAL_LIMIT = 2
 QUESTION_DROP_LATE_CORRECT_WINDOW_SECONDS = 8
 QUESTION_DROP_LATE_CORRECT_MAX_ACKS = 2
 QUESTION_DROP_CLOSE_BUFFER_SECONDS = 3
@@ -169,24 +169,19 @@ def _difficulty_mix_for(config: dict[str, Any]) -> dict[int, int]:
     return dict(QUESTION_DROP_DIFFICULTY_MIX[profile][bucket])
 
 
-def _tone_failure_line(tone_mode: str) -> str | None:
+def _attempt_feedback_line(tone_mode: str, *, attempts_left: int) -> str:
+    if attempts_left <= 0:
+        if tone_mode == "playful":
+            return "Not this one. You're out of attempts for this drop."
+        if tone_mode == "roast-light":
+            return "Confident guess, wrong answer. You're out of attempts for this drop."
+        return "Wrong answer. You're out of attempts for this drop."
+    remaining_label = "1 attempt left" if attempts_left == 1 else f"{attempts_left} attempts left"
     if tone_mode == "playful":
-        return random.choice(
-            (
-                "Not this one. Another clean guess can still steal it.",
-                "Close enough to keep trying, not close enough to score.",
-                "Clean guess, wrong answer. The drop is still live.",
-            )
-        )
+        return f"Not this one. {remaining_label} for this drop."
     if tone_mode == "roast-light":
-        return random.choice(
-            (
-                "Confident answer. Wrong answer.",
-                "That guess had energy. The points stayed put.",
-                "Clean format, wrong target.",
-            )
-        )
-    return None
+        return f"Confident guess, wrong answer. {remaining_label} for this drop."
+    return f"Wrong answer. {remaining_label} for this drop."
 
 
 @dataclass(frozen=True)
@@ -222,6 +217,7 @@ class QuestionDropRecentResolutionContext:
     winner_user_id: int | None
     resolved_at: datetime
     participant_user_ids: list[int]
+    attempt_counts_by_user: dict[int, int]
     acknowledged_user_ids: set[int]
     timeout_result_message_id: int | None = None
     participation_finalized: bool = False
@@ -255,9 +251,8 @@ class QuestionDropsService:
         self._pending_posts: dict[tuple[int, str], dict[str, Any]] = {}
         self._recent_activity: dict[tuple[int, int], datetime] = {}
         self._recently_resolved_drops: dict[tuple[int, int], QuestionDropRecentResolutionContext] = {}
-        self._wrong_feedback_users: dict[int, set[int]] = defaultdict(set)
-        self._wrong_feedback_count: dict[int, int] = defaultdict(int)
         self._attempted_users: dict[int, set[int]] = defaultdict(set)
+        self._attempt_counts_by_user: dict[int, dict[int, int]] = defaultdict(dict)
         self._next_prune_at: datetime | None = None
         self._meta = default_question_drops_meta()
         self._ai_provider = build_question_drop_ai_provider()
@@ -294,9 +289,8 @@ class QuestionDropsService:
             self._active_drops = {}
             self._pending_posts = {}
             self._recent_activity.clear()
-            self._wrong_feedback_users.clear()
-            self._wrong_feedback_count.clear()
             self._attempted_users.clear()
+            self._attempt_counts_by_user.clear()
             self._next_prune_at = None
             self._meta = default_question_drops_meta()
             print(f"Question Drops storage hydration failed: {exc}")
@@ -331,9 +325,8 @@ class QuestionDropsService:
                 continue
             self._active_drops[(record["guild_id"], record["channel_id"])] = record
             exposure_id = int(record["exposure_id"])
-            self._wrong_feedback_users.setdefault(exposure_id, set())
-            self._wrong_feedback_count.setdefault(exposure_id, 0)
             self._attempted_users[exposure_id] = set(record.get("participant_user_ids", []) or [])
+            self._attempt_counts_by_user[exposure_id] = dict(record.get("attempt_counts_by_user", {}) or {})
 
     async def _message_still_exists(self, record: dict[str, Any]) -> bool:
         channel = self.bot.get_channel(record["channel_id"]) if hasattr(self.bot, "get_channel") else None
@@ -3193,6 +3186,7 @@ class QuestionDropsService:
         winner_user_id: int | None,
         resolved_at: datetime,
         participant_user_ids: list[int] | None = None,
+        attempt_counts_by_user: dict[int, int] | None = None,
         participation_finalized: bool = True,
     ):
         self._recently_resolved_drops[self._recently_resolved_key(record["guild_id"], record["channel_id"])] = QuestionDropRecentResolutionContext(
@@ -3210,6 +3204,7 @@ class QuestionDropsService:
             participant_user_ids=sorted(
                 user_id for user_id in (participant_user_ids or record.get("participant_user_ids", []) or []) if isinstance(user_id, int) and user_id > 0
             ),
+            attempt_counts_by_user=dict(sorted((attempt_counts_by_user or record.get("attempt_counts_by_user", {}) or {}).items())),
             acknowledged_user_ids=set(),
             participation_finalized=bool(participation_finalized),
         )
@@ -3348,7 +3343,21 @@ class QuestionDropsService:
             recent = self._recently_resolved_drop_locked(message.guild.id, message.channel.id, now=now)
             if recent is not None and author_id != recent.winner_user_id:
                 direct_reply = reply_target_id == int(recent.message_id)
-                if is_answer_attempt(recent.answer_spec, candidate_content, direct_reply=direct_reply) and judge_answer(
+                attempt_limit = answer_attempt_limit(recent.answer_spec)
+                attempts_used = int(recent.attempt_counts_by_user.get(author_id, 0) or 0)
+                locked_out = attempts_used >= attempt_limit
+                if locked_out:
+                    self._log_drop_event(
+                        "drop_attempt_locked_out",
+                        level=logging.INFO,
+                        guild_id=recent.guild_id,
+                        channel_id=recent.channel_id,
+                        exposure_id=recent.exposure_id,
+                        author_id=author_id,
+                        attempt_limit=attempt_limit,
+                        attempts_used=attempts_used,
+                    )
+                elif is_answer_attempt(recent.answer_spec, candidate_content, direct_reply=direct_reply) and judge_answer(
                     recent.answer_spec, candidate_content
                 ):
                     if (
@@ -3465,17 +3474,18 @@ class QuestionDropsService:
         message_created_at = self._message_created_at_utc(message, fallback=now)
         reply_target_id = _extract_reply_target_id(message)
         candidate_content = self._sanitize_answer_candidate(message.content)
+        author_id = int(getattr(getattr(message, "author", None), "id", 0) or 0)
         self._log_drop_event(
             "drop_attempt_received",
             guild_id=message.guild.id,
             channel_id=message.channel.id,
-            author_id=getattr(getattr(message, "author", None), "id", None),
+            author_id=author_id,
             message_id=getattr(message, "id", None),
             message_created_at=message_created_at,
         )
         result_payload: dict[str, Any] | None = None
         attempt_reaction: str | None = None
-        feedback_line: str | None = None
+        feedback_payload: dict[str, Any] | None = None
         check_recent = False
         late_ack_payload: dict[str, Any] | None = None
         expire_request: dict[str, Any] | None = None
@@ -3489,19 +3499,40 @@ class QuestionDropsService:
             else:
                 direct_reply = reply_target_id == int(current["message_id"])
                 is_attempt = is_answer_attempt(current["answer_spec"], candidate_content, direct_reply=direct_reply)
+                exposure_id = int(current["exposure_id"])
+                attempt_limit = answer_attempt_limit(current["answer_spec"])
+                attempt_counts = self._attempt_counts_by_user.setdefault(exposure_id, dict(current.get("attempt_counts_by_user", {}) or {}))
+                attempts_used = int(attempt_counts.get(author_id, 0) or 0)
+                locked_out = author_id > 0 and attempts_used >= attempt_limit
                 self._log_drop_event(
                     "drop_attempt_window_check",
                     guild_id=current["guild_id"],
                     channel_id=current["channel_id"],
-                    exposure_id=current["exposure_id"],
-                    author_id=getattr(getattr(message, "author", None), "id", None),
+                    exposure_id=exposure_id,
+                    author_id=author_id,
                     is_attempt=is_attempt,
+                    locked_out=locked_out,
+                    attempt_limit=attempt_limit,
+                    attempts_used=attempts_used,
                     live=self._active_drop_is_live(current, now=now),
                     message_created_at=message_created_at,
                     score_deadline_at=self._active_drop_expires_at(current),
                     close_after_at=self._active_drop_close_after_at(current),
                 )
                 if not is_attempt:
+                    if not self._active_drop_is_live(current, now=now):
+                        expire_request = {"record": dict(current), "timed_out": True, "announce": True, "delete_post_message": False}
+                elif locked_out:
+                    self._log_drop_event(
+                        "drop_attempt_locked_out",
+                        level=logging.INFO,
+                        guild_id=current["guild_id"],
+                        channel_id=current["channel_id"],
+                        exposure_id=exposure_id,
+                        author_id=author_id,
+                        attempt_limit=attempt_limit,
+                        attempts_used=attempts_used,
+                    )
                     if not self._active_drop_is_live(current, now=now):
                         expire_request = {"record": dict(current), "timed_out": True, "announce": True, "delete_post_message": False}
                 elif not self._message_is_within_answer_window(current, message_created_at=message_created_at):
@@ -3513,8 +3544,8 @@ class QuestionDropsService:
                             level=logging.INFO,
                             guild_id=current["guild_id"],
                             channel_id=current["channel_id"],
-                            exposure_id=current["exposure_id"],
-                            author_id=getattr(getattr(message, "author", None), "id", None),
+                            exposure_id=exposure_id,
+                            author_id=author_id,
                             message_created_at=message_created_at,
                             score_deadline_at=self._active_drop_expires_at(current),
                         )
@@ -3526,8 +3557,8 @@ class QuestionDropsService:
                             level=logging.INFO,
                             guild_id=current["guild_id"],
                             channel_id=current["channel_id"],
-                            exposure_id=current["exposure_id"],
-                            author_id=getattr(getattr(message, "author", None), "id", None),
+                            exposure_id=exposure_id,
+                            author_id=author_id,
                             message_created_at=message_created_at,
                             close_after_at=self._active_drop_close_after_at(current),
                         )
@@ -3537,27 +3568,26 @@ class QuestionDropsService:
                         "drop_attempt_judge",
                         guild_id=current["guild_id"],
                         channel_id=current["channel_id"],
-                        exposure_id=current["exposure_id"],
-                        author_id=getattr(getattr(message, "author", None), "id", None),
+                        exposure_id=exposure_id,
+                        author_id=author_id,
                         correct=correct,
+                        attempt_limit=attempt_limit,
+                        attempts_used=attempts_used,
                     )
                     if not correct:
                         attempt_reaction = state_emoji("wrong")
-                    exposure_id = int(current["exposure_id"])
                     participants = self._attempted_users.setdefault(exposure_id, set(current.get("participant_user_ids", []) or []))
-                    first_attempt = message.author.id not in participants
+                    first_attempt = author_id not in participants
                     if first_attempt:
-                        participants.add(message.author.id)
-                        participant_ids = sorted(participants)
-                        current["participant_user_ids"] = participant_ids
-                        if not correct:
-                            await self.store.update_active_drop_participants(current["guild_id"], current["channel_id"], participant_ids)
+                        participants.add(author_id)
+                    participant_ids = sorted(participants)
+                    current["participant_user_ids"] = participant_ids
                     if correct:
                         participant_ids = sorted(participants)
                         claimed = await self._claim_and_close_active_drop(
                             current,
                             resolved_at=now,
-                            winner_user_id=message.author.id,
+                            winner_user_id=author_id,
                         )
                         if claimed is None:
                             check_recent = True
@@ -3567,14 +3597,15 @@ class QuestionDropsService:
                                 guild_id=current["guild_id"],
                                 channel_id=current["channel_id"],
                                 exposure_id=current["exposure_id"],
-                                author_id=message.author.id,
+                                author_id=author_id,
                             )
                         else:
                             self._remember_recently_resolved_drop(
                                 claimed,
-                                winner_user_id=message.author.id,
+                                winner_user_id=author_id,
                                 resolved_at=now,
                                 participant_user_ids=participant_ids,
+                                attempt_counts_by_user=dict(current.get("attempt_counts_by_user", {}) or {}),
                                 participation_finalized=True,
                             )
                             self._clear_active_drop_runtime_state(exposure_id)
@@ -3588,7 +3619,7 @@ class QuestionDropsService:
                                 "answer_spec": claimed["answer_spec"],
                                 "exposure_id": exposure_id,
                                 "participant_ids": participant_ids,
-                                "winner_user_id": message.author.id,
+                                "winner_user_id": author_id,
                             }
                             self._log_drop_event(
                                 "drop_attempt_claim",
@@ -3596,16 +3627,22 @@ class QuestionDropsService:
                                 guild_id=claimed["guild_id"],
                                 channel_id=claimed["channel_id"],
                                 exposure_id=claimed["exposure_id"],
-                                author_id=message.author.id,
+                                author_id=author_id,
                             )
-                    elif (
-                        message.author.id not in self._wrong_feedback_users[exposure_id]
-                        and self._wrong_feedback_count[exposure_id] < QUESTION_DROP_WRONG_FEEDBACK_GLOBAL_LIMIT
-                    ):
-                        feedback_line = _tone_failure_line(current.get("tone_mode", "clean"))
-                        if feedback_line:
-                            self._wrong_feedback_users[exposure_id].add(message.author.id)
-                            self._wrong_feedback_count[exposure_id] += 1
+                    else:
+                        attempt_counts[author_id] = attempts_used + 1
+                        current["attempt_counts_by_user"] = dict(sorted(attempt_counts.items()))
+                        attempts_left = max(0, attempt_limit - int(current["attempt_counts_by_user"].get(author_id, 0) or 0))
+                        await self.store.update_active_drop_progress(
+                            current["guild_id"],
+                            current["channel_id"],
+                            participant_user_ids=participant_ids,
+                            attempt_counts_by_user=current["attempt_counts_by_user"],
+                        )
+                        feedback_payload = {
+                            "tone_mode": current.get("tone_mode", "clean"),
+                            "attempts_left": attempts_left,
+                        }
         for record in due_finalizations:
             await self._finalize_timeout_context(record)
         if expire_request is not None:
@@ -3664,12 +3701,18 @@ class QuestionDropsService:
                     allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
                 )
             return True
-        if feedback_line:
+        if feedback_payload is not None:
+            title = f"{state_emoji('wrong')} Not Yet"
+            if int(feedback_payload["attempts_left"]) <= 0:
+                title = f"{state_emoji('wrong')} Out of Attempts"
             with contextlib.suppress(discord.HTTPException):
                 await message.channel.send(
                     embed=ge.make_status_embed(
-                        f"{state_emoji('wrong')} Not Yet",
-                        feedback_line,
+                        title,
+                        _attempt_feedback_line(
+                            str(feedback_payload.get("tone_mode", "clean")),
+                            attempts_left=int(feedback_payload["attempts_left"]),
+                        ),
                         tone="warning",
                         footer="Babblebox Question Drops",
                     ),
@@ -3679,9 +3722,8 @@ class QuestionDropsService:
         return False
 
     def _clear_active_drop_runtime_state(self, exposure_id: int):
-        self._wrong_feedback_users.pop(exposure_id, None)
-        self._wrong_feedback_count.pop(exposure_id, None)
         self._attempted_users.pop(exposure_id, None)
+        self._attempt_counts_by_user.pop(exposure_id, None)
 
     def _build_participation_results(
         self,
@@ -4365,6 +4407,9 @@ class QuestionDropsService:
             else:
                 exposure_id = int(claimed["exposure_id"])
                 participant_ids = sorted(self._attempted_users.get(exposure_id, set(claimed.get("participant_user_ids", []) or [])))
+                attempt_counts_by_user = dict(
+                    sorted(self._attempt_counts_by_user.get(exposure_id, dict(claimed.get("attempt_counts_by_user", {}) or {})).items())
+                )
                 self._clear_recently_resolved_drop(claimed["guild_id"], claimed["channel_id"])
                 self._clear_active_drop_runtime_state(exposure_id)
                 if timed_out and allow_recovery:
@@ -4373,6 +4418,7 @@ class QuestionDropsService:
                         winner_user_id=None,
                         resolved_at=resolved_at,
                         participant_user_ids=participant_ids,
+                        attempt_counts_by_user=attempt_counts_by_user,
                         participation_finalized=False,
                     )
                     self._log_drop_event(
@@ -4603,6 +4649,7 @@ class QuestionDropsService:
             "slot_key": slot_key,
             "tone_mode": config.get("tone_mode", "clean"),
             "participant_user_ids": [],
+            "attempt_counts_by_user": {},
         }
         try:
             stored_exposure, stored_active = await self.store.finalize_pending_post(
@@ -4628,9 +4675,8 @@ class QuestionDropsService:
         self._pending_posts.pop((guild_id, slot_key), None)
         self._active_drops[(guild_id, channel_id)] = normalized_record
         exposure_id = int(normalized_record["exposure_id"])
-        self._wrong_feedback_users[exposure_id] = set()
-        self._wrong_feedback_count[exposure_id] = 0
         self._attempted_users[exposure_id] = set()
+        self._attempt_counts_by_user[exposure_id] = {}
 
     def _repeat_windows_for_variant(self, variant: QuestionDropVariant, *, category_variant_capacity: Counter, category_concept_counts: Counter) -> tuple[int, int, float, float]:
         if variant.source_type == "generated":

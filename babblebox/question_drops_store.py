@@ -268,6 +268,21 @@ def _normalize_participant_ids(values: Any) -> list[int]:
     return sorted({int(value) for value in values if isinstance(value, int) and value > 0})
 
 
+def _normalize_attempt_counts(values: Any) -> dict[int, int]:
+    if not isinstance(values, dict):
+        return {}
+    normalized: dict[int, int] = {}
+    for raw_key, raw_value in values.items():
+        try:
+            user_id = int(raw_key)
+        except (TypeError, ValueError):
+            continue
+        if user_id <= 0 or not isinstance(raw_value, int) or raw_value <= 0:
+            continue
+        normalized[user_id] = int(raw_value)
+    return dict(sorted(normalized.items()))
+
+
 def normalize_active_drop(payload: Any, *, allow_missing_exposure_id: bool = False) -> dict[str, Any] | None:
     if not isinstance(payload, dict):
         return None
@@ -315,6 +330,7 @@ def normalize_active_drop(payload: Any, *, allow_missing_exposure_id: bool = Fal
         "slot_key": payload["slot_key"].strip(),
         "tone_mode": tone_mode if tone_mode in {"clean", "playful", "roast-light"} else "clean",
         "participant_user_ids": _normalize_participant_ids(payload.get("participant_user_ids", [])),
+        "attempt_counts_by_user": _normalize_attempt_counts(payload.get("attempt_counts_by_user", {})),
     }
     if not allow_missing_exposure_id and normalized["exposure_id"] is None:
         return None
@@ -523,7 +539,14 @@ class _BaseQuestionDropsStore:
     async def register_posted_drop(self, exposure_record: dict[str, Any], active_record: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
         raise NotImplementedError
 
-    async def update_active_drop_participants(self, guild_id: int, channel_id: int, participant_user_ids: list[int]):
+    async def update_active_drop_progress(
+        self,
+        guild_id: int,
+        channel_id: int,
+        *,
+        participant_user_ids: list[int],
+        attempt_counts_by_user: dict[int, int],
+    ):
         raise NotImplementedError
 
     async def delete_active_drop(self, guild_id: int, channel_id: int):
@@ -733,11 +756,19 @@ class _MemoryQuestionDropsStore(_BaseQuestionDropsStore):
         self.active_drops[active_key] = deepcopy(normalized_active)
         return deepcopy(normalized_exposure), deepcopy(normalized_active)
 
-    async def update_active_drop_participants(self, guild_id: int, channel_id: int, participant_user_ids: list[int]):
+    async def update_active_drop_progress(
+        self,
+        guild_id: int,
+        channel_id: int,
+        *,
+        participant_user_ids: list[int],
+        attempt_counts_by_user: dict[int, int],
+    ):
         record = self.active_drops.get((guild_id, channel_id))
         if record is None:
             return
         record["participant_user_ids"] = _normalize_participant_ids(participant_user_ids)
+        record["attempt_counts_by_user"] = _normalize_attempt_counts(attempt_counts_by_user)
 
     async def delete_active_drop(self, guild_id: int, channel_id: int):
         self.active_drops.pop((guild_id, channel_id), None)
@@ -997,6 +1028,10 @@ def _active_drop_from_row(row) -> dict[str, Any] | None:
                 row["participant_user_ids"],
                 label="question_drop_active.participant_user_ids",
             ),
+            "attempt_counts_by_user": decode_postgres_json_object(
+                row["attempt_counts_by_user"] if "attempt_counts_by_user" in row else {},
+                label="question_drop_active.attempt_counts_by_user",
+            ),
         }
     )
 
@@ -1206,11 +1241,13 @@ class _PostgresQuestionDropsStore(_BaseQuestionDropsStore):
                 "slot_key TEXT NOT NULL, "
                 "tone_mode TEXT NOT NULL DEFAULT 'clean', "
                 "participant_user_ids JSONB NOT NULL DEFAULT '[]'::jsonb, "
+                "attempt_counts_by_user JSONB NOT NULL DEFAULT '{}'::jsonb, "
                 "PRIMARY KEY (guild_id, channel_id)"
                 ")"
             ),
             "ALTER TABLE question_drop_active ADD COLUMN IF NOT EXISTS close_after_at TIMESTAMPTZ",
             "ALTER TABLE question_drop_active ADD COLUMN IF NOT EXISTS participant_user_ids JSONB NOT NULL DEFAULT '[]'::jsonb",
+            "ALTER TABLE question_drop_active ADD COLUMN IF NOT EXISTS attempt_counts_by_user JSONB NOT NULL DEFAULT '{}'::jsonb",
             "CREATE INDEX IF NOT EXISTS ix_question_drop_active_close_after ON question_drop_active (close_after_at)",
             "CREATE INDEX IF NOT EXISTS ix_question_drop_active_expires ON question_drop_active (expires_at)",
             (
@@ -1354,7 +1391,7 @@ class _PostgresQuestionDropsStore(_BaseQuestionDropsStore):
             rows = await conn.fetch(
                 (
                     "SELECT guild_id, channel_id, message_id, author_user_id, exposure_id, concept_id, variant_hash, category, "
-                    "difficulty, prompt, answer_spec, asked_at, expires_at, close_after_at, slot_key, tone_mode, participant_user_ids "
+                    "difficulty, prompt, answer_spec, asked_at, expires_at, close_after_at, slot_key, tone_mode, participant_user_ids, attempt_counts_by_user "
                     "FROM question_drop_active ORDER BY COALESCE(close_after_at, expires_at) ASC"
                 )
             )
@@ -1375,7 +1412,7 @@ class _PostgresQuestionDropsStore(_BaseQuestionDropsStore):
             row = await conn.fetchrow(
                 (
                     "SELECT guild_id, channel_id, message_id, author_user_id, exposure_id, concept_id, variant_hash, category, "
-                    "difficulty, prompt, answer_spec, asked_at, expires_at, close_after_at, slot_key, tone_mode, participant_user_ids "
+                    "difficulty, prompt, answer_spec, asked_at, expires_at, close_after_at, slot_key, tone_mode, participant_user_ids, attempt_counts_by_user "
                     "FROM question_drop_active WHERE guild_id = $1 AND channel_id = $2"
                 ),
                 guild_id,
@@ -1516,9 +1553,9 @@ class _PostgresQuestionDropsStore(_BaseQuestionDropsStore):
             (
                 "INSERT INTO question_drop_active ("
                 "guild_id, channel_id, message_id, author_user_id, exposure_id, concept_id, variant_hash, category, difficulty, "
-                "prompt, answer_spec, asked_at, expires_at, close_after_at, slot_key, tone_mode, participant_user_ids"
+                "prompt, answer_spec, asked_at, expires_at, close_after_at, slot_key, tone_mode, participant_user_ids, attempt_counts_by_user"
                 ") VALUES ("
-                "$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12, $13, $14, $15, $16, $17::jsonb"
+                "$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12, $13, $14, $15, $16, $17::jsonb, $18::jsonb"
                 ") ON CONFLICT (guild_id, channel_id) DO UPDATE SET "
                 "message_id = EXCLUDED.message_id, "
                 "author_user_id = EXCLUDED.author_user_id, "
@@ -1534,7 +1571,8 @@ class _PostgresQuestionDropsStore(_BaseQuestionDropsStore):
                 "close_after_at = EXCLUDED.close_after_at, "
                 "slot_key = EXCLUDED.slot_key, "
                 "tone_mode = EXCLUDED.tone_mode, "
-                "participant_user_ids = EXCLUDED.participant_user_ids"
+                "participant_user_ids = EXCLUDED.participant_user_ids, "
+                "attempt_counts_by_user = EXCLUDED.attempt_counts_by_user"
             ),
             normalized["guild_id"],
             normalized["channel_id"],
@@ -1553,6 +1591,7 @@ class _PostgresQuestionDropsStore(_BaseQuestionDropsStore):
             normalized["slot_key"],
             normalized["tone_mode"],
             json.dumps(normalized["participant_user_ids"]),
+            json.dumps(normalized["attempt_counts_by_user"]),
         )
 
     async def register_posted_drop(self, exposure_record: dict[str, Any], active_record: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
@@ -1595,15 +1634,27 @@ class _PostgresQuestionDropsStore(_BaseQuestionDropsStore):
                     await self._upsert_active_drop_with_conn(conn, normalize_active_drop(normalized_active))
         return normalized_exposure, normalize_active_drop(normalized_active)
 
-    async def update_active_drop_participants(self, guild_id: int, channel_id: int, participant_user_ids: list[int]):
+    async def update_active_drop_progress(
+        self,
+        guild_id: int,
+        channel_id: int,
+        *,
+        participant_user_ids: list[int],
+        attempt_counts_by_user: dict[int, int],
+    ):
         normalized_ids = _normalize_participant_ids(participant_user_ids)
+        normalized_attempt_counts = _normalize_attempt_counts(attempt_counts_by_user)
         async with self._io_lock:
             async with self._pool.acquire() as conn:
                 await conn.execute(
-                    "UPDATE question_drop_active SET participant_user_ids = $3::jsonb WHERE guild_id = $1 AND channel_id = $2",
+                    (
+                        "UPDATE question_drop_active SET participant_user_ids = $3::jsonb, attempt_counts_by_user = $4::jsonb "
+                        "WHERE guild_id = $1 AND channel_id = $2"
+                    ),
                     guild_id,
                     channel_id,
                     json.dumps(normalized_ids),
+                    json.dumps(normalized_attempt_counts),
                 )
 
     async def delete_active_drop(self, guild_id: int, channel_id: int):
@@ -1626,7 +1677,7 @@ class _PostgresQuestionDropsStore(_BaseQuestionDropsStore):
                     row = await conn.fetchrow(
                         (
                             "SELECT guild_id, channel_id, message_id, author_user_id, exposure_id, concept_id, variant_hash, category, "
-                            "difficulty, prompt, answer_spec, asked_at, expires_at, close_after_at, slot_key, tone_mode, participant_user_ids "
+                            "difficulty, prompt, answer_spec, asked_at, expires_at, close_after_at, slot_key, tone_mode, participant_user_ids, attempt_counts_by_user "
                             "FROM question_drop_active WHERE guild_id = $1 AND channel_id = $2 AND message_id = $3 FOR UPDATE"
                         ),
                         guild_id,
@@ -1992,8 +2043,20 @@ class QuestionDropsStore:
     async def register_posted_drop(self, exposure_record: dict[str, Any], active_record: dict[str, Any]) -> tuple[dict[str, Any], dict[str, Any]]:
         return await self._store.register_posted_drop(exposure_record, active_record)
 
-    async def update_active_drop_participants(self, guild_id: int, channel_id: int, participant_user_ids: list[int]):
-        await self._store.update_active_drop_participants(guild_id, channel_id, participant_user_ids)
+    async def update_active_drop_progress(
+        self,
+        guild_id: int,
+        channel_id: int,
+        *,
+        participant_user_ids: list[int],
+        attempt_counts_by_user: dict[int, int],
+    ):
+        await self._store.update_active_drop_progress(
+            guild_id,
+            channel_id,
+            participant_user_ids=participant_user_ids,
+            attempt_counts_by_user=attempt_counts_by_user,
+        )
 
     async def delete_active_drop(self, guild_id: int, channel_id: int):
         await self._store.delete_active_drop(guild_id, channel_id)
