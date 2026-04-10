@@ -224,6 +224,108 @@
   border: 0;
 }
 
+.site-footer {
+  padding: 34px 0 48px;
+}
+
+.site-footer-grid {
+  position: relative;
+  display: grid;
+  grid-template-columns: minmax(0, 1.05fr) minmax(0, 1.2fr);
+  gap: 30px 44px;
+  padding-top: 30px;
+  border-top: 1px solid rgba(169, 190, 255, 0.14);
+}
+
+.site-footer-grid::before {
+  content: "";
+  position: absolute;
+  top: -1px;
+  left: 0;
+  width: min(200px, 38%);
+  height: 1px;
+  background: linear-gradient(90deg, rgba(125, 220, 255, 0.8), rgba(255, 131, 155, 0.32), transparent);
+}
+
+.site-footer-brand {
+  display: grid;
+  align-content: start;
+  gap: 10px;
+  max-width: 34rem;
+}
+
+.site-footer-kicker,
+.site-footer-label {
+  color: rgba(223, 231, 255, 0.72);
+  font-size: 0.72rem;
+  font-weight: 800;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+}
+
+.site-footer-brand strong {
+  color: var(--soft);
+  font-family: "Sora", sans-serif;
+  font-size: clamp(1.28rem, 1rem + 0.65vw, 1.7rem);
+  letter-spacing: -0.05em;
+}
+
+.site-footer-brand p,
+.site-footer-note {
+  margin: 0;
+  color: var(--muted);
+}
+
+.site-footer-brand p {
+  max-width: 44ch;
+  line-height: 1.72;
+}
+
+.site-footer-note {
+  font-size: 0.95rem;
+}
+
+.site-footer-meta {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 20px 18px;
+  align-content: start;
+}
+
+.site-footer-column {
+  display: grid;
+  gap: 10px;
+  align-content: start;
+}
+
+.site-footer-links {
+  display: grid;
+  gap: 10px;
+}
+
+.site-footer-links a {
+  color: var(--muted);
+  line-height: 1.5;
+  transition:
+    color 0.18s ease,
+    transform 0.18s ease;
+}
+
+.site-footer-links a:hover {
+  color: var(--text);
+  transform: translateX(2px);
+}
+
+@media (max-width: 980px) {
+  .site-footer-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .site-footer-meta {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+}
+
 @media (max-width: 520px) {
   .site-nav-compact .btn {
     min-height: 38px;
@@ -242,6 +344,20 @@
 
   .site-nav-compact .site-brand-subtitle {
     display: none;
+  }
+
+  .site-footer {
+    padding-bottom: 40px;
+  }
+
+  .site-footer-grid {
+    gap: 24px;
+    padding-top: 24px;
+  }
+
+  .site-footer-meta {
+    grid-template-columns: 1fr;
+    gap: 18px;
   }
 }
 

@@ -1602,7 +1602,7 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             )
 
             link_safety_field = next(field for field in ctx.send_calls[0]["embed"].fields if field.name == "Link Safety")
-            self.assertIn("lookup candidate only, no action", link_safety_field.value)
+            self.assertIn("lookup candidate, link-only caution", link_safety_field.value)
         finally:
             await cog.service.close()
 

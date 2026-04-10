@@ -1825,6 +1825,9 @@ class AdminServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(updated["latest_message_basis"], "Known malicious domain")
         self.assertEqual(updated["latest_message_confidence"], "high")
         self.assertEqual(updated["latest_scan_source"], "new_message")
+        activity_field = next(field for field in self.log_channel.sent[0]["message"].embed.fields if field.name == "Activity")
+        self.assertIn("Message events: 2 hits", activity_field.value)
+        self.assertIn("Latest signal: New message | High confidence", activity_field.value)
 
     async def test_member_risk_mixed_script_name_with_risky_message_queues_review(self):
         await self._configure_member_risk(with_logs=True, mode="review")
@@ -1858,7 +1861,8 @@ class AdminServiceTests(unittest.IsolatedAsyncioTestCase):
         field_names = [field.name for field in queue_embed.fields]
         self.assertIn("Message Evidence", field_names)
         self.assertIn("Identity Hints", field_names)
-        self.assertIn("Confidence Risers", field_names)
+        self.assertIn("Escalation Context", field_names)
+        self.assertIn("Activity", field_names)
 
     async def test_member_risk_trusted_role_bypasses_message_lane(self):
         await self._configure_member_risk(with_logs=True, mode="review")
@@ -2119,6 +2123,101 @@ class AdminServiceTests(unittest.IsolatedAsyncioTestCase):
         field_names = [field.name for field in self.log_channel.sent[0]["embed"].fields]
         self.assertIn("Message Evidence", field_names)
         self.assertIn("Identity Hints", field_names)
+
+    async def test_member_update_identity_only_rechecks_member_risk_without_queueing(self):
+        await self._configure_member_risk(with_logs=True, mode="review")
+        before = FakeMember(
+            211,
+            self.guild,
+            roles=[],
+            top_role=FakeRole(5, position=5),
+            created_at=ge.now_utc() - timedelta(hours=2),
+            joined_at=ge.now_utc() - timedelta(minutes=30),
+            avatar=object(),
+            display_name="normal-user",
+        )
+        after = FakeMember(
+            before.id,
+            self.guild,
+            roles=[],
+            top_role=before.top_role,
+            created_at=before.created_at,
+            joined_at=before.joined_at,
+            avatar=None,
+            display_name="Official Support",
+        )
+        self.guild.members[after.id] = after
+
+        await self.service.handle_member_update(before, after)
+
+        self.assertEqual(len(self.log_channel.sent), 1)
+        self.assertEqual(self.log_channel.sent[0]["embed"].title, "Member Risk Note")
+        self.assertIsNone(await self.store.fetch_member_risk_state(self.guild.id, after.id))
+
+    async def test_member_update_identity_only_noop_does_not_log_noise(self):
+        await self._configure_member_risk(with_logs=True, mode="review")
+        before = FakeMember(
+            212,
+            self.guild,
+            roles=[],
+            top_role=FakeRole(5, position=5),
+            created_at=ge.now_utc() - timedelta(days=90),
+            joined_at=ge.now_utc() - timedelta(days=30),
+            avatar=object(),
+            display_name="normal-user",
+        )
+        after = FakeMember(
+            before.id,
+            self.guild,
+            roles=[],
+            top_role=before.top_role,
+            created_at=before.created_at,
+            joined_at=before.joined_at,
+            avatar=object(),
+            display_name="trusted-helper",
+        )
+        self.guild.members[after.id] = after
+
+        await self.service.handle_member_update(before, after)
+
+        self.assertEqual(self.log_channel.sent, [])
+        self.assertIsNone(await self.store.fetch_member_risk_state(self.guild.id, after.id))
+
+    async def test_member_update_identity_only_note_dedupes_repeat_updates(self):
+        await self._configure_member_risk(with_logs=True, mode="review")
+        before = FakeMember(
+            213,
+            self.guild,
+            roles=[],
+            top_role=FakeRole(5, position=5),
+            created_at=ge.now_utc() - timedelta(hours=2),
+            joined_at=ge.now_utc() - timedelta(minutes=30),
+            avatar=object(),
+            display_name="normal-user",
+        )
+        after = FakeMember(
+            before.id,
+            self.guild,
+            roles=[],
+            top_role=before.top_role,
+            created_at=before.created_at,
+            joined_at=before.joined_at,
+            avatar=None,
+            display_name="Official Support",
+        )
+        self.guild.members[after.id] = after
+
+        await self.service.handle_member_update(before, after)
+        await self.service.handle_member_update(before, after)
+
+        self.assertEqual(len(self.log_channel.sent), 1)
+
+    def test_member_risk_signal_summary_labels_host_pattern_cleanly(self):
+        summary = self.service._member_risk_signal_summary(["campaign_host_family", "campaign_path_shape", "campaign_lure_reuse"])
+
+        self.assertIn("shared risky host pattern", summary)
+        self.assertIn("shared risky link shape", summary)
+        self.assertIn("reused lure wording", summary)
 
     async def test_member_risk_does_not_touch_profile_bio_surfaces(self):
         class NoBioMember(FakeMember):

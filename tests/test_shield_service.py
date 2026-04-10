@@ -9,7 +9,14 @@ from unittest.mock import AsyncMock, patch
 from babblebox import game_engine as ge
 
 from babblebox.shield_ai import SHIELD_AI_ALLOWED_GUILD_ID, ShieldAIReviewResult
-from babblebox.shield_service import ShieldDecision, ShieldMatch, ShieldService, _alert_content_fingerprint, _build_snapshot
+from babblebox.shield_service import (
+    ShieldDecision,
+    ShieldMatch,
+    ShieldService,
+    _alert_content_fingerprint,
+    _build_snapshot,
+    _campaign_kind_label,
+)
 from babblebox.shield_store import SHIELD_META_GLOBAL_AI_OVERRIDE_KEY, ShieldStateStore, _MemoryShieldStore, _PostgresShieldStore
 
 
@@ -346,6 +353,11 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
 
     def _content_fingerprint(self, content: str, *, attachments=None) -> str:
         return _alert_content_fingerprint(_build_snapshot(content, attachments))
+
+    def test_campaign_kind_labels_stay_operator_friendly(self):
+        self.assertEqual(_campaign_kind_label("path_shape"), "shared risky link shape")
+        self.assertEqual(_campaign_kind_label("host_family"), "shared risky host pattern")
+        self.assertEqual(_campaign_kind_label("lure"), "reused lure wording")
 
     async def test_privacy_pack_matches_email(self):
         ok, _ = await self.service.set_pack_config(10, "privacy", enabled=True, action="log", sensitivity="normal")

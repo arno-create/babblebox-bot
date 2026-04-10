@@ -85,6 +85,37 @@ MEMBER_RISK_MODE_LABELS = {
     "review": "Moderator review",
     "review_or_kick": "Review or kick",
 }
+MEMBER_RISK_SIGNAL_LABELS = {
+    "account_new_1d": "account under 24 hours old",
+    "account_new_7d": "account under 7 days old",
+    "default_avatar": "default avatar",
+    "joined_recently": "recent join",
+    "name_zero_width": "zero-width name tricks",
+    "name_separator_heavy": "separator-heavy name",
+    "name_unreadable": "unreadable name pattern",
+    "name_impersonation": "impersonation-like name",
+    "name_mixed_script": "mixed-script display name",
+    "scam_high": "high-confidence scam message",
+    "scam_medium": "medium-confidence scam message",
+    "malicious_link": "known malicious link",
+    "unknown_suspicious_link": "unknown risky link",
+    "suspicious_attachment": "suspicious attachment + CTA",
+    "cta_download": "download or login CTA",
+    "newcomer_early_message": "recent join or new account context",
+    "first_message_link": "first newcomer message carried a link",
+    "first_external_link": "first newcomer external link",
+    "newcomer_first_messages_risky": "risky activity in first newcomer messages",
+    "fresh_campaign_cluster_2": "repeat fresh-account campaign",
+    "fresh_campaign_cluster_3": "multi-account fresh campaign",
+    "campaign_path_shape": "shared risky link shape",
+    "campaign_host_family": "shared risky host pattern",
+    "campaign_lure_reuse": "reused lure wording",
+}
+MEMBER_RISK_SCAN_SOURCE_LABELS = {
+    "new_message": "New message",
+    "message_edit": "Edited message",
+    "webhook_message": "Webhook or community post",
+}
 VERIFICATION_LOGIC_LABELS = {
     "must_have_role": "Unverified if member DOES NOT have this role",
     "must_not_have_role": "Unverified if member DOES have this role",
@@ -2065,10 +2096,9 @@ class AdminService:
             mention = queued_member.mention if queued_member is not None else f"<@{user_id}>"
             deadline = deserialize_datetime(row.get("kick_at"))
             if deadline is not None:
-                preview_lines.append(f"{mention} • due {ge.format_timestamp(deadline, 'R')}")
+                preview_lines.append(f"{mention} - due {ge.format_timestamp(deadline, 'R')}")
             else:
                 preview_lines.append(mention)
-        preview_lines = [line.replace("\a due", "- due").replace(" • due", " - due") for line in preview_lines]
         if len(pending_rows) > VERIFICATION_QUEUE_PREVIEW_LIMIT:
             remaining = len(pending_rows) - VERIFICATION_QUEUE_PREVIEW_LIMIT
             suffix = "" if remaining == 1 else "s"
@@ -2079,33 +2109,8 @@ class AdminService:
         return ge.style_embed(embed, footer="Babblebox Admin | Verification cleanup")
 
     def _member_risk_signal_summary(self, signal_codes: list[str] | tuple[str, ...]) -> str:
-        labels = {
-            "account_new_1d": "account under 24 hours old",
-            "account_new_7d": "account under 7 days old",
-            "default_avatar": "default avatar",
-            "joined_recently": "recent join",
-            "name_zero_width": "zero-width name tricks",
-            "name_separator_heavy": "separator-heavy name",
-            "name_unreadable": "unreadable name pattern",
-            "name_impersonation": "impersonation-like name",
-            "name_mixed_script": "mixed-script display name",
-            "scam_high": "high-confidence scam message",
-            "scam_medium": "medium-confidence scam message",
-            "malicious_link": "known malicious link",
-            "unknown_suspicious_link": "unknown risky link",
-            "suspicious_attachment": "suspicious attachment + CTA",
-            "cta_download": "download or login CTA",
-            "newcomer_early_message": "recent join or new account context",
-            "first_message_link": "first newcomer message carried a link",
-            "first_external_link": "first newcomer external link",
-            "newcomer_first_messages_risky": "risky activity in first newcomer messages",
-            "fresh_campaign_cluster_2": "repeat fresh-account campaign",
-            "fresh_campaign_cluster_3": "multi-account fresh campaign",
-            "campaign_path_shape": "shared risky path shape",
-            "campaign_lure_reuse": "reused lure copy",
-        }
         ordered = order_member_risk_signal_codes(signal_codes)
-        rendered = [labels.get(code, code.replace("_", " ")) for code in ordered[:5]]
+        rendered = [MEMBER_RISK_SIGNAL_LABELS.get(code, code.replace("_", " ")) for code in ordered[:5]]
         if len(ordered) > 5:
             rendered.append(f"+{len(ordered) - 5} more")
         return ", ".join(rendered) if rendered else "No evidence recorded."
@@ -2122,11 +2127,37 @@ class AdminService:
     def _member_risk_context_field(self, signal_codes: list[str] | tuple[str, ...]) -> str:
         ordered = order_member_risk_signal_codes(signal_codes)
         if not ordered:
-            return "No extra confidence multipliers recorded."
+            return "No escalation context recorded."
         rendered = [f"- {self._member_risk_signal_summary([code])}" for code in ordered[:3]]
         if len(ordered) > 3:
             rendered.append(f"- +{len(ordered) - 3} more")
         return "\n".join(rendered)
+
+    def _member_risk_activity_field(self, record: dict[str, Any]) -> str:
+        lines: list[str] = []
+        try:
+            message_event_count = int(record.get("message_event_count", 0) or 0)
+        except (TypeError, ValueError):
+            message_event_count = 0
+        if message_event_count > 0:
+            suffix = "" if message_event_count == 1 else "s"
+            lines.append(f"Message events: {message_event_count} hit{suffix}")
+        source = str(record.get("latest_scan_source") or "").strip()
+        confidence = str(record.get("latest_message_confidence") or "").strip()
+        latest_bits: list[str] = []
+        if source:
+            latest_bits.append(MEMBER_RISK_SCAN_SOURCE_LABELS.get(source, source.replace("_", " ").title()))
+        if confidence:
+            latest_bits.append(f"{confidence.title()} confidence")
+        if latest_bits:
+            lines.append(f"Latest signal: {' | '.join(latest_bits)}")
+        first_seen_at = deserialize_datetime(record.get("first_seen_at"))
+        if first_seen_at is not None:
+            lines.append(f"First seen: {ge.format_timestamp(first_seen_at, 'R')}")
+        last_seen_at = deserialize_datetime(record.get("last_seen_at"))
+        if last_seen_at is not None and (first_seen_at is None or last_seen_at != first_seen_at):
+            lines.append(f"Last seen: {ge.format_timestamp(last_seen_at, 'R')}")
+        return "\n".join(lines) if lines else "No activity context recorded."
 
     def _member_risk_evidence_fields(self, signal_codes: list[str] | tuple[str, ...]) -> tuple[str, str, str]:
         message_codes, identity_codes, other_codes = self._split_member_risk_signal_codes(signal_codes)
@@ -2257,7 +2288,8 @@ class AdminService:
         )
         embed.add_field(name="Message Evidence", value=message_evidence, inline=False)
         embed.add_field(name="Identity Hints", value=identity_hints, inline=False)
-        embed.add_field(name="Confidence Risers", value=confidence_risers, inline=False)
+        embed.add_field(name="Escalation Context", value=confidence_risers, inline=False)
+        embed.add_field(name="Activity", value=self._member_risk_activity_field(current), inline=False)
         if current.get("primary_domain"):
             embed.add_field(name="Primary Domain", value=f"`{current['primary_domain']}`", inline=False)
         if member is not None:
@@ -3000,50 +3032,60 @@ class AdminService:
     async def handle_member_update(self, before: discord.Member, after: discord.Member):
         if not self.storage_ready:
             return
-        before_compiled = self.get_compiled_config(after.guild.id)
-        before_status, _ = self._verification_status(before, before_compiled)
-        after_status, _ = self._verification_status(after, before_compiled)
-        if before_status == after_status and self._role_ids_for(before) == self._role_ids_for(after):
+        compiled = self.get_compiled_config(after.guild.id)
+        now = ge.now_utc()
+        before_role_ids = self._role_ids_for(before)
+        after_role_ids = self._role_ids_for(after)
+        roles_changed = before_role_ids != after_role_ids
+        before_status, _ = self._verification_status(before, compiled)
+        after_status, _ = self._verification_status(after, compiled)
+        verification_changed = before_status != after_status
+        identity_changed = False
+        if compiled.member_risk_enabled:
+            before_identity = self._member_identity_signal_codes(before, now=now)
+            after_identity = self._member_identity_signal_codes(after, now=now)
+            identity_changed = before_identity != after_identity
+        if not verification_changed and not roles_changed and not identity_changed:
             return
-        if after_status in {"verified", "exempt"}:
-            existing = await self.store.fetch_verification_state(after.guild.id, after.id)
-            await self.store.delete_verification_state(after.guild.id, after.id)
-            if existing and existing.get("review_pending"):
-                await self._sync_verification_review_queue(
-                    after.guild,
-                    before_compiled,
-                    now=ge.now_utc(),
-                    note=f"{after.mention} no longer needs verification cleanup, so the review queue was refreshed.",
-                )
+        if verification_changed or roles_changed:
+            if after_status in {"verified", "exempt"}:
+                existing = await self.store.fetch_verification_state(after.guild.id, after.id)
+                await self.store.delete_verification_state(after.guild.id, after.id)
+                if existing and existing.get("review_pending"):
+                    await self._sync_verification_review_queue(
+                        after.guild,
+                        compiled,
+                        now=now,
+                        note=f"{after.mention} no longer needs verification cleanup, so the review queue was refreshed.",
+                    )
+            elif after_status == "unverified":
+                await self._ensure_verification_state(after, reason="role update")
+        if not compiled.member_risk_enabled:
             return
-        if after_status == "unverified":
-            await self._ensure_verification_state(after, reason="role update")
-        if not before_compiled.member_risk_enabled:
+        if not roles_changed and not identity_changed:
             return
         existing_member_risk = await self.store.fetch_member_risk_state(after.guild.id, after.id)
-        exempt_reason = self._member_risk_exempt_reason(after, before_compiled)
+        exempt_reason = self._member_risk_exempt_reason(after, compiled)
         if exempt_reason is not None:
             if existing_member_risk is not None:
                 await self.store.delete_member_risk_state(after.guild.id, after.id)
                 if existing_member_risk.get("review_pending"):
                     await self._sync_member_risk_review_queue(
                         after.guild,
-                        before_compiled,
-                        now=ge.now_utc(),
+                        compiled,
+                        now=now,
                         note=f"{after.mention} became exempt from suspicious-member review, so the queue was refreshed.",
                     )
             return
-        before_identity = self._member_identity_signal_codes(before, now=ge.now_utc())
-        after_identity = self._member_identity_signal_codes(after, now=ge.now_utc())
-        if before_identity == after_identity:
+        if not identity_changed:
             return
         assessment = self._assess_member_risk(
             after,
             types.SimpleNamespace(signal_codes=(), primary_domain=None),
-            now=ge.now_utc(),
+            now=now,
         )
         if assessment.level == "note":
-            await self._log_member_risk_note(after.guild, before_compiled, after, assessment)
+            await self._log_member_risk_note(after.guild, compiled, after, assessment)
 
     async def handle_message(self, message: discord.Message):
         if not self.storage_ready or message.guild is None or message.author.bot or message.webhook_id is not None:
@@ -3691,7 +3733,7 @@ class AdminService:
         )
         embed.add_field(name="Message Evidence", value=message_evidence, inline=False)
         embed.add_field(name="Identity Hints", value=identity_hints, inline=False)
-        embed.add_field(name="Confidence Risers", value=confidence_risers, inline=False)
+        embed.add_field(name="Escalation Context", value=confidence_risers, inline=False)
         if assessment.primary_domain:
             embed.add_field(name="Primary Domain", value=f"`{assessment.primary_domain}`", inline=False)
         await self.send_log(guild, compiled, embed=embed, alert=False)
