@@ -470,8 +470,25 @@ class AdminServiceTests(unittest.IsolatedAsyncioTestCase):
         ok, _ = await self.service.set_member_risk_config(self.guild.id, enabled=True, mode=mode)
         self.assertTrue(ok)
 
-    def _member_risk_decision(self, *codes: str, primary_domain: str | None = "mint-pass.live"):
-        evidence = types.SimpleNamespace(signal_codes=tuple(codes), primary_domain=primary_domain)
+    def _member_risk_decision(
+        self,
+        *codes: str,
+        primary_domain: str | None = "mint-pass.live",
+        message_codes: tuple[str, ...] | None = None,
+        context_codes: tuple[str, ...] | None = None,
+        match_class: str | None = None,
+        confidence: str | None = None,
+        scan_source: str = "new_message",
+    ):
+        evidence = types.SimpleNamespace(
+            signal_codes=tuple(codes),
+            message_codes=tuple(message_codes or ()),
+            context_codes=tuple(context_codes or ()),
+            primary_domain=primary_domain,
+            message_match_class=match_class,
+            message_confidence=confidence,
+            scan_source=scan_source,
+        )
         return types.SimpleNamespace(member_risk_evidence=evidence)
 
     def _dm_forbidden(self):
@@ -1748,6 +1765,67 @@ class AdminServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(queue)
         self.assertEqual(self.log_channel.sent[0]["embed"].title, "Member Risk Review Queue")
 
+    async def test_member_risk_review_persists_latest_message_metadata_and_updates_event_count(self):
+        await self._configure_member_risk(with_logs=True, mode="review")
+        member = FakeMember(
+            20301,
+            self.guild,
+            roles=[],
+            top_role=FakeRole(5, position=5),
+            created_at=ge.now_utc() - timedelta(hours=4),
+            joined_at=ge.now_utc() - timedelta(minutes=20),
+            avatar=None,
+            display_name="Support Desk",
+        )
+        self.guild.members[member.id] = member
+        message = types.SimpleNamespace(guild=self.guild, author=member, webhook_id=None)
+
+        await self.service.handle_member_risk_message(
+            message,
+            self._member_risk_decision(
+                "scam_medium",
+                "unknown_suspicious_link",
+                "newcomer_early_message",
+                primary_domain="mint-pass.live",
+                message_codes=("scam_medium", "unknown_suspicious_link"),
+                context_codes=("newcomer_early_message",),
+                match_class="scam_brand_impersonation",
+                confidence="medium",
+                scan_source="message_edit",
+            ),
+        )
+
+        record = await self.store.fetch_member_risk_state(self.guild.id, member.id)
+        self.assertIsNotNone(record)
+        self.assertEqual(record["message_event_count"], 1)
+        self.assertEqual(record["latest_message_basis"], "Official-looking brand lure")
+        self.assertEqual(record["latest_message_confidence"], "medium")
+        self.assertEqual(record["latest_scan_source"], "message_edit")
+        risk_field = next(field for field in self.log_channel.sent[0]["embed"].fields if field.name == "Risk")
+        self.assertIn("Basis: Official-looking brand lure", risk_field.value)
+
+        await self.service.handle_member_risk_message(
+            message,
+            self._member_risk_decision(
+                "scam_high",
+                "malicious_link",
+                "fresh_campaign_cluster_2",
+                primary_domain="secure-auth-session.click",
+                message_codes=("scam_high", "malicious_link"),
+                context_codes=("fresh_campaign_cluster_2",),
+                match_class="known_malicious_domain",
+                confidence="high",
+                scan_source="new_message",
+            ),
+        )
+
+        updated = await self.store.fetch_member_risk_state(self.guild.id, member.id)
+        self.assertIsNotNone(updated)
+        self.assertEqual(updated["message_event_count"], 2)
+        self.assertEqual(updated["latest_message_basis"], "Known malicious domain")
+        self.assertEqual(updated["latest_message_confidence"], "high")
+        self.assertEqual(updated["latest_scan_source"], "new_message")
+
     async def test_member_risk_mixed_script_name_with_risky_message_queues_review(self):
         await self._configure_member_risk(with_logs=True, mode="review")
         member = FakeMember(
@@ -1921,6 +1999,37 @@ class AdminServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(await self.store.fetch_member_risk_state(self.guild.id, member.id))
         self.assertEqual(self.log_channel.sent[-1]["embed"].title, "Member Risk Note")
         self.assertIn("Known malicious-link intel", self.log_channel.sent[-1]["embed"].description)
+
+    async def test_member_risk_log_mode_note_uses_precise_message_basis_label(self):
+        await self._configure_member_risk(with_logs=True, mode="log")
+        member = FakeMember(
+            2063,
+            self.guild,
+            roles=[],
+            top_role=FakeRole(5, position=5),
+            created_at=ge.now_utc() - timedelta(hours=2),
+            joined_at=ge.now_utc() - timedelta(minutes=10),
+            avatar=None,
+            display_name="Support Desk",
+        )
+        self.guild.members[member.id] = member
+        message = types.SimpleNamespace(guild=self.guild, author=member, webhook_id=None)
+
+        await self.service.handle_member_risk_message(
+            message,
+            self._member_risk_decision(
+                "scam_medium",
+                "unknown_suspicious_link",
+                "first_external_link",
+                message_codes=("scam_medium", "unknown_suspicious_link"),
+                context_codes=("first_external_link",),
+                match_class="scam_brand_impersonation",
+                confidence="medium",
+            ),
+        )
+
+        self.assertEqual(self.log_channel.sent[-1]["embed"].title, "Member Risk Note")
+        self.assertIn("Basis: Official-looking brand lure", self.log_channel.sent[-1]["embed"].description)
 
     async def test_member_risk_review_action_delay_and_ignore(self):
         await self._configure_member_risk(with_logs=True, mode="review")

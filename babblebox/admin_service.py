@@ -1759,6 +1759,16 @@ class AdminService:
             return "Combined local message heuristics drove this case."
         return "This case is based on low-confidence member context only."
 
+    def _member_risk_basis_label(
+        self,
+        signal_codes: list[str] | tuple[str, ...],
+        *,
+        latest_message_basis: str | None = None,
+    ) -> str:
+        if latest_message_basis:
+            return latest_message_basis
+        return self._member_risk_basis_text(signal_codes)
+
     def _member_risk_message_basis(self, evidence: Any) -> str | None:
         match_class = str(getattr(evidence, "message_match_class", "") or "").strip()
         labels = {
@@ -2241,7 +2251,7 @@ class AdminService:
             value=(
                 f"Level: **{str(current.get('risk_level', 'review')).title()}**\n"
                 f"Mode: **{MEMBER_RISK_MODE_LABELS.get(compiled.member_risk_mode, compiled.member_risk_mode.title())}**\n"
-                f"Basis: {self._member_risk_basis_text(list(current.get('signal_codes', [])))}"
+                f"Basis: {self._member_risk_basis_label(list(current.get('signal_codes', [])), latest_message_basis=current.get('latest_message_basis'))}"
             ),
             inline=False,
         )
@@ -3674,7 +3684,7 @@ class AdminService:
             "Member Risk Note",
             (
                 f"{member.mention} showed low-confidence suspicious-member signals, but Babblebox did not restrict them.\n"
-                f"Basis: {self._member_risk_basis_text(assessment.message_codes or assessment.signal_codes)}"
+                f"Basis: {self._member_risk_basis_label(assessment.message_codes or assessment.signal_codes, latest_message_basis=assessment.latest_message_basis)}"
             ),
             tone="info",
             footer="Babblebox Admin | Suspicious-member review",
@@ -3710,6 +3720,10 @@ class AdminService:
             "last_result_at": None,
             "last_notified_code": None,
             "last_notified_at": None,
+            "message_event_count": 1,
+            "latest_message_basis": assessment.latest_message_basis,
+            "latest_message_confidence": assessment.latest_message_confidence,
+            "latest_scan_source": assessment.latest_scan_source,
         }
 
     async def handle_member_risk_message(self, message: discord.Message, decision: Any):
@@ -3745,10 +3759,19 @@ class AdminService:
             await self._log_member_risk_note(message.guild, compiled, member, assessment)
             return
         record = existing or self._build_member_risk_state(member, assessment, now=now)
+        if existing is not None:
+            try:
+                prior_message_event_count = int(record.get("message_event_count", 0) or 0)
+            except (TypeError, ValueError):
+                prior_message_event_count = 0
+            record["message_event_count"] = max(0, prior_message_event_count) + 1
         record["last_seen_at"] = serialize_datetime(now)
         record["risk_level"] = "critical" if assessment.level == "critical" else "review"
         record["signal_codes"] = list(assessment.signal_codes)
         record["primary_domain"] = assessment.primary_domain
+        record["latest_message_basis"] = assessment.latest_message_basis
+        record["latest_message_confidence"] = assessment.latest_message_confidence
+        record["latest_scan_source"] = assessment.latest_scan_source
         snooze_until = deserialize_datetime(record.get("snooze_until"))
         if snooze_until is not None and snooze_until > now:
             await self.store.upsert_member_risk_state(record)
