@@ -128,10 +128,12 @@ Babblebox is intentionally compact:
   - admin-only configuration for administrators or Manage Server users
   - privacy leak pack
   - promo / invite pack
-- scam / malicious-link pack
+- scam / malicious-link pack with local weighted scam-language scoring
 - separate adult / 18+ link pack
 - bundled local link safety with safe-domain families, suspicious-domain gating, and no external provider requirement
 - local-first malicious-link blocking with a feed of ~200k known malicious domains
+- in-scope Shield coverage for new messages, meaningful edits, and webhook/community-post style delivery
+- private suspicious-member review that only escalates when risky message signals combine with bounded account-age, avatar-state, display-name suspicion, newcomer first-link context, or fresh-campaign reuse
 - optional AI-assisted second-pass review for moderator context only
 - AI stays off by default and is currently limited to guild `1322933864360050688`
 - log-first defaults
@@ -143,10 +145,11 @@ Babblebox is intentionally compact:
 - Admin lifecycle helpers
   - returned-after-ban follow-up role assignment within a clear 30-day return window
   - auto-remove or moderator-review follow-up role expiry
-  - review alerts with compact action buttons instead of a case system
-  - verification retention with warning-before-kick cleanup
-  - verification-help channel deadline extensions with a small extension cap
-  - shared exclusions, trusted-role bypasses, templates, and compact admin logs
+- review alerts with compact action buttons instead of a case system
+- verification retention with warning-before-kick cleanup
+- verification-help channel deadline extensions with a small extension cap
+- optional suspicious-member note, review, or review-or-kick lane under `/admin risk`
+- shared exclusions, trusted-role bypasses, templates, and compact admin logs
 
 ### Daily Arcade
 
@@ -326,12 +329,13 @@ Slash is recommended for the heavier config flows here. Prefix stays positional,
 | `/admin status` | `bb!admin status` | View overview counts or inspect one member |
 | `/admin followup` | `bb!admin followup true @Probation review 30d` | Configure returned-after-ban follow-up roles |
 | `/admin verification` | `bb!admin verification true @Verified must_have_role review 7d 2d` | Configure warning-before-kick verification cleanup and the shared review queue |
+| `/admin risk` | `bb!admin risk true review` | Configure private suspicious-member note, review, or review-or-kick handling |
 | `/admin logs` | `bb!admin logs #admin-log @Mods` | Set the shared admin log channel and alert role |
 | `/admin exclusions` | `bb!admin exclusions` | Configure shared exclusions and trusted roles |
 | `/admin templates` | `bb!admin templates` | Configure warning/kick DMs and optional rejoin link |
 | `/admin sync` | `bb!admin sync` | One-time catch-up scan for current unverified members |
 
-Verification cleanup is batch-first: routine sweeps emit grouped summaries, review mode uses one persistent queue message, and startup reconciliation resumes quietly without paging staff about unchanged backlog.
+Verification cleanup stays batch-first, and suspicious-member review stays private: routine sweeps emit grouped summaries, review mode uses one persistent queue message per lane, startup reconciliation resumes quietly, and Babblebox does not post public channel reactions or reply callouts for weak evidence.
 
 ### Daily Arcade
 
@@ -442,11 +446,15 @@ Babblebox Shield is intentionally compact and conservative:
 - moderator context goes to a configured log channel instead of a heavy database log
 - repeated-hit escalation is in-memory and bounded
 - custom regex is intentionally not accepted; advanced mode uses safe text matching only
+- in-scope scans can cover new posts, meaningful edits, embed text, attachment labels, forwarded message snapshots, and webhook/community-post style delivery
+- local scam decisions combine host/path/query risk with brand bait, official-looking framing, CTA wording, urgency, newcomer first-link context, fresh-campaign reuse, and explicit warning/education suppressors
+- suspicious-member review reuses Admin's compact review queues and only combines locally flagged message or link signals with bounded account creation time, avatar state, and display-name risk hints
+- profile bios or about-me text are not part of the suspicious-member lane in the current implementation
 - optional AI review never becomes the primary moderation engine
 - AI review only runs after local Shield already flagged a message
 - AI review is currently limited to guild `1322933864360050688`
 - AI review is admin-only, off by default, and never punishes by itself
-- only minimal, sanitized, truncated flagged content is sent to the AI provider
+- only minimal, sanitized, truncated flagged text from the scanned surfaces is sent to the AI provider
 
 ## Capture and Later Media Handling
 
@@ -543,6 +551,8 @@ Admin lifecycle storage stays row-based and compact:
 - `admin_followup_roles`
 - `admin_verification_states`
 - `admin_verification_review_queues`
+- `admin_member_risk_states`
+- `admin_member_risk_review_queues`
 - `admin_verification_notification_snapshots`
 
 Stored data is intentionally small:
@@ -551,7 +561,9 @@ Stored data is intentionally small:
 - short-lived ban-return candidates with a 30-day purge window
 - active follow-up role rows only while Babblebox still manages that follow-up
 - pending verification rows only while someone is still unverified
+- active suspicious-member rows only while review remains unresolved
 - one shared verification review queue row only while overdue review backlog exists
+- one shared suspicious-member review queue row only while suspicious-member backlog exists
 - short-lived grouped verification notification snapshots only while restart-safe suppression state matters
 
 Not stored:

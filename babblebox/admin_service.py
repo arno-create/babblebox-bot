@@ -5,6 +5,8 @@ import calendar
 import contextlib
 import hashlib
 import re
+import types
+import unicodedata
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from typing import Any
@@ -18,10 +20,12 @@ from babblebox.admin_store import (
     AdminStorageUnavailable,
     AdminStore,
     VALID_FOLLOWUP_MODES,
+    VALID_MEMBER_RISK_MODES,
     VALID_VERIFICATION_DEADLINE_ACTIONS,
     VALID_VERIFICATION_LOGIC,
     default_admin_config,
     normalize_admin_config,
+    order_member_risk_signal_codes,
 )
 from babblebox.text_safety import normalize_plain_text
 from babblebox.utility_helpers import deserialize_datetime, format_duration_brief, parse_duration_string, serialize_datetime
@@ -44,6 +48,12 @@ GROUPED_MEMBER_PREVIEW_LIMIT = 3
 VERIFICATION_NOTIFICATION_SUPPRESSION_SECONDS = 24 * 3600
 VERIFICATION_QUEUE_PREVIEW_LIMIT = 5
 VERIFICATION_SUMMARY_LINE_LIMIT = 8
+MEMBER_RISK_QUEUE_PREVIEW_LIMIT = 5
+MEMBER_RISK_DELAY_SECONDS = 24 * 3600
+MEMBER_RISK_NOTE_DEDUP_SECONDS = 12 * 3600
+NEW_ACCOUNT_STRONG_SECONDS = 24 * 3600
+NEW_ACCOUNT_RECENT_SECONDS = 7 * 24 * 3600
+NEW_MEMBER_EARLY_SECONDS = 24 * 3600
 VERIFICATION_QUEUE_RELEVANT_CONFIG_FIELDS = frozenset(
     {
         "admin_log_channel_id",
@@ -58,8 +68,23 @@ VERIFICATION_QUEUE_RELEVANT_CONFIG_FIELDS = frozenset(
         "verification_exempt_bots",
     }
 )
+MEMBER_RISK_QUEUE_RELEVANT_CONFIG_FIELDS = frozenset(
+    {
+        "admin_log_channel_id",
+        "member_risk_enabled",
+        "member_risk_mode",
+        "excluded_user_ids",
+        "excluded_role_ids",
+        "trusted_role_ids",
+    }
+)
 
 FOLLOWUP_MODE_LABELS = {"auto_remove": "Auto-remove", "review": "Moderator review"}
+MEMBER_RISK_MODE_LABELS = {
+    "log": "Log only",
+    "review": "Moderator review",
+    "review_or_kick": "Review or kick",
+}
 VERIFICATION_LOGIC_LABELS = {
     "must_have_role": "Unverified if member DOES NOT have this role",
     "must_not_have_role": "Unverified if member DOES have this role",
@@ -79,8 +104,80 @@ VERIFICATION_REVIEW_ACTION_LABELS = {
     "delay": "Delay",
     "ignore": "Ignore",
 }
+MEMBER_RISK_REVIEW_ACTION_LABELS = {
+    "kick": "Kick",
+    "delay": "Delay",
+    "ignore": "Ignore",
+}
 FOLLOWUP_DURATION_RE = re.compile(r"(?ix)^\s*(\d+)\s*(d|day|days|w|week|weeks|mo|mon|month|months|y|yr|year|years)\s*$")
 VERIFICATION_REVIEW_DELAY_SECONDS = 24 * 3600
+ZERO_WIDTH_NAME_RE = re.compile(r"[\u200b-\u200f\u2060\ufeff]")
+SEPARATOR_HEAVY_NAME_RE = re.compile(r"[_\-.]{3,}|[|/\\]{2,}")
+IMPERSIONATION_NAME_RE = re.compile(r"(?i)\b(?:admin|moderator|mod|support|official|staff|team)\b")
+MIXED_SCRIPT_CONFUSABLE_SCRIPTS = frozenset({"latin", "cyrillic", "greek"})
+MEMBER_RISK_MESSAGE_SIGNAL_CODES = frozenset(
+    {
+        "scam_high",
+        "scam_medium",
+        "malicious_link",
+        "unknown_suspicious_link",
+        "suspicious_attachment",
+        "cta_download",
+        "newcomer_early_message",
+        "first_message_link",
+        "first_external_link",
+        "newcomer_first_messages_risky",
+        "fresh_campaign_cluster_2",
+        "fresh_campaign_cluster_3",
+        "campaign_path_shape",
+        "campaign_host_family",
+        "campaign_lure_reuse",
+    }
+)
+MEMBER_RISK_CORE_MESSAGE_SIGNAL_CODES = frozenset(
+    {
+        "scam_high",
+        "scam_medium",
+        "malicious_link",
+        "unknown_suspicious_link",
+        "suspicious_attachment",
+        "cta_download",
+    }
+)
+MEMBER_RISK_IDENTITY_SIGNAL_CODES = frozenset(
+    {
+        "account_new_1d",
+        "account_new_7d",
+        "default_avatar",
+        "joined_recently",
+        "name_zero_width",
+        "name_separator_heavy",
+        "name_unreadable",
+        "name_impersonation",
+        "name_mixed_script",
+    }
+)
+MEMBER_RISK_STRONG_IDENTITY_HINT_CODES = frozenset(
+    {
+        "name_zero_width",
+        "name_separator_heavy",
+        "name_unreadable",
+        "name_impersonation",
+        "name_mixed_script",
+    }
+)
+MEMBER_RISK_CRITICAL_MESSAGE_AMPLIFIER_CODES = frozenset(
+    {
+        "suspicious_attachment",
+        "cta_download",
+        "fresh_campaign_cluster_2",
+        "fresh_campaign_cluster_3",
+        "campaign_path_shape",
+        "campaign_host_family",
+        "campaign_lure_reuse",
+        "newcomer_first_messages_risky",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -111,6 +208,8 @@ class CompiledAdminConfig:
     followup_exempt_staff: bool
     verification_exempt_staff: bool
     verification_exempt_bots: bool
+    member_risk_enabled: bool
+    member_risk_mode: str
 
 
 @dataclass(frozen=True)
@@ -217,6 +316,21 @@ class VerificationSweepBatch:
     queue_refresh_guild_ids: set[int] = field(default_factory=set)
 
 
+@dataclass(frozen=True)
+class MemberRiskAssessment:
+    level: str
+    identity_score: int
+    message_score: int
+    signal_codes: tuple[str, ...]
+    identity_codes: tuple[str, ...] = ()
+    message_codes: tuple[str, ...] = ()
+    context_codes: tuple[str, ...] = ()
+    primary_domain: str | None = None
+    latest_message_basis: str | None = None
+    latest_message_confidence: str | None = None
+    latest_scan_source: str | None = None
+
+
 def _compile_config(raw: dict[str, Any]) -> CompiledAdminConfig:
     return CompiledAdminConfig(
         guild_id=int(raw["guild_id"]),
@@ -245,6 +359,8 @@ def _compile_config(raw: dict[str, Any]) -> CompiledAdminConfig:
         followup_exempt_staff=bool(raw["followup_exempt_staff"]),
         verification_exempt_staff=bool(raw["verification_exempt_staff"]),
         verification_exempt_bots=bool(raw["verification_exempt_bots"]),
+        member_risk_enabled=bool(raw.get("member_risk_enabled", False)),
+        member_risk_mode=str(raw.get("member_risk_mode", "review")),
     )
 
 
@@ -344,6 +460,7 @@ class AdminService:
         self._scheduler_task: asyncio.Task | None = None
         self._compiled_configs: dict[int, CompiledAdminConfig] = {}
         self._log_dedup: dict[tuple[int, str], float] = {}
+        self._member_risk_note_dedup: dict[tuple[int, int, str], float] = {}
         self._verification_sync_sessions: dict[int, VerificationSyncSession] = {}
         self._verification_sync_lock = asyncio.Lock()
         self._startup_resume_pending = True
@@ -397,6 +514,7 @@ class AdminService:
                 "pending_reviews": 0,
                 "verification_pending": 0,
                 "verification_warned": 0,
+                "member_risk_pending": 0,
             }
         return await self.store.fetch_guild_counts(guild_id)
 
@@ -459,6 +577,8 @@ class AdminService:
             )
         if config["verification_deadline_action"] not in VALID_VERIFICATION_DEADLINE_ACTIONS:
             return "Verification deadline action must be `auto_kick` or `review`."
+        if config.get("member_risk_mode") not in VALID_MEMBER_RISK_MODES:
+            return "Member risk mode must be `log`, `review`, or `review_or_kick`."
         if config["followup_duration_unit"] == "months" and config["followup_duration_value"] > 12:
             return "Follow-up month durations can be at most 12 months."
         if config["verification_warning_lead_seconds"] >= config["verification_kick_after_seconds"]:
@@ -468,6 +588,45 @@ class AdminService:
                 label = field.replace("_ids", "").replace("_", " ")
                 return f"You can keep up to {EXCLUSION_LIMIT} entries in `{label}`."
         return None
+
+    async def set_member_risk_config(
+        self,
+        guild_id: int,
+        *,
+        enabled: bool | None = None,
+        mode: str | None = None,
+    ) -> tuple[bool, str]:
+        cleaned_mode = mode.strip().lower() if isinstance(mode, str) else None
+        if cleaned_mode is not None and cleaned_mode not in VALID_MEMBER_RISK_MODES:
+            return False, "Member risk mode must be `log`, `review`, or `review_or_kick`."
+
+        def mutate(config: dict[str, Any]):
+            if enabled is not None:
+                config["member_risk_enabled"] = bool(enabled)
+            if cleaned_mode is not None:
+                config["member_risk_mode"] = cleaned_mode
+
+        preview = self.get_config(guild_id)
+        final_enabled = preview["member_risk_enabled"] if enabled is None else bool(enabled)
+        final_mode = preview["member_risk_mode"] if cleaned_mode is None else cleaned_mode
+        requested_fields = {
+            field
+            for field, supplied in (
+                ("member_risk_enabled", enabled is not None),
+                ("member_risk_mode", cleaned_mode is not None),
+            )
+            if supplied
+        }
+        return await self._update_config(
+            guild_id,
+            mutate,
+            success_message=(
+                f"Suspicious-member review is {'enabled' if final_enabled else 'disabled'} with `{final_mode}` mode."
+            ),
+            post_update_hook=self._reconcile_member_risk_backlog_after_config_change,
+            requested_fields=requested_fields,
+            force_post_update=bool(requested_fields),
+        )
 
     async def set_followup_config(
         self,
@@ -721,6 +880,11 @@ class AdminService:
             return []
         return await self.store.list_verification_review_queues()
 
+    async def list_member_risk_review_queues(self) -> list[dict[str, Any]]:
+        if not self.storage_ready:
+            return []
+        return await self.store.list_member_risk_review_queues()
+
     async def current_verification_review_target(self, guild_id: int) -> dict[str, Any] | None:
         if not self.storage_ready:
             return None
@@ -731,20 +895,33 @@ class AdminService:
         pending = await self._active_verification_review_rows(guild, compiled)
         return pending[0] if pending else None
 
+    async def current_member_risk_review_target(self, guild_id: int) -> dict[str, Any] | None:
+        if not self.storage_ready:
+            return None
+        guild = self.bot.get_guild(guild_id)
+        if guild is None:
+            return None
+        compiled = self.get_compiled_config(guild_id)
+        pending = await self._active_member_risk_review_rows(guild, compiled)
+        return pending[0] if pending else None
+
     async def get_member_status(self, member: discord.Member) -> dict[str, Any]:
         compiled = self.get_compiled_config(member.guild.id)
         followup = await self.store.fetch_followup(member.guild.id, member.id) if self.storage_ready else None
         candidate = await self.store.fetch_ban_candidate(member.guild.id, member.id) if self.storage_ready else None
         verification = await self.store.fetch_verification_state(member.guild.id, member.id) if self.storage_ready else None
+        member_risk = await self.store.fetch_member_risk_state(member.guild.id, member.id) if self.storage_ready else None
         verified_state, verified_reason = self._verification_status(member, compiled)
         return {
             "followup": followup,
             "candidate": candidate,
             "verification": verification,
+            "member_risk": member_risk,
             "verified_state": verified_state,
             "verified_reason": verified_reason,
             "followup_exempt_reason": self._followup_exempt_reason(member, compiled),
             "verification_exempt_reason": self._verification_exempt_reason(member, compiled),
+            "member_risk_exempt_reason": self._member_risk_exempt_reason(member, compiled),
         }
 
     def _bot_member(self, guild: discord.Guild | None):
@@ -1449,6 +1626,220 @@ class AdminService:
             return ("verified", "Member has the verification role.") if has_role else ("unverified", "Member is missing the verification role.")
         return ("unverified", "Member still has the unverified role.") if has_role else ("verified", "Member does not have the unverified role.")
 
+    def _member_risk_exempt_reason(self, member: discord.Member, compiled: CompiledAdminConfig) -> str | None:
+        if getattr(member, "bot", False):
+            return "Bots are exempt."
+        if member.id in compiled.excluded_user_ids:
+            return "Member is explicitly excluded."
+        role_ids = self._role_ids_for(member)
+        if compiled.excluded_role_ids.intersection(role_ids):
+            return "Member has an excluded role."
+        if compiled.trusted_role_ids.intersection(role_ids):
+            return "Member has a trusted role."
+        if self._is_staff_member(member):
+            return "Member has staff permissions."
+        return None
+
+    def _member_created_at(self, member: discord.Member) -> datetime | None:
+        created_at = getattr(member, "created_at", None)
+        if isinstance(created_at, datetime):
+            return created_at
+        return deserialize_datetime(created_at) if created_at is not None else None
+
+    def _member_joined_at(self, member: discord.Member) -> datetime | None:
+        joined_at = getattr(member, "joined_at", None)
+        if isinstance(joined_at, datetime):
+            return joined_at
+        return deserialize_datetime(joined_at) if joined_at is not None else None
+
+    def _display_name_script_buckets(self, value: str) -> set[str]:
+        scripts: set[str] = set()
+        for character in value:
+            if not character.isalpha():
+                continue
+            try:
+                name = unicodedata.name(character)
+            except ValueError:
+                continue
+            for script in MIXED_SCRIPT_CONFUSABLE_SCRIPTS:
+                if script.upper() in name:
+                    scripts.add(script)
+                    break
+        return scripts
+
+    def _member_name_signals(self, member: discord.Member) -> list[str]:
+        display_name = str(getattr(member, "display_name", "") or "").strip()
+        if not display_name:
+            return []
+        signals: list[str] = []
+        if ZERO_WIDTH_NAME_RE.search(display_name):
+            signals.append("name_zero_width")
+        normalized = normalize_plain_text(display_name)
+        if SEPARATOR_HEAVY_NAME_RE.search(display_name) and len(re.sub(r"[_\-.|/\\\s]", "", display_name)) <= 6:
+            signals.append("name_separator_heavy")
+        if normalized and IMPERSIONATION_NAME_RE.search(normalized) and not self._is_staff_member(member):
+            signals.append("name_impersonation")
+        if normalized and len(re.sub(r"[^a-z0-9]", "", normalized.lower())) <= 2 and len(normalized) >= 4:
+            signals.append("name_unreadable")
+        if len(self._display_name_script_buckets(display_name)) >= 2:
+            signals.append("name_mixed_script")
+        return signals
+
+    def _member_identity_signal_codes(self, member: discord.Member, *, now: datetime) -> list[str]:
+        signals: list[str] = []
+        created_at = self._member_created_at(member)
+        if created_at is not None:
+            age_seconds = max(0, int((now - created_at).total_seconds()))
+            if age_seconds <= NEW_ACCOUNT_STRONG_SECONDS:
+                signals.append("account_new_1d")
+            elif age_seconds <= NEW_ACCOUNT_RECENT_SECONDS:
+                signals.append("account_new_7d")
+        avatar_attr_present = hasattr(member, "avatar") or hasattr(member, "default_avatar")
+        if avatar_attr_present and getattr(member, "avatar", None) is None:
+            signals.append("default_avatar")
+        signals.extend(self._member_name_signals(member))
+        joined_at = self._member_joined_at(member)
+        if joined_at is not None and (now - joined_at).total_seconds() <= NEW_MEMBER_EARLY_SECONDS:
+            signals.append("joined_recently")
+        return sorted(set(signals))
+
+    def _member_risk_signal_weight(self, code: str) -> int:
+        weights = {
+            "account_new_1d": 2,
+            "account_new_7d": 1,
+            "default_avatar": 1,
+            "joined_recently": 1,
+            "name_zero_width": 1,
+            "name_separator_heavy": 1,
+            "name_unreadable": 1,
+            "name_impersonation": 2,
+            "name_mixed_script": 1,
+            "scam_high": 4,
+            "scam_medium": 3,
+            "malicious_link": 4,
+            "unknown_suspicious_link": 2,
+            "suspicious_attachment": 2,
+            "cta_download": 2,
+            "newcomer_early_message": 1,
+            "first_message_link": 1,
+            "first_external_link": 1,
+            "newcomer_first_messages_risky": 1,
+            "fresh_campaign_cluster_2": 1,
+            "fresh_campaign_cluster_3": 2,
+            "campaign_path_shape": 1,
+            "campaign_host_family": 1,
+            "campaign_lure_reuse": 1,
+        }
+        return weights.get(code, 0)
+
+    def _split_member_risk_signal_codes(
+        self,
+        signal_codes: list[str] | tuple[str, ...],
+    ) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+        ordered = order_member_risk_signal_codes(signal_codes)
+        message_codes: list[str] = []
+        identity_codes: list[str] = []
+        other_codes: list[str] = []
+        for code in ordered:
+            if code in MEMBER_RISK_MESSAGE_SIGNAL_CODES:
+                message_codes.append(code)
+            elif code in MEMBER_RISK_IDENTITY_SIGNAL_CODES:
+                identity_codes.append(code)
+            else:
+                other_codes.append(code)
+        return tuple(message_codes), tuple(identity_codes), tuple(other_codes)
+
+    def _member_risk_basis_text(self, message_codes: list[str] | tuple[str, ...]) -> str:
+        message_code_set = set(message_codes)
+        if "malicious_link" in message_code_set:
+            return "Known malicious-link intel contributed to this case."
+        if "unknown_suspicious_link" in message_code_set:
+            return "An unknown risky link only escalated after combined local scam evidence."
+        if message_code_set & {"scam_high", "scam_medium", "suspicious_attachment", "cta_download"}:
+            return "Combined local message heuristics drove this case."
+        return "This case is based on low-confidence member context only."
+
+    def _member_risk_basis_label(
+        self,
+        signal_codes: list[str] | tuple[str, ...],
+        *,
+        latest_message_basis: str | None = None,
+    ) -> str:
+        if latest_message_basis:
+            return latest_message_basis
+        return self._member_risk_basis_text(signal_codes)
+
+    def _member_risk_message_basis(self, evidence: Any) -> str | None:
+        match_class = str(getattr(evidence, "message_match_class", "") or "").strip()
+        labels = {
+            "known_malicious_domain": "Known malicious domain",
+            "scam_attachment": "Executable or archive lure",
+            "scam_bait_link": "Scam bait + link",
+            "scam_brand_impersonation": "Official-looking brand lure",
+            "scam_campaign_lure": "Scam social-engineering pattern",
+            "scam_download": "Executable download link",
+            "scam_mint_wallet_lure": "Mint or wallet lure",
+            "scam_risky_unknown_link": "Risky unknown-link lure",
+            "scam_shortener": "Shortened or punycode lure",
+        }
+        if match_class:
+            return labels.get(match_class, match_class.replace("_", " ").title())
+        message_codes = getattr(evidence, "message_codes", ()) or getattr(evidence, "signal_codes", ())
+        return self._member_risk_basis_text(message_codes)
+
+    def _assess_member_risk(
+        self,
+        member: discord.Member,
+        evidence: Any,
+        *,
+        now: datetime,
+    ) -> MemberRiskAssessment:
+        identity_codes = self._member_identity_signal_codes(member, now=now)
+        raw_message_codes = getattr(evidence, "message_codes", ()) or ()
+        raw_context_codes = getattr(evidence, "context_codes", ()) or ()
+        if not raw_message_codes and not raw_context_codes:
+            fallback_message_codes, _identity_codes, _other_codes = self._split_member_risk_signal_codes(
+                getattr(evidence, "signal_codes", ()) or ()
+            )
+            raw_message_codes = [code for code in fallback_message_codes if code in MEMBER_RISK_CORE_MESSAGE_SIGNAL_CODES]
+            raw_context_codes = [code for code in fallback_message_codes if code not in MEMBER_RISK_CORE_MESSAGE_SIGNAL_CODES]
+        message_codes = tuple(order_member_risk_signal_codes(raw_message_codes))
+        context_codes = tuple(order_member_risk_signal_codes(raw_context_codes))
+        identity_score = sum(self._member_risk_signal_weight(code) for code in identity_codes)
+        message_score = sum(self._member_risk_signal_weight(code) for code in (*message_codes, *context_codes))
+        signal_codes = tuple(order_member_risk_signal_codes([*message_codes, *context_codes, *identity_codes]))
+        level = "low"
+        has_strong_message = any(code in {"scam_high", "malicious_link"} for code in message_codes)
+        has_core_message = any(code in MEMBER_RISK_CORE_MESSAGE_SIGNAL_CODES for code in message_codes)
+        if message_score <= 0 or not has_core_message:
+            if identity_score >= 3 and any(code in MEMBER_RISK_STRONG_IDENTITY_HINT_CODES for code in identity_codes):
+                level = "note"
+        else:
+            has_message_amplifier = any(
+                code in MEMBER_RISK_CRITICAL_MESSAGE_AMPLIFIER_CODES
+                for code in (*message_codes, *context_codes)
+            )
+            core_message_score = sum(self._member_risk_signal_weight(code) for code in message_codes)
+            if has_strong_message and has_message_amplifier and message_score >= 8:
+                level = "critical"
+            elif core_message_score >= 4 or message_score >= 5:
+                level = "review"
+            elif message_score >= 3:
+                level = "note"
+        return MemberRiskAssessment(
+            level=level,
+            identity_score=identity_score,
+            message_score=message_score,
+            signal_codes=signal_codes,
+            identity_codes=tuple(order_member_risk_signal_codes(identity_codes)),
+            message_codes=message_codes,
+            context_codes=context_codes,
+            primary_domain=getattr(evidence, "primary_domain", None),
+            latest_message_basis=self._member_risk_message_basis(evidence),
+            latest_message_confidence=str(getattr(evidence, "message_confidence", "") or "").strip() or None,
+            latest_scan_source=str(getattr(evidence, "scan_source", "") or "").strip() or None,
+        )
+
     def _render_template(
         self,
         template: str | None,
@@ -1687,6 +2078,218 @@ class AdminService:
             embed.add_field(name="Last Update", value=note, inline=False)
         return ge.style_embed(embed, footer="Babblebox Admin | Verification cleanup")
 
+    def _member_risk_signal_summary(self, signal_codes: list[str] | tuple[str, ...]) -> str:
+        labels = {
+            "account_new_1d": "account under 24 hours old",
+            "account_new_7d": "account under 7 days old",
+            "default_avatar": "default avatar",
+            "joined_recently": "recent join",
+            "name_zero_width": "zero-width name tricks",
+            "name_separator_heavy": "separator-heavy name",
+            "name_unreadable": "unreadable name pattern",
+            "name_impersonation": "impersonation-like name",
+            "name_mixed_script": "mixed-script display name",
+            "scam_high": "high-confidence scam message",
+            "scam_medium": "medium-confidence scam message",
+            "malicious_link": "known malicious link",
+            "unknown_suspicious_link": "unknown risky link",
+            "suspicious_attachment": "suspicious attachment + CTA",
+            "cta_download": "download or login CTA",
+            "newcomer_early_message": "recent join or new account context",
+            "first_message_link": "first newcomer message carried a link",
+            "first_external_link": "first newcomer external link",
+            "newcomer_first_messages_risky": "risky activity in first newcomer messages",
+            "fresh_campaign_cluster_2": "repeat fresh-account campaign",
+            "fresh_campaign_cluster_3": "multi-account fresh campaign",
+            "campaign_path_shape": "shared risky path shape",
+            "campaign_lure_reuse": "reused lure copy",
+        }
+        ordered = order_member_risk_signal_codes(signal_codes)
+        rendered = [labels.get(code, code.replace("_", " ")) for code in ordered[:5]]
+        if len(ordered) > 5:
+            rendered.append(f"+{len(ordered) - 5} more")
+        return ", ".join(rendered) if rendered else "No evidence recorded."
+
+    def _member_risk_signal_field(self, signal_codes: list[str] | tuple[str, ...], *, empty_text: str) -> str:
+        ordered = order_member_risk_signal_codes(signal_codes)
+        if not ordered:
+            return empty_text
+        rendered = [f"- {self._member_risk_signal_summary([code])}" for code in ordered[:4]]
+        if len(ordered) > 4:
+            rendered.append(f"- +{len(ordered) - 4} more")
+        return "\n".join(rendered)
+
+    def _member_risk_context_field(self, signal_codes: list[str] | tuple[str, ...]) -> str:
+        ordered = order_member_risk_signal_codes(signal_codes)
+        if not ordered:
+            return "No extra confidence multipliers recorded."
+        rendered = [f"- {self._member_risk_signal_summary([code])}" for code in ordered[:3]]
+        if len(ordered) > 3:
+            rendered.append(f"- +{len(ordered) - 3} more")
+        return "\n".join(rendered)
+
+    def _member_risk_evidence_fields(self, signal_codes: list[str] | tuple[str, ...]) -> tuple[str, str, str]:
+        message_codes, identity_codes, other_codes = self._split_member_risk_signal_codes(signal_codes)
+        core_message_codes = [
+            code
+            for code in message_codes
+            if code in {"malicious_link", "unknown_suspicious_link", "scam_high", "scam_medium", "suspicious_attachment", "cta_download"}
+        ]
+        context_codes = [code for code in message_codes if code not in core_message_codes]
+        if other_codes:
+            context_codes.extend(other_codes)
+        return (
+            self._member_risk_signal_field(core_message_codes, empty_text="No message evidence recorded."),
+            self._member_risk_signal_field(identity_codes, empty_text="No identity hints recorded."),
+            self._member_risk_context_field(context_codes),
+        )
+
+    def build_member_risk_removal_embed(
+        self,
+        member: discord.Member,
+        *,
+        guild: discord.Guild,
+        compiled: CompiledAdminConfig,
+        primary_domain: str | None,
+    ) -> discord.Embed:
+        lines = [
+            f"Recent activity in {guild.name} triggered a safety review and Babblebox removed your access for now.",
+            "If you believe this was a mistake, contact the server staff.",
+        ]
+        if primary_domain:
+            lines.insert(1, f"Recent activity involving `{primary_domain}` was part of that review.")
+        if compiled.invite_link:
+            lines.append(f"Rejoin: {compiled.invite_link}")
+        return ge.make_status_embed(
+            "Safety Review Update",
+            "\n\n".join(lines),
+            tone="warning",
+            footer="Babblebox Admin | Suspicious-member review",
+        )
+
+    def build_member_risk_review_resolution_embed(self, record: dict[str, Any], *, message: str, success: bool) -> discord.Embed:
+        embed = ge.make_status_embed(
+            "Member Risk Review Updated" if success else "Member Risk Review Failed",
+            message,
+            tone="success" if success else "warning",
+            footer="Babblebox Admin | Suspicious-member review",
+        )
+        embed.add_field(name="Member", value=f"<@{record['user_id']}>", inline=True)
+        return embed
+
+    def _member_risk_review_sort_key(self, record: dict[str, Any]) -> tuple[int, datetime, int]:
+        fallback = ge.now_utc()
+        risk_rank = {"critical": 0, "review": 1, "note": 2}
+        return (
+            risk_rank.get(str(record.get("risk_level") or "review"), 3),
+            deserialize_datetime(record.get("last_seen_at")) or fallback,
+            int(record.get("user_id") or 0),
+        )
+
+    async def _active_member_risk_review_rows(
+        self,
+        guild: discord.Guild,
+        compiled: CompiledAdminConfig,
+    ) -> list[dict[str, Any]]:
+        pending: list[dict[str, Any]] = []
+        for record in await self.store.list_member_risk_states_for_guild(guild.id):
+            if not record.get("review_pending"):
+                continue
+            member = guild.get_member(int(record["user_id"]))
+            if member is None:
+                await self.store.delete_member_risk_state(guild.id, int(record["user_id"]))
+                continue
+            if not compiled.member_risk_enabled or compiled.member_risk_mode == "log":
+                await self.store.upsert_member_risk_state(self._close_member_risk_review_record(record))
+                continue
+            if self._member_risk_exempt_reason(member, compiled) is not None:
+                await self.store.delete_member_risk_state(guild.id, int(record["user_id"]))
+                continue
+            if record.get("review_message_channel_id") is not None or record.get("review_message_id") is not None:
+                cleaned = dict(record)
+                cleaned["review_message_channel_id"] = None
+                cleaned["review_message_id"] = None
+                await self.store.upsert_member_risk_state(cleaned)
+                record = cleaned
+            pending.append(record)
+        pending.sort(key=self._member_risk_review_sort_key)
+        return pending
+
+    def build_member_risk_review_queue_embed(
+        self,
+        guild: discord.Guild,
+        pending_rows: list[dict[str, Any]],
+        *,
+        compiled: CompiledAdminConfig,
+        note: str | None = None,
+    ) -> discord.Embed:
+        embed = discord.Embed(
+            title="Member Risk Review Queue",
+            description=(
+                "Suspicious-member cases are queued here when message and account signals combine strongly enough for private staff review."
+                if pending_rows
+                else "No pending suspicious-member reviews remain."
+            ),
+            color=ge.EMBED_THEME["warning"],
+        )
+        embed.add_field(name="Queue", value=f"Pending reviews: **{len(pending_rows)}**", inline=False)
+        if not pending_rows:
+            if note:
+                embed.add_field(name="Last Update", value=note, inline=False)
+            return ge.style_embed(embed, footer="Babblebox Admin | Suspicious-member review")
+        current = pending_rows[0]
+        member = guild.get_member(int(current["user_id"]))
+        member_label = (
+            f"{ge.display_name_of(member)} (`{member.id}`)"
+            if member is not None
+            else f"<@{current['user_id']}> (`{current['user_id']}`)"
+        )
+        message_evidence, identity_hints, confidence_risers = self._member_risk_evidence_fields(list(current.get("signal_codes", [])))
+        embed.add_field(name="Current Case", value=member_label, inline=False)
+        embed.add_field(
+            name="Risk",
+            value=(
+                f"Level: **{str(current.get('risk_level', 'review')).title()}**\n"
+                f"Mode: **{MEMBER_RISK_MODE_LABELS.get(compiled.member_risk_mode, compiled.member_risk_mode.title())}**\n"
+                f"Basis: {self._member_risk_basis_label(list(current.get('signal_codes', [])), latest_message_basis=current.get('latest_message_basis'))}"
+            ),
+            inline=False,
+        )
+        embed.add_field(name="Message Evidence", value=message_evidence, inline=False)
+        embed.add_field(name="Identity Hints", value=identity_hints, inline=False)
+        embed.add_field(name="Confidence Risers", value=confidence_risers, inline=False)
+        if current.get("primary_domain"):
+            embed.add_field(name="Primary Domain", value=f"`{current['primary_domain']}`", inline=False)
+        if member is not None:
+            issue = self._kick_issue(guild, member)
+            kick_status = issue.detail if issue is not None else "Kick is currently available if permissions and hierarchy stay the same."
+        else:
+            kick_status = "Kick cannot be checked because the member is no longer cached."
+        embed.add_field(name="Kick Check", value=kick_status, inline=False)
+        preview_lines: list[str] = []
+        for row in pending_rows[:MEMBER_RISK_QUEUE_PREVIEW_LIMIT]:
+            user_id = int(row["user_id"])
+            queued_member = guild.get_member(user_id)
+            mention = queued_member.mention if queued_member is not None else f"<@{user_id}>"
+            preview_lines.append(f"{mention} - {str(row.get('risk_level', 'review')).title()}")
+        if len(pending_rows) > MEMBER_RISK_QUEUE_PREVIEW_LIMIT:
+            remaining = len(pending_rows) - MEMBER_RISK_QUEUE_PREVIEW_LIMIT
+            suffix = "" if remaining == 1 else "s"
+            preview_lines.append(f"... and {remaining} more queued case{suffix}.")
+        embed.add_field(name="Backlog Preview", value="\n".join(preview_lines), inline=False)
+        if note:
+            embed.add_field(name="Last Update", value=note, inline=False)
+        return ge.style_embed(embed, footer="Babblebox Admin | Suspicious-member review")
+
+    def build_member_risk_review_queue_notice_embed(
+        self,
+        *,
+        title: str,
+        message: str,
+        tone: str = "info",
+    ) -> discord.Embed:
+        return ge.make_status_embed(title, message, tone=tone, footer="Babblebox Admin | Suspicious-member review")
+
     async def _verification_queue_message(
         self,
         channel,
@@ -1911,6 +2514,191 @@ class AdminService:
         )
 
     def _close_verification_review_record(self, record: dict[str, Any]) -> dict[str, Any]:
+        updated = dict(record)
+        updated["review_pending"] = False
+        updated["review_version"] = int(updated.get("review_version", 0) or 0) + 1
+        updated["review_message_channel_id"] = None
+        updated["review_message_id"] = None
+        return updated
+
+    async def _retire_member_risk_review_queue(
+        self,
+        guild: discord.Guild,
+        compiled: CompiledAdminConfig,
+        *,
+        queue_record: dict[str, Any] | None,
+        title: str,
+        message: str,
+        tone: str = "info",
+    ):
+        if queue_record is None:
+            return
+        channel = self._guild_channel(guild, queue_record.get("channel_id"))
+        message_obj = await self._verification_queue_message(channel, message_id=queue_record.get("message_id")) if channel is not None else None
+        if message_obj is not None:
+            with contextlib.suppress(discord.Forbidden, discord.HTTPException):
+                await message_obj.edit(
+                    embed=self.build_member_risk_review_queue_notice_embed(title=title, message=message, tone=tone),
+                    view=None,
+                )
+        await self.store.delete_member_risk_review_queue(guild.id)
+
+    async def _sync_member_risk_review_queue(
+        self,
+        guild: discord.Guild,
+        compiled: CompiledAdminConfig,
+        *,
+        now: datetime,
+        note: str | None = None,
+        inactive_reason: str | None = None,
+    ):
+        from babblebox.cogs.admin import MemberRiskReviewView
+
+        pending_rows = await self._active_member_risk_review_rows(guild, compiled)
+        queue_record = await self.store.fetch_member_risk_review_queue(guild.id)
+        if not pending_rows:
+            if queue_record is not None:
+                if inactive_reason is not None:
+                    await self._retire_member_risk_review_queue(
+                        guild,
+                        compiled,
+                        queue_record=queue_record,
+                        title="Member Risk Review Queue Updated",
+                        message=inactive_reason,
+                    )
+                else:
+                    channel = self._guild_channel(guild, queue_record.get("channel_id"))
+                    message = await self._verification_queue_message(channel, message_id=queue_record.get("message_id")) if channel is not None else None
+                    if message is not None:
+                        with contextlib.suppress(discord.Forbidden, discord.HTTPException):
+                            await message.edit(
+                                embed=self.build_member_risk_review_queue_embed(guild, [], compiled=compiled, note=note),
+                                view=None,
+                            )
+                    await self.store.delete_member_risk_review_queue(guild.id)
+            return
+        if compiled.admin_log_channel_id is None:
+            await self._retire_member_risk_review_queue(
+                guild,
+                compiled,
+                queue_record=queue_record,
+                title="Member Risk Review Queue Unavailable",
+                message="The shared suspicious-member review queue is unavailable until an admin log channel is configured.",
+                tone="warning",
+            )
+            await self.log_operability_warning_once(
+                guild,
+                compiled,
+                key="member-risk-review-queue-no-log-channel",
+                message="Babblebox has suspicious-member review backlog but no admin log channel is configured for the shared queue.",
+                alert=False,
+            )
+            return
+        channel = self._guild_channel(guild, compiled.admin_log_channel_id)
+        if channel is None:
+            await self._retire_member_risk_review_queue(
+                guild,
+                compiled,
+                queue_record=queue_record,
+                title="Member Risk Review Queue Unavailable",
+                message="The shared suspicious-member review queue is unavailable until the configured admin log channel is accessible again.",
+                tone="warning",
+            )
+            await self.log_operability_warning_once(
+                guild,
+                compiled,
+                key="member-risk-review-queue-missing-log-channel",
+                message="Babblebox has suspicious-member review backlog but could not access the configured admin log channel for the shared queue.",
+                alert=False,
+            )
+            return
+        if queue_record is not None and queue_record.get("channel_id") != channel.id:
+            await self._retire_member_risk_review_queue(
+                guild,
+                compiled,
+                queue_record=queue_record,
+                title="Member Risk Review Queue Moved",
+                message=f"The shared suspicious-member review queue moved to {channel.mention}.",
+            )
+            queue_record = None
+        current = pending_rows[0]
+        view = MemberRiskReviewView(
+            guild_id=guild.id,
+            user_id=int(current["user_id"]),
+            version=int(current.get("review_version", 0) or 0),
+        )
+        embed = self.build_member_risk_review_queue_embed(guild, pending_rows, compiled=compiled, note=note)
+        message = await self._verification_queue_message(channel, message_id=queue_record.get("message_id") if queue_record else None)
+        if message is None:
+            with contextlib.suppress(discord.Forbidden, discord.HTTPException):
+                message = await channel.send(
+                    embed=embed,
+                    view=view,
+                    allowed_mentions=discord.AllowedMentions(users=False, roles=False, everyone=False),
+                )
+        else:
+            with contextlib.suppress(discord.Forbidden, discord.HTTPException):
+                await message.edit(embed=embed, view=view)
+        if message is None:
+            await self.log_operability_warning_once(
+                guild,
+                compiled,
+                key="member-risk-review-queue-send-failed",
+                message="Babblebox has suspicious-member review backlog but could not create or update the shared review queue message.",
+                alert=False,
+            )
+            return
+        await self.store.upsert_member_risk_review_queue(
+            {
+                "guild_id": guild.id,
+                "channel_id": channel.id,
+                "message_id": message.id,
+                "updated_at": serialize_datetime(now),
+            }
+        )
+        with contextlib.suppress(Exception):
+            self.bot.add_view(view, message_id=message.id)
+
+    async def _reconcile_member_risk_backlog_after_config_change(
+        self,
+        guild_id: int,
+        *,
+        before: dict[str, Any],
+        after: dict[str, Any],
+        changed_fields: set[str],
+        requested_fields: set[str],
+        force: bool = False,
+    ):
+        relevant_fields = (changed_fields | requested_fields) & MEMBER_RISK_QUEUE_RELEVANT_CONFIG_FIELDS
+        if not relevant_fields and not force:
+            return
+        guild = self.bot.get_guild(guild_id)
+        if guild is None:
+            return
+        compiled_before = _compile_config(before)
+        compiled_after = _compile_config(after)
+        now = ge.now_utc()
+        active_note = None
+        if compiled_before.admin_log_channel_id != compiled_after.admin_log_channel_id and compiled_before.admin_log_channel_id is not None:
+            active_note = (
+                f"Suspicious-member review backlog moved to <#{compiled_after.admin_log_channel_id}>."
+                if compiled_after.admin_log_channel_id is not None
+                else active_note
+            )
+        inactive_reason = None
+        if not compiled_after.member_risk_enabled:
+            inactive_reason = "Suspicious-member review is disabled, so this review queue is inactive."
+        elif compiled_after.member_risk_mode == "log":
+            inactive_reason = "Suspicious-member review is in log-only mode."
+        await self._sync_member_risk_review_queue(
+            guild,
+            compiled_after,
+            now=now,
+            note=active_note,
+            inactive_reason=inactive_reason,
+        )
+
+    def _close_member_risk_review_record(self, record: dict[str, Any]) -> dict[str, Any]:
         updated = dict(record)
         updated["review_pending"] = False
         updated["review_version"] = int(updated.get("review_version", 0) or 0) + 1
@@ -2171,19 +2959,42 @@ class AdminService:
             return
         await self._maybe_handle_return_followup(member)
         await self._ensure_verification_state(member, reason="join")
+        compiled = self.get_compiled_config(member.guild.id)
+        if not compiled.member_risk_enabled:
+            return
+        exempt_reason = self._member_risk_exempt_reason(member, compiled)
+        if exempt_reason is not None:
+            await self.store.delete_member_risk_state(member.guild.id, member.id)
+            return
+        assessment = self._assess_member_risk(
+            member,
+            types.SimpleNamespace(signal_codes=(), primary_domain=None),
+            now=ge.now_utc(),
+        )
+        if assessment.level == "note":
+            await self._log_member_risk_note(member.guild, compiled, member, assessment)
 
     async def handle_member_remove(self, member: discord.Member):
         if not self.storage_ready:
             return
         existing = await self.store.fetch_verification_state(member.guild.id, member.id)
+        member_risk = await self.store.fetch_member_risk_state(member.guild.id, member.id)
         await self.store.delete_verification_state(member.guild.id, member.id)
         await self.store.delete_followup(member.guild.id, member.id)
+        await self.store.delete_member_risk_state(member.guild.id, member.id)
         if existing and existing.get("review_pending"):
             await self._sync_verification_review_queue(
                 member.guild,
                 self.get_compiled_config(member.guild.id),
                 now=ge.now_utc(),
                 note=f"<@{member.id}> left the server, so the review queue was refreshed.",
+            )
+        if member_risk and member_risk.get("review_pending"):
+            await self._sync_member_risk_review_queue(
+                member.guild,
+                self.get_compiled_config(member.guild.id),
+                now=ge.now_utc(),
+                note=f"<@{member.id}> left the server, so the suspicious-member review queue was refreshed.",
             )
 
     async def handle_member_update(self, before: discord.Member, after: discord.Member):
@@ -2207,6 +3018,32 @@ class AdminService:
             return
         if after_status == "unverified":
             await self._ensure_verification_state(after, reason="role update")
+        if not before_compiled.member_risk_enabled:
+            return
+        existing_member_risk = await self.store.fetch_member_risk_state(after.guild.id, after.id)
+        exempt_reason = self._member_risk_exempt_reason(after, before_compiled)
+        if exempt_reason is not None:
+            if existing_member_risk is not None:
+                await self.store.delete_member_risk_state(after.guild.id, after.id)
+                if existing_member_risk.get("review_pending"):
+                    await self._sync_member_risk_review_queue(
+                        after.guild,
+                        before_compiled,
+                        now=ge.now_utc(),
+                        note=f"{after.mention} became exempt from suspicious-member review, so the queue was refreshed.",
+                    )
+            return
+        before_identity = self._member_identity_signal_codes(before, now=ge.now_utc())
+        after_identity = self._member_identity_signal_codes(after, now=ge.now_utc())
+        if before_identity == after_identity:
+            return
+        assessment = self._assess_member_risk(
+            after,
+            types.SimpleNamespace(signal_codes=(), primary_domain=None),
+            now=ge.now_utc(),
+        )
+        if assessment.level == "note":
+            await self._log_member_risk_note(after.guild, before_compiled, after, assessment)
 
     async def handle_message(self, message: discord.Message):
         if not self.storage_ready or message.guild is None or message.author.bot or message.webhook_id is not None:
@@ -2835,6 +3672,289 @@ class AdminService:
         )
         return True, "The verification deadline was ignored for now.", record
 
+    async def _log_member_risk_note(self, guild: discord.Guild, compiled: CompiledAdminConfig, member: discord.Member, assessment: MemberRiskAssessment):
+        signature = hashlib.sha256("|".join(assessment.signal_codes).encode("utf-8")).hexdigest()[:12]
+        dedup_key = (guild.id, member.id, signature)
+        now = asyncio.get_running_loop().time()
+        if now - self._member_risk_note_dedup.get(dedup_key, 0.0) < MEMBER_RISK_NOTE_DEDUP_SECONDS:
+            return
+        self._member_risk_note_dedup[dedup_key] = now
+        message_evidence, identity_hints, confidence_risers = self._member_risk_evidence_fields(assessment.signal_codes)
+        embed = ge.make_status_embed(
+            "Member Risk Note",
+            (
+                f"{member.mention} showed low-confidence suspicious-member signals, but Babblebox did not restrict them.\n"
+                f"Basis: {self._member_risk_basis_label(assessment.message_codes or assessment.signal_codes, latest_message_basis=assessment.latest_message_basis)}"
+            ),
+            tone="info",
+            footer="Babblebox Admin | Suspicious-member review",
+        )
+        embed.add_field(name="Message Evidence", value=message_evidence, inline=False)
+        embed.add_field(name="Identity Hints", value=identity_hints, inline=False)
+        embed.add_field(name="Confidence Risers", value=confidence_risers, inline=False)
+        if assessment.primary_domain:
+            embed.add_field(name="Primary Domain", value=f"`{assessment.primary_domain}`", inline=False)
+        await self.send_log(guild, compiled, embed=embed, alert=False)
+
+    def _build_member_risk_state(
+        self,
+        member: discord.Member,
+        assessment: MemberRiskAssessment,
+        *,
+        now: datetime,
+    ) -> dict[str, Any]:
+        return {
+            "guild_id": member.guild.id,
+            "user_id": member.id,
+            "first_seen_at": serialize_datetime(now),
+            "last_seen_at": serialize_datetime(now),
+            "snooze_until": None,
+            "risk_level": assessment.level,
+            "signal_codes": list(assessment.signal_codes),
+            "primary_domain": assessment.primary_domain,
+            "review_pending": False,
+            "review_version": 0,
+            "review_message_channel_id": None,
+            "review_message_id": None,
+            "last_result_code": None,
+            "last_result_at": None,
+            "last_notified_code": None,
+            "last_notified_at": None,
+            "message_event_count": 1,
+            "latest_message_basis": assessment.latest_message_basis,
+            "latest_message_confidence": assessment.latest_message_confidence,
+            "latest_scan_source": assessment.latest_scan_source,
+        }
+
+    async def handle_member_risk_message(self, message: discord.Message, decision: Any):
+        if not self.storage_ready or getattr(message, "guild", None) is None:
+            return
+        member = getattr(message, "author", None)
+        if member is None or getattr(member, "bot", False) or getattr(message, "webhook_id", None) is not None:
+            return
+        compiled = self.get_compiled_config(message.guild.id)
+        if not compiled.member_risk_enabled:
+            return
+        exempt_reason = self._member_risk_exempt_reason(member, compiled)
+        existing = await self.store.fetch_member_risk_state(message.guild.id, member.id)
+        if exempt_reason is not None:
+            if existing is not None:
+                await self.store.delete_member_risk_state(message.guild.id, member.id)
+                if existing.get("review_pending"):
+                    await self._sync_member_risk_review_queue(
+                        message.guild,
+                        compiled,
+                        now=ge.now_utc(),
+                        note=f"{member.mention} is now exempt from suspicious-member review, so the queue was refreshed.",
+                    )
+            return
+        evidence = getattr(decision, "member_risk_evidence", None)
+        if evidence is None:
+            return
+        now = ge.now_utc()
+        assessment = self._assess_member_risk(member, evidence, now=now)
+        if assessment.level == "low":
+            return
+        if assessment.level == "note" or compiled.member_risk_mode == "log":
+            await self._log_member_risk_note(message.guild, compiled, member, assessment)
+            return
+        record = existing or self._build_member_risk_state(member, assessment, now=now)
+        if existing is not None:
+            try:
+                prior_message_event_count = int(record.get("message_event_count", 0) or 0)
+            except (TypeError, ValueError):
+                prior_message_event_count = 0
+            record["message_event_count"] = max(0, prior_message_event_count) + 1
+        record["last_seen_at"] = serialize_datetime(now)
+        record["risk_level"] = "critical" if assessment.level == "critical" else "review"
+        record["signal_codes"] = list(assessment.signal_codes)
+        record["primary_domain"] = assessment.primary_domain
+        record["latest_message_basis"] = assessment.latest_message_basis
+        record["latest_message_confidence"] = assessment.latest_message_confidence
+        record["latest_scan_source"] = assessment.latest_scan_source
+        snooze_until = deserialize_datetime(record.get("snooze_until"))
+        if snooze_until is not None and snooze_until > now:
+            await self.store.upsert_member_risk_state(record)
+            return
+        if assessment.level == "critical" and compiled.member_risk_mode == "review_or_kick":
+            dm_sent = False
+            with contextlib.suppress(discord.Forbidden, discord.HTTPException):
+                await member.send(
+                    embed=self.build_member_risk_removal_embed(
+                        member,
+                        guild=message.guild,
+                        compiled=compiled,
+                        primary_domain=assessment.primary_domain,
+                    )
+                )
+                dm_sent = True
+            issue = self._kick_issue(message.guild, member) if dm_sent else AdminActionIssue(
+                code="dm_failed",
+                detail="Babblebox could not DM that member right now.",
+                because_text="Babblebox could not DM that member right now",
+            )
+            if issue is None:
+                try:
+                    await member.kick(reason="Babblebox suspicious-member review triggered by risky message activity.")
+                except (discord.Forbidden, discord.HTTPException):
+                    issue = AdminActionIssue(code="kick_failed", detail="Babblebox could not kick that member right now.", because_text="Babblebox could not kick that member right now")
+            if issue is None:
+                await self.store.delete_member_risk_state(message.guild.id, member.id)
+                await self.send_log(
+                    message.guild,
+                    compiled,
+                    embed=ge.make_status_embed(
+                        "Member Risk Kick",
+                        (
+                            f"{member.mention} was removed after combined suspicious-member signals."
+                            if dm_sent
+                            else f"{member.mention} was removed after combined suspicious-member signals and the DM could not be delivered."
+                        ),
+                        tone="warning",
+                        footer="Babblebox Admin | Suspicious-member review",
+                    ),
+                    alert=False,
+                )
+                await self._sync_member_risk_review_queue(
+                    message.guild,
+                    compiled,
+                    now=now,
+                    note=f"{member.mention} was removed after suspicious-member review.",
+                )
+                return
+        record["review_pending"] = True
+        record["review_version"] = int(record.get("review_version", 0) or 0) + 1
+        record["review_message_channel_id"] = None
+        record["review_message_id"] = None
+        record["snooze_until"] = None
+        await self.store.upsert_member_risk_state(record)
+        await self._sync_member_risk_review_queue(
+            message.guild,
+            compiled,
+            now=now,
+            note=f"{member.mention} was added to suspicious-member review.",
+        )
+
+    async def handle_member_risk_review_action(
+        self,
+        *,
+        guild_id: int,
+        user_id: int,
+        version: int,
+        action: str,
+        actor: discord.Member,
+    ) -> tuple[bool, str, dict[str, Any] | None]:
+        if action not in MEMBER_RISK_REVIEW_ACTION_LABELS:
+            return False, "That suspicious-member review action is no longer supported.", None
+        record = await self.store.fetch_member_risk_state(guild_id, user_id)
+        if record is None:
+            return False, "That suspicious-member review is already closed.", None
+        if not record.get("review_pending") or int(record.get("review_version", 0) or 0) != version:
+            return False, "That suspicious-member review queue view is stale. Refresh the shared queue message instead.", record
+        guild = getattr(actor, "guild", None)
+        if guild is None or guild.id != guild_id:
+            return False, "This suspicious-member review action must be used inside the correct server.", record
+        compiled = self.get_compiled_config(guild_id)
+        member = guild.get_member(user_id)
+        if member is None:
+            await self.store.delete_member_risk_state(guild_id, user_id)
+            await self._sync_member_risk_review_queue(
+                guild,
+                compiled,
+                now=ge.now_utc(),
+                note=f"<@{user_id}> already left the server, so the queue was refreshed.",
+            )
+            return True, "That member already left the server, so Babblebox cleared the pending review.", record
+        if self._member_risk_exempt_reason(member, compiled) is not None:
+            await self.store.delete_member_risk_state(guild_id, user_id)
+            await self._sync_member_risk_review_queue(
+                guild,
+                compiled,
+                now=ge.now_utc(),
+                note=f"{member.mention} is now exempt from suspicious-member review, so the queue was refreshed.",
+            )
+            return True, "That member is now exempt from suspicious-member review.", record
+        if action == "kick":
+            issue = self._kick_issue(guild, member)
+            if issue is not None:
+                return False, issue.detail, record
+            with contextlib.suppress(discord.Forbidden, discord.HTTPException):
+                await member.send(
+                    embed=self.build_member_risk_removal_embed(
+                        member,
+                        guild=guild,
+                        compiled=compiled,
+                        primary_domain=record.get("primary_domain"),
+                    )
+                )
+            try:
+                await member.kick(reason=f"Babblebox suspicious-member review action by {ge.display_name_of(actor)}.")
+            except (discord.Forbidden, discord.HTTPException):
+                return False, "Babblebox could not kick that member right now.", record
+            await self.store.delete_member_risk_state(guild_id, user_id)
+            await self.send_log(
+                guild,
+                compiled,
+                embed=ge.make_status_embed(
+                    "Member Risk Review Kick",
+                    f"{actor.mention} kicked <@{user_id}> from suspicious-member review.",
+                    tone="success",
+                    footer="Babblebox Admin | Suspicious-member review",
+                ),
+                alert=False,
+            )
+            await self._sync_member_risk_review_queue(
+                guild,
+                compiled,
+                now=ge.now_utc(),
+                note=f"{actor.mention} kicked <@{user_id}> from suspicious-member review.",
+            )
+            return True, "The member was kicked.", record
+
+        updated = self._close_member_risk_review_record(record)
+        now = ge.now_utc()
+        if action == "delay":
+            updated["snooze_until"] = serialize_datetime(now + timedelta(seconds=MEMBER_RISK_DELAY_SECONDS))
+            await self.store.upsert_member_risk_state(updated)
+            await self.send_log(
+                guild,
+                compiled,
+                embed=ge.make_status_embed(
+                    "Member Risk Review Delayed",
+                    f"{actor.mention} delayed suspicious-member review for <@{user_id}> by 24 hours.",
+                    tone="info",
+                    footer="Babblebox Admin | Suspicious-member review",
+                ),
+                alert=False,
+            )
+            await self._sync_member_risk_review_queue(
+                guild,
+                compiled,
+                now=now,
+                note=f"{actor.mention} delayed suspicious-member review for <@{user_id}> by 24 hours.",
+            )
+            return True, "The suspicious-member review was delayed by 24 hours.", updated
+
+        await self.store.delete_member_risk_state(guild_id, user_id)
+        await self.send_log(
+            guild,
+            compiled,
+            embed=ge.make_status_embed(
+                "Member Risk Review Ignored",
+                f"{actor.mention} dismissed suspicious-member review for <@{user_id}>.",
+                tone="info",
+                footer="Babblebox Admin | Suspicious-member review",
+            ),
+            alert=False,
+        )
+        await self._sync_member_risk_review_queue(
+            guild,
+            compiled,
+            now=now,
+            note=f"{actor.mention} ignored suspicious-member review for <@{user_id}>.",
+        )
+        return True, "The suspicious-member review was ignored for now.", record
+
     async def _wait_for_ready_state(self) -> bool:
         while True:
             try:
@@ -2871,6 +3991,32 @@ class AdminService:
                 continue
             await self._sync_verification_review_queue(guild, compiled, now=now)
 
+    async def _refresh_startup_member_risk_review_queues(self, *, now: datetime):
+        guild_ids = {int(guild_id) for guild_id in self._compiled_configs}
+        for record in await self.store.list_member_risk_review_queues():
+            guild_ids.add(int(record["guild_id"]))
+        for guild_id in guild_ids:
+            guild = self.bot.get_guild(guild_id)
+            if guild is None:
+                continue
+            compiled = self.get_compiled_config(guild_id)
+            if not compiled.member_risk_enabled and not await self.store.fetch_member_risk_review_queue(guild_id):
+                continue
+            if compiled.member_risk_mode == "log" and not await self.store.fetch_member_risk_review_queue(guild_id):
+                continue
+            await self._sync_member_risk_review_queue(
+                guild,
+                compiled,
+                now=now,
+                inactive_reason=(
+                    "Suspicious-member review is disabled, so this review queue is inactive."
+                    if not compiled.member_risk_enabled
+                    else "Suspicious-member review is in log-only mode."
+                    if compiled.member_risk_mode == "log"
+                    else None
+                ),
+            )
+
     async def _run_sweep(self) -> bool:
         if not self.storage_ready:
             return False
@@ -2895,6 +4041,7 @@ class AdminService:
             await self._sync_verification_review_queue(guild, self.get_compiled_config(guild_id), now=now)
         if self._startup_resume_pending:
             await self._refresh_startup_verification_review_queues(now=now)
+            await self._refresh_startup_member_risk_review_queues(now=now)
             self._startup_resume_pending = False
         return processed
 

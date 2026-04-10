@@ -649,7 +649,7 @@
             compact instead of turning into an everything archive.
           </p>
           <p>
-            Effective date: <strong>March 26, 2026</strong>. By using Babblebox in a Discord server or through Babblebox's
+            Effective date: <strong>April 10, 2026</strong>. By using Babblebox in a Discord server or through Babblebox's
             Discord-based features, you agree to the practices described on this page.
           </p>
           <div class="hero-actions">
@@ -736,12 +736,14 @@
               <li>Later markers, reminders, AFK state, AFK schedules, and related user preferences.</li>
               <li>Daily Arcade scores, attempts, streak counters, Buddy and profile state, and other compact identity or progression fields.</li>
               <li>Shield and admin configuration such as enabled modules, scope controls, allowlists, trusted roles, log destinations, and short-lived admin lifecycle state.</li>
+              <li>If a server enables suspicious-member review, compact account-age, avatar-state, display-name, and locally flagged message or link context needed to score that private review lane.</li>
               <li>Anonymous confession or reply submission text, one trusted-link field, compact review metadata, limited private appeals or reports, a bot-private author mapping, and bot-private owner reply opportunities needed to run staff-blind confession moderation when a server enables the feature.</li>
               <li>For Confessions, Babblebox protects sensitive content and identity linkage with application-level encryption and separate lookup domains before those fields reach durable Postgres storage.</li>
             </ul>
             <h3>Limited message and attachment context</h3>
             <ul>
-              <li>Babblebox may read message content or metadata needed to respond to commands, deliver Watch alerts, build Moment Cards from visible messages, process Capture requests, or evaluate locally flagged Shield events.</li>
+              <li>Babblebox may read message content or metadata needed to respond to commands, deliver Watch alerts, build Moment Cards from visible messages, process Capture requests, or evaluate locally flagged Shield events, including visible message text, embed text, forwarded message snapshots, and attachment labels.</li>
+              <li>The suspicious-member lane stays private/admin-facing, uses bounded local signals, and does not inspect Discord profile bios or about-me text in the current implementation.</li>
               <li>Attachment names or URLs may be used at send time when needed for previews or private transcript delivery.</li>
               <li>For anonymous confessions, raw attachment filenames and raw Discord CDN URLs are kept out of staff-visible review surfaces.</li>
             </ul>
@@ -818,7 +820,9 @@
             <p>
               Babblebox does not perform always-on AI scanning by default. If optional AI-assisted Shield review is enabled
               where available, it only runs after local Shield logic has already flagged content. In that flow, only minimal,
-              sanitized, and truncated flagged content needed for that review is intended to be sent to the configured AI provider.
+              sanitized, and truncated flagged text needed for that review is intended to be sent to the configured AI provider,
+              even when the local signal came from embed text, attachment labels, or forwarded message snapshots instead of the
+              raw message body alone.
             </p>
             <h3>No sale of personal information</h3>
             <p>Babblebox is not designed to sell user data. Information is shared only when needed to operate the service, comply with law, protect the service, or deliver optional integrations that a specific feature requires.</p>
@@ -829,7 +833,7 @@
             <p>Babblebox aims to keep durable data small, specific, and tied to live product needs instead of retaining broad historical records.</p>
             <ul>
               <li>Daily Arcade raw result rows are designed to prune after 180 days while streak and lifetime totals remain in the profile row.</li>
-              <li>Short-lived admin lifecycle records are kept only while they are operationally relevant, such as pending verification or active follow-up role management.</li>
+              <li>Short-lived admin lifecycle records are kept only while they are operationally relevant, such as pending verification, active follow-up role management, or unresolved suspicious-member review.</li>
               <li>Ban-return candidate records are intended to have a bounded purge window rather than indefinite retention.</li>
               <li>Resolved anonymous confession rows scrub previews, body text, trusted-link fields, and attachment metadata after the moderation workflow is complete while compact keyed duplicate signatures are retained for abuse prevention.</li>
               <li>Keyed duplicate-abuse signals are guild-scoped instead of global across every server.</li>

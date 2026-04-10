@@ -17,6 +17,7 @@ VALID_FOLLOWUP_MODES = {"auto_remove", "review"}
 VALID_FOLLOWUP_DURATION_UNITS = {"days", "weeks", "months"}
 VALID_VERIFICATION_LOGIC = {"must_have_role", "must_not_have_role"}
 VALID_VERIFICATION_DEADLINE_ACTIONS = {"auto_kick", "review"}
+VALID_MEMBER_RISK_MODES = {"log", "review", "review_or_kick"}
 
 
 class AdminStorageUnavailable(RuntimeError):
@@ -51,7 +52,48 @@ def default_admin_config(guild_id: int | None = None) -> dict[str, Any]:
         "followup_exempt_staff": True,
         "verification_exempt_staff": True,
         "verification_exempt_bots": True,
+        "member_risk_enabled": False,
+        "member_risk_mode": "review",
     }
+
+
+MEMBER_RISK_SIGNAL_PRIORITY = {
+    "malicious_link": 10,
+    "scam_high": 20,
+    "fresh_campaign_cluster_3": 30,
+    "fresh_campaign_cluster_2": 40,
+    "campaign_lure_reuse": 50,
+    "campaign_path_shape": 60,
+    "campaign_host_family": 65,
+    "unknown_suspicious_link": 70,
+    "scam_medium": 80,
+    "suspicious_attachment": 90,
+    "cta_download": 100,
+    "newcomer_first_messages_risky": 110,
+    "first_external_link": 120,
+    "first_message_link": 130,
+    "newcomer_early_message": 140,
+    "name_impersonation": 150,
+    "name_mixed_script": 160,
+    "account_new_1d": 170,
+    "joined_recently": 180,
+    "account_new_7d": 190,
+    "default_avatar": 200,
+    "name_zero_width": 210,
+    "name_unreadable": 220,
+    "name_separator_heavy": 230,
+}
+
+
+def order_member_risk_signal_codes(values: Any) -> list[str]:
+    if not isinstance(values, (list, tuple, set)):
+        values = []
+    unique = {
+        str(value).strip()
+        for value in values
+        if isinstance(value, str) and str(value).strip()
+    }
+    return sorted(unique, key=lambda value: (MEMBER_RISK_SIGNAL_PRIORITY.get(value, 999), value))[:10]
 
 
 def _resolve_database_url(configured: str | None = None) -> tuple[str, str | None]:
@@ -159,6 +201,11 @@ def normalize_admin_config(guild_id: int, payload: Any) -> dict[str, Any]:
     cleaned["followup_exempt_staff"] = bool(payload.get("followup_exempt_staff", True))
     cleaned["verification_exempt_staff"] = bool(payload.get("verification_exempt_staff", True))
     cleaned["verification_exempt_bots"] = bool(payload.get("verification_exempt_bots", True))
+    cleaned_member_risk_mode = str(payload.get("member_risk_mode", "review")).strip().lower()
+    cleaned["member_risk_enabled"] = bool(payload.get("member_risk_enabled"))
+    cleaned["member_risk_mode"] = (
+        cleaned_member_risk_mode if cleaned_member_risk_mode in VALID_MEMBER_RISK_MODES else "review"
+    )
     return cleaned
 
 
@@ -252,6 +299,76 @@ def normalize_verification_state(payload: Any) -> dict[str, Any] | None:
 
 
 def normalize_verification_review_queue(payload: Any) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    guild_id = payload.get("guild_id")
+    channel_id = payload.get("channel_id")
+    message_id = payload.get("message_id")
+    updated_at = _serialize_datetime(_parse_datetime(payload.get("updated_at")))
+    if not isinstance(guild_id, int) or guild_id <= 0:
+        return None
+    return {
+        "guild_id": guild_id,
+        "channel_id": channel_id if isinstance(channel_id, int) and channel_id > 0 else None,
+        "message_id": message_id if isinstance(message_id, int) and message_id > 0 else None,
+        "updated_at": updated_at,
+    }
+
+
+def normalize_member_risk_state(payload: Any) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    guild_id = payload.get("guild_id")
+    user_id = payload.get("user_id")
+    first_seen_at = _serialize_datetime(_parse_datetime(payload.get("first_seen_at")))
+    last_seen_at = _serialize_datetime(_parse_datetime(payload.get("last_seen_at")))
+    snooze_until = _serialize_datetime(_parse_datetime(payload.get("snooze_until")))
+    risk_level = _clean_optional_text(payload.get("risk_level"))
+    primary_domain = _clean_optional_text(payload.get("primary_domain"))
+    review_version = payload.get("review_version")
+    review_message_channel_id = payload.get("review_message_channel_id")
+    review_message_id = payload.get("review_message_id")
+    last_result_code = _clean_optional_text(payload.get("last_result_code"))
+    last_result_at = _serialize_datetime(_parse_datetime(payload.get("last_result_at")))
+    last_notified_code = _clean_optional_text(payload.get("last_notified_code"))
+    last_notified_at = _serialize_datetime(_parse_datetime(payload.get("last_notified_at")))
+    message_event_count = payload.get("message_event_count")
+    latest_message_basis = _clean_optional_text(payload.get("latest_message_basis"))
+    latest_message_confidence = _clean_optional_text(payload.get("latest_message_confidence"))
+    latest_scan_source = _clean_optional_text(payload.get("latest_scan_source"))
+    signal_codes_raw = payload.get("signal_codes", [])
+    if not all(isinstance(value, int) and value > 0 for value in (guild_id, user_id)):
+        return None
+    if first_seen_at is None or last_seen_at is None:
+        return None
+    if risk_level not in {"note", "review", "critical"}:
+        return None
+    signal_codes = order_member_risk_signal_codes(signal_codes_raw)
+    return {
+        "guild_id": guild_id,
+        "user_id": user_id,
+        "first_seen_at": first_seen_at,
+        "last_seen_at": last_seen_at,
+        "snooze_until": snooze_until,
+        "risk_level": risk_level,
+        "signal_codes": signal_codes,
+        "primary_domain": primary_domain,
+        "review_pending": bool(payload.get("review_pending")),
+        "review_version": review_version if isinstance(review_version, int) and review_version >= 0 else 0,
+        "review_message_channel_id": review_message_channel_id if isinstance(review_message_channel_id, int) and review_message_channel_id > 0 else None,
+        "review_message_id": review_message_id if isinstance(review_message_id, int) and review_message_id > 0 else None,
+        "last_result_code": last_result_code,
+        "last_result_at": last_result_at,
+        "last_notified_code": last_notified_code,
+        "last_notified_at": last_notified_at,
+        "message_event_count": message_event_count if isinstance(message_event_count, int) and message_event_count >= 0 else 0,
+        "latest_message_basis": latest_message_basis,
+        "latest_message_confidence": latest_message_confidence,
+        "latest_scan_source": latest_scan_source,
+    }
+
+
+def normalize_member_risk_review_queue(payload: Any) -> dict[str, Any] | None:
     if not isinstance(payload, dict):
         return None
     guild_id = payload.get("guild_id")
@@ -388,6 +505,30 @@ class _BaseAdminStore:
     async def list_verification_states_for_guild(self, guild_id: int) -> list[dict[str, Any]]:
         raise NotImplementedError
 
+    async def upsert_member_risk_state(self, record: dict[str, Any]):
+        raise NotImplementedError
+
+    async def fetch_member_risk_state(self, guild_id: int, user_id: int) -> dict[str, Any] | None:
+        raise NotImplementedError
+
+    async def delete_member_risk_state(self, guild_id: int, user_id: int):
+        raise NotImplementedError
+
+    async def list_member_risk_states_for_guild(self, guild_id: int) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    async def list_member_risk_review_queues(self) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    async def fetch_member_risk_review_queue(self, guild_id: int) -> dict[str, Any] | None:
+        raise NotImplementedError
+
+    async def upsert_member_risk_review_queue(self, record: dict[str, Any]):
+        raise NotImplementedError
+
+    async def delete_member_risk_review_queue(self, guild_id: int):
+        raise NotImplementedError
+
     async def fetch_guild_counts(self, guild_id: int) -> dict[str, int]:
         raise NotImplementedError
 
@@ -402,6 +543,8 @@ class _MemoryAdminStore(_BaseAdminStore):
         self.verification_states: dict[tuple[int, int], dict[str, Any]] = {}
         self.verification_review_queues: dict[int, dict[str, Any]] = {}
         self.verification_notification_snapshots: dict[tuple[int, str, str, str, str], dict[str, Any]] = {}
+        self.member_risk_states: dict[tuple[int, int], dict[str, Any]] = {}
+        self.member_risk_review_queues: dict[int, dict[str, Any]] = {}
 
     async def load(self):
         self.configs = {}
@@ -410,6 +553,8 @@ class _MemoryAdminStore(_BaseAdminStore):
         self.verification_states = {}
         self.verification_review_queues = {}
         self.verification_notification_snapshots = {}
+        self.member_risk_states = {}
+        self.member_risk_review_queues = {}
 
     async def fetch_all_configs(self) -> dict[int, dict[str, Any]]:
         return {guild_id: deepcopy(config) for guild_id, config in self.configs.items()}
@@ -567,15 +712,51 @@ class _MemoryAdminStore(_BaseAdminStore):
         rows.sort(key=lambda item: item.get("joined_at") or "")
         return rows
 
+    async def upsert_member_risk_state(self, record: dict[str, Any]):
+        normalized = normalize_member_risk_state(record)
+        if normalized is not None:
+            self.member_risk_states[(normalized["guild_id"], normalized["user_id"])] = normalized
+
+    async def fetch_member_risk_state(self, guild_id: int, user_id: int) -> dict[str, Any] | None:
+        record = self.member_risk_states.get((guild_id, user_id))
+        return deepcopy(record) if record is not None else None
+
+    async def delete_member_risk_state(self, guild_id: int, user_id: int):
+        self.member_risk_states.pop((guild_id, user_id), None)
+
+    async def list_member_risk_states_for_guild(self, guild_id: int) -> list[dict[str, Any]]:
+        rows = [deepcopy(record) for record in self.member_risk_states.values() if record.get("guild_id") == guild_id]
+        rows.sort(key=lambda item: item.get("first_seen_at") or "")
+        return rows
+
+    async def list_member_risk_review_queues(self) -> list[dict[str, Any]]:
+        rows = [deepcopy(record) for record in self.member_risk_review_queues.values()]
+        rows.sort(key=lambda item: item.get("guild_id", 0))
+        return rows
+
+    async def fetch_member_risk_review_queue(self, guild_id: int) -> dict[str, Any] | None:
+        record = self.member_risk_review_queues.get(guild_id)
+        return deepcopy(record) if record is not None else None
+
+    async def upsert_member_risk_review_queue(self, record: dict[str, Any]):
+        normalized = normalize_member_risk_review_queue(record)
+        if normalized is not None:
+            self.member_risk_review_queues[int(normalized["guild_id"])] = normalized
+
+    async def delete_member_risk_review_queue(self, guild_id: int):
+        self.member_risk_review_queues.pop(guild_id, None)
+
     async def fetch_guild_counts(self, guild_id: int) -> dict[str, int]:
         followups = [record for record in self.followups.values() if record.get("guild_id") == guild_id]
         verification_rows = [record for record in self.verification_states.values() if record.get("guild_id") == guild_id]
+        member_risk_rows = [record for record in self.member_risk_states.values() if record.get("guild_id") == guild_id]
         return {
             "ban_candidates": sum(1 for record in self.ban_candidates.values() if record.get("guild_id") == guild_id),
             "active_followups": len(followups),
             "pending_reviews": sum(1 for record in followups if record.get("review_pending")),
             "verification_pending": len(verification_rows),
             "verification_warned": sum(1 for record in verification_rows if record.get("warning_sent_at")),
+            "member_risk_pending": sum(1 for record in member_risk_rows if record.get("review_pending")),
         }
 
 
@@ -619,6 +800,8 @@ def _config_from_row(row) -> dict[str, Any]:
             "followup_exempt_staff": row["followup_exempt_staff"],
             "verification_exempt_staff": row["verification_exempt_staff"],
             "verification_exempt_bots": row["verification_exempt_bots"],
+            "member_risk_enabled": row.get("member_risk_enabled", False),
+            "member_risk_mode": row.get("member_risk_mode", "review"),
         },
     )
 
@@ -683,6 +866,47 @@ def _verification_notification_snapshot_from_row(row) -> dict[str, Any] | None:
             "reason_code": row["reason_code"],
             "signature": row["signature"],
             "notified_at": _serialize_datetime(row["notified_at"]),
+        }
+    )
+
+
+def _member_risk_from_row(row) -> dict[str, Any] | None:
+    return normalize_member_risk_state(
+        {
+            "guild_id": row["guild_id"],
+            "user_id": row["user_id"],
+            "first_seen_at": _serialize_datetime(row["first_seen_at"]),
+            "last_seen_at": _serialize_datetime(row["last_seen_at"]),
+            "snooze_until": _serialize_datetime(row["snooze_until"]),
+            "risk_level": row["risk_level"],
+            "signal_codes": decode_postgres_json_array(
+                row["signal_codes"],
+                label="admin_member_risk_states.signal_codes",
+            ),
+            "primary_domain": row["primary_domain"],
+            "review_pending": row["review_pending"],
+            "review_version": int(row["review_version"]),
+            "review_message_channel_id": row["review_message_channel_id"],
+            "review_message_id": row["review_message_id"],
+            "last_result_code": row["last_result_code"],
+            "last_result_at": _serialize_datetime(row["last_result_at"]),
+            "last_notified_code": row["last_notified_code"],
+            "last_notified_at": _serialize_datetime(row["last_notified_at"]),
+            "message_event_count": int(row["message_event_count"]),
+            "latest_message_basis": row["latest_message_basis"],
+            "latest_message_confidence": row["latest_message_confidence"],
+            "latest_scan_source": row["latest_scan_source"],
+        }
+    )
+
+
+def _member_risk_review_queue_from_row(row) -> dict[str, Any] | None:
+    return normalize_member_risk_review_queue(
+        {
+            "guild_id": row["guild_id"],
+            "channel_id": row["channel_id"],
+            "message_id": row["message_id"],
+            "updated_at": _serialize_datetime(row["updated_at"]),
         }
     )
 
@@ -760,6 +984,8 @@ class _PostgresAdminStore(_BaseAdminStore):
                 "followup_exempt_staff BOOLEAN NOT NULL DEFAULT TRUE, "
                 "verification_exempt_staff BOOLEAN NOT NULL DEFAULT TRUE, "
                 "verification_exempt_bots BOOLEAN NOT NULL DEFAULT TRUE, "
+                "member_risk_enabled BOOLEAN NOT NULL DEFAULT FALSE, "
+                "member_risk_mode TEXT NOT NULL DEFAULT 'review', "
                 "updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc', now())"
                 ")"
             ),
@@ -808,6 +1034,39 @@ class _PostgresAdminStore(_BaseAdminStore):
                 ")"
             ),
             (
+                "CREATE TABLE IF NOT EXISTS admin_member_risk_states ("
+                "guild_id BIGINT NOT NULL, "
+                "user_id BIGINT NOT NULL, "
+                "first_seen_at TIMESTAMPTZ NOT NULL, "
+                "last_seen_at TIMESTAMPTZ NOT NULL, "
+                "snooze_until TIMESTAMPTZ NULL, "
+                "risk_level TEXT NOT NULL, "
+                "signal_codes JSONB NOT NULL DEFAULT '[]'::jsonb, "
+                "primary_domain TEXT NULL, "
+                "review_pending BOOLEAN NOT NULL DEFAULT FALSE, "
+                "review_version INTEGER NOT NULL DEFAULT 0, "
+                "review_message_channel_id BIGINT NULL, "
+                "review_message_id BIGINT NULL, "
+                "last_result_code TEXT NULL, "
+                "last_result_at TIMESTAMPTZ NULL, "
+                "last_notified_code TEXT NULL, "
+                "last_notified_at TIMESTAMPTZ NULL, "
+                "message_event_count INTEGER NOT NULL DEFAULT 0, "
+                "latest_message_basis TEXT NULL, "
+                "latest_message_confidence TEXT NULL, "
+                "latest_scan_source TEXT NULL, "
+                "PRIMARY KEY (guild_id, user_id)"
+                ")"
+            ),
+            (
+                "CREATE TABLE IF NOT EXISTS admin_member_risk_review_queues ("
+                "guild_id BIGINT PRIMARY KEY, "
+                "channel_id BIGINT NULL, "
+                "message_id BIGINT NULL, "
+                "updated_at TIMESTAMPTZ NULL"
+                ")"
+            ),
+            (
                 "CREATE TABLE IF NOT EXISTS admin_verification_review_queues ("
                 "guild_id BIGINT PRIMARY KEY, "
                 "channel_id BIGINT NULL, "
@@ -830,6 +1089,8 @@ class _PostgresAdminStore(_BaseAdminStore):
         ]
         alter_statements = [
             "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS verification_deadline_action TEXT NOT NULL DEFAULT 'auto_kick'",
+            "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS member_risk_enabled BOOLEAN NOT NULL DEFAULT FALSE",
+            "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS member_risk_mode TEXT NOT NULL DEFAULT 'review'",
             "ALTER TABLE admin_followup_roles ADD COLUMN IF NOT EXISTS review_pending BOOLEAN NOT NULL DEFAULT FALSE",
             "ALTER TABLE admin_followup_roles ADD COLUMN IF NOT EXISTS review_version INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE admin_followup_roles ADD COLUMN IF NOT EXISTS review_message_channel_id BIGINT NULL",
@@ -842,6 +1103,20 @@ class _PostgresAdminStore(_BaseAdminStore):
             "ALTER TABLE admin_verification_states ADD COLUMN IF NOT EXISTS last_result_at TIMESTAMPTZ NULL",
             "ALTER TABLE admin_verification_states ADD COLUMN IF NOT EXISTS last_notified_code TEXT NULL",
             "ALTER TABLE admin_verification_states ADD COLUMN IF NOT EXISTS last_notified_at TIMESTAMPTZ NULL",
+            "ALTER TABLE admin_member_risk_states ADD COLUMN IF NOT EXISTS snooze_until TIMESTAMPTZ NULL",
+            "ALTER TABLE admin_member_risk_states ADD COLUMN IF NOT EXISTS primary_domain TEXT NULL",
+            "ALTER TABLE admin_member_risk_states ADD COLUMN IF NOT EXISTS review_pending BOOLEAN NOT NULL DEFAULT FALSE",
+            "ALTER TABLE admin_member_risk_states ADD COLUMN IF NOT EXISTS review_version INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE admin_member_risk_states ADD COLUMN IF NOT EXISTS review_message_channel_id BIGINT NULL",
+            "ALTER TABLE admin_member_risk_states ADD COLUMN IF NOT EXISTS review_message_id BIGINT NULL",
+            "ALTER TABLE admin_member_risk_states ADD COLUMN IF NOT EXISTS last_result_code TEXT NULL",
+            "ALTER TABLE admin_member_risk_states ADD COLUMN IF NOT EXISTS last_result_at TIMESTAMPTZ NULL",
+            "ALTER TABLE admin_member_risk_states ADD COLUMN IF NOT EXISTS last_notified_code TEXT NULL",
+            "ALTER TABLE admin_member_risk_states ADD COLUMN IF NOT EXISTS last_notified_at TIMESTAMPTZ NULL",
+            "ALTER TABLE admin_member_risk_states ADD COLUMN IF NOT EXISTS message_event_count INTEGER NOT NULL DEFAULT 0",
+            "ALTER TABLE admin_member_risk_states ADD COLUMN IF NOT EXISTS latest_message_basis TEXT NULL",
+            "ALTER TABLE admin_member_risk_states ADD COLUMN IF NOT EXISTS latest_message_confidence TEXT NULL",
+            "ALTER TABLE admin_member_risk_states ADD COLUMN IF NOT EXISTS latest_scan_source TEXT NULL",
         ]
         index_statements = [
             "CREATE INDEX IF NOT EXISTS ix_admin_ban_return_expires ON admin_ban_return_candidates (expires_at)",
@@ -853,6 +1128,9 @@ class _PostgresAdminStore(_BaseAdminStore):
             "CREATE INDEX IF NOT EXISTS ix_admin_verification_review_pending ON admin_verification_states (review_pending, review_message_id)",
             "CREATE INDEX IF NOT EXISTS ix_admin_verification_last_notified ON admin_verification_states (guild_id, last_notified_at)",
             "CREATE INDEX IF NOT EXISTS ix_admin_verification_snapshot_notified ON admin_verification_notification_snapshots (guild_id, notified_at)",
+            "CREATE INDEX IF NOT EXISTS ix_admin_member_risk_guild ON admin_member_risk_states (guild_id)",
+            "CREATE INDEX IF NOT EXISTS ix_admin_member_risk_review_pending ON admin_member_risk_states (review_pending, review_message_id)",
+            "CREATE INDEX IF NOT EXISTS ix_admin_member_risk_last_notified ON admin_member_risk_states (guild_id, last_notified_at)",
         ]
         async with self._pool.acquire() as conn:
             for statement in table_statements:
@@ -884,14 +1162,15 @@ class _PostgresAdminStore(_BaseAdminStore):
                         "verification_warning_lead_seconds, verification_help_channel_id, verification_help_extension_seconds, verification_max_extensions, "
                         "admin_log_channel_id, admin_alert_role_id, warning_template, kick_template, invite_link, "
                         "excluded_user_ids, excluded_role_ids, trusted_role_ids, "
-                        "followup_exempt_staff, verification_exempt_staff, verification_exempt_bots, updated_at"
+                        "followup_exempt_staff, verification_exempt_staff, verification_exempt_bots, "
+                        "member_risk_enabled, member_risk_mode, updated_at"
                         ") VALUES ("
                         "$1, $2, $3, $4, $5, $6, "
                         "$7, $8, $9, $10, $11, "
                         "$12, $13, $14, $15, "
                         "$16, $17, $18, $19, $20, "
                         "$21::jsonb, $22::jsonb, $23::jsonb, "
-                        "$24, $25, $26, timezone('utc', now())"
+                        "$24, $25, $26, $27, $28, timezone('utc', now())"
                         ") "
                         "ON CONFLICT (guild_id) DO UPDATE SET "
                         "followup_enabled = EXCLUDED.followup_enabled, "
@@ -919,6 +1198,8 @@ class _PostgresAdminStore(_BaseAdminStore):
                         "followup_exempt_staff = EXCLUDED.followup_exempt_staff, "
                         "verification_exempt_staff = EXCLUDED.verification_exempt_staff, "
                         "verification_exempt_bots = EXCLUDED.verification_exempt_bots, "
+                        "member_risk_enabled = EXCLUDED.member_risk_enabled, "
+                        "member_risk_mode = EXCLUDED.member_risk_mode, "
                         "updated_at = EXCLUDED.updated_at"
                     ),
                     normalized["guild_id"],
@@ -947,6 +1228,8 @@ class _PostgresAdminStore(_BaseAdminStore):
                     normalized["followup_exempt_staff"],
                     normalized["verification_exempt_staff"],
                     normalized["verification_exempt_bots"],
+                    normalized["member_risk_enabled"],
+                    normalized["member_risk_mode"],
                 )
 
     async def upsert_ban_candidate(self, record: dict[str, Any]):
@@ -1314,6 +1597,138 @@ class _PostgresAdminStore(_BaseAdminStore):
             )
         return [record for row in rows if (record := _verification_from_row(row)) is not None]
 
+    async def upsert_member_risk_state(self, record: dict[str, Any]):
+        normalized = normalize_member_risk_state(record)
+        if normalized is None:
+            return
+        async with self._io_lock:
+            async with self._pool.acquire() as conn:
+                await conn.execute(
+                    (
+                        "INSERT INTO admin_member_risk_states ("
+                        "guild_id, user_id, first_seen_at, last_seen_at, snooze_until, risk_level, signal_codes, "
+                        "primary_domain, review_pending, review_version, review_message_channel_id, review_message_id, "
+                        "last_result_code, last_result_at, last_notified_code, last_notified_at, "
+                        "message_event_count, latest_message_basis, latest_message_confidence, latest_scan_source"
+                        ") VALUES ("
+                        "$1, $2, $3, $4, $5, $6, $7::jsonb, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20"
+                        ") ON CONFLICT (guild_id, user_id) DO UPDATE SET "
+                        "first_seen_at = EXCLUDED.first_seen_at, "
+                        "last_seen_at = EXCLUDED.last_seen_at, "
+                        "snooze_until = EXCLUDED.snooze_until, "
+                        "risk_level = EXCLUDED.risk_level, "
+                        "signal_codes = EXCLUDED.signal_codes, "
+                        "primary_domain = EXCLUDED.primary_domain, "
+                        "review_pending = EXCLUDED.review_pending, "
+                        "review_version = EXCLUDED.review_version, "
+                        "review_message_channel_id = EXCLUDED.review_message_channel_id, "
+                        "review_message_id = EXCLUDED.review_message_id, "
+                        "last_result_code = EXCLUDED.last_result_code, "
+                        "last_result_at = EXCLUDED.last_result_at, "
+                        "last_notified_code = EXCLUDED.last_notified_code, "
+                        "last_notified_at = EXCLUDED.last_notified_at, "
+                        "message_event_count = EXCLUDED.message_event_count, "
+                        "latest_message_basis = EXCLUDED.latest_message_basis, "
+                        "latest_message_confidence = EXCLUDED.latest_message_confidence, "
+                        "latest_scan_source = EXCLUDED.latest_scan_source"
+                    ),
+                    normalized["guild_id"],
+                    normalized["user_id"],
+                    _parse_datetime(normalized["first_seen_at"]),
+                    _parse_datetime(normalized["last_seen_at"]),
+                    _parse_datetime(normalized["snooze_until"]),
+                    normalized["risk_level"],
+                    json.dumps(normalized["signal_codes"]),
+                    normalized["primary_domain"],
+                    normalized["review_pending"],
+                    normalized["review_version"],
+                    normalized["review_message_channel_id"],
+                    normalized["review_message_id"],
+                    normalized["last_result_code"],
+                    _parse_datetime(normalized["last_result_at"]),
+                    normalized["last_notified_code"],
+                    _parse_datetime(normalized["last_notified_at"]),
+                    normalized["message_event_count"],
+                    normalized["latest_message_basis"],
+                    normalized["latest_message_confidence"],
+                    normalized["latest_scan_source"],
+                )
+
+    async def fetch_member_risk_state(self, guild_id: int, user_id: int) -> dict[str, Any] | None:
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                (
+                    "SELECT guild_id, user_id, first_seen_at, last_seen_at, snooze_until, risk_level, signal_codes, "
+                    "primary_domain, review_pending, review_version, review_message_channel_id, review_message_id, "
+                    "last_result_code, last_result_at, last_notified_code, last_notified_at, "
+                    "message_event_count, latest_message_basis, latest_message_confidence, latest_scan_source "
+                    "FROM admin_member_risk_states WHERE guild_id = $1 AND user_id = $2"
+                ),
+                guild_id,
+                user_id,
+            )
+        return _member_risk_from_row(row) if row is not None else None
+
+    async def delete_member_risk_state(self, guild_id: int, user_id: int):
+        async with self._io_lock:
+            async with self._pool.acquire() as conn:
+                await conn.execute("DELETE FROM admin_member_risk_states WHERE guild_id = $1 AND user_id = $2", guild_id, user_id)
+
+    async def list_member_risk_states_for_guild(self, guild_id: int) -> list[dict[str, Any]]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                (
+                    "SELECT guild_id, user_id, first_seen_at, last_seen_at, snooze_until, risk_level, signal_codes, "
+                    "primary_domain, review_pending, review_version, review_message_channel_id, review_message_id, "
+                    "last_result_code, last_result_at, last_notified_code, last_notified_at, "
+                    "message_event_count, latest_message_basis, latest_message_confidence, latest_scan_source "
+                    "FROM admin_member_risk_states WHERE guild_id = $1 ORDER BY first_seen_at ASC"
+                ),
+                guild_id,
+            )
+        return [record for row in rows if (record := _member_risk_from_row(row)) is not None]
+
+    async def list_member_risk_review_queues(self) -> list[dict[str, Any]]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT guild_id, channel_id, message_id, updated_at FROM admin_member_risk_review_queues ORDER BY guild_id ASC"
+            )
+        return [record for row in rows if (record := _member_risk_review_queue_from_row(row)) is not None]
+
+    async def fetch_member_risk_review_queue(self, guild_id: int) -> dict[str, Any] | None:
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT guild_id, channel_id, message_id, updated_at FROM admin_member_risk_review_queues WHERE guild_id = $1",
+                guild_id,
+            )
+        return _member_risk_review_queue_from_row(row) if row is not None else None
+
+    async def upsert_member_risk_review_queue(self, record: dict[str, Any]):
+        normalized = normalize_member_risk_review_queue(record)
+        if normalized is None:
+            return
+        async with self._io_lock:
+            async with self._pool.acquire() as conn:
+                await conn.execute(
+                    (
+                        "INSERT INTO admin_member_risk_review_queues (guild_id, channel_id, message_id, updated_at) "
+                        "VALUES ($1, $2, $3, $4) "
+                        "ON CONFLICT (guild_id) DO UPDATE SET "
+                        "channel_id = EXCLUDED.channel_id, "
+                        "message_id = EXCLUDED.message_id, "
+                        "updated_at = EXCLUDED.updated_at"
+                    ),
+                    normalized["guild_id"],
+                    normalized["channel_id"],
+                    normalized["message_id"],
+                    _parse_datetime(normalized["updated_at"]),
+                )
+
+    async def delete_member_risk_review_queue(self, guild_id: int):
+        async with self._io_lock:
+            async with self._pool.acquire() as conn:
+                await conn.execute("DELETE FROM admin_member_risk_review_queues WHERE guild_id = $1", guild_id)
+
     async def fetch_guild_counts(self, guild_id: int) -> dict[str, int]:
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -1323,7 +1738,8 @@ class _PostgresAdminStore(_BaseAdminStore):
                     "(SELECT COUNT(*) FROM admin_followup_roles WHERE guild_id = $1) AS active_followups, "
                     "(SELECT COUNT(*) FROM admin_followup_roles WHERE guild_id = $1 AND review_pending = TRUE) AS pending_reviews, "
                     "(SELECT COUNT(*) FROM admin_verification_states WHERE guild_id = $1) AS verification_pending, "
-                    "(SELECT COUNT(*) FROM admin_verification_states WHERE guild_id = $1 AND warning_sent_at IS NOT NULL) AS verification_warned"
+                    "(SELECT COUNT(*) FROM admin_verification_states WHERE guild_id = $1 AND warning_sent_at IS NOT NULL) AS verification_warned, "
+                    "(SELECT COUNT(*) FROM admin_member_risk_states WHERE guild_id = $1 AND review_pending = TRUE) AS member_risk_pending"
                 ),
                 guild_id,
             )
@@ -1333,6 +1749,7 @@ class _PostgresAdminStore(_BaseAdminStore):
             "pending_reviews": int(row["pending_reviews"] or 0),
             "verification_pending": int(row["verification_pending"] or 0),
             "verification_warned": int(row["verification_warned"] or 0),
+            "member_risk_pending": int(row["member_risk_pending"] or 0),
         }
 
 
@@ -1469,6 +1886,30 @@ class AdminStore:
 
     async def list_verification_states_for_guild(self, guild_id: int) -> list[dict[str, Any]]:
         return await self._store.list_verification_states_for_guild(guild_id)
+
+    async def upsert_member_risk_state(self, record: dict[str, Any]):
+        await self._store.upsert_member_risk_state(record)
+
+    async def fetch_member_risk_state(self, guild_id: int, user_id: int) -> dict[str, Any] | None:
+        return await self._store.fetch_member_risk_state(guild_id, user_id)
+
+    async def delete_member_risk_state(self, guild_id: int, user_id: int):
+        await self._store.delete_member_risk_state(guild_id, user_id)
+
+    async def list_member_risk_states_for_guild(self, guild_id: int) -> list[dict[str, Any]]:
+        return await self._store.list_member_risk_states_for_guild(guild_id)
+
+    async def list_member_risk_review_queues(self) -> list[dict[str, Any]]:
+        return await self._store.list_member_risk_review_queues()
+
+    async def fetch_member_risk_review_queue(self, guild_id: int) -> dict[str, Any] | None:
+        return await self._store.fetch_member_risk_review_queue(guild_id)
+
+    async def upsert_member_risk_review_queue(self, record: dict[str, Any]):
+        await self._store.upsert_member_risk_review_queue(record)
+
+    async def delete_member_risk_review_queue(self, guild_id: int):
+        await self._store.delete_member_risk_review_queue(guild_id)
 
     async def fetch_guild_counts(self, guild_id: int) -> dict[str, int]:
         return await self._store.fetch_guild_counts(guild_id)

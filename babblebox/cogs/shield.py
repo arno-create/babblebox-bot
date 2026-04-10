@@ -298,8 +298,8 @@ class ShieldCog(commands.Cog):
             return "adult | matched local intel"
         if assessment.category == "unknown_suspicious":
             if assessment.provider_lookup_warranted:
-                return "unknown suspicious | lookup candidate only, no action"
-            return "unknown suspicious | local caution only, no action"
+                return "unknown suspicious | lookup candidate, link-only caution"
+            return "unknown suspicious | local caution, link-only"
         if assessment.category == "unknown":
             return "unknown | no action"
         return "safe | allowlisted or safe family"
@@ -428,7 +428,7 @@ class ShieldCog(commands.Cog):
         ai_status = self.service.get_ai_status(guild_id)
         embed = discord.Embed(
             title="Shield Control Panel",
-            description="Shield stays local-first. Bundled intel handles malicious/scam and optional adult / 18+ domains, safe mainstream families bypass suspicion, and unknown suspicious links stay non-enforcing in this phase.",
+            description="Shield stays local-first. Bundled intel handles malicious/scam and optional adult / 18+ domains, safe mainstream families bypass suspicion, and unknown suspicious links stay conservative unless combined local scam evidence raises confidence.",
             color=ge.EMBED_THEME["warning"] if config["module_enabled"] else ge.EMBED_THEME["info"],
         )
         log_channel = f"<#{config['log_channel_id']}>" if config.get("log_channel_id") else "Not set"
@@ -483,7 +483,7 @@ class ShieldCog(commands.Cog):
         config = self.service.get_config(guild_id)
         embed = discord.Embed(
             title="Shield Rules",
-            description="Confidence-tier local policy. Local malicious and adult matches can act hard; unknown suspicious links remain advisory in phase 1.",
+            description="Confidence-tier local policy. Local malicious and adult matches can act hard, while unknown suspicious links stay link-only unless local scam signals, newcomer context, or campaign repetition justify escalation.",
             color=ge.EMBED_THEME["info"],
         )
         pack_lines = []

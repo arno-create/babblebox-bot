@@ -37,22 +37,68 @@ LINK_CATEGORY_STRENGTH = {
     MALICIOUS_LINK_CATEGORY: 4,
 }
 
-WARNING_DISCUSSION_RE = re.compile(
-    r"(?i)(?:\b(?:beware|warning|avoid|do not|don't|never|fake|malicious|phish(?:ing)?|report(?:ed|ing)?|blocked|blocklist(?:ed)?|heads up|scam|for review|for triage|triage)\b|\b(?:example|sample)\b.{0,24}\b(?:link|site|domain|url)\b|\b(?:scam|phish(?:ing)?|malicious)\b.{0,24}\b(?:example|sample)\b)"
+EXPLICIT_WARNING_DISCUSSION_RE = re.compile(
+    r"(?ix)(?:"
+    r"\b(?:warning|beware|heads\ up|security\ alert|phishing\ alert|scam\ alert|security\ awareness|for\ review|for\ triage|incident\ review|training\ example|educational\ example)\b"
+    r"|"
+    r"\b(?:do\ not|don't|never|avoid)\s+(?:click|open|visit|install|run|claim|verify|connect|connect\ wallet|login|log\ in|mint)\b"
+    r"|"
+    r"\b(?:example|sample)\b.{0,24}\b(?:scam|phish(?:ing)?|malicious|fake|link|site|domain|url)\b"
+    r"|"
+    r"\b(?:reported\ as|flagged\ as|blocklist(?:ed)?\ as)\b.{0,24}\b(?:scam|phish(?:ing)?|malicious|fake|link|site|domain|url)\b"
+    r"|"
+    r"\b(?:is|was|looks)\s+(?:malicious|fake|phishing|a\ scam|a\ phish)\b"
+    r")"
 )
-SOCIAL_ENGINEERING_RE = re.compile(r"(?i)\b(?:download|run|install|open|verify|claim|login|log in|connect wallet|sync)\b")
+PAST_TENSE_DISCUSSION_RE = re.compile(
+    r"(?ix)(?:"
+    r"\b(?:we|staff|mods?|already)\s+(?:blocked|reported|flagged)\b"
+    r"|"
+    r"\b(?:blocked|reported|flagged)\b.{0,18}\b(?:yesterday|earlier|internally|during\ triage|for\ review)\b"
+    r")"
+)
+SOCIAL_ENGINEERING_RE = re.compile(
+    r"(?i)\b(?:download|run|install|open|visit|click(?: here)?|verify|claim|login|log in|sign in|connect wallet|wallet connect|sync|mint|minting|authenticate|authorize)\b"
+)
 SCAM_BAIT_RE = re.compile(
-    r"(?i)\b(?:free nitro|nitro gift|steam gift|claim reward|claim now|verify your account|wallet connect|seed phrase|airdrop|gift inventory|limited time claim)\b"
+    r"(?i)\b(?:free nitro|nitro gift|steam gift|claim reward|claim now|verify your account|wallet connect|seed phrase|airdrop|gift inventory|limited time claim|free mint|mint opportunity|minting page|whitelist spot)\b"
 )
-BRAND_BAIT_RE = re.compile(r"(?i)\b(?:discord|nitro|steam|epic|wallet|crypto|gift)\b")
+BRAND_BAIT_RE = re.compile(r"(?i)\b(?:discord|nitro|steam|epic|wallet|crypto|gift|opensea|metamask|coinbase|walletconnect)\b")
+SUPPORT_LURE_RE = re.compile(r"(?i)\b(?:support|help\s*desk|helpdesk|ticket|case(?:\s*#\d+)?|service\s*desk)\b")
+SECURITY_NOTICE_RE = re.compile(
+    r"(?i)\b(?:security (?:alert|check|review|notice)|session (?:expired|review|check|validation)|unusual activity|suspicious activity|account (?:locked|recovery|recovery flow|suspension)|password reset|re-authenticate|reauthenticate|device verification)\b"
+)
+FAKE_AUTHORITY_RE = re.compile(
+    r"(?i)\b(?:official bot|support bot|verification bot|security bot|system (?:message|notice)|staff(?: team)?|mod(?:erator)?(?: team)?|admin(?: team)?)\b"
+)
+QR_SETUP_LURE_RE = re.compile(
+    r"(?i)\b(?:qr(?:\s*code)?|scan the qr|scan to verify|device auth|pair your device|captcha|setup|installer|installation package)\b"
+)
 SUSPICIOUS_FILE_RE = re.compile(r"(?i)\.(?:exe|scr|bat|cmd|msi|zip|rar|7z|iso|apk)(?:$|[?#])")
 ENCODED_QUERY_RE = re.compile(r"(?i)(?:%[0-9a-f]{2}){3,}")
 TOKEN_RE = re.compile(r"[a-z0-9]+")
 LINK_HOST_LABEL_RE = re.compile(r"[a-z0-9-]+")
 HIGH_SEVERITY_CONTEXT_SIGNALS = frozenset({"suspicious_file_target", "message_scam_bait", "suspicious_attachment_link_combo"})
 LOOKUP_CONTEXT_SIGNALS = HIGH_SEVERITY_CONTEXT_SIGNALS | frozenset(
-    {"message_social_engineering", "message_brand_bait", "encoded_or_long_query"}
+    {
+        "message_social_engineering",
+        "message_brand_bait",
+        "message_support_lure",
+        "message_security_notice",
+        "message_fake_authority",
+        "message_qr_setup_lure",
+        "encoded_or_long_query",
+    }
 )
+EMBEDDED_TOKEN_LABEL_MIN_LEN = 7
+DEEP_SUBDOMAIN_LABEL_THRESHOLD = 4
+
+
+def looks_like_warning_discussion(text: str) -> bool:
+    cleaned = normalize_plain_text(text)
+    if not cleaned:
+        return False
+    return bool(EXPLICIT_WARNING_DISCUSSION_RE.search(cleaned) or PAST_TENSE_DISCUSSION_RE.search(cleaned))
 
 
 def domain_matches(domain: str, candidate: str) -> bool:
@@ -182,6 +228,8 @@ class _BundledLinkIntel:
     suspicious_tlds: frozenset[str]
     suspicious_host_tokens: frozenset[str]
     brand_tokens: frozenset[str]
+    embedded_brand_tokens: frozenset[str]
+    embedded_host_tokens: frozenset[str]
     suspicious_path_tokens: frozenset[str]
     suspicious_query_tokens: frozenset[str]
     suspicious_threshold: int
@@ -212,6 +260,21 @@ def _clean_domain_list(values: Any) -> frozenset[str]:
         if isinstance(value, str) and normalize_plain_text(str(value)).strip()
     }
     return frozenset(value for value in cleaned if value)
+
+
+def _embedded_token_hits(labels: Sequence[str], tokens: frozenset[str]) -> tuple[str, ...]:
+    hits: list[str] = []
+    for label in labels:
+        if len(label) < EMBEDDED_TOKEN_LABEL_MIN_LEN or "-" in label:
+            continue
+        for token in sorted(tokens):
+            if len(token) < 4:
+                continue
+            if token == label or token not in label:
+                continue
+            if token not in hits:
+                hits.append(token)
+    return tuple(hits)
 
 
 def _load_external_malicious_domains(paths: Sequence[Path] | None = None) -> _ExternalMaliciousFeed:
@@ -287,6 +350,8 @@ def _load_bundled_intel(
         suspicious_tlds=_clean_domain_list(payload.get("suspicious_tlds", [])),
         suspicious_host_tokens=_clean_domain_list(payload.get("suspicious_host_tokens", [])),
         brand_tokens=_clean_domain_list(payload.get("brand_tokens", [])),
+        embedded_brand_tokens=_clean_domain_list(payload.get("embedded_brand_tokens", [])),
+        embedded_host_tokens=_clean_domain_list(payload.get("embedded_host_tokens", [])),
         suspicious_path_tokens=_clean_domain_list(payload.get("suspicious_path_tokens", [])),
         suspicious_query_tokens=_clean_domain_list(payload.get("suspicious_query_tokens", [])),
         suspicious_threshold=max(1, suspicious_threshold),
@@ -467,20 +532,41 @@ class ShieldLinkSafetyEngine:
             has_suspicious_attachment=has_suspicious_attachment,
         )
         signals.extend(context_signals)
+        labels = [label for label in domain.split(".") if label]
+        if len(labels) >= DEEP_SUBDOMAIN_LABEL_THRESHOLD and (
+            cached.suspicious_base_score > 0
+            or any(
+                signal.startswith("path_token:")
+                or signal.startswith("query_token:")
+                or signal == "encoded_or_long_query"
+                for signal in context_signals
+            )
+        ):
+            signals.append("deep_subdomain_stack")
         context_score = self._score_context_signals(context_signals)
+        if "deep_subdomain_stack" in signals:
+            context_score += 1
+        suspicious_score = cached.suspicious_base_score + context_score
         host_signal_set = set(cached.host_signals)
         shortener_only = host_signal_set == {"shortener_domain"}
-        host_risk = bool(host_signal_set) and not shortener_only
+        host_risk = cached.suspicious_base_score >= self.intel.suspicious_threshold and not shortener_only
         high_severity_context_count = sum(signal in HIGH_SEVERITY_CONTEXT_SIGNALS for signal in context_signals)
         lookup_context = any(signal in LOOKUP_CONTEXT_SIGNALS for signal in context_signals)
-        suspicious_context = high_severity_context_count > 0
-        suspicious_enough = host_risk or suspicious_context or (shortener_only and lookup_context)
-        if warning_context and not host_risk and high_severity_context_count == 0:
+        suspicious_enough = (
+            host_risk
+            or (cached.suspicious_base_score > 0 and suspicious_score >= self.intel.suspicious_threshold)
+            or high_severity_context_count > 0
+            or (shortener_only and lookup_context)
+        )
+        if warning_context and suspicious_score < self.intel.provider_lookup_threshold and high_severity_context_count == 0:
             suspicious_enough = False
         provider_lookup_warranted = (
             not warning_context
             and (
-                (host_risk and (lookup_context or context_score >= 2))
+                (
+                    cached.suspicious_base_score > 0
+                    and suspicious_score >= self.intel.provider_lookup_threshold
+                )
                 or (shortener_only and lookup_context)
                 or high_severity_context_count >= 2
             )
@@ -539,6 +625,8 @@ class ShieldLinkSafetyEngine:
 
         host_signals: list[str] = []
         suspicious_score = 0
+        labels = [label for label in domain.split(".") if label]
+        root_labels = labels[:-1] if len(labels) > 1 else labels
         if "xn--" in domain:
             host_signals.append("punycode_host")
             suspicious_score += 2
@@ -546,7 +634,6 @@ class ShieldLinkSafetyEngine:
             host_signals.append("shortener_domain")
             suspicious_score += 1
 
-        labels = [label for label in domain.split(".") if label]
         tld = labels[-1] if labels else ""
         if tld in self.intel.suspicious_tlds:
             host_signals.append(f"suspicious_tld:{tld}")
@@ -559,6 +646,20 @@ class ShieldLinkSafetyEngine:
                 suspicious_score += 1
             if token in self.intel.brand_tokens:
                 host_signals.append(f"brand_token:{token}")
+                suspicious_score += 1
+        embedded_brand_hits = _embedded_token_hits(root_labels, self.intel.embedded_brand_tokens)
+        embedded_host_hits = _embedded_token_hits(root_labels, self.intel.embedded_host_tokens)
+        allow_embedded_hits = bool(
+            (embedded_brand_hits and embedded_host_hits)
+            or len(embedded_host_hits) >= 2
+        )
+        if allow_embedded_hits:
+            for token in embedded_brand_hits[:2]:
+                host_signals.append(f"embedded_brand_token:{token}")
+            for token in embedded_host_hits[:3]:
+                host_signals.append(f"embedded_host_token:{token}")
+            suspicious_score += 2
+            if embedded_brand_hits and len(embedded_host_hits) >= 2:
                 suspicious_score += 1
         if domain.count("-") >= 3:
             host_signals.append("hyphen_heavy_host")
@@ -601,9 +702,17 @@ class ShieldLinkSafetyEngine:
             signals.append("message_brand_bait")
         if SOCIAL_ENGINEERING_RE.search(message_text):
             signals.append("message_social_engineering")
+        if SUPPORT_LURE_RE.search(message_text):
+            signals.append("message_support_lure")
+        if SECURITY_NOTICE_RE.search(message_text):
+            signals.append("message_security_notice")
+        if FAKE_AUTHORITY_RE.search(message_text):
+            signals.append("message_fake_authority")
+        if QR_SETUP_LURE_RE.search(message_text):
+            signals.append("message_qr_setup_lure")
         if has_suspicious_attachment:
             signals.append("suspicious_attachment_link_combo")
-        warning_context = bool(WARNING_DISCUSSION_RE.search(message_text))
+        warning_context = looks_like_warning_discussion(message_text)
         if warning_context:
             signals.append("warning_or_discussion_context")
         return tuple(dict.fromkeys(signals)), warning_context
@@ -613,7 +722,15 @@ class ShieldLinkSafetyEngine:
         for signal in signals:
             if signal in {"suspicious_file_target", "message_scam_bait"}:
                 score += 2
-            elif signal in {"message_social_engineering", "message_brand_bait", "suspicious_attachment_link_combo"}:
+            elif signal in {
+                "message_social_engineering",
+                "message_brand_bait",
+                "message_support_lure",
+                "message_security_notice",
+                "message_fake_authority",
+                "message_qr_setup_lure",
+                "suspicious_attachment_link_combo",
+            }:
                 score += 1
             elif signal.startswith("path_token:") or signal.startswith("query_token:") or signal == "encoded_or_long_query":
                 score += 1

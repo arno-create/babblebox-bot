@@ -16,6 +16,7 @@ from babblebox.admin_store import (
     _config_from_row as _admin_config_from_row,
     default_admin_config,
     normalize_admin_config,
+    normalize_member_risk_state,
     normalize_verification_state,
 )
 from babblebox.utility_helpers import deserialize_datetime, serialize_datetime
@@ -102,6 +103,9 @@ class FakeMember:
         bot: bool = False,
         guild_permissions: FakePermissions | None = None,
         joined_at=None,
+        created_at=None,
+        avatar=None,
+        display_name: str | None = None,
     ):
         self.id = user_id
         self.guild = guild
@@ -110,8 +114,11 @@ class FakeMember:
         self.bot = bot
         self.guild_permissions = guild_permissions or FakePermissions()
         self.mention = f"<@{user_id}>"
-        self.display_name = f"User {user_id}"
+        self.display_name = display_name or f"User {user_id}"
         self.joined_at = joined_at or ge.now_utc()
+        self.created_at = created_at or ge.now_utc()
+        self.avatar = avatar
+        self.default_avatar = object()
         self.sent = []
         self.kicked = False
 
@@ -176,6 +183,12 @@ class AdminStoreNormalizationTests(unittest.TestCase):
         self.assertEqual(config["verification_deadline_action"], "auto_kick")
         self.assertEqual(default_admin_config(10)["verification_deadline_action"], "auto_kick")
 
+    def test_admin_config_defaults_member_risk_to_disabled_review(self):
+        config = normalize_admin_config(10, {})
+        self.assertFalse(config["member_risk_enabled"])
+        self.assertEqual(config["member_risk_mode"], "review")
+        self.assertEqual(default_admin_config(10)["member_risk_mode"], "review")
+
     def test_verification_state_normalization_keeps_review_metadata(self):
         normalized = normalize_verification_state(
             {
@@ -203,6 +216,49 @@ class AdminStoreNormalizationTests(unittest.TestCase):
         self.assertEqual(normalized["review_message_id"], 75)
         self.assertEqual(normalized["last_result_code"], "kick:blocked:missing_kick_members")
         self.assertEqual(normalized["last_notified_code"], "kick:blocked:missing_kick_members")
+
+    def test_member_risk_state_normalization_prioritizes_high_signal_codes(self):
+        normalized = normalize_member_risk_state(
+            {
+                "guild_id": 10,
+                "user_id": 20,
+                "first_seen_at": serialize_datetime(ge.now_utc() - timedelta(hours=3)),
+                "last_seen_at": serialize_datetime(ge.now_utc()),
+                "snooze_until": None,
+                "risk_level": "review",
+                "signal_codes": [
+                    "name_separator_heavy",
+                    "default_avatar",
+                    "account_new_7d",
+                    "campaign_path_shape",
+                    "campaign_lure_reuse",
+                    "scam_high",
+                    "malicious_link",
+                    "first_message_link",
+                    "first_external_link",
+                    "newcomer_first_messages_risky",
+                    "fresh_campaign_cluster_3",
+                    "name_zero_width",
+                ],
+                "primary_domain": "mint-pass.live",
+                "review_pending": True,
+                "review_version": 1,
+            }
+        )
+
+        self.assertIsNotNone(normalized)
+        self.assertEqual(
+            normalized["signal_codes"][:6],
+            [
+                "malicious_link",
+                "scam_high",
+                "fresh_campaign_cluster_3",
+                "campaign_lure_reuse",
+                "campaign_path_shape",
+                "newcomer_first_messages_risky",
+            ],
+        )
+        self.assertNotIn("name_separator_heavy", normalized["signal_codes"])
 
     def test_postgres_config_row_decodes_json_string_id_lists(self):
         config = _admin_config_from_row(
@@ -406,6 +462,34 @@ class AdminServiceTests(unittest.IsolatedAsyncioTestCase):
             duration_text="30d",
         )
         self.assertTrue(ok)
+
+    async def _configure_member_risk(self, *, with_logs: bool = False, mode: str = "review"):
+        if with_logs:
+            ok, _ = await self.service.set_logs_config(self.guild.id, channel_id=self.log_channel.id, alert_role_id=None)
+            self.assertTrue(ok)
+        ok, _ = await self.service.set_member_risk_config(self.guild.id, enabled=True, mode=mode)
+        self.assertTrue(ok)
+
+    def _member_risk_decision(
+        self,
+        *codes: str,
+        primary_domain: str | None = "mint-pass.live",
+        message_codes: tuple[str, ...] | None = None,
+        context_codes: tuple[str, ...] | None = None,
+        match_class: str | None = None,
+        confidence: str | None = None,
+        scan_source: str = "new_message",
+    ):
+        evidence = types.SimpleNamespace(
+            signal_codes=tuple(codes),
+            message_codes=tuple(message_codes or ()),
+            context_codes=tuple(context_codes or ()),
+            primary_domain=primary_domain,
+            message_match_class=match_class,
+            message_confidence=confidence,
+            scan_source=scan_source,
+        )
+        return types.SimpleNamespace(member_risk_evidence=evidence)
 
     def _dm_forbidden(self):
         return discord.Forbidden(types.SimpleNamespace(status=403, reason="Forbidden", headers={}), "DMs are closed")
@@ -1548,3 +1632,519 @@ class AdminServiceTests(unittest.IsolatedAsyncioTestCase):
             embed.description,
             "Babblebox auto-removed <@&70> from <@110> and <@111> after 30 days.",
         )
+
+    async def test_member_risk_identity_only_logs_note_without_queue(self):
+        await self._configure_member_risk(with_logs=True, mode="review")
+        member = FakeMember(
+            201,
+            self.guild,
+            roles=[],
+            top_role=FakeRole(5, position=5),
+            created_at=ge.now_utc() - timedelta(hours=2),
+            joined_at=ge.now_utc() - timedelta(minutes=30),
+            avatar=None,
+            display_name="Official Support",
+        )
+        self.guild.members[member.id] = member
+
+        await self.service.handle_member_join(member)
+
+        self.assertIsNone(await self.store.fetch_member_risk_state(self.guild.id, member.id))
+        self.assertEqual(len(self.log_channel.sent), 1)
+        self.assertEqual(self.log_channel.sent[0]["embed"].title, "Member Risk Note")
+
+    async def test_member_risk_default_avatar_alone_does_not_punish(self):
+        await self._configure_member_risk(with_logs=True, mode="review")
+        member = FakeMember(
+            202,
+            self.guild,
+            roles=[],
+            top_role=FakeRole(5, position=5),
+            created_at=ge.now_utc() - timedelta(days=60),
+            joined_at=ge.now_utc() - timedelta(days=30),
+            avatar=None,
+        )
+        self.guild.members[member.id] = member
+
+        await self.service.handle_member_join(member)
+
+        self.assertIsNone(await self.store.fetch_member_risk_state(self.guild.id, member.id))
+        self.assertEqual(self.log_channel.sent, [])
+
+    async def test_member_risk_recent_account_alone_does_not_punish(self):
+        member = FakeMember(
+            2021,
+            self.guild,
+            roles=[],
+            top_role=FakeRole(5, position=5),
+            created_at=ge.now_utc() - timedelta(hours=6),
+            joined_at=ge.now_utc() - timedelta(days=3),
+            avatar=object(),
+            display_name="normal-user",
+        )
+
+        assessment = self.service._assess_member_risk(
+            member,
+            types.SimpleNamespace(signal_codes=(), primary_domain=None),
+            now=ge.now_utc(),
+        )
+
+        self.assertEqual(assessment.level, "low")
+        self.assertIn("account_new_1d", assessment.signal_codes)
+        self.assertNotIn("joined_recently", assessment.signal_codes)
+
+    async def test_member_risk_mixed_script_name_alone_does_not_punish(self):
+        member = FakeMember(
+            2022,
+            self.guild,
+            roles=[],
+            top_role=FakeRole(5, position=5),
+            created_at=ge.now_utc() - timedelta(days=90),
+            joined_at=ge.now_utc() - timedelta(days=30),
+            avatar=object(),
+            display_name="Admіn",
+        )
+
+        assessment = self.service._assess_member_risk(
+            member,
+            types.SimpleNamespace(signal_codes=(), primary_domain=None),
+            now=ge.now_utc(),
+        )
+
+        self.assertEqual(assessment.level, "low")
+        self.assertIn("name_mixed_script", assessment.signal_codes)
+
+    async def test_member_risk_context_only_first_link_does_not_log_or_queue(self):
+        await self._configure_member_risk(with_logs=True, mode="review")
+        member = FakeMember(
+            2023,
+            self.guild,
+            roles=[],
+            top_role=FakeRole(5, position=5),
+            created_at=ge.now_utc() - timedelta(hours=4),
+            joined_at=ge.now_utc() - timedelta(minutes=15),
+            avatar=None,
+            display_name="new-user",
+        )
+        self.guild.members[member.id] = member
+        message = types.SimpleNamespace(guild=self.guild, author=member, webhook_id=None)
+
+        await self.service.handle_member_risk_message(
+            message,
+            self._member_risk_decision("newcomer_early_message", "first_message_link", "first_external_link", "newcomer_first_messages_risky"),
+        )
+
+        self.assertIsNone(await self.store.fetch_member_risk_state(self.guild.id, member.id))
+        self.assertEqual(self.log_channel.sent, [])
+
+    async def test_member_risk_message_creates_review_for_new_account_and_risky_message(self):
+        await self._configure_member_risk(with_logs=True, mode="review")
+        member = FakeMember(
+            203,
+            self.guild,
+            roles=[],
+            top_role=FakeRole(5, position=5),
+            created_at=ge.now_utc() - timedelta(hours=4),
+            joined_at=ge.now_utc() - timedelta(minutes=20),
+            avatar=None,
+            display_name="Support Desk",
+        )
+        self.guild.members[member.id] = member
+        message = types.SimpleNamespace(guild=self.guild, author=member, webhook_id=None)
+
+        await self.service.handle_member_risk_message(
+            message,
+            self._member_risk_decision("scam_medium", "unknown_suspicious_link", "newcomer_early_message"),
+        )
+
+        record = await self.store.fetch_member_risk_state(self.guild.id, member.id)
+        queue = await self.store.fetch_member_risk_review_queue(self.guild.id)
+        self.assertIsNotNone(record)
+        self.assertTrue(record["review_pending"])
+        self.assertEqual(record["risk_level"], "review")
+        self.assertIsNotNone(queue)
+        self.assertEqual(self.log_channel.sent[0]["embed"].title, "Member Risk Review Queue")
+
+    async def test_member_risk_review_persists_latest_message_metadata_and_updates_event_count(self):
+        await self._configure_member_risk(with_logs=True, mode="review")
+        member = FakeMember(
+            20301,
+            self.guild,
+            roles=[],
+            top_role=FakeRole(5, position=5),
+            created_at=ge.now_utc() - timedelta(hours=4),
+            joined_at=ge.now_utc() - timedelta(minutes=20),
+            avatar=None,
+            display_name="Support Desk",
+        )
+        self.guild.members[member.id] = member
+        message = types.SimpleNamespace(guild=self.guild, author=member, webhook_id=None)
+
+        await self.service.handle_member_risk_message(
+            message,
+            self._member_risk_decision(
+                "scam_medium",
+                "unknown_suspicious_link",
+                "newcomer_early_message",
+                primary_domain="mint-pass.live",
+                message_codes=("scam_medium", "unknown_suspicious_link"),
+                context_codes=("newcomer_early_message",),
+                match_class="scam_brand_impersonation",
+                confidence="medium",
+                scan_source="message_edit",
+            ),
+        )
+
+        record = await self.store.fetch_member_risk_state(self.guild.id, member.id)
+        self.assertIsNotNone(record)
+        self.assertEqual(record["message_event_count"], 1)
+        self.assertEqual(record["latest_message_basis"], "Official-looking brand lure")
+        self.assertEqual(record["latest_message_confidence"], "medium")
+        self.assertEqual(record["latest_scan_source"], "message_edit")
+        risk_field = next(field for field in self.log_channel.sent[0]["embed"].fields if field.name == "Risk")
+        self.assertIn("Basis: Official-looking brand lure", risk_field.value)
+
+        await self.service.handle_member_risk_message(
+            message,
+            self._member_risk_decision(
+                "scam_high",
+                "malicious_link",
+                "fresh_campaign_cluster_2",
+                primary_domain="secure-auth-session.click",
+                message_codes=("scam_high", "malicious_link"),
+                context_codes=("fresh_campaign_cluster_2",),
+                match_class="known_malicious_domain",
+                confidence="high",
+                scan_source="new_message",
+            ),
+        )
+
+        updated = await self.store.fetch_member_risk_state(self.guild.id, member.id)
+        self.assertIsNotNone(updated)
+        self.assertEqual(updated["message_event_count"], 2)
+        self.assertEqual(updated["latest_message_basis"], "Known malicious domain")
+        self.assertEqual(updated["latest_message_confidence"], "high")
+        self.assertEqual(updated["latest_scan_source"], "new_message")
+
+    async def test_member_risk_mixed_script_name_with_risky_message_queues_review(self):
+        await self._configure_member_risk(with_logs=True, mode="review")
+        member = FakeMember(
+            2031,
+            self.guild,
+            roles=[],
+            top_role=FakeRole(5, position=5),
+            created_at=ge.now_utc() - timedelta(hours=4),
+            joined_at=ge.now_utc() - timedelta(minutes=20),
+            avatar=None,
+            display_name="Admіn Support",
+        )
+        self.guild.members[member.id] = member
+        message = types.SimpleNamespace(guild=self.guild, author=member, webhook_id=None)
+
+        await self.service.handle_member_risk_message(
+            message,
+            self._member_risk_decision(
+                "scam_medium",
+                "unknown_suspicious_link",
+                "first_external_link",
+                "newcomer_first_messages_risky",
+            ),
+        )
+
+        record = await self.store.fetch_member_risk_state(self.guild.id, member.id)
+        self.assertIsNotNone(record)
+        self.assertIn("name_mixed_script", record["signal_codes"])
+        queue_embed = self.log_channel.sent[0]["embed"]
+        field_names = [field.name for field in queue_embed.fields]
+        self.assertIn("Message Evidence", field_names)
+        self.assertIn("Identity Hints", field_names)
+        self.assertIn("Confidence Risers", field_names)
+
+    async def test_member_risk_trusted_role_bypasses_message_lane(self):
+        await self._configure_member_risk(with_logs=True, mode="review")
+        trusted_role = FakeRole(91, position=12)
+        self.guild.roles[trusted_role.id] = trusted_role
+        ok, _ = await self.service.set_exclusion_target(self.guild.id, "trusted_role_ids", trusted_role.id, True)
+        self.assertTrue(ok)
+        member = FakeMember(
+            204,
+            self.guild,
+            roles=[trusted_role],
+            top_role=trusted_role,
+            created_at=ge.now_utc() - timedelta(hours=3),
+            joined_at=ge.now_utc() - timedelta(minutes=15),
+            avatar=None,
+            display_name="Official Mod",
+        )
+        self.guild.members[member.id] = member
+        message = types.SimpleNamespace(guild=self.guild, author=member, webhook_id=None)
+
+        await self.service.handle_member_risk_message(
+            message,
+            self._member_risk_decision("scam_high", "malicious_link", "newcomer_early_message"),
+        )
+
+        self.assertIsNone(await self.store.fetch_member_risk_state(self.guild.id, member.id))
+        self.assertIsNone(await self.store.fetch_member_risk_review_queue(self.guild.id))
+        self.assertEqual(self.log_channel.sent, [])
+
+    async def test_member_risk_review_or_kick_removes_member_and_includes_rejoin_link(self):
+        ok, _ = await self.service.set_templates(self.guild.id, invite_link="https://discord.gg/rejoin")
+        self.assertTrue(ok)
+        await self._configure_member_risk(with_logs=True, mode="review_or_kick")
+        member = FakeMember(
+            205,
+            self.guild,
+            roles=[],
+            top_role=FakeRole(5, position=5),
+            created_at=ge.now_utc() - timedelta(hours=2),
+            joined_at=ge.now_utc() - timedelta(minutes=10),
+            avatar=None,
+            display_name="Official Support",
+        )
+        self.guild.members[member.id] = member
+        message = types.SimpleNamespace(guild=self.guild, author=member, webhook_id=None)
+
+        await self.service.handle_member_risk_message(
+            message,
+            self._member_risk_decision("scam_high", "malicious_link", "newcomer_early_message", "fresh_campaign_cluster_2"),
+        )
+
+        self.assertTrue(member.kicked)
+        self.assertIsNone(await self.store.fetch_member_risk_state(self.guild.id, member.id))
+        self.assertIn("Rejoin: https://discord.gg/rejoin", member.sent[0].description)
+        self.assertEqual(self.log_channel.sent[-1]["embed"].title, "Member Risk Kick")
+
+    async def test_member_risk_review_or_kick_falls_back_to_review_when_dm_fails(self):
+        await self._configure_member_risk(with_logs=True, mode="review_or_kick")
+        member = FakeMember(
+            206,
+            self.guild,
+            roles=[],
+            top_role=FakeRole(5, position=5),
+            created_at=ge.now_utc() - timedelta(hours=2),
+            joined_at=ge.now_utc() - timedelta(minutes=10),
+            avatar=None,
+            display_name="Official Support",
+        )
+        self._make_dm_fail(member)
+        self.guild.members[member.id] = member
+        message = types.SimpleNamespace(guild=self.guild, author=member, webhook_id=None)
+
+        await self.service.handle_member_risk_message(
+            message,
+            self._member_risk_decision("scam_high", "malicious_link", "newcomer_early_message", "fresh_campaign_cluster_2"),
+        )
+
+        record = await self.store.fetch_member_risk_state(self.guild.id, member.id)
+        self.assertFalse(member.kicked)
+        self.assertIsNotNone(record)
+        self.assertTrue(record["review_pending"])
+        self.assertEqual(self.log_channel.sent[0]["embed"].title, "Member Risk Review Queue")
+
+    async def test_member_risk_review_or_kick_permission_failure_falls_back_to_review(self):
+        await self._configure_member_risk(with_logs=True, mode="review_or_kick")
+        self.guild.me.guild_permissions = FakePermissions(
+            manage_roles=True,
+            kick_members=False,
+            view_channel=True,
+            send_messages=True,
+            embed_links=True,
+        )
+        member = FakeMember(
+            2061,
+            self.guild,
+            roles=[],
+            top_role=FakeRole(5, position=5),
+            created_at=ge.now_utc() - timedelta(hours=2),
+            joined_at=ge.now_utc() - timedelta(minutes=10),
+            avatar=None,
+            display_name="Official Support",
+        )
+        self.guild.members[member.id] = member
+        message = types.SimpleNamespace(guild=self.guild, author=member, webhook_id=None)
+
+        await self.service.handle_member_risk_message(
+            message,
+            self._member_risk_decision("scam_high", "malicious_link", "first_external_link", "fresh_campaign_cluster_2"),
+        )
+
+        record = await self.store.fetch_member_risk_state(self.guild.id, member.id)
+        self.assertFalse(member.kicked)
+        self.assertIsNotNone(record)
+        self.assertTrue(record["review_pending"])
+        self.assertEqual(self.log_channel.sent[0]["embed"].title, "Member Risk Review Queue")
+
+    async def test_member_risk_log_mode_keeps_strong_cases_private_and_non_destructive(self):
+        await self._configure_member_risk(with_logs=True, mode="log")
+        member = FakeMember(
+            2062,
+            self.guild,
+            roles=[],
+            top_role=FakeRole(5, position=5),
+            created_at=ge.now_utc() - timedelta(hours=2),
+            joined_at=ge.now_utc() - timedelta(minutes=10),
+            avatar=None,
+            display_name="Support Desk",
+        )
+        self.guild.members[member.id] = member
+        message = types.SimpleNamespace(guild=self.guild, author=member, webhook_id=None)
+
+        await self.service.handle_member_risk_message(
+            message,
+            self._member_risk_decision("scam_high", "malicious_link", "first_external_link", "fresh_campaign_cluster_2"),
+        )
+
+        self.assertFalse(member.kicked)
+        self.assertIsNone(await self.store.fetch_member_risk_state(self.guild.id, member.id))
+        self.assertEqual(self.log_channel.sent[-1]["embed"].title, "Member Risk Note")
+        self.assertIn("Known malicious-link intel", self.log_channel.sent[-1]["embed"].description)
+
+    async def test_member_risk_log_mode_note_uses_precise_message_basis_label(self):
+        await self._configure_member_risk(with_logs=True, mode="log")
+        member = FakeMember(
+            2063,
+            self.guild,
+            roles=[],
+            top_role=FakeRole(5, position=5),
+            created_at=ge.now_utc() - timedelta(hours=2),
+            joined_at=ge.now_utc() - timedelta(minutes=10),
+            avatar=None,
+            display_name="Support Desk",
+        )
+        self.guild.members[member.id] = member
+        message = types.SimpleNamespace(guild=self.guild, author=member, webhook_id=None)
+
+        await self.service.handle_member_risk_message(
+            message,
+            self._member_risk_decision(
+                "scam_medium",
+                "unknown_suspicious_link",
+                "first_external_link",
+                message_codes=("scam_medium", "unknown_suspicious_link"),
+                context_codes=("first_external_link",),
+                match_class="scam_brand_impersonation",
+                confidence="medium",
+            ),
+        )
+
+        self.assertEqual(self.log_channel.sent[-1]["embed"].title, "Member Risk Note")
+        self.assertIn("Basis: Official-looking brand lure", self.log_channel.sent[-1]["embed"].description)
+
+    async def test_member_risk_review_action_delay_and_ignore(self):
+        await self._configure_member_risk(with_logs=True, mode="review")
+        member = FakeMember(
+            207,
+            self.guild,
+            roles=[],
+            top_role=FakeRole(5, position=5),
+            created_at=ge.now_utc() - timedelta(hours=3),
+            joined_at=ge.now_utc() - timedelta(minutes=10),
+            avatar=None,
+            display_name="Support Desk",
+        )
+        self.guild.members[member.id] = member
+        message = types.SimpleNamespace(guild=self.guild, author=member, webhook_id=None)
+        await self.service.handle_member_risk_message(
+            message,
+            self._member_risk_decision("scam_medium", "unknown_suspicious_link", "newcomer_early_message"),
+        )
+        record = await self.store.fetch_member_risk_state(self.guild.id, member.id)
+        actor = FakeMember(1, self.guild, guild_permissions=FakePermissions(manage_guild=True))
+        self.guild.members[actor.id] = actor
+
+        ok, _message, updated = await self.service.handle_member_risk_review_action(
+            guild_id=self.guild.id,
+            user_id=member.id,
+            version=int(record["review_version"]),
+            action="delay",
+            actor=actor,
+        )
+        self.assertTrue(ok)
+        self.assertFalse(updated["review_pending"])
+        self.assertIsNotNone(updated["snooze_until"])
+
+        delayed = await self.store.fetch_member_risk_state(self.guild.id, member.id)
+        delayed["review_pending"] = True
+        delayed["review_version"] = int(delayed["review_version"]) + 1
+        delayed["snooze_until"] = None
+        await self.store.upsert_member_risk_state(delayed)
+        ok, _message, _record = await self.service.handle_member_risk_review_action(
+            guild_id=self.guild.id,
+            user_id=member.id,
+            version=int(delayed["review_version"]),
+            action="ignore",
+            actor=actor,
+        )
+        self.assertTrue(ok)
+        self.assertIsNone(await self.store.fetch_member_risk_state(self.guild.id, member.id))
+
+    async def test_member_risk_join_tolerates_missing_avatar_attrs(self):
+        await self._configure_member_risk(with_logs=True, mode="review")
+        member = FakeMember(
+            208,
+            self.guild,
+            roles=[],
+            top_role=FakeRole(5, position=5),
+            created_at=ge.now_utc() - timedelta(days=20),
+            joined_at=ge.now_utc() - timedelta(days=2),
+            display_name="normal-user",
+        )
+        delattr(member, "avatar")
+        delattr(member, "default_avatar")
+        self.guild.members[member.id] = member
+
+        await self.service.handle_member_join(member)
+
+        self.assertIsNone(await self.store.fetch_member_risk_state(self.guild.id, member.id))
+
+    async def test_member_risk_note_dedupes_repeated_identity_only_noise(self):
+        await self._configure_member_risk(with_logs=True, mode="review")
+        member = FakeMember(
+            209,
+            self.guild,
+            roles=[],
+            top_role=FakeRole(5, position=5),
+            created_at=ge.now_utc() - timedelta(hours=2),
+            joined_at=ge.now_utc() - timedelta(minutes=30),
+            avatar=None,
+            display_name="Official Support",
+        )
+        self.guild.members[member.id] = member
+
+        await self.service.handle_member_join(member)
+        await self.service.handle_member_join(member)
+
+        self.assertEqual(len(self.log_channel.sent), 1)
+        field_names = [field.name for field in self.log_channel.sent[0]["embed"].fields]
+        self.assertIn("Message Evidence", field_names)
+        self.assertIn("Identity Hints", field_names)
+
+    async def test_member_risk_does_not_touch_profile_bio_surfaces(self):
+        class NoBioMember(FakeMember):
+            @property
+            def bio(self):
+                raise AssertionError("bio should not be inspected")
+
+            @property
+            def about_me(self):
+                raise AssertionError("about_me should not be inspected")
+
+        member = NoBioMember(
+            210,
+            self.guild,
+            roles=[],
+            top_role=FakeRole(5, position=5),
+            created_at=ge.now_utc() - timedelta(hours=2),
+            joined_at=ge.now_utc() - timedelta(minutes=30),
+            avatar=None,
+            display_name="Official Support",
+        )
+
+        assessment = self.service._assess_member_risk(
+            member,
+            types.SimpleNamespace(signal_codes=(), primary_domain=None),
+            now=ge.now_utc(),
+        )
+
+        self.assertEqual(assessment.level, "note")
