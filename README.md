@@ -446,9 +446,11 @@ Babblebox Shield is intentionally compact and conservative:
 - no deleted-message archive table
 - no full message-body retention in Postgres
 - moderator context goes to a configured log channel instead of a heavy database log
+- low-confidence repeated-link notes stay compact, no-ping, and cohort-deduped instead of repeatedly blasting the mod log
 - repeated-hit escalation is in-memory and bounded
 - custom regex is intentionally not accepted; advanced mode uses safe text matching only
 - in-scope scans can cover new posts, meaningful edits, embed text, attachment labels, forwarded message snapshots, and webhook/community-post style delivery
+- attachment filenames stay metadata-only for link repetition; real link evidence must come from actual extracted links, not repeated media filenames
 - local scam decisions combine host/path/query risk with brand bait, official-looking framing, CTA wording, urgency, newcomer first-link context, fresh-campaign reuse, and explicit warning/education suppressors
 - suspicious-member review reuses Admin's compact review queues and only combines locally flagged message or link signals with bounded account creation time, avatar state, and display-name risk hints
 - profile bios or about-me text are not part of the suspicious-member lane in the current implementation

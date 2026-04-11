@@ -111,10 +111,17 @@ class FakeGuild:
 
 
 class FakeAttachment:
-    def __init__(self, filename: str, *, description: Optional[str] = None, title: Optional[str] = None):
+    def __init__(
+        self,
+        filename: str,
+        *,
+        description: Optional[str] = None,
+        title: Optional[str] = None,
+        content_type: Optional[str] = None,
+    ):
         self.filename = filename
         self.url = f"https://cdn.discordapp.com/{filename}"
-        self.content_type = None
+        self.content_type = content_type
         self.description = description
         self.title = title
 
@@ -865,6 +872,38 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(result.matches)
         self.assertEqual(result.link_assessments, ())
 
+    def test_common_filename_tokens_do_not_become_bare_links(self):
+        for token in ("voice-message.ogg", "podcast.mp3", "image.png", "photo.jpg", "manual.pdf", "report.docx"):
+            snapshot = _build_snapshot(token)
+            self.assertEqual(snapshot.urls, (), msg=token)
+            self.assertFalse(snapshot.has_links, msg=token)
+
+    def test_file_like_tlds_still_extract_when_a_real_url_is_present(self):
+        snapshot = _build_snapshot("Download https://voice-message.ogg right now")
+
+        self.assertEqual(snapshot.urls, ("https://voice-message.ogg",))
+        self.assertTrue(snapshot.has_links)
+
+    async def test_suspicious_archive_target_still_marks_link_as_suspicious(self):
+        result = self.service.test_message_details(
+            10,
+            "Install https://wallet-verify-hub.click/download/update.zip now to verify access.",
+        )
+
+        self.assertEqual(result.link_assessments[0].category, "unknown_suspicious")
+        self.assertIn("suspicious_file_target", result.link_assessments[0].matched_signals)
+
+    async def test_discord_native_media_link_stays_non_promo_without_context(self):
+        ok, _ = await self.service.set_pack_config(10, "promo", enabled=True, action="log", sensitivity="high")
+        self.assertTrue(ok)
+
+        result = self.service.test_message_details(
+            10,
+            "https://cdn.discordapp.com/attachments/123/456/voice-message.ogg",
+        )
+
+        self.assertFalse([match for match in result.matches if match.pack == "promo"])
+
     async def test_malicious_like_wording_without_risky_link_does_not_trigger_scam(self):
         ok, _ = await self.service.set_pack_config(10, "scam", enabled=True, action="delete_log", sensitivity="high")
         self.assertTrue(ok)
@@ -960,6 +999,136 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(final.action, "log")
         self.assertFalse(final.deleted)
         self.assertEqual(final.reasons[0].match_class, "repetitive_link_noise")
+
+    async def test_repeated_same_external_link_with_varied_captions_still_clusters(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        author = FakeAuthor(42, roles=[FakeRole(11, position=1)])
+
+        ok, _ = await self.service.set_module_enabled(guild.id, True)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_pack_config(
+            guild.id,
+            "promo",
+            enabled=True,
+            low_action="log",
+            medium_action="delete_log",
+            high_action="delete_escalate",
+            sensitivity="normal",
+        )
+        self.assertTrue(ok)
+
+        messages = (
+            "check this out https://example.com/docs/guide",
+            "useful resource https://example.com/docs/guide",
+            "read here https://example.com/docs/guide",
+            "docs again https://example.com/docs/guide",
+        )
+
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            decisions = [
+                await self.service.handle_message(FakeMessage(guild=guild, channel=channel, author=author, content=text))
+                for text in messages
+            ]
+
+        self.assertEqual(decisions[:-1], [None, None, None])
+        final = decisions[-1]
+        self.assertIsNotNone(final)
+        self.assertEqual(final.reasons[0].match_class, "repetitive_link_noise")
+        self.assertEqual(final.reasons[0].label, "Repeated external link")
+
+    async def test_repeated_voice_message_attachments_do_not_create_link_noise(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        author = FakeAuthor(42, roles=[FakeRole(11, position=1)])
+
+        ok, _ = await self.service.set_module_enabled(guild.id, True)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_pack_config(
+            guild.id,
+            "promo",
+            enabled=True,
+            low_action="log",
+            medium_action="delete_log",
+            high_action="delete_escalate",
+            sensitivity="normal",
+        )
+        self.assertTrue(ok)
+
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            decisions = [
+                await self.service.handle_message(
+                    FakeMessage(
+                        guild=guild,
+                        channel=channel,
+                        author=author,
+                        content="",
+                        attachments=[FakeAttachment("voice-message.ogg", content_type="audio/ogg")],
+                    )
+                )
+                for _ in range(4)
+            ]
+
+        self.assertEqual(decisions, [None, None, None, None])
+
+    async def test_repeated_audio_attachments_without_links_do_not_trigger_link_noise(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        author = FakeAuthor(42, roles=[FakeRole(11, position=1)])
+
+        ok, _ = await self.service.set_module_enabled(guild.id, True)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_pack_config(
+            guild.id,
+            "promo",
+            enabled=True,
+            low_action="log",
+            medium_action="delete_log",
+            high_action="delete_escalate",
+            sensitivity="high",
+        )
+        self.assertTrue(ok)
+
+        messages = (
+            FakeMessage(guild=guild, channel=channel, author=author, content="", attachments=[FakeAttachment("voice-message.ogg", content_type="audio/ogg")]),
+            FakeMessage(guild=guild, channel=channel, author=author, content="", attachments=[FakeAttachment("podcast.mp3", content_type="audio/mpeg")]),
+            FakeMessage(guild=guild, channel=channel, author=author, content="", attachments=[FakeAttachment("meeting.wav", content_type="audio/wav")]),
+            FakeMessage(guild=guild, channel=channel, author=author, content="", attachments=[FakeAttachment("memo.m4a", content_type="audio/mp4")]),
+        )
+
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            decisions = [await self.service.handle_message(message) for message in messages]
+
+        self.assertEqual(decisions, [None, None, None, None])
+
+    async def test_repeated_harmless_attachment_only_posts_do_not_enter_link_noise_logic(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        author = FakeAuthor(42, roles=[FakeRole(11, position=1)])
+
+        ok, _ = await self.service.set_module_enabled(guild.id, True)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_pack_config(
+            guild.id,
+            "promo",
+            enabled=True,
+            low_action="log",
+            medium_action="delete_log",
+            high_action="delete_escalate",
+            sensitivity="high",
+        )
+        self.assertTrue(ok)
+
+        attachments = ("image.png", "photo.jpg", "manual.pdf", "report.docx")
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            decisions = [
+                await self.service.handle_message(
+                    FakeMessage(guild=guild, channel=channel, author=author, content="", attachments=[FakeAttachment(filename)])
+                )
+                for filename in attachments
+            ]
+
+        self.assertEqual(decisions, [None, None, None, None])
 
     async def test_allowlisted_invite_repetition_stays_suppressed(self):
         guild = FakeGuild(10)
@@ -1465,6 +1634,116 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
             await self.service._send_alert(second, compiled, decision, content_fingerprint=fingerprint)
 
         self.assertEqual(len(log_channel.sent), 2)
+
+    async def test_low_confidence_repetition_alert_is_compact_and_does_not_ping(self):
+        guild = FakeGuild(10)
+        public_channel = FakeChannel(20)
+        log_channel = FakeChannel(99, name="shield-log")
+        self.bot.register_channel(log_channel)
+        author = FakeAuthor(42, roles=[FakeRole(11, position=1)])
+
+        ok, _ = await self.service.set_module_enabled(guild.id, True)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_pack_config(guild.id, "promo", enabled=True, action="log", sensitivity="normal")
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_log_channel(guild.id, log_channel.id)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_alert_role(guild.id, 777)
+        self.assertTrue(ok)
+
+        for _ in range(4):
+            decision = await self.service.handle_message(
+                FakeMessage(guild=guild, channel=public_channel, author=author, content="https://example.com/docs/guide")
+            )
+
+        self.assertIsNotNone(decision)
+        self.assertEqual(len(log_channel.sent), 1)
+        sent = log_channel.sent[0]
+        self.assertIsNone(sent["content"])
+        embed = sent["embed"]
+        self.assertEqual(embed.title, "Shield Note | Promo / Invite")
+        self.assertEqual([field.name for field in embed.fields], ["Detection", "Why it was noted", "Scan Source", "Preview", "Jump"])
+        self.assertIn("Repeated external link", embed.fields[0].value)
+        self.assertIn("posted 4 times in 10 minutes", embed.fields[1].value)
+        self.assertIn("https://example.com/docs/guide", embed.fields[3].value)
+
+    async def test_low_confidence_repetition_cohort_dedup_suppresses_repeated_notes(self):
+        guild = FakeGuild(10)
+        public_channel = FakeChannel(20)
+        log_channel = FakeChannel(99, name="shield-log")
+        self.bot.register_channel(log_channel)
+        author = FakeAuthor(42, roles=[FakeRole(11, position=1)])
+
+        ok, _ = await self.service.set_log_channel(guild.id, log_channel.id)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_alert_role(guild.id, 777)
+        self.assertTrue(ok)
+        compiled = self.service._compiled_configs[guild.id]
+        decision = ShieldDecision(
+            matched=True,
+            action="log",
+            pack="promo",
+            reasons=(
+                ShieldMatch(
+                    pack="promo",
+                    label="Repeated external link",
+                    reason="The same external link was posted 4 times in 10 minutes without enough promo evidence to treat it as self-promo.",
+                    action="log",
+                    confidence="low",
+                    heuristic=True,
+                    match_class="repetitive_link_noise",
+                ),
+            ),
+            alert_evidence_signature="repeat-fingerprint",
+            alert_evidence_summary="The same external link was posted 4 times in 10 minutes without enough promo evidence to treat it as self-promo.",
+        )
+        first = FakeMessage(guild=guild, channel=public_channel, author=author, content="https://example.com/docs/guide")
+        second = FakeMessage(guild=guild, channel=public_channel, author=author, content="check this out https://example.com/docs/guide")
+        clock = {"now": 100.0}
+        fake_loop = types.SimpleNamespace(time=lambda: clock["now"])
+
+        with patch("babblebox.shield_service.asyncio.get_running_loop", return_value=fake_loop):
+            await self.service._send_alert(first, compiled, decision, content_fingerprint="first")
+            clock["now"] = 106.0
+            await self.service._send_alert(second, compiled, decision, content_fingerprint="second")
+
+        self.assertEqual(len(log_channel.sent), 1)
+        self.assertIsNone(log_channel.sent[0]["content"])
+
+    async def test_high_confidence_scam_log_only_alert_can_still_ping(self):
+        guild = FakeGuild(10)
+        public_channel = FakeChannel(20)
+        log_channel = FakeChannel(99, name="shield-log")
+        self.bot.register_channel(log_channel)
+        author = FakeAuthor(42, roles=[FakeRole(11, position=1)])
+
+        ok, _ = await self.service.set_log_channel(guild.id, log_channel.id)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_alert_role(guild.id, 777)
+        self.assertTrue(ok)
+        compiled = self.service._compiled_configs[guild.id]
+        decision = ShieldDecision(
+            matched=True,
+            action="log",
+            pack="scam",
+            reasons=(
+                ShieldMatch(
+                    pack="scam",
+                    label="Known malicious domain",
+                    reason="A linked domain matched Shield's local malicious-domain intelligence.",
+                    action="log",
+                    confidence="high",
+                    heuristic=False,
+                    match_class="known_malicious_domain",
+                ),
+            ),
+        )
+        message = FakeMessage(guild=guild, channel=public_channel, author=author, content="https://dlscord-gift.com/claim")
+
+        await self.service._send_alert(message, compiled, decision, content_fingerprint="danger")
+
+        self.assertEqual(len(log_channel.sent), 1)
+        self.assertEqual(log_channel.sent[0]["content"], "<@&777>")
 
     async def test_ai_config_is_restricted_to_allowed_guild(self):
         ok, message = await self.service.set_ai_config(10, enabled=True)
