@@ -4147,8 +4147,8 @@ class ConfessionsService:
             value=(
                 f"- Run `/confess create` or tap **Create a confession**.\n"
                 f"- Add up to {MAX_CONFESSION_LENGTH} characters and one link under this server's link policy.\n"
-                "- Use **Reply to confession anonymously** from a live confession post when replies are enabled.\n"
-                "- First anonymous replies to a top-level confession open a reusable Babblebox reply thread when Discord allows it.\n"
+                "- Use **Reply anonymously** from any eligible published confession when replies are enabled.\n"
+                "- Top-level replies open one reusable Babblebox reply thread when Discord allows it, and replies inside that thread stay there without nested threads.\n"
                 "- If someone explicitly replies to your confession or first owner reply, Babblebox can privately offer you a public anonymous owner reply.\n"
                 "- Use **Manage My Confession** to delete your own submission privately.\n"
                 "- Use **Appeal / Report** for false positives, restrictions, or problem reports when this server has private support configured.\n"
@@ -4163,7 +4163,7 @@ class ConfessionsService:
                 f"Adult content: **{'Blocked' if config['block_adult_language'] else 'Allowed'}**\n"
                 f"Link policy: **{link_policy}**\n"
                 f"Images: **{image_policy}**\n"
-                f"Reply to confession anonymously: **{reply_policy}**\n"
+                f"Reply anonymously: **{reply_policy}**\n"
                 f"Owner replies: **{owner_reply_policy}**\n"
                 f"Owner-reply publishing: **{owner_reply_review}**\n"
                 f"Self-edit: **{edit_policy}**\n"
@@ -4212,7 +4212,7 @@ class ConfessionsService:
             else f"Up to {MAX_CONFESSION_LENGTH} characters and one link total under the server policy. Images are off by default unless admins explicitly enable them."
         )
         reply_line = (
-            "Reply to confession anonymously is enabled with extra moderation burden, so every reply stays anonymous, text-only, and launches from a live confession post. Top-level replies reuse one Babblebox discussion thread when Discord allows it. "
+            "Reply anonymously is enabled with extra moderation burden, so every eligible published confession can open the same text-only anonymous reply flow. Top-level replies reuse one Babblebox discussion thread when Discord allows it, and replies inside that thread stay there without nested threads. "
             + (
                 "This server routes those replies through private review before posting."
                 if config.get("anonymous_reply_review_required")
@@ -4505,11 +4505,8 @@ class ConfessionsService:
         return embeds
 
     def _build_public_confession_view(self, guild_id: int, submission: dict[str, Any], *, is_latest: bool = False) -> discord.ui.View | None:
-        if submission.get("status") != "published" or submission.get("submission_kind") != "confession":
-            return None
-        config = self.get_config(guild_id)
-        show_reply = bool(config["allow_anonymous_replies"])
-        show_create = bool(is_latest)
+        show_reply = self._submission_has_public_reply_cta(guild_id, submission)
+        show_create = bool(is_latest and submission.get("submission_kind") == "confession" and submission.get("status") == "published")
         if not show_create and not show_reply:
             return None
         cog = self.bot.get_cog("ConfessionsCog")
@@ -4519,6 +4516,24 @@ class ConfessionsService:
         if not callable(build_view):
             return None
         return build_view(guild_id=guild_id, show_create=show_create, show_reply=show_reply)
+
+    def public_reply_target_confession_id(self, submission: dict[str, Any]) -> str | None:
+        if submission.get("status") != "published":
+            return None
+        submission_kind = str(submission.get("submission_kind") or "")
+        if submission_kind == "confession":
+            target_id = submission.get("confession_id")
+        elif submission_kind == "reply" and submission.get("reply_flow") == REPLY_FLOW_TO_CONFESSION:
+            target_id = submission.get("confession_id")
+        else:
+            return None
+        cleaned_target = normalize_plain_text(target_id).upper() if target_id else ""
+        return cleaned_target or None
+
+    def _submission_has_public_reply_cta(self, guild_id: int, submission: dict[str, Any]) -> bool:
+        if self.public_reply_target_confession_id(submission) is None:
+            return False
+        return bool(self.get_config(guild_id)["allow_anonymous_replies"])
 
     async def _publish_submission(self, guild: discord.Guild, submission: dict[str, Any]) -> tuple[bool, int | None, int | None, str | None]:
         confession_channel = await self._resolve_channel_reference(guild, self.get_config(guild.id).get("confession_channel_id"))
@@ -4542,7 +4557,6 @@ class ConfessionsService:
                         prepared_thread = await self._prepare_discussion_thread(guild, reply_channel)
                         if prepared_thread is not None:
                             target_channel = prepared_thread
-            view = None
 
         async def _send(channel: Any, *, attach_view: discord.ui.View | None) -> tuple[bool, int | None, int | None]:
             message = await channel.send(embeds=embeds, view=attach_view, allowed_mentions=discord.AllowedMentions.none())
@@ -4557,7 +4571,7 @@ class ConfessionsService:
         except (discord.Forbidden, discord.HTTPException):
             if target_channel is not confession_channel:
                 try:
-                    ok, message_id, channel_id = await _send(confession_channel, attach_view=None)
+                    ok, message_id, channel_id = await _send(confession_channel, attach_view=view)
                     return ok, message_id, channel_id, None
                 except (discord.Forbidden, discord.HTTPException):
                     pass
@@ -4572,7 +4586,7 @@ class ConfessionsService:
             )
             if target_channel is not confession_channel:
                 with contextlib.suppress(discord.Forbidden, discord.HTTPException, Exception):
-                    ok, message_id, channel_id = await _send(confession_channel, attach_view=None)
+                    ok, message_id, channel_id = await _send(confession_channel, attach_view=view)
                     return ok, message_id, channel_id, None
         return False, None, None, "Babblebox could not send to the confession channel."
 
@@ -4732,9 +4746,13 @@ class ConfessionsService:
                 exc=exc,
             )
 
-    async def _sync_published_confession_views(self, guild: discord.Guild):
-        submissions = await self.store.list_published_top_level_submissions(guild.id)
-        latest_submission_id = submissions[-1]["submission_id"] if submissions else None
+    async def _sync_public_submission_views(
+        self,
+        guild: discord.Guild,
+        submissions: list[dict[str, Any]],
+        *,
+        latest_submission_id: str | None = None,
+    ):
         for submission in submissions:
             channel_id = submission.get("posted_channel_id")
             message_id = submission.get("posted_message_id")
@@ -4747,7 +4765,7 @@ class ConfessionsService:
             view = self._build_public_confession_view(
                 guild.id,
                 submission,
-                is_latest=submission.get("submission_id") == latest_submission_id,
+                is_latest=bool(latest_submission_id and submission.get("submission_id") == latest_submission_id),
             )
             with contextlib.suppress(discord.Forbidden, discord.HTTPException):
                 await message.edit(view=view)
@@ -4763,6 +4781,13 @@ class ConfessionsService:
                         message_id=getattr(message, "id", None),
                         exc=exc,
                     )
+
+    async def _sync_published_confession_views(self, guild: discord.Guild):
+        submissions = await self.store.list_published_top_level_submissions(guild.id)
+        latest_submission_id = submissions[-1]["submission_id"] if submissions else None
+        await self._sync_public_submission_views(guild, submissions, latest_submission_id=latest_submission_id)
+        reply_submissions = await self.store.list_published_public_reply_submissions(guild.id)
+        await self._sync_public_submission_views(guild, reply_submissions)
 
     async def resume_public_confession_views(self):
         for guild_id in sorted(self._compiled_configs):

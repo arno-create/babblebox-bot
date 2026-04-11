@@ -622,11 +622,28 @@ class ServiceCogStub:
 
     def build_public_confession_view(self, *, guild_id: int, show_create: bool = False, show_reply: bool = True):
         children = []
+        compose_button = None
+        reply_button = None
         if show_create:
-            children.append(types.SimpleNamespace(custom_id="bb-confession-post:compose"))
+            compose_button = types.SimpleNamespace(
+                custom_id="bb-confession-post:compose",
+                label="Create a confession",
+                style=discord.ButtonStyle.primary,
+            )
+            children.append(compose_button)
         if show_reply:
-            children.append(types.SimpleNamespace(custom_id="bb-confession-post:reply"))
-        return types.SimpleNamespace(guild_id=guild_id, children=children)
+            reply_button = types.SimpleNamespace(
+                custom_id="bb-confession-post:reply",
+                label="Reply anonymously",
+                style=discord.ButtonStyle.secondary,
+            )
+            children.append(reply_button)
+        return types.SimpleNamespace(
+            guild_id=guild_id,
+            compose_button=compose_button,
+            reply_button=reply_button,
+            children=children,
+        )
 
     def build_owner_reply_prompt_view(self):
         return types.SimpleNamespace(
@@ -2071,7 +2088,7 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(result.ok)
         self.assertEqual(result.state, "published")
 
-    async def test_published_confessions_show_reply_button_when_replies_enabled_and_not_on_nested_replies(self):
+    async def test_published_confessions_show_reply_button_when_replies_enabled_on_roots_and_thread_replies(self):
         await self._configure(
             review_channel=True,
             allow_replies=True,
@@ -2099,7 +2116,18 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(self.guild.threads), 1)
         thread = list(self.guild.threads.values())[0]
         self.assertEqual(thread.name, f"Replies {published.confession_id}")
-        self.assertEqual(_view_custom_ids(thread.sent[0].view), [])
+        self.assertEqual(_view_custom_ids(thread.sent[0].view), ["bb-confession-post:reply"])
+
+    async def test_latest_top_level_confession_uses_create_primary_and_reply_secondary_styles(self):
+        await self._configure(review_channel=True, allow_replies=True, anonymous_reply_review_required=False)
+        published = await self.service.submit_confession(self.guild, author_id=91801, content="style root", attachments=[])
+
+        self.assertEqual(published.state, "published")
+        view = self.confession_channel.sent[0].view
+        self.assertEqual(view.compose_button.label, "Create a confession")
+        self.assertEqual(view.compose_button.style, discord.ButtonStyle.primary)
+        self.assertEqual(view.reply_button.label, "Reply anonymously")
+        self.assertEqual(view.reply_button.style, discord.ButtonStyle.secondary)
 
     async def test_top_level_replies_create_and_reuse_one_discussion_thread(self):
         await self._configure(review_channel=True, allow_replies=True, anonymous_reply_review_required=False)
@@ -2155,6 +2183,8 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(second_reply.ok)
         self.assertEqual(len(self.guild.threads), 1)
         self.assertEqual(len(thread.sent), 2)
+        self.assertEqual(_view_custom_ids(thread.sent[0].view), ["bb-confession-post:reply"])
+        self.assertEqual(_view_custom_ids(thread.sent[1].view), ["bb-confession-post:reply"])
         fields = _embed_fields_by_name(thread.sent[1].embeds[0])
         self.assertIn("Replying To", fields)
         self.assertIn(f"Confession `{stored_first_reply['confession_id']}`", str(fields["Replying To"]["value"]))
@@ -2210,6 +2240,7 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(thread.sent), 1)
         self.assertEqual(len(self.confession_channel.sent), 2)
         self.assertIn("Anonymous Reply", json.dumps([embed.to_dict() for embed in self.confession_channel.sent[1].embeds]))
+        self.assertEqual(_view_custom_ids(self.confession_channel.sent[1].view), ["bb-confession-post:reply"])
 
     async def test_missing_thread_creation_permission_falls_back_to_channel_reply_post(self):
         self.confession_channel.bot_can_create_public_threads = False
@@ -2227,6 +2258,7 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(reply.ok)
         self.assertEqual(len(self.guild.threads), 0)
         self.assertEqual(len(self.confession_channel.sent), 2)
+        self.assertEqual(_view_custom_ids(self.confession_channel.sent[1].view), ["bb-confession-post:reply"])
 
     async def test_deleted_discussion_thread_falls_back_cleanly_and_does_not_create_nested_state(self):
         await self._configure(review_channel=True, allow_replies=True, anonymous_reply_review_required=False)
@@ -2254,6 +2286,7 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(reply.ok)
         self.assertEqual(len(self.confession_channel.sent), 2)
+        self.assertEqual(_view_custom_ids(self.confession_channel.sent[1].view), ["bb-confession-post:reply"])
 
     async def test_images_can_publish_without_forced_review_when_review_requirement_is_off(self):
         await self._configure(review_channel=True, allow_images=True, image_review_required=False)
@@ -2313,6 +2346,31 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
         await self.service.sync_published_confession_views(self.guild)
         self.assertIsNotNone(live_message.view)
         self.assertEqual(_view_custom_ids(live_message.view), ["bb-confession-post:compose", "bb-confession-post:reply"])
+
+    async def test_sync_published_confession_views_updates_thread_reply_posts_when_reply_policy_changes(self):
+        await self._configure(review_channel=True, allow_replies=True, anonymous_reply_review_required=False)
+        published = await self.service.submit_confession(self.guild, author_id=92101, content="root for sync", attachments=[])
+        reply = await self.service.submit_confession(
+            self.guild,
+            author_id=92102,
+            content="reply for sync",
+            submission_kind="reply",
+            parent_confession_id=published.confession_id,
+        )
+        self.assertTrue(reply.ok)
+        thread = list(self.guild.threads.values())[0]
+        live_message = thread.sent[0]
+        self.assertEqual(_view_custom_ids(live_message.view), ["bb-confession-post:reply"])
+
+        ok, message = await self.service.configure_guild(self.guild.id, allow_anonymous_replies=False)
+        self.assertTrue(ok, message)
+        await self.service.sync_published_confession_views(self.guild)
+        self.assertIsNone(live_message.view)
+
+        ok, message = await self.service.configure_guild(self.guild.id, allow_anonymous_replies=True)
+        self.assertTrue(ok, message)
+        await self.service.sync_published_confession_views(self.guild)
+        self.assertEqual(_view_custom_ids(live_message.view), ["bb-confession-post:reply"])
 
     async def test_latest_top_level_confession_is_only_post_with_create_launcher(self):
         await self._configure(review_channel=True, allow_replies=True, anonymous_reply_review_required=False)
@@ -3302,8 +3360,12 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("stays anonymous", reply_modal.body_input.placeholder)
         self.assertIn("private approval", reply_modal.body_input.placeholder)
         self.assertNotIn("reviewed", reply_modal.body_input.placeholder.casefold())
-        self.assertIn("Reply to confession anonymously", [child.label for child in result_view.children if getattr(child, "label", None)])
-        self.assertIn("Reply to confession anonymously", [child.label for child in public_view.children if getattr(child, "label", None)])
+        result_labels = [child.label for child in result_view.children if getattr(child, "label", None)]
+        public_labels = [child.label for child in public_view.children if getattr(child, "label", None)]
+        self.assertIn("Reply anonymously", result_labels)
+        self.assertIn("Reply anonymously", public_labels)
+        self.assertNotIn("Reply to confession anonymously", result_labels)
+        self.assertNotIn("Reply to confession anonymously", public_labels)
 
     async def test_reply_to_user_command_opens_private_owner_reply_inbox(self):
         await self.cog.service.configure_guild(
@@ -4812,11 +4874,15 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(custom_ids, ["bb-confession-post:compose", "bb-confession-post:reply"])
         self.assertTrue(all(published.confession_id not in value for value in custom_ids))
+        self.assertEqual(live_message.view.compose_button.style, discord.ButtonStyle.primary)
+        self.assertEqual(live_message.view.reply_button.style, discord.ButtonStyle.secondary)
+        self.assertEqual(live_message.view.reply_button.label, "Reply anonymously")
 
         member = self._member(127)
         open_interaction = FakeInteraction(guild=self.guild, user=member, message=live_message)
         await live_message.view.reply_button.callback(open_interaction)
         self.assertEqual(open_interaction.response.modal_calls[0].title, "Anonymous Reply")
+        self.assertEqual(open_interaction.response.modal_calls[0].target_input.default, published.confession_id)
 
         modal = open_interaction.response.modal_calls[0]
         modal.target_input._value = published.confession_id
@@ -4824,6 +4890,35 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
         submit_interaction = FakeInteraction(guild=self.guild, user=member)
         await modal.on_submit(submit_interaction)
         self.assertEqual(submit_interaction.followup_calls[0]["kwargs"]["embed"].title, "Reply Received")
+
+    async def test_thread_reply_public_reply_button_opens_modal_targeting_reply_confession(self):
+        await self.cog.service.configure_guild(
+            self.guild.id,
+            enabled=True,
+            confession_channel_id=20,
+            review_channel_id=30,
+            review_mode=False,
+            allow_anonymous_replies=True,
+        )
+        root = await self.cog.service.submit_confession(self.guild, author_id=35, content="thread root", attachments=[])
+        reply = await self.cog.service.submit_confession(
+            self.guild,
+            author_id=36,
+            content="thread reply",
+            submission_kind="reply",
+            parent_confession_id=root.confession_id,
+        )
+        self.assertTrue(reply.ok)
+        thread = list(self.guild.threads.values())[0]
+        live_message = thread.sent[0]
+        self.assertEqual(_view_custom_ids(live_message.view), ["bb-confession-post:reply"])
+
+        interaction = FakeInteraction(guild=self.guild, user=self._member(132), message=live_message)
+        await live_message.view.reply_button.callback(interaction)
+
+        self.assertEqual(len(interaction.response.modal_calls), 1)
+        self.assertEqual(interaction.response.modal_calls[0].title, "Anonymous Reply")
+        self.assertEqual(interaction.response.modal_calls[0].target_input.default, reply.confession_id)
 
     async def test_latest_public_create_button_opens_private_confession_modal(self):
         await self.cog.service.configure_guild(
@@ -4858,6 +4953,35 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(ok, message)
 
         interaction = FakeInteraction(guild=self.guild, user=self._member(128), message=live_message)
+        await stale_view.reply_button.callback(interaction)
+
+        self.assertEqual(interaction.response.sent[0]["kwargs"]["embed"].title, "Replies Are Off")
+
+    async def test_stale_thread_reply_button_fails_closed_after_replies_are_disabled(self):
+        await self.cog.service.configure_guild(
+            self.guild.id,
+            enabled=True,
+            confession_channel_id=20,
+            review_channel_id=30,
+            review_mode=False,
+            allow_anonymous_replies=True,
+        )
+        root = await self.cog.service.submit_confession(self.guild, author_id=37, content="stale thread root", attachments=[])
+        reply = await self.cog.service.submit_confession(
+            self.guild,
+            author_id=38,
+            content="stale thread reply",
+            submission_kind="reply",
+            parent_confession_id=root.confession_id,
+        )
+        self.assertTrue(reply.ok)
+        thread = list(self.guild.threads.values())[0]
+        live_message = thread.sent[0]
+        stale_view = live_message.view
+        ok, message = await self.cog.service.configure_guild(self.guild.id, allow_anonymous_replies=False)
+        self.assertTrue(ok, message)
+
+        interaction = FakeInteraction(guild=self.guild, user=self._member(133), message=live_message)
         await stale_view.reply_button.callback(interaction)
 
         self.assertEqual(interaction.response.sent[0]["kwargs"]["embed"].title, "Replies Are Off")
@@ -5089,6 +5213,37 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(message_id, live_message.id)
         custom_ids = [child.custom_id for child in view.children if getattr(child, "custom_id", None)]
         self.assertEqual(custom_ids, ["bb-confession-post:compose", "bb-confession-post:reply"])
+
+    async def test_resume_public_confession_views_restores_reply_buttons_on_thread_replies(self):
+        ok, message = await self.cog.service.configure_guild(
+            self.guild.id,
+            enabled=True,
+            confession_channel_id=20,
+            review_channel_id=30,
+            review_mode=False,
+            allow_anonymous_replies=True,
+        )
+        self.assertTrue(ok, message)
+        root = await self.cog.service.submit_confession(self.guild, author_id=46, content="restore thread root", attachments=[])
+        reply = await self.cog.service.submit_confession(
+            self.guild,
+            author_id=47,
+            content="restore thread reply",
+            submission_kind="reply",
+            parent_confession_id=root.confession_id,
+        )
+        self.assertTrue(reply.ok)
+        thread = list(self.guild.threads.values())[0]
+        live_message = thread.sent[0]
+        self.bot.views.clear()
+
+        await self.cog.service.resume_public_confession_views()
+
+        restored = {message_id: view for view, message_id in self.bot.views}
+        self.assertIn(self.guild.get_channel(20).sent[0].id, restored)
+        self.assertIn(live_message.id, restored)
+        reply_custom_ids = [child.custom_id for child in restored[live_message.id].children if getattr(child, "custom_id", None)]
+        self.assertEqual(reply_custom_ids, ["bb-confession-post:reply"])
 
     async def test_confession_related_modals_use_4000_character_limit_but_support_details_stay_1800(self):
         composer = ConfessionComposerModal(self.cog, guild_id=self.guild.id)

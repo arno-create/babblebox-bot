@@ -502,6 +502,87 @@ class ConfessionsStorePrivacyTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await store.close()
 
+    async def test_memory_store_lists_only_published_public_reply_submissions(self):
+        store = ConfessionsStore(backend="memory")
+        await store.load()
+        try:
+            await store.upsert_submission(
+                {
+                    "submission_id": "sub-root",
+                    "guild_id": 10,
+                    "confession_id": "CF-ROOT100",
+                    "submission_kind": "confession",
+                    "status": "published",
+                    "review_status": "approved",
+                    "staff_preview": "Root preview",
+                    "content_body": "Root body",
+                    "shared_link_url": None,
+                    "content_fingerprint": "h1:root",
+                    "similarity_key": "sim:root",
+                    "fuzzy_signature": "fh1:root",
+                    "flag_codes": [],
+                    "attachment_meta": [],
+                    "posted_channel_id": 20,
+                    "posted_message_id": 21,
+                    "created_at": "2026-04-03T00:00:00+00:00",
+                    "published_at": "2026-04-03T00:01:00+00:00",
+                }
+            )
+            await store.upsert_submission(
+                {
+                    "submission_id": "sub-reply-public",
+                    "guild_id": 10,
+                    "confession_id": "CF-REPLY100",
+                    "submission_kind": "reply",
+                    "reply_flow": "reply_to_confession",
+                    "parent_confession_id": "CF-ROOT100",
+                    "status": "published",
+                    "review_status": "approved",
+                    "staff_preview": "Reply preview",
+                    "content_body": "Reply body",
+                    "shared_link_url": None,
+                    "content_fingerprint": "h1:reply",
+                    "similarity_key": "sim:reply",
+                    "fuzzy_signature": "fh1:reply",
+                    "flag_codes": [],
+                    "attachment_meta": [],
+                    "posted_channel_id": 30,
+                    "posted_message_id": 31,
+                    "created_at": "2026-04-03T00:02:00+00:00",
+                    "published_at": "2026-04-03T00:03:00+00:00",
+                }
+            )
+            await store.upsert_submission(
+                {
+                    "submission_id": "sub-reply-owner",
+                    "guild_id": 10,
+                    "confession_id": "CF-OWNER100",
+                    "submission_kind": "reply",
+                    "reply_flow": "owner_reply_to_user",
+                    "owner_reply_generation": 1,
+                    "parent_confession_id": "CF-ROOT100",
+                    "status": "published",
+                    "review_status": "approved",
+                    "staff_preview": "Owner preview",
+                    "content_body": "Owner body",
+                    "shared_link_url": None,
+                    "content_fingerprint": "h1:owner",
+                    "similarity_key": "sim:owner",
+                    "fuzzy_signature": "fh1:owner",
+                    "flag_codes": [],
+                    "attachment_meta": [],
+                    "posted_channel_id": 30,
+                    "posted_message_id": 32,
+                    "created_at": "2026-04-03T00:04:00+00:00",
+                    "published_at": "2026-04-03T00:05:00+00:00",
+                }
+            )
+
+            records = await store.list_published_public_reply_submissions(10)
+            self.assertEqual([record["confession_id"] for record in records], ["CF-REPLY100"])
+        finally:
+            await store.close()
+
     async def test_owner_reply_opportunity_row_decrypts_private_payload(self):
         privacy = _privacy()
         row = {
@@ -1333,6 +1414,49 @@ class PostgresConfessionsStoreTests(unittest.IsolatedAsyncioTestCase):
         record = await self.store.fetch_submission("sub-root-thread")
         self.assertEqual(record["discussion_thread_id"], 40)
 
+    async def test_postgres_store_lists_published_public_reply_submissions(self):
+        self.connection.fetch_results.append(
+            [
+                {
+                    "submission_id": "sub-reply-public",
+                    "guild_id": 10,
+                    "confession_id": "CF-REPLY200",
+                    "submission_kind": "reply",
+                    "reply_flow": "reply_to_confession",
+                    "owner_reply_generation": None,
+                    "parent_confession_id": "CF-ROOT200",
+                    "reply_target_label": None,
+                    "reply_target_preview": None,
+                    "status": "published",
+                    "review_status": "approved",
+                    "staff_preview": "Reply preview",
+                    "content_body": "Reply body",
+                    "shared_link_url": None,
+                    "content_ciphertext": None,
+                    "content_fingerprint": "h1:reply",
+                    "similarity_key": None,
+                    "fuzzy_signature": "fh1:reply",
+                    "flag_codes": json.dumps([]),
+                    "attachment_meta": json.dumps([]),
+                    "posted_channel_id": 40,
+                    "posted_message_id": 41,
+                    "discussion_thread_id": None,
+                    "current_case_id": None,
+                    "created_at": "2026-04-03T00:02:00+00:00",
+                    "published_at": "2026-04-03T00:03:00+00:00",
+                    "resolved_at": None,
+                }
+            ]
+        )
+
+        records = await self.store.list_published_public_reply_submissions(10)
+
+        self.assertEqual([record["confession_id"] for record in records], ["CF-REPLY200"])
+        statement, args = self.connection.fetch_calls[-1]
+        self.assertIn("submission_kind = 'reply'", statement)
+        self.assertIn("reply_flow = 'reply_to_confession'", statement)
+        self.assertEqual(args, (10,))
+
     async def test_postgres_store_fetch_all_configs_round_trips_admin_runtime_fields(self):
         self.connection.fetch_results.append(
             [
@@ -1870,6 +1994,7 @@ class PostgresConfessionsStoreTests(unittest.IsolatedAsyncioTestCase):
         await self.store.fetch_submission_by_confession_id(10, "CF-AAAA1111")
         await self.store.fetch_submission_by_message_id(10, 20)
         await self.store.list_published_top_level_submissions(10)
+        await self.store.list_published_public_reply_submissions(10)
         await self.store.list_recent_submissions_for_author(10, 101, limit=5)
         await self.store.list_review_cases(10, limit=25)
         await self.store.fetch_case(10, "CS-AAAA1111")

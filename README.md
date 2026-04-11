@@ -108,7 +108,7 @@ Babblebox is intentionally compact:
 - self-edit is off by default and only applies to still-pending submissions when enabled
 - enabled image support stays bounded and always routes through private review, which requires a separate private review channel
 - the latest published confession post also keeps a live `Create a confession` launcher so members do not have to return to the panel to submit again
-- enabled `Reply to confession anonymously` stays text-only, appears on published confession posts instead of the launch panel, creates one reusable thread per top-level confession when Discord allows it, falls back to ordinary in-channel reply posts when threading is unavailable, and stays anonymous even if private approval happens first
+- enabled `Reply anonymously` stays text-only, appears on eligible published confession posts instead of the launch panel, creates one reusable thread per top-level confession when Discord allows it, keeps reply-confessions inside that same thread without nested threads, falls back to ordinary in-channel reply posts when threading is unavailable, and stays anonymous even if private approval happens first
 - owner replies are a separate feature, are enabled by default, stay text-only, and publish publicly as `Anonymous Owner Reply` when used
 - owner-reply review is off by default; admins can enable it separately if they want owner replies queued before posting
 - if someone explicitly replies to your confession or your first public owner reply, Babblebox can DM a bot-private owner reply prompt and `/confess reply-to-user` works as the fallback inbox
@@ -403,7 +403,7 @@ Confession notes:
 - self-edit is off by default and only applies to pending submissions when enabled
 - enabled image confessions always enter the private review queue and require a separate private review channel
 - the latest eligible live confession post also shows `Create a confession` so members always have one current public launcher in-channel
-- enabled `Reply to confession anonymously` stays text-only, launches from published confession posts instead of the public panel, uses one reusable thread per top-level confession when Discord allows it, keeps reply-confessions inside the existing thread without nested threads, and stays anonymous even if private approval happens first
+- enabled `Reply anonymously` stays text-only, launches from eligible published confession posts instead of the public panel, uses one reusable thread per top-level confession when Discord allows it, keeps reply-confessions inside that same thread without nested threads, and stays anonymous even if private approval happens first
 - owner replies are separate from public anonymous replies, are enabled by default, stay text-only, and post publicly as `Anonymous Owner Reply`
 - owner replies only come from Babblebox-owned reply opportunities after someone explicitly replies to your confession or your first owner reply; the chain stops after that extra bounce
 - members can privately delete their own confessions and use a dedicated appeals / reports channel when admins configure one
