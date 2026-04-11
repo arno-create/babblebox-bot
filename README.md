@@ -130,7 +130,8 @@ Babblebox is intentionally compact:
   - privacy leak pack
   - promo / invite pack
 - scam / malicious-link pack with local weighted scam-language scoring
-- separate adult / 18+ link pack
+- separate adult / 18+ pack for adult-domain intel plus optional sexual-solicitation / DM-ad text detection
+- optional Shield link policy mode: `Default` or `Trusted Links Only`, separate from Confessions link mode
 - bundled local link safety with safe-domain families, suspicious-domain gating, and no external provider requirement
 - local-first malicious-link blocking with a feed of ~200k known malicious domains
 - in-scope Shield coverage for new messages, meaningful edits, and webhook/community-post style delivery
@@ -310,7 +311,8 @@ Slash is the best fit for multi-option admin setup here. Prefix stays positional
 | Slash | Prefix | Purpose |
 | --- | --- | --- |
 | `/shield panel` | `bb!shield panel` | Open the Shield admin panel |
-| `/shield rules` | `bb!shield rules true promo true log` | Configure module, packs, link safety, and escalation |
+| `/shield rules` | `bb!shield rules true promo true log` | Configure module, packs, optional adult solicitation, link safety, and escalation |
+| `/shield links` | `bb!shield links trusted_only` | Configure Shield `Default` vs `Trusted Links Only` live-message policy |
 | `/shield logs` | `bb!shield logs #shield-log @Mods` | Set the mod-log channel and optional alert role |
 | `/shield filters` | `bb!shield filters` | Tune scope, includes, excludes, and trusted roles |
 | `/shield allowlist` | `bb!shield allowlist` | Manage domain, invite, and phrase allowlists |
@@ -318,6 +320,8 @@ Slash is the best fit for multi-option admin setup here. Prefix stays positional
 | `/shield advanced add` | `bb!shield advanced add Gift claim*gift wildcard log` | Add a safe advanced pattern |
 | `/shield advanced list` | `bb!shield advanced list` | Review advanced patterns |
 | `/shield test` | `bb!shield test free nitro claim now https://bit.ly/x` | Dry-run a message through Shield |
+
+Shield’s live-message link policy is intentionally separate from Confessions link mode. Confessions keeps `Disabled`, `Trusted Only`, and `Allow All Safe`, while Shield only adds the bounded `Trusted Links Only` mode on top of its current default behavior.
 
 ### Admin Lifecycle
 

@@ -24,7 +24,7 @@ PACK_CHOICES = [
     app_commands.Choice(name="Privacy Leak", value="privacy"),
     app_commands.Choice(name="Promo / Invite", value="promo"),
     app_commands.Choice(name="Scam / Malicious Links", value="scam"),
-    app_commands.Choice(name="Adult / 18+ Links", value="adult"),
+    app_commands.Choice(name="Adult / 18+ Links + Solicitation", value="adult"),
 ]
 ACTION_CHOICES = [
     app_commands.Choice(name="Detect only", value="detect"),
@@ -78,6 +78,10 @@ AI_CONFIDENCE_CHOICES = [
     app_commands.Choice(name="Low", value="low"),
     app_commands.Choice(name="Medium", value="medium"),
     app_commands.Choice(name="High", value="high"),
+]
+LINK_POLICY_MODE_CHOICES = [
+    app_commands.Choice(name="Default", value="default"),
+    app_commands.Choice(name="Trusted Links Only", value="trusted_only"),
 ]
 SHIELD_AI_OVERRIDE_OWNER_IDS = {1266444952779620413, 1345860619836063754}
 
@@ -283,12 +287,38 @@ class ShieldCog(commands.Cog):
 
     def _pack_policy_detail(self, config: dict[str, object], pack: str) -> str:
         low_action, medium_action, high_action = self._pack_policy_actions(config, pack)
+        adult_solicit_line = ""
+        if pack == "adult":
+            adult_solicit_line = f"\nSolicitation text: {'On' if config.get('adult_solicitation_enabled') else 'Off'}"
         return (
             f"Enabled: {'Yes' if config[f'{pack}_enabled'] else 'No'} | "
             f"Sensitivity: {SENSITIVITY_LABELS[config[f'{pack}_sensitivity']]}\n"
             f"Low action: `{low_action}`\n"
             f"Medium action: `{medium_action}`\n"
             f"High action: `{high_action}`"
+            f"{adult_solicit_line}"
+        )
+
+    def _link_policy_actions(self, config: dict[str, object]) -> tuple[str, str, str]:
+        return (
+            str(config.get("link_policy_low_action", "log")),
+            str(config.get("link_policy_medium_action", "log")),
+            str(config.get("link_policy_high_action", "log")),
+        )
+
+    def _link_policy_label(self, config: dict[str, object]) -> str:
+        return "Trusted links only" if config.get("link_policy_mode") == "trusted_only" else "Default"
+
+    def _link_policy_detail(self, config: dict[str, object]) -> str:
+        low_action, medium_action, high_action = self._link_policy_actions(config)
+        if config.get("link_policy_mode") == "trusted_only":
+            detail = "Shield allows only Babblebox-trusted families plus admin allowlisted domains and invite codes."
+        else:
+            detail = "Shield preserves the current broad link behavior; trusted-link policy is inactive."
+        return (
+            f"Mode: **{self._link_policy_label(config)}**\n"
+            f"Low / Medium / High: `{low_action}` / `{medium_action}` / `{high_action}`\n"
+            f"{detail}"
         )
 
     def _link_assessment_label(self, assessment) -> str:
@@ -428,7 +458,7 @@ class ShieldCog(commands.Cog):
         ai_status = self.service.get_ai_status(guild_id)
         embed = discord.Embed(
             title="Shield Control Panel",
-            description="Shield stays local-first. Bundled intel handles malicious/scam and optional adult / 18+ domains, safe mainstream families bypass suspicion, unknown suspicious links stay conservative unless combined local scam evidence raises confidence, and attachment filenames stay metadata-only unless real link evidence exists.",
+            description="Shield stays local-first. Bundled intel handles malicious/scam and optional adult / 18+ domains, adult solicitation text is separately optional, trusted-link mode stays server-side and distinct from Confessions, safe mainstream families bypass suspicion, and attachment filenames stay metadata-only unless real link evidence exists.",
             color=ge.EMBED_THEME["warning"] if config["module_enabled"] else ge.EMBED_THEME["info"],
         )
         log_channel = f"<#{config['log_channel_id']}>" if config.get("log_channel_id") else "Not set"
@@ -460,6 +490,11 @@ class ShieldCog(commands.Cog):
             )
         embed.add_field(name="Link Safety", value="\n\n".join(link_safety_lines), inline=False)
         embed.add_field(
+            name="Link Policy",
+            value=self._link_policy_detail(config),
+            inline=False,
+        )
+        embed.add_field(
             name="AI Assist",
             value=(
                 f"Status: {ai_status['status']}\n"
@@ -483,7 +518,7 @@ class ShieldCog(commands.Cog):
         config = self.service.get_config(guild_id)
         embed = discord.Embed(
             title="Shield Rules",
-            description="Confidence-tier local policy. Local malicious and adult matches can act hard, while unknown suspicious links stay link-only unless local scam signals, newcomer context, or campaign repetition justify escalation.",
+            description="Confidence-tier local policy. Local malicious and adult matches can act hard, adult solicitation stays optional, and unknown suspicious links stay link-only unless local scam signals, newcomer context, or campaign repetition justify escalation.",
             color=ge.EMBED_THEME["info"],
         )
         pack_lines = []
@@ -500,6 +535,11 @@ class ShieldCog(commands.Cog):
                 f"{self._pack_policy_detail(config, pack)}"
             )
         embed.add_field(name="Link Safety Policy", value="\n\n".join(link_safety_lines), inline=False)
+        embed.add_field(
+            name="Trusted-Link Policy",
+            value=self._link_policy_detail(config),
+            inline=False,
+        )
         embed.add_field(
             name="Escalation",
             value=(
@@ -521,7 +561,8 @@ class ShieldCog(commands.Cog):
             name="Quick Use",
             value=(
                 "`/shield rules pack:promo enabled:true low_action:log medium_action:delete_log high_action:delete_escalate sensitivity:high`\n"
-                "`/shield rules pack:adult enabled:true low_action:log medium_action:delete_log high_action:delete_log`\n"
+                "`/shield rules pack:adult enabled:true adult_solicitation:true low_action:log medium_action:delete_log high_action:delete_log`\n"
+                "`/shield links mode:trusted_only low_action:log medium_action:delete_log high_action:delete_log`\n"
                 "`/shield rules module:true escalation_threshold:3 timeout_minutes:10`\n"
                 "`bb!shield advanced list` for safe custom patterns"
             ),
@@ -533,7 +574,7 @@ class ShieldCog(commands.Cog):
         config = self.service.get_config(guild_id)
         embed = discord.Embed(
             title="Shield Scope and Allowlists",
-            description="Control where Shield scans, who it skips, and what it should not flag.",
+            description="Control where Shield scans, who it skips, what it should not flag, and which domains or invites can override trusted-link mode.",
             color=ge.EMBED_THEME["info"],
         )
         embed.add_field(
@@ -561,7 +602,8 @@ class ShieldCog(commands.Cog):
             value=(
                 f"Domains: {self._format_text_list(config['allow_domains'], limit=6)}\n"
                 f"Invite codes: {self._format_text_list(config['allow_invite_codes'], limit=6)}\n"
-                f"Phrases: {self._format_text_list(config['allow_phrases'], limit=4)}"
+                f"Phrases: {self._format_text_list(config['allow_phrases'], limit=4)}\n"
+                f"Trusted-link mode: **{self._link_policy_label(config)}**"
             ),
             inline=False,
         )
@@ -737,6 +779,7 @@ class ShieldCog(commands.Cog):
         medium_action="Action for medium-confidence matches",
         high_action="Action for high-confidence matches",
         sensitivity="How broad or cautious the pack should be",
+        adult_solicitation="Enable the adult pack's optional DM-ad and sexual-solicitation text detector",
         escalation_threshold="Repeated-hit threshold for delete_escalate",
         escalation_window_minutes="Strike window used for delete_escalate",
         timeout_minutes="Timeout length used when escalation or timeout actions fire",
@@ -760,6 +803,7 @@ class ShieldCog(commands.Cog):
         medium_action: Optional[str] = None,
         high_action: Optional[str] = None,
         sensitivity: Optional[str] = None,
+        adult_solicitation: Optional[bool] = None,
         escalation_threshold: Optional[int] = None,
         escalation_window_minutes: Optional[int] = None,
         timeout_minutes: Optional[int] = None,
@@ -772,7 +816,7 @@ class ShieldCog(commands.Cog):
             module_ok, module_message = await self.service.set_module_enabled(ctx.guild.id, module)
             ok = ok and module_ok
             messages.append(module_message)
-        pack_fields_used = any(value is not None for value in (enabled, action, low_action, medium_action, high_action, sensitivity))
+        pack_fields_used = any(value is not None for value in (enabled, action, low_action, medium_action, high_action, sensitivity, adult_solicitation))
         if pack_fields_used and pack is None:
             ok = False
             messages.append("Choose a pack when changing pack enabled, action policy, or sensitivity.")
@@ -786,6 +830,7 @@ class ShieldCog(commands.Cog):
                 medium_action=medium_action,
                 high_action=high_action,
                 sensitivity=sensitivity,
+                adult_solicitation=adult_solicitation,
             )
             ok = ok and pack_ok
             messages.append(pack_message)
@@ -802,6 +847,56 @@ class ShieldCog(commands.Cog):
             await send_hybrid_response(ctx, embed=self._rules_embed(ctx.guild.id), ephemeral=True)
             return
         await self._send_result(ctx, "Shield Rules", "\n".join(messages), ok=ok)
+
+    @shield_group.command(name="links", with_app_command=True, description="Configure Shield's trusted-link policy lane")
+    @app_commands.describe(
+        mode="Use the current broad behavior or require trusted links only",
+        action="Shorthand to derive the trusted-link policy action ladder from one action",
+        low_action="Action for safe-but-untrusted low-confidence policy matches",
+        medium_action="Action for medium-confidence policy matches such as invites or link hubs",
+        high_action="Action for dangerous high-confidence policy matches that still fall through to the policy lane",
+    )
+    @app_commands.choices(
+        mode=LINK_POLICY_MODE_CHOICES,
+        action=ACTION_CHOICES,
+        low_action=LOW_ACTION_CHOICES,
+        medium_action=MEDIUM_ACTION_CHOICES,
+        high_action=ACTION_CHOICES,
+    )
+    async def shield_links_command(
+        self,
+        ctx: commands.Context,
+        mode: Optional[str] = None,
+        action: Optional[str] = None,
+        low_action: Optional[str] = None,
+        medium_action: Optional[str] = None,
+        high_action: Optional[str] = None,
+    ):
+        if not await self._guard(ctx):
+            return
+        if all(value is None for value in (mode, action, low_action, medium_action, high_action)):
+            embed = discord.Embed(
+                title="Shield Link Policy",
+                description="Shield link policy is server-wide live-message policy and stays separate from Confessions link mode.",
+                color=ge.EMBED_THEME["info"],
+            )
+            embed.add_field(name="Current Policy", value=self._link_policy_detail(self.service.get_config(ctx.guild.id)), inline=False)
+            embed.add_field(
+                name="Quick Use",
+                value="`/shield links mode:trusted_only low_action:log medium_action:delete_log high_action:delete_log`",
+                inline=False,
+            )
+            await send_hybrid_response(ctx, embed=ge.style_embed(embed, footer="Babblebox Shield | Trusted-link policy"), ephemeral=True)
+            return
+        ok, message = await self.service.set_link_policy_config(
+            ctx.guild.id,
+            mode=mode,
+            action=action,
+            low_action=low_action,
+            medium_action=medium_action,
+            high_action=high_action,
+        )
+        await self._send_result(ctx, "Shield Link Policy", message, ok=ok)
 
     @shield_group.command(name="logs", with_app_command=True, description="Configure Shield log delivery")
     @app_commands.describe(channel="Channel for Shield alerts", role="Optional role to ping for alerts", clear_channel="Clear the current log channel", clear_role="Clear the current alert role")

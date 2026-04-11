@@ -28,6 +28,7 @@ from babblebox.shield_ai import (
 )
 from babblebox.shield_link_safety import (
     ADULT_LINK_CATEGORY,
+    LINK_IN_BIO_DOMAINS,
     MALICIOUS_LINK_CATEGORY,
     MEDIA_EMBED_DOMAINS,
     SHORTENER_DOMAINS,
@@ -39,15 +40,18 @@ from babblebox.shield_link_safety import (
     domain_in_set as link_domain_in_set,
     domain_matches as link_domain_matches,
     extract_link_domain as link_extract_domain,
+    is_trusted_destination,
     looks_like_warning_discussion,
     merge_link_assessments,
     normalize_link_host as link_normalize_link_host,
 )
 from babblebox.shield_store import (
+    DEFAULT_SHIELD_LINK_POLICY_MODE,
     LOW_CONFIDENCE_ACTIONS,
     MEDIUM_CONFIDENCE_ACTIONS,
     ShieldStateStore,
     ShieldStorageUnavailable,
+    VALID_SHIELD_LINK_POLICY_MODES,
     default_guild_shield_config,
     normalize_guild_shield_config,
 )
@@ -101,7 +105,8 @@ PACK_LABELS = {
     "privacy": "Privacy Leak",
     "promo": "Promo / Invite",
     "scam": "Scam / Malicious Links",
-    "adult": "Adult / 18+ Links",
+    "adult": "Adult / 18+ Links + Solicitation",
+    "link_policy": "Link Policy",
     "advanced": "Advanced Pattern",
 }
 MATCH_CLASS_LABELS = {
@@ -112,10 +117,18 @@ MATCH_CLASS_LABELS = {
     "repetitive_link_noise": "Repeated link pattern",
     "known_malicious_domain": "Known malicious domain",
     "adult_domain": "Known adult domain",
+    "adult_dm_ad": "Adult-content DM ad",
+    "adult_solicitation": "Sexual solicitation",
     "scam_campaign_lure": "Weighted scam campaign lure",
     "scam_risky_unknown_link": "Risky unknown-link lure",
     "scam_brand_impersonation": "Brand impersonation lure",
     "scam_mint_wallet_lure": "Mint or wallet lure",
+    "untrusted_external_link": "Untrusted external link",
+    "untrusted_invite_link": "Untrusted invite link",
+    "blocked_link_hub": "Blocked link hub or storefront",
+    "link_policy_malicious": "Known malicious domain",
+    "link_policy_adult": "Known adult domain",
+    "link_policy_suspicious": "Suspicious external link",
 }
 ESCALATION_BLOCKED_MATCH_CLASSES = {"repetitive_link_noise"}
 ACTION_LABELS = {
@@ -129,7 +142,7 @@ ACTION_LABELS = {
 SENSITIVITY_LABELS = {"low": "Low", "normal": "Normal", "high": "High"}
 ACTION_STRENGTH = {"disabled": -1, "detect": 0, "log": 1, "delete_log": 2, "timeout_log": 3, "delete_escalate": 4}
 CONFIDENCE_STRENGTH = {"low": 1, "medium": 2, "high": 3, "custom": 4}
-PACK_STRENGTH = {"privacy": 1, "promo": 2, "scam": 3, "adult": 3, "advanced": 4}
+PACK_STRENGTH = {"privacy": 1, "promo": 2, "link_policy": 2, "scam": 3, "adult": 3, "advanced": 4}
 AI_PRIORITY_LABELS = {"low": "Low", "normal": "Normal", "high": "High"}
 AI_REVIEW_PACK_SET = frozenset(SHIELD_AI_REVIEW_PACKS)
 SCAN_SOURCE_LABELS = {
@@ -158,6 +171,24 @@ INVITE_CTA_RE = re.compile(r"(?i)\b(?:join|check out|new|growing|active|friendly
 PROMO_CONTEXT_RE = re.compile(r"(?i)\b(?:server|community|channel|stream|shop|store|commission(?:s)?|prices|portfolio|page)\b")
 MONETIZED_PROMO_RE = re.compile(
     r"(?i)\b(?:commission(?:s)? open|patreon|ko-fi|gumroad|etsy|shop|store|prices|paid promo|sponsored)\b"
+)
+ADULT_SOLICIT_EXPLICIT_RE = re.compile(
+    r"(?i)\b(?:nudes?|lewds?|nsfw(?:\s+(?:pics?|content))?|onlyfans|18\+\s*(?:pics?|content)|adult\s+content|porn|sext(?:ing)?)\b"
+)
+ADULT_SOLICIT_CONTACT_RE = re.compile(r"(?i)\b(?:dm(?: me)?|message me|msg me|pm me|inbox me|hit me up)\b")
+ADULT_SOLICIT_DM_GATE_RE = re.compile(r"(?i)\b(?:more in dms?|dm for|message for|ask in dms?|ask me in dms?)\b")
+ADULT_SOLICIT_SALE_RE = re.compile(
+    r"(?i)\b(?:sell(?:ing)?|buy|paid|pay|prices?|menu|subscribe|purchase|order|customs? open|taking requests|requests open)\b"
+)
+ADULT_SOLICIT_WEAK_OFFER_RE = re.compile(r"(?i)\b(?:available|open|taking requests|customs?)\b")
+ADULT_SOLICIT_REPORTING_RE = re.compile(
+    r"(?i)\b(?:report(?:ed|ing)?|rules?|policy|they said|he said|she said|quoted?|quote|example|sample|screenshot|for review|moderation)\b"
+)
+ADULT_SOLICIT_EDUCATION_RE = re.compile(
+    r"(?i)\b(?:sexual health|consent|assault|trafficking|awareness|support group|support worker|education(?:al)?|victim|survivor)\b"
+)
+ADULT_SOLICIT_DISAPPROVAL_RE = re.compile(
+    r"(?i)\b(?:don['’]?t say|stop posting|not allowed|against the rules|rule violation|banned phrase|keep that out)\b"
 )
 SOCIAL_ENGINEERING_RE = re.compile(
     r"(?i)\b(?:download|run|install|open|visit|click(?: here)?|verify|claim|login|log in|sign in|connect wallet|wallet connect|sync|mint|minting|authenticate|authorize)\b"
@@ -326,6 +357,9 @@ class CompiledShieldConfig:
     promo: PackSettings
     scam: PackSettings
     adult: PackSettings
+    adult_solicitation_enabled: bool
+    link_policy_mode: str
+    link_policy: PackSettings
     ai_enabled: bool
     ai_min_confidence: str
     ai_enabled_packs: frozenset[str]
@@ -343,6 +377,8 @@ class CompiledShieldConfig:
             return self.scam
         if pack == "adult":
             return self.adult
+        if pack == "link_policy":
+            return self.link_policy
         return PackSettings(enabled=True, low_action="log", medium_action="log", high_action="log", sensitivity="normal")
 
 
@@ -1080,6 +1116,14 @@ def _confidence_from_score(score: int) -> str:
     return "low"
 
 
+def _adult_solicitation_context_suppressed(text: str) -> bool:
+    return bool(
+        ADULT_SOLICIT_REPORTING_RE.search(text)
+        or ADULT_SOLICIT_EDUCATION_RE.search(text)
+        or ADULT_SOLICIT_DISAPPROVAL_RE.search(text)
+    )
+
+
 def _validate_email_candidate(candidate: str) -> str | None:
     cleaned = candidate.strip().strip("()[]{}<>,;:\"'")
     if "@" not in cleaned or cleaned.count("@") != 1:
@@ -1323,9 +1367,12 @@ class ShieldService:
         medium_action: str | None = None,
         high_action: str | None = None,
         sensitivity: str | None = None,
+        adult_solicitation: bool | None = None,
     ) -> tuple[bool, str]:
         if pack not in RULE_PACKS:
             return False, "Unknown Shield pack."
+        if adult_solicitation is not None and pack != "adult":
+            return False, "Adult solicitation can only be configured on the adult pack."
         cleaned_action = action.strip().lower() if isinstance(action, str) else None
         cleaned_low_action = low_action.strip().lower() if isinstance(low_action, str) else None
         cleaned_medium_action = medium_action.strip().lower() if isinstance(medium_action, str) else None
@@ -1373,9 +1420,15 @@ class ShieldService:
             config[f"{pack}_action"] = config.get(f"{pack}_high_action", config.get(f"{pack}_action", "log"))
             if cleaned_sensitivity is not None:
                 config[f"{pack}_sensitivity"] = cleaned_sensitivity
+            if pack == "adult" and adult_solicitation is not None:
+                config["adult_solicitation_enabled"] = bool(adult_solicitation)
 
         new_enabled = current[f"{pack}_enabled"] if enabled is None else bool(enabled)
         new_sensitivity = current[f"{pack}_sensitivity"] if cleaned_sensitivity is None else cleaned_sensitivity
+        solicitation_note = ""
+        if pack == "adult":
+            solicitation_state = current.get("adult_solicitation_enabled", False) if adult_solicitation is None else bool(adult_solicitation)
+            solicitation_note = f" Sexual-solicitation text detection is {'on' if solicitation_state else 'off'}."
         return await self._update_config(
             guild_id,
             mutate,
@@ -1383,6 +1436,73 @@ class ShieldService:
                 f"{PACK_LABELS[pack]} is {'enabled' if new_enabled else 'disabled'} "
                 f"with {self._policy_summary(low_action=final_low_action, medium_action=final_medium_action, high_action=final_high_action)} "
                 f"at {SENSITIVITY_LABELS[new_sensitivity].lower()} sensitivity."
+                f"{solicitation_note}"
+            ),
+        )
+
+    async def set_link_policy_config(
+        self,
+        guild_id: int,
+        *,
+        mode: str | None = None,
+        action: str | None = None,
+        low_action: str | None = None,
+        medium_action: str | None = None,
+        high_action: str | None = None,
+    ) -> tuple[bool, str]:
+        cleaned_mode = str(mode).strip().lower() if isinstance(mode, str) else None
+        if cleaned_mode is not None and cleaned_mode not in VALID_SHIELD_LINK_POLICY_MODES:
+            return False, "Link policy mode must be `default` or `trusted_only`."
+        cleaned_action = action.strip().lower() if isinstance(action, str) else None
+        cleaned_low_action = low_action.strip().lower() if isinstance(low_action, str) else None
+        cleaned_medium_action = medium_action.strip().lower() if isinstance(medium_action, str) else None
+        cleaned_high_action = high_action.strip().lower() if isinstance(high_action, str) else None
+        if cleaned_action is not None and cleaned_action not in SHIELD_ACTIONS - {"disabled"}:
+            return False, "That action is not supported."
+        if cleaned_action is not None and any(value is not None for value in (cleaned_low_action, cleaned_medium_action, cleaned_high_action)):
+            return False, "Use either the legacy `action` shorthand or explicit low/medium/high actions."
+        if cleaned_low_action is not None and cleaned_low_action not in LOW_CONFIDENCE_ACTIONS:
+            return False, "Low-confidence actions must be `detect` or `log`."
+        if cleaned_medium_action is not None and cleaned_medium_action not in MEDIUM_CONFIDENCE_ACTIONS:
+            return False, "Medium-confidence actions must be `detect`, `log`, or `delete_log`."
+        if cleaned_high_action is not None and cleaned_high_action not in SHIELD_ACTIONS - {"disabled"}:
+            return False, "High-confidence action is not supported."
+
+        current = self.get_config(guild_id)
+        if cleaned_action is not None:
+            derived_low, derived_medium, derived_high = _legacy_action_policy(cleaned_action)
+        else:
+            derived_low = current.get("link_policy_low_action", "log")
+            derived_medium = current.get("link_policy_medium_action", "log")
+            derived_high = current.get("link_policy_high_action", "log")
+        final_low_action = derived_low if cleaned_low_action is None else cleaned_low_action
+        final_medium_action = derived_medium if cleaned_medium_action is None else cleaned_medium_action
+        final_high_action = derived_high if cleaned_high_action is None else cleaned_high_action
+
+        def mutate(config: dict[str, Any]):
+            if cleaned_mode is not None:
+                config["link_policy_mode"] = cleaned_mode
+            if cleaned_action is not None:
+                config["link_policy_action"] = cleaned_action
+                low_default, medium_default, high_default = _legacy_action_policy(cleaned_action)
+                config["link_policy_low_action"] = low_default
+                config["link_policy_medium_action"] = medium_default
+                config["link_policy_high_action"] = high_default
+            if cleaned_low_action is not None:
+                config["link_policy_low_action"] = cleaned_low_action
+            if cleaned_medium_action is not None:
+                config["link_policy_medium_action"] = cleaned_medium_action
+            if cleaned_high_action is not None:
+                config["link_policy_high_action"] = cleaned_high_action
+            config["link_policy_action"] = config.get("link_policy_high_action", config.get("link_policy_action", "log"))
+
+        final_mode = current.get("link_policy_mode", DEFAULT_SHIELD_LINK_POLICY_MODE) if cleaned_mode is None else cleaned_mode
+        return await self._update_config(
+            guild_id,
+            mutate,
+            success_message=(
+                f"Shield link policy is now `{final_mode}` with "
+                f"{self._policy_summary(low_action=final_low_action, medium_action=final_medium_action, high_action=final_high_action)}."
             ),
         )
 
@@ -2154,7 +2274,9 @@ class ShieldService:
         matches.extend(self._detect_privacy(compiled, snapshot))
         matches.extend(self._detect_promo(compiled, snapshot, repetitive_promo=repetitive_promo or RepetitionSignals(None, 0, False, False)))
         matches.extend(self._detect_link_safety_domains(compiled, snapshot, active_link_assessments))
+        matches.extend(self._detect_adult_solicitation(compiled, snapshot))
         matches.extend(self._detect_scam(compiled, snapshot, active_link_assessments, scan_source=scan_source, scam_context=scam_context or ShieldScamContext()))
+        matches.extend(self._detect_link_policy(compiled, snapshot, active_link_assessments, existing_matches=matches))
         matches.extend(self._detect_custom_patterns(compiled, snapshot))
         matches.sort(
             key=lambda item: (
@@ -2203,6 +2325,140 @@ class ShieldService:
                         match_class="adult_domain",
                     )
                 )
+        return self._dedupe_matches(matches)
+
+    def _detect_adult_solicitation(self, compiled: CompiledShieldConfig, snapshot: ShieldSnapshot) -> list[ShieldMatch]:
+        settings = compiled.adult
+        if not settings.enabled or not compiled.adult_solicitation_enabled:
+            return []
+        text = snapshot.context_text
+        squashed = snapshot.context_squashed
+        if not text or _adult_solicitation_context_suppressed(text):
+            return []
+
+        explicit = bool(ADULT_SOLICIT_EXPLICIT_RE.search(text) or ADULT_SOLICIT_EXPLICIT_RE.search(squashed))
+        direct_contact = bool(ADULT_SOLICIT_CONTACT_RE.search(text))
+        dm_gate = bool(ADULT_SOLICIT_DM_GATE_RE.search(text))
+        sale = bool(ADULT_SOLICIT_SALE_RE.search(text))
+        weak_offer = bool(ADULT_SOLICIT_WEAK_OFFER_RE.search(text))
+        if not explicit:
+            return []
+
+        confidence: str | None = None
+        if (direct_contact or dm_gate) and sale:
+            confidence = "high"
+        elif direct_contact or dm_gate or sale:
+            confidence = "medium"
+        elif settings.sensitivity == "high" and weak_offer:
+            confidence = "low"
+        if confidence is None:
+            return []
+
+        dm_routed = direct_contact or dm_gate
+        label = "Adult-content DM ad" if dm_routed else "Sexual solicitation"
+        reason = (
+            "Explicit adult-content wording was paired with DM routing and sales language."
+            if dm_routed and sale
+            else "Explicit adult-content wording was paired with DM routing or gated-offer language."
+            if dm_routed
+            else "Explicit adult-content wording was paired with sexual solicitation or sales language."
+        )
+        return [
+            self._make_pack_match(
+                pack="adult",
+                settings=settings,
+                label=label,
+                reason=reason,
+                confidence=confidence,
+                heuristic=True,
+                match_class="adult_dm_ad" if dm_routed else "adult_solicitation",
+            )
+        ]
+
+    def _link_is_trusted_under_policy(
+        self,
+        compiled: CompiledShieldConfig,
+        link: ShieldLink,
+        assessment: ShieldLinkAssessment | None,
+    ) -> bool:
+        if link.invite_code is not None:
+            return link.invite_code in compiled.allow_invite_codes
+        if self._domain_is_allowlisted(link.domain, compiled.allow_domains):
+            return True
+        return is_trusted_destination(link.domain, safe_family=assessment.safe_family if assessment is not None else None)
+
+    def _detect_link_policy(
+        self,
+        compiled: CompiledShieldConfig,
+        snapshot: ShieldSnapshot,
+        link_assessments: Sequence[ShieldLinkAssessment],
+        *,
+        existing_matches: Sequence[ShieldMatch],
+    ) -> list[ShieldMatch]:
+        settings = compiled.link_policy
+        if not settings.enabled or compiled.link_policy_mode == DEFAULT_SHIELD_LINK_POLICY_MODE or not snapshot.links:
+            return []
+        if any(match.pack in {"scam", "adult"} for match in existing_matches):
+            return []
+
+        assessments_by_domain = {assessment.normalized_domain: assessment for assessment in link_assessments}
+        matches: list[ShieldMatch] = []
+        seen_classes: set[str] = set()
+        for link in snapshot.links:
+            assessment = assessments_by_domain.get(link.domain)
+            if self._link_is_trusted_under_policy(compiled, link, assessment):
+                continue
+
+            label = "Untrusted external link"
+            reason = "Shield trusted-only mode allows only trusted destinations or admin allowlist entries. This link was neither trusted nor allowlisted."
+            confidence = "low"
+            heuristic = True
+            match_class = "untrusted_external_link"
+
+            if link.invite_code is not None:
+                label = "Untrusted invite link"
+                reason = "Shield trusted-only mode requires Discord invites to be explicitly allowlisted. This invite was not on the invite allowlist."
+                confidence = "medium"
+                heuristic = False
+                match_class = "untrusted_invite_link"
+            elif assessment is not None and assessment.category == MALICIOUS_LINK_CATEGORY:
+                label = "Known malicious domain"
+                reason = "Shield trusted-only mode blocked a domain that matched local malicious-link intelligence."
+                confidence = "high"
+                heuristic = False
+                match_class = "link_policy_malicious"
+            elif assessment is not None and assessment.category == ADULT_LINK_CATEGORY:
+                label = "Adult / 18+ domain"
+                reason = "Shield trusted-only mode blocked a domain that matched local adult / 18+ domain intelligence."
+                confidence = "high"
+                heuristic = False
+                match_class = "link_policy_adult"
+            elif link.category in {"shortener", "storefront"} or link_domain_in_set(link.domain, LINK_IN_BIO_DOMAINS):
+                label = "Blocked link hub / storefront"
+                reason = "Shield trusted-only mode blocks shorteners, link-in-bio hubs, and storefront-style destinations unless admins explicitly allow them."
+                confidence = "medium"
+                heuristic = False
+                match_class = "blocked_link_hub"
+            elif assessment is not None and assessment.category == UNKNOWN_SUSPICIOUS_LINK_CATEGORY:
+                reason = "Shield trusted-only mode blocked an untrusted destination that also carried local suspicious-link signals."
+                confidence = "medium"
+                heuristic = False
+                match_class = "link_policy_suspicious"
+
+            if match_class in seen_classes:
+                continue
+            seen_classes.add(match_class)
+            matches.append(
+                self._make_pack_match(
+                    pack="link_policy",
+                    settings=settings,
+                    label=label,
+                    reason=reason,
+                    confidence=confidence,
+                    heuristic=heuristic,
+                    match_class=match_class,
+                )
+            )
         return self._dedupe_matches(matches)
 
     def _detect_privacy(self, compiled: CompiledShieldConfig, snapshot: ShieldSnapshot) -> list[ShieldMatch]:
@@ -3305,6 +3561,10 @@ class ShieldService:
                 )
             )
 
+        link_policy_mode = str(raw.get("link_policy_mode", DEFAULT_SHIELD_LINK_POLICY_MODE)).strip().lower()
+        if link_policy_mode not in VALID_SHIELD_LINK_POLICY_MODES:
+            link_policy_mode = DEFAULT_SHIELD_LINK_POLICY_MODE
+
         return CompiledShieldConfig(
             guild_id=guild_id,
             module_enabled=bool(raw.get("module_enabled")),
@@ -3348,6 +3608,15 @@ class ShieldService:
                 medium_action=str(raw.get("adult_medium_action", "log")).strip().lower(),
                 high_action=str(raw.get("adult_high_action", "log")).strip().lower(),
                 sensitivity=str(raw.get("adult_sensitivity", "normal")).strip().lower(),
+            ),
+            adult_solicitation_enabled=bool(raw.get("adult_solicitation_enabled")),
+            link_policy_mode=link_policy_mode,
+            link_policy=PackSettings(
+                enabled=link_policy_mode != DEFAULT_SHIELD_LINK_POLICY_MODE,
+                low_action=str(raw.get("link_policy_low_action", "log")).strip().lower(),
+                medium_action=str(raw.get("link_policy_medium_action", "log")).strip().lower(),
+                high_action=str(raw.get("link_policy_high_action", "log")).strip().lower(),
+                sensitivity="normal",
             ),
             ai_enabled=bool(raw.get("ai_enabled")),
             ai_min_confidence=(

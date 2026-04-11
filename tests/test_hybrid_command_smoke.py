@@ -1429,6 +1429,7 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             embed = cog.build_panel_embed(guild_id, "overview")
             protection_field = next(field for field in embed.fields if field.name == "Protection Packs")
             link_safety_field = next(field for field in embed.fields if field.name == "Link Safety")
+            link_policy_field = next(field for field in embed.fields if field.name == "Link Policy")
 
             self.assertIn("**Privacy Leak**", protection_field.value)
             self.assertIn("Enabled: Yes | Sensitivity: High", protection_field.value)
@@ -1437,7 +1438,8 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Enabled: Yes | Sensitivity: Normal", protection_field.value)
             self.assertIn("Low / Medium / High: `log` / `log` / `log`", protection_field.value)
             self.assertIn("**Scam / Malicious Links**", link_safety_field.value)
-            self.assertIn("**Adult / 18+ Links**", link_safety_field.value)
+            self.assertIn("**Adult / 18+ Links + Solicitation**", link_safety_field.value)
+            self.assertIn("Mode: **Default**", link_policy_field.value)
         finally:
             await cog.service.close()
 
@@ -1556,7 +1558,96 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             )
 
             self.assertEqual(len(ctx.send_calls), 1)
-            self.assertIn("Adult / 18+ Links", ctx.send_calls[0]["embed"].description)
+            self.assertIn("Adult / 18+ Links + Solicitation", ctx.send_calls[0]["embed"].description)
+        finally:
+            await cog.service.close()
+
+    async def test_shield_rules_command_accepts_adult_solicitation_toggle(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
+        cog = ShieldCog(bot)
+        try:
+            cog.service.storage_ready = True
+            ctx = FakeContext(
+                interaction=FakeInteraction(),
+                guild=FakeGuild(10),
+                channel=FakeChannel(),
+                author=FakeAuthor(manage_guild=True),
+            )
+
+            await ShieldCog.shield_rules_command.callback(
+                cog,
+                ctx,
+                module=None,
+                pack="adult",
+                enabled=True,
+                action=None,
+                low_action="log",
+                medium_action="delete_log",
+                high_action="delete_log",
+                sensitivity="normal",
+                adult_solicitation=True,
+                escalation_threshold=None,
+                escalation_window_minutes=None,
+                timeout_minutes=None,
+            )
+
+            self.assertEqual(len(ctx.send_calls), 1)
+            self.assertIn("Sexual-solicitation text detection is on", ctx.send_calls[0]["embed"].description)
+            self.assertTrue(cog.service.get_config(10)["adult_solicitation_enabled"])
+        finally:
+            await cog.service.close()
+
+    async def test_shield_links_command_returns_private_summary(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
+        cog = ShieldCog(bot)
+        try:
+            cog.service.storage_ready = True
+            ctx = FakeContext(
+                interaction=FakeInteraction(),
+                guild=FakeGuild(10),
+                channel=FakeChannel(),
+                author=FakeAuthor(manage_guild=True),
+            )
+
+            await ShieldCog.shield_links_command.callback(cog, ctx, mode=None, action=None, low_action=None, medium_action=None, high_action=None)
+
+            self.assertEqual(len(ctx.send_calls), 1)
+            self.assertTrue(ctx.send_calls[0]["ephemeral"])
+            embed = ctx.send_calls[0]["embed"]
+            self.assertEqual(embed.title, "Shield Link Policy")
+            self.assertIn("separate from Confessions link mode", embed.description)
+            self.assertIn("Mode: **Default**", embed.fields[0].value)
+        finally:
+            await cog.service.close()
+
+    async def test_shield_links_command_updates_policy(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
+        cog = ShieldCog(bot)
+        try:
+            cog.service.storage_ready = True
+            ctx = FakeContext(
+                interaction=FakeInteraction(),
+                guild=FakeGuild(10),
+                channel=FakeChannel(),
+                author=FakeAuthor(manage_guild=True),
+            )
+
+            await ShieldCog.shield_links_command.callback(
+                cog,
+                ctx,
+                mode="trusted_only",
+                action=None,
+                low_action="log",
+                medium_action="delete_log",
+                high_action="delete_log",
+            )
+
+            self.assertEqual(len(ctx.send_calls), 1)
+            self.assertIn("Shield link policy is now `trusted_only`", ctx.send_calls[0]["embed"].description)
+            config = cog.service.get_config(10)
+            self.assertEqual(config["link_policy_mode"], "trusted_only")
+            self.assertEqual(config["link_policy_medium_action"], "delete_log")
+            self.assertEqual(config["link_policy_high_action"], "delete_log")
         finally:
             await cog.service.close()
 

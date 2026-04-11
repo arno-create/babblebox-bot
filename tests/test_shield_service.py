@@ -309,6 +309,12 @@ class ShieldPostgresReloadTests(unittest.IsolatedAsyncioTestCase):
                     "adult_medium_action": "delete_log",
                     "adult_high_action": "delete_log",
                     "adult_sensitivity": "normal",
+                    "adult_solicitation_enabled": True,
+                    "link_policy_mode": "trusted_only",
+                    "link_policy_action": "delete_log",
+                    "link_policy_low_action": "log",
+                    "link_policy_medium_action": "delete_log",
+                    "link_policy_high_action": "delete_log",
                     "ai_enabled": True,
                     "ai_min_confidence": "medium",
                     "ai_enabled_packs": json.dumps(["privacy", "promo"]),
@@ -345,6 +351,11 @@ class ShieldPostgresReloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(config["allow_domains"], ["example.com"])
         self.assertEqual(config["allow_invite_codes"], ["abc123"])
         self.assertEqual(config["allow_phrases"], ["friendly server"])
+        self.assertTrue(config["adult_solicitation_enabled"])
+        self.assertEqual(config["link_policy_mode"], "trusted_only")
+        self.assertEqual(config["link_policy_low_action"], "log")
+        self.assertEqual(config["link_policy_medium_action"], "delete_log")
+        self.assertEqual(config["link_policy_high_action"], "delete_log")
         self.assertEqual(config["ai_enabled_packs"], ["privacy", "promo"])
         self.assertTrue(meta["global_ai_override_enabled"])
         self.assertEqual(meta["global_ai_override_updated_by"], 77)
@@ -681,6 +692,216 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue([match for match in result.matches if match.pack == "adult"])
         self.assertEqual(result.link_assessments[0].category, "adult")
+
+    async def test_adult_solicitation_text_is_off_by_default(self):
+        ok, _ = await self.service.set_pack_config(10, "adult", enabled=True, action="delete_log", sensitivity="normal")
+        self.assertTrue(ok)
+
+        result = self.service.test_message_details(10, "DM me for nudes")
+
+        self.assertFalse([match for match in result.matches if match.pack == "adult"])
+
+    async def test_adult_dm_ad_matches_when_enabled(self):
+        ok, _ = await self.service.set_pack_config(
+            10,
+            "adult",
+            enabled=True,
+            action="delete_log",
+            sensitivity="normal",
+            adult_solicitation=True,
+        )
+        self.assertTrue(ok)
+
+        result = self.service.test_message_details(10, "DM me for nudes")
+
+        adult_matches = [match for match in result.matches if match.pack == "adult"]
+        self.assertTrue(adult_matches)
+        self.assertEqual(adult_matches[0].match_class, "adult_dm_ad")
+        self.assertEqual(adult_matches[0].label, "Adult-content DM ad")
+        self.assertEqual(adult_matches[0].confidence, "medium")
+
+    async def test_adult_solicitation_high_confidence_requires_sales_and_dm_routing(self):
+        ok, _ = await self.service.set_pack_config(
+            10,
+            "adult",
+            enabled=True,
+            action="delete_log",
+            sensitivity="normal",
+            adult_solicitation=True,
+        )
+        self.assertTrue(ok)
+
+        result = self.service.test_message_details(10, "selling nude pics, more in DMs")
+
+        adult_matches = [match for match in result.matches if match.pack == "adult"]
+        self.assertTrue(adult_matches)
+        self.assertEqual(adult_matches[0].match_class, "adult_dm_ad")
+        self.assertEqual(adult_matches[0].confidence, "high")
+        self.assertEqual(adult_matches[0].action, "delete_log")
+
+    async def test_adult_solicitation_suppresses_education_and_reporting_contexts(self):
+        ok, _ = await self.service.set_pack_config(
+            10,
+            "adult",
+            enabled=True,
+            action="delete_log",
+            sensitivity="high",
+            adult_solicitation=True,
+        )
+        self.assertTrue(ok)
+
+        for text in (
+            "This sexual health workshop covers consent, trafficking awareness, and adult content moderation.",
+            'Reported screenshot for review: they said "DM me for nudes" in another server.',
+        ):
+            with self.subTest(text=text):
+                result = self.service.test_message_details(10, text)
+                self.assertFalse([match for match in result.matches if match.pack == "adult"])
+
+    async def test_adult_solicitation_requires_bounded_adult_offer_structure(self):
+        ok, _ = await self.service.set_pack_config(
+            10,
+            "adult",
+            enabled=True,
+            action="delete_log",
+            sensitivity="high",
+            adult_solicitation=True,
+        )
+        self.assertTrue(ok)
+
+        for text in ("DM me later", "nudes are not allowed here", "more content in DMs"):
+            with self.subTest(text=text):
+                result = self.service.test_message_details(10, text)
+                self.assertFalse([match for match in result.matches if match.pack == "adult"])
+
+    async def test_adult_solicitation_low_confidence_requires_high_sensitivity(self):
+        ok, _ = await self.service.set_pack_config(
+            10,
+            "adult",
+            enabled=True,
+            action="delete_log",
+            sensitivity="normal",
+            adult_solicitation=True,
+        )
+        self.assertTrue(ok)
+
+        normal_result = self.service.test_message_details(10, "NSFW customs available")
+        self.assertFalse([match for match in normal_result.matches if match.pack == "adult"])
+
+        ok, _ = await self.service.set_pack_config(
+            10,
+            "adult",
+            enabled=True,
+            action="delete_log",
+            sensitivity="high",
+            adult_solicitation=True,
+        )
+        self.assertTrue(ok)
+
+        high_result = self.service.test_message_details(10, "NSFW customs available")
+
+        adult_matches = [match for match in high_result.matches if match.pack == "adult"]
+        self.assertTrue(adult_matches)
+        self.assertEqual(adult_matches[0].match_class, "adult_solicitation")
+        self.assertEqual(adult_matches[0].confidence, "low")
+
+    async def test_trusted_only_link_policy_allows_trusted_docs_link(self):
+        ok, _ = await self.service.set_link_policy_config(10, mode="trusted_only")
+        self.assertTrue(ok)
+
+        result = self.service.test_message_details(10, "Useful docs: https://docs.github.com/en")
+
+        self.assertFalse([match for match in result.matches if match.pack == "link_policy"])
+
+    async def test_trusted_only_link_policy_blocks_safe_unknown_domain(self):
+        ok, _ = await self.service.set_link_policy_config(10, mode="trusted_only")
+        self.assertTrue(ok)
+
+        result = self.service.test_message_details(10, "Read this https://example.com/guide")
+
+        policy_matches = [match for match in result.matches if match.pack == "link_policy"]
+        self.assertTrue(policy_matches)
+        self.assertEqual(policy_matches[0].match_class, "untrusted_external_link")
+        self.assertEqual(policy_matches[0].confidence, "low")
+
+    async def test_trusted_only_link_policy_blocks_unallowlisted_invites_even_without_promo_pack(self):
+        ok, _ = await self.service.set_link_policy_config(10, mode="trusted_only")
+        self.assertTrue(ok)
+
+        result = self.service.test_message_details(10, "Join us https://discord.gg/notallowed")
+
+        policy_matches = [match for match in result.matches if match.pack == "link_policy"]
+        self.assertTrue(policy_matches)
+        self.assertEqual(policy_matches[0].match_class, "untrusted_invite_link")
+        self.assertEqual(policy_matches[0].confidence, "medium")
+        self.assertFalse([match for match in result.matches if match.pack == "promo"])
+
+    async def test_trusted_only_link_policy_respects_domain_and_invite_allowlists(self):
+        ok, _ = await self.service.set_link_policy_config(10, mode="trusted_only")
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_allow_entry(10, "allow_domains", "example.com", True)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_allow_entry(10, "allow_invite_codes", "abc123", True)
+        self.assertTrue(ok)
+
+        domain_result = self.service.test_message_details(10, "Read this https://example.com/guide")
+        invite_result = self.service.test_message_details(10, "Join us https://discord.gg/abc123")
+
+        self.assertFalse([match for match in domain_result.matches if match.pack == "link_policy"])
+        self.assertFalse([match for match in invite_result.matches if match.pack == "link_policy"])
+
+    async def test_trusted_only_link_policy_blocks_link_hubs_and_suspicious_domains(self):
+        ok, _ = await self.service.set_link_policy_config(10, mode="trusted_only")
+        self.assertTrue(ok)
+
+        hub_result = self.service.test_message_details(10, "Creator links https://linktr.ee/example")
+        suspicious_result = self.service.test_message_details(10, "Community update https://verify-hub.live/news")
+
+        hub_matches = [match for match in hub_result.matches if match.pack == "link_policy"]
+        suspicious_matches = [match for match in suspicious_result.matches if match.pack == "link_policy"]
+        self.assertTrue(hub_matches)
+        self.assertEqual(hub_matches[0].match_class, "blocked_link_hub")
+        self.assertEqual(hub_matches[0].confidence, "medium")
+        self.assertTrue(suspicious_matches)
+        self.assertEqual(suspicious_matches[0].match_class, "link_policy_suspicious")
+        self.assertEqual(suspicious_matches[0].confidence, "medium")
+
+    async def test_trusted_only_link_policy_blocks_malicious_and_adult_domains_when_specialized_packs_are_off(self):
+        ok, _ = await self.service.set_link_policy_config(10, mode="trusted_only")
+        self.assertTrue(ok)
+
+        malicious_result = self.service.test_message_details(10, "Free nitro https://dlscord-gift.com/claim")
+        adult_result = self.service.test_message_details(10, "Adult link https://pornhub.com/view_video.php?viewkey=test")
+
+        malicious_matches = [match for match in malicious_result.matches if match.pack == "link_policy"]
+        adult_matches = [match for match in adult_result.matches if match.pack == "link_policy"]
+        self.assertTrue(malicious_matches)
+        self.assertEqual(malicious_matches[0].match_class, "link_policy_malicious")
+        self.assertEqual(malicious_matches[0].confidence, "high")
+        self.assertTrue(adult_matches)
+        self.assertEqual(adult_matches[0].match_class, "link_policy_adult")
+        self.assertEqual(adult_matches[0].confidence, "high")
+
+    async def test_specialized_scam_and_adult_packs_still_own_matches_under_trusted_only_mode(self):
+        ok, _ = await self.service.set_pack_config(10, "scam", enabled=True, action="delete_log", sensitivity="normal")
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_pack_config(10, "adult", enabled=True, action="delete_log", sensitivity="normal")
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_link_policy_config(10, mode="trusted_only")
+        self.assertTrue(ok)
+
+        malicious_result = self.service.test_message_details(10, "Free nitro https://dlscord-gift.com/claim")
+        adult_result = self.service.test_message_details(10, "Adult link https://pornhub.com/view_video.php?viewkey=test")
+
+        self.assertTrue([match for match in malicious_result.matches if match.pack == "scam"])
+        self.assertFalse([match for match in malicious_result.matches if match.pack == "link_policy"])
+        self.assertTrue([match for match in adult_result.matches if match.pack == "adult"])
+        self.assertFalse([match for match in adult_result.matches if match.pack == "link_policy"])
+
+    async def test_default_link_policy_mode_preserves_current_non_policy_behavior(self):
+        result = self.service.test_message_details(10, "Read this https://example.com/guide")
+
+        self.assertFalse([match for match in result.matches if match.pack == "link_policy"])
 
     async def test_allowlisted_domain_overrides_local_malicious_intelligence(self):
         ok, _ = await self.service.set_pack_config(10, "scam", enabled=True, action="delete_log", sensitivity="normal")
@@ -2174,6 +2395,11 @@ class ShieldStoreNormalizationTests(unittest.TestCase):
         self.assertEqual(config["promo_low_action"], "log")
         self.assertEqual(config["promo_medium_action"], "delete_log")
         self.assertEqual(config["promo_high_action"], "delete_log")
+        self.assertFalse(config["adult_solicitation_enabled"])
+        self.assertEqual(config["link_policy_mode"], "default")
+        self.assertEqual(config["link_policy_low_action"], "log")
+        self.assertEqual(config["link_policy_medium_action"], "log")
+        self.assertEqual(config["link_policy_high_action"], "log")
 
     def test_normalize_state_preserves_global_ai_override_meta(self):
         store = _MemoryShieldStore()
@@ -2192,3 +2418,25 @@ class ShieldStoreNormalizationTests(unittest.TestCase):
         self.assertTrue(normalized["meta"]["global_ai_override_enabled"])
         self.assertEqual(normalized["meta"]["global_ai_override_updated_by"], 1266444952779620413)
         self.assertEqual(normalized["meta"]["global_ai_override_updated_at"], "2026-03-27T10:00:00+00:00")
+
+    def test_normalize_state_preserves_trusted_link_policy_and_adult_solicitation_fields(self):
+        store = _MemoryShieldStore()
+        snapshot = {
+            "version": 3,
+            "guilds": {
+                "123": {
+                    "adult_solicitation_enabled": True,
+                    "link_policy_mode": "trusted_only",
+                    "link_policy_action": "timeout_log",
+                }
+            },
+        }
+
+        normalized = store.normalize_state(deepcopy(snapshot))
+        config = normalized["guilds"]["123"]
+
+        self.assertTrue(config["adult_solicitation_enabled"])
+        self.assertEqual(config["link_policy_mode"], "trusted_only")
+        self.assertEqual(config["link_policy_low_action"], "log")
+        self.assertEqual(config["link_policy_medium_action"], "delete_log")
+        self.assertEqual(config["link_policy_high_action"], "timeout_log")

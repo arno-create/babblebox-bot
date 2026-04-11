@@ -28,6 +28,21 @@ MALICIOUS_LINK_CATEGORY = "malicious"
 ADULT_LINK_CATEGORY = "adult"
 UNKNOWN_LINK_CATEGORY = "unknown"
 UNKNOWN_SUSPICIOUS_LINK_CATEGORY = "unknown_suspicious"
+TRUSTED_LINK_SAFE_FAMILIES = frozenset({"social", "media", "docs", "dev", "wiki"})
+TRUSTED_MAINSTREAM_DOMAINS = frozenset(
+    {
+        "google.com",
+        "youtube.com",
+        "youtu.be",
+        "wikipedia.org",
+        "github.com",
+        "gitlab.com",
+        "python.org",
+        "docs.python.org",
+        "mozilla.org",
+    }
+)
+LINK_IN_BIO_DOMAINS = frozenset({"linktr.ee", "beacons.ai", "carrd.co"})
 
 LINK_CATEGORY_STRENGTH = {
     SAFE_LINK_CATEGORY: 0,
@@ -124,6 +139,12 @@ def matching_domain(domain: str, candidates: Container[str]) -> str | None:
 
 def domain_in_set(domain: str, candidates: Container[str]) -> bool:
     return matching_domain(domain, candidates) is not None
+
+
+def is_trusted_destination(domain: str, *, safe_family: str | None = None) -> bool:
+    if safe_family in TRUSTED_LINK_SAFE_FAMILIES:
+        return True
+    return matching_domain(domain, TRUSTED_MAINSTREAM_DOMAINS) is not None
 
 
 def clean_url_candidate(raw_url: str) -> str | None:
