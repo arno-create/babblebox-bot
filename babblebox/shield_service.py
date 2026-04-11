@@ -82,6 +82,7 @@ MAX_MESSAGE_PREVIEW = 220
 ALERT_DEDUP_SECONDS = 30.0
 ALERT_SIGNATURE_DEDUP_SECONDS = 5.0
 REPETITION_WINDOW_SECONDS = 10 * 60.0
+LOW_CONFIDENCE_ALERT_COHORT_SECONDS = REPETITION_WINDOW_SECONDS
 DIRECT_PROMO_REPEAT_THRESHOLD = 3
 GENERIC_LINK_NOISE_THRESHOLD = 4
 MEDIA_LINK_NOISE_THRESHOLD = 5
@@ -108,7 +109,7 @@ MATCH_CLASS_LABELS = {
     "self_promo": "Self-promo link",
     "monetized_promo": "Monetized promo",
     "cta_promo": "Call-to-action promo",
-    "repetitive_link_noise": "Repetitive link noise",
+    "repetitive_link_noise": "Repeated link pattern",
     "known_malicious_domain": "Known malicious domain",
     "adult_domain": "Known adult domain",
     "scam_campaign_lure": "Weighted scam campaign lure",
@@ -200,6 +201,63 @@ BARE_URL_TLD_RE = re.compile(r"(?i)(?:xn--[a-z0-9-]{2,59}|[a-z]{2,24})$")
 BARE_URL_MAX_TOKENS = 64
 BARE_URL_MAX_LENGTH = 180
 BARE_URL_FILENAME_TLDS = frozenset({"7z", "apk", "bat", "cmd", "exe", "iso", "msi", "rar", "scr", "zip"})
+BARE_URL_AMBIGUOUS_FILE_TLDS = frozenset(
+    {
+        "aac",
+        "ai",
+        "avi",
+        "bmp",
+        "css",
+        "csv",
+        "doc",
+        "docm",
+        "docx",
+        "eps",
+        "gif",
+        "heic",
+        "html",
+        "ico",
+        "java",
+        "jpeg",
+        "jpg",
+        "js",
+        "json",
+        "m4a",
+        "md",
+        "mid",
+        "midi",
+        "mkv",
+        "mov",
+        "mp3",
+        "mp4",
+        "ogg",
+        "pdf",
+        "php",
+        "png",
+        "ppt",
+        "pptx",
+        "psd",
+        "py",
+        "rtf",
+        "svg",
+        "tar",
+        "tif",
+        "tiff",
+        "ts",
+        "txt",
+        "wav",
+        "webm",
+        "webp",
+        "wma",
+        "wmv",
+        "xls",
+        "xlsm",
+        "xlsx",
+        "xml",
+        "yaml",
+        "yml",
+    }
+)
 CAMPAIGN_HOST_FAMILY_MAP = {
     "auth": frozenset({"auth", "login", "secure", "security", "session", "verify", "verification", "token"}),
     "reward": frozenset({"bonus", "claim", "drop", "gift", "inventory", "promo", "reward"}),
@@ -345,6 +403,8 @@ class ShieldDecision:
     scan_source: str = "new_message"
     scan_surface_labels: tuple[str, ...] = ()
     member_risk_evidence: "ShieldMemberRiskEvidence | None" = None
+    alert_evidence_signature: str | None = None
+    alert_evidence_summary: str | None = None
 
 
 @dataclass(frozen=True)
@@ -434,6 +494,7 @@ class RepetitionSignals:
     hits: int
     pure_media_links: bool
     has_unallowlisted_links: bool
+    evidence_kind: str = ""
 
 
 def _ordered_token_match(text: str, tokens: Sequence[str]) -> bool:
@@ -501,6 +562,8 @@ def _looks_like_bare_url_candidate(raw_token: str) -> str | None:
         return None
     tld = labels[-1]
     has_pathish_suffix = any(char in candidate for char in "/?#")
+    if not has_pathish_suffix and tld in BARE_URL_AMBIGUOUS_FILE_TLDS:
+        return None
     if not has_pathish_suffix and (tld in BARE_URL_FILENAME_TLDS or BARE_URL_TLD_RE.fullmatch(tld) is None):
         return None
     return candidate
@@ -604,6 +667,28 @@ def _alert_content_fingerprint(snapshot: ShieldSnapshot) -> str:
         )
     )
     return hashlib.sha1(content.encode("utf-8")).hexdigest()
+
+
+def _link_repetition_kind(links: Sequence[ShieldLink]) -> str:
+    if not links:
+        return ""
+    categories = {link.category for link in links}
+    if categories == {"media_embed"}:
+        return "media_link"
+    if categories == {"discord_invite"}:
+        return "invite_link"
+    return "external_link"
+
+
+def _link_repetition_fingerprint(links: Sequence[ShieldLink]) -> tuple[str | None, str]:
+    if not links:
+        return None, ""
+    kind = _link_repetition_kind(links)
+    canonical_links = tuple(sorted({link.canonical_url for link in links}))
+    if not canonical_links or not kind:
+        return None, ""
+    joined = "|".join((kind, *canonical_links))
+    return hashlib.sha1(joined.encode("utf-8")).hexdigest(), kind
 
 
 def _confidence_rank(confidence: str) -> int:
@@ -812,13 +897,20 @@ def _append_surface_text(parts: list[str], value: Any):
         parts.append(cleaned)
 
 
-def _collect_attachment_surface_texts(attachments: Sequence[Any] | None) -> tuple[str, ...]:
+def _collect_attachment_surface_texts(attachments: Sequence[Any] | None) -> tuple[tuple[str, ...], tuple[str, ...]]:
     parts: list[str] = []
+    link_parts: list[str] = []
     for attachment in attachments or ():
         _append_surface_text(parts, getattr(attachment, "filename", ""))
-        _append_surface_text(parts, getattr(attachment, "title", ""))
-        _append_surface_text(parts, getattr(attachment, "description", ""))
-    return tuple(parts)
+        title = _surface_text_or_none(getattr(attachment, "title", ""))
+        if title is not None:
+            parts.append(title)
+            link_parts.append(title)
+        description = _surface_text_or_none(getattr(attachment, "description", ""))
+        if description is not None:
+            parts.append(description)
+            link_parts.append(description)
+    return tuple(parts), tuple(link_parts)
 
 
 def _collect_embed_surface_texts(embeds: Sequence[Any] | None) -> tuple[str, ...]:
@@ -865,36 +957,50 @@ def _collect_embed_surface_texts(embeds: Sequence[Any] | None) -> tuple[str, ...
     return tuple(parts)
 
 
-def _collect_message_surface_texts(message: Any) -> tuple[tuple[str, ...], tuple[str, ...]]:
+def _collect_message_surface_texts(message: Any) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
     extra_texts: list[str] = []
+    link_texts: list[str] = []
     surface_labels: list[str] = []
     normalized_content = normalize_plain_text(getattr(message, "content", ""))
 
     system_content = _surface_text_or_none(getattr(message, "system_content", ""))
     if system_content is not None and system_content.casefold() != normalized_content.casefold():
         extra_texts.append(system_content)
+        link_texts.append(system_content)
         surface_labels.append("system")
 
     embed_texts = _collect_embed_surface_texts(getattr(message, "embeds", ()))
     if embed_texts:
         extra_texts.extend(embed_texts)
+        link_texts.extend(embed_texts)
         surface_labels.append("embeds")
 
-    attachment_texts = _collect_attachment_surface_texts(getattr(message, "attachments", ()))
+    attachment_texts, attachment_link_texts = _collect_attachment_surface_texts(getattr(message, "attachments", ()))
     if attachment_texts:
         extra_texts.extend(attachment_texts)
         surface_labels.append("attachment_meta")
+    if attachment_link_texts:
+        link_texts.extend(attachment_link_texts)
 
     snapshot_texts: list[str] = []
+    snapshot_link_texts: list[str] = []
     for forwarded in getattr(message, "message_snapshots", ()) or ():
-        _append_surface_text(snapshot_texts, getattr(forwarded, "content", ""))
-        snapshot_texts.extend(_collect_embed_surface_texts(getattr(forwarded, "embeds", ())))
-        snapshot_texts.extend(_collect_attachment_surface_texts(getattr(forwarded, "attachments", ())))
+        forwarded_content = _surface_text_or_none(getattr(forwarded, "content", ""))
+        if forwarded_content is not None:
+            snapshot_texts.append(forwarded_content)
+            snapshot_link_texts.append(forwarded_content)
+        forwarded_embed_texts = _collect_embed_surface_texts(getattr(forwarded, "embeds", ()))
+        snapshot_texts.extend(forwarded_embed_texts)
+        snapshot_link_texts.extend(forwarded_embed_texts)
+        forwarded_attachment_texts, forwarded_attachment_link_texts = _collect_attachment_surface_texts(getattr(forwarded, "attachments", ()))
+        snapshot_texts.extend(forwarded_attachment_texts)
+        snapshot_link_texts.extend(forwarded_attachment_link_texts)
     if snapshot_texts:
         extra_texts.extend(snapshot_texts)
+        link_texts.extend(snapshot_link_texts)
         surface_labels.append("forwarded_snapshot")
 
-    return tuple(extra_texts), tuple(dict.fromkeys(surface_labels))
+    return tuple(extra_texts), tuple(link_texts), tuple(dict.fromkeys(surface_labels))
 
 
 def _build_snapshot(
@@ -902,13 +1008,17 @@ def _build_snapshot(
     attachments: Sequence[Any] | None = None,
     *,
     extra_texts: Sequence[str] | None = None,
+    link_texts: Sequence[str] | None = None,
     surface_labels: Sequence[str] | None = None,
 ) -> ShieldSnapshot:
     scan_text = normalize_plain_text(" ".join(part for part in (text or "", *(extra_texts or ())) if part))
     normalized = scan_text
     squashed = squash_for_evasion_checks(normalized.casefold())
     lowered = normalized.casefold()
-    urls = _extract_urls(lowered)
+    link_scan_text = normalize_plain_text(
+        " ".join(part for part in (text or "", *((link_texts if link_texts is not None else extra_texts) or ())) if part)
+    )
+    urls = _extract_urls(link_scan_text.casefold())
     context_text = _strip_urls_from_text(lowered, urls)
     context_squashed = squash_for_evasion_checks(context_text)
     links = tuple(link for link in (_build_link(url) for url in urls) if link is not None)
@@ -939,11 +1049,12 @@ def _build_snapshot(
 
 
 def _build_message_snapshot(message: discord.Message) -> ShieldSnapshot:
-    extra_texts, surface_labels = _collect_message_surface_texts(message)
+    extra_texts, link_texts, surface_labels = _collect_message_surface_texts(message)
     return _build_snapshot(
         getattr(message, "content", None),
         getattr(message, "attachments", None),
         extra_texts=extra_texts,
+        link_texts=link_texts,
         surface_labels=surface_labels,
     )
 
@@ -1062,6 +1173,7 @@ class ShieldService:
         self._compiled_configs: dict[int, CompiledShieldConfig] = {}
         self._alert_dedup: dict[tuple[int, int], tuple[float, str]] = {}
         self._alert_signature_dedup: dict[tuple[Any, ...], float] = {}
+        self._compact_alert_cohorts: dict[tuple[Any, ...], float] = {}
         self._strike_windows: dict[tuple[int, int, str], list[float]] = {}
         self._recent_promos: dict[tuple[int, int, str], list[float]] = {}
         self._recent_scam_campaigns: dict[tuple[int, str, str], list[tuple[float, int]]] = {}
@@ -1605,6 +1717,9 @@ class ShieldService:
             scan_source=scan_source,
             scan_surface_labels=snapshot.surface_labels,
         )
+        if best.match_class == "repetitive_link_noise" and repetition.fingerprint is not None:
+            decision.alert_evidence_signature = repetition.fingerprint
+            decision.alert_evidence_summary = self._repetition_reason(repetition)
 
         if best.action.startswith("delete"):
             decision.deleted = await self._delete_message(message)
@@ -2353,19 +2468,37 @@ class ShieldService:
                 break
         return matches
 
+    def _unallowlisted_links(self, compiled: CompiledShieldConfig, snapshot: ShieldSnapshot) -> tuple[ShieldLink, ...]:
+        links_by_canonical: dict[str, ShieldLink] = {}
+        for link in snapshot.links:
+            allowed = (
+                (link.invite_code is not None and link.invite_code in compiled.allow_invite_codes)
+                or (link.invite_code is None and self._domain_is_allowlisted(link.domain, compiled.allow_domains))
+            )
+            if allowed or link.canonical_url in links_by_canonical:
+                continue
+            links_by_canonical[link.canonical_url] = link
+        return tuple(sorted(links_by_canonical.values(), key=lambda item: item.canonical_url))
+
+    def _repetition_reason(self, repetitive_promo: RepetitionSignals) -> str:
+        hit_count = repetitive_promo.hits
+        window_minutes = int(REPETITION_WINDOW_SECONDS // 60)
+        if repetitive_promo.evidence_kind == "media_link":
+            return (
+                f"The same external media link was posted {hit_count} times in {window_minutes} minutes "
+                "without enough promo evidence to treat it as self-promo."
+            )
+        return (
+            f"The same external link was posted {hit_count} times in {window_minutes} minutes "
+            "without enough promo evidence to treat it as self-promo."
+        )
+
     def _detect_promo(self, compiled: CompiledShieldConfig, snapshot: ShieldSnapshot, *, repetitive_promo: RepetitionSignals) -> list[ShieldMatch]:
         settings = compiled.promo
         if not settings.enabled:
             return []
         matches: list[ShieldMatch] = []
-        unallowlisted_links = [
-            link
-            for link in snapshot.links
-            if (
-                (link.invite_code is not None and link.invite_code not in compiled.allow_invite_codes)
-                or (link.invite_code is None and not self._domain_is_allowlisted(link.domain, compiled.allow_domains))
-            )
-        ]
+        unallowlisted_links = list(self._unallowlisted_links(compiled, snapshot))
         unallowlisted_invites = [link for link in unallowlisted_links if link.invite_code is not None]
         creator_links = [link for link in unallowlisted_links if link.category == "creator_social"]
         storefront_links = [link for link in unallowlisted_links if link.category == "storefront"]
@@ -2434,17 +2567,12 @@ class ShieldService:
         elif repetitive_promo.has_unallowlisted_links:
             noise_threshold = MEDIA_LINK_NOISE_THRESHOLD if repetitive_promo.pure_media_links else GENERIC_LINK_NOISE_THRESHOLD
             if repetitive_promo.hits >= noise_threshold and (settings.sensitivity == "high" or not repetitive_promo.pure_media_links):
-                reason = (
-                    "The same media or GIF link was repeated several times. This looks noisy, not promotional."
-                    if repetitive_promo.pure_media_links
-                    else "The same external link message was repeated several times without enough promo evidence to treat it as self-promo."
-                )
                 matches.append(
                     self._make_pack_match(
                         pack="promo",
                         settings=settings,
-                        label="Repetitive link noise",
-                        reason=reason,
+                        label="Repeated media link" if repetitive_promo.pure_media_links else "Repeated external link",
+                        reason=self._repetition_reason(repetitive_promo),
                         confidence="low",
                         heuristic=True,
                         match_class="repetitive_link_noise",
@@ -2459,26 +2587,22 @@ class ShieldService:
         snapshot: ShieldSnapshot,
         now: float,
     ) -> RepetitionSignals:
-        fingerprint = _canonical_repetition_fingerprint(snapshot)
+        unallowlisted_links = self._unallowlisted_links(compiled, snapshot)
+        fingerprint, evidence_kind = _link_repetition_fingerprint(unallowlisted_links)
         if fingerprint is None:
             return RepetitionSignals(None, 0, False, False)
         key = (message.guild.id, message.author.id, fingerprint)
         hits = [value for value in self._recent_promos.get(key, []) if now - value <= REPETITION_WINDOW_SECONDS]
         hits.append(now)
         self._recent_promos[key] = hits
-        has_unallowlisted_links = any(
-            (
-                (link.invite_code is not None and link.invite_code not in compiled.allow_invite_codes)
-                or (link.invite_code is None and not self._domain_is_allowlisted(link.domain, compiled.allow_domains))
-            )
-            for link in snapshot.links
-        )
-        pure_media_links = bool(snapshot.links) and all(link.category == "media_embed" for link in snapshot.links)
+        has_unallowlisted_links = bool(unallowlisted_links)
+        pure_media_links = bool(unallowlisted_links) and all(link.category == "media_embed" for link in unallowlisted_links)
         return RepetitionSignals(
             fingerprint=fingerprint,
             hits=len(hits),
             pure_media_links=pure_media_links,
             has_unallowlisted_links=has_unallowlisted_links,
+            evidence_kind=evidence_kind,
         )
 
     def _extract_scam_features(
@@ -2825,6 +2949,9 @@ class ShieldService:
         self._alert_signature_dedup = {
             key: value for key, value in self._alert_signature_dedup.items() if now - value <= ALERT_SIGNATURE_DEDUP_SECONDS
         }
+        self._compact_alert_cohorts = {
+            key: value for key, value in self._compact_alert_cohorts.items() if now - value <= LOW_CONFIDENCE_ALERT_COHORT_SECONDS
+        }
         self._recent_promos = {
             key: [value for value in values if now - value <= REPETITION_WINDOW_SECONDS]
             for key, values in self._recent_promos.items()
@@ -2893,6 +3020,80 @@ class ShieldService:
             return True
         return False
 
+    def _should_use_compact_alert(self, decision: ShieldDecision, top_reason: ShieldMatch | None) -> bool:
+        return bool(
+            top_reason is not None
+            and top_reason.heuristic
+            and top_reason.confidence == "low"
+            and decision.action in LOW_CONFIDENCE_ACTIONS
+            and not decision.deleted
+            and not decision.timed_out
+            and not decision.escalated
+        )
+
+    def _should_ping_alert_role(self, decision: ShieldDecision, top_reason: ShieldMatch | None) -> bool:
+        if top_reason is None or self._should_use_compact_alert(decision, top_reason):
+            return False
+        if decision.deleted or decision.timed_out or decision.escalated:
+            return True
+        return bool(top_reason.pack in {"scam", "adult"} and top_reason.confidence == "high")
+
+    def _compact_alert_cohort_key(
+        self,
+        message: discord.Message,
+        decision: ShieldDecision,
+        top_reason: ShieldMatch | None,
+        *,
+        content_fingerprint: str,
+    ) -> tuple[Any, ...]:
+        return (
+            message.guild.id,
+            getattr(message.author, "id", 0),
+            decision.pack or "",
+            top_reason.match_class if top_reason is not None else "",
+            decision.action,
+            top_reason.confidence if top_reason is not None else "",
+            decision.alert_evidence_signature or content_fingerprint,
+        )
+
+    def _build_compact_alert_embed(
+        self,
+        message: discord.Message,
+        decision: ShieldDecision,
+        *,
+        preview: str,
+        attachment_summary: Sequence[str],
+        top_reason: ShieldMatch | None,
+    ) -> discord.Embed:
+        embed = discord.Embed(
+            title=f"Shield Note | {PACK_LABELS.get(decision.pack or '', 'Shield')}",
+            description=f"{message.author.mention} in {message.channel.mention}",
+            color=ge.EMBED_THEME["info"],
+        )
+        if top_reason is not None:
+            embed.add_field(
+                name="Detection",
+                value=(
+                    f"**{top_reason.label}**\n"
+                    f"Confidence: {top_reason.confidence.title()}\n"
+                    f"Resolved action: {ACTION_LABELS.get(decision.action, decision.action)}"
+                ),
+                inline=False,
+            )
+            evidence_summary = decision.alert_evidence_summary or top_reason.reason
+            if evidence_summary:
+                embed.add_field(name="Why it was noted", value=evidence_summary, inline=False)
+        source_summary = SCAN_SOURCE_LABELS.get(decision.scan_source, decision.scan_source.replace("_", " ").title())
+        if decision.scan_surface_labels:
+            source_summary = f"{source_summary} | Surfaces: {', '.join(decision.scan_surface_labels)}"
+        embed.add_field(name="Scan Source", value=source_summary, inline=False)
+        embed.add_field(name="Preview", value=preview or "[no text content]", inline=False)
+        if attachment_summary:
+            embed.add_field(name="Attachments", value="\n".join(attachment_summary[:2]), inline=False)
+        embed.add_field(name="Jump", value=f"[Open message]({message.jump_url})", inline=False)
+        ge.style_embed(embed, footer="Babblebox Shield | Compact low-confidence note")
+        return embed
+
     async def _send_alert(
         self,
         message: discord.Message,
@@ -2910,6 +3111,18 @@ class ShieldService:
         if last_alert is not None and now - last_alert[0] < ALERT_DEDUP_SECONDS and last_alert[1] == content_fingerprint:
             return
         top_reason = decision.reasons[0] if decision.reasons else None
+        compact_alert = self._should_use_compact_alert(decision, top_reason)
+        if compact_alert:
+            cohort_key = self._compact_alert_cohort_key(
+                message,
+                decision,
+                top_reason,
+                content_fingerprint=content_fingerprint,
+            )
+            last_cohort_alert = self._compact_alert_cohorts.get(cohort_key)
+            if last_cohort_alert is not None and now - last_cohort_alert < LOW_CONFIDENCE_ALERT_COHORT_SECONDS:
+                return
+            self._compact_alert_cohorts[cohort_key] = now
         signature_key = (
             message.guild.id,
             getattr(message.channel, "id", 0),
@@ -2939,94 +3152,103 @@ class ShieldService:
             preview = make_message_preview(snapshot.scan_text, limit=MAX_MESSAGE_PREVIEW)
         attachment_summary = make_attachment_labels(message, include_urls=False)
         primary_risky_assessment = self._primary_risky_assessment(decision.link_assessments)
-        alert_title = f"Shield Alert | {PACK_LABELS.get(decision.pack or '', 'Shield')}"
-        embed = discord.Embed(
-            title=alert_title,
-            description=f"{message.author.mention} in {message.channel.mention}",
-            color=ge.EMBED_THEME["danger"] if decision.deleted or decision.timed_out else ge.EMBED_THEME["warning"],
-        )
-        if top_reason is not None:
-            embed.add_field(
-                name="Detection",
-                value=(
-                    f"**{top_reason.label}**\n"
-                    f"Pack: {PACK_LABELS.get(top_reason.pack, top_reason.pack.title())}\n"
-                    f"Class: {_match_class_label(top_reason.match_class)}\n"
-                    f"Confidence: {top_reason.confidence.title()}\n"
-                    f"Resolved action: {ACTION_LABELS.get(decision.action, decision.action)}"
-                ),
-                inline=False,
+        if compact_alert:
+            embed = self._build_compact_alert_embed(
+                message,
+                decision,
+                preview=preview,
+                attachment_summary=attachment_summary,
+                top_reason=top_reason,
             )
-        evidence_lines: list[str] = []
-        if primary_risky_assessment is not None:
-            evidence_lines.append(_link_assessment_basis(primary_risky_assessment))
-            evidence_lines.append(f"Primary risky domain: `{primary_risky_assessment.normalized_domain}`")
-        elif top_reason is not None and top_reason.heuristic:
-            evidence_lines.append("Combined local heuristic signals drove this match.")
-        if top_reason is not None and top_reason.pack == "scam" and top_reason.heuristic:
-            signal_codes = set(getattr(getattr(decision, "member_risk_evidence", None), "signal_codes", ()) or ())
-            context_bits: list[str] = []
-            if "first_message_link" in signal_codes:
-                context_bits.append("first newcomer message carried a link")
-            if "first_external_link" in signal_codes:
-                context_bits.append("first newcomer external link")
-            if "newcomer_first_messages_risky" in signal_codes:
-                context_bits.append("risky activity in the first newcomer messages")
-            if "campaign_path_shape" in signal_codes:
-                context_bits.append("shared risky link shape")
-            if "campaign_host_family" in signal_codes:
-                context_bits.append("shared risky host pattern")
-            if "campaign_lure_reuse" in signal_codes:
-                context_bits.append("reused lure wording")
-            if "fresh_campaign_cluster_2" in signal_codes or "fresh_campaign_cluster_3" in signal_codes:
-                context_bits.append("fresh-account campaign repetition")
-            if context_bits:
-                evidence_lines.append("Confidence rose with: " + ", ".join(context_bits[:3]) + ".")
-        if evidence_lines:
-            embed.add_field(name="Evidence Basis", value="\n".join(evidence_lines), inline=False)
-        source_summary = SCAN_SOURCE_LABELS.get(decision.scan_source, decision.scan_source.replace("_", " ").title())
-        if decision.scan_surface_labels:
-            source_summary = f"{source_summary} | Surfaces: {', '.join(decision.scan_surface_labels)}"
-        embed.add_field(name="Scan Source", value=source_summary, inline=False)
-        embed.add_field(name="Action", value=self._format_action_summary(decision), inline=False)
-        embed.add_field(name="Reason", value="\n".join(f"- {item.reason}" for item in decision.reasons[:3]), inline=False)
-        embed.add_field(name="Preview", value=preview or "[no text content]", inline=False)
-        if attachment_summary:
-            embed.add_field(name="Attachments", value="\n".join(attachment_summary[:4]), inline=False)
-        if decision.link_assessments and top_reason is not None and top_reason.pack in {"scam", "adult"}:
-            embed.add_field(
-                name="Link Safety",
-                value="\n".join(
-                    f"`{item.normalized_domain}` | {_link_assessment_summary(item)}"
-                    + (
-                        f" | signals: {', '.join(signal for signal in item.matched_signals[:3])}"
-                        if item.matched_signals
-                        else ""
-                    )
-                    for item in decision.link_assessments[:3]
-                ),
-                inline=False,
+        else:
+            alert_title = f"Shield Alert | {PACK_LABELS.get(decision.pack or '', 'Shield')}"
+            embed = discord.Embed(
+                title=alert_title,
+                description=f"{message.author.mention} in {message.channel.mention}",
+                color=ge.EMBED_THEME["danger"] if decision.deleted or decision.timed_out else ge.EMBED_THEME["warning"],
             )
-        if decision.ai_review is not None:
-            ai_review = decision.ai_review
-            ai_lines = [
-                f"Classification: **{ai_review.classification_label}**",
-                f"Confidence: {ai_review.confidence.title()}",
-                f"Priority: {AI_PRIORITY_LABELS.get(ai_review.priority, ai_review.priority.title())}",
-            ]
-            if ai_review.false_positive:
-                ai_lines.append("Possible false positive: Yes")
-            ai_lines.append(ai_review.explanation)
-            ai_lines.append(f"Model: `{ai_review.model}`")
-            embed.add_field(name="AI Assist", value="\n".join(ai_lines), inline=False)
-        embed.add_field(name="Jump", value=f"[Open message]({message.jump_url})", inline=True)
-        if top_reason is not None and top_reason.pack == "scam" and top_reason.heuristic:
-            embed.add_field(name="Note", value="Scam detection is heuristic and experimental.", inline=True)
-        if decision.action_note:
-            embed.add_field(name="Operational Note", value=decision.action_note, inline=False)
-        ge.style_embed(embed, footer="Babblebox Shield | No message archive is stored")
+            if top_reason is not None:
+                embed.add_field(
+                    name="Detection",
+                    value=(
+                        f"**{top_reason.label}**\n"
+                        f"Pack: {PACK_LABELS.get(top_reason.pack, top_reason.pack.title())}\n"
+                        f"Class: {_match_class_label(top_reason.match_class)}\n"
+                        f"Confidence: {top_reason.confidence.title()}\n"
+                        f"Resolved action: {ACTION_LABELS.get(decision.action, decision.action)}"
+                    ),
+                    inline=False,
+                )
+            evidence_lines: list[str] = []
+            if primary_risky_assessment is not None:
+                evidence_lines.append(_link_assessment_basis(primary_risky_assessment))
+                evidence_lines.append(f"Primary risky domain: `{primary_risky_assessment.normalized_domain}`")
+            elif top_reason is not None and top_reason.heuristic:
+                evidence_lines.append("Combined local heuristic signals drove this match.")
+            if top_reason is not None and top_reason.pack == "scam" and top_reason.heuristic:
+                signal_codes = set(getattr(getattr(decision, "member_risk_evidence", None), "signal_codes", ()) or ())
+                context_bits: list[str] = []
+                if "first_message_link" in signal_codes:
+                    context_bits.append("first newcomer message carried a link")
+                if "first_external_link" in signal_codes:
+                    context_bits.append("first newcomer external link")
+                if "newcomer_first_messages_risky" in signal_codes:
+                    context_bits.append("risky activity in the first newcomer messages")
+                if "campaign_path_shape" in signal_codes:
+                    context_bits.append("shared risky link shape")
+                if "campaign_host_family" in signal_codes:
+                    context_bits.append("shared risky host pattern")
+                if "campaign_lure_reuse" in signal_codes:
+                    context_bits.append("reused lure wording")
+                if "fresh_campaign_cluster_2" in signal_codes or "fresh_campaign_cluster_3" in signal_codes:
+                    context_bits.append("fresh-account campaign repetition")
+                if context_bits:
+                    evidence_lines.append("Confidence rose with: " + ", ".join(context_bits[:3]) + ".")
+            if evidence_lines:
+                embed.add_field(name="Evidence Basis", value="\n".join(evidence_lines), inline=False)
+            source_summary = SCAN_SOURCE_LABELS.get(decision.scan_source, decision.scan_source.replace("_", " ").title())
+            if decision.scan_surface_labels:
+                source_summary = f"{source_summary} | Surfaces: {', '.join(decision.scan_surface_labels)}"
+            embed.add_field(name="Scan Source", value=source_summary, inline=False)
+            embed.add_field(name="Action", value=self._format_action_summary(decision), inline=False)
+            embed.add_field(name="Reason", value="\n".join(f"- {item.reason}" for item in decision.reasons[:3]), inline=False)
+            embed.add_field(name="Preview", value=preview or "[no text content]", inline=False)
+            if attachment_summary:
+                embed.add_field(name="Attachments", value="\n".join(attachment_summary[:4]), inline=False)
+            if decision.link_assessments and top_reason is not None and top_reason.pack in {"scam", "adult"}:
+                embed.add_field(
+                    name="Link Safety",
+                    value="\n".join(
+                        f"`{item.normalized_domain}` | {_link_assessment_summary(item)}"
+                        + (
+                            f" | signals: {', '.join(signal for signal in item.matched_signals[:3])}"
+                            if item.matched_signals
+                            else ""
+                        )
+                        for item in decision.link_assessments[:3]
+                    ),
+                    inline=False,
+                )
+            if decision.ai_review is not None:
+                ai_review = decision.ai_review
+                ai_lines = [
+                    f"Classification: **{ai_review.classification_label}**",
+                    f"Confidence: {ai_review.confidence.title()}",
+                    f"Priority: {AI_PRIORITY_LABELS.get(ai_review.priority, ai_review.priority.title())}",
+                ]
+                if ai_review.false_positive:
+                    ai_lines.append("Possible false positive: Yes")
+                ai_lines.append(ai_review.explanation)
+                ai_lines.append(f"Model: `{ai_review.model}`")
+                embed.add_field(name="AI Assist", value="\n".join(ai_lines), inline=False)
+            embed.add_field(name="Jump", value=f"[Open message]({message.jump_url})", inline=True)
+            if top_reason is not None and top_reason.pack == "scam" and top_reason.heuristic:
+                embed.add_field(name="Note", value="Scam detection is heuristic and experimental.", inline=True)
+            if decision.action_note:
+                embed.add_field(name="Operational Note", value=decision.action_note, inline=False)
+            ge.style_embed(embed, footer="Babblebox Shield | No message archive is stored")
 
-        content = f"<@&{compiled.alert_role_id}>" if compiled.alert_role_id is not None else None
+        content = f"<@&{compiled.alert_role_id}>" if compiled.alert_role_id is not None and self._should_ping_alert_role(decision, top_reason) else None
         allowed_mentions = discord.AllowedMentions(users=False, roles=True, everyone=False)
         with contextlib.suppress(discord.Forbidden, discord.HTTPException):
             await channel.send(content=content, embed=embed, allowed_mentions=allowed_mentions)

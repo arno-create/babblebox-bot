@@ -428,7 +428,7 @@ class ShieldCog(commands.Cog):
         ai_status = self.service.get_ai_status(guild_id)
         embed = discord.Embed(
             title="Shield Control Panel",
-            description="Shield stays local-first. Bundled intel handles malicious/scam and optional adult / 18+ domains, safe mainstream families bypass suspicion, and unknown suspicious links stay conservative unless combined local scam evidence raises confidence.",
+            description="Shield stays local-first. Bundled intel handles malicious/scam and optional adult / 18+ domains, safe mainstream families bypass suspicion, unknown suspicious links stay conservative unless combined local scam evidence raises confidence, and attachment filenames stay metadata-only unless real link evidence exists.",
             color=ge.EMBED_THEME["warning"] if config["module_enabled"] else ge.EMBED_THEME["info"],
         )
         log_channel = f"<#{config['log_channel_id']}>" if config.get("log_channel_id") else "Not set"
@@ -635,14 +635,16 @@ class ShieldCog(commands.Cog):
             value=(
                 f"Log channel: {log_channel}\n"
                 f"Alert role: {alert_role}\n"
-                "Alerts are deduped so one message does not spam repeated mod notices."
+                "Alerts are deduped so one message does not spam repeated mod notices.\n"
+                "Low-confidence repeated-link notes stay compact and do not ping the alert role."
             ),
             inline=False,
         )
         embed.add_field(
             name="What Alerts Include",
             value=(
-                "Detection class, confidence, resolved action, compact preview, optional attachment summary, and optional AI second-pass note.\n"
+                "Full alerts cover meaningful actions or clearly dangerous matches. Low-confidence heuristics are downgraded to compact notes with precise evidence wording.\n"
+                "Moderator notes include the resolved action, compact preview, optional attachment summary, and optional AI second-pass note.\n"
                 "Babblebox does not keep a heavy deleted-message archive in Shield storage."
             ),
             inline=False,
