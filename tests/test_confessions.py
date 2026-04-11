@@ -1001,6 +1001,26 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(still_blocked.ok)
         self.assertEqual(still_blocked.state, "blocked")
 
+        for offset, (domain, content, path) in enumerate(
+            (
+                ("dlscord-gift.com", "malicious link still blocked", "/claim"),
+                ("pornhub.com", "adult link still blocked", "/view_video.php?viewkey=test"),
+                ("verify-hub.live", "suspicious link still blocked", "/news"),
+            ),
+            start=310,
+        ):
+            ok, message = await self.service.update_domain_policy(self.guild.id, bucket="allow", domain=domain, enabled=True)
+            self.assertTrue(ok, message)
+            blocked_risky = await self.service.submit_confession(
+                self.guild,
+                author_id=offset,
+                content=content,
+                link=f"https://{domain}{path}",
+                attachments=[],
+            )
+            self.assertFalse(blocked_risky.ok)
+            self.assertEqual(blocked_risky.state, "blocked")
+
     async def test_link_mode_allow_all_safe_allows_non_mainstream_safe_links_but_keeps_shield_blocks(self):
         await self._configure(link_mode="allow_all_safe")
 
@@ -1032,6 +1052,18 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(storefront.ok)
         self.assertEqual(shortener.state, "blocked")
         self.assertEqual(storefront.state, "blocked")
+
+        ok, message = await self.service.update_domain_policy(self.guild.id, bucket="allow", domain="verify-hub.live", enabled=True)
+        self.assertTrue(ok, message)
+        suspicious_allowlisted = await self.service.submit_confession(
+            self.guild,
+            author_id=313,
+            content="still blocked even if admins allowlisted it",
+            link="https://verify-hub.live/news",
+            attachments=[],
+        )
+        self.assertFalse(suspicious_allowlisted.ok)
+        self.assertEqual(suspicious_allowlisted.state, "blocked")
 
         ok, message = await self.service.update_domain_policy(self.guild.id, bucket="block", domain="example.com", enabled=True)
         self.assertTrue(ok, message)

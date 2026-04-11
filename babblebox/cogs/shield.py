@@ -316,7 +316,10 @@ class ShieldCog(commands.Cog):
     def _link_policy_detail(self, config: dict[str, object]) -> str:
         low_action, medium_action, high_action = self._link_policy_actions(config)
         if config.get("link_policy_mode") == "trusted_only":
-            detail = "Shield allows only trusted mainstream destinations plus admin allowlisted domains and invite codes."
+            detail = (
+                "Shield allows only trusted mainstream destinations, plus admin allowlisted domains and invite codes "
+                "as policy exceptions. Malicious, adult, and suspicious-link intel still wins."
+            )
         else:
             detail = "Shield preserves the current broad link behavior; trusted-link policy is inactive."
         return (
@@ -331,12 +334,18 @@ class ShieldCog(commands.Cog):
         if assessment.category == "adult":
             return "adult | matched local intel"
         if assessment.category == "unknown_suspicious":
+            if "guild_allow_domain" in getattr(assessment, "matched_signals", ()):
+                return "unknown suspicious | allowlisted but still risky"
             if assessment.provider_lookup_warranted:
                 return "unknown suspicious | lookup candidate, link-only caution"
             return "unknown suspicious | local caution, link-only"
         if assessment.category == "unknown":
+            if "guild_allow_domain" in getattr(assessment, "matched_signals", ()):
+                return "unknown | admin allowlisted policy exception"
             return "unknown | no action"
-        return "safe | allowlisted or safe family"
+        if "guild_allow_domain" in getattr(assessment, "matched_signals", ()):
+            return "safe family | admin allowlisted"
+        return "safe family"
 
     def _is_override_owner(self, user_id: int) -> bool:
         return user_id in SHIELD_AI_OVERRIDE_OWNER_IDS
@@ -462,7 +471,7 @@ class ShieldCog(commands.Cog):
         ai_status = self.service.get_ai_status(guild_id)
         embed = discord.Embed(
             title="Shield Control Panel",
-            description="Shield stays local-first. Bundled intel handles malicious/scam and optional adult / 18+ domains, the solicitation detector stays separately optional, specific 18+ channels can relax only that detector without weakening adult-domain or scam protections, trusted-link mode stays server-side and distinct from Confessions, safe mainstream destinations bypass suspicion, and attachment filenames stay metadata-only unless real link evidence exists.",
+            description="Shield stays local-first. Bundled intel handles malicious/scam and optional adult / 18+ domains, the solicitation detector stays separately optional, specific 18+ channels can relax only that detector without weakening adult-domain or scam protections, trusted-link mode stays server-side and distinct from Confessions, domain and invite allowlists stay bounded to that policy lane, phrase allowlists only suppress targeted promo or adult-solicitation text matches, safe mainstream destinations bypass suspicion, and attachment filenames stay metadata-only unless real link evidence exists.",
             color=ge.EMBED_THEME["warning"] if config["module_enabled"] else ge.EMBED_THEME["info"],
         )
         log_channel = f"<#{config['log_channel_id']}>" if config.get("log_channel_id") else "Not set"
@@ -578,7 +587,7 @@ class ShieldCog(commands.Cog):
         config = self.service.get_config(guild_id)
         embed = discord.Embed(
             title="Shield Scope and Allowlists",
-            description="Control where Shield scans, who it skips, what it should not flag, which domains or invites can override trusted-link mode, and which channels relax only the optional solicitation detector.",
+            description="Control where Shield scans, who it skips, which domains or invites can bypass only trusted-link policy, which phrases suppress only targeted promo or adult-solicitation text matches, and which channels relax only the optional solicitation detector.",
             color=ge.EMBED_THEME["info"],
         )
         embed.add_field(
@@ -607,9 +616,11 @@ class ShieldCog(commands.Cog):
                 f"Domains: {self._format_text_list(config['allow_domains'], limit=6)}\n"
                 f"Invite codes: {self._format_text_list(config['allow_invite_codes'], limit=6)}\n"
                 f"Phrases: {self._format_text_list(config['allow_phrases'], limit=4)}\n"
+                "Domains / invites: trusted-link policy exceptions only\n"
+                "Phrases: suppress promo or adult-solicitation text matches only\n"
                 f"Solicitation carve-out channels: {self._format_mentions(config.get('adult_solicitation_excluded_channel_ids', []), kind='channel')}\n"
                 f"Trusted-link mode: **{self._link_policy_label(config)}**\n"
-                "Only the optional solicitation detector backs off there; adult-domain, scam, and malicious-link protections still run."
+                "Malicious, suspicious-link, adult-domain, and scam protections still run."
             ),
             inline=False,
         )
@@ -857,7 +868,7 @@ class ShieldCog(commands.Cog):
 
     @shield_group.command(name="links", with_app_command=True, description="Configure Shield's trusted-link policy lane")
     @app_commands.describe(
-        mode="Use the current broad behavior or require trusted mainstream destinations plus allowlists only",
+        mode="Use the current broad behavior or require trusted mainstream destinations plus bounded domain or invite policy exceptions",
         action="Shorthand to derive the trusted-link policy action ladder from one action",
         low_action="Action for safe-but-untrusted low-confidence policy matches",
         medium_action="Action for medium-confidence policy matches such as invites or link hubs",
@@ -989,8 +1000,12 @@ class ShieldCog(commands.Cog):
             return
         await self._send_result(ctx, "Shield Filters", "\n".join(messages), ok=ok)
 
-    @shield_group.command(name="allowlist", with_app_command=True, description="Configure Shield allowlists for domains, invite codes, and phrases")
-    @app_commands.describe(bucket="Which allowlist bucket to change", state="Turn this allowlist entry on or off", value="The domain, invite code, or phrase to change")
+    @shield_group.command(name="allowlist", with_app_command=True, description="Configure Shield's bounded domain, invite, and phrase carve-outs")
+    @app_commands.describe(
+        bucket="Which bounded allowlist bucket to change",
+        state="Turn this allowlist entry on or off",
+        value="The domain, invite code, or phrase to change",
+    )
     @app_commands.choices(bucket=ALLOWLIST_BUCKET_CHOICES, state=STATE_CHOICES)
     async def shield_allowlist_command(
         self,

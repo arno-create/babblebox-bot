@@ -459,7 +459,7 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(compiled.promo.high_action, "delete_log")
         self.assertFalse(compiled.adult.enabled)
 
-    async def test_allowlisted_invite_suppresses_promo_match(self):
+    async def test_allowlisted_invite_does_not_bypass_promo_match(self):
         ok, _ = await self.service.set_pack_config(10, "promo", enabled=True, action="log", sensitivity="normal")
         self.assertTrue(ok)
         ok, _ = await self.service.set_allow_entry(10, "allow_invite_codes", "abc123", True)
@@ -467,7 +467,9 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
 
         matches = self.service.test_message(10, "Join us here https://discord.gg/abc123")
 
-        self.assertFalse([match for match in matches if match.pack == "promo"])
+        promo_matches = [match for match in matches if match.pack == "promo"]
+        self.assertTrue(promo_matches)
+        self.assertEqual(promo_matches[0].match_class, "discord_invite")
 
     async def test_promo_high_sensitivity_skips_generic_info_link(self):
         ok, _ = await self.service.set_pack_config(10, "promo", enabled=True, action="log", sensitivity="high")
@@ -901,6 +903,8 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse([match for match in domain_result.matches if match.pack == "link_policy"])
         self.assertFalse([match for match in invite_result.matches if match.pack == "link_policy"])
+        self.assertEqual(domain_result.link_assessments[0].category, "unknown")
+        self.assertIn("guild_allow_domain", domain_result.link_assessments[0].matched_signals)
 
     async def test_trusted_only_link_policy_blocks_link_hubs_and_suspicious_domains(self):
         ok, _ = await self.service.set_link_policy_config(10, mode="trusted_only")
@@ -934,6 +938,33 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(adult_matches[0].match_class, "link_policy_adult")
         self.assertEqual(adult_matches[0].confidence, "high")
 
+    async def test_trusted_only_link_policy_still_blocks_allowlisted_risky_domains(self):
+        ok, _ = await self.service.set_link_policy_config(10, mode="trusted_only")
+        self.assertTrue(ok)
+        for domain in ("dlscord-gift.com", "pornhub.com", "verify-hub.live"):
+            ok, _ = await self.service.set_allow_entry(10, "allow_domains", domain, True)
+            self.assertTrue(ok)
+
+        malicious_result = self.service.test_message_details(10, "Free nitro https://dlscord-gift.com/claim")
+        adult_result = self.service.test_message_details(10, "Adult link https://pornhub.com/view_video.php?viewkey=test")
+        suspicious_result = self.service.test_message_details(10, "Community update https://verify-hub.live/news")
+
+        self.assertEqual(
+            [match.match_class for match in malicious_result.matches if match.pack == "link_policy"],
+            ["link_policy_malicious"],
+        )
+        self.assertEqual(
+            [match.match_class for match in adult_result.matches if match.pack == "link_policy"],
+            ["link_policy_adult"],
+        )
+        self.assertEqual(
+            [match.match_class for match in suspicious_result.matches if match.pack == "link_policy"],
+            ["link_policy_suspicious"],
+        )
+        self.assertIn("guild_allow_domain", malicious_result.link_assessments[0].matched_signals)
+        self.assertIn("guild_allow_domain", adult_result.link_assessments[0].matched_signals)
+        self.assertIn("guild_allow_domain", suspicious_result.link_assessments[0].matched_signals)
+
     async def test_specialized_scam_and_adult_packs_still_own_matches_under_trusted_only_mode(self):
         ok, _ = await self.service.set_pack_config(10, "scam", enabled=True, action="delete_log", sensitivity="normal")
         self.assertTrue(ok)
@@ -955,7 +986,7 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse([match for match in result.matches if match.pack == "link_policy"])
 
-    async def test_allowlisted_domain_overrides_local_malicious_intelligence(self):
+    async def test_allowlisted_domain_does_not_override_local_malicious_intelligence(self):
         ok, _ = await self.service.set_pack_config(10, "scam", enabled=True, action="delete_log", sensitivity="normal")
         self.assertTrue(ok)
         ok, _ = await self.service.set_allow_entry(10, "allow_domains", "dlscord-gift.com", True)
@@ -963,20 +994,22 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
 
         result = self.service.test_message_details(10, "Free nitro https://dlscord-gift.com/claim")
 
-        self.assertFalse([match for match in result.matches if match.pack == "scam"])
-        self.assertEqual(result.link_assessments[0].category, "safe")
+        self.assertTrue([match for match in result.matches if match.pack == "scam"])
+        self.assertEqual(result.link_assessments[0].category, "malicious")
         self.assertIn("guild_allow_domain", result.link_assessments[0].matched_signals)
 
-    async def test_allowlisted_domain_stays_safe_even_with_suspicious_path(self):
+    async def test_allowlisted_domain_only_bypasses_policy_lane_when_no_risky_intel_matches(self):
         ok, _ = await self.service.set_allow_entry(10, "allow_domains", "example.com", True)
         self.assertTrue(ok)
 
         result = self.service.test_message_details(10, "Please verify https://example.com/login?token=abc123")
 
-        self.assertEqual(result.link_assessments[0].category, "safe")
+        self.assertFalse(result.matches)
+        self.assertEqual(result.link_assessments[0].category, "unknown")
+        self.assertIn("guild_allow_domain", result.link_assessments[0].matched_signals)
         self.assertFalse(result.link_assessments[0].provider_lookup_warranted)
 
-    async def test_allow_phrase_bypasses_known_malicious_domain(self):
+    async def test_allow_phrase_does_not_bypass_known_malicious_domain(self):
         guild = FakeGuild(10)
         channel = FakeChannel(20)
         author = FakeAuthor(42, roles=[FakeRole(11, position=1)])
@@ -996,20 +1029,46 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
 
         decision = await self.service.handle_message(message)
 
-        self.assertIsNone(decision)
+        self.assertIsNotNone(decision)
+        self.assertTrue([reason for reason in decision.reasons if reason.pack == "scam"])
+        self.assertEqual(decision.link_assessments[0].category, "malicious")
 
-    async def test_test_message_details_reports_allow_phrase_bypass_without_matches(self):
-        ok, _ = await self.service.set_pack_config(10, "scam", enabled=True, action="delete_log", sensitivity="high")
+    async def test_test_message_details_reports_bounded_allow_phrase_bypass_for_promo(self):
+        ok, _ = await self.service.set_pack_config(10, "promo", enabled=True, action="log", sensitivity="normal")
         self.assertTrue(ok)
-        ok, _ = await self.service.set_allow_entry(10, "allow_phrases", "scam example", True)
+        ok, _ = await self.service.set_allow_entry(10, "allow_phrases", "join us here", True)
         self.assertTrue(ok)
 
-        result = self.service.test_message_details(10, "scam example https://dlscord-gift.com/claim")
+        result = self.service.test_message_details(10, "join us here https://discord.gg/abc123")
 
         self.assertFalse(result.matches)
         self.assertIsNotNone(result.bypass_reason)
         self.assertIn("allow phrase", result.bypass_reason.lower())
-        self.assertEqual(result.link_assessments[0].category, "malicious")
+        self.assertEqual(result.link_assessments[0].category, "safe")
+
+    async def test_allow_phrase_does_not_bypass_trusted_link_policy(self):
+        ok, _ = await self.service.set_link_policy_config(10, mode="trusted_only")
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_allow_entry(10, "allow_phrases", "reference link", True)
+        self.assertTrue(ok)
+
+        result = self.service.test_message_details(10, "reference link https://example.com/guide")
+
+        policy_matches = [match for match in result.matches if match.pack == "link_policy"]
+        self.assertTrue(policy_matches)
+        self.assertEqual(policy_matches[0].match_class, "untrusted_external_link")
+
+    async def test_allow_phrase_still_suppresses_adult_solicitation_text_match(self):
+        ok, _ = await self.service.set_pack_config(10, "adult", enabled=True, action="log", sensitivity="normal", adult_solicitation=True)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_allow_entry(10, "allow_phrases", "policy example", True)
+        self.assertTrue(ok)
+
+        result = self.service.test_message_details(10, "policy example dm me for nudes")
+
+        self.assertFalse([match for match in result.matches if match.pack == "adult"])
+        self.assertIsNotNone(result.bypass_reason)
+        self.assertIn("allow phrase", result.bypass_reason.lower())
 
     async def test_unknown_safe_domain_stays_unknown_without_provider_lookup(self):
         result = self.service.test_message_details(10, "Reference link https://example.org/guide")
@@ -1403,7 +1462,7 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(decisions, [None, None, None, None])
 
-    async def test_allowlisted_invite_repetition_stays_suppressed(self):
+    async def test_allowlisted_domain_repetition_still_hits_link_noise_logic(self):
         guild = FakeGuild(10)
         channel = FakeChannel(20)
         author = FakeAuthor(42, roles=[FakeRole(11, position=1)])
@@ -1412,18 +1471,20 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(ok)
         ok, _ = await self.service.set_pack_config(guild.id, "promo", enabled=True, action="log", sensitivity="high")
         self.assertTrue(ok)
-        ok, _ = await self.service.set_allow_entry(guild.id, "allow_invite_codes", "abc123", True)
+        ok, _ = await self.service.set_allow_entry(guild.id, "allow_domains", "example.com", True)
         self.assertTrue(ok)
 
         with patch.object(self.service, "_send_alert", new=AsyncMock()):
             decisions = [
                 await self.service.handle_message(
-                    FakeMessage(guild=guild, channel=channel, author=author, content="https://discord.gg/abc123")
+                    FakeMessage(guild=guild, channel=channel, author=author, content="https://example.com")
                 )
-                for _ in range(5)
+                for _ in range(4)
             ]
 
-        self.assertEqual(decisions, [None, None, None, None, None])
+        self.assertEqual(decisions[:3], [None, None, None])
+        self.assertIsNotNone(decisions[3])
+        self.assertEqual(decisions[3].reasons[0].match_class, "repetitive_link_noise")
 
     async def test_repeated_invite_spam_can_reach_high_confidence_policy(self):
         guild = FakeGuild(10)
@@ -1575,6 +1636,20 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue([match for match in result.matches if match.pack == "scam"])
         self.assertEqual(result.link_assessments[0].category, "unknown_suspicious")
         self.assertIn("suspicious_attachment_link_combo", result.link_assessments[0].matched_signals)
+
+    async def test_attachment_only_scam_bait_uses_non_link_match_class(self):
+        ok, _ = await self.service.set_pack_config(10, "scam", enabled=True, action="delete_log", sensitivity="normal")
+        self.assertTrue(ok)
+
+        result = self.service.test_message_details(
+            10,
+            "Free nitro claim now",
+            attachments=[FakeAttachment("reward.zip", description="gift package")],
+        )
+
+        match_classes = {match.match_class for match in result.matches if match.pack == "scam"}
+        self.assertIn("scam_bait_attachment", match_classes)
+        self.assertNotIn("scam_bait_link", match_classes)
 
     async def test_forwarded_snapshot_content_is_scanned(self):
         guild = FakeGuild(10)

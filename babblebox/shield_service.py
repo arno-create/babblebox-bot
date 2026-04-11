@@ -119,6 +119,7 @@ MATCH_CLASS_LABELS = {
     "adult_domain": "Known adult domain",
     "adult_dm_ad": "Adult-content DM ad",
     "adult_solicitation": "Sexual solicitation",
+    "scam_bait_attachment": "Scam bait + suspicious file",
     "scam_campaign_lure": "Weighted scam campaign lure",
     "scam_risky_unknown_link": "Risky unknown-link lure",
     "scam_brand_impersonation": "Brand impersonation lure",
@@ -150,6 +151,16 @@ SCAN_SOURCE_LABELS = {
     "message_edit": "Edited message",
     "webhook_message": "Webhook or community post",
 }
+ALLOW_PHRASE_SUPPRESSED_MATCH_CLASSES = frozenset(
+    {
+        "discord_invite",
+        "self_promo",
+        "monetized_promo",
+        "cta_promo",
+        "adult_dm_ad",
+        "adult_solicitation",
+    }
+)
 
 INVITE_RE = re.compile(r"(?i)(?:https?://)?(?:www\.)?(?:discord(?:app)?\.com/invite|discord\.gg)/([a-z0-9-]{2,32})")
 ETH_WALLET_RE = re.compile(r"\b0x[a-fA-F0-9]{40}\b")
@@ -768,20 +779,23 @@ def _link_assessment_summary(assessment: ShieldLinkAssessment) -> str:
         return "lookup candidate; link-only caution" if assessment.provider_lookup_warranted else "local caution; link-only"
     if assessment.category == UNKNOWN_LINK_CATEGORY:
         return "unknown, no action"
-    return "safe or allowlisted"
+    if "guild_allow_domain" in assessment.matched_signals:
+        return "safe family; admin allowlisted"
+    return "safe family"
 
 
 def _link_assessment_basis(assessment: ShieldLinkAssessment) -> str:
+    allowlist_note = " Admin allowlists do not override risky-link intel." if "guild_allow_domain" in assessment.matched_signals else ""
     if assessment.category == MALICIOUS_LINK_CATEGORY:
         if any(signal.startswith("external_malicious_domain_") for signal in assessment.matched_signals):
-            return "Hard intel from the external malicious-domain feed."
+            return f"Hard intel from the external malicious-domain feed.{allowlist_note}"
         if any(signal.startswith("bundled_malicious_domain_") for signal in assessment.matched_signals):
-            return "Hard intel from the bundled malicious-domain feed."
-        return "Hard intel from local malicious-domain intelligence."
+            return f"Hard intel from the bundled malicious-domain feed.{allowlist_note}"
+        return f"Hard intel from local malicious-domain intelligence.{allowlist_note}"
     if assessment.category == UNKNOWN_SUSPICIOUS_LINK_CATEGORY:
-        return "Combined suspicion around an unknown risky link."
+        return f"Combined suspicion around an unknown risky link.{allowlist_note}"
     if assessment.category == ADULT_LINK_CATEGORY:
-        return "Hard intel from the adult-domain list."
+        return f"Hard intel from the adult-domain list.{allowlist_note}"
     return "No risky-link intel matched."
 
 
@@ -1367,16 +1381,16 @@ class ShieldService:
         ]
         snapshot = _build_snapshot(text, fake_attachments)
         now = time.monotonic()
-        if self._allow_phrase_bypass(compiled, snapshot):
-            link_assessments = self._collect_link_assessments(compiled, snapshot, now=now)
-            return ShieldTestResult(
-                matches=(),
-                link_assessments=link_assessments,
-                bypass_reason="A guild allow phrase matched this sample, so live Shield handling would bypass it.",
-            )
         link_assessments = self._collect_link_assessments(compiled, snapshot, now=now)
-        matches = tuple(self._collect_matches(compiled, snapshot, link_assessments=link_assessments, channel_id=channel_id))
+        allow_phrase = self._matching_allow_phrase(compiled, snapshot)
+        raw_matches = self._collect_matches(compiled, snapshot, link_assessments=link_assessments, channel_id=channel_id)
+        matches, allow_phrase_suppressed = self._apply_allow_phrase_suppression(raw_matches, allow_phrase=allow_phrase)
         bypass_reason = None
+        if allow_phrase_suppressed:
+            bypass_reason = (
+                "A guild allow phrase matched this sample, so live Shield handling would suppress only targeted promo "
+                "or adult-solicitation text matches here."
+            )
         if (
             channel_id is not None
             and channel_id in compiled.adult_solicitation_excluded_channel_ids
@@ -1387,7 +1401,7 @@ class ShieldService:
                 bypass_reason = (
                     "This channel relaxes only the optional adult-solicitation detector, so that specific text match would be skipped here."
                 )
-        return ShieldTestResult(matches=matches, link_assessments=link_assessments, bypass_reason=bypass_reason)
+        return ShieldTestResult(matches=tuple(matches), link_assessments=link_assessments, bypass_reason=bypass_reason)
 
     async def set_module_enabled(self, guild_id: int, enabled: bool) -> tuple[bool, str]:
         return await self._update_config(
@@ -1842,9 +1856,6 @@ class ShieldService:
         channel_id: int | None,
     ) -> ShieldDecision | None:
         alert_content_fingerprint = _alert_content_fingerprint(snapshot)
-        if self._allow_phrase_bypass(compiled, snapshot):
-            return None
-
         repetition = (
             self._track_repetitive_promo(message, compiled, snapshot, now)
             if track_repetition
@@ -1867,6 +1878,7 @@ class ShieldService:
             scam_context=scam_context,
             channel_id=channel_id,
         )
+        matches, _ = self._apply_allow_phrase_suppression(matches, allow_phrase=self._matching_allow_phrase(compiled, snapshot))
         if not matches:
             return None
 
@@ -1990,8 +2002,23 @@ class ShieldService:
             repetitive_promo=repetitive_promo,
         )
 
-    def _allow_phrase_bypass(self, compiled: CompiledShieldConfig, snapshot: ShieldSnapshot) -> bool:
-        return any(phrase in snapshot.text for phrase in compiled.allow_phrases)
+    def _matching_allow_phrase(self, compiled: CompiledShieldConfig, snapshot: ShieldSnapshot) -> str | None:
+        return next((phrase for phrase in compiled.allow_phrases if phrase in snapshot.text), None)
+
+    def _apply_allow_phrase_suppression(
+        self,
+        matches: Sequence[ShieldMatch],
+        *,
+        allow_phrase: str | None,
+    ) -> tuple[list[ShieldMatch], bool]:
+        if not allow_phrase:
+            return list(matches), False
+        filtered = [
+            match
+            for match in matches
+            if match.match_class not in ALLOW_PHRASE_SUPPRESSED_MATCH_CLASSES
+        ]
+        return filtered, len(filtered) != len(matches)
 
     def _message_in_scope(self, compiled: CompiledShieldConfig, message: discord.Message) -> bool:
         author_id = getattr(message.author, "id", 0)
@@ -2442,6 +2469,12 @@ class ShieldService:
     ) -> bool:
         if link.invite_code is not None:
             return link.invite_code in compiled.allow_invite_codes
+        if assessment is not None and assessment.category in {
+            MALICIOUS_LINK_CATEGORY,
+            ADULT_LINK_CATEGORY,
+            UNKNOWN_SUSPICIOUS_LINK_CATEGORY,
+        }:
+            return False
         if self._domain_is_allowlisted(link.domain, compiled.allow_domains):
             return True
         return is_trusted_destination(link.domain, safe_family=assessment.safe_family if assessment is not None else None)
@@ -2786,11 +2819,7 @@ class ShieldService:
     def _unallowlisted_links(self, compiled: CompiledShieldConfig, snapshot: ShieldSnapshot) -> tuple[ShieldLink, ...]:
         links_by_canonical: dict[str, ShieldLink] = {}
         for link in snapshot.links:
-            allowed = (
-                (link.invite_code is not None and link.invite_code in compiled.allow_invite_codes)
-                or (link.invite_code is None and self._domain_is_allowlisted(link.domain, compiled.allow_domains))
-            )
-            if allowed or link.canonical_url in links_by_canonical:
+            if link.canonical_url in links_by_canonical:
                 continue
             links_by_canonical[link.canonical_url] = link
         return tuple(sorted(links_by_canonical.values(), key=lambda item: item.canonical_url))
@@ -3045,16 +3074,28 @@ class ShieldService:
             scan_source=scan_source,
             scam_context=scam_context,
         )
-        if features.bait and ((snapshot.has_links and features.risky_link_present) or snapshot.has_suspicious_attachment or features.dangerous_link_target):
+        if features.bait and ((snapshot.has_links and features.risky_link_present) or features.dangerous_link_target):
             matches.append(
                 ShieldMatch(
                     pack="scam",
                     label="Scam bait + link",
-                    reason="Gift, claim, or verification bait appeared next to a link or suspicious file.",
+                    reason="Gift, claim, or verification bait appeared next to a risky link or download target.",
                     action=settings.action_for_confidence("high"),
                     confidence="high",
                     heuristic=True,
                     match_class="scam_bait_link",
+                )
+            )
+        elif features.bait and snapshot.has_suspicious_attachment:
+            matches.append(
+                ShieldMatch(
+                    pack="scam",
+                    label="Scam bait + suspicious file",
+                    reason="Gift, claim, or verification bait appeared next to a suspicious file attachment.",
+                    action=settings.action_for_confidence("high"),
+                    confidence="high",
+                    heuristic=True,
+                    match_class="scam_bait_attachment",
                 )
             )
         if features.shortener_or_punycode and (features.social_engineering or features.cta or features.login_or_auth_flow):

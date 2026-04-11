@@ -216,8 +216,10 @@ class WebsiteDocsTests(unittest.TestCase):
         ):
             self.assertIn(text, readme)
             self.assertIn(text, help_html)
-        self.assertIn("trusted mainstream destinations plus admin allowlisted domains and invite codes", readme)
-        self.assertIn("trusted mainstream destinations plus allowlists only", help_html)
+        self.assertIn("admin allowlisted domains and invite codes as policy exceptions", readme)
+        self.assertIn("trusted mainstream destinations plus bounded domain or invite allowlists only", help_html)
+        self.assertIn("phrase allowlists stay narrower", readme)
+        self.assertIn("phrase allowlists suppress only targeted promo or adult-solicitation text matches", help_html)
         for text in ("solicitation carve-out", "optional solicitation"):
             self.assertIn(text, readme)
             self.assertIn(text, help_html)

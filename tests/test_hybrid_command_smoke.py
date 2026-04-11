@@ -1735,11 +1735,12 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             cog.service.storage_ready = True
             cog.service.store.state["guilds"]["10"] = {
                 "guild_id": 10,
-                "allow_phrases": ["scam example"],
+                "promo_enabled": True,
+                "allow_phrases": ["join us here"],
             }
             ctx = FakeContext(guild=FakeGuild(10), channel=FakeChannel(), author=FakeAuthor(manage_guild=True))
 
-            await cog.shield_test_command.callback(cog, ctx, text="scam example https://dlscord-gift.com/claim")
+            await cog.shield_test_command.callback(cog, ctx, text="join us here https://discord.gg/abc123")
 
             field_names = [field.name for field in ctx.send_calls[0]["embed"].fields]
             self.assertIn("Bypass", field_names)
