@@ -30,7 +30,7 @@ Depending on the feature being used, Babblebox may process or store:
 - compact feature configuration and state, including Watch preferences, ignored channels or users, Later markers, reminders, AFK state, AFK schedules, Daily Arcade results, Buddy or profile state, and Shield or admin configuration
 - limited message or attachment context needed to respond to commands, build Moment Cards from visible messages, deliver Watch alerts, process Capture requests, or evaluate locally flagged Shield events, including visible message text, embed text, forwarded message snapshots, and attachment labels
 - if a server enables suspicious-member review, compact account-age, avatar-state, display-name, and locally flagged message or link context needed to score that review lane
-- anonymous confession or reply submission text, trusted-link fields, compact review metadata, bot-private author mappings, bot-private owner reply opportunities, and limited private appeals or reports needed to run staff-blind confession moderation when a server has Confessions enabled
+- anonymous confession or reply submission text, Confessions link fields, compact review metadata, bot-private author mappings, bot-private owner reply opportunities, and limited private appeals or reports needed to run staff-blind confession moderation when a server has Confessions enabled
 - for Confessions, Babblebox now protects sensitive content and identity linkage with application-level encryption and separate lookup domains before those fields reach durable Postgres storage
 
 ## Information Babblebox Intentionally Avoids Storing Durably
@@ -70,7 +70,9 @@ Babblebox intentionally uses different visibility defaults depending on the feat
 - anonymous confessions are optional, are submitted privately when enabled, keep the author hidden from staff, and let staff review by confession ID and case ID only while Babblebox still enforces safety internally
 - that privacy model is meant to make raw database browsing and accidental exposure materially harder, not to claim that the service operator has been removed from the trust boundary
 - deploying the Confessions privacy code and keys is not enough by itself; Babblebox now tracks a privacy-hardening readiness state because legacy rows remain weaker until the Confessions backfill finishes
-- `Reply to confession anonymously` is off by default, stays text-only when enabled, and any approval happens privately without exposing the author
+- Confessions, anonymous replies, owner replies, and pending self-edits allow up to 4000 characters; appeals and reports stay capped at 1800
+- Confessions link policy can be `Disabled`, `Trusted Only`, or `Allow All Safe`, but Babblebox Shield still blocks unsafe, malicious, suspicious, adult-blocked, shortener, link-in-bio, storefront, and guild-blocked destinations in every mode
+- the latest live confession post can show `Create a confession`, and `Reply to confession anonymously` is off by default, stays text-only when enabled, and routes top-level replies into one reusable thread when Discord allows it without exposing the author
 - owner reply opportunities are bot-private, only trigger from explicit Discord replies to a published confession or first public owner reply, and can be opened from a DM prompt or `/confess reply-to-user`
 - public owner replies post as `Anonymous Owner Reply`, stay text-only, and do not expose the confession owner or the responding member in public or staff-facing moderation surfaces
 - self-edit is off by default and limited to pending submissions when enabled; self-delete is available privately to the original author through Babblebox's internal ownership check
@@ -107,7 +109,7 @@ Examples:
 - short-lived admin lifecycle rows remain only while they are operationally relevant
 - short-lived suspicious-member review rows remain only while review, snooze, or queue state is still operationally relevant
 - ban-return candidate records are intended to have a bounded purge window
-- terminal anonymous confession rows scrub previews, body text, trusted-link fields, and attachment metadata after resolution while the bot-private author mapping and compact keyed duplicate signatures are retained only for moderation continuity and abuse prevention
+- terminal anonymous confession rows scrub previews, body text, link fields, and attachment metadata after resolution while the bot-private author mapping and compact keyed duplicate signatures are retained only for moderation continuity and abuse prevention
 - keyed duplicate-abuse signals are guild-scoped instead of global across every server
 - Watch settings, reminders, AFK settings, and Later markers remain until changed, cleared, expired, or removed
 

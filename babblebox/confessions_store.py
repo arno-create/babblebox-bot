@@ -33,6 +33,8 @@ VALID_SUPPORT_TICKET_KINDS = {"appeal", "report"}
 VALID_SUPPORT_TICKET_STATUSES = {"open", "resolved"}
 VALID_OWNER_REPLY_OPPORTUNITY_STATUSES = {"pending", "locked", "used", "dismissed", "expired"}
 VALID_OWNER_REPLY_NOTIFICATION_STATUSES = {"none", "sent", "failed", "cooldown"}
+VALID_LINK_POLICY_MODES = {"disabled", "trusted_only", "allow_all_safe"}
+DEFAULT_LINK_POLICY_MODE = "trusted_only"
 PROTECTED_OWNER_REPLY_NAME = "Protected member"
 PROTECTED_OWNER_REPLY_PREVIEW = "[protected]"
 SECURE_AUTHOR_LINK_TABLE = "confession_author_identities"
@@ -64,6 +66,7 @@ def default_confession_config(guild_id: int | None = None) -> dict[str, Any]:
         "appeals_channel_id": None,
         "review_mode": True,
         "block_adult_language": True,
+        "link_policy_mode": DEFAULT_LINK_POLICY_MODE,
         "allow_trusted_mainstream_links": True,
         "custom_allow_domains": [],
         "custom_block_domains": [],
@@ -255,6 +258,15 @@ def _clean_attachment_meta(values: Any) -> list[dict[str, Any]]:
     return cleaned[:3]
 
 
+def _normalize_link_policy_mode(value: Any, *, legacy_allow_trusted_links: Any = None) -> str:
+    cleaned = normalize_plain_text(value).casefold() if value is not None else ""
+    if cleaned in VALID_LINK_POLICY_MODES:
+        return cleaned
+    if legacy_allow_trusted_links is not None:
+        return DEFAULT_LINK_POLICY_MODE if bool(legacy_allow_trusted_links) else "disabled"
+    return DEFAULT_LINK_POLICY_MODE
+
+
 def normalize_confession_config(guild_id: int, payload: Any) -> dict[str, Any]:
     cleaned = default_confession_config(guild_id)
     if not isinstance(payload, dict):
@@ -267,7 +279,11 @@ def normalize_confession_config(guild_id: int, payload: Any) -> dict[str, Any]:
     cleaned["appeals_channel_id"] = _clean_int(payload.get("appeals_channel_id"))
     cleaned["review_mode"] = bool(payload.get("review_mode", True))
     cleaned["block_adult_language"] = bool(payload.get("block_adult_language", True))
-    cleaned["allow_trusted_mainstream_links"] = bool(payload.get("allow_trusted_mainstream_links", True))
+    cleaned["link_policy_mode"] = _normalize_link_policy_mode(
+        payload.get("link_policy_mode"),
+        legacy_allow_trusted_links=payload.get("allow_trusted_mainstream_links"),
+    )
+    cleaned["allow_trusted_mainstream_links"] = cleaned["link_policy_mode"] != "disabled"
     cleaned["custom_allow_domains"] = _clean_domain_list(payload.get("custom_allow_domains"))
     cleaned["custom_block_domains"] = _clean_domain_list(payload.get("custom_block_domains"))
     cleaned["allowed_role_ids"] = _clean_int_list(payload.get("allowed_role_ids"))
@@ -350,6 +366,7 @@ def normalize_submission(payload: Any) -> dict[str, Any] | None:
     else:
         reply_flow = None
         owner_reply_generation = None
+    discussion_thread_id = _clean_int(payload.get("discussion_thread_id")) if submission_kind == "confession" else None
     return {
         "submission_id": submission_id,
         "guild_id": guild_id,
@@ -363,7 +380,7 @@ def normalize_submission(payload: Any) -> dict[str, Any] | None:
         "status": status,
         "review_status": review_status,
         "staff_preview": _clean_optional_text(payload.get("staff_preview"), max_length=260),
-        "content_body": _clean_optional_text(payload.get("content_body"), max_length=2000),
+        "content_body": _clean_optional_text(payload.get("content_body"), max_length=4000),
         "shared_link_url": _clean_optional_text(payload.get("shared_link_url"), max_length=500),
         "content_fingerprint": _clean_optional_text(payload.get("content_fingerprint"), max_length=160),
         "similarity_key": _clean_optional_text(payload.get("similarity_key"), max_length=160),
@@ -372,6 +389,7 @@ def normalize_submission(payload: Any) -> dict[str, Any] | None:
         "attachment_meta": _clean_attachment_meta(payload.get("attachment_meta")),
         "posted_channel_id": _clean_int(payload.get("posted_channel_id")),
         "posted_message_id": _clean_int(payload.get("posted_message_id")),
+        "discussion_thread_id": discussion_thread_id,
         "current_case_id": _clean_optional_text(payload.get("current_case_id"), max_length=32),
         "created_at": created_at,
         "published_at": _serialize_datetime(payload.get("published_at")),
@@ -613,7 +631,7 @@ def _raw_json_array_length(value: Any) -> int:
 
 def _has_sensitive_submission_plaintext(row: Any) -> bool:
     return any(
-        _clean_optional_text(row.get(field), max_length=2000) is not None
+        _clean_optional_text(row.get(field), max_length=4000) is not None
         for field in ("staff_preview", "content_body", "shared_link_url", "reply_target_label", "reply_target_preview")
     )
 
@@ -850,6 +868,7 @@ def _submission_from_row(row: Any, privacy: ConfessionsCrypto) -> dict[str, Any]
             "attachment_meta": decode_postgres_json_array(row["attachment_meta"], label="confession_submissions.attachment_meta"),
             "posted_channel_id": row["posted_channel_id"],
             "posted_message_id": row["posted_message_id"],
+            "discussion_thread_id": row.get("discussion_thread_id"),
             "current_case_id": row["current_case_id"],
             "created_at": row["created_at"],
             "published_at": row["published_at"],
@@ -895,7 +914,8 @@ def _config_from_row(row: Any) -> dict[str, Any] | None:
             "appeals_channel_id": row.get("appeals_channel_id"),
             "review_mode": row["review_mode"],
             "block_adult_language": row["block_adult_language"],
-            "allow_trusted_mainstream_links": row["allow_trusted_mainstream_links"],
+            "link_policy_mode": row.get("link_policy_mode"),
+            "allow_trusted_mainstream_links": row.get("allow_trusted_mainstream_links"),
             "custom_allow_domains": decode_postgres_json_array(
                 row["custom_allow_domains"],
                 label="confession_guild_configs.custom_allow_domains",
@@ -2244,6 +2264,7 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                 "appeals_channel_id BIGINT NULL, "
                 "review_mode BOOLEAN NOT NULL DEFAULT TRUE, "
                 "block_adult_language BOOLEAN NOT NULL DEFAULT TRUE, "
+                "link_policy_mode TEXT NOT NULL DEFAULT 'trusted_only', "
                 "allow_trusted_mainstream_links BOOLEAN NOT NULL DEFAULT TRUE, "
                 "custom_allow_domains JSONB NOT NULL DEFAULT '[]'::jsonb, "
                 "custom_block_domains JSONB NOT NULL DEFAULT '[]'::jsonb, "
@@ -2292,6 +2313,7 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                 "attachment_meta JSONB NOT NULL DEFAULT '[]'::jsonb, "
                 "posted_channel_id BIGINT NULL, "
                 "posted_message_id BIGINT NULL, "
+                "discussion_thread_id BIGINT NULL, "
                 "current_case_id TEXT NULL, "
                 "created_at TIMESTAMPTZ NOT NULL, "
                 "published_at TIMESTAMPTZ NULL, "
@@ -2438,6 +2460,7 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
         alter_statements = [
             "ALTER TABLE confession_guild_configs ADD COLUMN IF NOT EXISTS review_mode BOOLEAN NOT NULL DEFAULT TRUE",
             "ALTER TABLE confession_guild_configs ADD COLUMN IF NOT EXISTS block_adult_language BOOLEAN NOT NULL DEFAULT TRUE",
+            "ALTER TABLE confession_guild_configs ADD COLUMN IF NOT EXISTS link_policy_mode TEXT NULL",
             "ALTER TABLE confession_guild_configs ADD COLUMN IF NOT EXISTS allow_trusted_mainstream_links BOOLEAN NOT NULL DEFAULT TRUE",
             "ALTER TABLE confession_guild_configs ADD COLUMN IF NOT EXISTS custom_allow_domains JSONB NOT NULL DEFAULT '[]'::jsonb",
             "ALTER TABLE confession_guild_configs ADD COLUMN IF NOT EXISTS custom_block_domains JSONB NOT NULL DEFAULT '[]'::jsonb",
@@ -2471,6 +2494,7 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
             "ALTER TABLE confession_submissions ADD COLUMN IF NOT EXISTS fuzzy_signature TEXT NULL",
             "ALTER TABLE confession_submissions ADD COLUMN IF NOT EXISTS flag_codes JSONB NOT NULL DEFAULT '[]'::jsonb",
             "ALTER TABLE confession_submissions ADD COLUMN IF NOT EXISTS attachment_meta JSONB NOT NULL DEFAULT '[]'::jsonb",
+            "ALTER TABLE confession_submissions ADD COLUMN IF NOT EXISTS discussion_thread_id BIGINT NULL",
             "ALTER TABLE confession_submissions ADD COLUMN IF NOT EXISTS current_case_id TEXT NULL",
             "ALTER TABLE confession_private_media ADD COLUMN IF NOT EXISTS attachment_payload TEXT NULL",
             "ALTER TABLE confession_enforcement_states ADD COLUMN IF NOT EXISTS image_restriction_active BOOLEAN NOT NULL DEFAULT FALSE",
@@ -2501,6 +2525,9 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
             "ALTER TABLE confession_support_tickets ADD COLUMN IF NOT EXISTS message_channel_id BIGINT NULL",
             "ALTER TABLE confession_support_tickets ADD COLUMN IF NOT EXISTS message_id BIGINT NULL",
             "ALTER TABLE confession_support_tickets ADD COLUMN IF NOT EXISTS resolved_at TIMESTAMPTZ NULL",
+            "UPDATE confession_guild_configs SET link_policy_mode = CASE WHEN allow_trusted_mainstream_links THEN 'trusted_only' ELSE 'disabled' END WHERE link_policy_mode IS NULL OR link_policy_mode = ''",
+            "ALTER TABLE confession_guild_configs ALTER COLUMN link_policy_mode SET DEFAULT 'trusted_only'",
+            "ALTER TABLE confession_guild_configs ALTER COLUMN link_policy_mode SET NOT NULL",
             "ALTER TABLE confession_guild_configs ALTER COLUMN allow_images SET DEFAULT FALSE",
             "UPDATE confession_guild_configs SET image_review_required = allow_images WHERE image_review_required IS NULL",
             "UPDATE confession_guild_configs SET anonymous_reply_review_required = allow_anonymous_replies WHERE anonymous_reply_review_required IS NULL",
@@ -2517,6 +2544,7 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
             "CREATE UNIQUE INDEX IF NOT EXISTS ix_confession_submissions_confession_id ON confession_submissions (guild_id, confession_id)",
             "CREATE INDEX IF NOT EXISTS ix_confession_submissions_status_created ON confession_submissions (guild_id, status, created_at DESC)",
             "CREATE INDEX IF NOT EXISTS ix_confession_submissions_message_id ON confession_submissions (guild_id, posted_message_id)",
+            "CREATE INDEX IF NOT EXISTS ix_confession_submissions_discussion_thread_id ON confession_submissions (guild_id, discussion_thread_id)",
             "CREATE INDEX IF NOT EXISTS ix_confession_submissions_parent_confession_id ON confession_submissions (guild_id, parent_confession_id)",
             "CREATE INDEX IF NOT EXISTS ix_confession_submissions_reply_flow ON confession_submissions (guild_id, reply_flow)",
             "CREATE INDEX IF NOT EXISTS ix_confession_cases_status_created ON confession_cases (guild_id, status, created_at DESC)",
@@ -2565,14 +2593,14 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                     (
                         "INSERT INTO confession_guild_configs ("
                         "guild_id, enabled, confession_channel_id, panel_channel_id, panel_message_id, review_channel_id, appeals_channel_id, review_mode, block_adult_language, "
-                        "allow_trusted_mainstream_links, custom_allow_domains, custom_block_domains, allowed_role_ids, blocked_role_ids, "
+                        "link_policy_mode, allow_trusted_mainstream_links, custom_allow_domains, custom_block_domains, allowed_role_ids, blocked_role_ids, "
                         "allow_images, image_review_required, allow_anonymous_replies, anonymous_reply_review_required, allow_owner_replies, owner_reply_review_mode, allow_self_edit, "
                         "auto_moderation_exempt_admins, auto_moderation_exempt_role_ids, max_images, cooldown_seconds, "
                         "burst_limit, burst_window_seconds, auto_suspend_hours, strike_temp_ban_threshold, temp_ban_days, strike_perm_ban_threshold, updated_at"
                         ") VALUES ("
                         "$1, $2, $3, $4, $5, $6, $7, $8, $9, "
-                        "$10, $11::jsonb, $12::jsonb, $13::jsonb, $14::jsonb, $15, $16, $17, $18, $19, $20, $21, "
-                        "$22, $23::jsonb, $24, $25, $26, $27, $28, $29, $30, $31, timezone('utc', now())"
+                        "$10, $11, $12::jsonb, $13::jsonb, $14::jsonb, $15::jsonb, $16, $17, $18, $19, $20, $21, $22, "
+                        "$23, $24::jsonb, $25, $26, $27, $28, $29, $30, $31, $32, timezone('utc', now())"
                         ") "
                         "ON CONFLICT (guild_id) DO UPDATE SET "
                         "enabled = EXCLUDED.enabled, "
@@ -2583,6 +2611,7 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                         "appeals_channel_id = EXCLUDED.appeals_channel_id, "
                         "review_mode = EXCLUDED.review_mode, "
                         "block_adult_language = EXCLUDED.block_adult_language, "
+                        "link_policy_mode = EXCLUDED.link_policy_mode, "
                         "allow_trusted_mainstream_links = EXCLUDED.allow_trusted_mainstream_links, "
                         "custom_allow_domains = EXCLUDED.custom_allow_domains, "
                         "custom_block_domains = EXCLUDED.custom_block_domains, "
@@ -2616,6 +2645,7 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                     normalized["appeals_channel_id"],
                     normalized["review_mode"],
                     normalized["block_adult_language"],
+                    normalized["link_policy_mode"],
                     normalized["allow_trusted_mainstream_links"],
                     json.dumps(normalized["custom_allow_domains"]),
                     json.dumps(normalized["custom_block_domains"]),
@@ -2651,10 +2681,10 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                     (
                         "INSERT INTO confession_submissions ("
                         "submission_id, guild_id, confession_id, submission_kind, reply_flow, owner_reply_generation, parent_confession_id, reply_target_label, reply_target_preview, status, review_status, staff_preview, content_body, shared_link_url, content_ciphertext, "
-                        "content_fingerprint, similarity_key, fuzzy_signature, flag_codes, attachment_meta, posted_channel_id, posted_message_id, current_case_id, created_at, published_at, resolved_at"
+                        "content_fingerprint, similarity_key, fuzzy_signature, flag_codes, attachment_meta, posted_channel_id, posted_message_id, discussion_thread_id, current_case_id, created_at, published_at, resolved_at"
                         ") VALUES ("
                         "$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, "
-                        "$16, $17, $18, $19::jsonb, $20::jsonb, $21, $22, $23, $24, $25, $26"
+                        "$16, $17, $18, $19::jsonb, $20::jsonb, $21, $22, $23, $24, $25, $26, $27"
                         ") "
                         "ON CONFLICT (submission_id) DO UPDATE SET "
                         "submission_kind = EXCLUDED.submission_kind, "
@@ -2676,6 +2706,7 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                         "attachment_meta = EXCLUDED.attachment_meta, "
                         "posted_channel_id = EXCLUDED.posted_channel_id, "
                         "posted_message_id = EXCLUDED.posted_message_id, "
+                        "discussion_thread_id = EXCLUDED.discussion_thread_id, "
                         "current_case_id = EXCLUDED.current_case_id, "
                         "published_at = EXCLUDED.published_at, "
                         "resolved_at = EXCLUDED.resolved_at"
@@ -2702,6 +2733,7 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
                     json.dumps(row["attachment_meta"]),
                     row["posted_channel_id"],
                     row["posted_message_id"],
+                    row["discussion_thread_id"],
                     row["current_case_id"],
                     _parse_datetime(row["created_at"]),
                     _parse_datetime(row["published_at"]),

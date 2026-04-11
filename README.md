@@ -93,21 +93,22 @@ Babblebox is intentionally compact:
 - private composer and private member utilities launched with `/confess`, `/confess manage`, `/confess appeal`, `/confess report`, `/confess reply-to-user`, and `/confess about`
 - Babblebox keeps the author hidden from members and server staff in normal product use
 - staff-blind moderation by confession ID and case ID only while the bot still enforces safety internally
-- sensitive confession text, trusted-link fields, private media URLs, and owner/accountability linkages are protected with app-level encryption before they reach durable storage
+- sensitive confession text, link fields, private media URLs, and owner/accountability linkages are protected with app-level encryption before they reach durable storage
 - author linkage and enforcement identity lookups use a separate protected identity domain plus keyed lookup hashes instead of ordinary plaintext user IDs in routine Confessions tables
 - duplicate-abuse signals are keyed and guild-scoped so raw database access does not needlessly correlate matching confession text across servers
 - Confessions privacy hardening has an operator-facing readiness state; Babblebox warns when legacy rows still need backfill and shows that status in the private Confessions admin dashboard
-- one trusted link total per confession
-- built-in safe families for mainstream social, docs, wiki, and developer links when trusted links are enabled
+- up to 4000 characters and one link total per confession, anonymous reply, owner reply, or pending self-edit
+- link policy modes are `Disabled`, `Trusted Only` (default), and `Allow All Safe`; Babblebox Shield still blocks malicious, suspicious, adult-blocked, shortener, link-in-bio, storefront, and guild-blocked domains across every mode
 - offensive, vulgar, derogatory, spammy, and private-info patterns are filtered before anything posts
 - adult / 18+ language is blocked by default unless an admin changes that policy
-- shorteners, link-in-bio hubs, storefronts, malicious domains, and adult domains blocked unless a guild explicitly allowlists them
+- shorteners, link-in-bio hubs, storefronts, malicious domains, and adult domains stay blocked even if admins widen the normal Confessions link mode
 - admins can role-allowlist or blacklist who may submit; blacklist wins, and a non-empty allowlist means only those roles may submit
 - images are off by default and must be explicitly enabled by admins
 - anonymous replies are off by default and must be explicitly enabled by admins
 - self-edit is off by default and only applies to still-pending submissions when enabled
 - enabled image support stays bounded and always routes through private review, which requires a separate private review channel
-- enabled `Reply to confession anonymously` stays text-only, depth-1, appears on published confession posts instead of the launch panel, stays anonymous, and may go through private approval before posting
+- the latest published confession post also keeps a live `Create a confession` launcher so members do not have to return to the panel to submit again
+- enabled `Reply to confession anonymously` stays text-only, appears on published confession posts instead of the launch panel, creates one reusable thread per top-level confession when Discord allows it, falls back to ordinary in-channel reply posts when threading is unavailable, and stays anonymous even if private approval happens first
 - owner replies are a separate feature, are enabled by default, stay text-only, and publish publicly as `Anonymous Owner Reply` when used
 - owner-reply review is off by default; admins can enable it separately if they want owner replies queued before posting
 - if someone explicitly replies to your confession or your first public owner reply, Babblebox can DM a bot-private owner reply prompt and `/confess reply-to-user` works as the fallback inbox
@@ -393,15 +394,16 @@ Confession notes:
 - startup and admin status surfaces now warn if Confessions privacy hardening is only partially migrated and the backfill still needs to run
 - duplicate-abuse signals are keyed and guild-scoped rather than global across every server
 - adult / 18+ language is blocked by default unless admins change that policy
-- trusted-link mode allows Babblebox's bundled safe families for mainstream social, docs, wiki, and developer domains
-- one trusted link total is allowed per confession
+- Confessions allow up to 4000 characters plus one link total under the server's active link mode
+- link modes are `Disabled`, `Trusted Only` (default), and `Allow All Safe`; Shield still blocks unsafe and high-risk destinations in every mode
 - `/confess manage`, `/confess appeal`, `/confess report`, and `/confess about` mirror the private member flows from the panel buttons
 - admins can use `/confessions role` to manage role allowlist / blacklist controls; blacklist wins, and a non-empty allowlist means only those roles may submit
 - images are off by default and only work after admins explicitly enable them
 - anonymous replies are off by default and only work after admins explicitly enable them
 - self-edit is off by default and only applies to pending submissions when enabled
 - enabled image confessions always enter the private review queue and require a separate private review channel
-- enabled `Reply to confession anonymously` stays text-only, depth-1, launches from published confession posts instead of the public panel, stays anonymous, and may go through private approval before posting
+- the latest eligible live confession post also shows `Create a confession` so members always have one current public launcher in-channel
+- enabled `Reply to confession anonymously` stays text-only, launches from published confession posts instead of the public panel, uses one reusable thread per top-level confession when Discord allows it, keeps reply-confessions inside the existing thread without nested threads, and stays anonymous even if private approval happens first
 - owner replies are separate from public anonymous replies, are enabled by default, stay text-only, and post publicly as `Anonymous Owner Reply`
 - owner replies only come from Babblebox-owned reply opportunities after someone explicitly replies to your confession or your first owner reply; the chain stops after that extra bounce
 - members can privately delete their own confessions and use a dedicated appeals / reports channel when admins configure one

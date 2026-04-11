@@ -673,7 +673,7 @@
               <li>Daily Arcade scores, attempts, streak counters, Buddy and profile state, and other compact identity or progression fields.</li>
               <li>Shield and admin configuration such as enabled modules, scope controls, allowlists, trusted roles, log destinations, and short-lived admin lifecycle state.</li>
               <li>If a server enables suspicious-member review, compact account-age, avatar-state, display-name, and locally flagged message or link context needed to score that private review lane.</li>
-              <li>Anonymous confession or reply submission text, one trusted-link field, compact review metadata, limited private appeals or reports, a bot-private author mapping, and bot-private owner reply opportunities needed to run staff-blind confession moderation when a server enables the feature.</li>
+              <li>Anonymous confession or reply submission text, one Confessions link field under the server policy, compact review metadata, limited private appeals or reports, a bot-private author mapping, and bot-private owner reply opportunities needed to run staff-blind confession moderation when a server enables the feature.</li>
               <li>For Confessions, Babblebox protects sensitive content and identity linkage with application-level encryption and separate lookup domains before those fields reach durable Postgres storage.</li>
             </ul>
             <h3>Limited message and attachment context</h3>
@@ -735,7 +735,10 @@
               <li>Anonymous confessions are optional, keep the author hidden from staff, and are moderated by confession ID and case ID only while Babblebox still enforces safety internally.</li>
               <li>That privacy model is meant to reduce casual database readability and accidental exposure, not to claim that the service operator has been removed from the trust boundary.</li>
               <li>Deploying the Confessions privacy code and keys is not enough by itself; Babblebox now tracks a privacy-hardening readiness state because legacy rows remain weaker until the Confessions backfill finishes.</li>
-              <li><strong>Reply to confession anonymously</strong> is off by default, stays text-only when enabled, stays anonymous, and may go through private approval before posting.</li>
+              <li>Confessions, anonymous replies, owner replies, and pending self-edits allow up to 4000 characters; appeals and reports stay capped at 1800.</li>
+              <li>Confessions link mode can be <strong>Disabled</strong>, <strong>Trusted Only</strong>, or <strong>Allow All Safe</strong>, but Babblebox Shield still blocks unsafe or high-risk destinations in every mode.</li>
+              <li><strong>Reply to confession anonymously</strong> is off by default, stays text-only when enabled, stays anonymous, may go through private approval before posting, and routes top-level replies into one reusable thread when Discord allows it.</li>
+              <li>The latest eligible live confession post can also show <strong>Create a confession</strong> so members keep one current in-channel launcher.</li>
               <li>Owner reply opportunities are bot-private, only trigger from explicit Discord replies to a published confession or first public owner reply, and can be opened from a DM prompt or <code>/confess reply-to-user</code>.</li>
               <li>Public owner replies post as <code>Anonymous Owner Reply</code>, stay text-only, and do not expose the confession owner or the responding member in public or staff-facing moderation surfaces.</li>
               <li>Self-edit is off by default and limited to pending submissions when enabled; self-delete is available privately through Babblebox's internal ownership check.</li>
@@ -771,7 +774,7 @@
               <li>Daily Arcade raw result rows are designed to prune after 180 days while streak and lifetime totals remain in the profile row.</li>
               <li>Short-lived admin lifecycle records are kept only while they are operationally relevant, such as pending verification, active follow-up role management, or unresolved suspicious-member review.</li>
               <li>Ban-return candidate records are intended to have a bounded purge window rather than indefinite retention.</li>
-              <li>Resolved anonymous confession rows scrub previews, body text, trusted-link fields, and attachment metadata after the moderation workflow is complete while compact keyed duplicate signatures are retained for abuse prevention.</li>
+              <li>Resolved anonymous confession rows scrub previews, body text, link fields, and attachment metadata after the moderation workflow is complete while compact keyed duplicate signatures are retained for abuse prevention.</li>
               <li>Keyed duplicate-abuse signals are guild-scoped instead of global across every server.</li>
               <li>Watch configuration, Later markers, reminders, AFK settings, and similar utility records remain until changed, cleared, expired, or removed.</li>
             </ul>

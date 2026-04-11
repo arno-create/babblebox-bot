@@ -14,7 +14,7 @@ from discord.ext import commands
 from babblebox.app_command_hardening import harden_admin_root_group
 from babblebox import game_engine as ge
 from babblebox.command_utils import defer_hybrid_response, send_hybrid_response
-from babblebox.confessions_service import ConfessionSubmissionResult, ConfessionsService
+from babblebox.confessions_service import MAX_CONFESSION_LENGTH, ConfessionSubmissionResult, ConfessionsService
 from babblebox.text_safety import normalize_plain_text
 
 
@@ -40,6 +40,11 @@ ROLE_RESET_CHOICES = [
 EXEMPTION_RESET_CHOICES = [
     app_commands.Choice(name="Roles", value="roles"),
     app_commands.Choice(name="All", value="all"),
+]
+LINK_MODE_CHOICES = [
+    app_commands.Choice(name="Disabled", value="disabled"),
+    app_commands.Choice(name="Trusted Only", value="trusted_only"),
+    app_commands.Choice(name="Allow All Safe", value="allow_all_safe"),
 ]
 STAFF_ACTION_CHOICES = [
     app_commands.Choice(name="Approve", value="approve"),
@@ -70,8 +75,9 @@ def _moderation_action_payload(action: str) -> tuple[str, int | None, bool]:
 
 RISKY_POLICY_WARNINGS: dict[str, str] = {
     "allow_images": "Images increase moderation burden and can reveal someone through faces, screenshots, or files. Babblebox keeps them bounded, but admins still need to choose whether new image posts always enter review.",
-    "allow_replies": "Anonymous replies can increase abuse, drama, and moderation complexity. Babblebox keeps them text-only and depth-1, but admins still need to choose whether those replies always enter review.",
+    "allow_replies": "Anonymous replies can increase abuse, drama, and moderation complexity. Babblebox keeps them text-only and uses one reusable thread per top-level confession when it can, but admins still need to choose whether those replies always enter review.",
     "allow_self_edit": "Editing can create bait-and-switch moderation problems. Babblebox limits it to pending submissions only.",
+    "allow_all_safe_links": "Allowing all locally safe links expands moderation and privacy risk. Babblebox Shield still blocks unsafe links, but members can post a wider range of destinations that may still reveal identity or invite edge-case abuse.",
 }
 MODAL_TITLE_LIMIT = 45
 MODAL_TEXT_INPUT_LABEL_LIMIT = 45
@@ -235,12 +241,12 @@ class ConfessionComposerModal(discord.ui.Modal, title="Anonymous Confession"):
             style=discord.TextStyle.paragraph,
             placeholder="Keep it clear. Babblebox blocks mentions, unsafe links, and private details.",
             required=False,
-            max_length=1800,
+            max_length=MAX_CONFESSION_LENGTH,
         )
         self.link_input = discord.ui.TextInput(
-            label="Trusted link (optional)",
+            label="Link (optional)",
             style=discord.TextStyle.short,
-            placeholder="One trusted link only. Avoid links that reveal you.",
+            placeholder="One link only. Babblebox still blocks unsafe or high-risk links.",
             required=False,
             max_length=500,
         )
@@ -250,10 +256,10 @@ class ConfessionComposerModal(discord.ui.Modal, title="Anonymous Confession"):
         self.upload_label: discord.ui.Label | None = None
         if self.image_upload_notice:
             self.body_input.placeholder = ge.safe_field_text(
-                f"{self.image_upload_notice} You can still send text and one trusted link.",
+                f"{self.image_upload_notice} You can still send text and one link.",
                 limit=MODAL_TEXT_INPUT_PLACEHOLDER_LIMIT,
             )
-            self.link_input.placeholder = "Text and one trusted link only right now."
+            self.link_input.placeholder = "Text and one link only right now."
         elif self.image_upload_requested:
             if not self.cog.modal_file_upload_available():
                 self._apply_image_upload_fallback(guild_id, code="confession_modal_upload_runtime_unavailable")
@@ -287,8 +293,8 @@ class ConfessionComposerModal(discord.ui.Modal, title="Anonymous Confession"):
                     )
 
     def _apply_image_upload_fallback(self, guild_id: int, *, code: str, exc: Exception | None = None):
-        self.body_input.placeholder = "Image upload is temporarily unavailable right now. You can still send text and one trusted link."
-        self.link_input.placeholder = "Text and one trusted link only right now."
+        self.body_input.placeholder = "Image upload is temporarily unavailable right now. You can still send text and one link."
+        self.link_input.placeholder = "Text and one link only right now."
         self.cog.log_modal_diagnostic(
             code=code,
             stage="modal_upload_runtime",
@@ -421,7 +427,7 @@ class ReplyComposerModal(discord.ui.Modal, title="Anonymous Reply"):
             style=discord.TextStyle.paragraph,
             placeholder="Your anonymous reply stays anonymous. Babblebox may send it through private approval before posting.",
             required=True,
-            max_length=1800,
+            max_length=MAX_CONFESSION_LENGTH,
         )
         self.add_item(self.target_input)
         self.add_item(self.body_input)
@@ -497,7 +503,7 @@ class OwnerReplyComposerModal(discord.ui.Modal, title="Reply to Member Anonymous
             style=discord.TextStyle.paragraph,
             placeholder="Posts publicly as an Anonymous Owner Reply. Babblebox keeps you hidden. Private review may apply.",
             required=True,
-            max_length=1800,
+            max_length=MAX_CONFESSION_LENGTH,
         )
         self.add_item(self.body_input)
 
@@ -678,16 +684,16 @@ class EditConfessionModal(discord.ui.Modal):
             style=discord.TextStyle.paragraph,
             placeholder="Keep it clear. Babblebox re-checks safety before saving.",
             required=False,
-            max_length=1800,
+            max_length=MAX_CONFESSION_LENGTH,
             default=submission.get("content_body") or None,
         )
         self.add_item(self.body_input)
         self.link_input: discord.ui.TextInput | None = None
         if submission.get("submission_kind") != "reply":
             self.link_input = discord.ui.TextInput(
-                label="Trusted link (optional)",
+                label="Link (optional)",
                 style=discord.TextStyle.short,
-                placeholder="One trusted link only.",
+                placeholder="One link only.",
                 required=False,
                 max_length=500,
                 default=submission.get("shared_link_url") or None,
@@ -1449,6 +1455,114 @@ class StatelessPublishedConfessionReplyView(discord.ui.View):
         cog = _resolve_live_confessions_cog(interaction)
         if cog is None:
             await _send_confessions_runtime_unavailable(interaction)
+            return
+        await cog._run_member_interaction(
+            interaction,
+            stage="stateless_public_reply_button",
+            action=lambda: cog._handle_published_reply_button(interaction),
+            failure_message="Babblebox could not open that anonymous reply flow right now. Try the reply button again in a moment.",
+        )
+
+
+class PublishedConfessionReplyView(discord.ui.View):
+    def __init__(self, cog: "ConfessionsCog", *, guild_id: int, show_create: bool = False, show_reply: bool = True):
+        super().__init__(timeout=None)
+        self.cog = cog
+        self.guild_id = guild_id
+        self.show_create = show_create
+        self.show_reply = show_reply
+        self.compose_button: discord.ui.Button | None = None
+        self.reply_button: discord.ui.Button | None = None
+        if show_create:
+            self.compose_button = discord.ui.Button(
+                label="Create a confession",
+                style=discord.ButtonStyle.secondary,
+                custom_id="bb-confession-post:compose",
+                row=0,
+            )
+            self.compose_button.callback = self._compose_callback
+            self.add_item(self.compose_button)
+        if show_reply:
+            self.reply_button = discord.ui.Button(
+                label="Reply to confession anonymously",
+                style=discord.ButtonStyle.primary,
+                custom_id="bb-confession-post:reply",
+                row=0,
+            )
+            self.reply_button.callback = self._reply_callback
+            self.add_item(self.reply_button)
+
+    async def _resolve_cog(self, interaction: discord.Interaction):
+        cog = _resolve_live_confessions_cog(interaction, self.cog)
+        if cog is None:
+            await _send_confessions_runtime_unavailable(interaction)
+            return None
+        return cog
+
+    async def _compose_callback(self, interaction: discord.Interaction):
+        cog = await self._resolve_cog(interaction)
+        if cog is None:
+            return
+        await cog._run_member_interaction(
+            interaction,
+            stage="public_compose_button",
+            action=lambda: cog._open_confession_modal(interaction),
+            failure_message="Babblebox could not open the private confession composer right now. Try the create button again in a moment.",
+        )
+
+    async def _reply_callback(self, interaction: discord.Interaction):
+        cog = await self._resolve_cog(interaction)
+        if cog is None:
+            return
+        await cog._run_member_interaction(
+            interaction,
+            stage="public_reply_button",
+            action=lambda: cog._handle_published_reply_button(interaction),
+            failure_message="Babblebox could not open that anonymous reply flow right now. Try the reply button again in a moment.",
+        )
+
+
+class StatelessPublishedConfessionReplyView(discord.ui.View):
+    def __init__(self):
+        super().__init__(timeout=None)
+        self.compose_button = discord.ui.Button(
+            label="Create a confession",
+            style=discord.ButtonStyle.secondary,
+            custom_id="bb-confession-post:compose",
+            row=0,
+        )
+        self.compose_button.callback = self._compose_callback
+        self.add_item(self.compose_button)
+        self.reply_button = discord.ui.Button(
+            label="Reply to confession anonymously",
+            style=discord.ButtonStyle.primary,
+            custom_id="bb-confession-post:reply",
+            row=0,
+        )
+        self.reply_button.callback = self._reply_callback
+        self.add_item(self.reply_button)
+
+    async def _resolve_cog(self, interaction: discord.Interaction):
+        cog = _resolve_live_confessions_cog(interaction)
+        if cog is None:
+            await _send_confessions_runtime_unavailable(interaction)
+            return None
+        return cog
+
+    async def _compose_callback(self, interaction: discord.Interaction):
+        cog = await self._resolve_cog(interaction)
+        if cog is None:
+            return
+        await cog._run_member_interaction(
+            interaction,
+            stage="stateless_public_compose_button",
+            action=lambda: cog._open_confession_modal(interaction),
+            failure_message="Babblebox could not open the private confession composer right now. Try the create button again in a moment.",
+        )
+
+    async def _reply_callback(self, interaction: discord.Interaction):
+        cog = await self._resolve_cog(interaction)
+        if cog is None:
             return
         await cog._run_member_interaction(
             interaction,
@@ -2282,8 +2396,14 @@ class ConfessionsCog(commands.Cog):
             return self.service.build_member_result_view(result)
         return MemberResultActionView(self, guild_id=guild_id, result=result)
 
-    def build_public_confession_view(self, *, guild_id: int) -> PublishedConfessionReplyView:
-        return PublishedConfessionReplyView(self, guild_id=guild_id)
+    def build_public_confession_view(
+        self,
+        *,
+        guild_id: int,
+        show_create: bool = False,
+        show_reply: bool = True,
+    ) -> PublishedConfessionReplyView:
+        return PublishedConfessionReplyView(self, guild_id=guild_id, show_create=show_create, show_reply=show_reply)
 
     def build_owner_reply_prompt_view(self) -> StatelessOwnerReplyPromptView:
         return StatelessOwnerReplyPromptView()
@@ -3962,7 +4082,7 @@ class ConfessionsCog(commands.Cog):
 
     @app_commands.describe(
         block_adult_language="Block adult or 18+ language",
-        allow_trusted_links="Allow Babblebox's trusted link families",
+        link_mode="Choose whether confessions block links, allow trusted links only, or allow all locally safe links",
         allow_images="Enable image attachments for confessions",
         allow_replies="Enable anonymous replies",
         allow_owner_replies="Enable owner-bound anonymous owner replies when members respond to a confession",
@@ -3977,12 +4097,13 @@ class ConfessionsCog(commands.Cog):
         temp_ban_days="Temporary ban length",
         strike_perm_ban_threshold="Strike count for permanent ban",
     )
+    @app_commands.choices(link_mode=LINK_MODE_CHOICES)
     @confessions_group.command(name="policy", description="Adjust Confessions safety, link, image, and flood controls")
     async def confessions_policy_command(
         self,
         ctx: commands.Context,
         block_adult_language: Optional[bool] = None,
-        allow_trusted_links: Optional[bool] = None,
+        link_mode: Optional[str] = None,
         allow_images: Optional[bool] = None,
         allow_replies: Optional[bool] = None,
         allow_owner_replies: Optional[bool] = None,
@@ -4001,7 +4122,7 @@ class ConfessionsCog(commands.Cog):
             current = self.service.get_config(ctx.guild.id)
             updates = {
                 "block_adult_language": block_adult_language,
-                "allow_trusted_mainstream_links": allow_trusted_links,
+                "link_policy_mode": link_mode,
                 "allow_images": allow_images,
                 "allow_anonymous_replies": allow_replies,
                 "allow_owner_replies": allow_owner_replies,
@@ -4026,6 +4147,8 @@ class ConfessionsCog(commands.Cog):
                 reviewable_updates.append("anonymous_reply_review_required")
             if allow_self_edit and not current["allow_self_edit"]:
                 warning_fields.append(("Self-Edit", RISKY_POLICY_WARNINGS["allow_self_edit"]))
+            if link_mode == "allow_all_safe" and current.get("link_policy_mode") != "allow_all_safe":
+                warning_fields.append(("Allow All Safe Links", RISKY_POLICY_WARNINGS["allow_all_safe_links"]))
             if warning_fields:
                 await self._send_policy_warning(
                     ctx,
