@@ -1189,6 +1189,9 @@ class _BaseConfessionsStore:
     async def list_published_top_level_submissions(self, guild_id: int) -> list[dict[str, Any]]:
         raise NotImplementedError
 
+    async def list_published_public_reply_submissions(self, guild_id: int) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
     async def list_recent_submissions_for_author(self, guild_id: int, author_user_id: int, *, limit: int = 5) -> list[dict[str, Any]]:
         raise NotImplementedError
 
@@ -1532,6 +1535,21 @@ class _MemoryConfessionsStore(_BaseConfessionsStore):
             if record["guild_id"] != guild_id:
                 continue
             if record.get("status") != "published" or record.get("submission_kind") != "confession":
+                continue
+            if not isinstance(record.get("posted_channel_id"), int) or not isinstance(record.get("posted_message_id"), int):
+                continue
+            rows.append(_submission_from_row(deepcopy(record), self._privacy))
+        rows.sort(key=lambda item: item.get("published_at") or item.get("created_at") or "")
+        return rows
+
+    async def list_published_public_reply_submissions(self, guild_id: int) -> list[dict[str, Any]]:
+        rows = []
+        for record in self.submissions.values():
+            if record["guild_id"] != guild_id:
+                continue
+            if record.get("status") != "published" or record.get("submission_kind") != "reply":
+                continue
+            if record.get("reply_flow") != "reply_to_confession":
                 continue
             if not isinstance(record.get("posted_channel_id"), int) or not isinstance(record.get("posted_message_id"), int):
                 continue
@@ -2776,6 +2794,20 @@ class _PostgresConfessionsStore(_BaseConfessionsStore):
             )
         return [record for row in rows if (record := _submission_from_row(row, self._privacy)) is not None]
 
+    async def list_published_public_reply_submissions(self, guild_id: int) -> list[dict[str, Any]]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                (
+                    "SELECT * FROM confession_submissions "
+                    "WHERE guild_id = $1 AND status = 'published' AND submission_kind = 'reply' "
+                    "AND reply_flow = 'reply_to_confession' "
+                    "AND posted_channel_id IS NOT NULL AND posted_message_id IS NOT NULL "
+                    "ORDER BY COALESCE(published_at, created_at) ASC"
+                ),
+                guild_id,
+            )
+        return [record for row in rows if (record := _submission_from_row(row, self._privacy)) is not None]
+
     async def list_recent_submissions_for_author(self, guild_id: int, author_user_id: int, *, limit: int = 5) -> list[dict[str, Any]]:
         author_lookup_hashes = list(
             self._privacy.blind_index_candidates(label="author-link", guild_id=guild_id, value=author_user_id)
@@ -3828,6 +3860,9 @@ class ConfessionsStore:
 
     async def list_published_top_level_submissions(self, guild_id: int) -> list[dict[str, Any]]:
         return await self._store.list_published_top_level_submissions(guild_id)
+
+    async def list_published_public_reply_submissions(self, guild_id: int) -> list[dict[str, Any]]:
+        return await self._store.list_published_public_reply_submissions(guild_id)
 
     async def list_recent_submissions_for_author(self, guild_id: int, author_user_id: int, *, limit: int = 5) -> list[dict[str, Any]]:
         return await self._store.list_recent_submissions_for_author(guild_id, author_user_id, limit=limit)

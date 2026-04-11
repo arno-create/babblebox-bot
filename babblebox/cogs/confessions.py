@@ -1096,7 +1096,7 @@ class MemberResultActionView(TimedMemberPrivateView):
             failure_message="Babblebox could not reopen that private manage flow right now. Run `/confess manage` again in a moment.",
         )
 
-    @discord.ui.button(label="Reply to confession anonymously", style=discord.ButtonStyle.primary, row=0)
+    @discord.ui.button(label="Reply anonymously", style=discord.ButtonStyle.primary, row=0)
     async def reply_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         default_target = self.result.confession_id if self.result.submission_kind == "confession" else self.result.parent_confession_id
         await self.cog._run_member_interaction(
@@ -1422,7 +1422,7 @@ class PublishedConfessionReplyView(discord.ui.View):
         if show_create:
             self.compose_button = discord.ui.Button(
                 label="Create a confession",
-                style=discord.ButtonStyle.secondary,
+                style=discord.ButtonStyle.primary,
                 custom_id="bb-confession-post:compose",
                 row=0,
             )
@@ -1430,8 +1430,8 @@ class PublishedConfessionReplyView(discord.ui.View):
             self.add_item(self.compose_button)
         if show_reply:
             self.reply_button = discord.ui.Button(
-                label="Reply to confession anonymously",
-                style=discord.ButtonStyle.primary,
+                label="Reply anonymously",
+                style=discord.ButtonStyle.secondary,
                 custom_id="bb-confession-post:reply",
                 row=0,
             )
@@ -1473,15 +1473,15 @@ class StatelessPublishedConfessionReplyView(discord.ui.View):
         super().__init__(timeout=None)
         self.compose_button = discord.ui.Button(
             label="Create a confession",
-            style=discord.ButtonStyle.secondary,
+            style=discord.ButtonStyle.primary,
             custom_id="bb-confession-post:compose",
             row=0,
         )
         self.compose_button.callback = self._compose_callback
         self.add_item(self.compose_button)
         self.reply_button = discord.ui.Button(
-            label="Reply to confession anonymously",
-            style=discord.ButtonStyle.primary,
+            label="Reply anonymously",
+            style=discord.ButtonStyle.secondary,
             custom_id="bb-confession-post:reply",
             row=0,
         )
@@ -3049,10 +3049,14 @@ class ConfessionsCog(commands.Cog):
             await interaction.response.send_message("That confession is not available for anonymous replies.", ephemeral=True)
             return
         submission = await self.service.store.fetch_submission_by_message_id(interaction.guild.id, message_id)
-        if submission is None or submission.get("status") != "published" or submission.get("submission_kind") != "confession":
+        if submission is None:
             await interaction.response.send_message("That confession is not available for anonymous replies.", ephemeral=True)
             return
-        await self._open_reply_modal(interaction, default_target=submission["confession_id"])
+        target_confession_id = self.service.public_reply_target_confession_id(submission)
+        if target_confession_id is None:
+            await interaction.response.send_message("That confession is not available for anonymous replies.", ephemeral=True)
+            return
+        await self._open_reply_modal(interaction, default_target=target_confession_id)
 
     async def _send_owner_reply_inbox(self, interaction: discord.Interaction, *, edit_existing: bool = False):
         if interaction.guild is None or interaction.user is None:
