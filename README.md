@@ -141,7 +141,7 @@ Babblebox is intentionally compact:
 - log-first defaults
   - trusted-role bypass
   - included / excluded scope controls
-  - allowlists for domains, invite codes, and phrases
+- bounded allowlists for domains, invite codes, and phrases
   - compact advanced patterns with `contains`, `word`, and safe `wildcard` matching
   - raw custom regex intentionally unsupported to avoid unsafe hot-path backtracking
 - Admin lifecycle helpers
@@ -321,7 +321,7 @@ Slash is the best fit for multi-option admin setup here. Prefix stays positional
 | `/shield advanced list` | `bb!shield advanced list` | Review advanced patterns |
 | `/shield test` | `bb!shield test free nitro claim now https://bit.ly/x` | Dry-run a message through Shield |
 
-Shield's live-message link policy is intentionally separate from Confessions link mode. Confessions keeps `Disabled`, `Trusted Only`, and `Allow All Safe`, while Shield keeps `Default` plus the bounded `Trusted Links Only` mode. That stricter Shield mode allows trusted mainstream destinations plus admin allowlisted domains and invite codes, while stronger scam and adult-domain matches still belong to their specialized packs when those packs are enabled.
+Shield's live-message link policy is intentionally separate from Confessions link mode. Confessions keeps `Disabled`, `Trusted Only`, and `Allow All Safe`, while Shield keeps `Default` plus the bounded `Trusted Links Only` mode. That stricter Shield mode allows trusted mainstream destinations plus admin allowlisted domains and invite codes as policy exceptions, while malicious, suspicious, and adult-domain intel still belongs to the specialized Shield packs. Shield phrase allowlists stay narrower: they suppress only targeted promo or adult-solicitation text matches.
 
 ### Admin Lifecycle
 
@@ -539,7 +539,7 @@ Stored data is intentionally small:
 - action modes and sensitivities
 - AI enabled state, AI confidence threshold, and AI-eligible pack choices
 - compact include / exclude / trusted lists
-- compact allowlists
+- compact bounded allowlists
 - escalation thresholds
 - safe advanced pattern metadata
 

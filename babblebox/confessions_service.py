@@ -4097,10 +4097,19 @@ class ConfessionsService:
     def _link_policy_detail(self, config: dict[str, Any]) -> str:
         mode = str(config.get("link_policy_mode") or DEFAULT_LINK_POLICY_MODE)
         if mode == "disabled":
-            return "Links stay off unless admins add a custom safe allowlist entry. Shield still blocks unsafe domains."
+            return (
+                "Links stay off unless admins add a custom allowlist entry. Shield still blocks malicious, suspicious, "
+                "adult-blocked, shortener, link-in-bio, storefront, and guild-blocked destinations."
+            )
         if mode == "allow_all_safe":
-            return "Babblebox accepts non-mainstream links that local Shield checks still consider safe. Malicious, suspicious, adult-blocked, shortener, link-in-bio, and storefront links still fail."
-        return "Babblebox allows trusted mainstream families by default. Unknown or risky links still fail unless admins explicitly allow a safe domain."
+            return (
+                "Babblebox accepts non-mainstream links that local Shield checks still consider safe. Malicious, "
+                "suspicious, adult-blocked, shortener, link-in-bio, storefront, and guild-blocked links still fail."
+            )
+        return (
+            "Babblebox allows trusted mainstream families by default. Unknown links stay blocked unless admins "
+            "explicitly allow the domain, and risky destinations still fail."
+        )
 
 
     def build_member_panel_embed(self, guild: discord.Guild) -> discord.Embed:
@@ -4340,7 +4349,8 @@ class ConfessionsService:
                     f"Mode: **{self._link_policy_label(config)}**\n"
                     f"Allowlist: **{len(config['custom_allow_domains'])}** custom\n"
                     f"Blocklist: **{len(config['custom_block_domains'])}** custom\n"
-                    "Shield hard blocks: **Always on**"
+                    "Shield hard blocks: **Always on**\n"
+                    "Allowlists cannot override malicious, suspicious, adult, shortener, link-in-bio, storefront, or guild-blocked destinations."
                 ),
                 inline=False,
             )

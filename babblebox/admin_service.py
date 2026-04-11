@@ -1805,6 +1805,7 @@ class AdminService:
         labels = {
             "known_malicious_domain": "Known malicious domain",
             "scam_attachment": "Executable or archive lure",
+            "scam_bait_attachment": "Scam bait + suspicious file",
             "scam_bait_link": "Scam bait + link",
             "scam_brand_impersonation": "Official-looking brand lure",
             "scam_campaign_lure": "Scam social-engineering pattern",

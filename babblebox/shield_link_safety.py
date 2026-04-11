@@ -505,16 +505,6 @@ class ShieldLinkSafetyEngine:
     ) -> ShieldLinkAssessment:
         diagnostics = self.provider.diagnostics()
         provider_status = diagnostics.get("status", "Unavailable.")
-        if allowlisted:
-            return ShieldLinkAssessment(
-                normalized_domain=domain,
-                category=SAFE_LINK_CATEGORY,
-                matched_signals=("guild_allow_domain",),
-                provider_lookup_warranted=False,
-                provider_status=provider_status,
-                intel_version=self.intel.intel_version,
-            )
-
         cached = self.cache.get(domain, now=now)
         cache_hit = cached is not None
         if cached is None:
@@ -522,6 +512,8 @@ class ShieldLinkSafetyEngine:
             self.cache.set(domain, cached, now=now)
 
         signals = list(cached.host_signals)
+        if allowlisted:
+            signals.append("guild_allow_domain")
         if cached.safe_family is not None:
             signals.insert(0, f"safe_family:{cached.safe_family}")
             return ShieldLinkAssessment(

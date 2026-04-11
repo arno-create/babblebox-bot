@@ -2035,6 +2035,35 @@ class AdminServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.log_channel.sent[-1]["embed"].title, "Member Risk Note")
         self.assertIn("Basis: Official-looking brand lure", self.log_channel.sent[-1]["embed"].description)
 
+    async def test_member_risk_log_mode_note_uses_attachment_only_scam_basis_label(self):
+        await self._configure_member_risk(with_logs=True, mode="log")
+        member = FakeMember(
+            2064,
+            self.guild,
+            roles=[],
+            top_role=FakeRole(5, position=5),
+            created_at=ge.now_utc() - timedelta(hours=2),
+            joined_at=ge.now_utc() - timedelta(minutes=10),
+            avatar=None,
+            display_name="Support Desk",
+        )
+        self.guild.members[member.id] = member
+        message = types.SimpleNamespace(guild=self.guild, author=member, webhook_id=None)
+
+        await self.service.handle_member_risk_message(
+            message,
+            self._member_risk_decision(
+                "scam_high",
+                "suspicious_attachment",
+                message_codes=("scam_high", "suspicious_attachment"),
+                match_class="scam_bait_attachment",
+                confidence="high",
+            ),
+        )
+
+        self.assertEqual(self.log_channel.sent[-1]["embed"].title, "Member Risk Note")
+        self.assertIn("Basis: Scam bait + suspicious file", self.log_channel.sent[-1]["embed"].description)
+
     async def test_member_risk_review_action_delay_and_ignore(self):
         await self._configure_member_risk(with_logs=True, mode="review")
         member = FakeMember(
