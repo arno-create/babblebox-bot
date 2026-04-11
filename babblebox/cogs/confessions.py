@@ -1322,37 +1322,6 @@ class ConfessionMemberPanelView(discord.ui.View):
         )
 
 
-class PublishedConfessionReplyView(discord.ui.View):
-    def __init__(self, cog: "ConfessionsCog", *, guild_id: int):
-        super().__init__(timeout=None)
-        self.cog = cog
-        self.guild_id = guild_id
-
-    async def _resolve_cog(self, interaction: discord.Interaction):
-        cog = _resolve_live_confessions_cog(interaction, self.cog)
-        if cog is None:
-            await _send_confessions_runtime_unavailable(interaction)
-            return None
-        return cog
-
-    @discord.ui.button(
-        label="Reply to confession anonymously",
-        style=discord.ButtonStyle.primary,
-        custom_id="bb-confession-post:reply",
-        row=0,
-    )
-    async def reply_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        cog = await self._resolve_cog(interaction)
-        if cog is None:
-            return
-        await cog._run_member_interaction(
-            interaction,
-            stage="public_reply_button",
-            action=lambda: cog._handle_published_reply_button(interaction),
-            failure_message="Babblebox could not open that anonymous reply flow right now. Try the reply button again in a moment.",
-        )
-
-
 class StatelessConfessionMemberPanelView(discord.ui.View):
     def __init__(self):
         super().__init__(timeout=None)
@@ -1438,29 +1407,6 @@ class StatelessConfessionMemberPanelView(discord.ui.View):
             stage="stateless_panel_help",
             action=lambda: cog._send_confession_about(interaction),
             failure_message="Babblebox could not open the Confessions help panel right now. Run `/confess about` again in a moment.",
-        )
-
-
-class StatelessPublishedConfessionReplyView(discord.ui.View):
-    def __init__(self):
-        super().__init__(timeout=None)
-
-    @discord.ui.button(
-        label="Reply to confession anonymously",
-        style=discord.ButtonStyle.primary,
-        custom_id="bb-confession-post:reply",
-        row=0,
-    )
-    async def reply_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        cog = _resolve_live_confessions_cog(interaction)
-        if cog is None:
-            await _send_confessions_runtime_unavailable(interaction)
-            return
-        await cog._run_member_interaction(
-            interaction,
-            stage="stateless_public_reply_button",
-            action=lambda: cog._handle_published_reply_button(interaction),
-            failure_message="Babblebox could not open that anonymous reply flow right now. Try the reply button again in a moment.",
         )
 
 
