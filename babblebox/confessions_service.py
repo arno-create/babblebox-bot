@@ -44,6 +44,7 @@ from babblebox.shield_link_safety import (
     ShieldLinkAssessment,
     ShieldLinkSafetyEngine,
     domain_in_set,
+    is_trusted_destination,
 )
 from babblebox.text_safety import (
     CARD_RE,
@@ -108,20 +109,6 @@ RASTER_IMAGE_CONTENT_TYPES = frozenset(
     {"image/png", "image/jpeg", "image/jpg", "image/gif", "image/webp", "image/bmp"}
 )
 RASTER_IMAGE_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"})
-TRUSTED_SAFE_FAMILIES = frozenset({"social", "media", "docs", "dev", "wiki"})
-TRUSTED_MAINSTREAM_DOMAINS = {
-    "google.com",
-    "youtube.com",
-    "youtu.be",
-    "wikipedia.org",
-    "github.com",
-    "gitlab.com",
-    "python.org",
-    "docs.python.org",
-    "mozilla.org",
-}
-
-
 def _moderation_action_payload(action: str) -> tuple[str, int | None, bool]:
     if action == "pause_24h":
         return "suspend", 24 * 3600, False
@@ -1872,11 +1859,7 @@ class ConfessionsService:
             return False
         if link_mode == "allow_all_safe":
             return assessment.category in {SAFE_LINK_CATEGORY, UNKNOWN_LINK_CATEGORY}
-        if assessment.safe_family in TRUSTED_SAFE_FAMILIES:
-            return True
-        if domain_in_set(domain, TRUSTED_MAINSTREAM_DOMAINS):
-            return True
-        return False
+        return is_trusted_destination(domain, safe_family=assessment.safe_family)
 
     def _assess_links(
         self,

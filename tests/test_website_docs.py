@@ -34,7 +34,7 @@ class WebsiteDocsTests(unittest.TestCase):
             'id="faq"',
         ):
             self.assertIn(anchor, help_html)
-        for command in ("/support", "/daily", "/buddy", "/profile", "/vault", "/watch", "/later", "/capture", "/remind", "/afk", "/shield panel", "/confess", "/confessions moderate"):
+        for command in ("/support", "/daily", "/buddy", "/profile", "/vault", "/watch", "/later", "/capture", "/remind", "/afk", "/shield panel", "/shield links", "/confess", "/confessions moderate"):
             self.assertIn(command, help_html)
         self.assertIn("Broken Telephone, Exquisite Corpse, Spyfall, Word Bomb, and Pattern Hunt", help_html)
         self.assertIn("1-10 drops per day", help_html)
@@ -201,6 +201,28 @@ class WebsiteDocsTests(unittest.TestCase):
         self.assertIn("unknown risky links only escalate after combined local scam evidence", help_html)
         self.assertIn("newcomer first-link context", help_html)
         self.assertIn("newcomer first-link context", index_html)
+
+    def test_shield_docs_cover_trusted_link_mode_and_optional_adult_solicitation(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        help_html = (ROOT / "help.html").read_text(encoding="utf-8")
+
+        for text in (
+            "Trusted Links Only",
+            "/shield links",
+            "/shield logs",
+            "/shield filters",
+            "separate from Confessions link mode",
+            "DM-ad",
+        ):
+            self.assertIn(text, readme)
+            self.assertIn(text, help_html)
+        self.assertIn("trusted mainstream destinations plus admin allowlisted domains and invite codes", readme)
+        self.assertIn("trusted mainstream destinations plus allowlists only", help_html)
+        for text in ("solicitation carve-out", "optional solicitation"):
+            self.assertIn(text, readme)
+            self.assertIn(text, help_html)
+        self.assertIn("solicitation carve-out channels", readme)
+        self.assertIn("solicitation carve-out channels", help_html)
 
     def test_privacy_docs_cover_confessions_storage_and_staff_blind_behavior(self):
         privacy_md = (ROOT / "PRIVACY.md").read_text(encoding="utf-8")
