@@ -63,9 +63,13 @@ class WebsiteDocsTests(unittest.TestCase):
         self.assertIn("images stay off by default", help_html)
         self.assertIn("/confess reply-to-user", help_html)
         self.assertIn("Reply to confession anonymously", help_html)
+        self.assertIn("Create a confession", help_html)
         self.assertIn("Anonymous Owner Reply", help_html)
         self.assertIn("Owner replies are enabled by default", help_html)
         self.assertIn("private approval before posting", help_html)
+        self.assertIn("4000 characters", help_html)
+        self.assertIn("reuse one Babblebox thread", help_html)
+        self.assertIn("Allow All Safe", help_html)
         self.assertIn("explicitly replies to your confession or your first public owner reply", help_html)
         self.assertIn("can still reveal you if you include it", help_html)
         self.assertIn("simple number words only count for whole-number answers", help_html)
@@ -131,7 +135,12 @@ class WebsiteDocsTests(unittest.TestCase):
             "adult / 18+ language is blocked by default",
             "images are off by default",
             "Reply to confession anonymously",
-            "private approval before posting",
+            "Create a confession",
+            "private approval happens first",
+            "4000 characters",
+            "Allow All Safe",
+            "Trusted Only",
+            "reusable thread",
             "Anonymous Owner Reply",
             "owner replies are a separate feature",
             "automatically suspend or confession-ban",
@@ -209,6 +218,10 @@ class WebsiteDocsTests(unittest.TestCase):
             "privacy-hardening readiness state",
             "guild-scoped",
             "operator-facing warnings",
+            "4000 characters",
+            "Create a confession",
+            "Allow All Safe",
+            "reusable thread",
         ):
             self.assertIn(text, privacy_md if text != "Resolved anonymous confession rows scrub previews" else privacy_html)
         self.assertIn("anonymous confession rows scrub previews", privacy_md.casefold())

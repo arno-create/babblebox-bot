@@ -33,6 +33,12 @@ def _embed_fields_by_name(embed: discord.Embed) -> dict[str, dict[str, object]]:
     return {field["name"]: field for field in embed.to_dict().get("fields", [])}
 
 
+def _view_custom_ids(view) -> list[str]:
+    if view is None:
+        return []
+    return [child.custom_id for child in view.children if getattr(child, "custom_id", None)]
+
+
 class FakeGuildPermissions:
     def __init__(self, *, administrator: bool = False, manage_guild: bool = False):
         self.administrator = administrator
@@ -114,6 +120,7 @@ class FakeMessage:
         self.channel = channel
         self.reference = reference
         self.attachments = list(attachments or [])
+        self.thread = None
         self.jump_url = (
             f"https://discord.com/channels/{guild.id}/{channel.id}/{self.id}"
             if guild is not None and channel is not None
@@ -141,6 +148,18 @@ class FakeMessage:
         if self.channel is not None:
             self.channel._messages.pop(self.id, None)
 
+    async def create_thread(self, *, name: str, auto_archive_duration=None, slowmode_delay=None, reason=None):
+        create_thread = getattr(self.channel, "create_thread_from_message", None)
+        if not callable(create_thread):
+            raise RuntimeError("thread creation unavailable")
+        return await create_thread(
+            self,
+            name=name,
+            auto_archive_duration=auto_archive_duration,
+            slowmode_delay=slowmode_delay,
+            reason=reason,
+        )
+
 
 class FakeChannel:
     def __init__(
@@ -152,6 +171,10 @@ class FakeChannel:
         bot_can_view: bool = True,
         bot_can_send: bool = True,
         bot_can_embed: bool = True,
+        bot_can_create_public_threads: bool = True,
+        bot_can_send_in_threads: bool = True,
+        bot_can_manage_threads: bool = True,
+        bot_can_read_history: bool = True,
     ):
         self.id = channel_id
         self.name = name
@@ -161,10 +184,15 @@ class FakeChannel:
         self.bot_can_view = bot_can_view
         self.bot_can_send = bot_can_send
         self.bot_can_embed = bot_can_embed
+        self.bot_can_create_public_threads = bot_can_create_public_threads
+        self.bot_can_send_in_threads = bot_can_send_in_threads
+        self.bot_can_manage_threads = bot_can_manage_threads
+        self.bot_can_read_history = bot_can_read_history
         self.sent: list[FakeMessage] = []
         self._messages: dict[int, FakeMessage] = {}
 
     async def send(self, content=None, embed=None, embeds=None, view=None, ephemeral=None, allowed_mentions=None, **kwargs):
+        _validate_message_payload(embed=embed, embeds=embeds, view=view)
         message = FakeMessage(
             content=content,
             embed=embed,
@@ -205,8 +233,79 @@ class FakeChannel:
                 view_channel=self.bot_can_view,
                 send_messages=self.bot_can_send,
                 embed_links=self.bot_can_embed,
+                create_public_threads=self.bot_can_create_public_threads,
+                send_messages_in_threads=self.bot_can_send_in_threads,
+                manage_threads=self.bot_can_manage_threads,
+                read_message_history=self.bot_can_read_history,
             )
-        return FakeChannelPermissions(view_channel=True, send_messages=True, embed_links=True)
+        return FakeChannelPermissions(
+            view_channel=True,
+            send_messages=True,
+            embed_links=True,
+            create_public_threads=True,
+            send_messages_in_threads=True,
+            manage_threads=True,
+            read_message_history=True,
+        )
+
+    async def create_thread_from_message(self, message: FakeMessage, *, name: str, auto_archive_duration=None, slowmode_delay=None, reason=None):
+        if not self.bot_can_create_public_threads or not self.bot_can_send_in_threads:
+            raise RuntimeError("thread creation unavailable")
+        thread = FakeThread(name=name, parent=self)
+        if self.guild is not None:
+            self.guild.add_thread(thread)
+        message.thread = thread
+        return thread
+
+
+class FakeThread(FakeChannel):
+    _next_id = 5000
+
+    def __init__(self, *, name: str, parent: FakeChannel, archived: bool = False, locked: bool = False):
+        super().__init__(
+            FakeThread._next_id,
+            name=name,
+            public_view=parent.public_view,
+            bot_can_view=parent.bot_can_view,
+            bot_can_send=parent.bot_can_send,
+            bot_can_embed=parent.bot_can_embed,
+            bot_can_create_public_threads=parent.bot_can_create_public_threads,
+            bot_can_send_in_threads=parent.bot_can_send_in_threads,
+            bot_can_manage_threads=parent.bot_can_manage_threads,
+            bot_can_read_history=parent.bot_can_read_history,
+        )
+        FakeThread._next_id += 1
+        self.parent = parent
+        self.archived = archived
+        self.locked = locked
+        self.deleted = False
+
+    async def send(self, content=None, embed=None, embeds=None, view=None, ephemeral=None, allowed_mentions=None, **kwargs):
+        if self.deleted or self.locked or self.archived or not self.bot_can_send_in_threads:
+            raise RuntimeError("thread unavailable")
+        return await super().send(
+            content=content,
+            embed=embed,
+            embeds=embeds,
+            view=view,
+            ephemeral=ephemeral,
+            allowed_mentions=allowed_mentions,
+            **kwargs,
+        )
+
+    async def edit(self, *, archived=None, locked=None, name=None, reason=None, **kwargs):
+        if archived is not None:
+            self.archived = bool(archived)
+        if locked is not None:
+            self.locked = bool(locked)
+        if name is not None:
+            self.name = name
+        return self
+
+    async def delete(self, *, reason=None):
+        self.deleted = True
+        if self.guild is not None:
+            self.guild.threads.pop(self.id, None)
 
 
 class FakeGuild:
@@ -214,6 +313,7 @@ class FakeGuild:
         self.id = guild_id
         self.name = f"Guild {guild_id}"
         self.channels: dict[int, FakeChannel] = {}
+        self.threads: dict[int, FakeThread] = {}
         self.roles: dict[int, FakeRole] = {}
         self.members: dict[int, FakeUser] = {}
         self.default_role = FakeRole(guild_id, name="@everyone", guild=self)
@@ -222,6 +322,12 @@ class FakeGuild:
 
     def get_channel(self, channel_id: int):
         return self.channels.get(channel_id)
+
+    def get_thread(self, channel_id: int):
+        return self.threads.get(channel_id)
+
+    def get_channel_or_thread(self, channel_id: int):
+        return self.get_channel(channel_id) or self.get_thread(channel_id)
 
     def get_role(self, role_id: int):
         return self.roles.get(role_id)
@@ -242,6 +348,11 @@ class FakeGuild:
         channel.guild = self
         self.channels[channel.id] = channel
         return channel
+
+    def add_thread(self, thread: FakeThread):
+        thread.guild = self
+        self.threads[thread.id] = thread
+        return thread
 
 
 class FakeMessageReference:
@@ -448,10 +559,13 @@ class FakeBot:
 
     def get_channel(self, channel_id: int):
         for guild in self._guilds.values():
-            channel = guild.get_channel(channel_id)
+            channel = guild.get_channel_or_thread(channel_id)
             if channel is not None:
                 return channel
         return None
+
+    async def fetch_channel(self, channel_id: int):
+        return self.get_channel(channel_id)
 
     def get_guild(self, guild_id: int):
         return self._guilds.get(guild_id)
@@ -506,11 +620,13 @@ class ServiceCogStub:
             children=[types.SimpleNamespace(label=label, custom_id=f"bb-confession-support:test:{ticket_id}") for label in labels],
         )
 
-    def build_public_confession_view(self, *, guild_id: int):
-        return types.SimpleNamespace(
-            guild_id=guild_id,
-            children=[types.SimpleNamespace(custom_id="bb-confession-post:reply")],
-        )
+    def build_public_confession_view(self, *, guild_id: int, show_create: bool = False, show_reply: bool = True):
+        children = []
+        if show_create:
+            children.append(types.SimpleNamespace(custom_id="bb-confession-post:compose"))
+        if show_reply:
+            children.append(types.SimpleNamespace(custom_id="bb-confession-post:reply"))
+        return types.SimpleNamespace(guild_id=guild_id, children=children)
 
     def build_owner_reply_prompt_view(self):
         return types.SimpleNamespace(
@@ -610,6 +726,7 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
         allow_replies: bool | None = None,
         anonymous_reply_review_required: bool | None = None,
         allow_self_edit: bool | None = None,
+        link_mode: str | None = None,
     ):
         target = guild or self.guild
         ok, message = await self.service.configure_guild(
@@ -626,6 +743,7 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
             allow_anonymous_replies=allow_replies,
             anonymous_reply_review_required=anonymous_reply_review_required,
             allow_self_edit=allow_self_edit,
+            link_policy_mode=link_mode,
         )
         self.assertTrue(ok, message)
 
@@ -828,6 +946,87 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(blocked.ok)
         self.assertEqual(blocked.state, "blocked")
+
+    async def test_link_mode_disabled_only_allows_custom_allowlist_without_bypassing_hard_blocks(self):
+        await self._configure(link_mode="disabled")
+
+        blocked = await self.service.submit_confession(
+            self.guild,
+            author_id=307,
+            content="docs link blocked in disabled mode",
+            link="https://docs.github.com/en",
+            attachments=[],
+        )
+        self.assertFalse(blocked.ok)
+        self.assertEqual(blocked.state, "blocked")
+
+        ok, message = await self.service.update_domain_policy(self.guild.id, bucket="allow", domain="docs.github.com", enabled=True)
+        self.assertTrue(ok, message)
+        allowlisted = await self.service.submit_confession(
+            self.guild,
+            author_id=308,
+            content="allowlisted docs link",
+            link="https://docs.github.com/en",
+            attachments=[],
+        )
+        self.assertTrue(allowlisted.ok)
+        self.assertEqual(allowlisted.state, "published")
+
+        ok, message = await self.service.update_domain_policy(self.guild.id, bucket="allow", domain="linktr.ee", enabled=True)
+        self.assertTrue(ok, message)
+        still_blocked = await self.service.submit_confession(
+            self.guild,
+            author_id=309,
+            content="hard blocked shortener should stay blocked",
+            link="https://linktr.ee/example",
+            attachments=[],
+        )
+        self.assertFalse(still_blocked.ok)
+        self.assertEqual(still_blocked.state, "blocked")
+
+    async def test_link_mode_allow_all_safe_allows_non_mainstream_safe_links_but_keeps_shield_blocks(self):
+        await self._configure(link_mode="allow_all_safe")
+
+        safe_unknown = await self.service.submit_confession(
+            self.guild,
+            author_id=310,
+            content="safe personal site",
+            link="https://example.com/about",
+            attachments=[],
+        )
+        self.assertTrue(safe_unknown.ok)
+        self.assertEqual(safe_unknown.state, "published")
+
+        shortener = await self.service.submit_confession(
+            self.guild,
+            author_id=311,
+            content="shortener still blocked",
+            link="https://linktr.ee/example",
+            attachments=[],
+        )
+        storefront = await self.service.submit_confession(
+            self.guild,
+            author_id=312,
+            content="storefront still blocked",
+            link="https://patreon.com/example",
+            attachments=[],
+        )
+        self.assertFalse(shortener.ok)
+        self.assertFalse(storefront.ok)
+        self.assertEqual(shortener.state, "blocked")
+        self.assertEqual(storefront.state, "blocked")
+
+        ok, message = await self.service.update_domain_policy(self.guild.id, bucket="block", domain="example.com", enabled=True)
+        self.assertTrue(ok, message)
+        custom_blocked = await self.service.submit_confession(
+            self.guild,
+            author_id=313,
+            content="custom blocklist still wins",
+            link="https://example.com/contact",
+            attachments=[],
+        )
+        self.assertFalse(custom_blocked.ok)
+        self.assertEqual(custom_blocked.state, "blocked")
 
         promo = await self.service.submit_confession(
             self.guild,
@@ -1433,7 +1632,9 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
         ok, message = await self.service.handle_case_action(self.guild, case_id=reply.case_id, action="approve", version=1)
         self.assertTrue(ok, message)
 
-        fields = _embed_fields_by_name(self.confession_channel.sent[1].embeds[0])
+        thread = list(self.guild.threads.values())[0]
+        self.assertEqual(thread.parent.id, self.confession_channel.id)
+        fields = _embed_fields_by_name(thread.sent[0].embeds[0])
         self.assertIn("Replying To", fields)
         self.assertFalse(fields["Replying To"]["inline"])
         self.assertIn(f"Confession `{published.confession_id}`", str(fields["Replying To"]["value"]))
@@ -1457,10 +1658,12 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(anonymous_reply.state, "queued")
         ok, message = await self.service.handle_case_action(self.guild, case_id=anonymous_reply.case_id, action="approve", version=1)
         self.assertTrue(ok, message)
+        thread = list(self.guild.threads.values())[0]
 
         member_response = self._reply_message(
             author=self._member(926),
-            reply_to_message_id=self.confession_channel.sent[1].id,
+            channel=thread,
+            reply_to_message_id=thread.sent[0].id,
             content="responding to the anonymous reply",
         )
         await self.service.handle_member_response_message(member_response)
@@ -1877,7 +2080,10 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
         published = await self.service.submit_confession(self.guild, author_id=918, content="base confession", attachments=[])
 
         self.assertIsNotNone(self.confession_channel.sent[0].view)
-        self.assertEqual(self.confession_channel.sent[0].view.children[0].custom_id, "bb-confession-post:reply")
+        self.assertEqual(
+            _view_custom_ids(self.confession_channel.sent[0].view),
+            ["bb-confession-post:compose", "bb-confession-post:reply"],
+        )
 
         reply = await self.service.submit_confession(
             self.guild,
@@ -1889,7 +2095,165 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(reply.state, "queued")
         ok, message = await self.service.handle_case_action(self.guild, case_id=reply.case_id, action="approve", version=1)
         self.assertTrue(ok, message)
-        self.assertIsNone(self.confession_channel.sent[1].view)
+        self.assertEqual(len(self.confession_channel.sent), 1)
+        self.assertEqual(len(self.guild.threads), 1)
+        thread = list(self.guild.threads.values())[0]
+        self.assertEqual(thread.name, f"Replies {published.confession_id}")
+        self.assertEqual(_view_custom_ids(thread.sent[0].view), [])
+
+    async def test_top_level_replies_create_and_reuse_one_discussion_thread(self):
+        await self._configure(review_channel=True, allow_replies=True, anonymous_reply_review_required=False)
+        published = await self.service.submit_confession(self.guild, author_id=9184, content="thread root", attachments=[])
+        self.assertEqual(published.state, "published")
+
+        first_reply = await self.service.submit_confession(
+            self.guild,
+            author_id=9185,
+            content="first threaded reply",
+            submission_kind="reply",
+            parent_confession_id=published.confession_id,
+        )
+        second_reply = await self.service.submit_confession(
+            self.guild,
+            author_id=9186,
+            content="second threaded reply",
+            submission_kind="reply",
+            parent_confession_id=published.confession_id,
+        )
+
+        self.assertTrue(first_reply.ok)
+        self.assertTrue(second_reply.ok)
+        self.assertEqual(len(self.guild.threads), 1)
+        thread = list(self.guild.threads.values())[0]
+        self.assertEqual(len(thread.sent), 2)
+        stored = await self.service.store.fetch_submission_by_confession_id(self.guild.id, published.confession_id)
+        self.assertEqual(stored["discussion_thread_id"], thread.id)
+        self.assertEqual(thread.sent[0].channel.id, thread.id)
+        self.assertEqual(thread.sent[1].channel.id, thread.id)
+
+    async def test_reply_to_reply_in_thread_reuses_thread_without_creating_nested_thread(self):
+        await self._configure(review_channel=True, allow_replies=True, anonymous_reply_review_required=False)
+        published = await self.service.submit_confession(self.guild, author_id=9187, content="nested fallback root", attachments=[])
+        first_reply = await self.service.submit_confession(
+            self.guild,
+            author_id=9188,
+            content="reply one",
+            submission_kind="reply",
+            parent_confession_id=published.confession_id,
+        )
+        stored_first_reply = await self.service.store.fetch_submission_by_confession_id(self.guild.id, first_reply.confession_id)
+        thread = list(self.guild.threads.values())[0]
+
+        second_reply = await self.service.submit_confession(
+            self.guild,
+            author_id=9189,
+            content="reply to the reply",
+            submission_kind="reply",
+            parent_confession_id=stored_first_reply["confession_id"],
+        )
+
+        self.assertTrue(second_reply.ok)
+        self.assertEqual(len(self.guild.threads), 1)
+        self.assertEqual(len(thread.sent), 2)
+        fields = _embed_fields_by_name(thread.sent[1].embeds[0])
+        self.assertIn("Replying To", fields)
+        self.assertIn(f"Confession `{stored_first_reply['confession_id']}`", str(fields["Replying To"]["value"]))
+
+    async def test_archived_discussion_thread_is_reopened_and_reused(self):
+        await self._configure(review_channel=True, allow_replies=True, anonymous_reply_review_required=False)
+        published = await self.service.submit_confession(self.guild, author_id=91895, content="archived root", attachments=[])
+        await self.service.submit_confession(
+            self.guild,
+            author_id=91896,
+            content="seed thread",
+            submission_kind="reply",
+            parent_confession_id=published.confession_id,
+        )
+        thread = list(self.guild.threads.values())[0]
+        thread.archived = True
+
+        follow_up = await self.service.submit_confession(
+            self.guild,
+            author_id=91897,
+            content="reopen archived thread",
+            submission_kind="reply",
+            parent_confession_id=published.confession_id,
+        )
+
+        self.assertTrue(follow_up.ok)
+        self.assertFalse(thread.archived)
+        self.assertEqual(len(thread.sent), 2)
+
+    async def test_locked_or_unavailable_reply_threads_fall_back_to_channel_posts(self):
+        await self._configure(review_channel=True, allow_replies=True, anonymous_reply_review_required=False)
+        published = await self.service.submit_confession(self.guild, author_id=9190, content="thread fallback root", attachments=[])
+        first_reply = await self.service.submit_confession(
+            self.guild,
+            author_id=9191,
+            content="thread me first",
+            submission_kind="reply",
+            parent_confession_id=published.confession_id,
+        )
+        self.assertTrue(first_reply.ok)
+        thread = list(self.guild.threads.values())[0]
+        thread.locked = True
+
+        fallback_reply = await self.service.submit_confession(
+            self.guild,
+            author_id=9192,
+            content="fallback because thread is locked",
+            submission_kind="reply",
+            parent_confession_id=published.confession_id,
+        )
+
+        self.assertTrue(fallback_reply.ok)
+        self.assertEqual(len(thread.sent), 1)
+        self.assertEqual(len(self.confession_channel.sent), 2)
+        self.assertIn("Anonymous Reply", json.dumps([embed.to_dict() for embed in self.confession_channel.sent[1].embeds]))
+
+    async def test_missing_thread_creation_permission_falls_back_to_channel_reply_post(self):
+        self.confession_channel.bot_can_create_public_threads = False
+        await self._configure(review_channel=True, allow_replies=True, anonymous_reply_review_required=False)
+        published = await self.service.submit_confession(self.guild, author_id=9193, content="no thread perms", attachments=[])
+
+        reply = await self.service.submit_confession(
+            self.guild,
+            author_id=9194,
+            content="fallback to channel",
+            submission_kind="reply",
+            parent_confession_id=published.confession_id,
+        )
+
+        self.assertTrue(reply.ok)
+        self.assertEqual(len(self.guild.threads), 0)
+        self.assertEqual(len(self.confession_channel.sent), 2)
+
+    async def test_deleted_discussion_thread_falls_back_cleanly_and_does_not_create_nested_state(self):
+        await self._configure(review_channel=True, allow_replies=True, anonymous_reply_review_required=False)
+        published = await self.service.submit_confession(self.guild, author_id=9195, content="deleted thread root", attachments=[])
+        await self.service.submit_confession(
+            self.guild,
+            author_id=9196,
+            content="seed deleted thread",
+            submission_kind="reply",
+            parent_confession_id=published.confession_id,
+        )
+        thread = list(self.guild.threads.values())[0]
+        stored_root = await self.service.store.fetch_submission_by_confession_id(self.guild.id, published.confession_id)
+        stored_root["discussion_thread_id"] = thread.id
+        await self.service.store.upsert_submission(stored_root)
+        await thread.delete(reason="simulate deleted thread")
+
+        reply = await self.service.submit_confession(
+            self.guild,
+            author_id=9197,
+            content="recover after deleted thread",
+            submission_kind="reply",
+            parent_confession_id=published.confession_id,
+        )
+
+        self.assertTrue(reply.ok)
+        self.assertEqual(len(self.confession_channel.sent), 2)
 
     async def test_images_can_publish_without_forced_review_when_review_requirement_is_off(self):
         await self._configure(review_channel=True, allow_images=True, image_review_required=False)
@@ -1920,7 +2284,9 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(reply.ok)
         self.assertEqual(reply.state, "published")
-        self.assertEqual(len(self.confession_channel.sent), 2)
+        self.assertEqual(len(self.confession_channel.sent), 1)
+        self.assertEqual(len(self.guild.threads), 1)
+        self.assertEqual(len(list(self.guild.threads.values())[0].sent), 1)
         self.assertEqual(len(self.review_channel.sent), 0)
 
     async def test_published_confessions_do_not_show_reply_button_when_replies_disabled(self):
@@ -1928,7 +2294,7 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
         published = await self.service.submit_confession(self.guild, author_id=920, content="no reply button", attachments=[])
 
         self.assertEqual(published.state, "published")
-        self.assertIsNone(self.confession_channel.sent[0].view)
+        self.assertEqual(_view_custom_ids(self.confession_channel.sent[0].view), ["bb-confession-post:compose"])
 
     async def test_sync_published_confession_views_updates_existing_posts_when_reply_policy_changes(self):
         await self._configure(review_channel=True, allow_replies=True)
@@ -1940,13 +2306,69 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
         ok, message = await self.service.configure_guild(self.guild.id, allow_anonymous_replies=False)
         self.assertTrue(ok, message)
         await self.service.sync_published_confession_views(self.guild)
-        self.assertIsNone(live_message.view)
+        self.assertEqual(_view_custom_ids(live_message.view), ["bb-confession-post:compose"])
 
         ok, message = await self.service.configure_guild(self.guild.id, allow_anonymous_replies=True)
         self.assertTrue(ok, message)
         await self.service.sync_published_confession_views(self.guild)
         self.assertIsNotNone(live_message.view)
-        self.assertEqual(live_message.view.children[0].custom_id, "bb-confession-post:reply")
+        self.assertEqual(_view_custom_ids(live_message.view), ["bb-confession-post:compose", "bb-confession-post:reply"])
+
+    async def test_latest_top_level_confession_is_only_post_with_create_launcher(self):
+        await self._configure(review_channel=True, allow_replies=True, anonymous_reply_review_required=False)
+        first = await self.service.submit_confession(self.guild, author_id=9211, content="first top level", attachments=[])
+        second = await self.service.submit_confession(self.guild, author_id=9212, content="second top level", attachments=[])
+
+        self.assertEqual(first.state, "published")
+        self.assertEqual(second.state, "published")
+        self.assertEqual(_view_custom_ids(self.confession_channel.sent[0].view), ["bb-confession-post:reply"])
+        self.assertEqual(
+            _view_custom_ids(self.confession_channel.sent[1].view),
+            ["bb-confession-post:compose", "bb-confession-post:reply"],
+        )
+
+    async def test_latest_launcher_with_replies_disabled_keeps_only_latest_create_button(self):
+        await self._configure()
+        first = await self.service.submit_confession(self.guild, author_id=9216, content="first latest off", attachments=[])
+        second = await self.service.submit_confession(self.guild, author_id=9217, content="second latest off", attachments=[])
+
+        self.assertEqual(first.state, "published")
+        self.assertEqual(second.state, "published")
+        self.assertIsNone(self.confession_channel.sent[0].view)
+        self.assertEqual(_view_custom_ids(self.confession_channel.sent[1].view), ["bb-confession-post:compose"])
+
+    async def test_latest_launcher_ignores_replies_and_owner_replies(self):
+        await self._configure(review_channel=True, allow_replies=True, anonymous_reply_review_required=False)
+        owner = self._member(9213)
+        root = await self.service.submit_confession(self.guild, author_id=owner.id, member=owner, content="stay latest", attachments=[])
+        self.assertEqual(root.state, "published")
+
+        reply = await self.service.submit_confession(
+            self.guild,
+            author_id=9214,
+            content="thread reply",
+            submission_kind="reply",
+            parent_confession_id=root.confession_id,
+        )
+        self.assertTrue(reply.ok)
+        response = self._reply_message(
+            author=self._member(9215),
+            reply_to_message_id=self.confession_channel.sent[0].id,
+            content="owner ping",
+        )
+        await self.service.handle_member_response_message(response)
+        pending = await self.service.store.list_pending_owner_reply_opportunities_for_author(self.guild.id, owner.id, limit=5)
+        owner_reply = await self.service.submit_owner_reply(
+            self.guild,
+            author_id=owner.id,
+            member=owner,
+            opportunity_id=pending[0]["opportunity_id"],
+            content="owner follow-up",
+        )
+
+        self.assertTrue(owner_reply.ok)
+        self.assertEqual(_view_custom_ids(self.confession_channel.sent[0].view), ["bb-confession-post:compose", "bb-confession-post:reply"])
+        self.assertEqual(len(self.confession_channel.sent), 2)
 
     async def test_self_delete_enforces_ownership_and_withdraws_pending_confession(self):
         await self._configure(review_mode=True, review_channel=True)
@@ -1979,6 +2401,25 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(stored["status"], "deleted")
         self.assertIsNone(stored["posted_message_id"])
 
+    async def test_self_delete_published_root_confession_retires_discussion_thread(self):
+        await self._configure(review_channel=True, allow_replies=True, anonymous_reply_review_required=False)
+        published = await self.service.submit_confession(self.guild, author_id=931, content="thread root delete", attachments=[])
+        await self.service.submit_confession(
+            self.guild,
+            author_id=932,
+            content="reply before delete",
+            submission_kind="reply",
+            parent_confession_id=published.confession_id,
+        )
+        thread = list(self.guild.threads.values())[0]
+
+        ok, message = await self.service.self_delete_confession(self.guild, author_id=931, target_id=published.confession_id)
+
+        self.assertTrue(ok, message)
+        self.assertTrue(thread.deleted or (thread.archived and thread.locked))
+        stored = await self.service.store.fetch_submission_by_confession_id(self.guild.id, published.confession_id)
+        self.assertIsNone(stored["discussion_thread_id"])
+
     async def test_self_edit_is_disabled_by_default_and_updates_pending_when_enabled(self):
         await self._configure(review_mode=True, review_channel=True)
         queued = await self.service.submit_confession(self.guild, author_id=940, content="draft text", attachments=[])
@@ -2005,6 +2446,146 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
         case = await self.service.store.fetch_case(self.guild.id, queued.case_id)
         self.assertEqual(stored["content_body"], "edited text")
         self.assertEqual(case["review_version"], 2)
+
+    async def test_confession_and_reply_respect_4000_character_limit(self):
+        sentence = "Long but readable confession text for Babblebox. "
+        max_body = (sentence * ((4000 // len(sentence)) + 1))[:4000]
+        too_long = max_body + "!"
+        await self._configure(review_mode=False, review_channel=True, allow_replies=True, anonymous_reply_review_required=False)
+
+        confession = await self.service.submit_confession(self.guild, author_id=9410, content=max_body, attachments=[])
+        self.assertTrue(confession.ok)
+        self.assertEqual(confession.state, "published")
+        self.assertEqual(len(self.confession_channel.sent[0].embeds[0].description), 4000)
+
+        blocked_confession = await self.service.submit_confession(self.guild, author_id=9411, content=too_long, attachments=[])
+        self.assertFalse(blocked_confession.ok)
+        self.assertEqual(blocked_confession.state, "blocked")
+        self.assertIn("4000", blocked_confession.message)
+
+        reply = await self.service.submit_confession(
+            self.guild,
+            author_id=9412,
+            content=max_body,
+            submission_kind="reply",
+            parent_confession_id=confession.confession_id,
+        )
+        self.assertTrue(reply.ok)
+        self.assertEqual(reply.state, "published")
+        self.assertEqual(len(list(self.guild.threads.values())[0].sent[0].embeds[0].description), 4000)
+
+        blocked_reply = await self.service.submit_confession(
+            self.guild,
+            author_id=9413,
+            content=too_long,
+            submission_kind="reply",
+            parent_confession_id=confession.confession_id,
+        )
+        self.assertFalse(blocked_reply.ok)
+        self.assertEqual(blocked_reply.state, "blocked")
+        self.assertIn("4000", blocked_reply.message)
+
+    async def test_owner_reply_respects_4000_character_limit(self):
+        owner_max_body = " ".join(f"owner-reply-{index:04d}" for index in range(300))[:4000]
+        owner_too_long = owner_max_body + "!"
+        await self._configure(review_mode=False, review_channel=True)
+        responder = self._member(9414)
+        root_owner = self._member(9415)
+        await self.service.submit_confession(self.guild, author_id=root_owner.id, member=root_owner, content="owner root", attachments=[])
+        await self.service.handle_member_response_message(
+            self._reply_message(
+                author=responder,
+                reply_to_message_id=self.confession_channel.sent[0].id,
+                content="owner prompt please",
+            )
+        )
+        pending = await self.service.store.list_pending_owner_reply_opportunities_for_author(self.guild.id, root_owner.id, limit=5)
+
+        owner_reply = await self.service.submit_owner_reply(
+            self.guild,
+            author_id=root_owner.id,
+            member=root_owner,
+            opportunity_id=pending[0]["opportunity_id"],
+            content=owner_max_body,
+        )
+        self.assertTrue(owner_reply.ok)
+        self.assertEqual(owner_reply.state, "published")
+
+        second_owner = self._member(9416)
+        await self.service.submit_confession(self.guild, author_id=second_owner.id, member=second_owner, content="owner root two", attachments=[])
+        await self.service.handle_member_response_message(
+            self._reply_message(
+                author=self._member(9417),
+                reply_to_message_id=self.confession_channel.sent[2].id,
+                content="owner prompt too long",
+            )
+        )
+        pending = await self.service.store.list_pending_owner_reply_opportunities_for_author(self.guild.id, second_owner.id, limit=5)
+
+        blocked_owner_reply = await self.service.submit_owner_reply(
+            self.guild,
+            author_id=second_owner.id,
+            member=second_owner,
+            opportunity_id=pending[0]["opportunity_id"],
+            content=owner_too_long,
+        )
+        self.assertFalse(blocked_owner_reply.ok)
+        self.assertEqual(blocked_owner_reply.state, "blocked")
+        self.assertIn("4000", blocked_owner_reply.message)
+
+    async def test_self_edit_respects_4000_character_limit(self):
+        edit_max_body = " ".join(f"pending-edit-{index:04d}" for index in range(300))[:4000]
+        edit_too_long = edit_max_body + "!"
+        await self._configure(review_mode=True, review_channel=True, allow_self_edit=True)
+        queued = await self.service.submit_confession(self.guild, author_id=9416, content="edit me", attachments=[])
+        self.assertEqual(queued.state, "queued")
+        edited = await self.service.self_edit_confession(
+            self.guild,
+            author_id=9416,
+            target_id=queued.confession_id,
+            content=edit_max_body,
+        )
+        self.assertTrue(edited.ok)
+        blocked_edit = await self.service.self_edit_confession(
+            self.guild,
+            author_id=9416,
+            target_id=queued.confession_id,
+            content=edit_too_long,
+        )
+        self.assertFalse(blocked_edit.ok)
+        self.assertIn("4000", blocked_edit.message)
+
+    async def test_support_request_details_stay_capped_at_1800(self):
+        await self._configure(review_mode=True, review_channel=True, appeals_channel=True)
+        target = await self.service.submit_confession(self.guild, author_id=9417, content="report target", attachments=[])
+        ok, message = await self.service.submit_support_request(
+            self.guild,
+            author_id=9417,
+            kind="report",
+            target_id=target.confession_id,
+            details="r" * 1800,
+        )
+        self.assertTrue(ok, message)
+
+        blocked_ok, blocked_message = await self.service.submit_support_request(
+            self.guild,
+            author_id=9418,
+            kind="report",
+            target_id=target.confession_id,
+            details="r" * 1801,
+        )
+        self.assertFalse(blocked_ok)
+        self.assertIn("1800", blocked_message)
+
+    async def test_staff_detail_embed_splits_long_preview_across_multiple_fields(self):
+        await self._configure(review_mode=True, review_channel=True)
+        queued = await self.service.submit_confession(self.guild, author_id=9418, content="z" * 2500, attachments=[])
+
+        detail = await self.service.build_target_status_embed(self.guild, queued.confession_id)
+
+        preview_fields = [field for field in detail.to_dict().get("fields", []) if str(field.get("name", "")).startswith("Preview")]
+        self.assertGreaterEqual(len(preview_fields), 3)
+        self.assertTrue(all(len(str(field["value"])) <= 1024 for field in preview_fields))
 
     async def test_support_requests_require_configured_channel_and_hide_identity(self):
         await self._configure(review_mode=True, review_channel=True)
@@ -3626,6 +4207,18 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(config["allow_anonymous_replies"])
         self.assertFalse(config["allow_self_edit"])
 
+    async def test_policy_command_warns_before_enabling_allow_all_safe_links(self):
+        await self.cog.service.configure_guild(self.guild.id, enabled=True, confession_channel_id=20, review_channel_id=30, review_mode=False)
+        ctx = FakeContext(guild=self.guild, author=FakeUser(91, manage_guild=True))
+
+        await ConfessionsCog.confessions_policy_command.callback(self.cog, ctx, link_mode="allow_all_safe")
+
+        self.assertEqual(len(ctx.send_calls), 1)
+        self.assertEqual(ctx.send_calls[0]["embed"].title, "Confirm Risky Policy Change")
+        self.assertIn("Shield still blocks unsafe links", json.dumps(ctx.send_calls[0]["embed"].to_dict()))
+        self.assertIsNotNone(ctx.send_calls[0]["view"])
+        self.assertEqual(self.cog.service.get_config(self.guild.id)["link_policy_mode"], "trusted_only")
+
     async def test_policy_warning_offers_review_choices_only_for_reviewable_features(self):
         await self.cog.service.configure_guild(self.guild.id, enabled=True, confession_channel_id=20, review_channel_id=30, review_mode=False)
         ctx = FakeContext(guild=self.guild, author=FakeUser(190, manage_guild=True))
@@ -4217,8 +4810,8 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
         live_message = self.guild.get_channel(20).sent[0]
         custom_ids = [child.custom_id for child in live_message.view.children if getattr(child, "custom_id", None)]
 
-        self.assertEqual(custom_ids, ["bb-confession-post:reply"])
-        self.assertNotIn(published.confession_id, custom_ids[0])
+        self.assertEqual(custom_ids, ["bb-confession-post:compose", "bb-confession-post:reply"])
+        self.assertTrue(all(published.confession_id not in value for value in custom_ids))
 
         member = self._member(127)
         open_interaction = FakeInteraction(guild=self.guild, user=member, message=live_message)
@@ -4231,6 +4824,23 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
         submit_interaction = FakeInteraction(guild=self.guild, user=member)
         await modal.on_submit(submit_interaction)
         self.assertEqual(submit_interaction.followup_calls[0]["kwargs"]["embed"].title, "Reply Received")
+
+    async def test_latest_public_create_button_opens_private_confession_modal(self):
+        await self.cog.service.configure_guild(
+            self.guild.id,
+            enabled=True,
+            confession_channel_id=20,
+            review_channel_id=30,
+            review_mode=False,
+        )
+        await self.cog.service.submit_confession(self.guild, author_id=311, content="latest launcher", attachments=[])
+        live_message = self.guild.get_channel(20).sent[0]
+
+        interaction = FakeInteraction(guild=self.guild, user=self._member(130), message=live_message)
+        await live_message.view.compose_button.callback(interaction)
+
+        self.assertEqual(len(interaction.response.modal_calls), 1)
+        self.assertEqual(interaction.response.modal_calls[0].title, "Anonymous Confession")
 
     async def test_stale_public_reply_button_fails_closed_after_replies_are_disabled(self):
         await self.cog.service.configure_guild(
@@ -4270,6 +4880,23 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(interaction.response.modal_calls), 1)
         self.assertEqual(interaction.response.modal_calls[0].title, "Anonymous Reply")
+
+    async def test_stateless_public_create_view_uses_live_runtime_lookup(self):
+        await self.cog.service.configure_guild(
+            self.guild.id,
+            enabled=True,
+            confession_channel_id=20,
+            review_channel_id=30,
+            review_mode=False,
+        )
+        await self.cog.service.submit_confession(self.guild, author_id=34, content="compose fallback", attachments=[])
+        live_message = self.guild.get_channel(20).sent[0]
+        interaction = FakeInteraction(guild=self.guild, user=self._member(131), message=live_message, client=self.bot)
+
+        await StatelessPublishedConfessionReplyView().compose_button.callback(interaction)
+
+        self.assertEqual(len(interaction.response.modal_calls), 1)
+        self.assertEqual(interaction.response.modal_calls[0].title, "Anonymous Confession")
 
     async def test_review_view_custom_ids_are_case_only(self):
         view = self.cog.build_review_view(case_id="CS-AAAA1111", version=7)
@@ -4461,7 +5088,31 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
         view, message_id = self.bot.views[0]
         self.assertEqual(message_id, live_message.id)
         custom_ids = [child.custom_id for child in view.children if getattr(child, "custom_id", None)]
-        self.assertEqual(custom_ids, ["bb-confession-post:reply"])
+        self.assertEqual(custom_ids, ["bb-confession-post:compose", "bb-confession-post:reply"])
+
+    async def test_confession_related_modals_use_4000_character_limit_but_support_details_stay_1800(self):
+        composer = ConfessionComposerModal(self.cog, guild_id=self.guild.id)
+        reply = ReplyComposerModal(self.cog, guild_id=self.guild.id, default_target="CF-AAAA1111")
+        owner_reply = OwnerReplyComposerModal(self.cog, guild_id=self.guild.id, opportunity_id="opp-123")
+        edit = EditConfessionModal(
+            self.cog,
+            guild_id=self.guild.id,
+            target_id="CF-AAAA1111",
+            submission={
+                "submission_kind": "confession",
+                "content_body": "draft",
+                "shared_link_url": None,
+            },
+        )
+        appeal = AppealModal(self.cog)
+        report = ReportModal(self.cog)
+
+        self.assertEqual(composer.body_input.max_length, 4000)
+        self.assertEqual(reply.body_input.max_length, 4000)
+        self.assertEqual(owner_reply.body_input.max_length, 4000)
+        self.assertEqual(edit.body_input.max_length, 4000)
+        self.assertEqual(appeal.details_input.max_length, 1800)
+        self.assertEqual(report.details_input.max_length, 1800)
 
     async def test_modal_and_review_callbacks_return_generic_errors(self):
         await self.cog.service.configure_guild(self.guild.id, enabled=True, confession_channel_id=20, review_channel_id=30, review_mode=True)

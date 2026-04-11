@@ -24,8 +24,10 @@ from babblebox.confessions_privacy import (
 from babblebox.confessions_store import (
     ConfessionsStorageUnavailable,
     ConfessionsStore,
+    DEFAULT_LINK_POLICY_MODE,
     DISCORD_MEDIA_HOSTS,
     PRIVACY_CATEGORY_LABELS,
+    VALID_LINK_POLICY_MODES,
     default_confession_config,
     default_enforcement_state,
     normalize_confession_config,
@@ -70,8 +72,9 @@ CONFESSION_ID_PREFIX = "CF"
 CASE_ID_PREFIX = "CS"
 SUPPORT_TICKET_ID_PREFIX = "CT"
 MAX_ID_BODY = 8
-MAX_CONFESSION_LENGTH = 1800
+MAX_CONFESSION_LENGTH = 4000
 MAX_STAFF_PREVIEW = 220
+MAX_STAFF_DETAIL_FIELD = 1024
 MAX_ATTACHMENT_SIZE = 10 * 1024 * 1024
 REVIEW_PREVIEW_LIMIT = 5
 ROLE_PREVIEW_LIMIT = 10
@@ -365,6 +368,30 @@ def _reply_target_embed_preview(text: str | None) -> str | None:
     return _reply_target_snapshot_text(text, limit=PUBLIC_REPLY_CONTEXT_PREVIEW_LIMIT)
 
 
+def _split_embed_field_value(text: str | None, *, limit: int = MAX_STAFF_DETAIL_FIELD) -> tuple[str, ...]:
+    cleaned = normalize_plain_text(text)
+    if not cleaned:
+        return ()
+    if len(cleaned) <= limit:
+        return (cleaned,)
+    chunks: list[str] = []
+    remaining = cleaned
+    while remaining:
+        if len(remaining) <= limit:
+            chunks.append(remaining)
+            break
+        split_at = remaining.rfind("\n", 0, limit + 1)
+        if split_at < limit // 2:
+            split_at = remaining.rfind(" ", 0, limit + 1)
+        if split_at < limit // 2:
+            split_at = limit
+        head = remaining[:split_at].rstrip()
+        if head:
+            chunks.append(head)
+        remaining = remaining[split_at:].lstrip()
+    return tuple(ge.safe_field_text(chunk, limit=limit) for chunk in chunks if chunk)
+
+
 def _owner_reply_opportunity_age_text(iso_value: str | None) -> str:
     created_at = deserialize_datetime(iso_value)
     if created_at is None:
@@ -444,9 +471,9 @@ def _normalize_shared_link_input(raw_value: str | None) -> tuple[bool, str | Non
     if not cleaned:
         return True, None
     if len(_url_candidates(cleaned)) > 1:
-        return False, "Use one trusted link per confession."
+        return False, "Use one link per confession."
     if any(character.isspace() for character in cleaned):
-        return False, "Use one full link in the trusted link field."
+        return False, "Use one full link in the link field."
     candidate = _clean_url_candidate(cleaned)
     if candidate is None:
         return False, "That link is not valid."
@@ -787,6 +814,7 @@ class ConfessionsService:
         appeals_channel_id: int | None = None,
         review_mode: bool | None = None,
         block_adult_language: bool | None = None,
+        link_policy_mode: str | None = None,
         allow_trusted_mainstream_links: bool | None = None,
         allowed_role_ids: list[int] | None = None,
         blocked_role_ids: list[int] | None = None,
@@ -839,8 +867,13 @@ class ConfessionsService:
                 config["review_mode"] = bool(review_mode)
             if block_adult_language is not None:
                 config["block_adult_language"] = bool(block_adult_language)
+            if link_policy_mode is not None:
+                cleaned_mode = normalize_plain_text(link_policy_mode).casefold()
+                if cleaned_mode not in VALID_LINK_POLICY_MODES:
+                    raise ValueError("Choose `disabled`, `trusted_only`, or `allow_all_safe` for the confession link mode.")
+                config["link_policy_mode"] = cleaned_mode
             if allow_trusted_mainstream_links is not None:
-                config["allow_trusted_mainstream_links"] = bool(allow_trusted_mainstream_links)
+                config["link_policy_mode"] = "trusted_only" if bool(allow_trusted_mainstream_links) else "disabled"
             if allowed_role_ids is not None:
                 config["allowed_role_ids"] = list(allowed_role_ids)
             if blocked_role_ids is not None:
@@ -1828,12 +1861,17 @@ class ConfessionsService:
         return updated
 
     def _link_domain_allowed(self, compiled: dict[str, Any], assessment: ShieldLinkAssessment, *, domain: str) -> bool:
+        if assessment.category in {MALICIOUS_LINK_CATEGORY, ADULT_LINK_CATEGORY, UNKNOWN_SUSPICIOUS_LINK_CATEGORY}:
+            return False
         if domain_in_set(domain, set(compiled["custom_block_domain_set"])):
             return False
         if domain_in_set(domain, set(compiled["custom_allow_domain_set"])):
             return True
-        if not compiled["allow_trusted_mainstream_links"]:
+        link_mode = str(compiled.get("link_policy_mode") or DEFAULT_LINK_POLICY_MODE)
+        if link_mode == "disabled":
             return False
+        if link_mode == "allow_all_safe":
+            return assessment.category in {SAFE_LINK_CATEGORY, UNKNOWN_LINK_CATEGORY}
         if assessment.safe_family in TRUSTED_SAFE_FAMILIES:
             return True
         if domain_in_set(domain, TRUSTED_MAINSTREAM_DOMAINS):
@@ -1882,7 +1920,7 @@ class ConfessionsService:
                 flags.append("link_unsafe")
                 continue
             allowlisted = domain_in_set(domain, set(compiled["custom_allow_domain_set"]))
-            if not allowlisted and (
+            if (
                 domain_in_set(domain, SHORTENER_DOMAINS)
                 or domain_in_set(domain, LINK_IN_BIO_DOMAINS)
                 or domain_in_set(domain, STOREFRONT_DOMAINS)
@@ -1969,7 +2007,7 @@ class ConfessionsService:
         if not text and not shared_link_url and not attachment_meta:
             return SafetyResult("blocked", ("empty_content",), False, "Confessions cannot be empty.")
         if total_links > 1:
-            return SafetyResult("blocked", ("link_unsafe",), False, "Use one trusted link total per confession.")
+            return SafetyResult("blocked", ("link_unsafe",), False, "Use one link total per confession.")
         if text and len(re.sub(r"[^a-z0-9]", "", squashed.casefold())) < 3 and not shared_link_url and not attachment_meta:
             return SafetyResult("blocked", ("low_signal_spam",), False, "That confession is too low-signal to post.")
         if text and (LOW_SIGNAL_RE.fullmatch(text) or REPEATED_CHAR_RE.search(text) or REPEATED_WORD_RE.search(text)):
@@ -1984,7 +2022,7 @@ class ConfessionsService:
         if link_flags:
             primary = "malicious_link" if "malicious_link" in link_flags else "link_unsafe"
             return SafetyResult("blocked", tuple(link_flags), primary in STRIKE_FLAGS, "That confession contains blocked links.", assessments)
-        if has_links and not assessments and not compiled["allow_trusted_mainstream_links"] and not compiled["custom_allow_domains"]:
+        if has_links and not assessments and str(compiled.get("link_policy_mode") or DEFAULT_LINK_POLICY_MODE) == "disabled" and not compiled["custom_allow_domains"]:
             return SafetyResult("blocked", ("link_unsafe",), True, "Links are disabled for confessions in this server.")
 
         duplicate_signals = build_duplicate_signals(self.store.privacy, int(compiled["guild_id"]), text, attachment_meta, shared_link_url)
@@ -2118,8 +2156,6 @@ class ConfessionsService:
                 parent_submission = await self.store.fetch_submission_by_confession_id(guild.id, normalized_parent_confession_id)
                 if parent_submission is None or parent_submission.get("status") != "published":
                     return ConfessionSubmissionResult(False, "blocked", "That confession is not available for anonymous replies.", submission_kind=submission_kind, reply_flow=normalized_reply_flow)
-                if parent_submission.get("submission_kind") != "confession":
-                    return ConfessionSubmissionResult(False, "blocked", "Anonymous replies only support one level of depth right now.", submission_kind=submission_kind, reply_flow=normalized_reply_flow)
                 reply_target_label, reply_target_preview = await self._snapshot_reply_target_for_confession(guild, parent_submission)
         else:
             owner_reply_generation = None
@@ -2208,6 +2244,7 @@ class ConfessionsService:
             "attachment_meta": attachment_meta,
             "posted_channel_id": None,
             "posted_message_id": None,
+            "discussion_thread_id": None,
             "current_case_id": None,
             "created_at": now_iso,
             "published_at": None,
@@ -2382,6 +2419,8 @@ class ConfessionsService:
                 "created_at": now_iso,
             }
         )
+        if submission_kind == "confession":
+            await self._sync_published_confession_views(guild)
         return ConfessionSubmissionResult(
             True,
             "published",
@@ -2474,6 +2513,89 @@ class ConfessionsService:
             return None
         return f"https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"
 
+    async def _resolve_channel_reference(self, guild: discord.Guild, channel_id: int | None) -> Any:
+        if not isinstance(channel_id, int):
+            return None
+        channel = None
+        get_channel_or_thread = getattr(guild, "get_channel_or_thread", None)
+        if callable(get_channel_or_thread):
+            channel = get_channel_or_thread(channel_id)
+        if channel is None:
+            get_thread = getattr(guild, "get_thread", None)
+            if callable(get_thread):
+                channel = get_thread(channel_id)
+        if channel is None:
+            channel = guild.get_channel(channel_id)
+        if channel is None:
+            channel = self.bot.get_channel(channel_id)
+        if channel is None:
+            fetch_channel = getattr(self.bot, "fetch_channel", None)
+            if callable(fetch_channel):
+                with contextlib.suppress(discord.NotFound, discord.Forbidden, discord.HTTPException, Exception):
+                    channel = await fetch_channel(channel_id)
+        return channel
+
+    def _channel_is_thread(self, channel: Any) -> bool:
+        if channel is None:
+            return False
+        if isinstance(channel, discord.Thread):
+            return True
+        return hasattr(channel, "parent") and hasattr(channel, "archived") and hasattr(channel, "locked")
+
+    def _channel_permissions(self, guild: discord.Guild, channel: Any) -> Any:
+        permissions_for = getattr(channel, "permissions_for", None)
+        if not callable(permissions_for):
+            return None
+        bot_member = self._bot_member_for_guild(guild)
+        if bot_member is None:
+            return None
+        with contextlib.suppress(Exception):
+            return permissions_for(bot_member)
+        return None
+
+    def _can_create_discussion_thread(self, guild: discord.Guild, channel: Any) -> bool:
+        perms = self._channel_permissions(guild, channel)
+        if perms is None:
+            return True
+        return bool(
+            getattr(perms, "view_channel", False)
+            and getattr(perms, "send_messages", False)
+            and getattr(perms, "create_public_threads", False)
+            and getattr(perms, "send_messages_in_threads", False)
+            and getattr(perms, "read_message_history", False)
+        )
+
+    def _can_send_in_thread(self, guild: discord.Guild, channel: Any) -> bool:
+        perms = self._channel_permissions(guild, channel)
+        if perms is None:
+            return True
+        return bool(
+            getattr(perms, "view_channel", False)
+            and (
+                getattr(perms, "send_messages_in_threads", False)
+                or getattr(perms, "send_messages", False)
+            )
+        )
+
+    def _discussion_thread_name(self, confession_id: str) -> str:
+        return ge.safe_field_text(f"Replies {confession_id}", limit=100)
+
+    def _add_detail_text_fields(
+        self,
+        embed: discord.Embed,
+        *,
+        name: str,
+        value: str | None,
+        empty_value: str = "[not available]",
+    ):
+        chunks = _split_embed_field_value(value)
+        if not chunks:
+            embed.add_field(name=name, value=empty_value, inline=False)
+            return
+        for index, chunk in enumerate(chunks, start=1):
+            label = name if index == 1 else f"{name} ({index})"
+            embed.add_field(name=label, value=chunk, inline=False)
+
     def _public_confession_preview_from_message(self, message: Any) -> str | None:
         for embed in list(getattr(message, "embeds", None) or []):
             description = normalize_plain_text(getattr(embed, "description", None))
@@ -2493,13 +2615,116 @@ class ConfessionsService:
         if preview is not None:
             return label, preview
         channel_id = parent_submission.get("posted_channel_id")
-        channel = guild.get_channel(channel_id) or self.bot.get_channel(channel_id)
+        channel = await self._resolve_channel_reference(guild, channel_id)
         if channel is None:
             return label, None
         message = await self._queue_message(channel, message_id=parent_submission.get("posted_message_id"))
         if message is None:
             return label, None
         return label, self._public_confession_preview_from_message(message)
+
+    async def _resolve_submission_message(self, guild: discord.Guild, submission: dict[str, Any]) -> tuple[Any, Any]:
+        channel = await self._resolve_channel_reference(guild, submission.get("posted_channel_id"))
+        if channel is None:
+            return None, None
+        message = await self._queue_message(channel, message_id=submission.get("posted_message_id"))
+        return channel, message
+
+    async def _prepare_discussion_thread(self, guild: discord.Guild, thread: Any) -> Any:
+        if thread is None or not self._channel_is_thread(thread):
+            return None
+        if bool(getattr(thread, "locked", False)):
+            return None
+        if bool(getattr(thread, "archived", False)):
+            edit = getattr(thread, "edit", None)
+            if callable(edit):
+                with contextlib.suppress(discord.Forbidden, discord.HTTPException, Exception):
+                    await edit(archived=False, reason="Babblebox re-opened a confession discussion thread.")
+            if bool(getattr(thread, "archived", False)):
+                return None
+        if not self._can_send_in_thread(guild, thread):
+            return None
+        return thread
+
+    async def _recover_discussion_thread_from_message(self, guild: discord.Guild, root_submission: dict[str, Any]) -> Any:
+        _, message = await self._resolve_submission_message(guild, root_submission)
+        if message is None:
+            return None
+        thread = getattr(message, "thread", None)
+        thread = await self._prepare_discussion_thread(guild, thread)
+        if thread is None:
+            return None
+        thread_id = getattr(thread, "id", None)
+        if isinstance(thread_id, int) and root_submission.get("discussion_thread_id") != thread_id:
+            root_submission["discussion_thread_id"] = thread_id
+            await self.store.upsert_submission(root_submission)
+        return thread
+
+    async def _ensure_discussion_thread(self, guild: discord.Guild, root_submission: dict[str, Any]) -> Any:
+        if root_submission.get("submission_kind") != "confession" or root_submission.get("status") != "published":
+            return None
+        had_prior_thread = bool(root_submission.get("discussion_thread_id"))
+        stored_thread = await self._resolve_channel_reference(guild, root_submission.get("discussion_thread_id"))
+        stored_thread = await self._prepare_discussion_thread(guild, stored_thread)
+        if stored_thread is not None:
+            return stored_thread
+        _, root_message = await self._resolve_submission_message(guild, root_submission)
+        if self._channel_is_thread(getattr(root_message, "thread", None)):
+            had_prior_thread = True
+        live_thread = await self._recover_discussion_thread_from_message(guild, root_submission)
+        if live_thread is not None:
+            return live_thread
+        if had_prior_thread:
+            return None
+        channel, message = await self._resolve_submission_message(guild, root_submission)
+        if channel is None or message is None or not self._can_create_discussion_thread(guild, channel):
+            return None
+        create_thread = getattr(message, "create_thread", None)
+        if not callable(create_thread):
+            return None
+        try:
+            thread = await create_thread(name=self._discussion_thread_name(str(root_submission["confession_id"])))
+        except (discord.Forbidden, discord.HTTPException):
+            return None
+        except Exception as exc:
+            self.log_admin_diagnostic(
+                code="discussion_thread_create_failed",
+                stage="discussion_thread_create",
+                guild_id=guild.id,
+                channel_id=getattr(channel, "id", None),
+                message_id=getattr(message, "id", None),
+                note=f"confession_id={root_submission.get('confession_id')}",
+                exc=exc,
+            )
+            return None
+        thread = await self._prepare_discussion_thread(guild, thread)
+        if thread is None:
+            return None
+        thread_id = getattr(thread, "id", None)
+        if isinstance(thread_id, int):
+            root_submission["discussion_thread_id"] = thread_id
+            await self.store.upsert_submission(root_submission)
+        return thread
+
+    async def _retire_discussion_thread(self, guild: discord.Guild, root_submission: dict[str, Any], *, reason: str):
+        if root_submission.get("submission_kind") != "confession":
+            return
+        thread = await self._resolve_channel_reference(guild, root_submission.get("discussion_thread_id"))
+        if thread is None:
+            thread = await self._recover_discussion_thread_from_message(guild, root_submission)
+        deleted = False
+        delete = getattr(thread, "delete", None)
+        if callable(delete):
+            with contextlib.suppress(discord.Forbidden, discord.HTTPException, Exception):
+                await delete(reason=reason)
+                deleted = True
+        if not deleted:
+            edit = getattr(thread, "edit", None)
+            if callable(edit):
+                with contextlib.suppress(discord.Forbidden, discord.HTTPException, Exception):
+                    await edit(archived=True, locked=True, reason=reason)
+        if root_submission.get("discussion_thread_id") is not None:
+            root_submission["discussion_thread_id"] = None
 
     async def _resolve_public_reply_target(
         self,
@@ -2855,7 +3080,7 @@ class ConfessionsService:
             if referenced_submission.get("reply_flow") != REPLY_FLOW_OWNER_TO_USER or int(referenced_submission.get("owner_reply_generation") or 1) != 1:
                 await self._expire_owner_reply_opportunity(opportunity)
                 return None, "That response is no longer available for an owner reply."
-        source_channel = guild.get_channel(opportunity["source_channel_id"]) or self.bot.get_channel(opportunity["source_channel_id"])
+        source_channel = await self._resolve_channel_reference(guild, opportunity.get("source_channel_id"))
         if source_channel is None:
             await self._expire_owner_reply_opportunity(opportunity)
             return None, "That response is no longer available for an owner reply."
@@ -3334,12 +3559,14 @@ class ConfessionsService:
         previous_status = str(submission.get("status") or "")
         previous_review_status = str(submission.get("review_status") or "")
         if submission.get("posted_channel_id"):
-            channel = guild.get_channel(submission.get("posted_channel_id")) or self.bot.get_channel(submission.get("posted_channel_id"))
+            channel = await self._resolve_channel_reference(guild, submission.get("posted_channel_id"))
             if channel is not None:
                 message = await self._queue_message(channel, message_id=submission.get("posted_message_id"))
                 if message is not None:
                     with contextlib.suppress(discord.Forbidden, discord.HTTPException, Exception):
                         await message.delete()
+        if submission.get("submission_kind") == "confession":
+            await self._retire_discussion_thread(guild, submission, reason="Babblebox removed the root confession post.")
         submission["status"] = "deleted"
         submission["review_status"] = "withdrawn" if previous_status in {"queued", "blocked"} or previous_review_status == "pending" else previous_review_status
         submission["posted_channel_id"] = None
@@ -3353,6 +3580,8 @@ class ConfessionsService:
             case["resolved_at"] = now_iso
             await self.store.upsert_case(case)
         await self._sync_review_queue(guild, note=f"{self._submission_kind_label(submission)} `{submission['confession_id']}` was withdrawn by its owner.")
+        if submission.get("submission_kind") == "confession":
+            await self._sync_published_confession_views(guild)
         return True, f"{self._submission_kind_label(submission)} `{submission['confession_id']}` was deleted privately."
 
     async def self_edit_confession(
@@ -3560,10 +3789,11 @@ class ConfessionsService:
         context_label = normalize_plain_text(ticket.get("context_label"))
         if context_label:
             embed.add_field(name="Context", value=ge.safe_field_text(context_label, limit=1024), inline=False)
-        embed.add_field(
+        self._add_detail_text_fields(
+            embed,
             name="Details",
-            value=ge.safe_field_text(normalize_plain_text(ticket.get("details")) or "No details supplied.", limit=1024),
-            inline=False,
+            value=normalize_plain_text(ticket.get("details")) or "No details supplied.",
+            empty_value="No details supplied.",
         )
         if message:
             embed.add_field(name="Note", value=ge.safe_field_text(message, limit=1024), inline=False)
@@ -3677,6 +3907,8 @@ class ConfessionsService:
         squashed = squash_for_evasion_checks(normalized.casefold())
         if not normalized:
             return False, "Please add a short explanation."
+        if len(normalized) > 1800:
+            return False, "Support details must stay under 1800 characters."
         if MENTION_RE.search(normalized) or RAW_MENTION_RE.search(normalized) or RAW_MENTION_RE.search(squashed):
             return False, "Support requests cannot include user, role, channel, or mass mentions."
         private_pattern = _find_private_leak(normalized, squashed)
@@ -3871,11 +4103,29 @@ class ConfessionsService:
             return "Enabled with private review"
         return "Enabled without forced review"
 
+    def _link_policy_label(self, config: dict[str, Any]) -> str:
+        mode = str(config.get("link_policy_mode") or DEFAULT_LINK_POLICY_MODE)
+        if mode == "disabled":
+            return "Blocked except custom allowlist"
+        if mode == "allow_all_safe":
+            return "Allow all safe links"
+        return "Trusted links only"
+
+    def _link_policy_detail(self, config: dict[str, Any]) -> str:
+        mode = str(config.get("link_policy_mode") or DEFAULT_LINK_POLICY_MODE)
+        if mode == "disabled":
+            return "Links stay off unless admins add a custom safe allowlist entry. Shield still blocks unsafe domains."
+        if mode == "allow_all_safe":
+            return "Babblebox accepts non-mainstream links that local Shield checks still consider safe. Malicious, suspicious, adult-blocked, shortener, link-in-bio, and storefront links still fail."
+        return "Babblebox allows trusted mainstream families by default. Unknown or risky links still fail unless admins explicitly allow a safe domain."
+
+
     def build_member_panel_embed(self, guild: discord.Guild) -> discord.Embed:
         config = self.get_config(guild.id)
         ready = self.operability_message(guild.id) == "Confessions are ready."
         image_policy = self._image_policy_label(config)
         reply_policy = self._reply_policy_label(config)
+        link_policy = self._link_policy_label(config)
         owner_reply_policy = "Enabled by default" if config["allow_owner_replies"] else "Off"
         owner_reply_review = "Private review" if config["owner_reply_review_mode"] else "Direct publish"
         edit_policy = "Enabled with warning" if config["allow_self_edit"] else "Off by default"
@@ -3895,13 +4145,14 @@ class ConfessionsService:
         embed.add_field(
             name="How It Works",
             value=(
-                "📝 Run `/confess create` or tap **Create a confession**.\n"
-                "🔗 Add text and at most one trusted link.\n"
-                "💬 Use **Reply to confession anonymously** from a live confession post when replies are enabled.\n"
-                "📣 If someone explicitly replies to your confession or first owner reply, Babblebox can privately offer you a public anonymous owner reply.\n"
-                "🧹 Use **Manage My Confession** to delete your own submission privately.\n"
-                "🛟 Use **Appeal / Report** for false positives, restrictions, or problem reports when this server has private support configured.\n"
-                "🛡️ Images and public anonymous replies stay off by default unless admins explicitly enable them."
+                f"- Run `/confess create` or tap **Create a confession**.\n"
+                f"- Add up to {MAX_CONFESSION_LENGTH} characters and one link under this server's link policy.\n"
+                "- Use **Reply to confession anonymously** from a live confession post when replies are enabled.\n"
+                "- First anonymous replies to a top-level confession open a reusable Babblebox reply thread when Discord allows it.\n"
+                "- If someone explicitly replies to your confession or first owner reply, Babblebox can privately offer you a public anonymous owner reply.\n"
+                "- Use **Manage My Confession** to delete your own submission privately.\n"
+                "- Use **Appeal / Report** for false positives, restrictions, or problem reports when this server has private support configured.\n"
+                "- Images and public anonymous replies stay off by default unless admins explicitly enable them."
             ),
             inline=False,
         )
@@ -3910,7 +4161,7 @@ class ConfessionsService:
             value=(
                 f"Review mode: **{'On' if config['review_mode'] else 'Off'}**\n"
                 f"Adult content: **{'Blocked' if config['block_adult_language'] else 'Allowed'}**\n"
-                f"Trusted links: **{'Allowed' if config['allow_trusted_mainstream_links'] else 'Blocked'}**\n"
+                f"Link policy: **{link_policy}**\n"
                 f"Images: **{image_policy}**\n"
                 f"Reply to confession anonymously: **{reply_policy}**\n"
                 f"Owner replies: **{owner_reply_policy}**\n"
@@ -3951,17 +4202,17 @@ class ConfessionsService:
         role_snapshot = self._role_policy_snapshot(guild)
         support_snapshot = self.support_channel_snapshot(guild)
         image_line = (
-            f"Text, one trusted link total, and up to {config['max_images']} images only if admins explicitly enable them. "
+            f"Up to {MAX_CONFESSION_LENGTH} characters, one link total under the server policy, and up to {config['max_images']} images only if admins explicitly enable them. "
             + (
                 "This server routes enabled images through private review before posting."
                 if config.get("image_review_required")
                 else "Enabled images can post directly unless another review rule still catches them."
             )
             if config["allow_images"]
-            else "Text and one trusted link total. Images are off by default unless admins explicitly enable them."
+            else f"Up to {MAX_CONFESSION_LENGTH} characters and one link total under the server policy. Images are off by default unless admins explicitly enable them."
         )
         reply_line = (
-            "Reply to confession anonymously is enabled with extra moderation burden, so every reply stays anonymous, text-only, and launches from a live confession post. "
+            "Reply to confession anonymously is enabled with extra moderation burden, so every reply stays anonymous, text-only, and launches from a live confession post. Top-level replies reuse one Babblebox discussion thread when Discord allows it. "
             + (
                 "This server routes those replies through private review before posting."
                 if config.get("anonymous_reply_review_required")
@@ -3995,7 +4246,7 @@ class ConfessionsService:
         )
         embed.add_field(
             name="What You Can Add",
-            value=f"{image_line}\n{reply_line}\n{owner_reply_line}\n{role_line}",
+            value=f"{image_line}\n{self._link_policy_detail(config)}\n{reply_line}\n{owner_reply_line}\n{role_line}",
             inline=False,
         )
         embed.add_field(
@@ -4094,7 +4345,7 @@ class ConfessionsService:
                 name="Warnings",
                 value=(
                     "Images can increase moderation burden and abuse risk, so admins should decide whether they always enter private review.\n"
-                    "Public anonymous replies can increase abuse, drama, and moderation complexity, so admins should decide whether they always enter private review.\n"
+                    "Public anonymous replies can increase abuse, drama, and moderation complexity, even when Babblebox keeps top-level discussion inside one reusable thread.\n"
                     "Owner replies stay owner-bound, text-only, and limited to one extra bounce.\n"
                     "Editing can create bait-and-switch moderation problems."
                 ),
@@ -4103,10 +4354,10 @@ class ConfessionsService:
             embed.add_field(
                 name="Link Policy",
                 value=(
-                    f"Trusted families: **{'Allowed' if config['allow_trusted_mainstream_links'] else 'Blocked'}**\n"
+                    f"Mode: **{self._link_policy_label(config)}**\n"
                     f"Allowlist: **{len(config['custom_allow_domains'])}** custom\n"
                     f"Blocklist: **{len(config['custom_block_domains'])}** custom\n"
-                    "Unknown links: **Blocked**"
+                    "Shield hard blocks: **Always on**"
                 ),
                 inline=False,
             )
@@ -4235,7 +4486,7 @@ class ConfessionsService:
             generation = int(submission.get("owner_reply_generation") or 1)
             main.add_field(name="Flow", value="Owner reply" if generation == 1 else f"Owner reply round {generation}", inline=True)
         if shared_link_url:
-            main.add_field(name="Trusted Link", value=shared_link_url, inline=False)
+            main.add_field(name="Link", value=shared_link_url, inline=False)
         attachment_meta = list(submission.get("attachment_meta") or [])
         if attachment_meta:
             main.add_field(name="Images", value=f"{len(attachment_meta[:3])} attached", inline=True)
@@ -4253,10 +4504,13 @@ class ConfessionsService:
             embeds.append(ge.style_embed(image_embed, footer="Babblebox Confessions | Anonymous post"))
         return embeds
 
-    def _build_public_confession_view(self, guild_id: int, submission: dict[str, Any]) -> discord.ui.View | None:
+    def _build_public_confession_view(self, guild_id: int, submission: dict[str, Any], *, is_latest: bool = False) -> discord.ui.View | None:
         if submission.get("status") != "published" or submission.get("submission_kind") != "confession":
             return None
-        if not self.get_config(guild_id)["allow_anonymous_replies"]:
+        config = self.get_config(guild_id)
+        show_reply = bool(config["allow_anonymous_replies"])
+        show_create = bool(is_latest)
+        if not show_create and not show_reply:
             return None
         cog = self.bot.get_cog("ConfessionsCog")
         if cog is None:
@@ -4264,24 +4518,62 @@ class ConfessionsService:
         build_view = getattr(cog, "build_public_confession_view", None)
         if not callable(build_view):
             return None
-        return build_view(guild_id=guild_id)
+        return build_view(guild_id=guild_id, show_create=show_create, show_reply=show_reply)
 
     async def _publish_submission(self, guild: discord.Guild, submission: dict[str, Any]) -> tuple[bool, int | None, int | None, str | None]:
-        channel_id = submission.get("posted_channel_id") or self.get_config(guild.id).get("confession_channel_id")
-        channel = guild.get_channel(int(channel_id)) if isinstance(channel_id, int) else None
-        if channel is None:
-            channel = self.bot.get_channel(self.get_config(guild.id).get("confession_channel_id"))
-        if channel is None:
+        confession_channel = await self._resolve_channel_reference(guild, self.get_config(guild.id).get("confession_channel_id"))
+        if confession_channel is None:
             return False, None, None, "The confession channel is unavailable."
 
         embeds = await self._build_public_confession_embeds(submission)
+        target_channel = confession_channel
         view = self._build_public_confession_view(guild.id, {**submission, "status": "published"})
-        with contextlib.suppress(discord.Forbidden, discord.HTTPException):
-            message = await channel.send(embeds=embeds, view=view, allowed_mentions=discord.AllowedMentions.none())
-            if view is not None:
+        if submission.get("submission_kind") == "reply" and submission.get("reply_flow") != REPLY_FLOW_OWNER_TO_USER:
+            parent_id = normalize_plain_text(submission.get("parent_confession_id")).upper() if submission.get("parent_confession_id") else None
+            parent_submission = await self.store.fetch_submission_by_confession_id(guild.id, parent_id) if parent_id else None
+            if parent_submission is not None and parent_submission.get("status") == "published":
+                if parent_submission.get("submission_kind") == "confession":
+                    discussion_thread = await self._ensure_discussion_thread(guild, parent_submission)
+                    if discussion_thread is not None:
+                        target_channel = discussion_thread
+                else:
+                    reply_channel = await self._resolve_channel_reference(guild, parent_submission.get("posted_channel_id"))
+                    if self._channel_is_thread(reply_channel):
+                        prepared_thread = await self._prepare_discussion_thread(guild, reply_channel)
+                        if prepared_thread is not None:
+                            target_channel = prepared_thread
+            view = None
+
+        async def _send(channel: Any, *, attach_view: discord.ui.View | None) -> tuple[bool, int | None, int | None]:
+            message = await channel.send(embeds=embeds, view=attach_view, allowed_mentions=discord.AllowedMentions.none())
+            if attach_view is not None:
                 with contextlib.suppress(Exception):
-                    self.bot.add_view(view, message_id=message.id)
-            return True, getattr(message, "id", None), getattr(channel, "id", None), None
+                    self.bot.add_view(attach_view, message_id=message.id)
+            return True, getattr(message, "id", None), getattr(channel, "id", None)
+
+        try:
+            ok, message_id, channel_id = await _send(target_channel, attach_view=view)
+            return ok, message_id, channel_id, None
+        except (discord.Forbidden, discord.HTTPException):
+            if target_channel is not confession_channel:
+                try:
+                    ok, message_id, channel_id = await _send(confession_channel, attach_view=None)
+                    return ok, message_id, channel_id, None
+                except (discord.Forbidden, discord.HTTPException):
+                    pass
+        except Exception as exc:
+            self.log_admin_diagnostic(
+                code="publish_submission_send_failed",
+                stage="publish_submission_send",
+                guild_id=guild.id,
+                channel_id=getattr(target_channel, "id", None),
+                note=f"confession_id={submission.get('confession_id')}",
+                exc=exc,
+            )
+            if target_channel is not confession_channel:
+                with contextlib.suppress(discord.Forbidden, discord.HTTPException, Exception):
+                    ok, message_id, channel_id = await _send(confession_channel, attach_view=None)
+                    return ok, message_id, channel_id, None
         return False, None, None, "Babblebox could not send to the confession channel."
 
     async def _submission_for_case(self, guild_id: int, case_id: str) -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
@@ -4442,16 +4734,21 @@ class ConfessionsService:
 
     async def _sync_published_confession_views(self, guild: discord.Guild):
         submissions = await self.store.list_published_top_level_submissions(guild.id)
+        latest_submission_id = submissions[-1]["submission_id"] if submissions else None
         for submission in submissions:
             channel_id = submission.get("posted_channel_id")
             message_id = submission.get("posted_message_id")
-            channel = guild.get_channel(channel_id) or self.bot.get_channel(channel_id)
+            channel = await self._resolve_channel_reference(guild, channel_id)
             if channel is None:
                 continue
             message = await self._queue_message(channel, message_id=message_id)
             if message is None:
                 continue
-            view = self._build_public_confession_view(guild.id, submission)
+            view = self._build_public_confession_view(
+                guild.id,
+                submission,
+                is_latest=submission.get("submission_id") == latest_submission_id,
+            )
             with contextlib.suppress(discord.Forbidden, discord.HTTPException):
                 await message.edit(view=view)
             if view is not None:
@@ -4831,9 +5128,9 @@ class ConfessionsService:
         )
         embed.add_field(name="Reasons", value=", ".join(_staff_reason_labels(submission.get("flag_codes") or ())), inline=False)
         preview_value = submission.get("content_body") or submission.get("staff_preview") or "[quiet confession]"
-        embed.add_field(name="Preview", value=ge.safe_field_text(preview_value, limit=1024), inline=False)
+        self._add_detail_text_fields(embed, name="Preview", value=preview_value, empty_value="[quiet confession]")
         if submission.get("shared_link_url"):
-            embed.add_field(name="Trusted Link", value=str(submission["shared_link_url"]), inline=False)
+            embed.add_field(name="Link", value=str(submission["shared_link_url"]), inline=False)
         if submission.get("attachment_meta"):
             attachment_summary = _attachment_summary_from_meta(submission.get("attachment_meta", [])) or "Images attached"
             embed.add_field(name="Attachments", value=ge.safe_field_text(attachment_summary, limit=1024), inline=False)
@@ -4981,6 +5278,8 @@ class ConfessionsService:
             case["resolved_at"] = now_iso
             await self.store.upsert_case(case)
             await self._persist_enforcement_state(relaxed_state)
+            if submission.get("submission_kind") == "confession":
+                await self._sync_published_confession_views(guild)
             return True, f"Case `{case_id}` was resolved and confession `{submission['confession_id']}` was published."
 
         if action == "false_positive" and case.get("case_kind") == "review":
@@ -5005,6 +5304,8 @@ class ConfessionsService:
                     self._relax_case_penalty(state, case_id=case_id, now_iso=now_iso, clear_strikes=clear_strikes)
                 )
             await self._sync_review_queue(guild, note=f"Case `{case_id}` was overridden and posted.")
+            if submission.get("submission_kind") == "confession":
+                await self._sync_published_confession_views(guild)
             return True, f"Case `{case_id}` was overridden and posted as confession `{submission['confession_id']}`."
 
         if action == "clear" and case.get("case_kind") == "review":
@@ -5028,6 +5329,8 @@ class ConfessionsService:
             if state.get("last_case_id") == case_id and (state.get("is_permanent_ban") or state.get("active_restriction") != "none" or int(state.get("strike_count") or 0) > 0):
                 await self._persist_enforcement_state(self._relax_case_penalty(state, case_id=case_id, now_iso=now_iso, clear_strikes=clear_strikes))
             await self._sync_review_queue(guild, note=f"Case `{case_id}` was approved.")
+            if submission.get("submission_kind") == "confession":
+                await self._sync_published_confession_views(guild)
             return True, f"Case `{case_id}` was approved and posted as confession `{submission['confession_id']}`."
 
         if action == "deny":
@@ -5043,12 +5346,14 @@ class ConfessionsService:
             return True, f"Case `{case_id}` was denied."
 
         if action == "delete":
-            channel = guild.get_channel(submission.get("posted_channel_id")) or self.bot.get_channel(submission.get("posted_channel_id"))
+            channel = await self._resolve_channel_reference(guild, submission.get("posted_channel_id"))
             if channel is not None:
                 message = await self._queue_message(channel, message_id=submission.get("posted_message_id"))
                 if message is not None:
                     with contextlib.suppress(discord.Forbidden, discord.HTTPException, Exception):
                         await message.delete()
+            if submission.get("submission_kind") == "confession":
+                await self._retire_discussion_thread(guild, submission, reason="Babblebox removed the root confession post.")
             prior_status = str(submission.get("status") or "")
             submission["status"] = "deleted" if submission.get("posted_message_id") else ("denied" if prior_status in {"queued", "blocked"} else "deleted")
             if prior_status in {"queued", "blocked"}:
@@ -5062,6 +5367,8 @@ class ConfessionsService:
             case["resolved_at"] = now_iso
             await self.store.upsert_case(case)
             await self._sync_review_queue(guild, note=f"Case `{case_id}` was removed from the queue.")
+            if submission.get("submission_kind") == "confession":
+                await self._sync_published_confession_views(guild)
             return True, f"Confession `{submission['confession_id']}` was deleted."
 
         if action == "false_positive":
@@ -5250,6 +5557,9 @@ class ConfessionsService:
         submission = await self.store.fetch_submission_by_message_id(payload.guild_id, payload.message_id)
         if submission is None:
             return
+        guild = self.bot.get_guild(payload.guild_id)
+        if guild is not None and submission.get("submission_kind") == "confession":
+            await self._retire_discussion_thread(guild, submission, reason="The root confession post was removed.")
         submission["status"] = "deleted"
         submission["posted_channel_id"] = None
         submission["posted_message_id"] = None
@@ -5259,6 +5569,8 @@ class ConfessionsService:
         for opportunity in related_opportunities:
             if opportunity.get("status") in {"pending", "locked"}:
                 await self._expire_owner_reply_opportunity(opportunity)
+        if guild is not None and submission.get("submission_kind") == "confession":
+            await self._sync_published_confession_views(guild)
 
     async def handle_message_edit(self, message: discord.Message):
         guild = getattr(message, "guild", None)

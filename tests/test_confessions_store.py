@@ -10,6 +10,7 @@ from unittest import mock
 
 from babblebox.confessions_crypto import ConfessionsCrypto
 from babblebox.confessions_store import (
+    DEFAULT_LINK_POLICY_MODE,
     PROTECTED_OWNER_REPLY_PREVIEW,
     ConfessionsStorageUnavailable,
     ConfessionsStore,
@@ -131,6 +132,7 @@ class ConfessionsStoreNormalizationTests(unittest.TestCase):
         self.assertFalse(config["enabled"])
         self.assertTrue(config["review_mode"])
         self.assertTrue(config["block_adult_language"])
+        self.assertEqual(config["link_policy_mode"], DEFAULT_LINK_POLICY_MODE)
         self.assertTrue(config["allow_trusted_mainstream_links"])
         self.assertFalse(config["allow_images"])
         self.assertFalse(config["image_review_required"])
@@ -178,6 +180,7 @@ class ConfessionsStoreNormalizationTests(unittest.TestCase):
         self.assertEqual(config["panel_channel_id"], 444)
         self.assertEqual(config["panel_message_id"], 555)
         self.assertEqual(config["appeals_channel_id"], 666)
+        self.assertEqual(config["link_policy_mode"], DEFAULT_LINK_POLICY_MODE)
         self.assertEqual(config["custom_allow_domains"], ["google.com", "youtube.com"])
         self.assertEqual(config["custom_block_domains"], ["bad.example"])
         self.assertTrue(config["allow_images"])
@@ -196,6 +199,15 @@ class ConfessionsStoreNormalizationTests(unittest.TestCase):
         self.assertEqual(config["auto_suspend_hours"], 12)
         self.assertEqual(config["strike_temp_ban_threshold"], 9)
         self.assertEqual(config["strike_perm_ban_threshold"], 9)
+
+    def test_normalize_config_maps_legacy_and_explicit_link_modes(self):
+        disabled = normalize_confession_config(10, {"allow_trusted_mainstream_links": False})
+        self.assertEqual(disabled["link_policy_mode"], "disabled")
+        self.assertFalse(disabled["allow_trusted_mainstream_links"])
+
+        allow_all_safe = normalize_confession_config(10, {"link_policy_mode": "allow_all_safe"})
+        self.assertEqual(allow_all_safe["link_policy_mode"], "allow_all_safe")
+        self.assertTrue(allow_all_safe["allow_trusted_mainstream_links"])
 
     def test_normalize_config_keeps_images_enabled_only_with_private_review_channel(self):
         config = normalize_confession_config(
@@ -322,6 +334,40 @@ class ConfessionsStoreNormalizationTests(unittest.TestCase):
         self.assertEqual(reply_record["reply_flow"], "reply_to_confession")
         self.assertEqual(confession_record["owner_reply_generation"], None)
         self.assertIsNone(confession_record["reply_flow"])
+
+    def test_normalize_submission_preserves_4000_chars_and_thread_id_for_root_only(self):
+        root_body = "x" * 4000
+        root_record = normalize_submission(
+            {
+                "submission_id": "sub-root",
+                "guild_id": 10,
+                "confession_id": "CF-ROOT111",
+                "submission_kind": "confession",
+                "status": "published",
+                "review_status": "approved",
+                "content_body": root_body,
+                "discussion_thread_id": 999,
+                "created_at": "2026-04-03T00:00:00+00:00",
+            }
+        )
+        reply_record = normalize_submission(
+            {
+                "submission_id": "sub-reply",
+                "guild_id": 10,
+                "confession_id": "CF-REPLY11",
+                "submission_kind": "reply",
+                "status": "published",
+                "review_status": "approved",
+                "content_body": root_body,
+                "discussion_thread_id": 777,
+                "created_at": "2026-04-03T00:00:00+00:00",
+            }
+        )
+
+        self.assertEqual(root_record["content_body"], root_body)
+        self.assertEqual(root_record["discussion_thread_id"], 999)
+        self.assertEqual(reply_record["content_body"], root_body)
+        self.assertIsNone(reply_record["discussion_thread_id"])
 
     def test_normalize_owner_reply_opportunity_keeps_compact_private_state(self):
         record = normalize_owner_reply_opportunity(
@@ -1049,6 +1095,7 @@ class PostgresConfessionsStoreTests(unittest.IsolatedAsyncioTestCase):
                 "appeals_channel_id": 60,
                 "review_mode": False,
                 "block_adult_language": True,
+                "link_policy_mode": "trusted_only",
                 "allow_trusted_mainstream_links": True,
                 "custom_allow_domains": ["google.com"],
                 "custom_block_domains": ["bad.example"],
@@ -1082,19 +1129,21 @@ class PostgresConfessionsStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(args[3], 40)
         self.assertEqual(args[4], 50)
         self.assertEqual(args[6], 60)
-        self.assertEqual(json.loads(args[10]), ["google.com"])
-        self.assertEqual(json.loads(args[11]), ["bad.example"])
-        self.assertEqual(json.loads(args[12]), [501])
-        self.assertEqual(json.loads(args[13]), [502])
-        self.assertTrue(args[14])
+        self.assertEqual(args[9], "trusted_only")
+        self.assertTrue(args[10])
+        self.assertEqual(json.loads(args[11]), ["google.com"])
+        self.assertEqual(json.loads(args[12]), ["bad.example"])
+        self.assertEqual(json.loads(args[13]), [501])
+        self.assertEqual(json.loads(args[14]), [502])
         self.assertTrue(args[15])
         self.assertTrue(args[16])
-        self.assertFalse(args[17])
-        self.assertTrue(args[18])
+        self.assertTrue(args[17])
+        self.assertFalse(args[18])
         self.assertTrue(args[19])
         self.assertTrue(args[20])
-        self.assertFalse(args[21])
-        self.assertEqual(json.loads(args[22]), [901, 902])
+        self.assertTrue(args[21])
+        self.assertFalse(args[22])
+        self.assertEqual(json.loads(args[23]), [901, 902])
 
     async def test_postgres_store_fetch_config_round_trips_admin_runtime_fields(self):
         self.connection.fetchrow_results.append(
@@ -1108,6 +1157,7 @@ class PostgresConfessionsStoreTests(unittest.IsolatedAsyncioTestCase):
                 "appeals_channel_id": 60,
                 "review_mode": False,
                 "block_adult_language": True,
+                "link_policy_mode": "trusted_only",
                 "allow_trusted_mainstream_links": True,
                 "custom_allow_domains": json.dumps(["google.com"]),
                 "custom_block_domains": json.dumps(["bad.example"]),
@@ -1138,6 +1188,7 @@ class PostgresConfessionsStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(config["panel_channel_id"], 40)
         self.assertEqual(config["panel_message_id"], 50)
         self.assertEqual(config["appeals_channel_id"], 60)
+        self.assertEqual(config["link_policy_mode"], "trusted_only")
         self.assertEqual(config["allowed_role_ids"], [501])
         self.assertEqual(config["blocked_role_ids"], [502])
         self.assertTrue(config["allow_images"])
@@ -1218,6 +1269,70 @@ class PostgresConfessionsStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(record["reply_target_label"], "Responder")
         self.assertEqual(record["reply_target_preview"], "Snapshot preview")
 
+    async def test_postgres_store_upsert_submission_round_trips_discussion_thread_id(self):
+        await self.store.upsert_submission(
+            {
+                "submission_id": "sub-root-thread",
+                "guild_id": 10,
+                "confession_id": "CF-THREAD1",
+                "submission_kind": "confession",
+                "status": "published",
+                "review_status": "approved",
+                "staff_preview": "Published preview",
+                "content_body": "Published body",
+                "shared_link_url": None,
+                "content_fingerprint": "h1:thread",
+                "similarity_key": "sim:thread",
+                "fuzzy_signature": "fh1:thread",
+                "flag_codes": [],
+                "attachment_meta": [],
+                "posted_channel_id": 20,
+                "posted_message_id": 30,
+                "discussion_thread_id": 40,
+                "created_at": "2026-04-03T00:00:00+00:00",
+                "published_at": "2026-04-03T00:05:00+00:00",
+            }
+        )
+
+        statement, args = self.connection.execute_calls[-1]
+        self.assertIn("discussion_thread_id", statement)
+        self.assertEqual(args[22], 40)
+
+        self.connection.fetchrow_results.append(
+            {
+                "submission_id": "sub-root-thread",
+                "guild_id": 10,
+                "confession_id": "CF-THREAD1",
+                "submission_kind": "confession",
+                "reply_flow": None,
+                "owner_reply_generation": None,
+                "parent_confession_id": None,
+                "reply_target_label": None,
+                "reply_target_preview": None,
+                "status": "published",
+                "review_status": "approved",
+                "staff_preview": None,
+                "content_body": None,
+                "shared_link_url": None,
+                "content_ciphertext": args[14],
+                "content_fingerprint": "h1:thread",
+                "similarity_key": "sim:thread",
+                "fuzzy_signature": "fh1:thread",
+                "flag_codes": json.dumps([]),
+                "attachment_meta": json.dumps([]),
+                "posted_channel_id": 20,
+                "posted_message_id": 30,
+                "discussion_thread_id": 40,
+                "current_case_id": None,
+                "created_at": "2026-04-03T00:00:00+00:00",
+                "published_at": "2026-04-03T00:05:00+00:00",
+                "resolved_at": None,
+            }
+        )
+
+        record = await self.store.fetch_submission("sub-root-thread")
+        self.assertEqual(record["discussion_thread_id"], 40)
+
     async def test_postgres_store_fetch_all_configs_round_trips_admin_runtime_fields(self):
         self.connection.fetch_results.append(
             [
@@ -1231,6 +1346,7 @@ class PostgresConfessionsStoreTests(unittest.IsolatedAsyncioTestCase):
                     "appeals_channel_id": 60,
                     "review_mode": False,
                     "block_adult_language": True,
+                    "link_policy_mode": "trusted_only",
                     "allow_trusted_mainstream_links": True,
                     "custom_allow_domains": json.dumps(["google.com"]),
                     "custom_block_domains": json.dumps(["bad.example"]),
@@ -1264,6 +1380,7 @@ class PostgresConfessionsStoreTests(unittest.IsolatedAsyncioTestCase):
                     "appeals_channel_id": None,
                     "review_mode": True,
                     "block_adult_language": True,
+                    "link_policy_mode": "trusted_only",
                     "allow_trusted_mainstream_links": True,
                     "custom_allow_domains": json.dumps([]),
                     "custom_block_domains": json.dumps([]),
@@ -1293,6 +1410,7 @@ class PostgresConfessionsStoreTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(sorted(configs), [10, 11])
         self.assertEqual(configs[10]["panel_message_id"], 50)
         self.assertEqual(configs[10]["appeals_channel_id"], 60)
+        self.assertEqual(configs[10]["link_policy_mode"], "trusted_only")
         self.assertTrue(configs[10]["image_review_required"])
         self.assertFalse(configs[10]["anonymous_reply_review_required"])
         self.assertEqual(configs[11]["confession_channel_id"], 21)
