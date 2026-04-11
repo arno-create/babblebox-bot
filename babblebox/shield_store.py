@@ -102,6 +102,7 @@ def default_guild_shield_config(guild_id: int | None = None) -> dict[str, Any]:
         "adult_high_action": "log",
         "adult_sensitivity": "normal",
         "adult_solicitation_enabled": False,
+        "adult_solicitation_excluded_channel_ids": [],
         "link_policy_mode": DEFAULT_SHIELD_LINK_POLICY_MODE,
         "link_policy_action": "log",
         "link_policy_low_action": "log",
@@ -172,6 +173,7 @@ def normalize_guild_shield_config(guild_id: int, config: Any) -> dict[str, Any]:
     for field in (
         "included_channel_ids",
         "excluded_channel_ids",
+        "adult_solicitation_excluded_channel_ids",
         "included_user_ids",
         "excluded_user_ids",
         "included_role_ids",
@@ -482,6 +484,7 @@ class _PostgresShieldStore(_BaseShieldStore):
                 "adult_high_action TEXT NOT NULL DEFAULT 'log', "
                 "adult_sensitivity TEXT NOT NULL DEFAULT 'normal', "
                 "adult_solicitation_enabled BOOLEAN NOT NULL DEFAULT FALSE, "
+                "adult_solicitation_excluded_channel_ids JSONB NOT NULL DEFAULT '[]'::jsonb, "
                 "link_policy_mode TEXT NOT NULL DEFAULT 'default', "
                 "link_policy_action TEXT NOT NULL DEFAULT 'log', "
                 "link_policy_low_action TEXT NOT NULL DEFAULT 'log', "
@@ -522,6 +525,7 @@ class _PostgresShieldStore(_BaseShieldStore):
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS adult_high_action TEXT NOT NULL DEFAULT 'log'",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS adult_sensitivity TEXT NOT NULL DEFAULT 'normal'",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS adult_solicitation_enabled BOOLEAN NOT NULL DEFAULT FALSE",
+            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS adult_solicitation_excluded_channel_ids JSONB NOT NULL DEFAULT '[]'::jsonb",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS link_policy_mode TEXT NOT NULL DEFAULT 'default'",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS link_policy_action TEXT NOT NULL DEFAULT 'log'",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS link_policy_low_action TEXT NOT NULL DEFAULT 'log'",
@@ -627,6 +631,12 @@ class _PostgresShieldStore(_BaseShieldStore):
                 "adult_high_action": row["adult_high_action"] if "adult_high_action" in row else "log",
                 "adult_sensitivity": row["adult_sensitivity"] if "adult_sensitivity" in row else "normal",
                 "adult_solicitation_enabled": bool(row["adult_solicitation_enabled"]) if "adult_solicitation_enabled" in row else False,
+                "adult_solicitation_excluded_channel_ids": decode_postgres_json_array(
+                    row["adult_solicitation_excluded_channel_ids"],
+                    label="shield_guild_configs.adult_solicitation_excluded_channel_ids",
+                )
+                if "adult_solicitation_excluded_channel_ids" in row
+                else [],
                 "link_policy_mode": row["link_policy_mode"] if "link_policy_mode" in row else DEFAULT_SHIELD_LINK_POLICY_MODE,
                 "link_policy_action": row["link_policy_action"] if "link_policy_action" in row else "log",
                 "link_policy_low_action": row["link_policy_low_action"] if "link_policy_low_action" in row else "log",
@@ -719,7 +729,7 @@ class _PostgresShieldStore(_BaseShieldStore):
                 "privacy_enabled, privacy_action, privacy_low_action, privacy_medium_action, privacy_high_action, privacy_sensitivity, "
                 "promo_enabled, promo_action, promo_low_action, promo_medium_action, promo_high_action, promo_sensitivity, "
                 "scam_enabled, scam_action, scam_low_action, scam_medium_action, scam_high_action, scam_sensitivity, "
-                "adult_enabled, adult_action, adult_low_action, adult_medium_action, adult_high_action, adult_sensitivity, adult_solicitation_enabled, "
+                "adult_enabled, adult_action, adult_low_action, adult_medium_action, adult_high_action, adult_sensitivity, adult_solicitation_enabled, adult_solicitation_excluded_channel_ids, "
                 "link_policy_mode, link_policy_action, link_policy_low_action, link_policy_medium_action, link_policy_high_action, "
                 "ai_enabled, ai_min_confidence, ai_enabled_packs, "
                 "escalation_threshold, escalation_window_minutes, timeout_minutes, updated_at"
@@ -730,9 +740,9 @@ class _PostgresShieldStore(_BaseShieldStore):
                 "$16, $17, $18, $19, $20, $21, "
                 "$22, $23, $24, $25, $26, $27, "
                 "$28, $29, $30, $31, $32, $33, "
-                "$34, $35, $36, $37, $38, $39, $40, "
-                "$41, $42, $43, $44, $45, "
-                "$46, $47, $48::jsonb, $49, $50, $51, timezone('utc', now())"
+                "$34, $35, $36, $37, $38, $39, $40, $41::jsonb, "
+                "$42, $43, $44, $45, $46, "
+                "$47, $48, $49::jsonb, $50, $51, $52, timezone('utc', now())"
                 ") "
                 "ON CONFLICT (guild_id) DO UPDATE SET "
                 "module_enabled = EXCLUDED.module_enabled, "
@@ -774,6 +784,7 @@ class _PostgresShieldStore(_BaseShieldStore):
                 "adult_high_action = EXCLUDED.adult_high_action, "
                 "adult_sensitivity = EXCLUDED.adult_sensitivity, "
                 "adult_solicitation_enabled = EXCLUDED.adult_solicitation_enabled, "
+                "adult_solicitation_excluded_channel_ids = EXCLUDED.adult_solicitation_excluded_channel_ids, "
                 "link_policy_mode = EXCLUDED.link_policy_mode, "
                 "link_policy_action = EXCLUDED.link_policy_action, "
                 "link_policy_low_action = EXCLUDED.link_policy_low_action, "
@@ -827,6 +838,7 @@ class _PostgresShieldStore(_BaseShieldStore):
             config["adult_high_action"],
             config["adult_sensitivity"],
             config["adult_solicitation_enabled"],
+            json.dumps(config["adult_solicitation_excluded_channel_ids"]),
             config["link_policy_mode"],
             config["link_policy_action"],
             config["link_policy_low_action"],

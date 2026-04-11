@@ -753,10 +753,34 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         for text in (
             "This sexual health workshop covers consent, trafficking awareness, and adult content moderation.",
             'Reported screenshot for review: they said "DM me for nudes" in another server.',
+            'Moderation log quote: user said "selling nude pics, more in DMs" in another server.',
         ):
             with self.subTest(text=text):
                 result = self.service.test_message_details(10, text)
                 self.assertFalse([match for match in result.matches if match.pack == "adult"])
+
+    async def test_adult_solicitation_generic_policy_words_do_not_suppress_real_dm_ads(self):
+        ok, _ = await self.service.set_pack_config(
+            10,
+            "adult",
+            enabled=True,
+            action="delete_log",
+            sensitivity="normal",
+            adult_solicitation=True,
+        )
+        self.assertTrue(ok)
+
+        for text, expected_confidence in (
+            ("server rules: DM me for nudes", "medium"),
+            ("policy update: selling nude pics, more in DMs", "high"),
+            ("example pricing: DM me for nudes", "medium"),
+        ):
+            with self.subTest(text=text):
+                result = self.service.test_message_details(10, text)
+                adult_matches = [match for match in result.matches if match.pack == "adult"]
+                self.assertTrue(adult_matches)
+                self.assertEqual(adult_matches[0].match_class, "adult_dm_ad")
+                self.assertEqual(adult_matches[0].confidence, expected_confidence)
 
     async def test_adult_solicitation_requires_bounded_adult_offer_structure(self):
         ok, _ = await self.service.set_pack_config(
@@ -804,6 +828,34 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(adult_matches)
         self.assertEqual(adult_matches[0].match_class, "adult_solicitation")
         self.assertEqual(adult_matches[0].confidence, "low")
+
+    async def test_adult_solicitation_channel_carve_out_only_relaxes_optional_text_detector(self):
+        ok, _ = await self.service.set_pack_config(
+            10,
+            "adult",
+            enabled=True,
+            action="delete_log",
+            sensitivity="normal",
+            adult_solicitation=True,
+        )
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_filter_target(10, "adult_solicitation_excluded_channel_ids", 55, True)
+        self.assertTrue(ok)
+
+        carve_out_result = self.service.test_message_details(10, "DM me for nudes", channel_id=55)
+        normal_result = self.service.test_message_details(10, "DM me for nudes", channel_id=56)
+        domain_result = self.service.test_message_details(
+            10,
+            "Adult link https://pornhub.com/view_video.php?viewkey=test",
+            channel_id=55,
+        )
+
+        self.assertFalse([match for match in carve_out_result.matches if match.pack == "adult"])
+        self.assertIn("relaxes only the optional adult-solicitation detector", carve_out_result.bypass_reason or "")
+        self.assertTrue([match for match in normal_result.matches if match.pack == "adult"])
+        adult_domain_matches = [match for match in domain_result.matches if match.pack == "adult"]
+        self.assertTrue(adult_domain_matches)
+        self.assertEqual(adult_domain_matches[0].match_class, "adult_domain")
 
     async def test_trusted_only_link_policy_allows_trusted_docs_link(self):
         ok, _ = await self.service.set_link_policy_config(10, mode="trusted_only")
@@ -2426,6 +2478,7 @@ class ShieldStoreNormalizationTests(unittest.TestCase):
             "guilds": {
                 "123": {
                     "adult_solicitation_enabled": True,
+                    "adult_solicitation_excluded_channel_ids": [987, 654, 987],
                     "link_policy_mode": "trusted_only",
                     "link_policy_action": "timeout_log",
                 }
@@ -2436,6 +2489,7 @@ class ShieldStoreNormalizationTests(unittest.TestCase):
         config = normalized["guilds"]["123"]
 
         self.assertTrue(config["adult_solicitation_enabled"])
+        self.assertEqual(config["adult_solicitation_excluded_channel_ids"], [654, 987])
         self.assertEqual(config["link_policy_mode"], "trusted_only")
         self.assertEqual(config["link_policy_low_action"], "log")
         self.assertEqual(config["link_policy_medium_action"], "delete_log")

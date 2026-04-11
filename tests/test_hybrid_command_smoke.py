@@ -1438,7 +1438,7 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Enabled: Yes | Sensitivity: Normal", protection_field.value)
             self.assertIn("Low / Medium / High: `log` / `log` / `log`", protection_field.value)
             self.assertIn("**Scam / Malicious Links**", link_safety_field.value)
-            self.assertIn("**Adult / 18+ Links + Solicitation**", link_safety_field.value)
+            self.assertIn("**Adult / 18+ Links**", link_safety_field.value)
             self.assertIn("Mode: **Default**", link_policy_field.value)
         finally:
             await cog.service.close()
@@ -1558,7 +1558,7 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             )
 
             self.assertEqual(len(ctx.send_calls), 1)
-            self.assertIn("Adult / 18+ Links + Solicitation", ctx.send_calls[0]["embed"].description)
+            self.assertIn("Adult / 18+ Links", ctx.send_calls[0]["embed"].description)
         finally:
             await cog.service.close()
 
@@ -1592,7 +1592,7 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             )
 
             self.assertEqual(len(ctx.send_calls), 1)
-            self.assertIn("Sexual-solicitation text detection is on", ctx.send_calls[0]["embed"].description)
+            self.assertIn("Optional solicitation text detection is on", ctx.send_calls[0]["embed"].description)
             self.assertTrue(cog.service.get_config(10)["adult_solicitation_enabled"])
         finally:
             await cog.service.close()
@@ -1643,11 +1643,42 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             )
 
             self.assertEqual(len(ctx.send_calls), 1)
-            self.assertIn("Shield link policy is now `trusted_only`", ctx.send_calls[0]["embed"].description)
+            self.assertIn("Shield link policy is now **Trusted Links Only**", ctx.send_calls[0]["embed"].description)
             config = cog.service.get_config(10)
             self.assertEqual(config["link_policy_mode"], "trusted_only")
             self.assertEqual(config["link_policy_medium_action"], "delete_log")
             self.assertEqual(config["link_policy_high_action"], "delete_log")
+        finally:
+            await cog.service.close()
+
+    async def test_shield_filters_command_supports_solicitation_channel_carve_out(self):
+        current_channel = FakeChannel(20)
+        carve_out_channel = FakeChannel(77)
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
+        cog = ShieldCog(bot)
+        try:
+            cog.service.storage_ready = True
+            ctx = FakeContext(
+                interaction=FakeInteraction(),
+                guild=FakeGuild(10),
+                channel=current_channel,
+                author=FakeAuthor(manage_guild=True),
+            )
+
+            await ShieldCog.shield_filters_command.callback(
+                cog,
+                ctx,
+                mode=None,
+                target="adult_solicitation_excluded_channel_ids",
+                state="on",
+                channel=carve_out_channel,
+                role=None,
+                user=None,
+            )
+
+            self.assertEqual(len(ctx.send_calls), 1)
+            self.assertIn("adult-solicitation carve-out channels", ctx.send_calls[0]["embed"].description)
+            self.assertEqual(cog.service.get_config(10)["adult_solicitation_excluded_channel_ids"], [77])
         finally:
             await cog.service.close()
 
@@ -1714,6 +1745,41 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Bypass", field_names)
             bypass_field = next(field for field in ctx.send_calls[0]["embed"].fields if field.name == "Bypass")
             self.assertIn("allow phrase", bypass_field.value.lower())
+        finally:
+            await cog.service.close()
+
+    async def test_shield_test_command_respects_solicitation_channel_carve_out(self):
+        current_channel = ShieldAwareChannel(20)
+        log_channel = ShieldAwareChannel(30, name="mod-logs")
+        guild = ShieldAwareGuild(10, channels=[current_channel, log_channel])
+        bot = ShieldAwareBot(guild)
+        cog = ShieldCog(bot)
+        try:
+            cog.service.storage_ready = True
+            cog.service.store.state["guilds"][str(guild.id)] = {
+                "guild_id": guild.id,
+                "module_enabled": True,
+                "log_channel_id": log_channel.id,
+                "adult_enabled": True,
+                "adult_action": "delete_log",
+                "adult_solicitation_enabled": True,
+                "adult_solicitation_excluded_channel_ids": [current_channel.id],
+            }
+            ctx = FakeContext(
+                interaction=FakeInteraction(),
+                guild=guild,
+                channel=current_channel,
+                author=FakeAuthor(manage_guild=True),
+            )
+
+            await ShieldCog.shield_test_command.callback(cog, ctx, text="DM me for nudes")
+
+            self.assertEqual(len(ctx.send_calls), 1)
+            embed = ctx.send_calls[0]["embed"]
+            bypass_field = next(field for field in embed.fields if field.name == "Bypass")
+            result_field = next(field for field in embed.fields if field.name == "Result")
+            self.assertIn("relaxes only the optional adult-solicitation detector", bypass_field.value)
+            self.assertIn("No Shield pack matched", result_field.value)
         finally:
             await cog.service.close()
 

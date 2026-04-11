@@ -105,7 +105,7 @@ PACK_LABELS = {
     "privacy": "Privacy Leak",
     "promo": "Promo / Invite",
     "scam": "Scam / Malicious Links",
-    "adult": "Adult / 18+ Links + Solicitation",
+    "adult": "Adult / 18+ Links",
     "link_policy": "Link Policy",
     "advanced": "Advanced Pattern",
 }
@@ -182,13 +182,22 @@ ADULT_SOLICIT_SALE_RE = re.compile(
 )
 ADULT_SOLICIT_WEAK_OFFER_RE = re.compile(r"(?i)\b(?:available|open|taking requests|customs?)\b")
 ADULT_SOLICIT_REPORTING_RE = re.compile(
-    r"(?i)\b(?:report(?:ed|ing)?|rules?|policy|they said|he said|she said|quoted?|quote|example|sample|screenshot|for review|moderation)\b"
+    r"(?i)\b(?:report(?:ed|ing)?|for review|for moderation|moderation log|incident review|quoted?|quote|screenshot(?:ed)?|screencap)\b"
+)
+ADULT_SOLICIT_REPORT_ATTRIBUTION_RE = re.compile(
+    r"(?i)\b(?:they|he|she|someone|user|member)\s+(?:said|posted|sent|wrote|advertised|offered)\b"
+)
+ADULT_SOLICIT_EXAMPLE_RE = re.compile(
+    r"(?i)\b(?:example|sample)\s+(?:of|message|quote|post|ad|screenshot|report)\b"
 )
 ADULT_SOLICIT_EDUCATION_RE = re.compile(
     r"(?i)\b(?:sexual health|consent|assault|trafficking|awareness|support group|support worker|education(?:al)?|victim|survivor)\b"
 )
 ADULT_SOLICIT_DISAPPROVAL_RE = re.compile(
     r"(?i)\b(?:don['’]?t say|stop posting|not allowed|against the rules|rule violation|banned phrase|keep that out)\b"
+)
+ADULT_SOLICIT_STRONG_DISAPPROVAL_RE = re.compile(
+    r"(?i)\b(?:don['’]?t say|stop posting|not allowed|against (?:the )?(?:rules|policy)|rule violation|policy violation|banned phrase|keep that out)\b"
 )
 SOCIAL_ENGINEERING_RE = re.compile(
     r"(?i)\b(?:download|run|install|open|visit|click(?: here)?|verify|claim|login|log in|sign in|connect wallet|wallet connect|sync|mint|minting|authenticate|authorize)\b"
@@ -358,6 +367,7 @@ class CompiledShieldConfig:
     scam: PackSettings
     adult: PackSettings
     adult_solicitation_enabled: bool
+    adult_solicitation_excluded_channel_ids: frozenset[int]
     link_policy_mode: str
     link_policy: PackSettings
     ai_enabled: bool
@@ -1117,11 +1127,19 @@ def _confidence_from_score(score: int) -> str:
 
 
 def _adult_solicitation_context_suppressed(text: str) -> bool:
-    return bool(
-        ADULT_SOLICIT_REPORTING_RE.search(text)
-        or ADULT_SOLICIT_EDUCATION_RE.search(text)
-        or ADULT_SOLICIT_DISAPPROVAL_RE.search(text)
-    )
+    if ADULT_SOLICIT_EDUCATION_RE.search(text) or ADULT_SOLICIT_STRONG_DISAPPROVAL_RE.search(text):
+        return True
+    reporting = ADULT_SOLICIT_REPORTING_RE.search(text)
+    if reporting is None:
+        return bool(ADULT_SOLICIT_EXAMPLE_RE.search(text) and ADULT_SOLICIT_REPORT_ATTRIBUTION_RE.search(text))
+    matched_reporting = reporting.group(0).casefold()
+    if any(token in matched_reporting for token in ("for review", "moderation", "quote", "quoted", "screenshot", "screencap")):
+        return True
+    return bool(ADULT_SOLICIT_REPORT_ATTRIBUTION_RE.search(text) or ADULT_SOLICIT_EXAMPLE_RE.search(text))
+
+
+def _link_policy_mode_label(mode: str) -> str:
+    return "Trusted Links Only" if mode == "trusted_only" else "Default"
 
 
 def _validate_email_candidate(candidate: str) -> str | None:
@@ -1324,10 +1342,24 @@ class ShieldService:
         )
         return True, f"Global Shield AI override is now {'on' if enabled else 'off'}."
 
-    def test_message(self, guild_id: int, text: str, *, attachments: Sequence[Any] | None = None) -> list[ShieldMatch]:
-        return list(self.test_message_details(guild_id, text, attachments=attachments).matches)
+    def test_message(
+        self,
+        guild_id: int,
+        text: str,
+        *,
+        attachments: Sequence[Any] | None = None,
+        channel_id: int | None = None,
+    ) -> list[ShieldMatch]:
+        return list(self.test_message_details(guild_id, text, attachments=attachments, channel_id=channel_id).matches)
 
-    def test_message_details(self, guild_id: int, text: str, *, attachments: Sequence[Any] | None = None) -> ShieldTestResult:
+    def test_message_details(
+        self,
+        guild_id: int,
+        text: str,
+        *,
+        attachments: Sequence[Any] | None = None,
+        channel_id: int | None = None,
+    ) -> ShieldTestResult:
         compiled = self._compiled_configs.get(guild_id) or self._compile_config(guild_id, self.get_config(guild_id))
         fake_attachments = [
             type("Attachment", (), {"filename": value})() if isinstance(value, str) else value
@@ -1343,8 +1375,19 @@ class ShieldService:
                 bypass_reason="A guild allow phrase matched this sample, so live Shield handling would bypass it.",
             )
         link_assessments = self._collect_link_assessments(compiled, snapshot, now=now)
-        matches = tuple(self._collect_matches(compiled, snapshot, link_assessments=link_assessments))
-        return ShieldTestResult(matches=matches, link_assessments=link_assessments)
+        matches = tuple(self._collect_matches(compiled, snapshot, link_assessments=link_assessments, channel_id=channel_id))
+        bypass_reason = None
+        if (
+            channel_id is not None
+            and channel_id in compiled.adult_solicitation_excluded_channel_ids
+            and compiled.adult_solicitation_enabled
+        ):
+            unsuppressed_adult = self._detect_adult_solicitation(compiled, snapshot, channel_id=None)
+            if unsuppressed_adult and not any(match.match_class in {"adult_dm_ad", "adult_solicitation"} for match in matches):
+                bypass_reason = (
+                    "This channel relaxes only the optional adult-solicitation detector, so that specific text match would be skipped here."
+                )
+        return ShieldTestResult(matches=matches, link_assessments=link_assessments, bypass_reason=bypass_reason)
 
     async def set_module_enabled(self, guild_id: int, enabled: bool) -> tuple[bool, str]:
         return await self._update_config(
@@ -1428,7 +1471,7 @@ class ShieldService:
         solicitation_note = ""
         if pack == "adult":
             solicitation_state = current.get("adult_solicitation_enabled", False) if adult_solicitation is None else bool(adult_solicitation)
-            solicitation_note = f" Sexual-solicitation text detection is {'on' if solicitation_state else 'off'}."
+            solicitation_note = f" Optional solicitation text detection is {'on' if solicitation_state else 'off'}."
         return await self._update_config(
             guild_id,
             mutate,
@@ -1501,7 +1544,7 @@ class ShieldService:
             guild_id,
             mutate,
             success_message=(
-                f"Shield link policy is now `{final_mode}` with "
+                f"Shield link policy is now **{_link_policy_mode_label(final_mode)}** with "
                 f"{self._policy_summary(low_action=final_low_action, medium_action=final_medium_action, high_action=final_high_action)}."
             ),
         )
@@ -1536,6 +1579,7 @@ class ShieldService:
         if field not in {
             "included_channel_ids",
             "excluded_channel_ids",
+            "adult_solicitation_excluded_channel_ids",
             "included_user_ids",
             "excluded_user_ids",
             "included_role_ids",
@@ -1543,7 +1587,9 @@ class ShieldService:
             "trusted_role_ids",
         }:
             return False, "Unknown Shield filter."
-        label = field.replace("_ids", "").replace("_", " ")
+        label = {
+            "adult_solicitation_excluded_channel_ids": "adult-solicitation carve-out channels",
+        }.get(field, field.replace("_ids", "").replace("_", " "))
 
         def mutate(config: dict[str, Any]):
             values = set(_sorted_unique_ints(config.get(field, [])))
@@ -1753,6 +1799,7 @@ class ShieldService:
             now=now,
             scan_source=resolved_scan_source,
             track_repetition=resolved_scan_source != "message_edit",
+            channel_id=getattr(getattr(message, "channel", None), "id", None),
         )
 
     async def handle_message_edit(self, before: discord.Message, after: discord.Message) -> ShieldDecision | None:
@@ -1780,6 +1827,7 @@ class ShieldService:
             now=now,
             scan_source="message_edit",
             track_repetition=False,
+            channel_id=getattr(getattr(after, "channel", None), "id", None),
         )
 
     async def _scan_message(
@@ -1791,6 +1839,7 @@ class ShieldService:
         now: float,
         scan_source: str,
         track_repetition: bool,
+        channel_id: int | None,
     ) -> ShieldDecision | None:
         alert_content_fingerprint = _alert_content_fingerprint(snapshot)
         if self._allow_phrase_bypass(compiled, snapshot):
@@ -1816,6 +1865,7 @@ class ShieldService:
             link_assessments=link_assessments,
             scan_source=scan_source,
             scam_context=scam_context,
+            channel_id=channel_id,
         )
         if not matches:
             return None
@@ -2268,13 +2318,14 @@ class ShieldService:
         link_assessments: Sequence[ShieldLinkAssessment] | None = None,
         scan_source: str = "new_message",
         scam_context: ShieldScamContext | None = None,
+        channel_id: int | None = None,
     ) -> list[ShieldMatch]:
         active_link_assessments = tuple(link_assessments or ())
         matches: list[ShieldMatch] = []
         matches.extend(self._detect_privacy(compiled, snapshot))
         matches.extend(self._detect_promo(compiled, snapshot, repetitive_promo=repetitive_promo or RepetitionSignals(None, 0, False, False)))
         matches.extend(self._detect_link_safety_domains(compiled, snapshot, active_link_assessments))
-        matches.extend(self._detect_adult_solicitation(compiled, snapshot))
+        matches.extend(self._detect_adult_solicitation(compiled, snapshot, channel_id=channel_id))
         matches.extend(self._detect_scam(compiled, snapshot, active_link_assessments, scan_source=scan_source, scam_context=scam_context or ShieldScamContext()))
         matches.extend(self._detect_link_policy(compiled, snapshot, active_link_assessments, existing_matches=matches))
         matches.extend(self._detect_custom_patterns(compiled, snapshot))
@@ -2327,9 +2378,17 @@ class ShieldService:
                 )
         return self._dedupe_matches(matches)
 
-    def _detect_adult_solicitation(self, compiled: CompiledShieldConfig, snapshot: ShieldSnapshot) -> list[ShieldMatch]:
+    def _detect_adult_solicitation(
+        self,
+        compiled: CompiledShieldConfig,
+        snapshot: ShieldSnapshot,
+        *,
+        channel_id: int | None,
+    ) -> list[ShieldMatch]:
         settings = compiled.adult
         if not settings.enabled or not compiled.adult_solicitation_enabled:
+            return []
+        if channel_id is not None and channel_id in compiled.adult_solicitation_excluded_channel_ids:
             return []
         text = snapshot.context_text
         squashed = snapshot.context_squashed
@@ -3610,6 +3669,9 @@ class ShieldService:
                 sensitivity=str(raw.get("adult_sensitivity", "normal")).strip().lower(),
             ),
             adult_solicitation_enabled=bool(raw.get("adult_solicitation_enabled")),
+            adult_solicitation_excluded_channel_ids=frozenset(
+                _sorted_unique_ints(raw.get("adult_solicitation_excluded_channel_ids", []))
+            ),
             link_policy_mode=link_policy_mode,
             link_policy=PackSettings(
                 enabled=link_policy_mode != DEFAULT_SHIELD_LINK_POLICY_MODE,

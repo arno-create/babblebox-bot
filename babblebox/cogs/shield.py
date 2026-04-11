@@ -24,7 +24,7 @@ PACK_CHOICES = [
     app_commands.Choice(name="Privacy Leak", value="privacy"),
     app_commands.Choice(name="Promo / Invite", value="promo"),
     app_commands.Choice(name="Scam / Malicious Links", value="scam"),
-    app_commands.Choice(name="Adult / 18+ Links + Solicitation", value="adult"),
+    app_commands.Choice(name="Adult / 18+ Links", value="adult"),
 ]
 ACTION_CHOICES = [
     app_commands.Choice(name="Detect only", value="detect"),
@@ -63,6 +63,7 @@ PATTERN_MODE_CHOICES = [
 FILTER_TARGET_CHOICES = [
     app_commands.Choice(name="Include current/selected channel", value="included_channel_ids"),
     app_commands.Choice(name="Exclude current/selected channel", value="excluded_channel_ids"),
+    app_commands.Choice(name="Relax solicitation in current/selected channel", value="adult_solicitation_excluded_channel_ids"),
     app_commands.Choice(name="Include member", value="included_user_ids"),
     app_commands.Choice(name="Exclude member", value="excluded_user_ids"),
     app_commands.Choice(name="Include role", value="included_role_ids"),
@@ -289,7 +290,10 @@ class ShieldCog(commands.Cog):
         low_action, medium_action, high_action = self._pack_policy_actions(config, pack)
         adult_solicit_line = ""
         if pack == "adult":
-            adult_solicit_line = f"\nSolicitation text: {'On' if config.get('adult_solicitation_enabled') else 'Off'}"
+            adult_solicit_line = (
+                f"\nOptional solicitation detector: {'On' if config.get('adult_solicitation_enabled') else 'Off'}\n"
+                f"Solicitation carve-out channels: {self._format_mentions(config.get('adult_solicitation_excluded_channel_ids', []), kind='channel')}"
+            )
         return (
             f"Enabled: {'Yes' if config[f'{pack}_enabled'] else 'No'} | "
             f"Sensitivity: {SENSITIVITY_LABELS[config[f'{pack}_sensitivity']]}\n"
@@ -307,12 +311,12 @@ class ShieldCog(commands.Cog):
         )
 
     def _link_policy_label(self, config: dict[str, object]) -> str:
-        return "Trusted links only" if config.get("link_policy_mode") == "trusted_only" else "Default"
+        return "Trusted Links Only" if config.get("link_policy_mode") == "trusted_only" else "Default"
 
     def _link_policy_detail(self, config: dict[str, object]) -> str:
         low_action, medium_action, high_action = self._link_policy_actions(config)
         if config.get("link_policy_mode") == "trusted_only":
-            detail = "Shield allows only Babblebox-trusted families plus admin allowlisted domains and invite codes."
+            detail = "Shield allows only trusted mainstream destinations plus admin allowlisted domains and invite codes."
         else:
             detail = "Shield preserves the current broad link behavior; trusted-link policy is inactive."
         return (
@@ -458,7 +462,7 @@ class ShieldCog(commands.Cog):
         ai_status = self.service.get_ai_status(guild_id)
         embed = discord.Embed(
             title="Shield Control Panel",
-            description="Shield stays local-first. Bundled intel handles malicious/scam and optional adult / 18+ domains, adult solicitation text is separately optional, trusted-link mode stays server-side and distinct from Confessions, safe mainstream families bypass suspicion, and attachment filenames stay metadata-only unless real link evidence exists.",
+            description="Shield stays local-first. Bundled intel handles malicious/scam and optional adult / 18+ domains, the solicitation detector stays separately optional, specific 18+ channels can relax only that detector without weakening adult-domain or scam protections, trusted-link mode stays server-side and distinct from Confessions, safe mainstream destinations bypass suspicion, and attachment filenames stay metadata-only unless real link evidence exists.",
             color=ge.EMBED_THEME["warning"] if config["module_enabled"] else ge.EMBED_THEME["info"],
         )
         log_channel = f"<#{config['log_channel_id']}>" if config.get("log_channel_id") else "Not set"
@@ -512,13 +516,13 @@ class ShieldCog(commands.Cog):
             ),
             inline=False,
         )
-        return ge.style_embed(embed, footer="Babblebox Shield | Use /shield panel, rules, filters, logs, allowlist, ai, or test")
+        return ge.style_embed(embed, footer="Babblebox Shield | Use /shield panel, rules, links, filters, logs, allowlist, ai, or test")
 
     def _rules_embed(self, guild_id: int) -> discord.Embed:
         config = self.service.get_config(guild_id)
         embed = discord.Embed(
             title="Shield Rules",
-            description="Confidence-tier local policy. Local malicious and adult matches can act hard, adult solicitation stays optional, and unknown suspicious links stay link-only unless local scam signals, newcomer context, or campaign repetition justify escalation.",
+            description="Confidence-tier local policy. Local malicious and adult-domain matches can act hard, the solicitation detector stays optional and narrowly scoped, and unknown suspicious links stay link-only unless local scam signals, newcomer context, or campaign repetition justify escalation.",
             color=ge.EMBED_THEME["info"],
         )
         pack_lines = []
@@ -574,7 +578,7 @@ class ShieldCog(commands.Cog):
         config = self.service.get_config(guild_id)
         embed = discord.Embed(
             title="Shield Scope and Allowlists",
-            description="Control where Shield scans, who it skips, what it should not flag, and which domains or invites can override trusted-link mode.",
+            description="Control where Shield scans, who it skips, what it should not flag, which domains or invites can override trusted-link mode, and which channels relax only the optional solicitation detector.",
             color=ge.EMBED_THEME["info"],
         )
         embed.add_field(
@@ -598,12 +602,14 @@ class ShieldCog(commands.Cog):
             inline=False,
         )
         embed.add_field(
-            name="Allowlists",
+            name="Allowlists and Targeted Carve-Outs",
             value=(
                 f"Domains: {self._format_text_list(config['allow_domains'], limit=6)}\n"
                 f"Invite codes: {self._format_text_list(config['allow_invite_codes'], limit=6)}\n"
                 f"Phrases: {self._format_text_list(config['allow_phrases'], limit=4)}\n"
-                f"Trusted-link mode: **{self._link_policy_label(config)}**"
+                f"Solicitation carve-out channels: {self._format_mentions(config.get('adult_solicitation_excluded_channel_ids', []), kind='channel')}\n"
+                f"Trusted-link mode: **{self._link_policy_label(config)}**\n"
+                "Only the optional solicitation detector backs off there; adult-domain, scam, and malicious-link protections still run."
             ),
             inline=False,
         )
@@ -612,6 +618,7 @@ class ShieldCog(commands.Cog):
             value=(
                 "`/shield filters mode:only_included`\n"
                 "`/shield filters target:trusted_role_ids state:on role:@Mods`\n"
+                "`/shield filters target:adult_solicitation_excluded_channel_ids state:on channel:#18plus`\n"
                 "`/shield allowlist bucket:allow_domains state:on value:example.com`"
             ),
             inline=False,
@@ -779,7 +786,7 @@ class ShieldCog(commands.Cog):
         medium_action="Action for medium-confidence matches",
         high_action="Action for high-confidence matches",
         sensitivity="How broad or cautious the pack should be",
-        adult_solicitation="Enable the adult pack's optional DM-ad and sexual-solicitation text detector",
+        adult_solicitation="Enable the adult pack's optional solicitation / DM-ad text detector",
         escalation_threshold="Repeated-hit threshold for delete_escalate",
         escalation_window_minutes="Strike window used for delete_escalate",
         timeout_minutes="Timeout length used when escalation or timeout actions fire",
@@ -850,7 +857,7 @@ class ShieldCog(commands.Cog):
 
     @shield_group.command(name="links", with_app_command=True, description="Configure Shield's trusted-link policy lane")
     @app_commands.describe(
-        mode="Use the current broad behavior or require trusted links only",
+        mode="Use the current broad behavior or require trusted mainstream destinations plus allowlists only",
         action="Shorthand to derive the trusted-link policy action ladder from one action",
         low_action="Action for safe-but-untrusted low-confidence policy matches",
         medium_action="Action for medium-confidence policy matches such as invites or link hubs",
@@ -877,7 +884,7 @@ class ShieldCog(commands.Cog):
         if all(value is None for value in (mode, action, low_action, medium_action, high_action)):
             embed = discord.Embed(
                 title="Shield Link Policy",
-                description="Shield link policy is server-wide live-message policy and stays separate from Confessions link mode.",
+                description="Shield link policy is server-wide live-message policy, stays separate from Confessions link mode, and still respects admin allowlists.",
                 color=ge.EMBED_THEME["info"],
             )
             embed.add_field(name="Current Policy", value=self._link_policy_detail(self.service.get_config(ctx.guild.id)), inline=False)
@@ -925,10 +932,10 @@ class ShieldCog(commands.Cog):
             return
         await self._send_result(ctx, "Shield Logs", "\n".join(messages), ok=ok)
 
-    @shield_group.command(name="filters", with_app_command=True, description="Configure Shield scope, includes, excludes, and trusted roles")
+    @shield_group.command(name="filters", with_app_command=True, description="Configure Shield scope, includes, excludes, trusted roles, and solicitation carve-outs")
     @app_commands.describe(
         mode="Scan everything eligible or only explicitly included scope",
-        target="Which include/exclude/trust bucket to change",
+        target="Which include/exclude/trust bucket or solicitation carve-out to change",
         state="Turn that filter on or off",
         channel="Channel target for channel-based filters",
         role="Role target for role-based filters",
@@ -1084,7 +1091,8 @@ class ShieldCog(commands.Cog):
     async def shield_test_command(self, ctx: commands.Context, text: str):
         if not await self._guard(ctx):
             return
-        result = self.service.test_message_details(ctx.guild.id, text)
+        channel_id = getattr(ctx.channel, "id", None) if ctx.guild is not None else None
+        result = self.service.test_message_details(ctx.guild.id, text, channel_id=channel_id)
         embed = discord.Embed(title="Shield Test", description="Dry-run results for the current configuration.", color=ge.EMBED_THEME["info"])
         if result.bypass_reason:
             embed.add_field(name="Bypass", value=result.bypass_reason, inline=False)
@@ -1111,7 +1119,6 @@ class ShieldCog(commands.Cog):
                 ),
                 inline=False,
             )
-        channel_id = getattr(ctx.channel, "id", None) if ctx.guild is not None else None
         self._add_operability_field(embed, ctx.guild.id, channel_id=channel_id)
         await send_hybrid_response(ctx, embed=ge.style_embed(embed, footer="Babblebox Shield | Dry run only"), ephemeral=True)
 

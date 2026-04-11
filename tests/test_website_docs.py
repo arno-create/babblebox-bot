@@ -206,9 +206,23 @@ class WebsiteDocsTests(unittest.TestCase):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         help_html = (ROOT / "help.html").read_text(encoding="utf-8")
 
-        for text in ("Trusted Links Only", "/shield links", "separate from Confessions link mode", "DM-ad"):
+        for text in (
+            "Trusted Links Only",
+            "/shield links",
+            "/shield logs",
+            "/shield filters",
+            "separate from Confessions link mode",
+            "DM-ad",
+        ):
             self.assertIn(text, readme)
             self.assertIn(text, help_html)
+        self.assertIn("trusted mainstream destinations plus admin allowlisted domains and invite codes", readme)
+        self.assertIn("trusted mainstream destinations plus allowlists only", help_html)
+        for text in ("solicitation carve-out", "optional solicitation"):
+            self.assertIn(text, readme)
+            self.assertIn(text, help_html)
+        self.assertIn("solicitation carve-out channels", readme)
+        self.assertIn("solicitation carve-out channels", help_html)
 
     def test_privacy_docs_cover_confessions_storage_and_staff_blind_behavior(self):
         privacy_md = (ROOT / "PRIVACY.md").read_text(encoding="utf-8")
