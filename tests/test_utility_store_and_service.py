@@ -352,6 +352,43 @@ class UtilityStoreAndServiceTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
+    async def test_real_feature_gateway_allows_health_context_but_blocks_adult_and_severe_utility_text(self):
+        ok, afk_record = await self.service.set_afk(
+            user=DummyUser(710),
+            reason="Sexual health workshop tomorrow",
+            duration_seconds=30 * 60,
+            start_in_seconds=None,
+        )
+        self.assertTrue(ok)
+        self.assertIsInstance(afk_record, dict)
+
+        ok, adult_error = await self.service.create_reminder(
+            user=DummyUser(711),
+            text="DM me for nudes",
+            delay_seconds=20 * 60,
+            delivery="dm",
+            guild=None,
+            channel=None,
+            origin_jump_url=None,
+        )
+        self.assertFalse(ok)
+        self.assertIn("adult", adult_error.lower())
+
+        ok, severe_error = await self.service.set_afk(
+            user=DummyUser(712),
+            reason="kill yourself",
+            duration_seconds=30 * 60,
+            start_in_seconds=None,
+        )
+        self.assertFalse(ok)
+        self.assertIn("severe", severe_error.lower())
+
+    async def test_watch_keyword_stays_privacy_only_under_real_gateway(self):
+        valid, cleaned = self.service.validate_watch_keyword("dm me for nudes")
+
+        self.assertTrue(valid)
+        self.assertEqual(cleaned, "dm me for nudes")
+
     async def test_watch_summary_distinguishes_mentions_replies_and_channel_keywords(self):
         ok, _ = await self.service.set_watch_mentions(42, guild_id=100, channel_id=200, scope="channel", enabled=True)
         self.assertTrue(ok)
@@ -759,6 +796,36 @@ class UtilityStoreAndServiceTests(unittest.IsolatedAsyncioTestCase):
         user.send.assert_awaited_once()
         self.assertIn("withheld", user.send.await_args.args[0].lower())
         self.assertEqual(gateway.evaluations, [(FEATURE_SURFACE_REMINDER_PUBLIC_DELIVERY, "Safe reminder text")])
+
+    async def test_public_reminder_delivery_real_gateway_withholds_severe_text(self):
+        user = DummyMember(562, display_name="Ari")
+        guild = DummyGuild(1, members=[user])
+        channel = DummyChannel(2, guild=guild, visible_user_ids={user.id})
+        self.bot.add_user(user)
+        self.bot.add_channel(channel)
+        record = {
+            "id": "rem-real-severe",
+            "user_id": user.id,
+            "text": "kill yourself",
+            "delivery": "here",
+            "created_at": serialize_datetime(ge.now_utc()),
+            "due_at": serialize_datetime(ge.now_utc()),
+            "guild_id": guild.id,
+            "guild_name": guild.name,
+            "channel_id": channel.id,
+            "channel_name": channel.name,
+            "origin_jump_url": None,
+            "delivery_attempts": 0,
+            "last_attempt_at": None,
+            "retry_after": None,
+        }
+
+        removed = await self.service._deliver_single_reminder(record)
+
+        self.assertTrue(removed)
+        user.send.assert_awaited_once()
+        self.assertIn("withheld", user.send.await_args.args[0].lower())
+        self.assertFalse(channel.sent)
 
     async def test_public_reminder_delivery_posts_when_feature_gateway_allows_it(self):
         user = DummyMember(561, display_name="Ari")

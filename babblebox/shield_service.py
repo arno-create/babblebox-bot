@@ -48,11 +48,14 @@ from babblebox.shield_link_safety import (
     normalize_link_host as link_normalize_link_host,
 )
 from babblebox.shield_store import (
+    DEFAULT_SHIELD_SEVERE_CATEGORIES,
     DEFAULT_SHIELD_LINK_POLICY_MODE,
     LOW_CONFIDENCE_ACTIONS,
     MEDIUM_CONFIDENCE_ACTIONS,
+    SHIELD_SEVERE_TERM_LIMIT,
     ShieldStateStore,
     ShieldStorageUnavailable,
+    VALID_SHIELD_SEVERE_CATEGORIES,
     VALID_SHIELD_LINK_POLICY_MODES,
     default_guild_shield_config,
     normalize_guild_shield_config,
@@ -65,6 +68,9 @@ from babblebox.text_safety import (
     PHONE_RE,
     SSN_RE,
     URL_RE,
+    find_safety_term_hits,
+    fold_confusable_text,
+    is_harmful_context_suppressed,
     normalize_plain_text,
     sanitize_short_plain_text,
     squash_for_evasion_checks,
@@ -72,7 +78,7 @@ from babblebox.text_safety import (
 from babblebox.utility_helpers import deserialize_datetime, make_attachment_labels, make_message_preview
 
 
-RULE_PACKS = ("privacy", "promo", "scam", "adult")
+RULE_PACKS = ("privacy", "promo", "scam", "adult", "severe")
 SHIELD_ACTIONS = {"disabled", "detect", "log", "delete_log", "delete_escalate", "timeout_log"}
 SHIELD_SENSITIVITIES = {"low", "normal", "high"}
 CUSTOM_PATTERN_MODES = {"contains", "word", "wildcard"}
@@ -107,7 +113,8 @@ PACK_LABELS = {
     "privacy": "Privacy Leak",
     "promo": "Promo / Invite",
     "scam": "Scam / Malicious Links",
-    "adult": "Adult / 18+ Links",
+    "adult": "Adult / 18+ Safety",
+    "severe": "Severe Harm / Hate",
     "link_policy": "Link Policy",
     "advanced": "Advanced Pattern",
 }
@@ -121,6 +128,11 @@ MATCH_CLASS_LABELS = {
     "adult_domain": "Known adult domain",
     "adult_dm_ad": "Adult-content DM ad",
     "adult_solicitation": "Sexual solicitation",
+    "sexual_exploitation_solicitation": "Sexual exploitation solicitation",
+    "self_harm_encouragement": "Self-harm encouragement",
+    "eliminationist_hate": "Eliminationist hate",
+    "severe_slur_abuse": "Severe slur abuse",
+    "targeted_extreme_degradation": "Extreme degrading abuse",
     "scam_bait_attachment": "Scam bait + suspicious file",
     "scam_campaign_lure": "Weighted scam campaign lure",
     "scam_risky_unknown_link": "Risky unknown-link lure",
@@ -145,7 +157,7 @@ ACTION_LABELS = {
 SENSITIVITY_LABELS = {"low": "Low", "normal": "Normal", "high": "High"}
 ACTION_STRENGTH = {"disabled": -1, "detect": 0, "log": 1, "delete_log": 2, "timeout_log": 3, "delete_escalate": 4}
 CONFIDENCE_STRENGTH = {"low": 1, "medium": 2, "high": 3, "custom": 4}
-PACK_STRENGTH = {"privacy": 1, "promo": 2, "link_policy": 2, "scam": 3, "adult": 3, "advanced": 4}
+PACK_STRENGTH = {"privacy": 1, "promo": 2, "link_policy": 2, "scam": 3, "adult": 3, "severe": 4, "advanced": 5}
 AI_PRIORITY_LABELS = {"low": "Low", "normal": "Normal", "high": "High"}
 AI_REVIEW_PACK_SET = frozenset(SHIELD_AI_REVIEW_PACKS)
 SCAN_SOURCE_LABELS = {
@@ -185,32 +197,94 @@ PROMO_CONTEXT_RE = re.compile(r"(?i)\b(?:server|community|channel|stream|shop|st
 MONETIZED_PROMO_RE = re.compile(
     r"(?i)\b(?:commission(?:s)? open|patreon|ko-fi|gumroad|etsy|shop|store|prices|paid promo|sponsored)\b"
 )
-ADULT_SOLICIT_EXPLICIT_RE = re.compile(
-    r"(?i)\b(?:nudes?|lewds?|nsfw(?:\s+(?:pics?|content))?|onlyfans|18\+\s*(?:pics?|content)|adult\s+content|porn|sext(?:ing)?)\b"
-)
 ADULT_SOLICIT_CONTACT_RE = re.compile(r"(?i)\b(?:dm(?: me)?|message me|msg me|pm me|inbox me|hit me up)\b")
 ADULT_SOLICIT_DM_GATE_RE = re.compile(r"(?i)\b(?:more in dms?|dm for|message for|ask in dms?|ask me in dms?)\b")
 ADULT_SOLICIT_SALE_RE = re.compile(
     r"(?i)\b(?:sell(?:ing)?|buy|paid|pay|prices?|menu|subscribe|purchase|order|customs? open|taking requests|requests open)\b"
 )
 ADULT_SOLICIT_WEAK_OFFER_RE = re.compile(r"(?i)\b(?:available|open|taking requests|customs?)\b")
-ADULT_SOLICIT_REPORTING_RE = re.compile(
-    r"(?i)\b(?:report(?:ed|ing)?|for review|for moderation|moderation log|incident review|quoted?|quote|screenshot(?:ed)?|screencap)\b"
-)
-ADULT_SOLICIT_REPORT_ATTRIBUTION_RE = re.compile(
-    r"(?i)\b(?:they|he|she|someone|user|member)\s+(?:said|posted|sent|wrote|advertised|offered)\b"
-)
-ADULT_SOLICIT_EXAMPLE_RE = re.compile(
-    r"(?i)\b(?:example|sample)\s+(?:of|message|quote|post|ad|screenshot|report)\b"
-)
-ADULT_SOLICIT_EDUCATION_RE = re.compile(
-    r"(?i)\b(?:sexual health|consent|assault|trafficking|awareness|support group|support worker|education(?:al)?|victim|survivor)\b"
-)
 ADULT_SOLICIT_DISAPPROVAL_RE = re.compile(
     r"(?i)\b(?:don['’]?t say|stop posting|not allowed|against the rules|rule violation|banned phrase|keep that out)\b"
 )
 ADULT_SOLICIT_STRONG_DISAPPROVAL_RE = re.compile(
-    r"(?i)\b(?:don['’]?t say|stop posting|not allowed|against (?:the )?(?:rules|policy)|rule violation|policy violation|banned phrase|keep that out)\b"
+    r"(?i)\b(?:don['']?t say|stop posting|not allowed|against (?:the )?(?:rules|policy)|rule violation|policy violation|banned phrase|keep that out)\b"
+)
+ADULT_SOLICIT_STRONG_TERMS = frozenset(
+    {
+        "18+",
+        "adult content",
+        "lewd",
+        "lewds",
+        "nsfw",
+        "nude",
+        "nudes",
+        "only fans",
+        "onlyfans",
+        "porn",
+        "sexting",
+    }
+)
+ADULT_SOLICIT_EUPHEMISM_TERMS = frozenset({"custom content", "customs", "paid pics", "paid vids"})
+ADULT_SOLICIT_OF_SIGNAL_RE = re.compile(r"(?<![A-Za-z])(?:OF|O\.F\.)(?![A-Za-z])")
+ADULT_SOLICIT_PRODUCT_TERMS = frozenset({"content", "menu", "photo", "photos", "pic", "pics", "price", "prices", "vid", "video", "videos", "vids"})
+ADULT_SOLICIT_DIRECT_ROUTE_RE = re.compile(
+    r"(?i)\b(?:dm(?:s)?(?: me)?|message me|msg me|pm me|inbox me|send me|show me)\b.{0,18}\b(?:nudes?|lewds?|pics?|photos?|vids?|videos?|onlyfans|only fans|menu|prices?|custom content|customs?|18\+)\b"
+)
+ADULT_SOLICIT_OPEN_DM_RE = re.compile(
+    r"(?i)\b(?:my\s+)?dms?\s+(?:are\s+)?open\b.{0,18}\b(?:nudes?|lewds?|pics?|photos?|vids?|videos?|menu|prices?|custom content|customs?|requests?|18\+)\b"
+)
+ADULT_SOLICIT_DM_DESTINATION_RE = re.compile(
+    r"(?i)\b(?:nudes?|lewds?|pics?|photos?|vids?|videos?|menu|prices?|custom content|customs?|18\+)\b.{0,12}\b(?:in|via|through)\s+dms?\b"
+)
+ADULT_SOLICIT_SALES_OFFER_RE = re.compile(
+    r"(?i)\b(?:selling|buy|paid|pay|menu|prices?|subscribe|order)\b.{0,18}\b(?:nudes?|lewds?|pics?|photos?|vids?|videos?|onlyfans|only fans|custom content|customs?|18\+)\b"
+)
+ADULT_SOLICIT_BENIGN_PHOTO_RE = re.compile(
+    r"(?i)\b(?:art|camera|cat|cats|concert|dog|dogs|event|meme|memes|outfit|pet|pets|photo(?:graphy)?|receipt|reference|screenshot|screenshots|setup|travel|vacation|wedding)\b"
+)
+ADULT_SOLICIT_BENIGN_MENU_RE = re.compile(
+    r"(?i)\b(?:art|artist|bakery|cake|commission|design|hair|menu planning|nails|photo(?:graphy)?|portfolio|tattoo)\b"
+)
+SEVERE_CATEGORY_LABELS = {
+    "sexual_exploitation": "Sexual Exploitation",
+    "self_harm_encouragement": "Self-Harm Encouragement",
+    "eliminationist_hate": "Eliminationist Hate",
+    "severe_slur_abuse": "Severe Slur Abuse",
+}
+SEVERE_TERM_MAX_LEN = 60
+SEVERE_CHILD_ABUSE_TERMS = frozenset(
+    {"child porn", "child pornography", "child nudes", "cp", "csam", "csem", "minor nudes", "minor porn", "underage porn"}
+)
+SEVERE_CHILD_ABUSE_ROUTING_RE = re.compile(
+    r"(?i)\b(?:dm(?:s)?(?: me)?|message me|msg me|pm me|inbox me|telegram|trade|trading|sell(?:ing)?|buy|prices?|menu|collection|folder|drop|dropbox|send)\b"
+)
+SEVERE_SELF_HARM_LOW_TERMS = frozenset({"end your life", "kill yourself", "kys", "off yourself"})
+SEVERE_SELF_HARM_NORMAL_TERMS = frozenset({"drink bleach", "go die", "hang yourself", "slit your wrists", "you should die"})
+SEVERE_SELF_HARM_HIGH_TERMS = frozenset({"nobody would miss you if you died", "the world would be better if you were dead"})
+SEVERE_SELF_HARM_NEGATION_RE = re.compile(
+    r"(?i)\b(?:do not|don't|dont|never|please don't|please do not)\b.{0,10}\b(?:kill yourself|kys|off yourself|end your life|go die|you should die)\b"
+)
+SEVERE_SUPPORT_CONTEXT_RE = re.compile(r"(?i)\b(?:call 988|crisis line|hotline|please stay alive|suicide prevention|support)\b")
+SEVERE_PROTECTED_GROUP_RE = re.compile(
+    r"(?i)\b(?:asians?|black people|blacks|disabled people|gays?|immigrants?|jews?|latinos?|lesbians?|mexicans?|muslims?|queers?|trans(?: people)?|transgender(?: people)?)\b"
+)
+SEVERE_ELIMINATION_RE = re.compile(
+    r"(?i)\b(?:eradicate|exterminate|gas|kill all|lynch|purge|should die|should not exist|wipe out|wipe them out)\b"
+)
+SEVERE_DEHUMANIZING_RE = re.compile(r"(?i)\b(?:animals|cockroaches|filth|parasites|subhuman|vermin)\b")
+SEVERE_TARGETING_RE = re.compile(
+    r"(?i)\b(?:you|your|you['’]re|you are|u|ur|he|she|they|them|that person|this person|mods?|admins?|member|user)\b"
+)
+SEVERE_SLUR_LOW_TERMS = frozenset({"chink", "faggot", "gook", "kike", "n1gg3r", "n1gg@", "n1gga", "n1gger", "nigga", "nigger", "spic", "wetback"})
+SEVERE_SLUR_NORMAL_TERMS = frozenset({"coon", "cripple", "dyke", "mongoloid", "paki", "retard", "tranny"})
+SEVERE_DEGRADING_TERMS = frozenset({"human garbage", "subhuman", "vermin", "worthless trash"})
+SEVERE_REMOVABLE_DEFAULT_TERMS = frozenset(
+    set(SEVERE_CHILD_ABUSE_TERMS)
+    | set(SEVERE_SELF_HARM_LOW_TERMS)
+    | set(SEVERE_SELF_HARM_NORMAL_TERMS)
+    | set(SEVERE_SELF_HARM_HIGH_TERMS)
+    | set(SEVERE_SLUR_LOW_TERMS)
+    | set(SEVERE_SLUR_NORMAL_TERMS)
 )
 SOCIAL_ENGINEERING_RE = re.compile(
     r"(?i)\b(?:download|run|install|open|visit|click(?: here)?|verify|claim|login|log in|sign in|connect wallet|wallet connect|sync|mint|minting|authenticate|authorize)\b"
@@ -381,6 +455,10 @@ class CompiledShieldConfig:
     adult: PackSettings
     adult_solicitation_enabled: bool
     adult_solicitation_excluded_channel_ids: frozenset[int]
+    severe: PackSettings
+    severe_enabled_categories: frozenset[str]
+    severe_custom_terms: tuple[str, ...]
+    severe_removed_terms: frozenset[str]
     link_policy_mode: str
     link_policy: PackSettings
     ai_enabled: bool
@@ -400,6 +478,8 @@ class CompiledShieldConfig:
             return self.scam
         if pack == "adult":
             return self.adult
+        if pack == "severe":
+            return self.severe
         if pack == "link_policy":
             return self.link_policy
         return PackSettings(enabled=True, low_action="log", medium_action="log", high_action="log", sensitivity="normal")
@@ -1161,15 +1241,9 @@ def _confidence_from_score(score: int) -> str:
 
 
 def _adult_solicitation_context_suppressed(text: str) -> bool:
-    if ADULT_SOLICIT_EDUCATION_RE.search(text) or ADULT_SOLICIT_STRONG_DISAPPROVAL_RE.search(text):
-        return True
-    reporting = ADULT_SOLICIT_REPORTING_RE.search(text)
-    if reporting is None:
-        return bool(ADULT_SOLICIT_EXAMPLE_RE.search(text) and ADULT_SOLICIT_REPORT_ATTRIBUTION_RE.search(text))
-    matched_reporting = reporting.group(0).casefold()
-    if any(token in matched_reporting for token in ("for review", "moderation", "quote", "quoted", "screenshot", "screencap")):
-        return True
-    return bool(ADULT_SOLICIT_REPORT_ATTRIBUTION_RE.search(text) or ADULT_SOLICIT_EXAMPLE_RE.search(text))
+    if "server rules:" in text or "policy update:" in text or "example pricing:" in text:
+        return False
+    return is_harmful_context_suppressed(text, include_disapproval=True)
 
 
 def _link_policy_mode_label(mode: str) -> str:
@@ -1257,7 +1331,13 @@ def _feature_pack_settings(*, enabled: bool, low_action: str = "log", medium_act
     )
 
 
-def _build_feature_compiled_config(*, privacy_enabled: bool, adult_enabled: bool, adult_solicitation_enabled: bool) -> CompiledShieldConfig:
+def _build_feature_compiled_config(
+    *,
+    privacy_enabled: bool,
+    adult_enabled: bool,
+    adult_solicitation_enabled: bool,
+    severe_enabled: bool,
+) -> CompiledShieldConfig:
     disabled = _feature_pack_settings(enabled=False, low_action="detect", medium_action="detect", high_action="detect")
     return CompiledShieldConfig(
         guild_id=0,
@@ -1281,6 +1361,10 @@ def _build_feature_compiled_config(*, privacy_enabled: bool, adult_enabled: bool
         adult=_feature_pack_settings(enabled=adult_enabled),
         adult_solicitation_enabled=adult_solicitation_enabled,
         adult_solicitation_excluded_channel_ids=frozenset(),
+        severe=_feature_pack_settings(enabled=severe_enabled),
+        severe_enabled_categories=frozenset(DEFAULT_SHIELD_SEVERE_CATEGORIES),
+        severe_custom_terms=(),
+        severe_removed_terms=frozenset(),
         link_policy_mode=DEFAULT_SHIELD_LINK_POLICY_MODE,
         link_policy=disabled,
         ai_enabled=False,
@@ -1304,37 +1388,44 @@ _FEATURE_CONFIG_PRIVACY_AND_ADULT = _build_feature_compiled_config(
     privacy_enabled=True,
     adult_enabled=True,
     adult_solicitation_enabled=True,
+    severe_enabled=True,
 )
 _FEATURE_CONFIG_PRIVACY_ONLY = _build_feature_compiled_config(
     privacy_enabled=True,
     adult_enabled=False,
     adult_solicitation_enabled=False,
+    severe_enabled=False,
 )
 _FEATURE_SURFACE_POLICIES: dict[str, dict[str, Any]] = {
     FEATURE_SURFACE_AFK_REASON: {
         "compiled": _FEATURE_CONFIG_PRIVACY_AND_ADULT,
         "privacy_message": "AFK reasons cannot contain private contact, account, or payment details.",
         "adult_message": "AFK reasons cannot advertise adult or DM-gated sexual content.",
+        "severe_message": "AFK reasons cannot include severe hate, self-harm encouragement, or exploitative abuse solicitation.",
     },
     FEATURE_SURFACE_AFK_SCHEDULE_REASON: {
         "compiled": _FEATURE_CONFIG_PRIVACY_AND_ADULT,
         "privacy_message": "Recurring AFK reasons cannot contain private contact, account, or payment details.",
         "adult_message": "Recurring AFK reasons cannot advertise adult or DM-gated sexual content.",
+        "severe_message": "Recurring AFK reasons cannot include severe hate, self-harm encouragement, or exploitative abuse solicitation.",
     },
     FEATURE_SURFACE_REMINDER_CREATE: {
         "compiled": _FEATURE_CONFIG_PRIVACY_AND_ADULT,
         "privacy_message": "Reminder text cannot contain private contact, account, or payment details.",
         "adult_message": "Reminder text cannot advertise adult or DM-gated sexual content.",
+        "severe_message": "Reminder text cannot include severe hate, self-harm encouragement, or exploitative abuse solicitation.",
     },
     FEATURE_SURFACE_REMINDER_PUBLIC_DELIVERY: {
         "compiled": _FEATURE_CONFIG_PRIVACY_AND_ADULT,
         "privacy_message": "Babblebox withheld that public reminder because its text now looks like private contact or account information.",
         "adult_message": "Babblebox withheld that public reminder because its text looks like adult or DM-gated solicitation.",
+        "severe_message": "Babblebox withheld that public reminder because its text looked like severe hate, self-harm encouragement, or exploitative abuse solicitation.",
     },
     FEATURE_SURFACE_WATCH_KEYWORD: {
         "compiled": _FEATURE_CONFIG_PRIVACY_ONLY,
         "privacy_message": "Watch keywords cannot contain private-looking contact, account, or payment details.",
         "adult_message": None,
+        "severe_message": None,
     },
 }
 
@@ -1642,6 +1733,70 @@ class ShieldService:
                 f"{solicitation_note}"
             ),
         )
+
+    async def set_severe_category(self, guild_id: int, category: str, enabled: bool) -> tuple[bool, str]:
+        cleaned_category = normalize_plain_text(category).casefold()
+        if cleaned_category not in VALID_SHIELD_SEVERE_CATEGORIES:
+            return False, "Unknown severe-harm category."
+
+        def mutate(config: dict[str, Any]):
+            categories = set(_sorted_unique_text(config.get("severe_enabled_categories", DEFAULT_SHIELD_SEVERE_CATEGORIES)))
+            if enabled:
+                categories.add(cleaned_category)
+            else:
+                categories.discard(cleaned_category)
+            config["severe_enabled_categories"] = [value for value in DEFAULT_SHIELD_SEVERE_CATEGORIES if value in categories]
+
+        label = SEVERE_CATEGORY_LABELS.get(cleaned_category, cleaned_category.replace("_", " ").title())
+        return await self._update_config(
+            guild_id,
+            mutate,
+            success_message=f"Severe-harm category **{label}** is now {'on' if enabled else 'off'}.",
+        )
+
+    async def update_severe_term(self, guild_id: int, action: str, phrase: str) -> tuple[bool, str]:
+        cleaned_action = normalize_plain_text(action).casefold()
+        if cleaned_action not in {"add", "remove_default", "restore_default", "remove_custom"}:
+            return False, "Severe term actions must be add, remove_default, restore_default, or remove_custom."
+        ok, cleaned_or_error = self._normalize_severe_term(phrase)
+        if not ok:
+            return False, cleaned_or_error
+        term = cleaned_or_error
+
+        def mutate(config: dict[str, Any]):
+            custom_terms = list(_sorted_unique_text(config.get("severe_custom_terms", [])))
+            removed_terms = list(_sorted_unique_text(config.get("severe_removed_terms", [])))
+            if cleaned_action == "add":
+                if term in custom_terms or term in SEVERE_REMOVABLE_DEFAULT_TERMS:
+                    raise ValueError("That severe term is already active.")
+                if len(custom_terms) >= SHIELD_SEVERE_TERM_LIMIT:
+                    raise ValueError(f"You can keep up to {SHIELD_SEVERE_TERM_LIMIT} custom severe terms.")
+                custom_terms.append(term)
+            elif cleaned_action == "remove_custom":
+                if term not in custom_terms:
+                    raise ValueError("That custom severe term was not configured.")
+                custom_terms.remove(term)
+            elif cleaned_action == "remove_default":
+                if term not in SEVERE_REMOVABLE_DEFAULT_TERMS:
+                    raise ValueError("That phrase is not one of Babblebox's removable bundled severe terms.")
+                if term not in removed_terms:
+                    if len(removed_terms) >= SHIELD_SEVERE_TERM_LIMIT:
+                        raise ValueError(f"You can keep up to {SHIELD_SEVERE_TERM_LIMIT} removed bundled severe terms.")
+                    removed_terms.append(term)
+            elif cleaned_action == "restore_default":
+                if term not in removed_terms:
+                    raise ValueError("That bundled severe term is already active.")
+                removed_terms.remove(term)
+            config["severe_custom_terms"] = sorted(custom_terms)
+            config["severe_removed_terms"] = sorted(removed_terms)
+
+        success_messages = {
+            "add": f"Custom severe term `{term}` added.",
+            "remove_custom": f"Custom severe term `{term}` removed.",
+            "remove_default": f"Bundled severe term `{term}` disabled for this server.",
+            "restore_default": f"Bundled severe term `{term}` restored.",
+        }
+        return await self._update_config(guild_id, mutate, success_message=success_messages[cleaned_action])
 
     async def set_link_policy_config(
         self,
@@ -2499,6 +2654,7 @@ class ShieldService:
         matches.extend(self._detect_promo(compiled, snapshot, repetitive_promo=repetitive_promo or RepetitionSignals(None, 0, False, False)))
         matches.extend(self._detect_link_safety_domains(compiled, snapshot, active_link_assessments))
         matches.extend(self._detect_adult_solicitation(compiled, snapshot, channel_id=channel_id))
+        matches.extend(self._detect_severe_harm(compiled, snapshot))
         matches.extend(self._detect_scam(compiled, snapshot, active_link_assessments, scan_source=scan_source, scam_context=scam_context or ShieldScamContext()))
         matches.extend(self._detect_link_policy(compiled, snapshot, active_link_assessments, existing_matches=matches))
         matches.extend(self._detect_custom_patterns(compiled, snapshot))
@@ -2563,37 +2719,81 @@ class ShieldService:
             return []
         if channel_id is not None and channel_id in compiled.adult_solicitation_excluded_channel_ids:
             return []
-        text = snapshot.context_text
-        squashed = snapshot.context_squashed
+        raw_text = snapshot.scan_text or snapshot.context_text or ""
+        text = fold_confusable_text(snapshot.context_text)
+        squashed = squash_for_evasion_checks(text)
         if not text or _adult_solicitation_context_suppressed(text):
             return []
 
-        explicit = bool(ADULT_SOLICIT_EXPLICIT_RE.search(text) or ADULT_SOLICIT_EXPLICIT_RE.search(squashed))
+        strong_hits = find_safety_term_hits(ADULT_SOLICIT_STRONG_TERMS, text, squashed)
+        euphemism_hits = find_safety_term_hits(ADULT_SOLICIT_EUPHEMISM_TERMS, text, squashed)
+        if ADULT_SOLICIT_OF_SIGNAL_RE.search(raw_text):
+            euphemism_hits = [*euphemism_hits, "onlyfans_handle"]
+        product_hits = find_safety_term_hits(ADULT_SOLICIT_PRODUCT_TERMS, text, squashed)
+        product_hit_set = set(product_hits)
+        visual_hits = product_hit_set.intersection({"photo", "photos", "pic", "pics", "vid", "video", "videos", "vids"})
+        menu_price_only = bool(product_hit_set) and product_hit_set.issubset({"content", "menu", "price", "prices"})
         direct_contact = bool(ADULT_SOLICIT_CONTACT_RE.search(text))
         dm_gate = bool(ADULT_SOLICIT_DM_GATE_RE.search(text))
         sale = bool(ADULT_SOLICIT_SALE_RE.search(text))
         weak_offer = bool(ADULT_SOLICIT_WEAK_OFFER_RE.search(text))
-        if not explicit:
+        direct_route_offer = bool(
+            ADULT_SOLICIT_DIRECT_ROUTE_RE.search(text)
+            or ADULT_SOLICIT_OPEN_DM_RE.search(text)
+            or ADULT_SOLICIT_DM_DESTINATION_RE.search(text)
+        )
+        sales_offer = bool(ADULT_SOLICIT_SALES_OFFER_RE.search(text))
+        weak_photo_ad = direct_route_offer and not strong_hits and not euphemism_hits and bool(visual_hits)
+        if weak_photo_ad and ADULT_SOLICIT_BENIGN_PHOTO_RE.search(text):
+            return []
+        if sales_offer and not strong_hits and not euphemism_hits and ADULT_SOLICIT_BENIGN_MENU_RE.search(text):
+            return []
+
+        score = 0
+        if strong_hits:
+            score += 2
+        if euphemism_hits:
+            score += 2
+        if direct_contact or dm_gate:
+            score += 1
+        if sale:
+            score += 1
+        if weak_offer and (strong_hits or euphemism_hits):
+            score += 1
+        if product_hits and (direct_contact or dm_gate or sale or weak_offer):
+            score += 1
+        if direct_route_offer:
+            score += 2
+        if sales_offer:
+            score += 2
+        if not strong_hits and not euphemism_hits and not direct_route_offer and not sales_offer:
             return []
 
         confidence: str | None = None
-        if (direct_contact or dm_gate) and sale:
+        if (strong_hits or euphemism_hits or sales_offer) and (direct_contact or dm_gate) and sale:
             confidence = "high"
-        elif direct_contact or dm_gate or sale:
+        elif strong_hits or euphemism_hits:
+            if direct_contact or dm_gate or sale or direct_route_offer or sales_offer:
+                confidence = "medium"
+            elif settings.sensitivity == "high" and weak_offer:
+                confidence = "low"
+        elif sales_offer:
             confidence = "medium"
-        elif settings.sensitivity == "high" and weak_offer:
+        elif direct_route_offer and not menu_price_only:
+            confidence = "medium"
+        elif settings.sensitivity == "high" and weak_offer and product_hits and score >= 2:
             confidence = "low"
         if confidence is None:
             return []
 
-        dm_routed = direct_contact or dm_gate
+        dm_routed = direct_contact or dm_gate or direct_route_offer
         label = "Adult-content DM ad" if dm_routed else "Sexual solicitation"
         reason = (
-            "Explicit adult-content wording was paired with DM routing and sales language."
+            "Adult-content offer signals were paired with DM routing and sales language."
             if dm_routed and sale
-            else "Explicit adult-content wording was paired with DM routing or gated-offer language."
+            else "Adult-content offer signals were paired with DM routing or gated-access language."
             if dm_routed
-            else "Explicit adult-content wording was paired with sexual solicitation or sales language."
+            else "Adult-content offer signals were paired with solicitation or sales language."
         )
         return [
             self._make_pack_match(
@@ -2606,6 +2806,151 @@ class ShieldService:
                 match_class="adult_dm_ad" if dm_routed else "adult_solicitation",
             )
         ]
+
+    def _active_severe_terms(self, compiled: CompiledShieldConfig, terms: frozenset[str]) -> frozenset[str]:
+        return frozenset(term for term in terms if term not in compiled.severe_removed_terms)
+
+    def _detect_severe_harm(self, compiled: CompiledShieldConfig, snapshot: ShieldSnapshot) -> list[ShieldMatch]:
+        settings = compiled.severe
+        if not settings.enabled or not compiled.severe_enabled_categories:
+            return []
+        text = fold_confusable_text(snapshot.context_text)
+        squashed = squash_for_evasion_checks(text)
+        if not text or is_harmful_context_suppressed(text, include_disapproval=True):
+            return []
+        matches: list[ShieldMatch] = []
+        matches.extend(self._detect_severe_sexual_exploitation(compiled, text, squashed))
+        matches.extend(self._detect_severe_self_harm(compiled, text, squashed))
+        matches.extend(self._detect_severe_eliminationist_hate(compiled, text))
+        matches.extend(self._detect_severe_slur_abuse(compiled, text, squashed))
+        return self._dedupe_matches(matches)
+
+    def _detect_severe_sexual_exploitation(
+        self,
+        compiled: CompiledShieldConfig,
+        text: str,
+        squashed: str,
+    ) -> list[ShieldMatch]:
+        if "sexual_exploitation" not in compiled.severe_enabled_categories:
+            return []
+        hits = find_safety_term_hits(self._active_severe_terms(compiled, SEVERE_CHILD_ABUSE_TERMS), text, squashed)
+        if not hits or not SEVERE_CHILD_ABUSE_ROUTING_RE.search(text):
+            return []
+        confidence = "high" if any(hit in {"cp", "csam", "csem", "child porn", "child pornography"} for hit in hits) else "medium"
+        return [
+            self._make_pack_match(
+                pack="severe",
+                settings=compiled.severe,
+                label="Sexual exploitation solicitation",
+                reason="Child sexual-abuse material wording was paired with routing, sale, or trade language.",
+                confidence=confidence,
+                heuristic=True,
+                match_class="sexual_exploitation_solicitation",
+            )
+        ]
+
+    def _detect_severe_self_harm(
+        self,
+        compiled: CompiledShieldConfig,
+        text: str,
+        squashed: str,
+    ) -> list[ShieldMatch]:
+        if "self_harm_encouragement" not in compiled.severe_enabled_categories:
+            return []
+        if SEVERE_SELF_HARM_NEGATION_RE.search(text) or SEVERE_SUPPORT_CONTEXT_RE.search(text):
+            return []
+        low_terms = self._active_severe_terms(compiled, SEVERE_SELF_HARM_LOW_TERMS)
+        normal_terms = self._active_severe_terms(compiled, SEVERE_SELF_HARM_NORMAL_TERMS)
+        high_terms = self._active_severe_terms(compiled, SEVERE_SELF_HARM_HIGH_TERMS)
+        active_terms = set(low_terms)
+        if compiled.severe.sensitivity in {"normal", "high"}:
+            active_terms.update(normal_terms)
+        if compiled.severe.sensitivity == "high":
+            active_terms.update(high_terms)
+        hits = find_safety_term_hits(frozenset(active_terms), text, squashed)
+        if not hits:
+            return []
+        confidence = "high" if any(hit in low_terms for hit in hits) else "medium" if any(hit in normal_terms for hit in hits) else "low"
+        return [
+            self._make_pack_match(
+                pack="severe",
+                settings=compiled.severe,
+                label="Self-harm encouragement",
+                reason="Direct encouragement or imperatives urging self-harm were detected.",
+                confidence=confidence,
+                heuristic=True,
+                match_class="self_harm_encouragement",
+            )
+        ]
+
+    def _detect_severe_eliminationist_hate(self, compiled: CompiledShieldConfig, text: str) -> list[ShieldMatch]:
+        if "eliminationist_hate" not in compiled.severe_enabled_categories:
+            return []
+        if not SEVERE_PROTECTED_GROUP_RE.search(text):
+            return []
+        if SEVERE_ELIMINATION_RE.search(text):
+            confidence = "high"
+        elif compiled.severe.sensitivity == "high" and SEVERE_DEHUMANIZING_RE.search(text):
+            confidence = "low"
+        else:
+            return []
+        return [
+            self._make_pack_match(
+                pack="severe",
+                settings=compiled.severe,
+                label="Eliminationist hate",
+                reason="Protected-group targeting was paired with extermination or dehumanizing language.",
+                confidence=confidence,
+                heuristic=True,
+                match_class="eliminationist_hate",
+            )
+        ]
+
+    def _detect_severe_slur_abuse(
+        self,
+        compiled: CompiledShieldConfig,
+        text: str,
+        squashed: str,
+    ) -> list[ShieldMatch]:
+        if "severe_slur_abuse" not in compiled.severe_enabled_categories:
+            return []
+        low_terms = self._active_severe_terms(compiled, SEVERE_SLUR_LOW_TERMS)
+        normal_terms = self._active_severe_terms(compiled, SEVERE_SLUR_NORMAL_TERMS)
+        active_terms = set(low_terms)
+        if compiled.severe.sensitivity in {"normal", "high"}:
+            active_terms.update(normal_terms)
+        active_terms.update(compiled.severe_custom_terms)
+        hits = find_safety_term_hits(frozenset(active_terms), text, squashed)
+        targeted = bool(SEVERE_TARGETING_RE.search(text))
+        standalone = len([part for part in text.split(" ") if part]) <= 4
+        if hits and (targeted or standalone):
+            confidence = "high" if any(hit in low_terms for hit in hits) else "medium"
+            return [
+                self._make_pack_match(
+                    pack="severe",
+                    settings=compiled.severe,
+                    label="Severe slur abuse",
+                    reason="Severe slur language appeared in a directed abusive context.",
+                    confidence=confidence,
+                    heuristic=True,
+                    match_class="severe_slur_abuse",
+                )
+            ]
+        if compiled.severe.sensitivity == "high":
+            degrading_hits = find_safety_term_hits(SEVERE_DEGRADING_TERMS, text, squashed)
+            if degrading_hits and targeted:
+                return [
+                    self._make_pack_match(
+                        pack="severe",
+                        settings=compiled.severe,
+                        label="Extreme degrading abuse",
+                        reason="Targeted dehumanizing abuse crossed the severe-harm threshold.",
+                        confidence="low",
+                        heuristic=True,
+                        match_class="targeted_extreme_degradation",
+                    )
+                ]
+        return []
 
     def _link_is_trusted_under_policy(
         self,
@@ -3859,6 +4204,20 @@ class ShieldService:
             adult_solicitation_excluded_channel_ids=frozenset(
                 _sorted_unique_ints(raw.get("adult_solicitation_excluded_channel_ids", []))
             ),
+            severe=PackSettings(
+                enabled=bool(raw.get("severe_enabled")),
+                low_action=str(raw.get("severe_low_action", "log")).strip().lower(),
+                medium_action=str(raw.get("severe_medium_action", "log")).strip().lower(),
+                high_action=str(raw.get("severe_high_action", "log")).strip().lower(),
+                sensitivity=str(raw.get("severe_sensitivity", "normal")).strip().lower(),
+            ),
+            severe_enabled_categories=frozenset(
+                category
+                for category in _sorted_unique_text(raw.get("severe_enabled_categories", DEFAULT_SHIELD_SEVERE_CATEGORIES))
+                if category in VALID_SHIELD_SEVERE_CATEGORIES
+            ),
+            severe_custom_terms=tuple(_sorted_unique_text(raw.get("severe_custom_terms", []))[:SHIELD_SEVERE_TERM_LIMIT]),
+            severe_removed_terms=frozenset(_sorted_unique_text(raw.get("severe_removed_terms", []))[:SHIELD_SEVERE_TERM_LIMIT]),
             link_policy_mode=link_policy_mode,
             link_policy=PackSettings(
                 enabled=link_policy_mode != DEFAULT_SHIELD_LINK_POLICY_MODE,
@@ -3955,6 +4314,19 @@ class ShieldService:
             return False, cleaned_or_error
         return True, cleaned_or_error.casefold()
 
+    def _normalize_severe_term(self, raw_value: str) -> tuple[bool, str]:
+        ok, cleaned_or_error = sanitize_short_plain_text(
+            raw_value,
+            field_name="Severe term",
+            max_length=SEVERE_TERM_MAX_LEN,
+            sentence_limit=1,
+            reject_blocklist=False,
+            allow_empty=False,
+        )
+        if not ok:
+            return False, cleaned_or_error
+        return True, cleaned_or_error.casefold()
+
     def _validate_custom_pattern(
         self,
         *,
@@ -4017,6 +4389,12 @@ class ShieldFeatureSafetyGateway:
     _detect_privacy_payment = ShieldService._detect_privacy_payment
     _detect_privacy_sensitive_ids = ShieldService._detect_privacy_sensitive_ids
     _detect_adult_solicitation = ShieldService._detect_adult_solicitation
+    _active_severe_terms = ShieldService._active_severe_terms
+    _detect_severe_sexual_exploitation = ShieldService._detect_severe_sexual_exploitation
+    _detect_severe_self_harm = ShieldService._detect_severe_self_harm
+    _detect_severe_eliminationist_hate = ShieldService._detect_severe_eliminationist_hate
+    _detect_severe_slur_abuse = ShieldService._detect_severe_slur_abuse
+    _detect_severe_harm = ShieldService._detect_severe_harm
 
     def __init__(self, *, detector: ShieldService | None = None, link_safety: ShieldLinkSafetyEngine | None = None):
         self._detector = detector
@@ -4044,6 +4422,7 @@ class ShieldFeatureSafetyGateway:
         matches: list[ShieldMatch] = []
         matches.extend(self._detect_privacy(compiled, snapshot))
         matches.extend(self._detect_adult_solicitation(compiled, snapshot, channel_id=channel_id))
+        matches.extend(self._detect_severe_harm(compiled, snapshot))
         matches.sort(
             key=lambda item: (
                 ACTION_STRENGTH.get(item.action, 0),
@@ -4063,7 +4442,14 @@ class ShieldFeatureSafetyGateway:
             )
 
         top = matches[0]
-        user_message = policy["privacy_message"] if top.pack == "privacy" else policy.get("adult_message")
+        if top.pack == "privacy":
+            user_message = policy["privacy_message"]
+        elif top.pack == "adult":
+            user_message = policy.get("adult_message")
+        elif top.pack == "severe":
+            user_message = policy.get("severe_message")
+        else:
+            user_message = None
         if not isinstance(user_message, str) or not user_message:
             user_message = "That text is not allowed in this Babblebox feature."
         return ShieldFeatureDecision(

@@ -1118,7 +1118,14 @@ class UtilityService:
             return False, "Reminder delivery must be either `dm` or `here`."
         max_length = 80 if delivery == "here" else REMINDER_TEXT_MAX_LEN
         sentence_limit = 1 if delivery == "here" else 2
-        valid, cleaned_or_error = sanitize_short_plain_text(text, field_name="Reminder text", max_length=max_length, sentence_limit=sentence_limit, reject_blocklist=True, allow_empty=False)
+        valid, cleaned_or_error = sanitize_short_plain_text(
+            text,
+            field_name="Reminder text",
+            max_length=max_length,
+            sentence_limit=sentence_limit,
+            reject_blocklist=False,
+            allow_empty=False,
+        )
         if not valid:
             return False, cleaned_or_error
         feature_decision = self._evaluate_feature_text(FEATURE_SURFACE_REMINDER_CREATE, cleaned_or_error)

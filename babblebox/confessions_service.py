@@ -53,7 +53,9 @@ from babblebox.text_safety import (
     PHONE_RE,
     SSN_RE,
     URL_RE,
+    find_safety_term_hits,
     fold_confusable_text,
+    is_reporting_or_educational_context,
     normalize_plain_text,
     squash_for_evasion_checks,
 )
@@ -121,12 +123,6 @@ RAW_MENTION_RE = re.compile(r"(?i)<\s*[@#][!&]?\s*\d+\s*>|@\s*(?:everyone|here)"
 LOW_SIGNAL_RE = re.compile(r"(?i)^(?:[a-z0-9]\s*){1,3}$")
 REPEATED_CHAR_RE = re.compile(r"(.)\1{7,}")
 REPEATED_WORD_RE = re.compile(r"(?i)\b([a-z0-9']{2,})\b(?:\s+\1\b){3,}")
-REPORTING_CONTEXT_RE = re.compile(
-    r"(?i)\b(?:quote|quoted|quoting|report|reported|reporting|context|example|sample|they said|someone said|called me|called them|for review)\b"
-)
-EDUCATIONAL_CONTEXT_RE = re.compile(
-    r"(?i)\b(?:medical|medicine|doctor|clinic|health|sexual health|biology|education|educational|therapy|consent|pregnancy|assault|prevention|awareness|study|class)\b"
-)
 TARGETING_RE = re.compile(r"(?i)\b(?:you|your|they|them|he|she|someone|somebody|mods?|admins?)\b")
 TARGETED_ACCUSATION_RE = re.compile(
     r"(?i)\b(?:you|they|them|he|she|someone|somebody|mods?|admins?)\b.{0,28}\b"
@@ -487,23 +483,6 @@ def _staff_reason_labels(flag_codes: Sequence[str]) -> list[str]:
     for code in flag_codes:
         labels.append(STAFF_REASON_LABELS.get(str(code), str(code).replace("_", " ").title()))
     return labels or ["None"]
-
-
-def _contains_term(term: str, text: str, squashed: str) -> bool:
-    if " " in term:
-        return term in text or term in squashed
-    pattern = rf"\b{re.escape(term)}\b"
-    return re.search(pattern, text, re.IGNORECASE) is not None or re.search(pattern, squashed, re.IGNORECASE) is not None
-
-
-def _term_hits(terms: set[str], text: str, squashed: str) -> list[str]:
-    return sorted(term for term in terms if _contains_term(term, text, squashed))
-
-
-def _is_reporting_or_educational_context(text: str) -> bool:
-    return bool(REPORTING_CONTEXT_RE.search(text) or EDUCATIONAL_CONTEXT_RE.search(text))
-
-
 def _has_targeted_harassment_signal(text: str) -> bool:
     return bool(TARGETED_ACCUSATION_RE.search(text) or PRESSURE_CAMPAIGN_RE.search(text))
 
@@ -1885,12 +1864,12 @@ class ConfessionsService:
 
     def _classify_language(self, compiled: dict[str, Any], text: str, squashed: str) -> SafetyResult | None:
         lowered = fold_confusable_text(text)
-        dampened = _is_reporting_or_educational_context(lowered)
+        dampened = is_reporting_or_educational_context(lowered)
         squashed_folded = squash_for_evasion_checks(lowered)
-        hate_hits = _term_hits(SEVERE_HATE_TERMS, lowered, squashed_folded)
-        adult_hits = _term_hits(ADULT_TERMS, lowered, squashed_folded)
-        derog_hits = _term_hits(DEROGATORY_TERMS, lowered, squashed_folded)
-        vulgar_hits = _term_hits(VULGAR_TERMS, lowered, squashed_folded)
+        hate_hits = find_safety_term_hits(SEVERE_HATE_TERMS, lowered, squashed_folded)
+        adult_hits = find_safety_term_hits(ADULT_TERMS, lowered, squashed_folded)
+        derog_hits = find_safety_term_hits(DEROGATORY_TERMS, lowered, squashed_folded)
+        vulgar_hits = find_safety_term_hits(VULGAR_TERMS, lowered, squashed_folded)
         targeted = bool(TARGETING_RE.search(lowered))
         harassment_signal = _has_targeted_harassment_signal(lowered)
 

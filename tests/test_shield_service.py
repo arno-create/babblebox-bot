@@ -10,8 +10,11 @@ from babblebox import game_engine as ge
 
 from babblebox.shield_ai import SHIELD_AI_ALLOWED_GUILD_ID, ShieldAIReviewResult
 from babblebox.shield_service import (
+    FEATURE_SURFACE_AFK_REASON,
+    FEATURE_SURFACE_AFK_SCHEDULE_REASON,
     FEATURE_SURFACE_CONFESSIONS_LINKS,
     FEATURE_SURFACE_REMINDER_CREATE,
+    FEATURE_SURFACE_REMINDER_PUBLIC_DELIVERY,
     FEATURE_SURFACE_WATCH_KEYWORD,
     ShieldDecision,
     ShieldFeatureLinkScan,
@@ -835,6 +838,50 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(adult_matches[0].match_class, "adult_solicitation")
         self.assertEqual(adult_matches[0].confidence, "low")
 
+    async def test_adult_solicitation_catches_common_dm_gated_variants(self):
+        ok, _ = await self.service.set_pack_config(
+            10,
+            "adult",
+            enabled=True,
+            action="delete_log",
+            sensitivity="normal",
+            adult_solicitation=True,
+        )
+        self.assertTrue(ok)
+
+        for text, expected_class in (
+            ("My DMs are open for nudes", "adult_dm_ad"),
+            ("18+ pics in DM", "adult_dm_ad"),
+            ("DM me for OF", "adult_dm_ad"),
+            ("DM for pics", "adult_dm_ad"),
+            ("Buy my nudes", "adult_solicitation"),
+        ):
+            with self.subTest(text=text):
+                result = self.service.test_message_details(10, text)
+                adult_matches = [match for match in result.matches if match.pack == "adult"]
+                self.assertTrue(adult_matches)
+                self.assertEqual(adult_matches[0].match_class, expected_class)
+
+    async def test_adult_solicitation_suppresses_benign_photo_and_service_contexts(self):
+        ok, _ = await self.service.set_pack_config(
+            10,
+            "adult",
+            enabled=True,
+            action="delete_log",
+            sensitivity="high",
+            adult_solicitation=True,
+        )
+        self.assertTrue(ok)
+
+        for text in (
+            "DM me for pics of the event tonight.",
+            "Message me for menu prices for tattoo designs.",
+            "Sexual health workshop tomorrow.",
+        ):
+            with self.subTest(text=text):
+                result = self.service.test_message_details(10, text)
+                self.assertFalse([match for match in result.matches if match.pack == "adult"])
+
     async def test_adult_solicitation_channel_carve_out_only_relaxes_optional_text_detector(self):
         ok, _ = await self.service.set_pack_config(
             10,
@@ -899,6 +946,24 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(decision.allowed)
         self.assertEqual(decision.surface, FEATURE_SURFACE_WATCH_KEYWORD)
         self.assertFalse(decision.matches)
+
+    async def test_feature_gateway_allows_health_context_after_legacy_blocklist_removal(self):
+        decision = self.service.evaluate_feature_text(FEATURE_SURFACE_AFK_REASON, "Sexual health workshop tomorrow")
+
+        self.assertTrue(decision.allowed)
+        self.assertEqual(decision.surface, FEATURE_SURFACE_AFK_REASON)
+        self.assertFalse(decision.matches)
+
+    async def test_feature_gateway_blocks_adult_and_severe_text_on_bounded_surfaces(self):
+        adult_decision = self.service.evaluate_feature_text(FEATURE_SURFACE_AFK_SCHEDULE_REASON, "DM me for nudes")
+        severe_decision = self.service.evaluate_feature_text(FEATURE_SURFACE_REMINDER_PUBLIC_DELIVERY, "kill yourself")
+
+        self.assertFalse(adult_decision.allowed)
+        self.assertEqual(adult_decision.reason_code, "adult_dm_ad")
+        self.assertIn("adult", adult_decision.user_message.lower())
+        self.assertFalse(severe_decision.allowed)
+        self.assertEqual(severe_decision.reason_code, "self_harm_encouragement")
+        self.assertIn("severe", severe_decision.user_message.lower())
 
     async def test_feature_gateway_assesses_confession_links_with_shared_shield_intel(self):
         scan = self.service.assess_feature_links(
@@ -1123,6 +1188,89 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse([match for match in result.matches if match.pack == "adult"])
         self.assertIsNotNone(result.bypass_reason)
         self.assertIn("allow phrase", result.bypass_reason.lower())
+
+    async def test_severe_pack_is_off_by_default(self):
+        result = self.service.test_message_details(10, "kill yourself")
+
+        self.assertFalse([match for match in result.matches if match.pack == "severe"])
+
+    async def test_severe_pack_matches_self_harm_csam_hate_and_slur_abuse(self):
+        ok, _ = await self.service.set_pack_config(10, "severe", enabled=True, action="delete_log", sensitivity="normal")
+        self.assertTrue(ok)
+
+        expectations = {
+            "kill yourself": "self_harm_encouragement",
+            "DM me for CSAM prices": "sexual_exploitation_solicitation",
+            "exterminate jews": "eliminationist_hate",
+            "you retard": "severe_slur_abuse",
+        }
+        for text, expected_class in expectations.items():
+            with self.subTest(text=text):
+                result = self.service.test_message_details(10, text)
+                severe_matches = [match for match in result.matches if match.pack == "severe"]
+                self.assertTrue(severe_matches)
+                self.assertEqual(severe_matches[0].match_class, expected_class)
+
+    async def test_severe_pack_suppresses_reporting_contexts_and_normal_rudeness(self):
+        ok, _ = await self.service.set_pack_config(10, "severe", enabled=True, action="delete_log", sensitivity="normal")
+        self.assertTrue(ok)
+
+        for text in (
+            'Reported screenshot for moderation: they said "kill yourself" in another server.',
+            'History example for review: "exterminate jews" is genocidal rhetoric.',
+            "shut up",
+            "no one cares",
+        ):
+            with self.subTest(text=text):
+                result = self.service.test_message_details(10, text)
+                self.assertFalse([match for match in result.matches if match.pack == "severe"])
+
+    async def test_severe_pack_high_sensitivity_adds_extreme_degradation_layer(self):
+        ok, _ = await self.service.set_pack_config(10, "severe", enabled=True, action="delete_log", sensitivity="normal")
+        self.assertTrue(ok)
+        normal_result = self.service.test_message_details(10, "those immigrants are vermin")
+        self.assertFalse([match for match in normal_result.matches if match.pack == "severe"])
+
+        ok, _ = await self.service.set_pack_config(10, "severe", enabled=True, action="delete_log", sensitivity="high")
+        self.assertTrue(ok)
+        high_result = self.service.test_message_details(10, "those immigrants are vermin")
+        severe_matches = [match for match in high_result.matches if match.pack == "severe"]
+        self.assertTrue(severe_matches)
+        self.assertEqual(severe_matches[0].match_class, "eliminationist_hate")
+
+    async def test_severe_pack_category_toggle_and_term_customization_work(self):
+        ok, _ = await self.service.set_pack_config(10, "severe", enabled=True, action="delete_log", sensitivity="normal")
+        self.assertTrue(ok)
+
+        ok, _ = await self.service.set_severe_category(10, "self_harm_encouragement", False)
+        self.assertTrue(ok)
+        disabled_result = self.service.test_message_details(10, "kill yourself")
+        self.assertFalse([match for match in disabled_result.matches if match.pack == "severe"])
+
+        ok, _ = await self.service.set_severe_category(10, "self_harm_encouragement", True)
+        self.assertTrue(ok)
+        restored_result = self.service.test_message_details(10, "kill yourself")
+        self.assertTrue([match for match in restored_result.matches if match.pack == "severe"])
+
+        ok, _ = await self.service.update_severe_term(10, "add", "you scumlord")
+        self.assertTrue(ok)
+        custom_result = self.service.test_message_details(10, "you scumlord")
+        self.assertTrue([match for match in custom_result.matches if match.pack == "severe"])
+
+        ok, _ = await self.service.update_severe_term(10, "remove_custom", "you scumlord")
+        self.assertTrue(ok)
+        removed_custom_result = self.service.test_message_details(10, "you scumlord")
+        self.assertFalse([match for match in removed_custom_result.matches if match.pack == "severe"])
+
+        ok, _ = await self.service.update_severe_term(10, "remove_default", "retard")
+        self.assertTrue(ok)
+        removed_default_result = self.service.test_message_details(10, "you retard")
+        self.assertFalse([match for match in removed_default_result.matches if match.pack == "severe"])
+
+        ok, _ = await self.service.update_severe_term(10, "restore_default", "retard")
+        self.assertTrue(ok)
+        restored_default_result = self.service.test_message_details(10, "you retard")
+        self.assertTrue([match for match in restored_default_result.matches if match.pack == "severe"])
 
     async def test_unknown_safe_domain_stays_unknown_without_provider_lookup(self):
         result = self.service.test_message_details(10, "Reference link https://example.org/guide")
@@ -2623,3 +2771,31 @@ class ShieldStoreNormalizationTests(unittest.TestCase):
         self.assertEqual(config["link_policy_low_action"], "log")
         self.assertEqual(config["link_policy_medium_action"], "delete_log")
         self.assertEqual(config["link_policy_high_action"], "timeout_log")
+
+    def test_normalize_state_preserves_severe_pack_fields(self):
+        store = _MemoryShieldStore()
+        snapshot = {
+            "version": 3,
+            "guilds": {
+                "123": {
+                    "severe_enabled": True,
+                    "severe_action": "delete_log",
+                    "severe_sensitivity": "high",
+                    "severe_enabled_categories": ["self_harm_encouragement", "severe_slur_abuse", "invalid"],
+                    "severe_custom_terms": ["you scumlord", "you scumlord"],
+                    "severe_removed_terms": ["retard", "retard"],
+                }
+            },
+        }
+
+        normalized = store.normalize_state(deepcopy(snapshot))
+        config = normalized["guilds"]["123"]
+
+        self.assertTrue(config["severe_enabled"])
+        self.assertEqual(config["severe_low_action"], "log")
+        self.assertEqual(config["severe_medium_action"], "delete_log")
+        self.assertEqual(config["severe_high_action"], "delete_log")
+        self.assertEqual(config["severe_sensitivity"], "high")
+        self.assertEqual(config["severe_enabled_categories"], ["self_harm_encouragement", "severe_slur_abuse"])
+        self.assertEqual(config["severe_custom_terms"], ["you scumlord"])
+        self.assertEqual(config["severe_removed_terms"], ["retard"])

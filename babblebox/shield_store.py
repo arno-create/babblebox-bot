@@ -15,12 +15,20 @@ from babblebox.shield_ai import SHIELD_AI_MIN_CONFIDENCE_CHOICES, SHIELD_AI_REVI
 
 DEFAULT_DATABASE_URL_ENV_ORDER = ("UTILITY_DATABASE_URL", "SUPABASE_DB_URL", "DATABASE_URL")
 DEFAULT_BACKEND = "postgres"
-DEFAULT_VERSION = 3
+DEFAULT_VERSION = 4
 VALID_SCAN_MODES = {"all", "only_included"}
 VALID_SHIELD_ACTIONS = {"disabled", "detect", "log", "delete_log", "delete_escalate", "timeout_log"}
 VALID_SHIELD_SENSITIVITIES = {"low", "normal", "high"}
 VALID_SHIELD_LINK_POLICY_MODES = {"default", "trusted_only"}
 DEFAULT_SHIELD_LINK_POLICY_MODE = "default"
+VALID_SHIELD_SEVERE_CATEGORIES = (
+    "sexual_exploitation",
+    "self_harm_encouragement",
+    "eliminationist_hate",
+    "severe_slur_abuse",
+)
+DEFAULT_SHIELD_SEVERE_CATEGORIES = list(VALID_SHIELD_SEVERE_CATEGORIES)
+SHIELD_SEVERE_TERM_LIMIT = 20
 LOW_CONFIDENCE_ACTIONS = {"detect", "log"}
 MEDIUM_CONFIDENCE_ACTIONS = {"detect", "log", "delete_log"}
 HIGH_CONFIDENCE_ACTIONS = VALID_SHIELD_ACTIONS - {"disabled"}
@@ -103,6 +111,15 @@ def default_guild_shield_config(guild_id: int | None = None) -> dict[str, Any]:
         "adult_sensitivity": "normal",
         "adult_solicitation_enabled": False,
         "adult_solicitation_excluded_channel_ids": [],
+        "severe_enabled": False,
+        "severe_action": "log",
+        "severe_low_action": "log",
+        "severe_medium_action": "log",
+        "severe_high_action": "log",
+        "severe_sensitivity": "normal",
+        "severe_enabled_categories": list(DEFAULT_SHIELD_SEVERE_CATEGORIES),
+        "severe_custom_terms": [],
+        "severe_removed_terms": [],
         "link_policy_mode": DEFAULT_SHIELD_LINK_POLICY_MODE,
         "link_policy_action": "log",
         "link_policy_low_action": "log",
@@ -132,6 +149,10 @@ def _clean_text_list(values: Any) -> list[str]:
     if not isinstance(values, (list, tuple, set)):
         return []
     return sorted({str(value).strip().casefold() for value in values if isinstance(value, str) and str(value).strip()})
+
+
+def _clean_severe_category_list(values: Any) -> list[str]:
+    return [value for value in _clean_text_list(values) if value in VALID_SHIELD_SEVERE_CATEGORIES]
 
 
 def _legacy_pack_payload(config: dict[str, Any], pack: str) -> dict[str, Any]:
@@ -184,7 +205,7 @@ def normalize_guild_shield_config(guild_id: int, config: Any) -> dict[str, Any]:
     for field in ("allow_domains", "allow_invite_codes", "allow_phrases"):
         cleaned[field] = _clean_text_list(config.get(field))
 
-    for pack in ("privacy", "promo", "scam", "adult"):
+    for pack in ("privacy", "promo", "scam", "adult", "severe"):
         enabled_field = f"{pack}_enabled"
         action_field = f"{pack}_action"
         low_action_field = f"{pack}_low_action"
@@ -213,6 +234,12 @@ def normalize_guild_shield_config(guild_id: int, config: Any) -> dict[str, Any]:
         sensitivity = str(config.get(sensitivity_field, legacy.get("sensitivity", "normal"))).strip().lower()
         cleaned[sensitivity_field] = sensitivity if sensitivity in VALID_SHIELD_SENSITIVITIES else "normal"
     cleaned["adult_solicitation_enabled"] = bool(config.get("adult_solicitation_enabled"))
+    severe_categories = _clean_severe_category_list(config.get("severe_enabled_categories", DEFAULT_SHIELD_SEVERE_CATEGORIES))
+    cleaned["severe_enabled_categories"] = (
+        severe_categories if "severe_enabled_categories" in config else severe_categories or list(DEFAULT_SHIELD_SEVERE_CATEGORIES)
+    )
+    cleaned["severe_custom_terms"] = _clean_text_list(config.get("severe_custom_terms"))[:SHIELD_SEVERE_TERM_LIMIT]
+    cleaned["severe_removed_terms"] = _clean_text_list(config.get("severe_removed_terms"))[:SHIELD_SEVERE_TERM_LIMIT]
 
     link_policy_mode = str(config.get("link_policy_mode", DEFAULT_SHIELD_LINK_POLICY_MODE)).strip().lower()
     cleaned["link_policy_mode"] = link_policy_mode if link_policy_mode in VALID_SHIELD_LINK_POLICY_MODES else DEFAULT_SHIELD_LINK_POLICY_MODE
@@ -485,6 +512,15 @@ class _PostgresShieldStore(_BaseShieldStore):
                 "adult_sensitivity TEXT NOT NULL DEFAULT 'normal', "
                 "adult_solicitation_enabled BOOLEAN NOT NULL DEFAULT FALSE, "
                 "adult_solicitation_excluded_channel_ids JSONB NOT NULL DEFAULT '[]'::jsonb, "
+                "severe_enabled BOOLEAN NOT NULL DEFAULT FALSE, "
+                "severe_action TEXT NOT NULL DEFAULT 'log', "
+                "severe_low_action TEXT NOT NULL DEFAULT 'log', "
+                "severe_medium_action TEXT NOT NULL DEFAULT 'log', "
+                "severe_high_action TEXT NOT NULL DEFAULT 'log', "
+                "severe_sensitivity TEXT NOT NULL DEFAULT 'normal', "
+                "severe_enabled_categories JSONB NOT NULL DEFAULT '[\"sexual_exploitation\",\"self_harm_encouragement\",\"eliminationist_hate\",\"severe_slur_abuse\"]'::jsonb, "
+                "severe_custom_terms JSONB NOT NULL DEFAULT '[]'::jsonb, "
+                "severe_removed_terms JSONB NOT NULL DEFAULT '[]'::jsonb, "
                 "link_policy_mode TEXT NOT NULL DEFAULT 'default', "
                 "link_policy_action TEXT NOT NULL DEFAULT 'log', "
                 "link_policy_low_action TEXT NOT NULL DEFAULT 'log', "
@@ -526,6 +562,18 @@ class _PostgresShieldStore(_BaseShieldStore):
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS adult_sensitivity TEXT NOT NULL DEFAULT 'normal'",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS adult_solicitation_enabled BOOLEAN NOT NULL DEFAULT FALSE",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS adult_solicitation_excluded_channel_ids JSONB NOT NULL DEFAULT '[]'::jsonb",
+            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS severe_enabled BOOLEAN NOT NULL DEFAULT FALSE",
+            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS severe_action TEXT NOT NULL DEFAULT 'log'",
+            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS severe_low_action TEXT NOT NULL DEFAULT 'log'",
+            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS severe_medium_action TEXT NOT NULL DEFAULT 'log'",
+            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS severe_high_action TEXT NOT NULL DEFAULT 'log'",
+            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS severe_sensitivity TEXT NOT NULL DEFAULT 'normal'",
+            (
+                "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS severe_enabled_categories JSONB "
+                "NOT NULL DEFAULT '[\"sexual_exploitation\",\"self_harm_encouragement\",\"eliminationist_hate\",\"severe_slur_abuse\"]'::jsonb"
+            ),
+            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS severe_custom_terms JSONB NOT NULL DEFAULT '[]'::jsonb",
+            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS severe_removed_terms JSONB NOT NULL DEFAULT '[]'::jsonb",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS link_policy_mode TEXT NOT NULL DEFAULT 'default'",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS link_policy_action TEXT NOT NULL DEFAULT 'log'",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS link_policy_low_action TEXT NOT NULL DEFAULT 'log'",
@@ -637,6 +685,30 @@ class _PostgresShieldStore(_BaseShieldStore):
                 )
                 if "adult_solicitation_excluded_channel_ids" in row
                 else [],
+                "severe_enabled": bool(row["severe_enabled"]) if "severe_enabled" in row else False,
+                "severe_action": row["severe_action"] if "severe_action" in row else "log",
+                "severe_low_action": row["severe_low_action"] if "severe_low_action" in row else "log",
+                "severe_medium_action": row["severe_medium_action"] if "severe_medium_action" in row else "log",
+                "severe_high_action": row["severe_high_action"] if "severe_high_action" in row else "log",
+                "severe_sensitivity": row["severe_sensitivity"] if "severe_sensitivity" in row else "normal",
+                "severe_enabled_categories": decode_postgres_json_array(
+                    row["severe_enabled_categories"],
+                    label="shield_guild_configs.severe_enabled_categories",
+                )
+                if "severe_enabled_categories" in row
+                else list(DEFAULT_SHIELD_SEVERE_CATEGORIES),
+                "severe_custom_terms": decode_postgres_json_array(
+                    row["severe_custom_terms"],
+                    label="shield_guild_configs.severe_custom_terms",
+                )
+                if "severe_custom_terms" in row
+                else [],
+                "severe_removed_terms": decode_postgres_json_array(
+                    row["severe_removed_terms"],
+                    label="shield_guild_configs.severe_removed_terms",
+                )
+                if "severe_removed_terms" in row
+                else [],
                 "link_policy_mode": row["link_policy_mode"] if "link_policy_mode" in row else DEFAULT_SHIELD_LINK_POLICY_MODE,
                 "link_policy_action": row["link_policy_action"] if "link_policy_action" in row else "log",
                 "link_policy_low_action": row["link_policy_low_action"] if "link_policy_low_action" in row else "log",
@@ -730,6 +802,7 @@ class _PostgresShieldStore(_BaseShieldStore):
                 "promo_enabled, promo_action, promo_low_action, promo_medium_action, promo_high_action, promo_sensitivity, "
                 "scam_enabled, scam_action, scam_low_action, scam_medium_action, scam_high_action, scam_sensitivity, "
                 "adult_enabled, adult_action, adult_low_action, adult_medium_action, adult_high_action, adult_sensitivity, adult_solicitation_enabled, adult_solicitation_excluded_channel_ids, "
+                "severe_enabled, severe_action, severe_low_action, severe_medium_action, severe_high_action, severe_sensitivity, severe_enabled_categories, severe_custom_terms, severe_removed_terms, "
                 "link_policy_mode, link_policy_action, link_policy_low_action, link_policy_medium_action, link_policy_high_action, "
                 "ai_enabled, ai_min_confidence, ai_enabled_packs, "
                 "escalation_threshold, escalation_window_minutes, timeout_minutes, updated_at"
@@ -741,8 +814,9 @@ class _PostgresShieldStore(_BaseShieldStore):
                 "$22, $23, $24, $25, $26, $27, "
                 "$28, $29, $30, $31, $32, $33, "
                 "$34, $35, $36, $37, $38, $39, $40, $41::jsonb, "
-                "$42, $43, $44, $45, $46, "
-                "$47, $48, $49::jsonb, $50, $51, $52, timezone('utc', now())"
+                "$42, $43, $44, $45, $46, $47, $48::jsonb, $49::jsonb, $50::jsonb, "
+                "$51, $52, $53, $54, $55, "
+                "$56, $57, $58::jsonb, $59, $60, $61, timezone('utc', now())"
                 ") "
                 "ON CONFLICT (guild_id) DO UPDATE SET "
                 "module_enabled = EXCLUDED.module_enabled, "
@@ -785,6 +859,15 @@ class _PostgresShieldStore(_BaseShieldStore):
                 "adult_sensitivity = EXCLUDED.adult_sensitivity, "
                 "adult_solicitation_enabled = EXCLUDED.adult_solicitation_enabled, "
                 "adult_solicitation_excluded_channel_ids = EXCLUDED.adult_solicitation_excluded_channel_ids, "
+                "severe_enabled = EXCLUDED.severe_enabled, "
+                "severe_action = EXCLUDED.severe_action, "
+                "severe_low_action = EXCLUDED.severe_low_action, "
+                "severe_medium_action = EXCLUDED.severe_medium_action, "
+                "severe_high_action = EXCLUDED.severe_high_action, "
+                "severe_sensitivity = EXCLUDED.severe_sensitivity, "
+                "severe_enabled_categories = EXCLUDED.severe_enabled_categories, "
+                "severe_custom_terms = EXCLUDED.severe_custom_terms, "
+                "severe_removed_terms = EXCLUDED.severe_removed_terms, "
                 "link_policy_mode = EXCLUDED.link_policy_mode, "
                 "link_policy_action = EXCLUDED.link_policy_action, "
                 "link_policy_low_action = EXCLUDED.link_policy_low_action, "
@@ -839,6 +922,15 @@ class _PostgresShieldStore(_BaseShieldStore):
             config["adult_sensitivity"],
             config["adult_solicitation_enabled"],
             json.dumps(config["adult_solicitation_excluded_channel_ids"]),
+            config["severe_enabled"],
+            config["severe_action"],
+            config["severe_low_action"],
+            config["severe_medium_action"],
+            config["severe_high_action"],
+            config["severe_sensitivity"],
+            json.dumps(config["severe_enabled_categories"]),
+            json.dumps(config["severe_custom_terms"]),
+            json.dumps(config["severe_removed_terms"]),
             config["link_policy_mode"],
             config["link_policy_action"],
             config["link_policy_low_action"],

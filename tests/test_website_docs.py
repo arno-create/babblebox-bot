@@ -227,6 +227,9 @@ class WebsiteDocsTests(unittest.TestCase):
             self.assertIn(text, help_html)
         self.assertIn("solicitation carve-out channels", readme)
         self.assertIn("solicitation carve-out channels", help_html)
+        for text in ("Adult / 18+ Safety", "Severe Harm / Hate", "/shield severe category", "/shield severe term"):
+            self.assertIn(text, readme)
+            self.assertIn(text, help_html)
 
     def test_shield_docs_cover_cross_feature_immunity_boundary_and_live_ai_scope(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
@@ -245,11 +248,15 @@ class WebsiteDocsTests(unittest.TestCase):
             "live-message-only",
         ):
             self.assertIn(text, readme)
+        for text in ("watch keyword setup stays privacy-only", "privacy, adult, and severe"):
+            self.assertIn(text, readme)
         for text in (
             "bounded feature-surface checks",
             "The toggle controls live-message moderation",
             "live-message-only",
         ):
+            self.assertIn(text, help_html)
+        for text in ("watch keyword setup stays privacy-only", "privacy, adult, and severe"):
             self.assertIn(text, help_html)
         for text in (
             "feature-surface checks",
