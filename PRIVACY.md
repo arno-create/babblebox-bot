@@ -93,7 +93,7 @@ Babblebox may rely on necessary service providers to operate, including:
 
 Babblebox does not perform always-on AI scanning by default.
 
-If optional AI-assisted Shield review is enabled where available, it only runs after local Shield logic has already flagged live-message content. In that flow, only minimal, sanitized, and truncated flagged text intended for that review should be sent to the configured AI provider, even when the flagged signal came from scanned embed text, attachment labels, or forwarded message snapshots instead of the raw message body alone. Shield's private feature-surface checks for AFK, reminders, watch keywords, and Confessions link parity stay AI-free in this release.
+If optional AI-assisted Shield review is enabled where available, it only runs after local Shield logic has already flagged live-message content. The support server has full Shield AI access by default; ordinary guilds stay off by default unless the bot owner enables them globally or per guild. In that flow, only minimal, sanitized, and truncated flagged text intended for that review should be sent to the configured AI provider, even when the flagged signal came from scanned embed text, attachment labels, or forwarded message snapshots instead of the raw message body alone. Shield's private feature-surface checks for AFK, reminders, watch keywords, and Confessions link parity stay AI-free in this release.
 
 Babblebox is not designed to sell personal information.
 

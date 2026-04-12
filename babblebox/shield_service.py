@@ -17,11 +17,17 @@ from discord.ext import commands
 
 from babblebox import game_engine as ge
 from babblebox.shield_ai import (
+    DEFAULT_SHIELD_AI_FAST_MODEL,
     SHIELD_AI_MIN_CONFIDENCE_CHOICES,
+    SHIELD_AI_MODEL_ORDER,
     SHIELD_AI_REVIEW_PACKS,
+    SHIELD_AI_SUPPORT_GUILD_ID,
     ShieldAIReviewRequest,
     ShieldAIReviewResult,
     build_shield_ai_provider,
+    format_shield_ai_model,
+    format_shield_ai_model_list,
+    parse_shield_ai_model_list,
     sanitize_message_for_ai,
     shield_ai_available_in_guild,
     summarize_attachment_extensions,
@@ -58,6 +64,7 @@ from babblebox.shield_store import (
     SHIELD_SEVERE_TERM_LIMIT,
     ShieldStateStore,
     ShieldStorageUnavailable,
+    VALID_SHIELD_AI_ACCESS_MODES,
     VALID_SHIELD_SEVERE_CATEGORIES,
     VALID_SHIELD_LINK_POLICY_MODES,
     default_guild_shield_config,
@@ -495,6 +502,21 @@ class CompiledShieldConfig:
         if pack == "link_policy":
             return self.link_policy
         return PackSettings(enabled=True, low_action="log", medium_action="log", high_action="log", sensitivity="normal")
+
+
+@dataclass(frozen=True)
+class ShieldAIAccessPolicy:
+    guild_id: int
+    enabled: bool
+    source: str
+    support_default: bool
+    allowed_models: tuple[str, ...]
+    ordinary_global_enabled: bool
+    ordinary_global_allowed_models: tuple[str, ...]
+    guild_access_mode: str
+    guild_allowed_models_override: tuple[str, ...]
+    updated_by: int | None
+    updated_at: str | None
 
 
 @dataclass(frozen=True)
@@ -1522,14 +1544,21 @@ class ShieldService:
         meta = self.store.state.get("meta")
         if isinstance(meta, dict):
             return {
-                "global_ai_override_enabled": bool(meta.get("global_ai_override_enabled")),
-                "global_ai_override_updated_by": meta.get("global_ai_override_updated_by"),
-                "global_ai_override_updated_at": meta.get("global_ai_override_updated_at"),
+                "ordinary_ai_enabled": bool(meta.get("ordinary_ai_enabled")),
+                "ordinary_ai_allowed_models": tuple(
+                    model
+                    for model in (meta.get("ordinary_ai_allowed_models") or (DEFAULT_SHIELD_AI_FAST_MODEL,))
+                    if model in SHIELD_AI_MODEL_ORDER
+                )
+                or (DEFAULT_SHIELD_AI_FAST_MODEL,),
+                "ordinary_ai_updated_by": meta.get("ordinary_ai_updated_by"),
+                "ordinary_ai_updated_at": meta.get("ordinary_ai_updated_at"),
             }
         return {
-            "global_ai_override_enabled": False,
-            "global_ai_override_updated_by": None,
-            "global_ai_override_updated_at": None,
+            "ordinary_ai_enabled": False,
+            "ordinary_ai_allowed_models": (DEFAULT_SHIELD_AI_FAST_MODEL,),
+            "ordinary_ai_updated_by": None,
+            "ordinary_ai_updated_at": None,
         }
 
     def get_config(self, guild_id: int) -> dict[str, Any]:
@@ -1538,35 +1567,119 @@ class ShieldService:
             return normalize_guild_shield_config(guild_id, raw)
         return default_guild_shield_config(guild_id)
 
+    def _parse_allowed_models(self, values: Sequence[str] | str | None, *, allow_empty: bool = False) -> tuple[bool, tuple[str, ...] | str]:
+        try:
+            models = parse_shield_ai_model_list(values)
+        except ValueError:
+            return False, "Allowed Shield AI models must be `nano`, `mini`, `full`, or canonical model names."
+        if not models and not allow_empty:
+            return False, "Select at least one allowed Shield AI model."
+        return True, models
+
+    def resolve_ai_access_policy(self, guild_id: int) -> ShieldAIAccessPolicy:
+        config = self.get_config(guild_id)
+        meta = self.get_meta()
+        support_default = shield_ai_available_in_guild(guild_id)
+        ordinary_global_enabled = bool(meta["ordinary_ai_enabled"])
+        ordinary_global_allowed_models = tuple(meta["ordinary_ai_allowed_models"]) or (DEFAULT_SHIELD_AI_FAST_MODEL,)
+
+        if support_default:
+            enabled = True
+            allowed_models = SHIELD_AI_MODEL_ORDER
+            source = "support_default"
+            updated_by = None
+            updated_at = None
+        else:
+            enabled = ordinary_global_enabled
+            allowed_models = ordinary_global_allowed_models
+            source = "ordinary_global"
+            updated_by = meta["ordinary_ai_updated_by"]
+            updated_at = meta["ordinary_ai_updated_at"]
+
+        guild_access_mode = str(config.get("ai_access_mode", "inherit")).strip().lower()
+        if guild_access_mode not in VALID_SHIELD_AI_ACCESS_MODES:
+            guild_access_mode = "inherit"
+        guild_allowed_models_override = tuple(
+            model for model in config.get("ai_allowed_models_override", []) if model in SHIELD_AI_MODEL_ORDER
+        )
+        if guild_access_mode == "enabled":
+            enabled = True
+            source = "guild_override"
+            updated_by = config.get("ai_access_updated_by")
+            updated_at = config.get("ai_access_updated_at")
+        elif guild_access_mode == "disabled":
+            enabled = False
+            source = "guild_override"
+            updated_by = config.get("ai_access_updated_by")
+            updated_at = config.get("ai_access_updated_at")
+        if guild_allowed_models_override:
+            allowed_models = guild_allowed_models_override
+            source = "guild_override"
+            updated_by = config.get("ai_access_updated_by")
+            updated_at = config.get("ai_access_updated_at")
+
+        return ShieldAIAccessPolicy(
+            guild_id=guild_id,
+            enabled=enabled,
+            source=source,
+            support_default=support_default,
+            allowed_models=tuple(allowed_models),
+            ordinary_global_enabled=ordinary_global_enabled,
+            ordinary_global_allowed_models=ordinary_global_allowed_models,
+            guild_access_mode=guild_access_mode,
+            guild_allowed_models_override=guild_allowed_models_override,
+            updated_by=updated_by if isinstance(updated_by, int) and updated_by > 0 else None,
+            updated_at=updated_at if isinstance(updated_at, str) and updated_at.strip() else None,
+        )
+
     def is_ai_supported_guild(self, guild_id: int | None) -> bool:
-        return shield_ai_available_in_guild(guild_id) or self.get_meta()["global_ai_override_enabled"]
+        if guild_id is None:
+            return False
+        return self.resolve_ai_access_policy(guild_id).enabled
 
     def get_ai_status(self, guild_id: int) -> dict[str, Any]:
         config = self.get_config(guild_id)
-        meta = self.get_meta()
+        policy = self.resolve_ai_access_policy(guild_id)
         diagnostics = self.ai_provider.diagnostics()
-        supported = self.is_ai_supported_guild(guild_id)
         enabled_packs = [pack for pack in config.get("ai_enabled_packs", []) if pack in AI_REVIEW_PACK_SET]
         status_message = diagnostics["status"]
-        if not supported:
-            status_message = "AI review is not available in this server yet."
+        if not policy.enabled:
+            if policy.support_default:
+                status_message = "AI review is disabled for the support server by owner override."
+            elif policy.source == "guild_override":
+                status_message = "AI review is disabled for this guild by owner override."
+            else:
+                status_message = "AI review is off for ordinary guilds until the owner enables it."
         elif not diagnostics["available"]:
-            status_message = "AI review is disabled because the provider is not configured."
-        elif not config.get("ai_enabled"):
-            status_message = "AI review is configured but currently disabled for this server."
+            status_message = "AI review is enabled by policy but the provider is not configured."
+        else:
+            status_message = "Ready for second-pass review."
         return {
-            "supported": supported,
-            "support_server_default": shield_ai_available_in_guild(guild_id),
-            "global_override_enabled": meta["global_ai_override_enabled"],
-            "enabled": bool(config.get("ai_enabled")),
+            "supported": policy.enabled,
+            "enabled": policy.enabled,
+            "policy_source": policy.source,
+            "support_server_default": policy.support_default,
+            "ordinary_global_enabled": policy.ordinary_global_enabled,
+            "ordinary_global_allowed_models": list(policy.ordinary_global_allowed_models),
+            "guild_access_mode": policy.guild_access_mode,
+            "guild_allowed_models_override": list(policy.guild_allowed_models_override),
+            "allowed_models": list(policy.allowed_models),
             "enabled_packs": enabled_packs,
             "min_confidence": config.get("ai_min_confidence", "high"),
             "provider": diagnostics.get("provider"),
             "provider_available": bool(diagnostics.get("available")),
             "model": diagnostics.get("model"),
+            "routing_strategy": diagnostics.get("routing_strategy"),
+            "single_model_override": bool(diagnostics.get("single_model_override")),
+            "fast_model": diagnostics.get("fast_model"),
+            "complex_model": diagnostics.get("complex_model"),
+            "top_model": diagnostics.get("top_model"),
+            "top_tier_enabled": bool(diagnostics.get("top_tier_enabled")),
             "timeout_seconds": diagnostics.get("timeout_seconds"),
             "max_chars": diagnostics.get("max_chars"),
             "status": status_message,
+            "updated_by": policy.updated_by,
+            "updated_at": policy.updated_at,
         }
 
     def get_link_safety_status(self) -> dict[str, Any]:
@@ -1650,25 +1763,106 @@ class ShieldService:
             has_suspicious_attachment=has_suspicious_attachment,
         )
 
-    async def set_global_ai_override(self, enabled: bool, *, actor_id: int) -> tuple[bool, str]:
+    async def _save_meta(self, meta: dict[str, Any], *, failure_message: str) -> tuple[bool, str]:
         if not self.storage_ready:
             return False, self.storage_message("Shield AI")
         async with self._lock:
-            meta = self.get_meta()
-            meta["global_ai_override_enabled"] = bool(enabled)
-            meta["global_ai_override_updated_by"] = actor_id
-            meta["global_ai_override_updated_at"] = ge.now_utc().isoformat()
             self.store.state["meta"] = meta
             flushed = await self.store.flush()
             if not flushed:
-                return False, "Shield AI override could not be saved."
-        print(
-            "Shield AI override changed: "
-            f"enabled={'yes' if enabled else 'no'}, "
-            f"actor_id={actor_id}, "
-            f"updated_at={self.get_meta()['global_ai_override_updated_at']}"
+                return False, failure_message
+        return True, ""
+
+    async def set_ordinary_ai_policy(
+        self,
+        *,
+        enabled: bool | None = None,
+        allowed_models: Sequence[str] | str | None = None,
+        actor_id: int,
+    ) -> tuple[bool, str]:
+        meta = self.get_meta()
+        next_enabled = meta["ordinary_ai_enabled"] if enabled is None else bool(enabled)
+        next_models = meta["ordinary_ai_allowed_models"]
+        if allowed_models is not None:
+            ok, parsed_or_error = self._parse_allowed_models(allowed_models)
+            if not ok:
+                return False, parsed_or_error
+            next_models = parsed_or_error
+        updated_meta = {
+            "ordinary_ai_enabled": next_enabled,
+            "ordinary_ai_allowed_models": list(next_models),
+            "ordinary_ai_updated_by": actor_id,
+            "ordinary_ai_updated_at": ge.now_utc().isoformat(),
+        }
+        ok, failure = await self._save_meta(updated_meta, failure_message="Shield AI ordinary-guild policy could not be saved.")
+        if not ok:
+            return False, failure
+        return (
+            True,
+            f"Ordinary-guild Shield AI is now {'enabled' if next_enabled else 'disabled'} with allowed models "
+            f"{format_shield_ai_model_list(next_models)}.",
         )
-        return True, f"Global Shield AI override is now {'on' if enabled else 'off'}."
+
+    async def set_guild_ai_access_policy(
+        self,
+        guild_id: int,
+        *,
+        mode: str | None = None,
+        allowed_models: Sequence[str] | str | None = None,
+        actor_id: int,
+    ) -> tuple[bool, str]:
+        cleaned_mode = str(mode).strip().lower() if isinstance(mode, str) else None
+        if cleaned_mode is not None and cleaned_mode not in VALID_SHIELD_AI_ACCESS_MODES:
+            return False, "Guild AI access mode must be `inherit`, `enabled`, or `disabled`."
+        cleaned_models: tuple[str, ...] | None = None
+        if allowed_models is not None:
+            ok, parsed_or_error = self._parse_allowed_models(allowed_models)
+            if not ok:
+                return False, parsed_or_error
+            cleaned_models = parsed_or_error
+
+        def mutate(config: dict[str, Any]):
+            if cleaned_mode is not None:
+                config["ai_access_mode"] = cleaned_mode
+            if cleaned_models is not None:
+                config["ai_allowed_models_override"] = list(cleaned_models)
+            config["ai_access_updated_by"] = actor_id
+            config["ai_access_updated_at"] = ge.now_utc().isoformat()
+
+        preview = self.get_config(guild_id)
+        final_mode = preview.get("ai_access_mode", "inherit") if cleaned_mode is None else cleaned_mode
+        final_models = tuple(preview.get("ai_allowed_models_override", [])) if cleaned_models is None else cleaned_models
+        ok, message = await self._update_config(
+            guild_id,
+            mutate,
+            success_message=(
+                f"Guild Shield AI access now uses `{final_mode}` mode with model override "
+                f"{format_shield_ai_model_list(final_models) if final_models else 'inherit'}."
+            ),
+        )
+        return ok, message
+
+    async def inherit_guild_ai_access_policy(self, guild_id: int, *, actor_id: int) -> tuple[bool, str]:
+        def mutate(config: dict[str, Any]):
+            config["ai_access_mode"] = "inherit"
+            config["ai_allowed_models_override"] = []
+            config["ai_access_updated_by"] = actor_id
+            config["ai_access_updated_at"] = ge.now_utc().isoformat()
+
+        return await self._update_config(
+            guild_id,
+            mutate,
+            success_message="Guild Shield AI access policy now inherits the default owner policy again.",
+        )
+
+    async def restore_support_ai_defaults(self, *, actor_id: int) -> tuple[bool, str]:
+        ok, message = await self.inherit_guild_ai_access_policy(SHIELD_AI_SUPPORT_GUILD_ID, actor_id=actor_id)
+        if not ok:
+            return False, message
+        return True, "Support server Shield AI access restored to full default access."
+
+    async def set_global_ai_override(self, enabled: bool, *, actor_id: int) -> tuple[bool, str]:
+        return await self.set_ordinary_ai_policy(enabled=enabled, actor_id=actor_id)
 
     def test_message(
         self,
@@ -1731,7 +1925,7 @@ class ShieldService:
 
         message = f"Shield live-message moderation is now {'enabled' if enabled else 'disabled'} for this server."
         if enabled:
-            message += " AI stays off by default."
+            message += " Shield AI stays second-pass only and owner-managed."
             if first_enable:
                 message += (
                     " On first enable, Babblebox applies its recommended non-AI baseline anywhere you had not already customized it. "
@@ -2162,8 +2356,8 @@ class ShieldService:
         min_confidence: str | None = None,
         enabled_packs: Sequence[str] | None = None,
     ) -> tuple[bool, str]:
-        if not self.is_ai_supported_guild(guild_id):
-            return False, "AI review is not available in this server yet."
+        if enabled is not None:
+            return False, "Shield AI access is owner-managed privately. `/shield ai` only changes review threshold and eligible packs."
         cleaned_min_confidence = str(min_confidence).strip().lower() if isinstance(min_confidence, str) else None
         if cleaned_min_confidence is not None and cleaned_min_confidence not in SHIELD_AI_MIN_CONFIDENCE_CHOICES:
             return False, "AI review confidence threshold must be low, medium, or high."
@@ -2176,31 +2370,27 @@ class ShieldService:
                     return False, "AI review packs must be privacy, promo, scam, adult, or severe."
                 if pack not in cleaned_packs:
                     cleaned_packs.append(pack)
-        if enabled is True and not self.ai_provider.diagnostics().get("available"):
-            return False, "AI review cannot be enabled until the provider is configured."
-
         def mutate(config: dict[str, Any]):
-            if enabled is not None:
-                config["ai_enabled"] = bool(enabled)
             if cleaned_min_confidence is not None:
                 config["ai_min_confidence"] = cleaned_min_confidence
             if cleaned_packs is not None:
                 config["ai_enabled_packs"] = cleaned_packs
 
         current = self.get_config(guild_id)
-        final_enabled = current["ai_enabled"] if enabled is None else bool(enabled)
         final_min_confidence = current["ai_min_confidence"] if cleaned_min_confidence is None else cleaned_min_confidence
         final_packs = current["ai_enabled_packs"] if cleaned_packs is None else cleaned_packs
-        if final_enabled and not final_packs:
-            return False, "Select at least one local Shield pack before enabling AI review."
+        if not final_packs:
+            return False, "Select at least one local Shield pack for AI review."
         pack_summary = ", ".join(PACK_LABELS[pack] for pack in final_packs) if final_packs else "no packs selected"
+        policy = self.resolve_ai_access_policy(guild_id)
         provider_status = self.ai_provider.diagnostics().get("status", "Unavailable.")
         return await self._update_config(
             guild_id,
             mutate,
             success_message=(
-                f"Shield AI review is now {'enabled' if final_enabled else 'disabled'} "
-                f"at `{final_min_confidence}` local-confidence threshold for {pack_summary}. "
+                f"Shield AI review scope now uses `{final_min_confidence}` minimum local confidence for {pack_summary}. "
+                f"Owner policy source: `{policy.source}`. "
+                f"Allowed models: {format_shield_ai_model_list(policy.allowed_models)}. "
                 f"Provider status: {provider_status}"
             ),
         )
@@ -2428,9 +2618,10 @@ class ShieldService:
     def _should_request_ai_review(self, compiled: CompiledShieldConfig, decision: ShieldDecision) -> bool:
         if decision.action in {"disabled", "detect"}:
             return False
-        if compiled.log_channel_id is None or not compiled.ai_enabled:
+        if compiled.log_channel_id is None:
             return False
-        if not self.is_ai_supported_guild(compiled.guild_id):
+        policy = self.resolve_ai_access_policy(compiled.guild_id)
+        if not policy.enabled:
             return False
         if decision.pack not in compiled.ai_enabled_packs or decision.pack not in AI_REVIEW_PACK_SET:
             return False
@@ -2452,6 +2643,7 @@ class ShieldService:
         top_reason = decision.reasons[0] if decision.reasons else None
         if top_reason is None or decision.pack is None:
             return None
+        policy = self.resolve_ai_access_policy(message.guild.id)
         max_chars = int(self.ai_provider.diagnostics().get("max_chars") or 340)
         sanitized = sanitize_message_for_ai(snapshot.scan_text, max_chars=max_chars)
         return ShieldAIReviewRequest(
@@ -2462,12 +2654,15 @@ class ShieldService:
             local_labels=tuple(item.label for item in decision.reasons[:3]),
             local_reasons=tuple(item.reason for item in decision.reasons[:2]),
             sanitized_content=sanitized.text,
+            sanitized_redaction_count=sanitized.redaction_count,
+            sanitized_truncated=sanitized.truncated,
             has_links=snapshot.has_links,
             domains=tuple(sorted(snapshot.domains)[:3]),
             has_suspicious_attachment=snapshot.has_suspicious_attachment,
             attachment_extensions=summarize_attachment_extensions(snapshot.attachment_names),
             invite_detected=bool(snapshot.invite_codes),
             repetitive_promo=repetitive_promo,
+            allowed_models=policy.allowed_models,
         )
 
     def _matching_allow_phrase(self, compiled: CompiledShieldConfig, snapshot: ShieldSnapshot) -> str | None:
@@ -4357,11 +4552,18 @@ class ShieldService:
                     f"Classification: **{ai_review.classification_label}**",
                     f"Confidence: {ai_review.confidence.title()}",
                     f"Priority: {AI_PRIORITY_LABELS.get(ai_review.priority, ai_review.priority.title())}",
+                    f"Tier: `{ai_review.tier}` (target `{ai_review.target_tier}`)",
+                    f"Model: `{ai_review.model}`",
                 ]
                 if ai_review.false_positive:
                     ai_lines.append("Possible false positive: Yes")
+                if ai_review.route_reasons:
+                    ai_lines.append(f"Route reasons: {', '.join(ai_review.route_reasons[:4])}")
+                if ai_review.policy_capped:
+                    ai_lines.append("Policy cap: Stronger tier was blocked by this guild's allowed-model policy.")
+                if ai_review.fallback_used and ai_review.attempted_models:
+                    ai_lines.append(f"Fallback: {' -> '.join(ai_review.attempted_models)}")
                 ai_lines.append(ai_review.explanation)
-                ai_lines.append(f"Model: `{ai_review.model}`")
                 embed.add_field(name="AI Assist", value="\n".join(ai_lines), inline=False)
             embed.add_field(name="Jump", value=f"[Open message]({message.jump_url})", inline=True)
             if top_reason is not None and top_reason.pack == "scam" and top_reason.heuristic:

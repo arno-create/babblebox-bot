@@ -95,7 +95,7 @@ Babblebox depends on:
 - Discord APIs, permissions, channels, and DM delivery
 - website hosting
 - Supabase or Postgres-backed storage
-- optional third-party providers for enabled features such as already-flagged Shield review flows
+- optional third-party providers for enabled features such as owner-managed, second-pass Shield AI review of already-flagged live messages
 
 Babblebox does not provide a paid SLA, guaranteed moderation coverage, guaranteed delivery outcome, or guaranteed uptime.
 

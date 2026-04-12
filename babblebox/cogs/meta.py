@@ -165,10 +165,10 @@ HELP_PAGES: list[dict[str, str]] = [
             "Shield can watch for privacy leaks, invite or promo abuse, malicious or scam links, adult-domain intel plus optional solicitation / DM-ad text, and a separate Severe Harm / Hate pack for real-harm abuse only.\n"
             "`/shield panel`, `/shield rules`, `/shield links`, `/shield trusted`, `/shield filters`, `/shield allowlist`, `/shield logs`, `/shield severe category`, `/shield severe term`, `/shield ai`, and `/shield test` cover the shipped admin flow.\n"
             "`/admin panel`, `/admin followup`, `/admin verification`, and `/admin sync` cover returned-after-ban follow-up roles and unverified cleanup.\n"
-            "Live moderation stays off until an admin enables it, and the first enable applies a recommended non-AI baseline while leaving AI off.\n"
+            "Live moderation stays off until an admin enables it, and the first enable applies a recommended non-AI baseline while Shield AI access stays owner-managed.\n"
             "Trusted Links Only now exposes its built-in trusted families and domains under `/shield trusted`, keeps Confessions link mode separate, and still lets malicious, impersonation, adult, or suspicious-link intel override local trust exceptions.\n"
             "Repeated noisy links can stay low-confidence and log-only instead of being misread as strong promo, and bot or webhook posts stay on a more conservative scam threshold unless the evidence is genuinely strong.\n"
-            "AI assist is optional, admin-only, support-server limited by default, and only reviews messages that local Shield already flagged across privacy, promo, scam, adult, or severe. It never punishes on its own.\n"
+            "Shield AI is second-pass only, live-message-only, and owner-managed. The support server has full AI access by default, ordinary guilds stay off by default, `/shield ai` only configures review scope, and AI never punishes on its own.\n"
             "Admin lifecycle helpers stay compact: no Babblebox ban/kick command suite, no giant case archive, and no per-member task explosion."
         ),
         "try": "`/shield panel`, `/shield links`, `/shield trusted`, `/shield filters`, `/shield severe category`, `/admin panel`",

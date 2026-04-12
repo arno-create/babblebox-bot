@@ -125,7 +125,7 @@ Babblebox is intentionally compact:
   - Babblebox's bounded cross-feature immunity layer
   - admin-only configuration for administrators or Manage Server users
   - live-message moderation remains optional and admin-configurable
-  - first enable applies a recommended non-AI baseline once, while AI stays off by default
+  - first enable applies a recommended non-AI baseline once, while Shield AI access stays owner-managed
   - always-on private feature-surface checks for Confessions unsafe-link parity, AFK reasons, reminder text plus public reminder delivery, and watch keyword setup
   - AFK reasons and reminders use privacy, adult, and severe checks; watch keyword setup stays privacy-only
   - privacy leak pack
@@ -143,7 +143,9 @@ Babblebox is intentionally compact:
 - private suspicious-member review that only escalates when risky message signals combine with bounded account-age, avatar-state, display-name suspicion, newcomer first-link context, or fresh-campaign reuse
 - optional AI-assisted second-pass review for moderator context only
 - Shield AI stays live-message-only; AFK, reminders, watch keywords, and Confessions feature checks remain local-first and AI-free
-- AI stays off by default and is currently limited to guild `1322933864360050688`
+- support server AI is on by default with `gpt-5.4-nano`, `gpt-5.4-mini`, and `gpt-5.4`
+- ordinary guild AI stays off by default until the owner enables it globally or per guild
+- `/shield ai` only configures review scope; owner-only private policy controls real AI access and allowed models
 - log-first defaults
   - trusted-role bypass
   - included / excluded scope controls
@@ -324,12 +326,12 @@ Slash is the best fit for multi-option admin setup here. Prefix stays positional
 | `/shield allowlist` | `bb!shield allowlist` | Manage domain, invite, and phrase allowlists |
 | `/shield severe category` | `bb!shield severe category self_harm_encouragement off` | Turn severe-harm categories on or off |
 | `/shield severe term` | `bb!shield severe term add you scumlord` | Add, disable, restore, or remove bounded severe terms |
-| `/shield ai` | `bb!shield ai true high true false true true true` | Configure optional AI second-pass review |
+| `/shield ai` | `bb!shield ai high true false true true true` | Configure Shield AI review scope for already-flagged live messages |
 | `/shield advanced add` | `bb!shield advanced add Gift claim*gift wildcard log` | Add a safe advanced pattern |
 | `/shield advanced list` | `bb!shield advanced list` | Review advanced patterns |
 | `/shield test` | `bb!shield test free nitro claim now https://bit.ly/x` | Dry-run a message through Shield |
 
-Shield's live-message link policy is intentionally separate from Confessions link mode. Confessions keeps `Disabled`, `Trusted Only`, and `Allow All Safe`, while Shield keeps `Default` plus the bounded `Trusted Links Only` mode. That stricter Shield mode allows the built-in trusted pack plus admin allowlisted domains and invite codes as policy exceptions, and `/shield trusted` now exposes the built-in families, direct domains, and any local built-in disables that affect trusted-only mode. Malicious, trusted-brand impersonation, adult-domain, and strong suspicious-link intel still wins over those trust exceptions. Shield phrase allowlists stay narrower: they suppress only targeted promo or adult-solicitation text matches. The live Shield packs are `Privacy Leak`, `Promo / Invite`, `Scam / Malicious Links`, `Adult Links + Solicitation`, and `Severe Harm / Hate`; live moderation stays opt-in, and the first enable applies a recommended non-AI baseline with AI still off by default.
+Shield's live-message link policy is intentionally separate from Confessions link mode. Confessions keeps `Disabled`, `Trusted Only`, and `Allow All Safe`, while Shield keeps `Default` plus the bounded `Trusted Links Only` mode. That stricter Shield mode allows the built-in trusted pack plus admin allowlisted domains and invite codes as policy exceptions, and `/shield trusted` now exposes the built-in families, direct domains, and any local built-in disables that affect trusted-only mode. Malicious, trusted-brand impersonation, adult-domain, and strong suspicious-link intel still wins over those trust exceptions. Shield phrase allowlists stay narrower: they suppress only targeted promo or adult-solicitation text matches. The live Shield packs are `Privacy Leak`, `Promo / Invite`, `Scam / Malicious Links`, `Adult Links + Solicitation`, and `Severe Harm / Hate`; live moderation stays opt-in, the first enable applies a recommended non-AI baseline, and Shield AI remains owner-managed second-pass review only.
 
 Shield also now governs eligible non-chat surfaces in a bounded way. Confessions keeps its own privacy, review, and workflow logic, but shares Shield link intelligence. AFK reasons plus reminder text and public reminder delivery use fixed private privacy, adult, and severe feature-surface policies. Watch keyword setup stays privacy-only. None of those private feature checks create mod-log spam or call Shield AI.
 
@@ -471,8 +473,8 @@ Babblebox Shield is intentionally compact and conservative:
 - profile bios or about-me text are not part of the suspicious-member lane in the current implementation
 - optional AI review never becomes the primary moderation engine
 - AI review only runs after local Shield already flagged a message
-- AI review is currently limited to guild `1322933864360050688`
-- AI review is admin-only, off by default, and never punishes by itself
+- support server AI is on by default with full model access; ordinary guild AI is off by default unless the owner enables it globally or per guild
+- AI review is admin-visible, owner-managed, and never punishes by itself
 - AI review can cover privacy, promo, scam, adult, and severe once admins opt those packs in
 - only minimal, sanitized, truncated flagged text from the scanned surfaces is sent to the AI provider
 
@@ -708,7 +710,11 @@ UTILITY_DATABASE_URL=postgresql://...
 # or DATABASE_URL=postgresql://...
 OPENAI_API_KEY=sk-...
 # optional Shield AI tuning:
-# SHIELD_AI_MODEL=gpt-4.1-mini
+# SHIELD_AI_FAST_MODEL=gpt-5.4-nano
+# SHIELD_AI_COMPLEX_MODEL=gpt-5.4-mini
+# SHIELD_AI_TOP_MODEL=gpt-5.4
+# SHIELD_AI_ENABLE_TOP_TIER=false
+# SHIELD_AI_MODEL=
 # SHIELD_AI_TIMEOUT_SECONDS=4
 # SHIELD_AI_MAX_CHARS=340
 
@@ -729,7 +735,7 @@ Environment variable notes:
 - `CONFESSIONS_CONTENT_KEY_ID` and `CONFESSIONS_IDENTITY_KEY_ID` are optional but recommended active key labels; if omitted they default to `active`
 - `CONFESSIONS_CONTENT_LEGACY_KEYS` and `CONFESSIONS_IDENTITY_LEGACY_KEYS` are optional comma-separated `key_id=secret` lists used only during key rotation or compatibility windows so Babblebox can read old Confessions rows while writing with the new active key
 - `OPENAI_API_KEY` is optional and only needed for Shield AI assist
-- `SHIELD_AI_MODEL`, `SHIELD_AI_TIMEOUT_SECONDS`, and `SHIELD_AI_MAX_CHARS` are optional Shield AI tuning knobs
+- `SHIELD_AI_FAST_MODEL`, `SHIELD_AI_COMPLEX_MODEL`, `SHIELD_AI_TOP_MODEL`, `SHIELD_AI_ENABLE_TOP_TIER`, `SHIELD_AI_MODEL`, `SHIELD_AI_TIMEOUT_SECONDS`, and `SHIELD_AI_MAX_CHARS` are optional Shield AI tuning knobs
 - `UTILITY_STORAGE_BACKEND=memory` is for explicit local/test work only
 - `ADMIN_STORAGE_BACKEND=memory` is optional for local/test admin lifecycle work
 - `SHIELD_STORAGE_BACKEND=memory` is optional for local/test Shield work
