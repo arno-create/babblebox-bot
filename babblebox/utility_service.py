@@ -1159,7 +1159,7 @@ class UtilityService:
             "guild_name": guild.name if guild is not None else None,
             "channel_id": getattr(channel, "id", None) if delivery == "here" else None,
             "channel_name": getattr(channel, "name", None) if delivery == "here" else None,
-            "origin_jump_url": origin_jump_url if delivery == "dm" else None,
+            "origin_jump_url": origin_jump_url if guild is not None else None,
             "delivery_attempts": 0,
             "last_attempt_at": None,
             "retry_after": None,

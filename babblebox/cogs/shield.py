@@ -119,6 +119,7 @@ class ShieldPanelView(discord.ui.View):
         statuses = {
             "overview": self.overview_button,
             "rules": self.rules_button,
+            "links": self.links_button,
             "scope": self.scope_button,
             "ai": self.ai_button,
             "logs": self.logs_button,
@@ -181,6 +182,10 @@ class ShieldPanelView(discord.ui.View):
     async def rules_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._switch_section(interaction, "rules")
 
+    @discord.ui.button(label="Links", style=discord.ButtonStyle.secondary, row=0)
+    async def links_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        await self._switch_section(interaction, "links")
+
     @discord.ui.button(label="Scope", style=discord.ButtonStyle.secondary, row=0)
     async def scope_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._switch_section(interaction, "scope")
@@ -189,7 +194,7 @@ class ShieldPanelView(discord.ui.View):
     async def ai_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._switch_section(interaction, "ai")
 
-    @discord.ui.button(label="Logs", style=discord.ButtonStyle.secondary, row=0)
+    @discord.ui.button(label="Logs", style=discord.ButtonStyle.secondary, row=1)
     async def logs_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._switch_section(interaction, "logs")
 
@@ -343,20 +348,48 @@ class ShieldCog(commands.Cog):
         low_action, medium_action, high_action = self._link_policy_actions(config)
         if config.get("link_policy_mode") == "trusted_only":
             detail = (
-                "Shield allows only trusted mainstream destinations, plus admin allowlisted domains and invite codes "
-                "as policy exceptions. Malicious, adult, and suspicious-link intel still wins."
+                "Shield allows the built-in trusted pack plus admin allowlisted domains and invite codes as bounded "
+                "policy exceptions. Malicious, impersonation, adult, and suspicious-link intel still wins."
             )
         else:
-            detail = "Shield preserves the current broad link behavior; trusted-link policy is inactive."
+            detail = (
+                "Shield keeps the normal broad link posture here. Trusted-only policy is inactive, but malicious, "
+                "impersonation, adult, and suspicious-link intel still feeds the specialized packs."
+            )
         return (
             f"Mode: **{self._link_policy_label(config)}**\n"
             f"Low / Medium / High: `{low_action}` / `{medium_action}` / `{high_action}`\n"
             f"{detail}"
         )
 
+    def _format_trusted_family_lines(self, families: list[dict[str, object]], *, limit: int) -> str:
+        if not families:
+            return "None"
+        lines = []
+        for item in families[:limit]:
+            examples = ", ".join(str(value) for value in item.get("examples", [])[:3]) or "no sample domains"
+            state = "off here" if item.get("disabled") else "on"
+            lines.append(f"`{item['name']}` ({item['count']}) | {state} | {examples}")
+        if len(families) > limit:
+            lines.append(f"+{len(families) - limit} more families")
+        return "\n".join(lines)
+
+    def _format_trusted_domain_lines(self, domains: list[dict[str, object]], *, limit: int) -> str:
+        if not domains:
+            return "None"
+        lines = []
+        for item in domains[:limit]:
+            state = "off here" if item.get("disabled") else "on"
+            lines.append(f"`{item['domain']}` | {state}")
+        if len(domains) > limit:
+            lines.append(f"+{len(domains) - limit} more domains")
+        return "\n".join(lines)
+
     def _link_assessment_label(self, assessment) -> str:
         if assessment.category == "malicious":
             return "malicious | matched local intel"
+        if assessment.category == "impersonation":
+            return "trusted-brand impersonation | hard local block"
         if assessment.category == "adult":
             return "adult | matched local intel"
         if assessment.category == "unknown_suspicious":
@@ -509,6 +542,7 @@ class ShieldCog(commands.Cog):
                 f"Scan mode: `{config['scan_mode']}`\n"
                 f"Log channel: {log_channel}\n"
                 f"Alert role: {alert_role}\n"
+                "First enable: Babblebox applies its recommended non-AI baseline once, then leaves your edits alone.\n"
                 "Feature checks: AFK + reminders use privacy/adult/severe, Watch stays privacy-only, and Confessions shares link checks"
             ),
             inline=False,
@@ -541,7 +575,8 @@ class ShieldCog(commands.Cog):
                 f"Enabled: **{'Yes' if ai_status['enabled'] else 'No'}**\n"
                 f"Local-confidence threshold: `{ai_status['min_confidence']}`\n"
                 f"Packs: {self._format_ai_pack_summary(ai_status['enabled_packs'])}\n"
-                "Scope: Live-message moderation only"
+                "Scope: Live-message moderation only\n"
+                "AI stays off by default and only enriches moderator context."
             ),
             inline=False,
         )
@@ -553,13 +588,13 @@ class ShieldCog(commands.Cog):
             ),
             inline=False,
         )
-        return ge.style_embed(embed, footer="Babblebox Shield | Use /shield panel, rules, links, filters, logs, allowlist, ai, or test")
+        return ge.style_embed(embed, footer="Babblebox Shield | Use /shield panel, rules, links, trusted, filters, logs, allowlist, ai, or test")
 
     def _rules_embed(self, guild_id: int) -> discord.Embed:
         config = self.service.get_config(guild_id)
         embed = discord.Embed(
             title="Shield Rules",
-            description="Confidence-tier local policy. Local malicious and adult-domain matches can act hard, the adult solicitation detector stays optional and narrowly scoped, the severe pack stays targeted to real-harm abuse only, and unknown suspicious links stay link-only unless local scam signals, newcomer context, or campaign repetition justify escalation.",
+            description="Confidence-tier local policy. Local malicious, trusted-brand impersonation, and adult-domain matches can act hard, the adult solicitation detector stays optional and narrowly scoped, the severe pack stays targeted to real-harm abuse only, and unknown suspicious links stay link-only unless local scam signals, newcomer context, or campaign repetition justify escalation.",
             color=ge.EMBED_THEME["info"],
         )
         pack_lines = []
@@ -606,12 +641,62 @@ class ShieldCog(commands.Cog):
                 "`/shield rules pack:severe enabled:true low_action:detect medium_action:delete_log high_action:delete_log`\n"
                 "`/shield severe category category:self_harm_encouragement state:on`\n"
                 "`/shield links mode:trusted_only low_action:log medium_action:delete_log high_action:delete_log`\n"
+                "`/shield trusted view`\n"
                 "`/shield rules module:true escalation_threshold:3 timeout_minutes:10`\n"
                 "`bb!shield advanced list` for safe custom patterns"
             ),
             inline=False,
         )
         return ge.style_embed(embed, footer="Babblebox Shield | Low / Medium / High policy stays local and explicit")
+
+    def _links_embed(self, guild_id: int) -> discord.Embed:
+        config = self.service.get_config(guild_id)
+        trusted_state = self.service.trusted_pack_state(guild_id)
+        embed = discord.Embed(
+            title="Shield Links and Trust",
+            description="Trusted-link policy is a separate live-message lane. It stays distinct from Confessions link mode, and hard malicious, impersonation, adult, or suspicious-link evidence still wins over policy exceptions.",
+            color=ge.EMBED_THEME["info"],
+        )
+        embed.add_field(name="Current Policy", value=self._link_policy_detail(config), inline=False)
+        embed.add_field(
+            name="Built-In Trusted Pack",
+            value=(
+                f"Families:\n{self._format_trusted_family_lines(trusted_state['families'], limit=5)}\n\n"
+                f"Direct domains:\n{self._format_trusted_domain_lines(trusted_state['direct_domains'], limit=5)}"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Local Overrides",
+            value=(
+                f"Disabled built-in families: {self._format_text_list(trusted_state['disabled_families'], limit=6)}\n"
+                f"Disabled built-in domains: {self._format_text_list(trusted_state['disabled_domains'], limit=6)}\n"
+                f"Admin allowlisted domains: {self._format_text_list(trusted_state['allow_domains'], limit=6)}\n"
+                f"Admin allowlisted invites: {self._format_text_list(trusted_state['allow_invite_codes'], limit=6)}"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Precedence",
+            value=(
+                "1. Hard malicious, impersonation, adult, and strong suspicious-link evidence wins.\n"
+                "2. Admin allowlisted domains or invites can add bounded trusted-only exceptions.\n"
+                "3. Built-in trusted families and direct domains apply after subtracting any local built-in disables.\n"
+                "4. Phrase allowlists do not change link trust. They only suppress targeted promo or adult-solicitation text matches."
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Quick Use",
+            value=(
+                "`/shield links mode:trusted_only low_action:log medium_action:delete_log high_action:delete_log`\n"
+                "`/shield trusted view`\n"
+                "`/shield trusted family family:docs state:off`\n"
+                "`/shield trusted domain domain:docs.python.org state:off`"
+            ),
+            inline=False,
+        )
+        return ge.style_embed(embed, footer="Babblebox Shield | Trust stays visible, bounded, and override-aware")
 
     def _scope_embed(self, guild_id: int) -> discord.Embed:
         config = self.service.get_config(guild_id)
@@ -650,7 +735,8 @@ class ShieldCog(commands.Cog):
                 "Phrases: suppress promo or adult-solicitation text matches only\n"
                 f"Solicitation carve-out channels: {self._format_mentions(config.get('adult_solicitation_excluded_channel_ids', []), kind='channel')}\n"
                 f"Trusted-link mode: **{self._link_policy_label(config)}**\n"
-                "Malicious, suspicious-link, adult-domain, and scam protections still run."
+                "Built-in trusted families or domains are managed under `/shield trusted`.\n"
+                "Malicious, impersonation, suspicious-link, adult-domain, and scam protections still run."
             ),
             inline=False,
         )
@@ -660,7 +746,8 @@ class ShieldCog(commands.Cog):
                 "`/shield filters mode:only_included`\n"
                 "`/shield filters target:trusted_role_ids state:on role:@Mods`\n"
                 "`/shield filters target:adult_solicitation_excluded_channel_ids state:on channel:#adult-market`\n"
-                "`/shield allowlist bucket:allow_domains state:on value:example.com`"
+                "`/shield allowlist bucket:allow_domains state:on value:example.com`\n"
+                "`/shield trusted view`"
             ),
             inline=False,
         )
@@ -681,7 +768,8 @@ class ShieldCog(commands.Cog):
                 f"Server access: {'Allowed' if ai_status['supported'] else 'Not available in this server yet'}\n"
                 f"Provider: {ai_status['provider'] or 'Not configured'}\n"
                 f"Provider ready: {'Yes' if ai_status['provider_available'] else 'No'}\n"
-                f"Status: {ai_status['status']}"
+                f"Status: {ai_status['status']}\n"
+                "Default posture: Off until an admin opts in."
             ),
             inline=False,
         )
@@ -706,7 +794,7 @@ class ShieldCog(commands.Cog):
         )
         embed.add_field(
             name="Quick Use",
-            value="`/shield ai enabled:true min_confidence:high privacy:true promo:false scam:true`",
+            value="`/shield ai enabled:true min_confidence:high privacy:true promo:false scam:true adult:true severe:true`",
             inline=False,
         )
         return ge.style_embed(embed, footer="Babblebox Shield AI | Optional, admin-only, and support-server limited")
@@ -749,6 +837,8 @@ class ShieldCog(commands.Cog):
     def build_panel_embed(self, guild_id: int, section: str, *, channel_id: int | None = None) -> discord.Embed:
         if section == "rules":
             embed = self._rules_embed(guild_id)
+        elif section == "links":
+            embed = self._links_embed(guild_id)
         elif section == "scope":
             embed = self._scope_embed(guild_id)
         elif section == "ai":
@@ -925,13 +1015,24 @@ class ShieldCog(commands.Cog):
         if all(value is None for value in (mode, action, low_action, medium_action, high_action)):
             embed = discord.Embed(
                 title="Shield Link Policy",
-                description="Shield link policy is a live-message-only policy lane, stays separate from Confessions link mode, and still respects admin allowlists.",
+                description="Shield link policy is a live-message-only policy lane. It stays separate from Confessions link mode, and `/shield trusted` shows the built-in trusted pack plus local trust overrides.",
                 color=ge.EMBED_THEME["info"],
             )
             embed.add_field(name="Current Policy", value=self._link_policy_detail(self.service.get_config(ctx.guild.id)), inline=False)
             embed.add_field(
+                name="Trust Precedence",
+                value=(
+                    "Built-in trusted pack -> local trusted-only overrides -> admin allowlisted domains or invites.\n"
+                    "Hard malicious, impersonation, adult, and suspicious-link evidence still wins."
+                ),
+                inline=False,
+            )
+            embed.add_field(
                 name="Quick Use",
-                value="`/shield links mode:trusted_only low_action:log medium_action:delete_log high_action:delete_log`",
+                value=(
+                    "`/shield links mode:trusted_only low_action:log medium_action:delete_log high_action:delete_log`\n"
+                    "`/shield trusted view`"
+                ),
                 inline=False,
             )
             await send_hybrid_response(ctx, embed=ge.style_embed(embed, footer="Babblebox Shield | Trusted-link policy"), ephemeral=True)
@@ -945,6 +1046,41 @@ class ShieldCog(commands.Cog):
             high_action=high_action,
         )
         await self._send_result(ctx, "Shield Link Policy", message, ok=ok)
+
+    @shield_group.group(
+        name="trusted",
+        with_app_command=True,
+        invoke_without_command=True,
+        description="Inspect or tune Shield's built-in trusted families and domains",
+    )
+    async def shield_trusted_group(self, ctx: commands.Context):
+        if not await self._guard(ctx):
+            return
+        await send_hybrid_response(ctx, embed=self._links_embed(ctx.guild.id), ephemeral=True)
+
+    @shield_trusted_group.command(name="view", description="Show Shield's built-in trusted pack and local overrides")
+    async def shield_trusted_view_command(self, ctx: commands.Context):
+        if not await self._guard(ctx):
+            return
+        await send_hybrid_response(ctx, embed=self._links_embed(ctx.guild.id), ephemeral=True)
+
+    @shield_trusted_group.command(name="family", description="Turn one built-in trusted family on or off for this server")
+    @app_commands.describe(family="Built-in trusted family name, such as docs or dev", state="Turn that family on or off")
+    @app_commands.choices(state=STATE_CHOICES)
+    async def shield_trusted_family_command(self, ctx: commands.Context, family: str, state: str):
+        if not await self._guard(ctx):
+            return
+        ok, message = await self.service.set_trusted_builtin_family_enabled(ctx.guild.id, family, state == "on")
+        await self._send_result(ctx, "Shield Trusted Families", message, ok=ok)
+
+    @shield_trusted_group.command(name="domain", description="Turn one built-in trusted domain on or off for this server")
+    @app_commands.describe(domain="Built-in trusted domain, such as google.com", state="Turn that domain on or off")
+    @app_commands.choices(state=STATE_CHOICES)
+    async def shield_trusted_domain_command(self, ctx: commands.Context, domain: str, state: str):
+        if not await self._guard(ctx):
+            return
+        ok, message = await self.service.set_trusted_builtin_domain_enabled(ctx.guild.id, domain, state == "on")
+        await self._send_result(ctx, "Shield Trusted Domains", message, ok=ok)
 
     @shield_group.group(
         name="severe",
@@ -1096,6 +1232,8 @@ class ShieldCog(commands.Cog):
         privacy="Allow AI review for privacy-pack hits",
         promo="Allow AI review for promo-pack hits",
         scam="Allow AI review for scam-pack hits",
+        adult="Allow AI review for adult-pack hits",
+        severe="Allow AI review for severe-pack hits",
     )
     @app_commands.choices(min_confidence=AI_CONFIDENCE_CHOICES)
     async def shield_ai_command(
@@ -1106,10 +1244,12 @@ class ShieldCog(commands.Cog):
         privacy: Optional[bool] = None,
         promo: Optional[bool] = None,
         scam: Optional[bool] = None,
+        adult: Optional[bool] = None,
+        severe: Optional[bool] = None,
     ):
         if not await self._guard(ctx):
             return
-        if all(value is None for value in (enabled, min_confidence, privacy, promo, scam)):
+        if all(value is None for value in (enabled, min_confidence, privacy, promo, scam, adult, severe)):
             await send_hybrid_response(ctx, embed=self._ai_embed(ctx.guild.id), ephemeral=True)
             return
         if not self.service.is_ai_supported_guild(ctx.guild.id):
@@ -1117,7 +1257,7 @@ class ShieldCog(commands.Cog):
             return
         current = self.service.get_config(ctx.guild.id)
         next_packs = list(current.get("ai_enabled_packs", []))
-        for pack, state in (("privacy", privacy), ("promo", promo), ("scam", scam)):
+        for pack, state in (("privacy", privacy), ("promo", promo), ("scam", scam), ("adult", adult), ("severe", severe)):
             if state is None:
                 continue
             if state and pack not in next_packs:
@@ -1128,7 +1268,7 @@ class ShieldCog(commands.Cog):
             ctx.guild.id,
             enabled=enabled,
             min_confidence=min_confidence,
-            enabled_packs=next_packs if any(value is not None for value in (privacy, promo, scam)) else None,
+            enabled_packs=next_packs if any(value is not None for value in (privacy, promo, scam, adult, severe)) else None,
         )
         await self._send_result(ctx, "Shield AI", message, ok=ok)
 

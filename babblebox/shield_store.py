@@ -15,7 +15,7 @@ from babblebox.shield_ai import SHIELD_AI_MIN_CONFIDENCE_CHOICES, SHIELD_AI_REVI
 
 DEFAULT_DATABASE_URL_ENV_ORDER = ("UTILITY_DATABASE_URL", "SUPABASE_DB_URL", "DATABASE_URL")
 DEFAULT_BACKEND = "postgres"
-DEFAULT_VERSION = 4
+DEFAULT_VERSION = 5
 VALID_SCAN_MODES = {"all", "only_included"}
 VALID_SHIELD_ACTIONS = {"disabled", "detect", "log", "delete_log", "delete_escalate", "timeout_log"}
 VALID_SHIELD_SENSITIVITIES = {"low", "normal", "high"}
@@ -72,6 +72,7 @@ def default_guild_shield_config(guild_id: int | None = None) -> dict[str, Any]:
     return {
         "guild_id": guild_id,
         "module_enabled": False,
+        "baseline_version": 0,
         "log_channel_id": None,
         "alert_role_id": None,
         "scan_mode": "all",
@@ -85,6 +86,8 @@ def default_guild_shield_config(guild_id: int | None = None) -> dict[str, Any]:
         "allow_domains": [],
         "allow_invite_codes": [],
         "allow_phrases": [],
+        "trusted_builtin_disabled_families": [],
+        "trusted_builtin_disabled_domains": [],
         "privacy_enabled": False,
         "privacy_action": "log",
         "privacy_low_action": "log",
@@ -186,6 +189,8 @@ def normalize_guild_shield_config(guild_id: int, config: Any) -> dict[str, Any]:
         return cleaned
 
     cleaned["module_enabled"] = bool(config.get("module_enabled"))
+    baseline_version = config.get("baseline_version")
+    cleaned["baseline_version"] = baseline_version if isinstance(baseline_version, int) and baseline_version >= 0 else 0
     cleaned["log_channel_id"] = config.get("log_channel_id") if isinstance(config.get("log_channel_id"), int) else None
     cleaned["alert_role_id"] = config.get("alert_role_id") if isinstance(config.get("alert_role_id"), int) else None
     scan_mode = config.get("scan_mode", "all")
@@ -202,7 +207,13 @@ def normalize_guild_shield_config(guild_id: int, config: Any) -> dict[str, Any]:
         "trusted_role_ids",
     ):
         cleaned[field] = _clean_int_list(config.get(field))
-    for field in ("allow_domains", "allow_invite_codes", "allow_phrases"):
+    for field in (
+        "allow_domains",
+        "allow_invite_codes",
+        "allow_phrases",
+        "trusted_builtin_disabled_families",
+        "trusted_builtin_disabled_domains",
+    ):
         cleaned[field] = _clean_text_list(config.get(field))
 
     for pack in ("privacy", "promo", "scam", "adult", "severe"):
@@ -473,6 +484,7 @@ class _PostgresShieldStore(_BaseShieldStore):
                 "CREATE TABLE IF NOT EXISTS shield_guild_configs ("
                 "guild_id BIGINT PRIMARY KEY, "
                 "module_enabled BOOLEAN NOT NULL DEFAULT FALSE, "
+                "baseline_version SMALLINT NOT NULL DEFAULT 0, "
                 "log_channel_id BIGINT NULL, "
                 "alert_role_id BIGINT NULL, "
                 "scan_mode TEXT NOT NULL DEFAULT 'all', "
@@ -486,6 +498,8 @@ class _PostgresShieldStore(_BaseShieldStore):
                 "allow_domains JSONB NOT NULL DEFAULT '[]'::jsonb, "
                 "allow_invite_codes JSONB NOT NULL DEFAULT '[]'::jsonb, "
                 "allow_phrases JSONB NOT NULL DEFAULT '[]'::jsonb, "
+                "trusted_builtin_disabled_families JSONB NOT NULL DEFAULT '[]'::jsonb, "
+                "trusted_builtin_disabled_domains JSONB NOT NULL DEFAULT '[]'::jsonb, "
                 "privacy_enabled BOOLEAN NOT NULL DEFAULT FALSE, "
                 "privacy_action TEXT NOT NULL DEFAULT 'log', "
                 "privacy_low_action TEXT NOT NULL DEFAULT 'log', "
@@ -528,7 +542,7 @@ class _PostgresShieldStore(_BaseShieldStore):
                 "link_policy_high_action TEXT NOT NULL DEFAULT 'log', "
                 "ai_enabled BOOLEAN NOT NULL DEFAULT FALSE, "
                 "ai_min_confidence TEXT NOT NULL DEFAULT 'high', "
-                "ai_enabled_packs JSONB NOT NULL DEFAULT '[\"privacy\",\"promo\",\"scam\"]'::jsonb, "
+                "ai_enabled_packs JSONB NOT NULL DEFAULT '[\"privacy\",\"promo\",\"scam\",\"adult\",\"severe\"]'::jsonb, "
                 "escalation_threshold SMALLINT NOT NULL DEFAULT 3, "
                 "escalation_window_minutes SMALLINT NOT NULL DEFAULT 15, "
                 "timeout_minutes SMALLINT NOT NULL DEFAULT 10, "
@@ -542,6 +556,7 @@ class _PostgresShieldStore(_BaseShieldStore):
                 "updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc', now())"
                 ")"
             ),
+            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS baseline_version SMALLINT NOT NULL DEFAULT 0",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS privacy_sensitivity TEXT NOT NULL DEFAULT 'normal'",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS promo_sensitivity TEXT NOT NULL DEFAULT 'normal'",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS scam_sensitivity TEXT NOT NULL DEFAULT 'normal'",
@@ -579,9 +594,11 @@ class _PostgresShieldStore(_BaseShieldStore):
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS link_policy_low_action TEXT NOT NULL DEFAULT 'log'",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS link_policy_medium_action TEXT NOT NULL DEFAULT 'log'",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS link_policy_high_action TEXT NOT NULL DEFAULT 'log'",
+            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS trusted_builtin_disabled_families JSONB NOT NULL DEFAULT '[]'::jsonb",
+            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS trusted_builtin_disabled_domains JSONB NOT NULL DEFAULT '[]'::jsonb",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS ai_enabled BOOLEAN NOT NULL DEFAULT FALSE",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS ai_min_confidence TEXT NOT NULL DEFAULT 'high'",
-            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS ai_enabled_packs JSONB NOT NULL DEFAULT '[\"privacy\",\"promo\",\"scam\"]'::jsonb",
+            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS ai_enabled_packs JSONB NOT NULL DEFAULT '[\"privacy\",\"promo\",\"scam\",\"adult\",\"severe\"]'::jsonb",
             (
                 "CREATE TABLE IF NOT EXISTS shield_custom_patterns ("
                 "pattern_id TEXT PRIMARY KEY, "
@@ -611,6 +628,7 @@ class _PostgresShieldStore(_BaseShieldStore):
             loaded["guilds"][str(guild_id)] = {
                 "guild_id": guild_id,
                 "module_enabled": bool(row["module_enabled"]),
+                "baseline_version": int(row["baseline_version"]) if "baseline_version" in row else 0,
                 "log_channel_id": row["log_channel_id"],
                 "alert_role_id": row["alert_role_id"],
                 "scan_mode": row["scan_mode"],
@@ -654,6 +672,18 @@ class _PostgresShieldStore(_BaseShieldStore):
                     row["allow_phrases"],
                     label="shield_guild_configs.allow_phrases",
                 ),
+                "trusted_builtin_disabled_families": decode_postgres_json_array(
+                    row["trusted_builtin_disabled_families"],
+                    label="shield_guild_configs.trusted_builtin_disabled_families",
+                )
+                if "trusted_builtin_disabled_families" in row
+                else [],
+                "trusted_builtin_disabled_domains": decode_postgres_json_array(
+                    row["trusted_builtin_disabled_domains"],
+                    label="shield_guild_configs.trusted_builtin_disabled_domains",
+                )
+                if "trusted_builtin_disabled_domains" in row
+                else [],
                 "privacy_enabled": bool(row["privacy_enabled"]),
                 "privacy_action": row["privacy_action"],
                 "privacy_low_action": row["privacy_low_action"],
@@ -795,9 +825,9 @@ class _PostgresShieldStore(_BaseShieldStore):
         await conn.execute(
             (
                 "INSERT INTO shield_guild_configs ("
-                "guild_id, module_enabled, log_channel_id, alert_role_id, scan_mode, "
+                "guild_id, module_enabled, baseline_version, log_channel_id, alert_role_id, scan_mode, "
                 "included_channel_ids, excluded_channel_ids, included_user_ids, excluded_user_ids, "
-                "included_role_ids, excluded_role_ids, trusted_role_ids, allow_domains, allow_invite_codes, allow_phrases, "
+                "included_role_ids, excluded_role_ids, trusted_role_ids, allow_domains, allow_invite_codes, allow_phrases, trusted_builtin_disabled_families, trusted_builtin_disabled_domains, "
                 "privacy_enabled, privacy_action, privacy_low_action, privacy_medium_action, privacy_high_action, privacy_sensitivity, "
                 "promo_enabled, promo_action, promo_low_action, promo_medium_action, promo_high_action, promo_sensitivity, "
                 "scam_enabled, scam_action, scam_low_action, scam_medium_action, scam_high_action, scam_sensitivity, "
@@ -807,19 +837,20 @@ class _PostgresShieldStore(_BaseShieldStore):
                 "ai_enabled, ai_min_confidence, ai_enabled_packs, "
                 "escalation_threshold, escalation_window_minutes, timeout_minutes, updated_at"
                 ") VALUES ("
-                "$1, $2, $3, $4, $5, "
-                "$6::jsonb, $7::jsonb, $8::jsonb, $9::jsonb, "
-                "$10::jsonb, $11::jsonb, $12::jsonb, $13::jsonb, $14::jsonb, $15::jsonb, "
-                "$16, $17, $18, $19, $20, $21, "
-                "$22, $23, $24, $25, $26, $27, "
-                "$28, $29, $30, $31, $32, $33, "
-                "$34, $35, $36, $37, $38, $39, $40, $41::jsonb, "
-                "$42, $43, $44, $45, $46, $47, $48::jsonb, $49::jsonb, $50::jsonb, "
-                "$51, $52, $53, $54, $55, "
-                "$56, $57, $58::jsonb, $59, $60, $61, timezone('utc', now())"
+                "$1, $2, $3, $4, $5, $6, "
+                "$7::jsonb, $8::jsonb, $9::jsonb, $10::jsonb, "
+                "$11::jsonb, $12::jsonb, $13::jsonb, $14::jsonb, $15::jsonb, $16::jsonb, $17::jsonb, $18::jsonb, "
+                "$19, $20, $21, $22, $23, $24, "
+                "$25, $26, $27, $28, $29, $30, "
+                "$31, $32, $33, $34, $35, $36, "
+                "$37, $38, $39, $40, $41, $42, $43, $44::jsonb, "
+                "$45, $46, $47, $48, $49, $50, $51::jsonb, $52::jsonb, $53::jsonb, "
+                "$54, $55, $56, $57, $58, "
+                "$59, $60, $61::jsonb, $62, $63, $64, timezone('utc', now())"
                 ") "
                 "ON CONFLICT (guild_id) DO UPDATE SET "
                 "module_enabled = EXCLUDED.module_enabled, "
+                "baseline_version = EXCLUDED.baseline_version, "
                 "log_channel_id = EXCLUDED.log_channel_id, "
                 "alert_role_id = EXCLUDED.alert_role_id, "
                 "scan_mode = EXCLUDED.scan_mode, "
@@ -833,6 +864,8 @@ class _PostgresShieldStore(_BaseShieldStore):
                 "allow_domains = EXCLUDED.allow_domains, "
                 "allow_invite_codes = EXCLUDED.allow_invite_codes, "
                 "allow_phrases = EXCLUDED.allow_phrases, "
+                "trusted_builtin_disabled_families = EXCLUDED.trusted_builtin_disabled_families, "
+                "trusted_builtin_disabled_domains = EXCLUDED.trusted_builtin_disabled_domains, "
                 "privacy_enabled = EXCLUDED.privacy_enabled, "
                 "privacy_action = EXCLUDED.privacy_action, "
                 "privacy_low_action = EXCLUDED.privacy_low_action, "
@@ -883,6 +916,7 @@ class _PostgresShieldStore(_BaseShieldStore):
             ),
             config["guild_id"],
             config["module_enabled"],
+            config["baseline_version"],
             config["log_channel_id"],
             config["alert_role_id"],
             config["scan_mode"],
@@ -896,6 +930,8 @@ class _PostgresShieldStore(_BaseShieldStore):
             json.dumps(config["allow_domains"]),
             json.dumps(config["allow_invite_codes"]),
             json.dumps(config["allow_phrases"]),
+            json.dumps(config["trusted_builtin_disabled_families"]),
+            json.dumps(config["trusted_builtin_disabled_domains"]),
             config["privacy_enabled"],
             config["privacy_action"],
             config["privacy_low_action"],
