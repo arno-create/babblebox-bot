@@ -56,7 +56,7 @@ Babblebox is intentionally compact:
 - custom mastery announcement templates managed inside `/dropsadmin mastery category` and `/dropsadmin mastery scholar`
 - profile / buddy / vault knowledge tie-ins
 - rare AI celebration copy as a public-facing optional layer
-- numeric, number-word, safe multiple-choice, and spoiler-aware answer judging
+- numeric, number-word, safe multiple-choice, one-shot ordered-sequence, and spoiler-aware answer judging
 
 ### Everyday Utilities
 

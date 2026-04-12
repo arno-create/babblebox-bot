@@ -77,6 +77,7 @@ class WebsiteDocsTests(unittest.TestCase):
         self.assertIn("explicitly replies to your confession or your first public owner reply", help_html)
         self.assertIn("can still reveal you if you include it", help_html)
         self.assertIn("simple number words only count for whole-number answers", help_html)
+        self.assertIn("ordered-sequence prompts are one-shot", help_html)
         self.assertNotIn("jump-nav", help_html)
         self.assertIn("guide-band", help_html)
 
@@ -127,6 +128,7 @@ class WebsiteDocsTests(unittest.TestCase):
             "template_action",
             "{user.mention}",
             "{category.name}",
+            "one-shot ordered-sequence",
             "/hunt guess",
             "Pattern Hunt coder role DMs",
             "Anonymous Confessions",

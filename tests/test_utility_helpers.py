@@ -6,7 +6,9 @@ from types import SimpleNamespace
 from babblebox.utility_helpers import (
     AFK_QUICK_REASONS,
     build_afk_reason_text,
+    build_capture_delivery_embed,
     build_afk_status_embed,
+    build_later_marker_embed,
     build_reminder_delivery_view,
     canonicalize_afk_timezone,
     compute_latest_afk_schedule_start,
@@ -46,7 +48,8 @@ class UtilityHelperTests(unittest.TestCase):
                     "delivery": "here",
                     "guild_id": 123,
                     "origin_jump_url": "https://discord.com/channels/1/2/3",
-                }
+                },
+                delivered_in_guild_channel=True,
             )
         )
 
@@ -62,6 +65,43 @@ class UtilityHelperTests(unittest.TestCase):
                 }
             )
         )
+
+    def test_later_marker_embed_prioritizes_location_and_compact_attachments(self):
+        embed = build_later_marker_embed(
+            {
+                "guild_name": "Guild",
+                "channel_name": "clips",
+                "author_name": "Ari",
+                "saved_at": "2026-03-22T18:05:00+00:00",
+                "message_created_at": "2026-03-22T18:00:00+00:00",
+                "preview": "Line one\nMedia: [image: clip.png]",
+                "attachment_labels": ["clip.png", "clip.mp4", "clip.mp3", "notes.txt"],
+            }
+        )
+
+        self.assertEqual(embed.fields[0].name, "Location")
+        self.assertIn("Guild / #clips", embed.fields[0].value)
+        self.assertEqual(embed.fields[1].name, "Saved")
+        self.assertEqual(embed.fields[2].name, "Author")
+        attachments = next(field.value for field in embed.fields if field.name == "Attachments")
+        self.assertIn("+1 more", attachments)
+
+    def test_capture_delivery_embed_uses_clearer_button_label(self):
+        embed, view = build_capture_delivery_embed(
+            guild_name="Guild",
+            channel_name="general",
+            captured_count=6,
+            requested_count=8,
+            preview_lines=["[12:00] Ari: First line", "[12:01] Mira: Second line"],
+            jump_url="https://discord.com/channels/1/2/3",
+        )
+
+        self.assertEqual(embed.title, "Capture Ready")
+        self.assertEqual(embed.fields[0].name, "Source")
+        self.assertEqual(embed.fields[1].name, "Privacy")
+        self.assertEqual(embed.fields[2].name, "Latest Messages")
+        self.assertIsNotNone(view)
+        self.assertEqual(view.children[0].label, "Back to Channel")
 
     def test_afk_reason_builder_formats_quick_presets(self):
         self.assertEqual(

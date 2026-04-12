@@ -479,11 +479,11 @@ class UtilityCog(commands.Cog):
             if guild is not None:
                 location = f"#{marker.get('channel_name', 'unknown')}"
             preview = ge.safe_field_text(marker.get("preview", "[quiet message]"), limit=80)
-            lines.append(f"**{location}** • {saved_at}\n{marker.get('author_name', 'Unknown')} • {preview}")
+            lines.append(f"**{location}** | {saved_at}\nBy {marker.get('author_name', 'Unknown')}\n{preview}")
         if len(markers) > 8:
             lines.append(f"...and {len(markers) - 8} more")
-        embed.add_field(name="Markers", value="\n".join(lines), inline=False)
-        embed.add_field(name="Quick Use", value="`/later mark` to refresh a channel\n`/later clear here` to remove just this one", inline=False)
+        embed.add_field(name="Markers", value="\n\n".join(lines), inline=False)
+        embed.add_field(name="Quick Use", value="`/later mark` refreshes this channel\n`/later clear here` removes its saved marker", inline=False)
         return ge.style_embed(embed, footer="Babblebox Later | Use /later clear or bb!later clear.")
 
     def _reminder_list_embed(self, user: discord.abc.User, reminders: list[dict]) -> discord.Embed:
