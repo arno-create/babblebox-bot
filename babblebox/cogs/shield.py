@@ -113,7 +113,7 @@ class ShieldPanelView(discord.ui.View):
             button.style = discord.ButtonStyle.primary if self.section == name else discord.ButtonStyle.secondary
         config = self.cog.service.get_config(self.guild_id)
         ai_status = self.cog.service.get_ai_status(self.guild_id)
-        self.toggle_shield_button.label = "Disable Shield" if config["module_enabled"] else "Enable Shield"
+        self.toggle_shield_button.label = "Disable Live Moderation" if config["module_enabled"] else "Enable Live Moderation"
         self.toggle_ai_button.label = "Disable AI" if ai_status["enabled"] else "Enable AI"
         self.toggle_ai_button.disabled = not ai_status["supported"] or (not ai_status["provider_available"] and not ai_status["enabled"])
 
@@ -183,7 +183,7 @@ class ShieldPanelView(discord.ui.View):
     async def refresh_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._rerender(interaction, note="Shield panel refreshed.")
 
-    @discord.ui.button(label="Enable Shield", style=discord.ButtonStyle.success, row=1)
+    @discord.ui.button(label="Enable Live Moderation", style=discord.ButtonStyle.success, row=1)
     async def toggle_shield_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         current = self.cog.service.get_config(self.guild_id)
         ok, message = await self.cog.service.set_module_enabled(self.guild_id, not current["module_enabled"])
@@ -471,18 +471,19 @@ class ShieldCog(commands.Cog):
         ai_status = self.service.get_ai_status(guild_id)
         embed = discord.Embed(
             title="Shield Control Panel",
-            description="Shield stays local-first. Bundled intel handles malicious/scam and optional adult / 18+ domains, the solicitation detector stays separately optional, specific 18+ channels can relax only that detector without weakening adult-domain or scam protections, trusted-link mode stays server-side and distinct from Confessions, domain and invite allowlists stay bounded to that policy lane, phrase allowlists only suppress targeted promo or adult-solicitation text matches, safe mainstream destinations bypass suspicion, and attachment filenames stay metadata-only unless real link evidence exists.",
+            description="Shield is Babblebox's bounded immunity layer. Live-message moderation stays toggleable here, while private feature-surface checks stay always on for Confessions unsafe-link parity, AFK reasons, reminder text plus public reminder delivery, and watch keyword setup. Those feature checks keep local validation first, stay private, and never trigger Shield AI.",
             color=ge.EMBED_THEME["warning"] if config["module_enabled"] else ge.EMBED_THEME["info"],
         )
         log_channel = f"<#{config['log_channel_id']}>" if config.get("log_channel_id") else "Not set"
         alert_role = f"<@&{config['alert_role_id']}>" if config.get("alert_role_id") else "None"
         embed.add_field(
-            name="Core Shield",
+            name="Live Moderation",
             value=(
                 f"Enabled: **{'Yes' if config['module_enabled'] else 'No'}**\n"
                 f"Scan mode: `{config['scan_mode']}`\n"
                 f"Log channel: {log_channel}\n"
-                f"Alert role: {alert_role}"
+                f"Alert role: {alert_role}\n"
+                "Feature immunity: Always on for AFK reasons, reminders, watch keywords, and Confessions link checks"
             ),
             inline=False,
         )
@@ -513,7 +514,8 @@ class ShieldCog(commands.Cog):
                 f"Status: {ai_status['status']}\n"
                 f"Enabled: **{'Yes' if ai_status['enabled'] else 'No'}**\n"
                 f"Local-confidence threshold: `{ai_status['min_confidence']}`\n"
-                f"Packs: {self._format_ai_pack_summary(ai_status['enabled_packs'])}"
+                f"Packs: {self._format_ai_pack_summary(ai_status['enabled_packs'])}\n"
+                "Scope: Live-message moderation only"
             ),
             inline=False,
         )
@@ -521,7 +523,7 @@ class ShieldCog(commands.Cog):
             name="Storage Discipline",
             value=(
                 "Shield stores config and compact pattern metadata only.\n"
-                "Moderator context is delivered to the log channel instead of a heavy moderation archive."
+                "Private feature-surface blocks stay private, and moderator context is delivered to the log channel instead of a heavy moderation archive."
             ),
             inline=False,
         )
@@ -895,7 +897,7 @@ class ShieldCog(commands.Cog):
         if all(value is None for value in (mode, action, low_action, medium_action, high_action)):
             embed = discord.Embed(
                 title="Shield Link Policy",
-                description="Shield link policy is server-wide live-message policy, stays separate from Confessions link mode, and still respects admin allowlists.",
+                description="Shield link policy is a live-message-only policy lane, stays separate from Confessions link mode, and still respects admin allowlists.",
                 color=ge.EMBED_THEME["info"],
             )
             embed.add_field(name="Current Policy", value=self._link_policy_detail(self.service.get_config(ctx.guild.id)), inline=False)

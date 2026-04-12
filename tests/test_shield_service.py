@@ -10,7 +10,11 @@ from babblebox import game_engine as ge
 
 from babblebox.shield_ai import SHIELD_AI_ALLOWED_GUILD_ID, ShieldAIReviewResult
 from babblebox.shield_service import (
+    FEATURE_SURFACE_CONFESSIONS_LINKS,
+    FEATURE_SURFACE_REMINDER_CREATE,
+    FEATURE_SURFACE_WATCH_KEYWORD,
     ShieldDecision,
+    ShieldFeatureLinkScan,
     ShieldMatch,
     ShieldService,
     _alert_content_fingerprint,
@@ -858,6 +862,56 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         adult_domain_matches = [match for match in domain_result.matches if match.pack == "adult"]
         self.assertTrue(adult_domain_matches)
         self.assertEqual(adult_domain_matches[0].match_class, "adult_domain")
+
+    async def test_feature_gateway_blocks_private_reminder_text_without_live_side_effects(self):
+        before_state = (
+            len(self.service._alert_dedup),
+            len(self.service._alert_signature_dedup),
+            len(self.service._strike_windows),
+            len(self.service._recent_promos),
+            len(self.service._recent_scam_campaigns),
+            len(self.service._recent_newcomer_activity),
+        )
+        with patch.object(self.service, "_send_alert", new=AsyncMock()) as alert_mock, patch.object(self.service.ai_provider, "review", new=AsyncMock()) as ai_mock:
+            decision = self.service.evaluate_feature_text(FEATURE_SURFACE_REMINDER_CREATE, "Call me at +1 (212) 555-0189.")
+
+        self.assertFalse(decision.allowed)
+        self.assertEqual(decision.surface, FEATURE_SURFACE_REMINDER_CREATE)
+        self.assertEqual(decision.reason_code, "privacy_phone")
+        self.assertIn("private", decision.user_message.lower())
+        self.assertEqual(
+            before_state,
+            (
+                len(self.service._alert_dedup),
+                len(self.service._alert_signature_dedup),
+                len(self.service._strike_windows),
+                len(self.service._recent_promos),
+                len(self.service._recent_scam_campaigns),
+                len(self.service._recent_newcomer_activity),
+            ),
+        )
+        alert_mock.assert_not_awaited()
+        ai_mock.assert_not_awaited()
+
+    async def test_feature_gateway_watch_surface_stays_privacy_only(self):
+        decision = self.service.evaluate_feature_text(FEATURE_SURFACE_WATCH_KEYWORD, "dm me for nudes")
+
+        self.assertTrue(decision.allowed)
+        self.assertEqual(decision.surface, FEATURE_SURFACE_WATCH_KEYWORD)
+        self.assertFalse(decision.matches)
+
+    async def test_feature_gateway_assesses_confession_links_with_shared_shield_intel(self):
+        scan = self.service.assess_feature_links(
+            FEATURE_SURFACE_CONFESSIONS_LINKS,
+            text="verify here https://dlscord-gift.com/claim",
+            link_policy_mode="trusted_only",
+        )
+
+        self.assertIsInstance(scan, ShieldFeatureLinkScan)
+        self.assertTrue(scan.has_links)
+        self.assertIn("malicious_link", scan.flags)
+        self.assertEqual(scan.link_assessments[0].normalized_domain, "dlscord-gift.com")
+        self.assertEqual(scan.link_assessments[0].category, "malicious")
 
     async def test_trusted_only_link_policy_allows_trusted_docs_link(self):
         ok, _ = await self.service.set_link_policy_config(10, mode="trusted_only")

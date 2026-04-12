@@ -31,9 +31,11 @@ from babblebox.shield_link_safety import (
     LINK_IN_BIO_DOMAINS,
     MALICIOUS_LINK_CATEGORY,
     MEDIA_EMBED_DOMAINS,
+    SAFE_LINK_CATEGORY,
     SHORTENER_DOMAINS,
     SOCIAL_PROMO_DOMAINS,
     STOREFRONT_DOMAINS,
+    UNKNOWN_LINK_CATEGORY,
     UNKNOWN_SUSPICIOUS_LINK_CATEGORY,
     ShieldLinkAssessment,
     ShieldLinkSafetyEngine,
@@ -543,6 +545,24 @@ class ShieldTestResult:
     matches: tuple[ShieldMatch, ...]
     link_assessments: tuple[ShieldLinkAssessment, ...]
     bypass_reason: str | None = None
+
+
+@dataclass(frozen=True)
+class ShieldFeatureDecision:
+    allowed: bool
+    surface: str
+    reason_code: str | None
+    user_message: str | None
+    matches: tuple[ShieldMatch, ...] = ()
+    link_assessments: tuple[ShieldLinkAssessment, ...] = ()
+
+
+@dataclass(frozen=True)
+class ShieldFeatureLinkScan:
+    surface: str
+    has_links: bool
+    flags: tuple[str, ...]
+    link_assessments: tuple[ShieldLinkAssessment, ...]
 
 
 @dataclass(frozen=True)
@@ -1227,6 +1247,98 @@ def _looks_like_scam_warning(text: str) -> bool:
     return looks_like_warning_discussion(text)
 
 
+def _feature_pack_settings(*, enabled: bool, low_action: str = "log", medium_action: str = "delete_log", high_action: str = "delete_log", sensitivity: str = "normal") -> PackSettings:
+    return PackSettings(
+        enabled=enabled,
+        low_action=low_action,
+        medium_action=medium_action,
+        high_action=high_action,
+        sensitivity=sensitivity,
+    )
+
+
+def _build_feature_compiled_config(*, privacy_enabled: bool, adult_enabled: bool, adult_solicitation_enabled: bool) -> CompiledShieldConfig:
+    disabled = _feature_pack_settings(enabled=False, low_action="detect", medium_action="detect", high_action="detect")
+    return CompiledShieldConfig(
+        guild_id=0,
+        module_enabled=True,
+        log_channel_id=None,
+        alert_role_id=None,
+        scan_mode="all",
+        included_channel_ids=frozenset(),
+        excluded_channel_ids=frozenset(),
+        included_user_ids=frozenset(),
+        excluded_user_ids=frozenset(),
+        included_role_ids=frozenset(),
+        excluded_role_ids=frozenset(),
+        trusted_role_ids=frozenset(),
+        allow_domains=frozenset(),
+        allow_invite_codes=frozenset(),
+        allow_phrases=(),
+        privacy=_feature_pack_settings(enabled=privacy_enabled),
+        promo=disabled,
+        scam=disabled,
+        adult=_feature_pack_settings(enabled=adult_enabled),
+        adult_solicitation_enabled=adult_solicitation_enabled,
+        adult_solicitation_excluded_channel_ids=frozenset(),
+        link_policy_mode=DEFAULT_SHIELD_LINK_POLICY_MODE,
+        link_policy=disabled,
+        ai_enabled=False,
+        ai_min_confidence="high",
+        ai_enabled_packs=frozenset(),
+        escalation_threshold=99,
+        escalation_window_minutes=10,
+        timeout_minutes=10,
+        custom_patterns=(),
+    )
+
+
+FEATURE_SURFACE_AFK_REASON = "utility_afk_reason"
+FEATURE_SURFACE_AFK_SCHEDULE_REASON = "utility_afk_schedule_reason"
+FEATURE_SURFACE_REMINDER_CREATE = "utility_reminder_create"
+FEATURE_SURFACE_REMINDER_PUBLIC_DELIVERY = "utility_reminder_public_delivery"
+FEATURE_SURFACE_WATCH_KEYWORD = "utility_watch_keyword"
+FEATURE_SURFACE_CONFESSIONS_LINKS = "confessions_link_assessment"
+
+_FEATURE_CONFIG_PRIVACY_AND_ADULT = _build_feature_compiled_config(
+    privacy_enabled=True,
+    adult_enabled=True,
+    adult_solicitation_enabled=True,
+)
+_FEATURE_CONFIG_PRIVACY_ONLY = _build_feature_compiled_config(
+    privacy_enabled=True,
+    adult_enabled=False,
+    adult_solicitation_enabled=False,
+)
+_FEATURE_SURFACE_POLICIES: dict[str, dict[str, Any]] = {
+    FEATURE_SURFACE_AFK_REASON: {
+        "compiled": _FEATURE_CONFIG_PRIVACY_AND_ADULT,
+        "privacy_message": "AFK reasons cannot contain private contact, account, or payment details.",
+        "adult_message": "AFK reasons cannot advertise adult or DM-gated sexual content.",
+    },
+    FEATURE_SURFACE_AFK_SCHEDULE_REASON: {
+        "compiled": _FEATURE_CONFIG_PRIVACY_AND_ADULT,
+        "privacy_message": "Recurring AFK reasons cannot contain private contact, account, or payment details.",
+        "adult_message": "Recurring AFK reasons cannot advertise adult or DM-gated sexual content.",
+    },
+    FEATURE_SURFACE_REMINDER_CREATE: {
+        "compiled": _FEATURE_CONFIG_PRIVACY_AND_ADULT,
+        "privacy_message": "Reminder text cannot contain private contact, account, or payment details.",
+        "adult_message": "Reminder text cannot advertise adult or DM-gated sexual content.",
+    },
+    FEATURE_SURFACE_REMINDER_PUBLIC_DELIVERY: {
+        "compiled": _FEATURE_CONFIG_PRIVACY_AND_ADULT,
+        "privacy_message": "Babblebox withheld that public reminder because its text now looks like private contact or account information.",
+        "adult_message": "Babblebox withheld that public reminder because its text looks like adult or DM-gated solicitation.",
+    },
+    FEATURE_SURFACE_WATCH_KEYWORD: {
+        "compiled": _FEATURE_CONFIG_PRIVACY_ONLY,
+        "privacy_message": "Watch keywords cannot contain private-looking contact, account, or payment details.",
+        "adult_message": None,
+    },
+}
+
+
 class ShieldService:
     def __init__(self, bot: commands.Bot, store: ShieldStateStore | None = None):
         self.bot = bot
@@ -1246,6 +1358,7 @@ class ShieldService:
         self._lock = asyncio.Lock()
         self.ai_provider = build_shield_ai_provider()
         self.link_safety = ShieldLinkSafetyEngine()
+        self.feature_gateway = ShieldFeatureSafetyGateway(detector=self, link_safety=self.link_safety)
         self._compiled_configs: dict[int, CompiledShieldConfig] = {}
         self._alert_dedup: dict[tuple[int, int], tuple[float, str]] = {}
         self._alert_signature_dedup: dict[tuple[Any, ...], float] = {}
@@ -1336,6 +1449,39 @@ class ShieldService:
     def get_link_safety_status(self) -> dict[str, Any]:
         return self.link_safety.diagnostics()
 
+    def evaluate_feature_text(
+        self,
+        surface: str,
+        text: str | None,
+        *,
+        attachments: Sequence[Any] | None = None,
+        channel_id: int | None = None,
+    ) -> ShieldFeatureDecision:
+        return self.feature_gateway.evaluate(surface, text, attachments=attachments, channel_id=channel_id)
+
+    def assess_feature_links(
+        self,
+        surface: str,
+        *,
+        text: str,
+        squashed: str | None = None,
+        shared_link_url: str | None = None,
+        allow_domain_set: Iterable[str] = (),
+        block_domain_set: Iterable[str] = (),
+        link_policy_mode: str = DEFAULT_SHIELD_LINK_POLICY_MODE,
+        has_suspicious_attachment: bool = False,
+    ) -> ShieldFeatureLinkScan:
+        return self.feature_gateway.assess_links(
+            surface,
+            text=text,
+            squashed=squashed,
+            shared_link_url=shared_link_url,
+            allow_domain_set=allow_domain_set,
+            block_domain_set=block_domain_set,
+            link_policy_mode=link_policy_mode,
+            has_suspicious_attachment=has_suspicious_attachment,
+        )
+
     async def set_global_ai_override(self, enabled: bool, *, actor_id: int) -> tuple[bool, str]:
         if not self.storage_ready:
             return False, self.storage_message("Shield AI")
@@ -1407,7 +1553,7 @@ class ShieldService:
         return await self._update_config(
             guild_id,
             lambda config: config.__setitem__("module_enabled", bool(enabled)),
-            success_message=f"Shield is now {'enabled' if enabled else 'disabled'} for this server.",
+            success_message=f"Shield live-message moderation is now {'enabled' if enabled else 'disabled'} for this server.",
         )
 
     def _policy_summary(self, *, low_action: str, medium_action: str, high_action: str) -> str:
@@ -3858,3 +4004,198 @@ class ShieldService:
             "enabled": True,
         }
         return True, payload
+
+
+class ShieldFeatureSafetyGateway:
+    _make_pack_match = ShieldService._make_pack_match
+    _dedupe_matches = ShieldService._dedupe_matches
+    _detect_privacy = ShieldService._detect_privacy
+    _detect_privacy_email = ShieldService._detect_privacy_email
+    _detect_privacy_phone = ShieldService._detect_privacy_phone
+    _detect_privacy_ip = ShieldService._detect_privacy_ip
+    _detect_privacy_crypto = ShieldService._detect_privacy_crypto
+    _detect_privacy_payment = ShieldService._detect_privacy_payment
+    _detect_privacy_sensitive_ids = ShieldService._detect_privacy_sensitive_ids
+    _detect_adult_solicitation = ShieldService._detect_adult_solicitation
+
+    def __init__(self, *, detector: ShieldService | None = None, link_safety: ShieldLinkSafetyEngine | None = None):
+        self._detector = detector
+        self.link_safety = link_safety or getattr(detector, "link_safety", None) or ShieldLinkSafetyEngine()
+        self._owns_link_safety = detector is None and link_safety is None
+
+    async def close(self):
+        if self._owns_link_safety:
+            await self.link_safety.close()
+
+    def evaluate(
+        self,
+        surface: str,
+        text: str | None,
+        *,
+        attachments: Sequence[Any] | None = None,
+        channel_id: int | None = None,
+    ) -> ShieldFeatureDecision:
+        policy = _FEATURE_SURFACE_POLICIES.get(surface)
+        if policy is None:
+            raise ValueError(f"Unknown Shield feature surface: {surface}")
+
+        compiled: CompiledShieldConfig = policy["compiled"]
+        snapshot = _build_snapshot(text, attachments, surface_labels=(surface,))
+        matches: list[ShieldMatch] = []
+        matches.extend(self._detect_privacy(compiled, snapshot))
+        matches.extend(self._detect_adult_solicitation(compiled, snapshot, channel_id=channel_id))
+        matches.sort(
+            key=lambda item: (
+                ACTION_STRENGTH.get(item.action, 0),
+                CONFIDENCE_STRENGTH.get(item.confidence, 0),
+                PACK_STRENGTH.get(item.pack, 0),
+            ),
+            reverse=True,
+        )
+        if not matches:
+            return ShieldFeatureDecision(
+                allowed=True,
+                surface=surface,
+                reason_code=None,
+                user_message=None,
+                matches=(),
+                link_assessments=(),
+            )
+
+        top = matches[0]
+        user_message = policy["privacy_message"] if top.pack == "privacy" else policy.get("adult_message")
+        if not isinstance(user_message, str) or not user_message:
+            user_message = "That text is not allowed in this Babblebox feature."
+        return ShieldFeatureDecision(
+            allowed=False,
+            surface=surface,
+            reason_code=top.match_class or top.pack,
+            user_message=user_message,
+            matches=tuple(matches[:3]),
+            link_assessments=(),
+        )
+
+    def assess_links(
+        self,
+        surface: str,
+        *,
+        text: str,
+        squashed: str | None = None,
+        shared_link_url: str | None = None,
+        allow_domain_set: Iterable[str] = (),
+        block_domain_set: Iterable[str] = (),
+        link_policy_mode: str = DEFAULT_SHIELD_LINK_POLICY_MODE,
+        has_suspicious_attachment: bool = False,
+    ) -> ShieldFeatureLinkScan:
+        normalized_surface = normalize_plain_text(surface)
+        if not normalized_surface:
+            raise ValueError("Shield feature link assessment requires a stable surface label.")
+
+        normalized_text = normalize_plain_text(text).casefold()
+        squashed_text = normalize_plain_text(squashed).casefold() if squashed is not None else squash_for_evasion_checks(normalized_text)
+        allow_domains = frozenset(_sorted_unique_text(allow_domain_set))
+        block_domains = frozenset(_sorted_unique_text(block_domain_set))
+        mode = normalize_plain_text(link_policy_mode).casefold() or DEFAULT_SHIELD_LINK_POLICY_MODE
+        urls = list(_extract_urls(normalized_text))
+        if shared_link_url:
+            urls.append(shared_link_url)
+
+        assessments: list[ShieldLinkAssessment] = []
+        flags: list[str] = []
+        now = time.monotonic()
+        for raw_url in urls:
+            candidate = _clean_url_candidate(raw_url)
+            if candidate is None:
+                flags.append("malformed_link")
+                continue
+            try:
+                parsed = urlsplit(candidate)
+            except ValueError:
+                flags.append("malformed_link")
+                continue
+            domain = _normalize_link_host(parsed.netloc)
+            if domain is None:
+                flags.append("malformed_link")
+                continue
+            if _domain_in_set(domain, block_domains):
+                assessments.append(
+                    ShieldLinkAssessment(
+                        normalized_domain=domain,
+                        category=UNKNOWN_SUSPICIOUS_LINK_CATEGORY,
+                        matched_signals=("feature_block_domain",),
+                        provider_lookup_warranted=False,
+                        provider_status="Blocked by feature link policy.",
+                        intel_version="local",
+                    )
+                )
+                flags.append("link_unsafe")
+                continue
+
+            allowlisted = _domain_in_set(domain, allow_domains)
+            if _domain_in_set(domain, SHORTENER_DOMAINS) or _domain_in_set(domain, LINK_IN_BIO_DOMAINS) or _domain_in_set(domain, STOREFRONT_DOMAINS):
+                assessments.append(
+                    ShieldLinkAssessment(
+                        normalized_domain=domain,
+                        category=UNKNOWN_SUSPICIOUS_LINK_CATEGORY,
+                        matched_signals=("feature_blocked_hub",),
+                        provider_lookup_warranted=False,
+                        provider_status="Blocked by feature link policy.",
+                        intel_version="local",
+                    )
+                )
+                flags.append("link_unsafe")
+                continue
+
+            assessment = self.link_safety.assess_domain(
+                domain,
+                path=parsed.path or "/",
+                query=parsed.query or "",
+                message_text=normalized_text,
+                squashed_text=squashed_text,
+                has_suspicious_attachment=has_suspicious_attachment,
+                allowlisted=allowlisted,
+                now=now,
+            )
+            assessments.append(assessment)
+            if self._feature_link_allowed(
+                domain=domain,
+                assessment=assessment,
+                allow_domains=allow_domains,
+                block_domains=block_domains,
+                link_policy_mode=mode,
+            ):
+                continue
+            if assessment.category == MALICIOUS_LINK_CATEGORY:
+                flags.append("malicious_link")
+            elif assessment.category == ADULT_LINK_CATEGORY:
+                flags.append("adult_link")
+            else:
+                flags.append("link_unsafe")
+
+        return ShieldFeatureLinkScan(
+            surface=normalized_surface,
+            has_links=bool(urls),
+            flags=tuple(_sorted_unique_text(flags)),
+            link_assessments=tuple(assessments),
+        )
+
+    def _feature_link_allowed(
+        self,
+        *,
+        domain: str,
+        assessment: ShieldLinkAssessment,
+        allow_domains: frozenset[str],
+        block_domains: frozenset[str],
+        link_policy_mode: str,
+    ) -> bool:
+        if assessment.category in {MALICIOUS_LINK_CATEGORY, ADULT_LINK_CATEGORY, UNKNOWN_SUSPICIOUS_LINK_CATEGORY}:
+            return False
+        if _domain_in_set(domain, block_domains):
+            return False
+        if _domain_in_set(domain, allow_domains):
+            return True
+        if link_policy_mode == "disabled":
+            return False
+        if link_policy_mode == "allow_all_safe":
+            return assessment.category in {SAFE_LINK_CATEGORY, UNKNOWN_LINK_CATEGORY}
+        return is_trusted_destination(domain, safe_family=assessment.safe_family)

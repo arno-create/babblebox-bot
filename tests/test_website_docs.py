@@ -226,6 +226,39 @@ class WebsiteDocsTests(unittest.TestCase):
         self.assertIn("solicitation carve-out channels", readme)
         self.assertIn("solicitation carve-out channels", help_html)
 
+    def test_shield_docs_cover_cross_feature_immunity_boundary_and_live_ai_scope(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        help_html = (ROOT / "help.html").read_text(encoding="utf-8")
+        privacy_md = (ROOT / "PRIVACY.md").read_text(encoding="utf-8")
+        privacy_html = (ROOT / "privacy.html").read_text(encoding="utf-8")
+        index_html = (ROOT / "index.html").read_text(encoding="utf-8")
+
+        for text in (
+            "bounded cross-feature immunity layer",
+            "live-message moderation remains optional",
+            "AFK reasons",
+            "reminder text plus public reminder delivery",
+            "watch keyword",
+            "Confessions unsafe-link parity",
+            "live-message-only",
+        ):
+            self.assertIn(text, readme)
+        for text in (
+            "bounded feature-surface checks",
+            "The toggle controls live-message moderation",
+            "live-message-only",
+        ):
+            self.assertIn(text, help_html)
+        for text in (
+            "feature-surface checks",
+            "live-message content",
+            "Shield live moderation",
+        ):
+            self.assertIn(text, privacy_md)
+            self.assertIn(text, privacy_html)
+        self.assertIn("bounded private immunity", index_html)
+        self.assertIn("private feature-surface checks", index_html)
+
     def test_privacy_docs_cover_confessions_storage_and_staff_blind_behavior(self):
         privacy_md = (ROOT / "PRIVACY.md").read_text(encoding="utf-8")
         privacy_html = (ROOT / "privacy.html").read_text(encoding="utf-8")

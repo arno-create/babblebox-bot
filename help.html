@@ -630,7 +630,7 @@
               </article>
               <article class="info">
                 <strong>Shield stays bounded</strong>
-                <p>Shield is optional, log-first by default, and built around compact moderator alerts instead of a huge archive. Low-confidence repeated-link notes stay compact and do not ping by default.</p>
+                <p>Shield live moderation is optional, log-first by default, and built around compact moderator alerts instead of a huge archive. Bounded feature-surface checks still protect Confessions links, AFK, reminders, and watch keywords privately.</p>
               </article>
             </div>
           </div>
@@ -641,7 +641,7 @@
               <li>Invite Babblebox and make sure it can send embeds where you want people to use it.</li>
               <li>Use <code>/help</code> or <code>/support</code> in Discord, or jump through the sections below.</li>
               <li>Adopt one lane first: <code>/play</code>, <code>/drops status</code>, <code>/daily</code>, <code>/buddy</code>, or <code>/watch</code>.</li>
-              <li>Turn on Shield only if your server actually needs moderation automation.</li>
+              <li>Turn on Shield live moderation only if your server actually needs chat automation; bounded feature-surface safety still applies privately where it matters.</li>
             </ol>
           </aside>
         </div>
@@ -779,11 +779,11 @@
             <h2>Quiet tools for real server life.</h2>
             <p>Utilities are where Babblebox earns its keep on ordinary days. They reduce missed context and small task friction without filling channels with bot chatter.</p>
             <div class="command-list">
-              <div class="command-row"><div><code>/watch mentions</code>, <code>/watch replies</code>, <code>/watch keyword</code></div><div><p>Get private DM alerts for the things you care about.</p><span>Watch is built for low-noise monitoring, not public surveillance theater.</span></div></div>
+              <div class="command-row"><div><code>/watch mentions</code>, <code>/watch replies</code>, <code>/watch keyword</code></div><div><p>Get private DM alerts for the things you care about.</p><span>Watch is built for low-noise monitoring, not public surveillance theater, and keyword setup keeps local validation plus a narrow private Shield safety check.</span></div></div>
               <div class="command-row"><div><code>/later mark</code></div><div><p>Save a place in a server so you can come back later.</p><span>Useful when you want to keep momentum without opening tabs or pinning messages everywhere.</span></div></div>
               <div class="command-row"><div><code>/capture</code> and <code>/moment</code></div><div><p>Turn a message or exchange into something you can revisit or share.</p><span>Moment is the more showable lane; Capture is the more personal lane.</span></div></div>
-              <div class="command-row"><div><code>/remind</code></div><div><p>Set reminders without needing a separate productivity bot.</p><span>Reminder setup and failure states stay private so channels do not fill with housekeeping.</span></div></div>
-              <div class="command-row"><div><code>/afk</code>, <code>/afktimezone</code>, <code>/afkschedule</code></div><div><p>Set temporary AFK state, timezone hints, and repeating schedules.</p><span>This helps Babblebox explain absence cleanly without forcing manual status updates every time.</span></div></div>
+              <div class="command-row"><div><code>/remind</code></div><div><p>Set reminders without needing a separate productivity bot.</p><span>Reminder setup and failure states stay private so channels do not fill with housekeeping, and Babblebox rechecks public reminder delivery through Shield before posting it later.</span></div></div>
+              <div class="command-row"><div><code>/afk</code>, <code>/afktimezone</code>, <code>/afkschedule</code></div><div><p>Set temporary AFK state, timezone hints, and repeating schedules.</p><span>This helps Babblebox explain absence cleanly without forcing manual status updates every time, while AFK reasons stay on a bounded private Shield safety lane.</span></div></div>
             </div>
           </section>
 
@@ -791,7 +791,7 @@
             <div class="kicker">Shield / Admin</div>
             <h2>Compact safety for moderators, with honest confidence.</h2>
             <p>
-              Shield is optional and starts from local rules. It can look for likely privacy leaks, invite or promo abuse,
+              Shield live moderation is optional and starts from local rules. It can look for likely privacy leaks, invite or promo abuse,
               malicious or scam links, optional adult or 18+ domains, and an optional conservative solicitation /
               DM-ad detector inside the adult pack. It can also rescan meaningful edits and
               webhook or community-post style deliveries in scope, but it is designed to stay conservative when the
@@ -800,22 +800,22 @@
               a feed of about 200k known malicious domains, and phase 1 does not depend on any
               outside reputation provider. The linked Admin lane also supports a private suspicious-member review flow that
               only escalates when risky message signals combine with bounded account-age, avatar-state, display-name
-              suspicion, newcomer first-link context, or fresh-campaign reuse.
+              suspicion, newcomer first-link context, or fresh-campaign reuse. Separate from that live lane, Shield now also supplies private bounded feature-surface checks for Confessions unsafe-link parity, AFK reasons, reminder text plus public reminder delivery, and watch keyword setup. Those private feature checks do not create mod-log alerts and do not call Shield AI.
             </p>
             <div class="grid2">
               <article class="info"><strong>Main admin commands</strong><p><code>/shield panel</code>, <code>/shield rules</code>, <code>/shield links</code>, <code>/shield logs</code>, <code>/shield filters</code>, <code>/shield allowlist</code>, <code>/shield ai</code>, <code>/shield test</code>, and <code>/admin risk</code>.</p></article>
               <article class="info"><strong>Graduated local policy</strong><p>Shield uses low, medium, and high confidence actions so broad heuristics can log while stronger matches can delete or escalate.</p></article>
               <article class="info"><strong>Allowlist and scope controls</strong><p>Admins can carve out trusted roles, included or excluded scope, allowlisted domains, invite codes, phrases, and solicitation carve-out channels so weak or educational context stays bounded. Domain and invite allowlists stay scoped to Shield trusted-link policy, while phrase allowlists suppress only targeted promo or adult-solicitation text matches.</p></article>
-              <article class="info"><strong>No public shaming on weak evidence</strong><p>Babblebox keeps suspicious-member handling private. It does not post warning reactions or bot replies into chat for low-confidence cases.</p></article>
+              <article class="info"><strong>No public shaming on weak evidence</strong><p>Babblebox keeps suspicious-member handling private. It does not post warning reactions or bot replies into chat for low-confidence cases, and private feature-surface blocks stay private too.</p></article>
             </div>
             <div class="command-list">
-              <div class="command-row"><div><code>/shield panel</code></div><div><p>Open the compact Shield admin surface.</p><span>Use this first if you want the current state without memorizing command flags.</span></div></div>
+              <div class="command-row"><div><code>/shield panel</code></div><div><p>Open the compact Shield admin surface.</p><span>Use this first if you want the current state without memorizing command flags. The toggle controls live-message moderation; the bounded feature-surface lane stays on.</span></div></div>
               <div class="command-row"><div><code>/shield rules</code></div><div><p>Set pack sensitivity, low/medium/high action policy, adult-domain protection, the optional solicitation detector, and escalation thresholds.</p><span>A safe starting point is log-first policy with deletes reserved for cleaner high-confidence matches, while unknown risky links only escalate after combined local scam evidence.</span></div></div>
               <div class="command-row"><div><code>/shield links</code></div><div><p>Choose Shield <strong>Default</strong> or <strong>Trusted Links Only</strong> mode for live messages.</p><span>Shield link policy is separate from Confessions link mode. Domain and invite allowlists act only as trusted-link policy exceptions, and malicious, suspicious, or adult-domain intel still wins.</span></div></div>
               <div class="command-row"><div><code>/shield logs</code></div><div><p>Choose the private mod-log channel and optional alert role.</p><span>Shield stays calmer when its evidence goes to one review lane instead of spraying public callouts.</span></div></div>
               <div class="command-row"><div><code>/shield filters</code></div><div><p>Adjust included or excluded scope, trusted roles, and solicitation-only carve-out channels.</p><span>The 18+ carve-out only relaxes the optional solicitation detector; adult-domain, scam, and malicious-link protections still run there.</span></div></div>
               <div class="command-row"><div><code>/shield allowlist</code></div><div><p>Teach Shield which domains, invite codes, and phrases should get bounded policy carve-outs.</p><span>Domains and invites bypass only Trusted Links Only policy, while phrases suppress only targeted promo or adult-solicitation text matches. Malicious, suspicious, and adult-domain intel still wins.</span></div></div>
-              <div class="command-row"><div><code>/shield ai</code></div><div><p>Turn on optional second-pass AI review.</p><span>AI enriches moderator alerts only. It does not auto-delete, auto-timeout, or see broad server history.</span></div></div>
+              <div class="command-row"><div><code>/shield ai</code></div><div><p>Turn on optional second-pass AI review.</p><span>AI enriches moderator alerts only, stays live-message-only, and does not auto-delete, auto-timeout, or see broad server history.</span></div></div>
               <div class="command-row"><div><code>/admin risk</code></div><div><p>Configure private suspicious-member notes, review, or review-or-kick handling.</p><span>This lane reuses the admin review queue, stays private, and does not inspect Discord profile bios or about-me text.</span></div></div>
             </div>
           </section>
@@ -825,7 +825,7 @@
             <h2>Common questions</h2>
             <div class="faq-list">
               <article class="faq"><h3>Does Babblebox default to public or private replies?</h3><p>It depends on the surface. Showable things like party lobbies, Daily cards, Buddy, and Profile usually lean public. Personal tools and setup flows usually stay private.</p></article>
-              <article class="faq"><h3>Do I need every feature turned on?</h3><p>No. Babblebox is meant to work well when a server adopts only one lane first. You can use it just for games, just for utilities, just for identity surfaces, or add Shield only if you need it.</p></article>
+              <article class="faq"><h3>Do I need every feature turned on?</h3><p>No. Babblebox is meant to work well when a server adopts only one lane first. You can use it just for games, just for utilities, just for identity surfaces, or add Shield live moderation only if you need it while the bounded feature-surface safety lane still protects the relevant private flows.</p></article>
               <article class="faq"><h3>Does Shield automatically punish every match?</h3><p>No. Shield can log, delete, timeout, or escalate depending on the pack and the configured confidence tier. Uncertain detections can stay log-only, and low-confidence repeated-link notes stay compact instead of turning into loud mod-log pings.</p></article>
               <article class="faq"><h3>Does Shield AI read my whole server?</h3><p>No. Shield AI only reviews already-flagged messages, uses a sanitized excerpt with compact metadata, and does not decide punishment on its own.</p></article>
               <article class="faq"><h3>Will Babblebox work well on Discord mobile?</h3><p>That is the intent. Public cards are written to scan quickly, and the product tries to avoid oversized admin slabs or dense utility dumps.</p></article>

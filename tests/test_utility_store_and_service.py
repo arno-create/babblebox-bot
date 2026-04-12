@@ -12,6 +12,15 @@ import discord
 
 from babblebox import game_engine as ge
 from babblebox.cogs.utilities import UtilityCog
+from babblebox.shield_service import (
+    FEATURE_SURFACE_AFK_REASON,
+    FEATURE_SURFACE_AFK_SCHEDULE_REASON,
+    FEATURE_SURFACE_REMINDER_CREATE,
+    FEATURE_SURFACE_REMINDER_PUBLIC_DELIVERY,
+    FEATURE_SURFACE_WATCH_KEYWORD,
+    ShieldFeatureDecision,
+    ShieldFeatureSafetyGateway,
+)
 from babblebox.utility_helpers import build_afk_reason_text, compute_next_afk_schedule_start, deserialize_datetime, serialize_datetime
 from babblebox.utility_service import UtilityService
 from babblebox.utility_store import UtilityStateStore, UtilityStorageUnavailable, _PostgresUtilityStore
@@ -112,6 +121,28 @@ class DummyBot:
 
     async def fetch_channel(self, channel_id: int):
         return self.get_channel(channel_id)
+
+
+class FeatureGatewaySpy(ShieldFeatureSafetyGateway):
+    def __init__(self, *, blocked_surfaces: Optional[dict[str, str]] = None):
+        self.blocked_surfaces = dict(blocked_surfaces or {})
+        self.evaluations: list[tuple[str, Optional[str]]] = []
+
+    def evaluate(self, surface: str, text: Optional[str], *, attachments=None, channel_id=None) -> ShieldFeatureDecision:
+        self.evaluations.append((surface, text))
+        if surface in self.blocked_surfaces:
+            return ShieldFeatureDecision(
+                allowed=False,
+                surface=surface,
+                reason_code="spy_block",
+                user_message=self.blocked_surfaces[surface],
+            )
+        return ShieldFeatureDecision(
+            allowed=True,
+            surface=surface,
+            reason_code=None,
+            user_message=None,
+        )
 
 
 class FakeAcquire:
@@ -268,6 +299,58 @@ class UtilityStoreAndServiceTests(unittest.IsolatedAsyncioTestCase):
         summary = self.service.get_watch_summary(42, guild_id=100)
         self.assertEqual(len(summary["server_keywords"]), 1)
         self.assertEqual(summary["server_keywords"][0]["phrase"], "hello world")
+
+    async def test_feature_gateway_routes_utility_surfaces_with_stable_labels(self):
+        gateway = FeatureGatewaySpy()
+        self.bot.shield_service = types.SimpleNamespace(feature_gateway=gateway)
+
+        valid, cleaned = self.service.validate_watch_keyword("camera")
+        self.assertTrue(valid)
+        self.assertEqual(cleaned, "camera")
+
+        ok, reminder = await self.service.create_reminder(
+            user=DummyUser(700),
+            text="Check the thread.",
+            delay_seconds=20 * 60,
+            delivery="dm",
+            guild=None,
+            channel=None,
+            origin_jump_url=None,
+        )
+        self.assertTrue(ok)
+        self.assertIsInstance(reminder, dict)
+
+        ok, afk_record = await self.service.set_afk(
+            user=DummyUser(701),
+            reason="Stepped away",
+            duration_seconds=30 * 60,
+            start_in_seconds=None,
+        )
+        self.assertTrue(ok)
+        self.assertIsInstance(afk_record, dict)
+
+        ok, schedule = await self.service.create_afk_schedule(
+            user=DummyUser(702),
+            repeat="daily",
+            timezone_name="UTC+04:00",
+            local_hour=9,
+            local_minute=0,
+            weekday=None,
+            reason="Office hours",
+            preset=None,
+            duration_seconds=8 * 3600,
+        )
+        self.assertTrue(ok)
+        self.assertIsInstance(schedule, dict)
+        self.assertEqual(
+            [surface for surface, _ in gateway.evaluations],
+            [
+                FEATURE_SURFACE_WATCH_KEYWORD,
+                FEATURE_SURFACE_REMINDER_CREATE,
+                FEATURE_SURFACE_AFK_REASON,
+                FEATURE_SURFACE_AFK_SCHEDULE_REASON,
+            ],
+        )
 
     async def test_watch_summary_distinguishes_mentions_replies_and_channel_keywords(self):
         ok, _ = await self.service.set_watch_mentions(42, guild_id=100, channel_id=200, scope="channel", enabled=True)
@@ -644,6 +727,62 @@ class UtilityStoreAndServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(ok)
         self.assertIn("at least", message)
 
+    async def test_public_reminder_delivery_is_rechecked_and_withheld_privately_when_blocked(self):
+        user = DummyMember(560, display_name="Mira")
+        guild = DummyGuild(1, members=[user])
+        channel = DummyChannel(2, guild=guild, visible_user_ids={user.id})
+        gateway = FeatureGatewaySpy(blocked_surfaces={FEATURE_SURFACE_REMINDER_PUBLIC_DELIVERY: "Babblebox withheld that public reminder."})
+        self.bot.shield_service = types.SimpleNamespace(feature_gateway=gateway)
+        self.bot.add_user(user)
+        self.bot.add_channel(channel)
+        record = {
+            "id": "blocked-reminder",
+            "user_id": user.id,
+            "text": "Safe reminder text",
+            "delivery": "here",
+            "created_at": serialize_datetime(ge.now_utc()),
+            "due_at": serialize_datetime(ge.now_utc()),
+            "guild_id": guild.id,
+            "guild_name": guild.name,
+            "channel_id": channel.id,
+            "channel_name": channel.name,
+            "origin_jump_url": None,
+            "delivery_attempts": 0,
+            "last_attempt_at": None,
+            "retry_after": None,
+        }
+
+        delivered = await self.service._deliver_single_reminder(record)
+
+        self.assertTrue(delivered)
+        self.assertEqual(channel.sent, [])
+        user.send.assert_awaited_once()
+        self.assertIn("withheld", user.send.await_args.args[0].lower())
+        self.assertEqual(gateway.evaluations, [(FEATURE_SURFACE_REMINDER_PUBLIC_DELIVERY, "Safe reminder text")])
+
+    async def test_public_reminder_delivery_posts_when_feature_gateway_allows_it(self):
+        user = DummyMember(561, display_name="Ari")
+        guild = DummyGuild(1, members=[user])
+        channel = DummyChannel(2, guild=guild, visible_user_ids={user.id})
+        self.bot.add_user(user)
+        self.bot.add_channel(channel)
+        ok, reminder = await self.service.create_reminder(
+            user=user,
+            text="Check the thread.",
+            delay_seconds=20 * 60,
+            delivery="here",
+            guild=type("Guild", (), {"id": guild.id, "name": guild.name})(),
+            channel=type("Channel", (), {"id": channel.id, "name": channel.name})(),
+            origin_jump_url=None,
+        )
+        self.assertTrue(ok)
+
+        delivered = await self.service._deliver_single_reminder(reminder)
+
+        self.assertTrue(delivered)
+        self.assertEqual(len(channel.sent), 1)
+        user.send.assert_not_awaited()
+
     async def test_failed_reminder_delivery_is_retried_instead_of_removed(self):
         user = DummyMember(57, display_name="Mira")
         guild = DummyGuild(1, members=[user])
@@ -736,6 +875,31 @@ class UtilityStoreAndServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(lines), 1)
         self.assertIn("CoffeeUser", lines[0])
         self.assertIn("Stepped away", lines[0])
+
+    async def test_afk_reason_rejects_private_contact_details(self):
+        ok, message = await self.service.set_afk(
+            user=DummyUser(780),
+            reason="Call me at +1 (212) 555-0189.",
+            duration_seconds=30 * 60,
+            start_in_seconds=None,
+        )
+
+        self.assertFalse(ok)
+        self.assertIn("phone numbers", message.lower())
+
+    async def test_reminder_text_blocks_adult_dm_solicitation_via_feature_gateway(self):
+        ok, message = await self.service.create_reminder(
+            user=DummyUser(781),
+            text="DM me for adult content.",
+            delay_seconds=20 * 60,
+            delivery="dm",
+            guild=None,
+            channel=None,
+            origin_jump_url=None,
+        )
+
+        self.assertFalse(ok)
+        self.assertIn("adult", message.lower())
 
     async def test_scheduled_afk_activates_when_due(self):
         user = DummyUser(88)

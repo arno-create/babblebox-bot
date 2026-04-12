@@ -52,7 +52,7 @@ Babblebox uses information to operate the bot and its features, including:
 - running commands and building Discord responses
 - delivering Watch alerts, reminders, Later markers, Capture output, AFK behavior, and similar utilities
 - maintaining Daily Arcade progress, compact identity state, and other restart-safe feature state
-- applying optional Shield and admin lifecycle workflows where server administrators enable them
+- applying optional Shield live-message moderation plus bounded private Shield feature-surface checks for utilities and Confessions where those protections are part of the product
 - accepting and moderating anonymous confessions without exposing the author to server staff
 - keeping the service reliable on constrained infrastructure through compact, purpose-bound persistence
 
@@ -67,6 +67,7 @@ Babblebox intentionally uses different visibility defaults depending on the feat
 - Watch alerts are DM-only
 - Capture transcripts are delivered privately rather than kept as long-term database archives
 - Later markers, reminders, and sensitive setup flows are private-first
+- AFK reasons, reminder text, public reminder delivery, watch keywords, and Confessions link checks now use bounded private Shield feature-surface evaluation instead of bypassing Babblebox core safety entirely
 - anonymous confessions are optional, are submitted privately when enabled, keep the author hidden from staff, and let staff review by confession ID and case ID only while Babblebox still enforces safety internally
 - that privacy model is meant to make raw database browsing and accidental exposure materially harder, not to claim that the service operator has been removed from the trust boundary
 - deploying the Confessions privacy code and keys is not enough by itself; Babblebox now tracks a privacy-hardening readiness state because legacy rows remain weaker until the Confessions backfill finishes
@@ -95,7 +96,7 @@ Babblebox may rely on necessary service providers to operate, including:
 
 Babblebox does not perform always-on AI scanning by default.
 
-If optional AI-assisted Shield review is enabled where available, it only runs after local Shield logic has already flagged content. In that flow, only minimal, sanitized, and truncated flagged text intended for that review should be sent to the configured AI provider, even when the flagged signal came from scanned embed text, attachment labels, or forwarded message snapshots instead of the raw message body alone.
+If optional AI-assisted Shield review is enabled where available, it only runs after local Shield logic has already flagged live-message content. In that flow, only minimal, sanitized, and truncated flagged text intended for that review should be sent to the configured AI provider, even when the flagged signal came from scanned embed text, attachment labels, or forwarded message snapshots instead of the raw message body alone. Shield's private feature-surface checks for AFK, reminders, watch keywords, and Confessions link parity stay AI-free in this release.
 
 Babblebox is not designed to sell personal information.
 
@@ -137,7 +138,7 @@ Users and administrators can often control Babblebox directly through the bot by
 - removing reminders
 - clearing Later markers
 - changing Watch settings
-- disabling Shield
+- disabling Shield live moderation
 - reconfiguring admin log or review behavior
 
 If you have a privacy-related request about Babblebox-managed data, include enough detail to identify the relevant server, user, and feature state.

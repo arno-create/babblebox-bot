@@ -33,16 +33,14 @@ from babblebox.confessions_store import (
     normalize_confession_config,
     normalize_enforcement_state,
 )
+from babblebox.shield_service import FEATURE_SURFACE_CONFESSIONS_LINKS, ShieldFeatureSafetyGateway
 from babblebox.shield_link_safety import (
     ADULT_LINK_CATEGORY,
     MALICIOUS_LINK_CATEGORY,
     SAFE_LINK_CATEGORY,
-    SHORTENER_DOMAINS,
-    STOREFRONT_DOMAINS,
     UNKNOWN_LINK_CATEGORY,
     UNKNOWN_SUSPICIOUS_LINK_CATEGORY,
     ShieldLinkAssessment,
-    ShieldLinkSafetyEngine,
     domain_in_set,
     is_trusted_destination,
 )
@@ -101,7 +99,6 @@ PUBLIC_REPLY_CONTEXT_PREVIEW_LIMIT = 120
 REPLY_FLOW_TO_CONFESSION = "reply_to_confession"
 REPLY_FLOW_OWNER_TO_USER = "owner_reply_to_user"
 PUBLIC_QUIET_POST_BODY = "Shared quietly through Babblebox."
-LINK_IN_BIO_DOMAINS = frozenset({"linktr.ee", "beacons.ai", "carrd.co"})
 SPAM_RATE_LIMIT_FLAGS = frozenset(
     {"duplicate_spam", "empty_content", "low_signal_spam", "near_duplicate_spam", "repetitive_spam"}
 )
@@ -543,7 +540,7 @@ class ConfessionsService:
                 self._startup_storage_error = str(exc)
                 self.storage_error = str(exc)
         self._lock = asyncio.Lock()
-        self.link_safety = ShieldLinkSafetyEngine()
+        self._shield_feature_gateway_fallback = ShieldFeatureSafetyGateway()
         self._compiled_configs: dict[int, dict[str, Any]] = {}
         self._active_enforcement_cache: dict[tuple[int, int], dict[str, Any]] = {}
         self._support_rate_limits: dict[tuple[int, int, str], float] = {}
@@ -579,8 +576,13 @@ class ConfessionsService:
         return True
 
     async def close(self):
-        await self.link_safety.close()
+        await self._shield_feature_gateway_fallback.close()
         await self.store.close()
+
+    def _shield_feature_gateway(self) -> ShieldFeatureSafetyGateway:
+        shield_service = getattr(self.bot, "shield_service", None)
+        gateway = getattr(shield_service, "feature_gateway", None)
+        return gateway if callable(getattr(gateway, "assess_links", None)) else self._shield_feature_gateway_fallback
 
     def log_admin_diagnostic(
         self,
@@ -1869,77 +1871,17 @@ class ConfessionsService:
         attachment_meta: Sequence[dict[str, Any]],
         shared_link_url: str | None = None,
     ) -> tuple[tuple[str, ...], tuple[ShieldLinkAssessment, ...], bool]:
-        assessments: list[ShieldLinkAssessment] = []
-        flags: list[str] = []
-        now = time.monotonic()
-        urls = _url_candidates(text)
-        if shared_link_url:
-            urls.append(shared_link_url)
-        for raw_url in urls:
-            candidate = _clean_url_candidate(raw_url)
-            if candidate is None:
-                flags.append("malformed_link")
-                continue
-            try:
-                parsed = urlsplit(candidate)
-            except ValueError:
-                flags.append("malformed_link")
-                continue
-            domain = _normalize_link_host(parsed.netloc)
-            if domain is None:
-                flags.append("malformed_link")
-                continue
-            if domain_in_set(domain, set(compiled["custom_block_domain_set"])):
-                assessments.append(
-                    ShieldLinkAssessment(
-                        normalized_domain=domain,
-                        category=UNKNOWN_SUSPICIOUS_LINK_CATEGORY,
-                        matched_signals=("guild_block_domain",),
-                        provider_lookup_warranted=False,
-                        provider_status="Blocked by guild policy.",
-                        intel_version="local",
-                    )
-                )
-                flags.append("link_unsafe")
-                continue
-            allowlisted = domain_in_set(domain, set(compiled["custom_allow_domain_set"]))
-            if (
-                domain_in_set(domain, SHORTENER_DOMAINS)
-                or domain_in_set(domain, LINK_IN_BIO_DOMAINS)
-                or domain_in_set(domain, STOREFRONT_DOMAINS)
-            ):
-                assessments.append(
-                    ShieldLinkAssessment(
-                        normalized_domain=domain,
-                        category=UNKNOWN_SUSPICIOUS_LINK_CATEGORY,
-                        matched_signals=("category_blocked",),
-                        provider_lookup_warranted=False,
-                        provider_status="Blocked by confession link policy.",
-                        intel_version="local",
-                    )
-                )
-                flags.append("link_unsafe")
-                continue
-            assessment = self.link_safety.assess_domain(
-                domain,
-                path=parsed.path or "/",
-                query=parsed.query or "",
-                message_text=text.casefold(),
-                squashed_text=squashed.casefold(),
-                has_suspicious_attachment=False,
-                allowlisted=allowlisted,
-                now=now,
-            )
-            assessments.append(assessment)
-            if self._link_domain_allowed(compiled, assessment, domain=domain):
-                continue
-            if assessment.category == MALICIOUS_LINK_CATEGORY:
-                flags.append("malicious_link")
-            elif assessment.category == ADULT_LINK_CATEGORY:
-                flags.append("adult_link")
-            elif assessment.category in {UNKNOWN_SUSPICIOUS_LINK_CATEGORY, UNKNOWN_LINK_CATEGORY}:
-                flags.append("link_unsafe")
-        return tuple(_sorted_unique_text(flags)), tuple(assessments), bool(urls)
+        link_scan = self._shield_feature_gateway().assess_links(
+            FEATURE_SURFACE_CONFESSIONS_LINKS,
+            text=text,
+            squashed=squashed,
+            shared_link_url=shared_link_url,
+            allow_domain_set=compiled["custom_allow_domain_set"],
+            block_domain_set=compiled["custom_block_domain_set"],
+            link_policy_mode=str(compiled.get("link_policy_mode") or DEFAULT_LINK_POLICY_MODE),
+            has_suspicious_attachment=False,
+        )
+        return link_scan.flags, link_scan.link_assessments, link_scan.has_links
 
     def _classify_language(self, compiled: dict[str, Any], text: str, squashed: str) -> SafetyResult | None:
         lowered = fold_confusable_text(text)

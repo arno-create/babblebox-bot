@@ -125,8 +125,10 @@ Babblebox is intentionally compact:
 ### Shield / Safety
 
 - Babblebox Shield
-  - optional, admin-configurable moderation layer
+  - Babblebox's bounded cross-feature immunity layer
   - admin-only configuration for administrators or Manage Server users
+  - live-message moderation remains optional and admin-configurable
+  - always-on private feature-surface checks for Confessions unsafe-link parity, AFK reasons, reminder text plus public reminder delivery, and watch keyword setup
   - privacy leak pack
   - promo / invite pack
 - scam / malicious-link pack with local weighted scam-language scoring
@@ -137,6 +139,7 @@ Babblebox is intentionally compact:
 - in-scope Shield coverage for new messages, meaningful edits, and webhook/community-post style delivery
 - private suspicious-member review that only escalates when risky message signals combine with bounded account-age, avatar-state, display-name suspicion, newcomer first-link context, or fresh-campaign reuse
 - optional AI-assisted second-pass review for moderator context only
+- Shield AI stays live-message-only; AFK, reminders, watch keywords, and Confessions feature checks remain local-first and AI-free
 - AI stays off by default and is currently limited to guild `1322933864360050688`
 - log-first defaults
   - trusted-role bypass
@@ -303,6 +306,8 @@ AFK examples:
 - `/afkschedule add repeat:weekdays at:18:00 preset:studying`
 - `bb!afk deep work 1h30m`
 
+Shield now backs the bounded safety lane for stored or fan-out utility text as well: AFK reasons, reminder text, public reminder delivery, and watch keywords keep their feature-local validation first, then run through a compact private Shield feature gateway instead of bypassing core policy entirely.
+
 ### Shield / Safety
 
 Shield commands are private/admin-facing by default. The streamlined slash surface is centered on `/shield panel`.
@@ -322,6 +327,8 @@ Slash is the best fit for multi-option admin setup here. Prefix stays positional
 | `/shield test` | `bb!shield test free nitro claim now https://bit.ly/x` | Dry-run a message through Shield |
 
 Shield's live-message link policy is intentionally separate from Confessions link mode. Confessions keeps `Disabled`, `Trusted Only`, and `Allow All Safe`, while Shield keeps `Default` plus the bounded `Trusted Links Only` mode. That stricter Shield mode allows trusted mainstream destinations plus admin allowlisted domains and invite codes as policy exceptions, while malicious, suspicious, and adult-domain intel still belongs to the specialized Shield packs. Shield phrase allowlists stay narrower: they suppress only targeted promo or adult-solicitation text matches.
+
+Shield also now governs eligible non-chat surfaces in a bounded way. Confessions keeps its own privacy, review, and workflow logic, but shares Shield link intelligence. AFK reasons, reminder text, public reminder delivery, and watch keywords use fixed private feature-surface policies with no mod-log spam and no AI pass.
 
 ### Admin Lifecycle
 
