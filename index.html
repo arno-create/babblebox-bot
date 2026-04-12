@@ -1323,8 +1323,8 @@
             quieter utility flows built to feel native inside chat.
           </p>
           <p class="hero-subhead">
-            Party games when the server is active. Useful tools when it is not. Optional compact safety when admins need
-            it. No economy grind. No command-spam identity crisis. Just a cleaner, lower-noise bot designed with real
+            Party games when the server is active. Useful tools when it is not. Optional live moderation when admins need
+            it, plus bounded private immunity on the feature surfaces that would otherwise become loopholes. No economy grind. No command-spam identity crisis. Just a cleaner, lower-noise bot designed with real
             product thinking.
           </p>
           <div class="hero-actions">
@@ -1662,11 +1662,11 @@ categories, scholar progress, and mastery announcement setup in one readable sur
                 </article>
                 <article class="story-point">
                   <h4>Reminders stay private-first</h4>
-                  <p><code>/remind</code> setup and failure states stay out of the channel, which reduces spam risk and avoids turning routine utility into public housekeeping noise.</p>
+                  <p><code>/remind</code> setup and failure states stay out of the channel, which reduces spam risk, avoids turning routine utility into public housekeeping noise, and lets Babblebox recheck public reminder delivery privately before it posts later.</p>
                 </article>
                 <article class="story-point">
                   <h4>AFK stays clear about time</h4>
-                  <p><code>/afk</code> supports quick durations, scheduled starts, recurring schedules, and saved timezones so absence windows feel deliberate instead of messy.</p>
+                  <p><code>/afk</code> supports quick durations, scheduled starts, recurring schedules, and saved timezones so absence windows feel deliberate instead of messy, while AFK reasons stay on the same bounded Shield safety lane.</p>
                 </article>
                 <article class="story-point">
                   <h4>Later and Capture stay bounded</h4>
@@ -1763,7 +1763,7 @@ categories, scholar progress, and mastery announcement setup in one readable sur
             <p class="section-copy">
               Babblebox utilities are not the only disciplined part of the product. Shield and admin helpers stay compact,
               conservative, and admin-facing: useful when a server needs them, but never positioned as a giant all-seeing
-              moderation suite.
+              moderation suite. Live moderation stays optional; bounded feature-surface protection stays private and always on where the product actually needs it.
             </p>
           </div>
 
@@ -1781,7 +1781,7 @@ categories, scholar progress, and mastery announcement setup in one readable sur
               </div>
               <figcaption>
                 <strong><code>/shield panel</code> keeps moderation control compact.</strong>
-                <span>Optional Shield is off by default, log-first by default, and built around scoped rules, allowlists, local-first link safety, meaningful edit or webhook rescans with about 200k known malicious domains, conservative unknown-link handling, and no public bot callouts for weak evidence.</span>
+                <span>Optional Shield live moderation is off by default, log-first by default, and built around scoped rules, allowlists, local-first link safety, meaningful edit or webhook rescans with about 200k known malicious domains, conservative unknown-link handling, and no public bot callouts for weak evidence. Private feature-surface checks still cover Confessions links, AFK, reminders, and watch keywords.</span>
               </figcaption>
             </figure>
 
@@ -1806,7 +1806,7 @@ categories, scholar progress, and mastery announcement setup in one readable sur
           <div class="trust-rail">
             <article>
               <strong>Off by default</strong>
-              <p>Shield is optional. A safe starting point is log-first policy with stronger actions reserved for clearer matches.</p>
+              <p>Shield live moderation is optional. A safe starting point is log-first policy with stronger actions reserved for clearer matches, while private feature-surface checks still govern the relevant utility and Confessions lanes.</p>
             </article>
             <article>
               <strong>Scoped and allowlist-aware</strong>
@@ -1814,7 +1814,7 @@ categories, scholar progress, and mastery announcement setup in one readable sur
             </article>
             <article>
               <strong>AI stays second-pass only</strong>
-              <p>Optional AI review only sees already-flagged, sanitized text from the scanned surfaces, stays admin-only, and never becomes the primary punishment engine.</p>
+              <p>Optional AI review only sees already-flagged, sanitized live-message text, stays admin-only, and never becomes the primary punishment engine.</p>
             </article>
             <article>
               <strong>Suspicious-member review stays private</strong>

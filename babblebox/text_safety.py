@@ -147,6 +147,26 @@ PRIVATE_PATTERNS = (
     ("markdown links", MARKDOWN_LINK_RE),
 )
 
+REPORTING_CONTEXT_RE = re.compile(
+    r"(?i)\b(?:quote|quoted|quoting|report|reported|reporting|report this|context|for review|for moderation|moderation(?: note| log)?|mod note|admin note|incident review|review queue|screenshot(?:ed)?|screencap|news|headline|history|historical|documentary|sample|example)\b"
+)
+EDUCATIONAL_CONTEXT_RE = re.compile(
+    r"(?i)\b(?:medical|medicine|doctor|clinic|health|sexual health|biology|education|educational|therapy|consent|pregnancy|assault|prevention|awareness|study|class|support group|support worker|survivor|victim|trafficking|hotline|988)\b"
+)
+DISAPPROVAL_CONTEXT_RE = re.compile(
+    r"(?i)\b(?:don['’]t say|do not say|don['’]t post|do not post|don['’]t tell people to|do not tell people to|don['’]t call people|do not call people|stop posting|stop saying|stop telling people to|stop calling people|not allowed|against (?:the )?(?:rules|policy)|rule violation|policy violation|banned phrase|keep that out|warning example)\b"
+)
+QUOTE_ATTRIBUTION_RE = re.compile(
+    r"(?i)\b(?:they|he|she|someone|user|member|person|people|poster|account)\s+(?:said|saying|posted|posting|sent|sending|wrote|writing|advertised|advertising|offered|offering|asked|asking|told|telling|quoted|quoting|called|calling)\b|\bfor\s+(?:saying|posting|sending|writing|advertising|offering|asking|telling|calling)\b|\b(?:called me|called them|call people|tell people to)\b"
+)
+REPORTING_CONTEXT_ALWAYS_SUPPRESS_RE = re.compile(
+    r"(?i)\b(?:report this|for review|for moderation|moderation(?: note| log)?|mod note|admin note|incident review|review queue|screenshot(?:ed)?|screencap|news|headline|history|historical|documentary)\b"
+)
+MODERATION_ACTION_CONTEXT_RE = re.compile(
+    r"(?i)\b(?:mods?|moderators?|staff|admins?|filter|shield|automod)\s+(?:removed|deleted|flagged|warned|muted|timed out|banned)\b|\b(?:removed|deleted|flagged|warned)\s+(?:for|because)\b"
+)
+EXAMPLE_CONTEXT_RE = re.compile(r"(?i)\b(?:sample|example)\b")
+
 
 def normalize_plain_text(text: str | None) -> str:
     cleaned = unicodedata.normalize("NFKC", text or "")
@@ -180,6 +200,51 @@ def contains_blocklisted_term(text: str) -> bool:
         if blocked_re.search(text) or blocked_re.search(squashed):
             return True
     return False
+
+
+def contains_safety_term(term: str, text: str, squashed: str | None = None) -> bool:
+    candidate = squashed if squashed is not None else squash_for_evasion_checks(text)
+    if " " in term:
+        return term in text or term in candidate
+    pattern = rf"\b{re.escape(term)}\b"
+    return re.search(pattern, text, re.IGNORECASE) is not None or re.search(pattern, candidate, re.IGNORECASE) is not None
+
+
+def find_safety_term_hits(terms: set[str] | frozenset[str], text: str, squashed: str | None = None) -> list[str]:
+    candidate = squashed if squashed is not None else squash_for_evasion_checks(text)
+    return sorted(term for term in terms if contains_safety_term(term, text, candidate))
+
+
+def is_reporting_or_educational_context(text: str) -> bool:
+    return bool(
+        REPORTING_CONTEXT_RE.search(text)
+        or REPORTING_CONTEXT_ALWAYS_SUPPRESS_RE.search(text)
+        or MODERATION_ACTION_CONTEXT_RE.search(text)
+        or EDUCATIONAL_CONTEXT_RE.search(text)
+    )
+
+
+def is_harmful_context_suppressed(text: str, *, include_disapproval: bool = False) -> bool:
+    if EDUCATIONAL_CONTEXT_RE.search(text):
+        return True
+    if include_disapproval and DISAPPROVAL_CONTEXT_RE.search(text):
+        return True
+    if MODERATION_ACTION_CONTEXT_RE.search(text):
+        return True
+    if REPORTING_CONTEXT_ALWAYS_SUPPRESS_RE.search(text):
+        return True
+    reporting = REPORTING_CONTEXT_RE.search(text)
+    if reporting is None:
+        return False
+    matched_reporting = reporting.group(0).casefold()
+    if any(
+        token in matched_reporting
+        for token in ("for review", "for moderation", "moderation", "mod note", "admin note", "incident review", "review queue", "quoted", "screenshot", "screencap", "news", "headline", "history", "historical", "documentary", "report this")
+    ):
+        return True
+    if EXAMPLE_CONTEXT_RE.search(text):
+        return bool(QUOTE_ATTRIBUTION_RE.search(text))
+    return bool(QUOTE_ATTRIBUTION_RE.search(text))
 
 
 def sanitize_short_plain_text(

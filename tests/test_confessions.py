@@ -24,6 +24,8 @@ from babblebox.cogs.confessions import (
     StatelessPublishedConfessionReplyView,
     _validate_discord_modal_payload,
 )
+from babblebox.shield_link_safety import ShieldLinkAssessment
+from babblebox.shield_service import FEATURE_SURFACE_CONFESSIONS_LINKS, ShieldFeatureLinkScan
 from babblebox.confessions_service import CASE_ID_PREFIX, CONFESSION_ID_PREFIX, ConfessionSubmissionResult, ConfessionsService
 from babblebox.confessions_store import ConfessionsStore, _PostgresConfessionsStore
 from tests.test_confessions_store import _FakeConnection, _FakePool, _privacy
@@ -33,10 +35,48 @@ def _embed_fields_by_name(embed: discord.Embed) -> dict[str, dict[str, object]]:
     return {field["name"]: field for field in embed.to_dict().get("fields", [])}
 
 
+def _embed_text_blob(embed: discord.Embed) -> str:
+    payload = embed.to_dict()
+    parts: list[str] = []
+    for key in ("title", "description"):
+        value = payload.get(key)
+        if isinstance(value, str):
+            parts.append(value)
+    author = payload.get("author")
+    if isinstance(author, dict):
+        name = author.get("name")
+        if isinstance(name, str):
+            parts.append(name)
+    footer = payload.get("footer")
+    if isinstance(footer, dict):
+        text = footer.get("text")
+        if isinstance(text, str):
+            parts.append(text)
+    for field in payload.get("fields", []):
+        if isinstance(field, dict):
+            name = field.get("name")
+            value = field.get("value")
+            if isinstance(name, str):
+                parts.append(name)
+            if isinstance(value, str):
+                parts.append(value)
+    return " ".join(parts)
+
+
 def _view_custom_ids(view) -> list[str]:
     if view is None:
         return []
     return [child.custom_id for child in view.children if getattr(child, "custom_id", None)]
+
+
+class FeatureLinkGatewaySpy:
+    def __init__(self, scan: ShieldFeatureLinkScan):
+        self.scan = scan
+        self.calls: list[tuple[str, dict[str, object]]] = []
+
+    def assess_links(self, surface: str, **kwargs) -> ShieldFeatureLinkScan:
+        self.calls.append((surface, kwargs))
+        return self.scan
 
 
 class FakeGuildPermissions:
@@ -864,7 +904,7 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
         current = await self.service.current_review_target(self.guild.id)
         pending = await self.service.list_review_targets(self.guild.id, limit=10)
         embed = self.service.build_review_queue_embed(self.guild, pending, note="refreshed")
-        rendered = json.dumps(embed.to_dict())
+        rendered = _embed_text_blob(embed)
         self.assertNotIn("123456789", rendered)
         self.assertNotIn("987654321", rendered)
         self.assertNotIn("author_user_id", current)
@@ -963,6 +1003,40 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(blocked.ok)
         self.assertEqual(blocked.state, "blocked")
+
+    async def test_confession_link_assessment_delegates_to_shared_shield_feature_gateway(self):
+        await self._configure()
+        compiled = self.service._compiled_configs[self.guild.id]
+        scan = ShieldFeatureLinkScan(
+            surface=FEATURE_SURFACE_CONFESSIONS_LINKS,
+            has_links=True,
+            flags=("malicious_link",),
+            link_assessments=(
+                ShieldLinkAssessment(
+                    normalized_domain="dlscord-gift.com",
+                    category="malicious",
+                    matched_signals=("bundled_malicious_domain",),
+                    provider_lookup_warranted=False,
+                    provider_status="Matched local intel.",
+                    intel_version="local",
+                ),
+            ),
+        )
+        gateway = FeatureLinkGatewaySpy(scan)
+        self.bot.shield_service = types.SimpleNamespace(feature_gateway=gateway)
+
+        flags, assessments, has_links = self.service._assess_links(
+            compiled,
+            "verify here https://dlscord-gift.com/claim",
+            "verifyherehttps://dlscordgiftcomclaim",
+            (),
+        )
+
+        self.assertEqual(flags, ("malicious_link",))
+        self.assertTrue(has_links)
+        self.assertEqual(assessments[0].normalized_domain, "dlscord-gift.com")
+        self.assertEqual(gateway.calls[0][0], FEATURE_SURFACE_CONFESSIONS_LINKS)
+        self.assertEqual(gateway.calls[0][1]["link_policy_mode"], compiled["link_policy_mode"])
 
     async def test_link_mode_disabled_only_allows_custom_allowlist_without_bypassing_hard_blocks(self):
         await self._configure(link_mode="disabled")
@@ -2702,7 +2776,7 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(ok, message)
         self.assertEqual(len(self.appeals_channel.sent), 1)
-        rendered = json.dumps(self.appeals_channel.sent[0].embed.to_dict())
+        rendered = _embed_text_blob(self.appeals_channel.sent[0].embed)
         self.assertIn("CT-", rendered)
         self.assertIn(blocked.confession_id, rendered)
         self.assertIn(blocked.case_id, rendered)
@@ -2759,7 +2833,7 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Delete", report_labels)
         self.assertIn("Details", report_labels)
         self.assertIn("Refresh", report_labels)
-        rendered = json.dumps([message.embed.to_dict() for message in self.appeals_channel.sent])
+        rendered = " ".join(_embed_text_blob(message.embed) for message in self.appeals_channel.sent if message.embed is not None)
         self.assertNotIn("953", rendered)
         self.assertNotIn("954", rendered)
         stored = await self.service.store.list_support_tickets(self.guild.id, status="open", limit=10)

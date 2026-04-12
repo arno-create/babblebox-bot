@@ -15,6 +15,7 @@ from babblebox.shield_service import (
     CUSTOM_PATTERN_LIMIT,
     MATCH_CLASS_LABELS,
     PACK_LABELS,
+    SEVERE_CATEGORY_LABELS,
     SENSITIVITY_LABELS,
     ShieldService,
 )
@@ -24,7 +25,8 @@ PACK_CHOICES = [
     app_commands.Choice(name="Privacy Leak", value="privacy"),
     app_commands.Choice(name="Promo / Invite", value="promo"),
     app_commands.Choice(name="Scam / Malicious Links", value="scam"),
-    app_commands.Choice(name="Adult / 18+ Links", value="adult"),
+    app_commands.Choice(name="Adult Links + Solicitation", value="adult"),
+    app_commands.Choice(name="Severe Harm / Hate", value="severe"),
 ]
 ACTION_CHOICES = [
     app_commands.Choice(name="Detect only", value="detect"),
@@ -84,6 +86,18 @@ LINK_POLICY_MODE_CHOICES = [
     app_commands.Choice(name="Default", value="default"),
     app_commands.Choice(name="Trusted Links Only", value="trusted_only"),
 ]
+SEVERE_CATEGORY_CHOICES = [
+    app_commands.Choice(name="Sexual Exploitation", value="sexual_exploitation"),
+    app_commands.Choice(name="Self-Harm Encouragement", value="self_harm_encouragement"),
+    app_commands.Choice(name="Eliminationist Hate", value="eliminationist_hate"),
+    app_commands.Choice(name="Severe Slur Abuse", value="severe_slur_abuse"),
+]
+SEVERE_TERM_ACTION_CHOICES = [
+    app_commands.Choice(name="Add custom", value="add"),
+    app_commands.Choice(name="Disable bundled", value="remove_default"),
+    app_commands.Choice(name="Restore bundled", value="restore_default"),
+    app_commands.Choice(name="Remove custom", value="remove_custom"),
+]
 SHIELD_AI_OVERRIDE_OWNER_IDS = {1266444952779620413, 1345860619836063754}
 
 
@@ -113,7 +127,7 @@ class ShieldPanelView(discord.ui.View):
             button.style = discord.ButtonStyle.primary if self.section == name else discord.ButtonStyle.secondary
         config = self.cog.service.get_config(self.guild_id)
         ai_status = self.cog.service.get_ai_status(self.guild_id)
-        self.toggle_shield_button.label = "Disable Shield" if config["module_enabled"] else "Enable Shield"
+        self.toggle_shield_button.label = "Disable Live Moderation" if config["module_enabled"] else "Enable Live Moderation"
         self.toggle_ai_button.label = "Disable AI" if ai_status["enabled"] else "Enable AI"
         self.toggle_ai_button.disabled = not ai_status["supported"] or (not ai_status["provider_available"] and not ai_status["enabled"])
 
@@ -183,7 +197,7 @@ class ShieldPanelView(discord.ui.View):
     async def refresh_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._rerender(interaction, note="Shield panel refreshed.")
 
-    @discord.ui.button(label="Enable Shield", style=discord.ButtonStyle.success, row=1)
+    @discord.ui.button(label="Enable Live Moderation", style=discord.ButtonStyle.success, row=1)
     async def toggle_shield_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         current = self.cog.service.get_config(self.guild_id)
         ok, message = await self.cog.service.set_module_enabled(self.guild_id, not current["module_enabled"])
@@ -294,6 +308,17 @@ class ShieldCog(commands.Cog):
                 f"\nOptional solicitation detector: {'On' if config.get('adult_solicitation_enabled') else 'Off'}\n"
                 f"Solicitation carve-out channels: {self._format_mentions(config.get('adult_solicitation_excluded_channel_ids', []), kind='channel')}"
             )
+        severe_line = ""
+        if pack == "severe":
+            category_labels = [
+                SEVERE_CATEGORY_LABELS.get(str(value), str(value).replace("_", " ").title())
+                for value in config.get("severe_enabled_categories", [])
+            ]
+            severe_line = (
+                f"\nCategories: {', '.join(category_labels) if category_labels else 'None'}\n"
+                f"Custom terms: {self._format_text_list(config.get('severe_custom_terms', []), limit=4)}\n"
+                f"Removed bundled terms: {self._format_text_list(config.get('severe_removed_terms', []), limit=4)}"
+            )
         return (
             f"Enabled: {'Yes' if config[f'{pack}_enabled'] else 'No'} | "
             f"Sensitivity: {SENSITIVITY_LABELS[config[f'{pack}_sensitivity']]}\n"
@@ -301,6 +326,7 @@ class ShieldCog(commands.Cog):
             f"Medium action: `{medium_action}`\n"
             f"High action: `{high_action}`"
             f"{adult_solicit_line}"
+            f"{severe_line}"
         )
 
     def _link_policy_actions(self, config: dict[str, object]) -> tuple[str, str, str]:
@@ -423,12 +449,12 @@ class ShieldCog(commands.Cog):
         delete_actions_enabled = any(
             config.get(f"{pack}_enabled")
             and bool(set(self._pack_policy_actions(config, pack)).intersection({"delete_log", "delete_escalate"}))
-            for pack in ("privacy", "promo", "scam", "adult")
+            for pack in ("privacy", "promo", "scam", "adult", "severe")
         )
         timeout_actions_enabled = any(
             config.get(f"{pack}_enabled")
             and bool(set(self._pack_policy_actions(config, pack)).intersection({"timeout_log", "delete_escalate"}))
-            for pack in ("privacy", "promo", "scam", "adult")
+            for pack in ("privacy", "promo", "scam", "adult", "severe")
         )
 
         focus_channel = self._channel_from_guild(guild, channel_id)
@@ -471,18 +497,19 @@ class ShieldCog(commands.Cog):
         ai_status = self.service.get_ai_status(guild_id)
         embed = discord.Embed(
             title="Shield Control Panel",
-            description="Shield stays local-first. Bundled intel handles malicious/scam and optional adult / 18+ domains, the solicitation detector stays separately optional, specific 18+ channels can relax only that detector without weakening adult-domain or scam protections, trusted-link mode stays server-side and distinct from Confessions, domain and invite allowlists stay bounded to that policy lane, phrase allowlists only suppress targeted promo or adult-solicitation text matches, safe mainstream destinations bypass suspicion, and attachment filenames stay metadata-only unless real link evidence exists.",
+            description="Shield is Babblebox's bounded immunity layer. Live-message moderation stays toggleable here, while private feature-surface checks stay always on for Confessions unsafe-link parity, AFK reasons, reminder text plus public reminder delivery, and watch keyword setup. AFK and reminder text use privacy, adult, and severe checks; watch keywords stay privacy-only. Those feature checks keep local validation first, stay private, and never trigger Shield AI.",
             color=ge.EMBED_THEME["warning"] if config["module_enabled"] else ge.EMBED_THEME["info"],
         )
         log_channel = f"<#{config['log_channel_id']}>" if config.get("log_channel_id") else "Not set"
         alert_role = f"<@&{config['alert_role_id']}>" if config.get("alert_role_id") else "None"
         embed.add_field(
-            name="Core Shield",
+            name="Live Moderation",
             value=(
                 f"Enabled: **{'Yes' if config['module_enabled'] else 'No'}**\n"
                 f"Scan mode: `{config['scan_mode']}`\n"
                 f"Log channel: {log_channel}\n"
-                f"Alert role: {alert_role}"
+                f"Alert role: {alert_role}\n"
+                "Feature checks: AFK + reminders use privacy/adult/severe, Watch stays privacy-only, and Confessions shares link checks"
             ),
             inline=False,
         )
@@ -494,14 +521,14 @@ class ShieldCog(commands.Cog):
                 f"{self._pack_policy_compact(config, pack)}"
             )
         embed.add_field(name="Protection Packs", value="\n\n".join(protection_lines), inline=False)
-        link_safety_lines = []
-        for pack in ("scam", "adult"):
-            link_safety_lines.append(
+        high_risk_lines = []
+        for pack in ("scam", "adult", "severe"):
+            high_risk_lines.append(
                 f"**{PACK_LABELS[pack]}**\n"
                 f"Enabled: {'Yes' if config[f'{pack}_enabled'] else 'No'} | Sensitivity: {SENSITIVITY_LABELS[config[f'{pack}_sensitivity']]}\n"
                 f"{self._pack_policy_compact(config, pack)}"
             )
-        embed.add_field(name="Link Safety", value="\n\n".join(link_safety_lines), inline=False)
+        embed.add_field(name="High-Risk Packs", value="\n\n".join(high_risk_lines), inline=False)
         embed.add_field(
             name="Link Policy",
             value=self._link_policy_detail(config),
@@ -513,7 +540,8 @@ class ShieldCog(commands.Cog):
                 f"Status: {ai_status['status']}\n"
                 f"Enabled: **{'Yes' if ai_status['enabled'] else 'No'}**\n"
                 f"Local-confidence threshold: `{ai_status['min_confidence']}`\n"
-                f"Packs: {self._format_ai_pack_summary(ai_status['enabled_packs'])}"
+                f"Packs: {self._format_ai_pack_summary(ai_status['enabled_packs'])}\n"
+                "Scope: Live-message moderation only"
             ),
             inline=False,
         )
@@ -521,7 +549,7 @@ class ShieldCog(commands.Cog):
             name="Storage Discipline",
             value=(
                 "Shield stores config and compact pattern metadata only.\n"
-                "Moderator context is delivered to the log channel instead of a heavy moderation archive."
+                "Private feature-surface blocks stay private, and moderator context is delivered to the log channel instead of a heavy moderation archive."
             ),
             inline=False,
         )
@@ -531,7 +559,7 @@ class ShieldCog(commands.Cog):
         config = self.service.get_config(guild_id)
         embed = discord.Embed(
             title="Shield Rules",
-            description="Confidence-tier local policy. Local malicious and adult-domain matches can act hard, the solicitation detector stays optional and narrowly scoped, and unknown suspicious links stay link-only unless local scam signals, newcomer context, or campaign repetition justify escalation.",
+            description="Confidence-tier local policy. Local malicious and adult-domain matches can act hard, the adult solicitation detector stays optional and narrowly scoped, the severe pack stays targeted to real-harm abuse only, and unknown suspicious links stay link-only unless local scam signals, newcomer context, or campaign repetition justify escalation.",
             color=ge.EMBED_THEME["info"],
         )
         pack_lines = []
@@ -541,13 +569,13 @@ class ShieldCog(commands.Cog):
                 f"{self._pack_policy_detail(config, pack)}"
             )
         embed.add_field(name="Low / Medium / High Action Policy", value="\n\n".join(pack_lines), inline=False)
-        link_safety_lines = []
-        for pack in ("scam", "adult"):
-            link_safety_lines.append(
+        high_risk_lines = []
+        for pack in ("scam", "adult", "severe"):
+            high_risk_lines.append(
                 f"**{PACK_LABELS[pack]}**\n"
                 f"{self._pack_policy_detail(config, pack)}"
             )
-        embed.add_field(name="Link Safety Policy", value="\n\n".join(link_safety_lines), inline=False)
+        embed.add_field(name="High-Risk Policy", value="\n\n".join(high_risk_lines), inline=False)
         embed.add_field(
             name="Trusted-Link Policy",
             value=self._link_policy_detail(config),
@@ -575,6 +603,8 @@ class ShieldCog(commands.Cog):
             value=(
                 "`/shield rules pack:promo enabled:true low_action:log medium_action:delete_log high_action:delete_escalate sensitivity:high`\n"
                 "`/shield rules pack:adult enabled:true adult_solicitation:true low_action:log medium_action:delete_log high_action:delete_log`\n"
+                "`/shield rules pack:severe enabled:true low_action:detect medium_action:delete_log high_action:delete_log`\n"
+                "`/shield severe category category:self_harm_encouragement state:on`\n"
                 "`/shield links mode:trusted_only low_action:log medium_action:delete_log high_action:delete_log`\n"
                 "`/shield rules module:true escalation_threshold:3 timeout_minutes:10`\n"
                 "`bb!shield advanced list` for safe custom patterns"
@@ -587,7 +617,7 @@ class ShieldCog(commands.Cog):
         config = self.service.get_config(guild_id)
         embed = discord.Embed(
             title="Shield Scope and Allowlists",
-            description="Control where Shield scans, who it skips, which domains or invites can bypass only trusted-link policy, which phrases suppress only targeted promo or adult-solicitation text matches, and which channels relax only the optional solicitation detector.",
+            description="Control where Shield scans, who it skips, which domains or invites can bypass only trusted-link policy, which phrases suppress only targeted promo or adult-solicitation text matches, and which channels relax only the optional solicitation / DM-ad detector.",
             color=ge.EMBED_THEME["info"],
         )
         embed.add_field(
@@ -629,7 +659,7 @@ class ShieldCog(commands.Cog):
             value=(
                 "`/shield filters mode:only_included`\n"
                 "`/shield filters target:trusted_role_ids state:on role:@Mods`\n"
-                "`/shield filters target:adult_solicitation_excluded_channel_ids state:on channel:#18plus`\n"
+                "`/shield filters target:adult_solicitation_excluded_channel_ids state:on channel:#adult-market`\n"
                 "`/shield allowlist bucket:allow_domains state:on value:example.com`"
             ),
             inline=False,
@@ -895,7 +925,7 @@ class ShieldCog(commands.Cog):
         if all(value is None for value in (mode, action, low_action, medium_action, high_action)):
             embed = discord.Embed(
                 title="Shield Link Policy",
-                description="Shield link policy is server-wide live-message policy, stays separate from Confessions link mode, and still respects admin allowlists.",
+                description="Shield link policy is a live-message-only policy lane, stays separate from Confessions link mode, and still respects admin allowlists.",
                 color=ge.EMBED_THEME["info"],
             )
             embed.add_field(name="Current Policy", value=self._link_policy_detail(self.service.get_config(ctx.guild.id)), inline=False)
@@ -915,6 +945,35 @@ class ShieldCog(commands.Cog):
             high_action=high_action,
         )
         await self._send_result(ctx, "Shield Link Policy", message, ok=ok)
+
+    @shield_group.group(
+        name="severe",
+        with_app_command=True,
+        invoke_without_command=True,
+        description="Configure severe-harm categories and bundled or custom terms",
+    )
+    async def shield_severe_group(self, ctx: commands.Context):
+        if not await self._guard(ctx):
+            return
+        await send_hybrid_response(ctx, embed=self._rules_embed(ctx.guild.id), ephemeral=True)
+
+    @shield_severe_group.command(name="category", description="Turn a severe-harm category on or off")
+    @app_commands.describe(category="Which severe-harm category to change", state="Turn that category on or off")
+    @app_commands.choices(category=SEVERE_CATEGORY_CHOICES, state=STATE_CHOICES)
+    async def shield_severe_category_command(self, ctx: commands.Context, category: str, state: str):
+        if not await self._guard(ctx):
+            return
+        ok, message = await self.service.set_severe_category(ctx.guild.id, category, state == "on")
+        await self._send_result(ctx, "Shield Severe Categories", message, ok=ok)
+
+    @shield_severe_group.command(name="term", description="Manage bundled and custom severe-harm terms")
+    @app_commands.describe(action="What to do with the phrase", phrase="The exact bundled or custom severe phrase")
+    @app_commands.choices(action=SEVERE_TERM_ACTION_CHOICES)
+    async def shield_severe_term_command(self, ctx: commands.Context, action: str, phrase: str):
+        if not await self._guard(ctx):
+            return
+        ok, message = await self.service.update_severe_term(ctx.guild.id, action, phrase)
+        await self._send_result(ctx, "Shield Severe Terms", message, ok=ok)
 
     @shield_group.command(name="logs", with_app_command=True, description="Configure Shield log delivery")
     @app_commands.describe(channel="Channel for Shield alerts", role="Optional role to ping for alerts", clear_channel="Clear the current log channel", clear_role="Clear the current alert role")

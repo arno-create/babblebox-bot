@@ -8,7 +8,6 @@ Babblebox is intentionally compact and privacy-aware by design:
 
 - no general-purpose message archive
 - no media or attachment blob storage in Postgres
-- no durable quote-feed archive for Moment Cards
 - no always-on AI scanning by default
 - private-first handling for sensitive utility flows such as Watch, reminders, Later, Capture, anonymous confessions, and Shield configuration
 
@@ -28,7 +27,7 @@ Depending on the feature being used, Babblebox may process or store:
 
 - Discord identifiers such as user IDs, guild IDs, channel IDs, message IDs, role IDs, and timestamps
 - compact feature configuration and state, including Watch preferences, ignored channels or users, Later markers, reminders, AFK state, AFK schedules, Daily Arcade results, Buddy or profile state, and Shield or admin configuration
-- limited message or attachment context needed to respond to commands, build Moment Cards from visible messages, deliver Watch alerts, process Capture requests, or evaluate locally flagged Shield events, including visible message text, embed text, forwarded message snapshots, and attachment labels
+- limited message or attachment context needed to respond to commands, deliver Watch alerts, process Capture requests, or evaluate locally flagged Shield events, including visible message text, embed text, forwarded message snapshots, and attachment labels
 - if a server enables suspicious-member review, compact account-age, avatar-state, display-name, and locally flagged message or link context needed to score that review lane
 - anonymous confession or reply submission text, Confessions link fields, compact review metadata, bot-private author mappings, bot-private owner reply opportunities, and limited private appeals or reports needed to run staff-blind confession moderation when a server has Confessions enabled
 - for Confessions, Babblebox now protects sensitive content and identity linkage with application-level encryption and separate lookup domains before those fields reach durable Postgres storage
@@ -40,7 +39,6 @@ Babblebox is designed not to keep certain high-churn or high-risk data as long-t
 - a general-purpose message-content archive
 - media or attachment blobs in Postgres
 - raw attachment filenames or raw Discord CDN URLs in staff-visible confession records
-- a durable quote-feed database for Moment Cards
 - a full deleted-message archive table
 - long-term archives of DM bodies or Capture transcript bodies
 - heavy moderation warehouse-style event history
@@ -52,7 +50,7 @@ Babblebox uses information to operate the bot and its features, including:
 - running commands and building Discord responses
 - delivering Watch alerts, reminders, Later markers, Capture output, AFK behavior, and similar utilities
 - maintaining Daily Arcade progress, compact identity state, and other restart-safe feature state
-- applying optional Shield and admin lifecycle workflows where server administrators enable them
+- applying optional Shield live-message moderation plus bounded private Shield feature-surface checks for utilities and Confessions where those protections are part of the product
 - accepting and moderating anonymous confessions without exposing the author to server staff
 - keeping the service reliable on constrained infrastructure through compact, purpose-bound persistence
 
@@ -63,10 +61,10 @@ Babblebox is not designed as an ad network, data brokerage system, or marketing 
 Babblebox intentionally uses different visibility defaults depending on the feature:
 
 - some features are public-friendly by design, such as profile-style surfaces or Daily sharing
-- Moment Cards are built from visible Discord messages and remain tied to visible message context instead of becoming a hidden archive
 - Watch alerts are DM-only
 - Capture transcripts are delivered privately rather than kept as long-term database archives
 - Later markers, reminders, and sensitive setup flows are private-first
+- AFK reasons, reminder text, public reminder delivery, watch keywords, and Confessions link checks now use bounded private Shield feature-surface evaluation instead of bypassing Babblebox core safety entirely
 - anonymous confessions are optional, are submitted privately when enabled, keep the author hidden from staff, and let staff review by confession ID and case ID only while Babblebox still enforces safety internally
 - that privacy model is meant to make raw database browsing and accidental exposure materially harder, not to claim that the service operator has been removed from the trust boundary
 - deploying the Confessions privacy code and keys is not enough by itself; Babblebox now tracks a privacy-hardening readiness state because legacy rows remain weaker until the Confessions backfill finishes
@@ -95,7 +93,7 @@ Babblebox may rely on necessary service providers to operate, including:
 
 Babblebox does not perform always-on AI scanning by default.
 
-If optional AI-assisted Shield review is enabled where available, it only runs after local Shield logic has already flagged content. In that flow, only minimal, sanitized, and truncated flagged text intended for that review should be sent to the configured AI provider, even when the flagged signal came from scanned embed text, attachment labels, or forwarded message snapshots instead of the raw message body alone.
+If optional AI-assisted Shield review is enabled where available, it only runs after local Shield logic has already flagged live-message content. In that flow, only minimal, sanitized, and truncated flagged text intended for that review should be sent to the configured AI provider, even when the flagged signal came from scanned embed text, attachment labels, or forwarded message snapshots instead of the raw message body alone. Shield's private feature-surface checks for AFK, reminders, watch keywords, and Confessions link parity stay AI-free in this release.
 
 Babblebox is not designed to sell personal information.
 
@@ -137,7 +135,7 @@ Users and administrators can often control Babblebox directly through the bot by
 - removing reminders
 - clearing Later markers
 - changing Watch settings
-- disabling Shield
+- disabling Shield live moderation
 - reconfiguring admin log or review behavior
 
 If you have a privacy-related request about Babblebox-managed data, include enough detail to identify the relevant server, user, and feature state.

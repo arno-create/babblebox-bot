@@ -43,7 +43,6 @@ DURATION_UNITS = {
 IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"}
 VIDEO_EXTENSIONS = {".mp4", ".mov", ".webm", ".mkv", ".avi"}
 AUDIO_EXTENSIONS = {".ogg", ".mp3", ".wav", ".m4a", ".flac"}
-MESSAGE_LINK_RE = re.compile(r"https?://(?:canary\.|ptb\.)?discord(?:app)?\.com/channels/(?P<guild>\d+|@me)/(?P<channel>\d+)/(?P<message>\d+)")
 AFK_CLOCK_RE = re.compile(r"^(?P<hour>\d{1,2})(?::(?P<minute>\d{2}))?\s*(?P<ampm>am|pm)?$")
 
 AFK_QUICK_REASONS = {
@@ -721,73 +720,6 @@ def make_message_preview(content: str | None, *, attachments=None, limit: int = 
         preview = media_summary or "[quiet message]"
 
     return ge.safe_field_text(preview, limit=limit)
-
-
-def parse_message_link(raw: str | None) -> tuple[int | None, int, int] | None:
-    if not raw:
-        return None
-    match = MESSAGE_LINK_RE.search(raw.strip())
-    if match is None:
-        return None
-    guild_value = match.group("guild")
-    guild_id = None if guild_value == "@me" else int(guild_value)
-    return guild_id, int(match.group("channel")), int(match.group("message"))
-
-
-def _quote_block(text: str) -> str:
-    lines = [line.strip() for line in text.splitlines() if line.strip()]
-    if not lines:
-        return "> [moment unavailable]"
-    return "\n".join(f"> {line}" for line in lines[:4])
-
-
-def _message_color(message: discord.Message) -> discord.Color:
-    author_color = getattr(message.author, "color", None)
-    if isinstance(author_color, discord.Color) and author_color.value:
-        return author_color
-    return ge.EMBED_THEME["accent"]
-
-
-def build_moment_card_embed(
-    message: discord.Message,
-    *,
-    followup: discord.Message | None = None,
-    title: str | None = None,
-    requested_by: discord.abc.User | None = None,
-) -> discord.Embed:
-    preview = make_message_preview(message.content, attachments=message.attachments, limit=500)
-    embed = discord.Embed(
-        title=title or "Babblebox Moment",
-        description=_quote_block(preview),
-        color=_message_color(message),
-        timestamp=message.created_at or ge.now_utc(),
-    )
-
-    author_icon = None
-    display_avatar = getattr(message.author, "display_avatar", None)
-    if display_avatar is not None:
-        author_icon = getattr(display_avatar, "url", None)
-    embed.set_author(name=f"{ge.display_name_of(message.author)} saved a keepsake", icon_url=author_icon)
-
-    channel_name = getattr(message.channel, "mention", "#unknown")
-    guild_name = message.guild.name if message.guild else "Direct Messages"
-    scene = f"{guild_name} | {channel_name}"
-    if message.created_at is not None:
-        scene += f"\n{ge.format_timestamp(message.created_at, 'f')}"
-    embed.add_field(name="Scene", value=scene, inline=False)
-
-    if followup is not None:
-        echo_preview = make_message_preview(followup.content, attachments=followup.attachments, limit=320)
-        embed.add_field(
-            name=f"Echo | {ge.display_name_of(followup.author)}",
-            value=_quote_block(echo_preview),
-            inline=False,
-        )
-
-    if requested_by is not None and requested_by.id != getattr(message.author, "id", None):
-        embed.add_field(name="Saved By", value=ge.display_name_of(requested_by), inline=True)
-
-    return ge.style_embed(embed, footer="Babblebox Moment | Live link only, never archived")
 
 
 def build_watch_alert_embed(

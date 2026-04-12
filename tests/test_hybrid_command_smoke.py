@@ -456,6 +456,35 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Support Server", fields["Links"])
         self.assertIn("Official Website", fields["Links"])
 
+    def test_help_surfaces_do_not_reference_removed_moment_feature(self):
+        for page in HELP_PAGES:
+            self.assertNotIn("/moment", page.get("body", ""))
+            self.assertNotIn("/moment", page.get("try", ""))
+            self.assertNotIn("Babblebox Moment", page.get("body", ""))
+
+        compact_embed = build_help_embed()
+        compact_text = "\n".join(
+            [compact_embed.description or ""] + [field.value for field in compact_embed.fields if isinstance(field.value, str)]
+        )
+        self.assertNotIn("/moment", compact_text)
+        self.assertNotIn("Babblebox Moment", compact_text)
+
+    def test_help_surfaces_describe_shipped_shield_admin_flow(self):
+        shield_page = next(page for page in HELP_PAGES if page["title"] == "Shield / Admin Safety")
+        self.assertIn("/shield links", shield_page["body"])
+        self.assertIn("/shield filters", shield_page["body"])
+        self.assertIn("/shield severe category", shield_page["body"])
+        self.assertIn("/shield severe term", shield_page["body"])
+        self.assertIn("Trusted Links Only", shield_page["body"])
+        self.assertIn("Severe Harm / Hate", shield_page["body"])
+        self.assertNotIn("experimental scam heuristics", shield_page["body"])
+
+        compact_embed = build_help_embed()
+        shield_field = next(field for field in compact_embed.fields if field.name == "Shield / Admin")
+        self.assertIn("/shield links", shield_field.value)
+        self.assertIn("/shield filters", shield_field.value)
+        self.assertIn("/shield severe category", shield_field.value)
+
     def test_help_embeds_stay_within_discord_limits(self):
         for index, _page in enumerate(HELP_PAGES):
             with self.subTest(page=index):
@@ -1381,36 +1410,24 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await cog.service.close()
 
-    async def test_moment_public_card_uses_public_visibility(self):
-        bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
-        cog = UtilityCog(bot)
+    async def test_utility_command_surface_excludes_removed_moment_feature(self):
+        bot = commands.Bot(command_prefix="!", intents=discord.Intents.none())
         try:
-            source_author = types.SimpleNamespace(
-                id=5,
-                display_name="Mira",
-                color=discord.Color.blue(),
-                display_avatar=types.SimpleNamespace(url="https://cdn.example/avatar.png"),
-            )
-            source_message = types.SimpleNamespace(
-                content="That one line deserved a card.",
-                attachments=[],
-                author=source_author,
-                channel=types.SimpleNamespace(mention="#general"),
-                guild=types.SimpleNamespace(name="Guild"),
-                created_at=datetime(2026, 3, 21, 12, 0, tzinfo=timezone.utc),
-                jump_url="https://discord.com/channels/10/20/30",
-            )
-            ctx = FakeContext(interaction=FakeInteraction(), guild=FakeGuild(), channel=FakeChannel(), author=FakeAuthor())
+            cog = UtilityCog(bot)
+            await bot.add_cog(cog)
 
-            with patch.object(cog, "_resolve_moment_source", new=AsyncMock(return_value=(source_message, None))):
-                await UtilityCog.moment_create_command.callback(cog, ctx, message_link=None, title="Best Line", visibility="public")
+            slash_roots = {command.name for command in bot.tree.get_commands()}
+            prefix_commands = {command.name for command in cog.walk_commands()}
 
-            self.assertEqual(len(ctx.defer_calls), 1)
-            self.assertFalse(ctx.defer_calls[0]["ephemeral"])
-            self.assertEqual(len(ctx.send_calls), 1)
-            self.assertFalse(ctx.send_calls[0]["ephemeral"])
+            self.assertTrue({"watch", "later", "capture", "remind"}.issubset(slash_roots))
+            self.assertNotIn("moment", slash_roots)
+            self.assertNotIn("moment", prefix_commands)
         finally:
-            await cog.service.close()
+            for loaded in list(bot.cogs.values()):
+                service = getattr(loaded, "service", None)
+                if service is not None:
+                    await service.close()
+            await bot.close()
 
     async def test_shield_panel_overview_reflects_legacy_pack_state(self):
         bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
@@ -1428,7 +1445,7 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
 
             embed = cog.build_panel_embed(guild_id, "overview")
             protection_field = next(field for field in embed.fields if field.name == "Protection Packs")
-            link_safety_field = next(field for field in embed.fields if field.name == "Link Safety")
+            link_safety_field = next(field for field in embed.fields if field.name == "High-Risk Packs")
             link_policy_field = next(field for field in embed.fields if field.name == "Link Policy")
 
             self.assertIn("**Privacy Leak**", protection_field.value)
@@ -1438,7 +1455,8 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Enabled: Yes | Sensitivity: Normal", protection_field.value)
             self.assertIn("Low / Medium / High: `log` / `log` / `log`", protection_field.value)
             self.assertIn("**Scam / Malicious Links**", link_safety_field.value)
-            self.assertIn("**Adult / 18+ Links**", link_safety_field.value)
+            self.assertIn("**Adult Links + Solicitation**", link_safety_field.value)
+            self.assertIn("**Severe Harm / Hate**", link_safety_field.value)
             self.assertIn("Mode: **Default**", link_policy_field.value)
         finally:
             await cog.service.close()
@@ -1558,7 +1576,7 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             )
 
             self.assertEqual(len(ctx.send_calls), 1)
-            self.assertIn("Adult / 18+ Links", ctx.send_calls[0]["embed"].description)
+            self.assertIn("Adult Links + Solicitation", ctx.send_calls[0]["embed"].description)
         finally:
             await cog.service.close()
 
@@ -1679,6 +1697,56 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(len(ctx.send_calls), 1)
             self.assertIn("adult-solicitation carve-out channels", ctx.send_calls[0]["embed"].description)
             self.assertEqual(cog.service.get_config(10)["adult_solicitation_excluded_channel_ids"], [77])
+        finally:
+            await cog.service.close()
+
+    async def test_shield_severe_category_command_updates_config(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
+        cog = ShieldCog(bot)
+        try:
+            cog.service.storage_ready = True
+            ctx = FakeContext(
+                interaction=FakeInteraction(),
+                guild=FakeGuild(10),
+                channel=FakeChannel(),
+                author=FakeAuthor(manage_guild=True),
+            )
+
+            await ShieldCog.shield_severe_category_command.callback(
+                cog,
+                ctx,
+                category="self_harm_encouragement",
+                state="off",
+            )
+
+            self.assertEqual(len(ctx.send_calls), 1)
+            self.assertIn("Self-Harm Encouragement", ctx.send_calls[0]["embed"].description)
+            self.assertNotIn("self_harm_encouragement", cog.service.get_config(10)["severe_enabled_categories"])
+        finally:
+            await cog.service.close()
+
+    async def test_shield_severe_term_command_updates_config(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
+        cog = ShieldCog(bot)
+        try:
+            cog.service.storage_ready = True
+            ctx = FakeContext(
+                interaction=FakeInteraction(),
+                guild=FakeGuild(10),
+                channel=FakeChannel(),
+                author=FakeAuthor(manage_guild=True),
+            )
+
+            await ShieldCog.shield_severe_term_command.callback(
+                cog,
+                ctx,
+                action="add",
+                phrase="you scumlord",
+            )
+
+            self.assertEqual(len(ctx.send_calls), 1)
+            self.assertIn("Custom severe term", ctx.send_calls[0]["embed"].description)
+            self.assertIn("you scumlord", cog.service.get_config(10)["severe_custom_terms"])
         finally:
             await cog.service.close()
 

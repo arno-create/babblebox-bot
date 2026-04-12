@@ -1004,7 +1004,7 @@ def sanitize_afk_reason(reason):
         field_name="AFK reason",
         max_length=AFK_REASON_MAX_LEN,
         sentence_limit=AFK_REASON_SENTENCE_LIMIT,
-        reject_blocklist=True,
+        reject_blocklist=False,
         allow_empty=True,
     )
 

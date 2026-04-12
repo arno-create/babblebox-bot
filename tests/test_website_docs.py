@@ -1,6 +1,8 @@
 from pathlib import Path
 import unittest
 
+from babblebox.web import app
+
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -225,6 +227,48 @@ class WebsiteDocsTests(unittest.TestCase):
             self.assertIn(text, help_html)
         self.assertIn("solicitation carve-out channels", readme)
         self.assertIn("solicitation carve-out channels", help_html)
+        for text in ("Adult Links + Solicitation", "Severe Harm / Hate", "/shield severe category", "/shield severe term"):
+            self.assertIn(text, readme)
+            self.assertIn(text, help_html)
+        self.assertNotIn("Adult / 18+ Safety", readme)
+        self.assertNotIn("Adult / 18+ Safety", help_html)
+
+    def test_shield_docs_cover_cross_feature_immunity_boundary_and_live_ai_scope(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        help_html = (ROOT / "help.html").read_text(encoding="utf-8")
+        privacy_md = (ROOT / "PRIVACY.md").read_text(encoding="utf-8")
+        privacy_html = (ROOT / "privacy.html").read_text(encoding="utf-8")
+        index_html = (ROOT / "index.html").read_text(encoding="utf-8")
+
+        for text in (
+            "bounded cross-feature immunity layer",
+            "live-message moderation remains optional",
+            "AFK reasons",
+            "reminder text plus public reminder delivery",
+            "watch keyword",
+            "Confessions unsafe-link parity",
+            "live-message-only",
+        ):
+            self.assertIn(text, readme)
+        for text in ("watch keyword setup stays privacy-only", "privacy, adult, and severe"):
+            self.assertIn(text, readme)
+        for text in (
+            "bounded feature-surface checks",
+            "The toggle controls live-message moderation",
+            "live-message-only",
+        ):
+            self.assertIn(text, help_html)
+        for text in ("watch keyword setup stays privacy-only", "privacy, adult, and severe"):
+            self.assertIn(text, help_html)
+        for text in (
+            "feature-surface checks",
+            "live-message content",
+            "Shield live moderation",
+        ):
+            self.assertIn(text, privacy_md)
+            self.assertIn(text, privacy_html)
+        self.assertIn("bounded private immunity", index_html)
+        self.assertIn("private feature-surface checks", index_html)
 
     def test_privacy_docs_cover_confessions_storage_and_staff_blind_behavior(self):
         privacy_md = (ROOT / "PRIVACY.md").read_text(encoding="utf-8")
@@ -358,3 +402,17 @@ class WebsiteDocsTests(unittest.TestCase):
             "bb!admin followup true @Probation review 30d",
         ):
             self.assertIn(expected_text, readme)
+
+    def test_removed_moment_feature_is_absent_from_docs_and_health(self):
+        for path in ("README.md", "help.html", "PRIVACY.md", "privacy.html", "TERMS.md", "terms.html"):
+            content = (ROOT / path).read_text(encoding="utf-8")
+            self.assertNotIn("/moment", content, msg=path)
+            self.assertNotIn("bb!moment", content, msg=path)
+            self.assertNotIn("Moment Card", content, msg=path)
+            self.assertNotIn("Moment Cards", content, msg=path)
+            self.assertNotIn("Babblebox Moment", content, msg=path)
+
+        response = app.test_client().get("/health")
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertNotIn("/moment recent", payload["commands"])

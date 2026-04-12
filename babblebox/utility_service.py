@@ -11,6 +11,15 @@ import discord
 from discord.ext import commands
 
 from babblebox import game_engine as ge
+from babblebox.shield_service import (
+    FEATURE_SURFACE_AFK_REASON,
+    FEATURE_SURFACE_AFK_SCHEDULE_REASON,
+    FEATURE_SURFACE_REMINDER_CREATE,
+    FEATURE_SURFACE_REMINDER_PUBLIC_DELIVERY,
+    FEATURE_SURFACE_WATCH_KEYWORD,
+    ShieldFeatureDecision,
+    ShieldFeatureSafetyGateway,
+)
 from babblebox.text_safety import find_private_pattern, normalize_plain_text, sanitize_short_plain_text
 from babblebox.utility_helpers import (
     build_afk_notice_line,
@@ -103,6 +112,7 @@ class UtilityService:
         self._lock = asyncio.Lock()
         self._wake_event = asyncio.Event()
         self._scheduler_task: asyncio.Task | None = None
+        self._shield_feature_gateway_fallback = ShieldFeatureSafetyGateway()
 
         self._mention_global: set[int] = set()
         self._mention_by_guild: dict[int, set[int]] = {}
@@ -152,6 +162,7 @@ class UtilityService:
             self._scheduler_task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await self._scheduler_task
+        await self._shield_feature_gateway_fallback.close()
         await self.store.close()
 
     def storage_message(self, feature_name: str = "This feature") -> str:
@@ -159,6 +170,14 @@ class UtilityService:
 
     def _has_storage(self) -> bool:
         return self.storage_ready
+
+    def _shield_feature_gateway(self) -> ShieldFeatureSafetyGateway:
+        shield_service = getattr(self.bot, "shield_service", None)
+        gateway = getattr(shield_service, "feature_gateway", None)
+        return gateway if callable(getattr(gateway, "evaluate", None)) else self._shield_feature_gateway_fallback
+
+    def _evaluate_feature_text(self, surface: str, text: str | None) -> ShieldFeatureDecision:
+        return self._shield_feature_gateway().evaluate(surface, text)
 
     def _watch_config(self, user_id: int, *, create: bool = False) -> dict | None:
         configs = self.store.state.setdefault("watch", {})
@@ -385,6 +404,9 @@ class UtilityService:
             return False, "Keyword cannot be only numbers."
         if len(token) >= 4 and len(set(token.casefold())) == 1:
             return False, "Keyword is too repetitive to be useful."
+        feature_decision = self._evaluate_feature_text(FEATURE_SURFACE_WATCH_KEYWORD, cleaned)
+        if not feature_decision.allowed:
+            return False, feature_decision.user_message or "That keyword is not allowed."
         return True, cleaned
 
     def _watch_scope_label(self, scope: str) -> str:
@@ -1096,9 +1118,19 @@ class UtilityService:
             return False, "Reminder delivery must be either `dm` or `here`."
         max_length = 80 if delivery == "here" else REMINDER_TEXT_MAX_LEN
         sentence_limit = 1 if delivery == "here" else 2
-        valid, cleaned_or_error = sanitize_short_plain_text(text, field_name="Reminder text", max_length=max_length, sentence_limit=sentence_limit, reject_blocklist=True, allow_empty=False)
+        valid, cleaned_or_error = sanitize_short_plain_text(
+            text,
+            field_name="Reminder text",
+            max_length=max_length,
+            sentence_limit=sentence_limit,
+            reject_blocklist=False,
+            allow_empty=False,
+        )
         if not valid:
             return False, cleaned_or_error
+        feature_decision = self._evaluate_feature_text(FEATURE_SURFACE_REMINDER_CREATE, cleaned_or_error)
+        if not feature_decision.allowed:
+            return False, feature_decision.user_message or "That reminder text is not allowed."
         if delay_seconds < REMINDER_MIN_SECONDS or delay_seconds > REMINDER_MAX_SECONDS:
             return False, f"Reminders must be between {format_duration_brief(REMINDER_MIN_SECONDS)} and {format_duration_brief(REMINDER_MAX_SECONDS)}."
         if delivery == "here" and delay_seconds < REMINDER_PUBLIC_MIN_SECONDS:
@@ -1272,6 +1304,16 @@ class UtilityService:
         view = build_reminder_delivery_view(record)
         user_id = record.get("user_id")
         if record.get("delivery") == "here" and isinstance(record.get("channel_id"), int):
+            feature_decision = self._evaluate_feature_text(FEATURE_SURFACE_REMINDER_PUBLIC_DELIVERY, record.get("text"))
+            if not feature_decision.allowed:
+                user = self.bot.get_user(user_id)
+                if user is None:
+                    with contextlib.suppress(discord.HTTPException, discord.Forbidden, discord.NotFound):
+                        user = await self.bot.fetch_user(user_id)
+                if user is not None:
+                    with contextlib.suppress(discord.Forbidden, discord.HTTPException):
+                        await user.send(feature_decision.user_message or "Babblebox withheld that public reminder.")
+                return True
             channel = self.bot.get_channel(record["channel_id"])
             if channel is None:
                 with contextlib.suppress(discord.HTTPException, discord.Forbidden, discord.NotFound):
@@ -1459,6 +1501,9 @@ class UtilityService:
         valid, cleaned_or_error = ge.sanitize_afk_reason(reason)
         if not valid:
             return False, cleaned_or_error
+        feature_decision = self._evaluate_feature_text(FEATURE_SURFACE_AFK_REASON, cleaned_or_error)
+        if not feature_decision.allowed:
+            return False, feature_decision.user_message or "That AFK reason is not allowed."
         created_at = ge.now_utc()
         scheduled = start_in_seconds is not None or start_at is not None
         starts_at = start_at or (created_at + timedelta(seconds=start_in_seconds) if start_in_seconds is not None else created_at)
@@ -1500,6 +1545,9 @@ class UtilityService:
         valid, cleaned_or_error = ge.sanitize_afk_reason(reason)
         if not valid:
             return False, cleaned_or_error
+        feature_decision = self._evaluate_feature_text(FEATURE_SURFACE_AFK_SCHEDULE_REASON, cleaned_or_error)
+        if not feature_decision.allowed:
+            return False, feature_decision.user_message or "That recurring AFK reason is not allowed."
         ok, canonical_timezone, error = canonicalize_afk_timezone(timezone_name)
         if not ok or canonical_timezone is None:
             return False, error or "That AFK timezone is invalid."
