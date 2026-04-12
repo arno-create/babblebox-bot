@@ -1,6 +1,10 @@
 import unittest
 
-from babblebox.text_safety import sanitize_short_plain_text
+from babblebox.text_safety import (
+    is_harmful_context_suppressed,
+    is_reporting_or_educational_context,
+    sanitize_short_plain_text,
+)
 
 
 class TextSafetyTests(unittest.TestCase):
@@ -35,3 +39,26 @@ class TextSafetyTests(unittest.TestCase):
         )
         self.assertFalse(ok)
         self.assertIn("blocked or inappropriate", message)
+
+    def test_reporting_or_educational_context_recognizes_moderation_variants(self):
+        for text in (
+            "report this person for saying kill yourself",
+            "moderation note: user said dm me for nudes",
+            "mods deleted you retard spam",
+            "sexual health workshop tomorrow",
+        ):
+            with self.subTest(text=text):
+                self.assertTrue(is_reporting_or_educational_context(text))
+
+    def test_harmful_context_suppression_handles_reporting_and_disapproval_variants(self):
+        for text in (
+            "report this person for saying kill yourself",
+            "moderation note: user said dm me for nudes",
+            "mods deleted you retard spam",
+            "please do not call people retard",
+            "please do not tell people to kill yourself",
+        ):
+            with self.subTest(text=text):
+                self.assertTrue(is_harmful_context_suppressed(text, include_disapproval=True))
+
+        self.assertFalse(is_harmful_context_suppressed("selling nudes in DMs", include_disapproval=True))

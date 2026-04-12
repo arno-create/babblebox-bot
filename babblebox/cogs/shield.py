@@ -25,7 +25,7 @@ PACK_CHOICES = [
     app_commands.Choice(name="Privacy Leak", value="privacy"),
     app_commands.Choice(name="Promo / Invite", value="promo"),
     app_commands.Choice(name="Scam / Malicious Links", value="scam"),
-    app_commands.Choice(name="Adult / 18+ Safety", value="adult"),
+    app_commands.Choice(name="Adult Links + Solicitation", value="adult"),
     app_commands.Choice(name="Severe Harm / Hate", value="severe"),
 ]
 ACTION_CHOICES = [
@@ -617,7 +617,7 @@ class ShieldCog(commands.Cog):
         config = self.service.get_config(guild_id)
         embed = discord.Embed(
             title="Shield Scope and Allowlists",
-            description="Control where Shield scans, who it skips, which domains or invites can bypass only trusted-link policy, which phrases suppress only targeted promo or adult-solicitation text matches, and which channels relax only the optional solicitation detector.",
+            description="Control where Shield scans, who it skips, which domains or invites can bypass only trusted-link policy, which phrases suppress only targeted promo or adult-solicitation text matches, and which channels relax only the optional solicitation / DM-ad detector.",
             color=ge.EMBED_THEME["info"],
         )
         embed.add_field(
@@ -659,7 +659,7 @@ class ShieldCog(commands.Cog):
             value=(
                 "`/shield filters mode:only_included`\n"
                 "`/shield filters target:trusted_role_ids state:on role:@Mods`\n"
-                "`/shield filters target:adult_solicitation_excluded_channel_ids state:on channel:#18plus`\n"
+                "`/shield filters target:adult_solicitation_excluded_channel_ids state:on channel:#adult-market`\n"
                 "`/shield allowlist bucket:allow_domains state:on value:example.com`"
             ),
             inline=False,

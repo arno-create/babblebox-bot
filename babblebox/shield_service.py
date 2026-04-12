@@ -113,7 +113,7 @@ PACK_LABELS = {
     "privacy": "Privacy Leak",
     "promo": "Promo / Invite",
     "scam": "Scam / Malicious Links",
-    "adult": "Adult / 18+ Safety",
+    "adult": "Adult Links + Solicitation",
     "severe": "Severe Harm / Hate",
     "link_policy": "Link Policy",
     "advanced": "Advanced Pattern",
@@ -197,7 +197,7 @@ PROMO_CONTEXT_RE = re.compile(r"(?i)\b(?:server|community|channel|stream|shop|st
 MONETIZED_PROMO_RE = re.compile(
     r"(?i)\b(?:commission(?:s)? open|patreon|ko-fi|gumroad|etsy|shop|store|prices|paid promo|sponsored)\b"
 )
-ADULT_SOLICIT_CONTACT_RE = re.compile(r"(?i)\b(?:dm(?: me)?|message me|msg me|pm me|inbox me|hit me up)\b")
+ADULT_SOLICIT_CONTACT_RE = re.compile(r"(?i)\b(?:dm me|dm us|message me|message us|msg me|msg us|pm me|pm us|inbox me|inbox us|hit me up)\b")
 ADULT_SOLICIT_DM_GATE_RE = re.compile(r"(?i)\b(?:more in dms?|dm for|message for|ask in dms?|ask me in dms?)\b")
 ADULT_SOLICIT_SALE_RE = re.compile(
     r"(?i)\b(?:sell(?:ing)?|buy|paid|pay|prices?|menu|subscribe|purchase|order|customs? open|taking requests|requests open)\b"
@@ -236,6 +236,7 @@ ADULT_SOLICIT_OPEN_DM_RE = re.compile(
 ADULT_SOLICIT_DM_DESTINATION_RE = re.compile(
     r"(?i)\b(?:nudes?|lewds?|pics?|photos?|vids?|videos?|menu|prices?|custom content|customs?|18\+)\b.{0,12}\b(?:in|via|through)\s+dms?\b"
 )
+ADULT_SOLICIT_DM_MENU_PRICE_RE = re.compile(r"(?i)\b(?:menu|prices?)\b.{0,12}\b(?:in|via|through)\s+dms?\b")
 ADULT_SOLICIT_SALES_OFFER_RE = re.compile(
     r"(?i)\b(?:selling|buy|paid|pay|menu|prices?|subscribe|order)\b.{0,18}\b(?:nudes?|lewds?|pics?|photos?|vids?|videos?|onlyfans|only fans|custom content|customs?|18\+)\b"
 )
@@ -243,7 +244,7 @@ ADULT_SOLICIT_BENIGN_PHOTO_RE = re.compile(
     r"(?i)\b(?:art|camera|cat|cats|concert|dog|dogs|event|meme|memes|outfit|pet|pets|photo(?:graphy)?|receipt|reference|screenshot|screenshots|setup|travel|vacation|wedding)\b"
 )
 ADULT_SOLICIT_BENIGN_MENU_RE = re.compile(
-    r"(?i)\b(?:art|artist|bakery|cake|commission|design|hair|menu planning|nails|photo(?:graphy)?|portfolio|tattoo)\b"
+    r"(?i)\b(?:art|artist|bakery|bar|brunch|cake|cafe|catering|coffee|commission|design|dinner|drink|drinks|food|hair|lunch|menu planning|nails|photo(?:graphy)?|portfolio|restaurant|salon|service|services|spa|tattoo)\b"
 )
 SEVERE_CATEGORY_LABELS = {
     "sexual_exploitation": "Sexual Exploitation",
@@ -2698,8 +2699,8 @@ class ShieldService:
                     self._make_pack_match(
                         pack="adult",
                         settings=compiled.adult,
-                        label="Adult / 18+ domain",
-                        reason="A linked domain matched Shield's bundled adult / 18+ domain intelligence.",
+                        label="Known adult domain",
+                        reason="A linked domain matched Shield's bundled adult-domain intelligence.",
                         confidence="high",
                         heuristic=False,
                         match_class="adult_domain",
@@ -2733,6 +2734,7 @@ class ShieldService:
         product_hit_set = set(product_hits)
         visual_hits = product_hit_set.intersection({"photo", "photos", "pic", "pics", "vid", "video", "videos", "vids"})
         menu_price_only = bool(product_hit_set) and product_hit_set.issubset({"content", "menu", "price", "prices"})
+        benign_menu_context = bool(ADULT_SOLICIT_BENIGN_MENU_RE.search(text))
         direct_contact = bool(ADULT_SOLICIT_CONTACT_RE.search(text))
         dm_gate = bool(ADULT_SOLICIT_DM_GATE_RE.search(text))
         sale = bool(ADULT_SOLICIT_SALE_RE.search(text))
@@ -2743,10 +2745,13 @@ class ShieldService:
             or ADULT_SOLICIT_DM_DESTINATION_RE.search(text)
         )
         sales_offer = bool(ADULT_SOLICIT_SALES_OFFER_RE.search(text))
+        menu_price_dm_euphemism = bool(ADULT_SOLICIT_DM_MENU_PRICE_RE.search(text))
+        if menu_price_dm_euphemism and not benign_menu_context and settings.sensitivity in {"normal", "high"}:
+            euphemism_hits = [*euphemism_hits, "dm_menu_price"]
         weak_photo_ad = direct_route_offer and not strong_hits and not euphemism_hits and bool(visual_hits)
         if weak_photo_ad and ADULT_SOLICIT_BENIGN_PHOTO_RE.search(text):
             return []
-        if sales_offer and not strong_hits and not euphemism_hits and ADULT_SOLICIT_BENIGN_MENU_RE.search(text):
+        if sales_offer and not strong_hits and not euphemism_hits and benign_menu_context:
             return []
 
         score = 0
@@ -3011,8 +3016,8 @@ class ShieldService:
                 heuristic = False
                 match_class = "link_policy_malicious"
             elif assessment is not None and assessment.category == ADULT_LINK_CATEGORY:
-                label = "Adult / 18+ domain"
-                reason = "Shield trusted-only mode blocked a domain that matched local adult / 18+ domain intelligence."
+                label = "Known adult domain"
+                reason = "Shield trusted-only mode blocked a domain that matched local adult-domain intelligence."
                 confidence = "high"
                 heuristic = False
                 match_class = "link_policy_adult"

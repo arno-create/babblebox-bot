@@ -748,7 +748,7 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(adult_matches[0].confidence, "high")
         self.assertEqual(adult_matches[0].action, "delete_log")
 
-    async def test_adult_solicitation_suppresses_education_and_reporting_contexts(self):
+    async def test_adult_solicitation_suppresses_education_reporting_moderation_and_disapproval_contexts(self):
         ok, _ = await self.service.set_pack_config(
             10,
             "adult",
@@ -763,6 +763,10 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
             "This sexual health workshop covers consent, trafficking awareness, and adult content moderation.",
             'Reported screenshot for review: they said "DM me for nudes" in another server.',
             'Moderation log quote: user said "selling nude pics, more in DMs" in another server.',
+            "report this ad: DM me for nudes",
+            'moderation note: user said "DM me for nudes"',
+            "mods deleted DM me for nudes spam",
+            "please do not say DM me for nudes here",
         ):
             with self.subTest(text=text):
                 result = self.service.test_message_details(10, text)
@@ -854,6 +858,8 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
             ("18+ pics in DM", "adult_dm_ad"),
             ("DM me for OF", "adult_dm_ad"),
             ("DM for pics", "adult_dm_ad"),
+            ("menu in DM", "adult_dm_ad"),
+            ("prices via DM", "adult_dm_ad"),
             ("Buy my nudes", "adult_solicitation"),
         ):
             with self.subTest(text=text):
@@ -861,6 +867,36 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
                 adult_matches = [match for match in result.matches if match.pack == "adult"]
                 self.assertTrue(adult_matches)
                 self.assertEqual(adult_matches[0].match_class, expected_class)
+
+    async def test_adult_solicitation_dm_menu_euphemisms_require_normal_sensitivity(self):
+        ok, _ = await self.service.set_pack_config(
+            10,
+            "adult",
+            enabled=True,
+            action="delete_log",
+            sensitivity="low",
+            adult_solicitation=True,
+        )
+        self.assertTrue(ok)
+
+        low_result = self.service.test_message_details(10, "menu in DM")
+        self.assertFalse([match for match in low_result.matches if match.pack == "adult"])
+
+        ok, _ = await self.service.set_pack_config(
+            10,
+            "adult",
+            enabled=True,
+            action="delete_log",
+            sensitivity="normal",
+            adult_solicitation=True,
+        )
+        self.assertTrue(ok)
+
+        normal_result = self.service.test_message_details(10, "menu in DM")
+        adult_matches = [match for match in normal_result.matches if match.pack == "adult"]
+        self.assertTrue(adult_matches)
+        self.assertEqual(adult_matches[0].match_class, "adult_dm_ad")
+        self.assertEqual(adult_matches[0].confidence, "medium")
 
     async def test_adult_solicitation_suppresses_benign_photo_and_service_contexts(self):
         ok, _ = await self.service.set_pack_config(
@@ -876,6 +912,7 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         for text in (
             "DM me for pics of the event tonight.",
             "Message me for menu prices for tattoo designs.",
+            "catering menu in DM for tonight's event",
             "Sexual health workshop tomorrow.",
         ):
             with self.subTest(text=text):
@@ -1218,6 +1255,11 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         for text in (
             'Reported screenshot for moderation: they said "kill yourself" in another server.',
             'History example for review: "exterminate jews" is genocidal rhetoric.',
+            'moderation note: user said "kill yourself"',
+            "mods deleted you retard spam",
+            "report this ad: DM me for CSAM prices",
+            "please do not tell people to kill yourself",
+            "please do not call people retard",
             "shut up",
             "no one cares",
         ):

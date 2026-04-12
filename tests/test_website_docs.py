@@ -227,9 +227,11 @@ class WebsiteDocsTests(unittest.TestCase):
             self.assertIn(text, help_html)
         self.assertIn("solicitation carve-out channels", readme)
         self.assertIn("solicitation carve-out channels", help_html)
-        for text in ("Adult / 18+ Safety", "Severe Harm / Hate", "/shield severe category", "/shield severe term"):
+        for text in ("Adult Links + Solicitation", "Severe Harm / Hate", "/shield severe category", "/shield severe term"):
             self.assertIn(text, readme)
             self.assertIn(text, help_html)
+        self.assertNotIn("Adult / 18+ Safety", readme)
+        self.assertNotIn("Adult / 18+ Safety", help_html)
 
     def test_shield_docs_cover_cross_feature_immunity_boundary_and_live_ai_scope(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")

@@ -469,6 +469,22 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertNotIn("/moment", compact_text)
         self.assertNotIn("Babblebox Moment", compact_text)
 
+    def test_help_surfaces_describe_shipped_shield_admin_flow(self):
+        shield_page = next(page for page in HELP_PAGES if page["title"] == "Shield / Admin Safety")
+        self.assertIn("/shield links", shield_page["body"])
+        self.assertIn("/shield filters", shield_page["body"])
+        self.assertIn("/shield severe category", shield_page["body"])
+        self.assertIn("/shield severe term", shield_page["body"])
+        self.assertIn("Trusted Links Only", shield_page["body"])
+        self.assertIn("Severe Harm / Hate", shield_page["body"])
+        self.assertNotIn("experimental scam heuristics", shield_page["body"])
+
+        compact_embed = build_help_embed()
+        shield_field = next(field for field in compact_embed.fields if field.name == "Shield / Admin")
+        self.assertIn("/shield links", shield_field.value)
+        self.assertIn("/shield filters", shield_field.value)
+        self.assertIn("/shield severe category", shield_field.value)
+
     def test_help_embeds_stay_within_discord_limits(self):
         for index, _page in enumerate(HELP_PAGES):
             with self.subTest(page=index):
@@ -1439,7 +1455,7 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Enabled: Yes | Sensitivity: Normal", protection_field.value)
             self.assertIn("Low / Medium / High: `log` / `log` / `log`", protection_field.value)
             self.assertIn("**Scam / Malicious Links**", link_safety_field.value)
-            self.assertIn("**Adult / 18+ Safety**", link_safety_field.value)
+            self.assertIn("**Adult Links + Solicitation**", link_safety_field.value)
             self.assertIn("**Severe Harm / Hate**", link_safety_field.value)
             self.assertIn("Mode: **Default**", link_policy_field.value)
         finally:
@@ -1560,7 +1576,7 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             )
 
             self.assertEqual(len(ctx.send_calls), 1)
-            self.assertIn("Adult / 18+ Safety", ctx.send_calls[0]["embed"].description)
+            self.assertIn("Adult Links + Solicitation", ctx.send_calls[0]["embed"].description)
         finally:
             await cog.service.close()
 

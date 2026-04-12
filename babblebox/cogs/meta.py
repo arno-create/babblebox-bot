@@ -162,16 +162,16 @@ HELP_PAGES: list[dict[str, str]] = [
         "emoji": "\U0001f6e1\ufe0f",
         "description": "Optional server-side protection and compact admin automations with conservative defaults.",
         "body": (
-            "Shield can watch for privacy leaks, invite or promo abuse, and experimental scam heuristics.\n"
-            "`/shield panel`, `/shield rules`, `/shield ai`, and `/shield test` cover the core admin flow.\n"
+            "Shield can watch for privacy leaks, invite or promo abuse, malicious or scam links, adult-domain intel plus optional solicitation / DM-ad text, and a separate Severe Harm / Hate pack for real-harm abuse only.\n"
+            "`/shield panel`, `/shield rules`, `/shield links`, `/shield filters`, `/shield allowlist`, `/shield logs`, `/shield severe category`, `/shield severe term`, `/shield ai`, and `/shield test` cover the shipped admin flow.\n"
             "`/admin panel`, `/admin followup`, `/admin verification`, and `/admin sync` cover returned-after-ban follow-up roles and unverified cleanup.\n"
             "Everything stays off until an admin configures it.\n"
-            "Defaults are log-first, with low/medium/high action policy, allowlists, trusted-role bypasses, private mod-log alerts, and safe advanced wildcard patterns instead of raw regex.\n"
+            "Defaults are log-first, with low/medium/high action policy, Trusted Links Only mode, allowlists, trusted-role bypasses, solicitation carve-out channels, private mod-log alerts, and safe advanced wildcard patterns instead of raw regex.\n"
             "Repeated noisy links can stay low-confidence and log-only instead of being misread as strong promo.\n"
             "AI assist is optional, admin-only, support-server limited by default, and only reviews messages that local Shield already flagged. It never punishes on its own.\n"
             "Admin lifecycle helpers stay compact: no Babblebox ban/kick command suite, no giant case archive, and no per-member task explosion."
         ),
-        "try": "`/shield panel`, `/admin panel`, `/admin verification`, `/admin sync`",
+        "try": "`/shield panel`, `/shield links`, `/shield filters`, `/shield severe category`, `/admin panel`",
     },
     {
         "title": "Setup / Tips",
@@ -310,8 +310,9 @@ def build_help_embed() -> discord.Embed:
     embed.add_field(
         name="Shield / Admin",
         value=(
-            "`/shield panel`, `/shield rules`, `/shield ai`, `/admin panel`, `/admin verification`, and `/admin sync` "
-            "cover safety setup and compact admin automation."
+            "`/shield panel`, `/shield rules`, `/shield links`, `/shield filters`, `/shield severe category`, "
+            "`/shield severe term`, `/shield ai`, `/admin panel`, `/admin verification`, and `/admin sync` "
+            "cover live safety setup and compact admin automation."
         ),
         inline=False,
     )
