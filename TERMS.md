@@ -74,7 +74,7 @@ Babblebox may restrict or terminate use connected to abusive or high-risk behavi
 
 ## Media, Message Templates, and Custom Content
 
-Some features work with message links, attachment references, reminder text, AFK text, Watch keywords, Moment Card sources, or administrator-supplied templates and settings.
+Some features work with message links, attachment references, reminder text, AFK text, Watch keywords, or administrator-supplied templates and settings.
 
 Babblebox is not a general media host, backup service, or permanent record system.
 

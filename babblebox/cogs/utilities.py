@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import contextlib
 from typing import Optional
 
 import discord
@@ -9,8 +8,7 @@ from discord.ext import commands
 
 from babblebox import game_engine as ge
 from babblebox.command_utils import defer_hybrid_response, require_channel_permissions, send_hybrid_response
-from babblebox.text_safety import sanitize_short_plain_text
-from babblebox.utility_helpers import build_jump_view, build_moment_card_embed, deserialize_datetime, parse_message_link
+from babblebox.utility_helpers import build_jump_view, deserialize_datetime
 from babblebox.utility_service import WATCH_KEYWORD_LIMIT, UtilityService
 
 
@@ -27,10 +25,6 @@ WATCH_STATE_CHOICES = [
 WATCH_MODE_CHOICES = [
     app_commands.Choice(name="Contains phrase", value="contains"),
     app_commands.Choice(name="Whole word", value="word"),
-]
-VISIBILITY_CHOICES = [
-    app_commands.Choice(name="Public", value="public"),
-    app_commands.Choice(name="Only me", value="private"),
 ]
 REMINDER_DELIVERY_CHOICES = [
     app_commands.Choice(name="DM me", value="dm"),
@@ -168,8 +162,6 @@ class UtilityCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.service = UtilityService(bot)
-        self._moment_user_cooldowns: dict[int, float] = {}
-        self._moment_channel_cooldowns: dict[int, float] = {}
 
     async def cog_load(self):
         await self.service.start()
@@ -231,9 +223,6 @@ class UtilityCog(commands.Cog):
             ),
         )
         return False
-
-    def _is_private_visibility(self, visibility: str) -> bool:
-        return visibility == "private"
 
     def _watch_channel_id(self, channel) -> int | None:
         return channel.id if isinstance(channel, (discord.TextChannel, discord.Thread)) else None
@@ -363,24 +352,6 @@ class UtilityCog(commands.Cog):
         if len(user_ids) > 5:
             rendered.append(f"+{len(user_ids) - 5} more")
         return ", ".join(rendered)
-
-    def _moment_card_cooldown_error(self, ctx: commands.Context, *, visibility: str) -> str | None:
-        if self._is_private_visibility(visibility):
-            return None
-        now = self.bot.loop.time()
-        user_remaining = 12.0 - (now - self._moment_user_cooldowns.get(ctx.author.id, 0.0))
-        channel_key = ctx.channel.id if ctx.channel is not None else 0
-        channel_remaining = 6.0 - (now - self._moment_channel_cooldowns.get(channel_key, 0.0))
-        if user_remaining > 0 or channel_remaining > 0:
-            wait_for = int(max(user_remaining, channel_remaining)) + 1
-            return f"Moment cards are rate-limited in public channels. Try again in about {wait_for} seconds, or use private visibility."
-        self._moment_user_cooldowns[ctx.author.id] = now
-        if channel_key:
-            self._moment_channel_cooldowns[channel_key] = now
-        return None
-
-    def _message_link_hint(self) -> str:
-        return "Use a Discord message link, or run the prefix command as a reply to the message you want to turn into a card."
 
     def _watch_settings_embed(
         self,
@@ -578,226 +549,6 @@ class UtilityCog(commands.Cog):
             ),
         )
         return None
-
-    def _reply_source_message(self, ctx: commands.Context) -> discord.Message | None:
-        reference = getattr(getattr(ctx, "message", None), "reference", None)
-        resolved = getattr(reference, "resolved", None)
-        cached_message = getattr(reference, "cached_message", None)
-        if isinstance(resolved, discord.Message):
-            return resolved
-        if isinstance(cached_message, discord.Message):
-            return cached_message
-        return None
-
-    async def _resolve_moment_from_link(self, ctx: commands.Context, message_link: str) -> discord.Message | None:
-        parsed = parse_message_link(message_link)
-        if parsed is None:
-            await self._send_private_embed(
-                ctx,
-                embed=ge.make_status_embed(
-                    "Invalid Message Link",
-                    self._message_link_hint(),
-                    tone="warning",
-                    footer="Babblebox Moment",
-                ),
-            )
-            return None
-
-        guild_id, channel_id, message_id = parsed
-        if ctx.guild is None or guild_id != ctx.guild.id:
-            await self._send_private_embed(
-                ctx,
-                embed=ge.make_status_embed(
-                    "Same Server Only",
-                    "Moment cards only support message links from this server so Babblebox can verify access safely.",
-                    tone="warning",
-                    footer="Babblebox Moment",
-                ),
-            )
-            return None
-
-        channel = self.bot.get_channel(channel_id)
-        if channel is None:
-            with contextlib.suppress(discord.Forbidden, discord.HTTPException, discord.NotFound):
-                channel = await self.bot.fetch_channel(channel_id)
-        if channel is None:
-            await self._send_private_embed(
-                ctx,
-                embed=ge.make_status_embed(
-                    "Message Unavailable",
-                    "I could not open that channel.",
-                    tone="warning",
-                    footer="Babblebox Moment",
-                ),
-            )
-            return None
-
-        permissions = channel.permissions_for(ctx.author)
-        if not (permissions.view_channel and permissions.read_message_history):
-            await self._send_private_embed(
-                ctx,
-                embed=ge.make_status_embed(
-                    "Access Denied",
-                    "You need channel access and message history access for that message.",
-                    tone="warning",
-                    footer="Babblebox Moment",
-                ),
-            )
-            return None
-
-        try:
-            message = await channel.fetch_message(message_id)
-        except (discord.Forbidden, discord.HTTPException, discord.NotFound):
-            await self._send_private_embed(
-                ctx,
-                embed=ge.make_status_embed(
-                    "Message Missing",
-                    "I could not fetch that message. The link may be stale or inaccessible.",
-                    tone="warning",
-                    footer="Babblebox Moment",
-                ),
-            )
-            return None
-        return message
-
-    async def _resolve_moment_source(self, ctx: commands.Context, message_link: str | None) -> tuple[discord.Message | None, discord.Message | None]:
-        source = self._reply_source_message(ctx)
-        followup = None
-        if source is None and message_link:
-            source = await self._resolve_moment_from_link(ctx, message_link)
-        if source is None:
-            await self._send_private_embed(
-                ctx,
-                embed=ge.make_status_embed(
-                    "Moment Source Needed",
-                    self._message_link_hint(),
-                    tone="warning",
-                    footer="Babblebox Moment",
-                ),
-            )
-            return None, None
-
-        if source.author.bot or source.webhook_id is not None:
-            await self._send_private_embed(
-                ctx,
-                embed=ge.make_status_embed(
-                    "Not A Social Moment",
-                    "Moment cards are only available for regular user messages.",
-                    tone="warning",
-                    footer="Babblebox Moment",
-                ),
-            )
-            return None, None
-
-        reference = source.reference
-        resolved = getattr(reference, "resolved", None)
-        cached_message = getattr(reference, "cached_message", None)
-        reply_target = resolved if isinstance(resolved, discord.Message) else cached_message
-        if isinstance(reply_target, discord.Message) and not reply_target.author.bot and reply_target.guild == source.guild:
-            followup = source
-            source = reply_target
-        return source, followup
-
-    async def _resolve_recent_moment(self, ctx: commands.Context) -> tuple[discord.Message | None, discord.Message | None]:
-        if ctx.guild is None or ctx.channel is None:
-            await self._send_private_embed(
-                ctx,
-                embed=ge.make_status_embed(
-                    "Server Only",
-                    "Recent moments only work in server channels.",
-                    tone="warning",
-                    footer="Babblebox Moment",
-                ),
-            )
-            return None, None
-
-        history_kwargs = {"limit": 10}
-        if getattr(ctx, "message", None) is not None:
-            history_kwargs["before"] = ctx.message
-
-        recent_messages = [
-            message
-            async for message in ctx.channel.history(**history_kwargs)
-            if message.type in {discord.MessageType.default, discord.MessageType.reply}
-            and not message.author.bot
-            and message.webhook_id is None
-        ]
-        if not recent_messages:
-            await self._send_private_embed(
-                ctx,
-                embed=ge.make_status_embed(
-                    "No Recent Moment",
-                    "I could not find a recent user message in this channel.",
-                    tone="warning",
-                    footer="Babblebox Moment",
-                ),
-            )
-            return None, None
-
-        primary = recent_messages[0]
-        reference = primary.reference
-        resolved = getattr(reference, "resolved", None)
-        cached_message = getattr(reference, "cached_message", None)
-        reply_target = resolved if isinstance(resolved, discord.Message) else cached_message
-        if isinstance(reply_target, discord.Message) and not reply_target.author.bot:
-            return reply_target, primary
-        if len(recent_messages) >= 2 and recent_messages[1].author.id != primary.author.id:
-            return recent_messages[1], primary
-        return primary, None
-
-    async def _send_moment_card(
-        self,
-        ctx: commands.Context,
-        *,
-        source: discord.Message,
-        followup: discord.Message | None,
-        title: str | None,
-        visibility: str,
-    ):
-        if source.guild is None:
-            await self._send_private_embed(
-                ctx,
-                embed=ge.make_status_embed(
-                    "Server Only",
-                    "Moment cards are intended for server conversations.",
-                    tone="warning",
-                    footer="Babblebox Moment",
-                ),
-            )
-            return
-        cooldown_error = self._moment_card_cooldown_error(ctx, visibility=visibility)
-        if cooldown_error is not None:
-            await self._send_private_embed(
-                ctx,
-                embed=ge.make_status_embed("Moment Cooldown", cooldown_error, tone="warning", footer="Babblebox Moment"),
-            )
-            return
-
-        clean_title = None
-        if title:
-            ok, clean_or_error = sanitize_short_plain_text(
-                title,
-                field_name="Moment title",
-                max_length=48,
-                sentence_limit=1,
-                reject_blocklist=True,
-                allow_empty=False,
-            )
-            if not ok:
-                await self._send_private_embed(
-                    ctx,
-                    embed=ge.make_status_embed("Moment Title Rejected", clean_or_error, tone="warning", footer="Babblebox Moment"),
-                )
-                return
-            clean_title = clean_or_error
-
-        embed = build_moment_card_embed(source, followup=followup, title=clean_title, requested_by=ctx.author)
-        await send_hybrid_response(
-            ctx,
-            embed=embed,
-            view=build_jump_view((followup or source).jump_url, label="Open Source Message"),
-            ephemeral=self._is_private_visibility(visibility),
-        )
 
     @commands.hybrid_group(
         name="watch",
@@ -1211,65 +962,6 @@ class UtilityCog(commands.Cog):
             f"I DM'd you a private snapshot of **{len(messages)}** recent messages.",
         )
         await self._record_utility_action(ctx.author.id, "capture")
-
-    @commands.hybrid_group(
-        name="moment",
-        with_app_command=True,
-        description="Turn a message or small exchange into a shareable Moment Card",
-        invoke_without_command=True,
-    )
-    async def moment_group(self, ctx: commands.Context):
-        await self._send_usage(
-            ctx,
-            "Babblebox Moment",
-            "Turn a message into a shareable keepsake card with a live jump link. Try `/moment from-reply`, `/moment recent`, or `/moment create <message_link>`.",
-        )
-
-    @moment_group.command(name="create", with_app_command=True, description="Create a Moment Card from a message link or reply")
-    @app_commands.describe(message_link="Optional Discord message link from this server", title="Optional short title", visibility="Show the card publicly or only to you")
-    @app_commands.choices(visibility=VISIBILITY_CHOICES)
-    async def moment_create_command(
-        self,
-        ctx: commands.Context,
-        message_link: Optional[str] = None,
-        title: Optional[str] = None,
-        visibility: str = "public",
-    ):
-        await defer_hybrid_response(ctx, ephemeral=self._is_private_visibility(visibility))
-        source, followup = await self._resolve_moment_source(ctx, message_link)
-        if source is None:
-            return
-        await self._send_moment_card(ctx, source=source, followup=followup, title=title, visibility=visibility)
-
-    @moment_group.command(name="from-reply", with_app_command=True, description="Create a Moment Card from the message you replied to")
-    @app_commands.describe(title="Optional short title", visibility="Show the card publicly or only to you")
-    @app_commands.choices(visibility=VISIBILITY_CHOICES)
-    async def moment_from_reply_command(
-        self,
-        ctx: commands.Context,
-        title: Optional[str] = None,
-        visibility: str = "public",
-    ):
-        await defer_hybrid_response(ctx, ephemeral=self._is_private_visibility(visibility))
-        source, followup = await self._resolve_moment_source(ctx, None)
-        if source is None:
-            return
-        await self._send_moment_card(ctx, source=source, followup=followup, title=title, visibility=visibility)
-
-    @moment_group.command(name="recent", with_app_command=True, description="Turn the latest channel moment into a card")
-    @app_commands.describe(title="Optional short title", visibility="Show the card publicly or only to you")
-    @app_commands.choices(visibility=VISIBILITY_CHOICES)
-    async def moment_recent_command(
-        self,
-        ctx: commands.Context,
-        title: Optional[str] = None,
-        visibility: str = "public",
-    ):
-        await defer_hybrid_response(ctx, ephemeral=self._is_private_visibility(visibility))
-        source, followup = await self._resolve_recent_moment(ctx)
-        if source is None:
-            return
-        await self._send_moment_card(ctx, source=source, followup=followup, title=title, visibility=visibility)
 
     @commands.hybrid_group(
         name="remind",

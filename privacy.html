@@ -678,7 +678,7 @@
             </ul>
             <h3>Limited message and attachment context</h3>
             <ul>
-              <li>Babblebox may read message content or metadata needed to respond to commands, deliver Watch alerts, build Moment Cards from visible messages, process Capture requests, or evaluate locally flagged Shield events, including visible message text, embed text, forwarded message snapshots, and attachment labels.</li>
+              <li>Babblebox may read message content or metadata needed to respond to commands, deliver Watch alerts, process Capture requests, or evaluate locally flagged Shield events, including visible message text, embed text, forwarded message snapshots, and attachment labels.</li>
               <li>The suspicious-member lane stays private/admin-facing, uses bounded local signals, and does not inspect Discord profile bios or about-me text in the current implementation.</li>
               <li>Attachment names or URLs may be used at send time when needed for previews or private transcript delivery.</li>
               <li>For anonymous confessions, raw attachment filenames and raw Discord CDN URLs are kept out of staff-visible review surfaces.</li>
@@ -688,7 +688,6 @@
               <li>No general-purpose message archive.</li>
               <li>No media or attachment blob storage in Postgres.</li>
               <li>No durable storage of raw confession attachment filenames or raw Discord CDN URLs in staff-facing moderation records.</li>
-              <li>No durable quote-feed database for Moment Cards.</li>
               <li>No full deleted-message archive table.</li>
               <li>No long-term storage of DM bodies or full Capture transcript archives.</li>
             </ul>
@@ -728,7 +727,6 @@
             </p>
             <ul>
               <li>Public profile-style surfaces, Daily Arcade sharing, and similar outputs are intended to be visible in-server.</li>
-              <li>Moment Cards are built from visible server messages and remain tied to visible Discord context instead of becoming a hidden archive.</li>
               <li>Watch alerts are delivered through Discord DMs.</li>
               <li>Capture transcripts are delivered privately rather than kept as a long-term database archive.</li>
               <li>Later markers, reminders, anonymous confessions, and sensitive setup flows are designed to avoid unnecessary public exposure.</li>

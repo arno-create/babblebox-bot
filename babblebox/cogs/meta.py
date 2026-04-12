@@ -44,7 +44,7 @@ HELP_PAGES: list[dict[str, str]] = [
         "description": "Six clear lanes: Party Games, Question Drops, Daily Arcade, Utilities, Buddy/Profile, and Shield.",
         "body": (
             "Use the arrows to browse the product by lane.\n"
-            "Showable cards lean public by default so they feel native in chat.\n"
+            "Public-friendly surfaces lean public by default so they feel native in chat.\n"
             "Personal utilities, setup, and sensitive admin work stay private."
         ),
         "try": "`/play`, `/drops status`, `/daily`, `/profile`, `/watch`",
@@ -112,9 +112,9 @@ HELP_PAGES: list[dict[str, str]] = [
         "body": (
             "`/watch mentions`, `/watch replies`, and `/watch keyword ...` keep private DM alerts tidy.\n"
             "`/later`, `/capture`, `/remind`, `/afk`, `/afktimezone`, and `/afkschedule` stay personal by default.\n"
-            "`/moment` turns a message or exchange into a shareable keepsake card with a live link."
+            "Capture sends a private recent-message snapshot, Later keeps your place, and Watch stays quiet until something relevant happens."
         ),
-        "try": "`/watch settings`, `/later mark`, `/capture`, `/moment from-reply`",
+        "try": "`/watch settings`, `/later mark`, `/capture`, `/remind set`",
     },
     {
         "title": "Daily Arcade",
@@ -179,7 +179,7 @@ HELP_PAGES: list[dict[str, str]] = [
         "description": "A few quick habits make Babblebox feel much better.",
         "body": (
             "Keep DMs open for Watch, Later, Capture, reminders, Pattern Hunt, and other DM-based party moments.\n"
-            "Use public visibility for showable cards, and private visibility for sensitive utility flows.\n"
+            "Daily Arcade, Buddy, and Profile fit public channels best, while utilities and setup flows work better privately.\n"
             "Let a live Question Drop finish before opening `/play` in that same channel.\n"
             "If you run Shield, start with log-only or low-confidence logging and tune filters before enabling deletes."
         ),
@@ -295,7 +295,7 @@ def build_help_embed() -> discord.Embed:
         name="Daily / Utilities",
         value=(
             "`/daily` handles Shuffle, Emoji, and Signal. Personal tools include `/watch`, `/later`, `/capture`, "
-            "`/remind`, `/afk`, and `/moment`."
+            "`/remind`, and `/afk`."
         ),
         inline=False,
     )
@@ -322,7 +322,7 @@ def build_help_embed() -> discord.Embed:
     )
     embed.add_field(
         name="Visibility",
-        value="Public is best for showable cards. Private is better for personal utilities and setup flows.",
+        value="Daily Arcade, Buddy, and Profile work well in public channels. Personal utilities and setup flows work better privately.",
         inline=False,
     )
     return ge.style_embed(embed, footer="Babblebox Help | Start here, then open the lane you need")

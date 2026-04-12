@@ -456,6 +456,19 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Support Server", fields["Links"])
         self.assertIn("Official Website", fields["Links"])
 
+    def test_help_surfaces_do_not_reference_removed_moment_feature(self):
+        for page in HELP_PAGES:
+            self.assertNotIn("/moment", page.get("body", ""))
+            self.assertNotIn("/moment", page.get("try", ""))
+            self.assertNotIn("Babblebox Moment", page.get("body", ""))
+
+        compact_embed = build_help_embed()
+        compact_text = "\n".join(
+            [compact_embed.description or ""] + [field.value for field in compact_embed.fields if isinstance(field.value, str)]
+        )
+        self.assertNotIn("/moment", compact_text)
+        self.assertNotIn("Babblebox Moment", compact_text)
+
     def test_help_embeds_stay_within_discord_limits(self):
         for index, _page in enumerate(HELP_PAGES):
             with self.subTest(page=index):
@@ -1381,36 +1394,24 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await cog.service.close()
 
-    async def test_moment_public_card_uses_public_visibility(self):
-        bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
-        cog = UtilityCog(bot)
+    async def test_utility_command_surface_excludes_removed_moment_feature(self):
+        bot = commands.Bot(command_prefix="!", intents=discord.Intents.none())
         try:
-            source_author = types.SimpleNamespace(
-                id=5,
-                display_name="Mira",
-                color=discord.Color.blue(),
-                display_avatar=types.SimpleNamespace(url="https://cdn.example/avatar.png"),
-            )
-            source_message = types.SimpleNamespace(
-                content="That one line deserved a card.",
-                attachments=[],
-                author=source_author,
-                channel=types.SimpleNamespace(mention="#general"),
-                guild=types.SimpleNamespace(name="Guild"),
-                created_at=datetime(2026, 3, 21, 12, 0, tzinfo=timezone.utc),
-                jump_url="https://discord.com/channels/10/20/30",
-            )
-            ctx = FakeContext(interaction=FakeInteraction(), guild=FakeGuild(), channel=FakeChannel(), author=FakeAuthor())
+            cog = UtilityCog(bot)
+            await bot.add_cog(cog)
 
-            with patch.object(cog, "_resolve_moment_source", new=AsyncMock(return_value=(source_message, None))):
-                await UtilityCog.moment_create_command.callback(cog, ctx, message_link=None, title="Best Line", visibility="public")
+            slash_roots = {command.name for command in bot.tree.get_commands()}
+            prefix_commands = {command.name for command in cog.walk_commands()}
 
-            self.assertEqual(len(ctx.defer_calls), 1)
-            self.assertFalse(ctx.defer_calls[0]["ephemeral"])
-            self.assertEqual(len(ctx.send_calls), 1)
-            self.assertFalse(ctx.send_calls[0]["ephemeral"])
+            self.assertTrue({"watch", "later", "capture", "remind"}.issubset(slash_roots))
+            self.assertNotIn("moment", slash_roots)
+            self.assertNotIn("moment", prefix_commands)
         finally:
-            await cog.service.close()
+            for loaded in list(bot.cogs.values()):
+                service = getattr(loaded, "service", None)
+                if service is not None:
+                    await service.close()
+            await bot.close()
 
     async def test_shield_panel_overview_reflects_legacy_pack_state(self):
         bot = types.SimpleNamespace(loop=asyncio.get_running_loop())

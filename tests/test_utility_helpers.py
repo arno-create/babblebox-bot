@@ -3,8 +3,6 @@ import unittest
 from datetime import datetime, timezone
 from types import SimpleNamespace
 
-import discord
-
 from babblebox.utility_helpers import (
     AFK_QUICK_REASONS,
     build_afk_reason_text,
@@ -129,41 +127,3 @@ class UtilityHelperTests(unittest.TestCase):
         self.assertIn("Studying", embed.fields[0].value)
         self.assertNotEqual(embed.color.value, 0)
 
-    def test_moment_card_embed_uses_clean_scene_and_echo_labels(self):
-        created_at = datetime(2026, 3, 21, 9, 15, tzinfo=timezone.utc)
-        author = SimpleNamespace(
-            id=1,
-            display_name="Mira",
-            color=discord.Color.blue(),
-            display_avatar=SimpleNamespace(url="https://cdn.example/avatar.png"),
-        )
-        followup_author = SimpleNamespace(
-            id=2,
-            display_name="Noah",
-            color=discord.Color.gold(),
-            display_avatar=SimpleNamespace(url="https://cdn.example/avatar2.png"),
-        )
-        message = SimpleNamespace(
-            content="That line was way funnier than expected.",
-            attachments=[],
-            author=author,
-            channel=SimpleNamespace(mention="#clips"),
-            guild=SimpleNamespace(name="Babblebox HQ"),
-            created_at=created_at,
-        )
-        followup = SimpleNamespace(
-            content="I am saving this one.",
-            attachments=[],
-            author=followup_author,
-            channel=message.channel,
-            guild=message.guild,
-            created_at=created_at,
-        )
-
-        from babblebox.utility_helpers import build_moment_card_embed
-
-        embed = build_moment_card_embed(message, followup=followup)
-
-        self.assertEqual(embed.fields[0].name, "Scene")
-        self.assertIn("Babblebox HQ | #clips", embed.fields[0].value)
-        self.assertEqual(embed.fields[1].name, "Echo | Noah")

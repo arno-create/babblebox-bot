@@ -48,7 +48,6 @@ def health():
                 "/watch replies",
                 "/later mark",
                 "/capture",
-                "/moment recent",
                 "/remind set",
             ],
             "website": "https://arno-create.github.io/babblebox-bot/",

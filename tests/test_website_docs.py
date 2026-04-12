@@ -1,6 +1,8 @@
 from pathlib import Path
 import unittest
 
+from babblebox.web import app
+
 
 ROOT = Path(__file__).resolve().parent.parent
 
@@ -391,3 +393,17 @@ class WebsiteDocsTests(unittest.TestCase):
             "bb!admin followup true @Probation review 30d",
         ):
             self.assertIn(expected_text, readme)
+
+    def test_removed_moment_feature_is_absent_from_docs_and_health(self):
+        for path in ("README.md", "help.html", "PRIVACY.md", "privacy.html", "TERMS.md", "terms.html"):
+            content = (ROOT / path).read_text(encoding="utf-8")
+            self.assertNotIn("/moment", content, msg=path)
+            self.assertNotIn("bb!moment", content, msg=path)
+            self.assertNotIn("Moment Card", content, msg=path)
+            self.assertNotIn("Moment Cards", content, msg=path)
+            self.assertNotIn("Babblebox Moment", content, msg=path)
+
+        response = app.test_client().get("/health")
+        self.assertEqual(response.status_code, 200)
+        payload = response.get_json()
+        self.assertNotIn("/moment recent", payload["commands"])

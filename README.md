@@ -74,10 +74,7 @@ Babblebox is intentionally compact:
 - Capture
   - DM transcript snapshots of recent messages
   - better media placeholders and attachment context
-- Moment Cards
-  - live-linked keepsake cards for a message or exchange
-  - built from replies, recent messages, or message links
-  - no archive table and no generated image pipeline
+  - private delivery with jump-back context
 - Remind
   - safe one-time reminders with small active limits
 - AFK
@@ -283,9 +280,6 @@ Question Drops notes:
 | `/later list` | `bb!later list` | List saved markers |
 | `/later clear` | `bb!later clear here` | Clear markers |
 | `/capture` | `bb!capture 10` | DM yourself a recent-message snapshot |
-| `/moment create` | `bb!moment create <message_link>` | Create a Moment Card from a message |
-| `/moment from-reply` | `bb!moment from-reply` | Create a Moment Card from the replied message |
-| `/moment recent` | `bb!moment recent` | Create a Moment Card from the latest channel moment |
 | `/remind set` | `bb!remind set 2h dm take a break` | Create a reminder |
 | `/remind list` | `bb!remind list` | Review active reminders |
 | `/remind cancel` | `bb!remind cancel <id>` | Cancel a reminder |
@@ -590,15 +584,6 @@ Not stored:
 - long-term punishment event logs
 - message transcripts or DM bodies
 
-### Moment Cards
-
-Moment Cards do not introduce a durable archive table.
-
-- no stored generated images
-- no stored quote feed
-- no stored full message transcripts
-- cards are built live from visible Discord messages
-
 ## Architecture
 
 ```text
@@ -652,8 +637,8 @@ Moment Cards do not introduce a durable archive table.
 - `babblebox/game_engine.py`: lobby state, gameplay flow, recaps, help/manual, session stats
 - `babblebox/pattern_hunt_game.py`: Pattern Hunt hidden-rule engine, DM onboarding, and anchor flow
 - `babblebox/utility_store.py`: Postgres-first utility persistence, including Watch V2 schema
-- `babblebox/utility_service.py`: Watch, Later, Capture, Moment, Remind, AFK orchestration
-- `babblebox/utility_helpers.py`: utility preview rendering, transcript formatting, and Moment Card embeds
+- `babblebox/utility_service.py`: Watch, Later, Capture, Remind, and AFK orchestration
+- `babblebox/utility_helpers.py`: utility preview rendering, transcript formatting, and utility delivery helpers
 - `babblebox/daily_challenges.py`: deterministic Daily Arcade booth generation
 - `babblebox/profile_store.py`: compact profile and daily persistence
 - `babblebox/profile_service.py`: Daily Arcade, Question Drops identity tie-ins, Buddy, Profile, Vault, and anti-farm progression
@@ -672,7 +657,7 @@ Moment Cards do not introduce a durable archive table.
 - `babblebox/cogs/party_games.py`: Pattern Hunt private command surface
 - `babblebox/cogs/question_drops.py`: Question Drops grouped command surface and mastery admin flows
 - `babblebox/cogs/shield.py`: admin-facing Shield command surface
-- `babblebox/cogs/utilities.py`: Watch V2, Later, Capture, Moment, and Remind commands
+- `babblebox/cogs/utilities.py`: Watch V2, Later, Capture, and Remind commands
 
 ## Hosting Notes
 

@@ -8,7 +8,6 @@ Babblebox is intentionally compact and privacy-aware by design:
 
 - no general-purpose message archive
 - no media or attachment blob storage in Postgres
-- no durable quote-feed archive for Moment Cards
 - no always-on AI scanning by default
 - private-first handling for sensitive utility flows such as Watch, reminders, Later, Capture, anonymous confessions, and Shield configuration
 
@@ -28,7 +27,7 @@ Depending on the feature being used, Babblebox may process or store:
 
 - Discord identifiers such as user IDs, guild IDs, channel IDs, message IDs, role IDs, and timestamps
 - compact feature configuration and state, including Watch preferences, ignored channels or users, Later markers, reminders, AFK state, AFK schedules, Daily Arcade results, Buddy or profile state, and Shield or admin configuration
-- limited message or attachment context needed to respond to commands, build Moment Cards from visible messages, deliver Watch alerts, process Capture requests, or evaluate locally flagged Shield events, including visible message text, embed text, forwarded message snapshots, and attachment labels
+- limited message or attachment context needed to respond to commands, deliver Watch alerts, process Capture requests, or evaluate locally flagged Shield events, including visible message text, embed text, forwarded message snapshots, and attachment labels
 - if a server enables suspicious-member review, compact account-age, avatar-state, display-name, and locally flagged message or link context needed to score that review lane
 - anonymous confession or reply submission text, Confessions link fields, compact review metadata, bot-private author mappings, bot-private owner reply opportunities, and limited private appeals or reports needed to run staff-blind confession moderation when a server has Confessions enabled
 - for Confessions, Babblebox now protects sensitive content and identity linkage with application-level encryption and separate lookup domains before those fields reach durable Postgres storage
@@ -40,7 +39,6 @@ Babblebox is designed not to keep certain high-churn or high-risk data as long-t
 - a general-purpose message-content archive
 - media or attachment blobs in Postgres
 - raw attachment filenames or raw Discord CDN URLs in staff-visible confession records
-- a durable quote-feed database for Moment Cards
 - a full deleted-message archive table
 - long-term archives of DM bodies or Capture transcript bodies
 - heavy moderation warehouse-style event history
@@ -63,7 +61,6 @@ Babblebox is not designed as an ad network, data brokerage system, or marketing 
 Babblebox intentionally uses different visibility defaults depending on the feature:
 
 - some features are public-friendly by design, such as profile-style surfaces or Daily sharing
-- Moment Cards are built from visible Discord messages and remain tied to visible message context instead of becoming a hidden archive
 - Watch alerts are DM-only
 - Capture transcripts are delivered privately rather than kept as long-term database archives
 - Later markers, reminders, and sensitive setup flows are private-first
