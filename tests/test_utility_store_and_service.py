@@ -851,6 +851,7 @@ class UtilityStoreAndServiceTests(unittest.IsolatedAsyncioTestCase):
         user.send.assert_not_awaited()
         _args, kwargs = channel.sent[0]
         self.assertIsNotNone(kwargs.get("embed"))
+        self.assertIsNone(kwargs.get("view"))
         self.assertIsNotNone(kwargs.get("allowed_mentions"))
 
     async def test_public_reminder_persists_origin_jump_url_from_server_message(self):
@@ -870,6 +871,33 @@ class UtilityStoreAndServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(ok)
         self.assertEqual(reminder["origin_jump_url"], "https://discord.com/channels/1/2/3")
 
+    async def test_public_reminder_delivery_includes_jump_button_when_posted_in_channel(self):
+        user = DummyMember(582, display_name="Ari")
+        guild = DummyGuild(1, members=[user])
+        channel = DummyChannel(2, guild=guild, visible_user_ids={user.id})
+        self.bot.add_user(user)
+        self.bot.add_channel(channel)
+        ok, reminder = await self.service.create_reminder(
+            user=user,
+            text="Check the thread.",
+            delay_seconds=20 * 60,
+            delivery="here",
+            guild=type("Guild", (), {"id": guild.id, "name": guild.name})(),
+            channel=type("Channel", (), {"id": channel.id, "name": channel.name})(),
+            origin_jump_url="https://discord.com/channels/1/2/3",
+        )
+
+        self.assertTrue(ok)
+
+        delivered = await self.service._deliver_single_reminder(reminder)
+
+        self.assertTrue(delivered)
+        self.assertEqual(len(channel.sent), 1)
+        _args, kwargs = channel.sent[0]
+        self.assertIsNotNone(kwargs.get("view"))
+        self.assertEqual(kwargs["view"].children[0].label, "Jump to Message")
+        user.send.assert_not_awaited()
+
     async def test_dm_reminder_keeps_origin_without_showing_jump_button(self):
         user = DummyMember(581, display_name="Ari")
         self.bot.add_user(user)
@@ -887,6 +915,32 @@ class UtilityStoreAndServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(ok)
         self.assertEqual(reminder["origin_jump_url"], "https://discord.com/channels/1/2/3")
+
+        delivered = await self.service._deliver_single_reminder(reminder)
+
+        self.assertTrue(delivered)
+        user.send.assert_awaited_once()
+        self.assertIsNone(user.send.await_args.kwargs.get("view"))
+
+    async def test_public_reminder_fallback_dm_never_shows_jump_button(self):
+        user = DummyMember(583, display_name="Ari")
+        guild = DummyGuild(1, members=[user])
+        channel = DummyChannel(2, guild=guild, visible_user_ids={user.id})
+        response = types.SimpleNamespace(status=403, reason="Forbidden", text="Forbidden")
+        channel.send = AsyncMock(side_effect=discord.Forbidden(response=response, message="missing perms"))
+        self.bot.add_user(user)
+        self.bot.add_channel(channel)
+        ok, reminder = await self.service.create_reminder(
+            user=user,
+            text="Fallback to DM.",
+            delay_seconds=20 * 60,
+            delivery="here",
+            guild=type("Guild", (), {"id": guild.id, "name": guild.name})(),
+            channel=type("Channel", (), {"id": channel.id, "name": channel.name})(),
+            origin_jump_url="https://discord.com/channels/1/2/3",
+        )
+
+        self.assertTrue(ok)
 
         delivered = await self.service._deliver_single_reminder(reminder)
 
@@ -1289,6 +1343,84 @@ class UtilityStoreAndServiceTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertIn("Retrying delivery", embed.fields[0].value)
+
+    def test_later_list_embed_uses_compact_marker_blocks(self):
+        cog = object.__new__(UtilityCog)
+        user = DummyTarget(61, display_name="Mira")
+        embed = UtilityCog._later_list_embed(
+            cog,
+            user,
+            [
+                {
+                    "guild_name": "Guild",
+                    "channel_name": "clips",
+                    "saved_at": serialize_datetime(ge.now_utc() - timedelta(minutes=5)),
+                    "author_name": "Ari",
+                    "preview": "Quiet note\nMedia: [video: clip.mp4]",
+                }
+            ],
+            guild=None,
+        )
+
+        self.assertIn("**Guild / #clips** |", embed.fields[0].value)
+        self.assertIn("By Ari", embed.fields[0].value)
+        self.assertIn("`/later mark` refreshes this channel", embed.fields[1].value)
+
+    async def test_send_later_marker_dm_uses_clear_saved_message_button(self):
+        user = DummyMember(62, display_name="Mira")
+        marker = {
+            "guild_name": "Guild",
+            "channel_name": "clips",
+            "author_name": "Ari",
+            "saved_at": serialize_datetime(ge.now_utc()),
+            "message_created_at": serialize_datetime(ge.now_utc()),
+            "preview": "Saved preview",
+            "attachment_labels": ["clip.png"],
+            "message_jump_url": "https://discord.com/channels/1/2/3",
+        }
+
+        await self.service.send_later_marker_dm(user, marker)
+
+        user.send.assert_awaited_once()
+        kwargs = user.send.await_args.kwargs
+        self.assertEqual(kwargs["view"].children[0].label, "Open Saved Message")
+        self.assertEqual(kwargs["embed"].fields[0].name, "Location")
+
+    async def test_send_capture_dm_preserves_transcript_and_uses_shorter_return_button(self):
+        user = DummyMember(63, display_name="Mira")
+        guild = DummyGuild(10, members=[user])
+        channel = DummyChannel(20, guild=guild, visible_user_ids={user.id})
+        first = DummyMessage(
+            message_id=30,
+            author=user,
+            guild=guild,
+            channel=channel,
+            content="First line",
+            created_at=ge.now_utc() - timedelta(minutes=2),
+        )
+        first.attachments = [types.SimpleNamespace(filename="clip.png", url="https://cdn.example/clip.png", content_type="image/png")]
+        second = DummyMessage(
+            message_id=31,
+            author=user,
+            guild=guild,
+            channel=channel,
+            content="Second line",
+            created_at=ge.now_utc() - timedelta(minutes=1),
+        )
+
+        await self.service.send_capture_dm(
+            user=user,
+            guild_name=guild.name,
+            channel_name=channel.name,
+            messages=[first, second],
+            requested_count=10,
+        )
+
+        user.send.assert_awaited_once()
+        kwargs = user.send.await_args.kwargs
+        self.assertEqual(kwargs["embed"].title, "Capture Ready")
+        self.assertEqual(kwargs["view"].children[0].label, "Back to Channel")
+        self.assertEqual(kwargs["file"].filename, "babblebox-capture-general.txt")
 
     async def test_user_return_watch_triggers_on_next_message_after_creation(self):
         watcher = DummyMember(41, display_name="Mira")

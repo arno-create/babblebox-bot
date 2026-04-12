@@ -43,7 +43,7 @@ QUESTION_DROP_ANSWER_ATTEMPT_LIMITS = {
     "boolean": 1,
     "text": 3,
     "numeric": 3,
-    "ordered_tokens": 3,
+    "ordered_tokens": 1,
 }
 
 TRUE_ALIASES = {"true", "t", "yes", "y", "correct"}
@@ -65,6 +65,9 @@ _HEDGED_ANSWER_LEAD_RE = re.compile(
 _URL_RE = re.compile(r"https?://|\bdiscord\.gg/\S+", re.IGNORECASE)
 _MENTION_RE = re.compile(r"<(?:@!?\d+|@&\d+|#\d+)>")
 _NUMBER_WORD_RE = re.compile(r"[a-z]+", re.IGNORECASE)
+_ORDERED_ARROW_SPLIT_RE = re.compile(r"\s*(?:->|=>|→)\s*")
+_ORDERED_ITEM_PREFIX_RE = re.compile(r"^\s*\(?\d{1,2}\)?[.):-]?\s*")
+_ORDERED_INLINE_NUMBERED_ITEM_RE = re.compile(r"(?:^|\s)\(?\d{1,2}\)?[.)]\s*")
 _DIVISIBILITY_PROMPT_RE = re.compile(r"^Which number is divisible by (\d+)\? A\) (\d+) B\) (\d+) C\) (\d+)$")
 _AVERAGE_PROMPT_RE = re.compile(r"^Find the average: ([\d,\s]+)$")
 _MEDIAN_PROMPT_RE = re.compile(r"^Find the median: ([\d,\s]+)$")
@@ -275,6 +278,65 @@ def _numeric_words_allowed(answer_spec: dict[str, Any]) -> bool:
 
 def _strip_trailing_terminal_punctuation(raw: str | None) -> str:
     return str(raw or "").strip().rstrip(".!?").strip()
+
+
+def _normalize_ordered_expected_items(answer_spec: dict[str, Any]) -> tuple[str, ...]:
+    normalized_items = []
+    for token in answer_spec.get("tokens", []):
+        if not isinstance(token, str):
+            continue
+        normalized = normalize_answer_text(token)
+        if normalized:
+            normalized_items.append(normalized)
+    return tuple(normalized_items)
+
+
+def _normalize_ordered_item_sequence(parts: list[str]) -> tuple[str, ...]:
+    normalized_items = []
+    for part in parts:
+        normalized = normalize_answer_text(_ORDERED_ITEM_PREFIX_RE.sub("", str(part or "").strip(), count=1))
+        if not normalized:
+            return ()
+        normalized_items.append(normalized)
+    return tuple(normalized_items)
+
+
+def _split_numbered_ordered_items(raw: str) -> list[str] | None:
+    matches = list(_ORDERED_INLINE_NUMBERED_ITEM_RE.finditer(raw))
+    if len(matches) < 2:
+        return None
+    items: list[str] = []
+    for index, match in enumerate(matches):
+        start = match.end()
+        end = matches[index + 1].start() if index + 1 < len(matches) else len(raw)
+        item = raw[start:end].strip().rstrip(",;").strip()
+        if not item:
+            return None
+        items.append(item)
+    return items
+
+
+def _parse_ordered_answer_items(raw: str | None, *, expected_items: tuple[str, ...]) -> tuple[str, ...]:
+    content = _strip_trailing_terminal_punctuation(raw)
+    if not content:
+        return ()
+    numbered_items = _split_numbered_ordered_items(content)
+    if numbered_items is not None:
+        return _normalize_ordered_item_sequence(numbered_items)
+    if "\n" in content:
+        lines = [line.strip() for line in content.splitlines() if line.strip()]
+        if len(lines) >= 2:
+            return _normalize_ordered_item_sequence(lines)
+    if _ORDERED_ARROW_SPLIT_RE.search(content):
+        return _normalize_ordered_item_sequence([part for part in _ORDERED_ARROW_SPLIT_RE.split(content) if part.strip()])
+    for delimiter in (";", ","):
+        if delimiter in content:
+            return _normalize_ordered_item_sequence([part for part in content.split(delimiter) if part.strip()])
+    if expected_items and all(" " not in item for item in expected_items):
+        tokens = _normalize_token_sequence(content)
+        if len(tokens) >= 2:
+            return tokens
+    return ()
 
 
 def _parse_number_words_exact(raw: str | None) -> int | None:
@@ -575,8 +637,12 @@ def judge_answer(answer_spec: dict[str, Any], raw_answer: str | None) -> bool:
                 return True
         return False
     if answer_type == "ordered_tokens":
-        expected_tokens = tuple(normalize_answer_text(token) for token in answer_spec.get("tokens", []))
-        return any((candidate_tokens := _normalize_token_sequence(candidate)) and candidate_tokens == expected_tokens for candidate in candidates)
+        expected_items = _normalize_ordered_expected_items(answer_spec)
+        return any(
+            (candidate_items := _parse_ordered_answer_items(candidate, expected_items=expected_items))
+            and candidate_items == expected_items
+            for candidate in candidates
+        )
     return False
 
 
@@ -606,13 +672,13 @@ def is_answer_attempt(answer_spec: dict[str, Any], raw_answer: str | None, *, di
         normalized_values = {normalize_answer_text(candidate) for candidate in candidates if normalize_answer_text(candidate)}
         return bool(normalized_values.intersection(TRUE_ALIASES | FALSE_ALIASES))
     if answer_type == "ordered_tokens":
-        expected_tokens = tuple(normalize_answer_text(token) for token in answer_spec.get("tokens", []))
-        if not expected_tokens:
+        expected_items = _normalize_ordered_expected_items(answer_spec)
+        if not expected_items:
             return False
-        expected_counter = Counter(expected_tokens)
+        expected_counter = Counter(expected_items)
         for candidate in candidates:
-            candidate_tokens = _normalize_token_sequence(candidate)
-            if candidate_tokens and Counter(candidate_tokens) == expected_counter:
+            candidate_items = _parse_ordered_answer_items(candidate, expected_items=expected_items)
+            if candidate_items and len(candidate_items) == len(expected_items) and Counter(candidate_items) == expected_counter:
                 return True
         return False
     if answer_type == "text":
@@ -652,7 +718,7 @@ def render_answer_summary(answer_spec: dict[str, Any]) -> str:
         answer = str(answer_spec.get("answer") or "unknown")
         return f"{letter.upper()}) {answer}" if letter is not None else answer
     if answer_type == "ordered_tokens":
-        return " ".join(str(token) for token in answer_spec.get("tokens", [])) or "unknown"
+        return ", ".join(str(token) for token in answer_spec.get("tokens", [])) or "unknown"
     return "unknown"
 
 
@@ -692,7 +758,7 @@ def render_answer_instruction(answer_spec: dict[str, Any]) -> str:
     if answer_type == "ordered_tokens":
         return (
             f"{_attempt_limit_instruction_prefix(answer_spec)} "
-            "Reply is optional. Send a clean same-channel answer with the full sequence in order, like `red, blue, green`."
+            "Reply is optional. Send a clean same-channel answer with the full sequence in order using commas, like `red, blue, green`."
         )
     return f"{_attempt_limit_instruction_prefix(answer_spec)} Reply is optional. Send a short clean same-channel guess."
 

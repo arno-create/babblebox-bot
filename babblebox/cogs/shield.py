@@ -10,6 +10,7 @@ from discord.ext import commands
 from babblebox.app_command_hardening import harden_admin_root_group
 from babblebox import game_engine as ge
 from babblebox.command_utils import defer_hybrid_response, send_hybrid_response
+from babblebox.shield_ai import SHIELD_AI_SUPPORT_GUILD_ID, format_shield_ai_model_list
 from babblebox.shield_service import (
     ACTION_LABELS,
     CUSTOM_PATTERN_LIMIT,
@@ -129,8 +130,8 @@ class ShieldPanelView(discord.ui.View):
         config = self.cog.service.get_config(self.guild_id)
         ai_status = self.cog.service.get_ai_status(self.guild_id)
         self.toggle_shield_button.label = "Disable Live Moderation" if config["module_enabled"] else "Enable Live Moderation"
-        self.toggle_ai_button.label = "Disable AI" if ai_status["enabled"] else "Enable AI"
-        self.toggle_ai_button.disabled = not ai_status["supported"] or (not ai_status["provider_available"] and not ai_status["enabled"])
+        self.toggle_ai_button.label = "Owner-Managed Access"
+        self.toggle_ai_button.disabled = True
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.author_id:
@@ -210,18 +211,10 @@ class ShieldPanelView(discord.ui.View):
 
     @discord.ui.button(label="Enable AI", style=discord.ButtonStyle.success, row=1)
     async def toggle_ai_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        current = self.cog.service.get_ai_status(self.guild_id)
-        if not current["supported"]:
-            await interaction.response.send_message("AI review is not available in this server yet.", ephemeral=True)
-            return
-        if not current["provider_available"] and not current["enabled"]:
-            await interaction.response.send_message(
-                "AI review cannot be enabled until `OPENAI_API_KEY` is configured.",
-                ephemeral=True,
-            )
-            return
-        ok, message = await self.cog.service.set_ai_config(self.guild_id, enabled=not current["enabled"])
-        await self._rerender(interaction, note=message if ok else message)
+        await interaction.response.send_message(
+            "Shield AI access is owner-managed privately. This panel only shows the resolved access policy and review scope.",
+            ephemeral=True,
+        )
 
 
 class ShieldCog(commands.Cog):
@@ -293,6 +286,17 @@ class ShieldCog(commands.Cog):
         if not enabled_packs:
             return "None selected"
         return ", ".join(PACK_LABELS.get(pack, pack.title()) for pack in enabled_packs)
+
+    def _format_ai_models(self, models: list[str]) -> str:
+        return format_shield_ai_model_list(models)
+
+    def _ai_policy_source_label(self, source: str) -> str:
+        labels = {
+            "support_default": "Support-server default",
+            "ordinary_global": "Global ordinary-guild default",
+            "guild_override": "Per-guild owner override",
+        }
+        return labels.get(source, source.replace("_", " ").title())
 
     def _pack_policy_actions(self, config: dict[str, object], pack: str) -> tuple[str, str, str]:
         return (
@@ -409,27 +413,61 @@ class ShieldCog(commands.Cog):
     def _is_override_owner(self, user_id: int) -> bool:
         return user_id in SHIELD_AI_OVERRIDE_OWNER_IDS
 
-    def _build_ai_override_embed(self, *, title: str, note: str) -> discord.Embed:
+    def _build_ai_override_embed(self, *, title: str, note: str, guild_id: int | None = None) -> discord.Embed:
         meta = self.service.get_meta()
-        state_label = "On" if meta["global_ai_override_enabled"] else "Off"
-        updated_by = meta["global_ai_override_updated_by"]
-        updated_at = meta["global_ai_override_updated_at"] or "Never"
+        updated_by = meta["ordinary_ai_updated_by"]
+        updated_at = meta["ordinary_ai_updated_at"] or "Never"
         updated_by_label = f"`{updated_by}`" if updated_by is not None else "`None`"
         embed = discord.Embed(
             title=title,
             description=note,
-            color=ge.EMBED_THEME["accent"] if meta["global_ai_override_enabled"] else ge.EMBED_THEME["info"],
+            color=ge.EMBED_THEME["accent"] if meta["ordinary_ai_enabled"] else ge.EMBED_THEME["info"],
         )
         embed.add_field(
-            name="Global Override",
+            name="Support Defaults",
             value=(
-                f"State: **{state_label}**\n"
-                f"Support server baseline: Always available there\n"
+                "Enabled: **Yes**\n"
+                "Policy source: `support_default`\n"
+                f"Allowed models: {self._format_ai_models(['gpt-5.4-nano', 'gpt-5.4-mini', 'gpt-5.4'])}"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Ordinary-Guild Default",
+            value=(
+                f"Enabled: **{'Yes' if meta['ordinary_ai_enabled'] else 'No'}**\n"
+                f"Allowed models: {self._format_ai_models(list(meta['ordinary_ai_allowed_models']))}\n"
                 f"Last updated by: {updated_by_label}\n"
                 f"Last updated at: `{updated_at}`"
             ),
             inline=False,
         )
+        if guild_id is not None:
+            guild = self._guild_from_bot(guild_id)
+            ai_status = self.service.get_ai_status(guild_id)
+            guild_label = f"{getattr(guild, 'name', 'Unknown Guild')} (`{guild_id}`)"
+            embed.add_field(
+                name="Guild Policy",
+                value=(
+                    f"Guild: {guild_label}\n"
+                    f"Enabled: **{'Yes' if ai_status['enabled'] else 'No'}**\n"
+                    f"Source: {self._ai_policy_source_label(ai_status['policy_source'])}\n"
+                    f"Allowed models: {self._format_ai_models(ai_status['allowed_models'])}\n"
+                    f"Guild access mode: `{ai_status['guild_access_mode']}`\n"
+                    f"Guild model override: {self._format_ai_models(ai_status['guild_allowed_models_override'])}"
+                ),
+                inline=False,
+            )
+            embed.add_field(
+                name="Review Scope",
+                value=(
+                    f"Minimum local confidence: `{ai_status['min_confidence']}`\n"
+                    f"Eligible packs: {self._format_ai_pack_summary(ai_status['enabled_packs'])}\n"
+                    f"Routing: `{ai_status['routing_strategy'] or 'disabled'}`\n"
+                    f"Provider ready: {'Yes' if ai_status['provider_available'] else 'No'}"
+                ),
+                inline=False,
+            )
         embed.set_footer(text="Babblebox Shield AI | DM-only maintainer control")
         return embed
 
@@ -572,11 +610,13 @@ class ShieldCog(commands.Cog):
             name="AI Assist",
             value=(
                 f"Status: {ai_status['status']}\n"
-                f"Enabled: **{'Yes' if ai_status['enabled'] else 'No'}**\n"
+                f"Enabled by owner policy: **{'Yes' if ai_status['enabled'] else 'No'}**\n"
+                f"Policy source: {self._ai_policy_source_label(ai_status['policy_source'])}\n"
+                f"Allowed models: {self._format_ai_models(ai_status['allowed_models'])}\n"
                 f"Local-confidence threshold: `{ai_status['min_confidence']}`\n"
                 f"Packs: {self._format_ai_pack_summary(ai_status['enabled_packs'])}\n"
                 "Scope: Live-message moderation only\n"
-                "AI stays off by default and only enriches moderator context."
+                "AI stays second-pass only and only enriches moderator context."
             ),
             inline=False,
         )
@@ -758,28 +798,42 @@ class ShieldCog(commands.Cog):
         ai_status = self.service.get_ai_status(guild_id)
         embed = discord.Embed(
             title="Shield AI Assist",
-            description="Optional second-pass review for already-flagged messages only.",
+            description="Second-pass review for already-flagged live messages only. Access is owner-managed; this page shows the resolved policy plus this guild's local review scope.",
             color=ge.EMBED_THEME["info"],
         )
         embed.add_field(
-            name="Availability",
+            name="Access Policy",
             value=(
-                "Default rollout: Support server\n"
-                f"Server access: {'Allowed' if ai_status['supported'] else 'Not available in this server yet'}\n"
+                f"Enabled: **{'Yes' if ai_status['enabled'] else 'No'}**\n"
+                f"Policy source: {self._ai_policy_source_label(ai_status['policy_source'])}\n"
+                f"Support default: {'Yes' if ai_status['support_server_default'] else 'No'}\n"
+                f"Ordinary-guild default: {'Enabled' if ai_status['ordinary_global_enabled'] else 'Disabled'}\n"
+                f"Allowed models: {self._format_ai_models(ai_status['allowed_models'])}\n"
+                f"Guild model override: {self._format_ai_models(ai_status['guild_allowed_models_override'])}\n"
+                f"Status: {ai_status['status']}"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Provider and Routing",
+            value=(
                 f"Provider: {ai_status['provider'] or 'Not configured'}\n"
                 f"Provider ready: {'Yes' if ai_status['provider_available'] else 'No'}\n"
-                f"Status: {ai_status['status']}\n"
-                "Default posture: Off until an admin opts in."
+                f"Routing: `{ai_status['routing_strategy'] or 'disabled'}`\n"
+                f"Fast tier: `{ai_status['fast_model'] or 'Not configured'}`\n"
+                f"Complex tier: `{ai_status['complex_model'] or 'Not configured'}`\n"
+                f"Frontier tier: `{ai_status['top_model'] or 'Not configured'}`\n"
+                f"Frontier enabled: {'Yes' if ai_status['top_tier_enabled'] else 'No'}"
             ),
             inline=False,
         )
         embed.add_field(
             name="Runtime Policy",
             value=(
-                f"Enabled: **{'Yes' if config['ai_enabled'] else 'No'}**\n"
                 f"Local-confidence threshold: `{config['ai_min_confidence']}`\n"
                 f"Eligible packs: {self._format_ai_pack_summary(ai_status['enabled_packs'])}\n"
-                f"Model: `{ai_status['model'] or 'Not configured'}`"
+                "Live-message only: Yes\n"
+                "Punishment engine: Never"
             ),
             inline=False,
         )
@@ -788,16 +842,17 @@ class ShieldCog(commands.Cog):
             value=(
                 "Only already-flagged messages are eligible.\n"
                 "Babblebox redacts obvious private patterns, truncates content, and avoids sending broad history or attachment bodies.\n"
-                "AI output only enriches moderator alerts. It never directly deletes, times out, or punishes users."
+                "AI output only enriches moderator alerts. It never directly deletes, times out, or punishes users.\n"
+                "AFK, reminders, watch keywords, and Confessions feature-surface checks stay local and AI-free."
             ),
             inline=False,
         )
         embed.add_field(
             name="Quick Use",
-            value="`/shield ai enabled:true min_confidence:high privacy:true promo:false scam:true adult:true severe:true`",
+            value="`/shield ai min_confidence:high privacy:true promo:false scam:true adult:true severe:true`",
             inline=False,
         )
-        return ge.style_embed(embed, footer="Babblebox Shield AI | Optional, admin-only, and support-server limited")
+        return ge.style_embed(embed, footer="Babblebox Shield AI | Review scope is admin-configurable; access is owner-managed")
 
     def _logs_embed(self, guild_id: int) -> discord.Embed:
         config = self.service.get_config(guild_id)
@@ -1225,9 +1280,8 @@ class ShieldCog(commands.Cog):
         ok, message = await self.service.set_allow_entry(ctx.guild.id, bucket, value, state == "on")
         await self._send_result(ctx, "Shield Allowlists", message, ok=ok)
 
-    @shield_group.command(name="ai", with_app_command=True, description="Configure optional Shield AI second-pass review")
+    @shield_group.command(name="ai", with_app_command=True, description="Configure Shield AI review scope for already-flagged live messages")
     @app_commands.describe(
-        enabled="Turn Shield AI second-pass review on or off",
         min_confidence="Minimum local Shield confidence needed before AI review is attempted",
         privacy="Allow AI review for privacy-pack hits",
         promo="Allow AI review for promo-pack hits",
@@ -1239,7 +1293,6 @@ class ShieldCog(commands.Cog):
     async def shield_ai_command(
         self,
         ctx: commands.Context,
-        enabled: Optional[bool] = None,
         min_confidence: Optional[str] = None,
         privacy: Optional[bool] = None,
         promo: Optional[bool] = None,
@@ -1249,11 +1302,8 @@ class ShieldCog(commands.Cog):
     ):
         if not await self._guard(ctx):
             return
-        if all(value is None for value in (enabled, min_confidence, privacy, promo, scam, adult, severe)):
+        if all(value is None for value in (min_confidence, privacy, promo, scam, adult, severe)):
             await send_hybrid_response(ctx, embed=self._ai_embed(ctx.guild.id), ephemeral=True)
-            return
-        if not self.service.is_ai_supported_guild(ctx.guild.id):
-            await self._send_result(ctx, "Shield AI", "AI review is not available in this server yet.", ok=False)
             return
         current = self.service.get_config(ctx.guild.id)
         next_packs = list(current.get("ai_enabled_packs", []))
@@ -1266,40 +1316,141 @@ class ShieldCog(commands.Cog):
                 next_packs.remove(pack)
         ok, message = await self.service.set_ai_config(
             ctx.guild.id,
-            enabled=enabled,
             min_confidence=min_confidence,
             enabled_packs=next_packs if any(value is not None for value in (privacy, promo, scam, adult, severe)) else None,
         )
         await self._send_result(ctx, "Shield AI", message, ok=ok)
 
-    @commands.command(name="shieldaiglobal", hidden=True)
-    async def shield_ai_global_override_command(self, ctx: commands.Context, mode: str = "status"):
+    @commands.command(name="shieldai", hidden=True)
+    async def shield_ai_owner_command(self, ctx: commands.Context, *parts: str):
         if ctx.guild is not None:
+            await ctx.send(content="That command is only available in DM.")
             return
         author_id = getattr(ctx.author, "id", 0)
         if not self._is_override_owner(author_id):
-            print(f"Shield AI override denied: unauthorized_dm_user_id={author_id}")
+            print(f"Shield AI owner command denied: unauthorized_dm_user_id={author_id}")
             await ctx.send(content="That command is unavailable.")
             return
-        normalized_mode = str(mode or "status").strip().lower()
-        if normalized_mode not in {"status", "on", "off"}:
-            await ctx.send(embed=self._build_ai_override_embed(title="Shield AI Override", note="Use `status`, `on`, or `off`."))
-            return
-        if normalized_mode == "status":
+
+        tokens = [str(part).strip() for part in parts if str(part).strip()]
+        if not tokens:
+            tokens = ["status"]
+
+        root = tokens[0].casefold()
+        usage = (
+            "Use `status`, `global status|enable [models]|disable|models <csv>`, "
+            "`guild <id> status|enable [models]|disable|models <csv>|inherit`, or `support status|defaults`."
+        )
+
+        if root == "status":
             await ctx.send(
                 embed=self._build_ai_override_embed(
-                    title="Shield AI Override",
-                    note="Private maintainer status for the global Shield AI rollout override.",
+                    title="Shield AI Owner Policy",
+                    note="Private maintainer status for support defaults, global ordinary-guild defaults, and guild overrides.",
                 )
             )
             return
-        ok, message = await self.service.set_global_ai_override(normalized_mode == "on", actor_id=author_id)
-        await ctx.send(
-            embed=self._build_ai_override_embed(
-                title="Shield AI Override",
-                note=message if ok else f"Override update failed: {message}",
+
+        if root == "global":
+            if len(tokens) == 1 or tokens[1].casefold() == "status":
+                await ctx.send(
+                    embed=self._build_ai_override_embed(
+                        title="Shield AI Global Policy",
+                        note="Ordinary-guild default policy for Shield AI access.",
+                    )
+                )
+                return
+            subcommand = tokens[1].casefold()
+            if subcommand == "enable":
+                models = ",".join(tokens[2:]) if len(tokens) > 2 else None
+                ok, message = await self.service.set_ordinary_ai_policy(enabled=True, allowed_models=models, actor_id=author_id)
+            elif subcommand == "disable":
+                ok, message = await self.service.set_ordinary_ai_policy(enabled=False, actor_id=author_id)
+            elif subcommand == "models":
+                if len(tokens) < 3:
+                    await ctx.send(embed=self._build_ai_override_embed(title="Shield AI Global Policy", note=usage))
+                    return
+                ok, message = await self.service.set_ordinary_ai_policy(enabled=None, allowed_models=",".join(tokens[2:]), actor_id=author_id)
+            else:
+                await ctx.send(embed=self._build_ai_override_embed(title="Shield AI Global Policy", note=usage))
+                return
+            await ctx.send(embed=self._build_ai_override_embed(title="Shield AI Global Policy", note=message if ok else f"Update failed: {message}"))
+            return
+
+        if root == "guild":
+            if len(tokens) < 3:
+                await ctx.send(embed=self._build_ai_override_embed(title="Shield AI Guild Policy", note=usage))
+                return
+            try:
+                guild_id = int(tokens[1])
+            except ValueError:
+                await ctx.send(embed=self._build_ai_override_embed(title="Shield AI Guild Policy", note="Guild IDs must be numeric."))
+                return
+            subcommand = tokens[2].casefold()
+            if subcommand == "status":
+                await ctx.send(
+                    embed=self._build_ai_override_embed(
+                        title="Shield AI Guild Policy",
+                        note="Private maintainer status for this guild's resolved Shield AI policy.",
+                        guild_id=guild_id,
+                    )
+                )
+                return
+            if subcommand == "enable":
+                models = ",".join(tokens[3:]) if len(tokens) > 3 else None
+                ok, message = await self.service.set_guild_ai_access_policy(
+                    guild_id,
+                    mode="enabled",
+                    allowed_models=models,
+                    actor_id=author_id,
+                )
+            elif subcommand == "disable":
+                ok, message = await self.service.set_guild_ai_access_policy(guild_id, mode="disabled", actor_id=author_id)
+            elif subcommand == "models":
+                if len(tokens) < 4:
+                    await ctx.send(embed=self._build_ai_override_embed(title="Shield AI Guild Policy", note=usage, guild_id=guild_id))
+                    return
+                ok, message = await self.service.set_guild_ai_access_policy(
+                    guild_id,
+                    allowed_models=",".join(tokens[3:]),
+                    actor_id=author_id,
+                )
+            elif subcommand == "inherit":
+                ok, message = await self.service.inherit_guild_ai_access_policy(guild_id, actor_id=author_id)
+            else:
+                await ctx.send(embed=self._build_ai_override_embed(title="Shield AI Guild Policy", note=usage, guild_id=guild_id))
+                return
+            await ctx.send(
+                embed=self._build_ai_override_embed(
+                    title="Shield AI Guild Policy",
+                    note=message if ok else f"Update failed: {message}",
+                    guild_id=guild_id,
+                )
             )
-        )
+            return
+
+        if root == "support":
+            if len(tokens) == 1 or tokens[1].casefold() == "status":
+                await ctx.send(
+                    embed=self._build_ai_override_embed(
+                        title="Shield AI Support Policy",
+                        note="Private maintainer status for the support server defaults.",
+                        guild_id=SHIELD_AI_SUPPORT_GUILD_ID,
+                    )
+                )
+                return
+            if tokens[1].casefold() == "defaults":
+                ok, message = await self.service.restore_support_ai_defaults(actor_id=author_id)
+                await ctx.send(
+                    embed=self._build_ai_override_embed(
+                        title="Shield AI Support Policy",
+                        note=message if ok else f"Update failed: {message}",
+                        guild_id=SHIELD_AI_SUPPORT_GUILD_ID,
+                    )
+                )
+                return
+
+        await ctx.send(embed=self._build_ai_override_embed(title="Shield AI Owner Policy", note=usage))
 
     @shield_group.command(name="test", with_app_command=True, description="Dry-run a message through the current Shield rules")
     async def shield_test_command(self, ctx: commands.Context, text: str):

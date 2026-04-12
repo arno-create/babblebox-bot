@@ -1301,7 +1301,6 @@ class UtilityService:
         due_at = deserialize_datetime(record.get("due_at"))
         delayed = bool(due_at is not None and (ge.now_utc() - due_at).total_seconds() > 120)
         embed = build_reminder_delivery_embed(record, delayed=delayed)
-        view = build_reminder_delivery_view(record)
         user_id = record.get("user_id")
         if record.get("delivery") == "here" and isinstance(record.get("channel_id"), int):
             feature_decision = self._evaluate_feature_text(FEATURE_SURFACE_REMINDER_PUBLIC_DELIVERY, record.get("text"))
@@ -1320,7 +1319,12 @@ class UtilityService:
                     channel = await self.bot.fetch_channel(record["channel_id"])
             if channel is not None:
                 with contextlib.suppress(discord.Forbidden, discord.HTTPException):
-                    await channel.send(content=f"<@{user_id}>", embed=embed, allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False))
+                    await channel.send(
+                        content=f"<@{user_id}>",
+                        embed=embed,
+                        view=build_reminder_delivery_view(record, delivered_in_guild_channel=True),
+                        allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
+                    )
                     return True
         user = self.bot.get_user(user_id)
         if user is None:
@@ -1328,12 +1332,12 @@ class UtilityService:
                 user = await self.bot.fetch_user(user_id)
         if user is not None:
             with contextlib.suppress(discord.Forbidden, discord.HTTPException):
-                await user.send(embed=embed, view=view)
+                await user.send(embed=embed, view=None)
                 return True
         return False
 
     async def send_later_marker_dm(self, user: discord.abc.User, marker: dict):
-        await user.send(embed=build_later_marker_embed(marker), view=build_jump_view(marker["message_jump_url"]))
+        await user.send(embed=build_later_marker_embed(marker), view=build_jump_view(marker["message_jump_url"], label="Open Saved Message"))
 
     async def send_capture_dm(self, *, user: discord.abc.User, guild_name: str, channel_name: str, messages: list[discord.Message], requested_count: int):
         jump_url = messages[-1].jump_url if messages else None

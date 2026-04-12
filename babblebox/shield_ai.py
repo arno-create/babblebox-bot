@@ -5,7 +5,7 @@ import json
 import os
 import re
 from dataclasses import dataclass
-from typing import Any, Sequence
+from typing import Any, Iterable, Sequence
 
 import aiohttp
 
@@ -23,10 +23,30 @@ from babblebox.text_safety import (
 )
 
 
-SHIELD_AI_ALLOWED_GUILD_ID = 1322933864360050688
+SHIELD_AI_SUPPORT_GUILD_ID = 1322933864360050688
+SHIELD_AI_ALLOWED_GUILD_ID = SHIELD_AI_SUPPORT_GUILD_ID
 SHIELD_AI_REVIEW_PACKS = ("privacy", "promo", "scam", "adult", "severe")
 SHIELD_AI_MIN_CONFIDENCE_CHOICES = ("low", "medium", "high")
+SHIELD_AI_ROUTING_TIERS = ("fast", "complex", "frontier")
+SHIELD_AI_MODEL_ORDER = ("gpt-5.4-nano", "gpt-5.4-mini", "gpt-5.4")
+SHIELD_AI_MODEL_ALIASES = {
+    "nano": "gpt-5.4-nano",
+    "mini": "gpt-5.4-mini",
+    "full": "gpt-5.4",
+    "gpt-5.4-nano": "gpt-5.4-nano",
+    "gpt-5.4-mini": "gpt-5.4-mini",
+    "gpt-5.4": "gpt-5.4",
+}
+SHIELD_AI_MODEL_SHORT_NAMES = {
+    "gpt-5.4-nano": "nano",
+    "gpt-5.4-mini": "mini",
+    "gpt-5.4": "full",
+}
 DEFAULT_SHIELD_AI_MODEL = "gpt-4.1-mini"
+DEFAULT_SHIELD_AI_FAST_MODEL = "gpt-5.4-nano"
+DEFAULT_SHIELD_AI_COMPLEX_MODEL = "gpt-5.4-mini"
+DEFAULT_SHIELD_AI_TOP_MODEL = "gpt-5.4"
+DEFAULT_SHIELD_AI_ENABLE_TOP_TIER = False
 DEFAULT_SHIELD_AI_TIMEOUT_SECONDS = 4.0
 DEFAULT_SHIELD_AI_MAX_CHARS = 340
 DEFAULT_SHIELD_AI_CONCURRENCY = 2
@@ -81,7 +101,53 @@ _SYSTEM_PROMPT = (
 
 
 def shield_ai_available_in_guild(guild_id: int | None) -> bool:
-    return int(guild_id or 0) == SHIELD_AI_ALLOWED_GUILD_ID
+    return int(guild_id or 0) == SHIELD_AI_SUPPORT_GUILD_ID
+
+
+def normalize_shield_ai_model_name(value: str | None) -> str | None:
+    cleaned = normalize_plain_text(value).casefold()
+    if not cleaned:
+        return None
+    return SHIELD_AI_MODEL_ALIASES.get(cleaned)
+
+
+def parse_shield_ai_model_list(values: Iterable[str] | str | None) -> tuple[str, ...]:
+    if values is None:
+        return ()
+    raw_items: Iterable[str]
+    if isinstance(values, str):
+        raw_items = values.split(",")
+    else:
+        raw_items = values
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for item in raw_items:
+        normalized = normalize_shield_ai_model_name(item)
+        if normalized is None:
+            raise ValueError("Allowed Shield AI models must be `nano`, `mini`, `full`, or canonical model names.")
+        if normalized in seen:
+            continue
+        seen.add(normalized)
+        cleaned.append(normalized)
+    cleaned.sort(key=_model_rank)
+    return tuple(cleaned)
+
+
+def format_shield_ai_model(model: str | None) -> str:
+    normalized = normalize_shield_ai_model_name(model)
+    if normalized is None:
+        return str(model or "").strip() or "unknown"
+    return f"{SHIELD_AI_MODEL_SHORT_NAMES[normalized]} ({normalized})"
+
+
+def format_shield_ai_model_list(models: Iterable[str] | None) -> str:
+    items = []
+    for model in models or ():
+        normalized = normalize_shield_ai_model_name(model)
+        if normalized is None:
+            continue
+        items.append(format_shield_ai_model(normalized))
+    return ", ".join(items) if items else "None"
 
 
 def _read_float_env(name: str, default: float, *, minimum: float, maximum: float) -> float:
@@ -106,6 +172,17 @@ def _read_int_env(name: str, default: int, *, minimum: int, maximum: int) -> int
     return min(maximum, max(minimum, value))
 
 
+def _read_bool_env(name: str, default: bool) -> bool:
+    raw = os.getenv(name, "").strip().casefold()
+    if not raw:
+        return default
+    if raw in {"1", "true", "yes", "on"}:
+        return True
+    if raw in {"0", "false", "no", "off"}:
+        return False
+    return default
+
+
 def _truncate_text(text: str, limit: int) -> tuple[str, bool]:
     if len(text) <= limit:
         return text, False
@@ -117,6 +194,13 @@ def _truncate_text(text: str, limit: int) -> tuple[str, bool]:
     if not window:
         window = text[: limit - 3]
     return f"{window}...", True
+
+
+def _model_rank(model: str) -> int:
+    normalized = normalize_shield_ai_model_name(model)
+    if normalized is None:
+        return len(SHIELD_AI_MODEL_ORDER)
+    return SHIELD_AI_MODEL_ORDER.index(normalized)
 
 
 def summarize_attachment_extensions(filenames: Sequence[str]) -> tuple[str, ...]:
@@ -152,12 +236,15 @@ class ShieldAIReviewRequest:
     local_labels: tuple[str, ...]
     local_reasons: tuple[str, ...]
     sanitized_content: str
-    has_links: bool
-    domains: tuple[str, ...]
-    has_suspicious_attachment: bool
-    attachment_extensions: tuple[str, ...]
-    invite_detected: bool
-    repetitive_promo: bool
+    sanitized_redaction_count: int = 0
+    sanitized_truncated: bool = False
+    has_links: bool = False
+    domains: tuple[str, ...] = ()
+    has_suspicious_attachment: bool = False
+    attachment_extensions: tuple[str, ...] = ()
+    invite_detected: bool = False
+    repetitive_promo: bool = False
+    allowed_models: tuple[str, ...] = SHIELD_AI_MODEL_ORDER
 
 
 @dataclass(frozen=True)
@@ -169,10 +256,39 @@ class ShieldAIReviewResult:
     explanation: str
     model: str
     provider: str = OPENAI_PROVIDER_NAME
+    tier: str = "fast"
+    target_tier: str = "fast"
+    route_reasons: tuple[str, ...] = ()
+    attempted_models: tuple[str, ...] = ()
+    fallback_used: bool = False
+    policy_capped: bool = False
 
     @property
     def classification_label(self) -> str:
         return AI_CLASSIFICATION_LABELS.get(self.classification, self.classification.replace("_", " ").title())
+
+
+@dataclass(frozen=True)
+class ShieldAIRoutePlan:
+    target_tier: str
+    selected_tier: str
+    selected_model: str
+    route_reasons: tuple[str, ...]
+    attempted_models: tuple[str, ...]
+    policy_capped: bool
+    single_model_override: bool = False
+
+
+class _RetryableProviderFailure(RuntimeError):
+    pass
+
+
+class _NonRetryableProviderFailure(RuntimeError):
+    pass
+
+
+class _TimeoutProviderFailure(RuntimeError):
+    pass
 
 
 def sanitize_message_for_ai(text: str | None, *, max_chars: int = DEFAULT_SHIELD_AI_MAX_CHARS) -> SanitizedShieldAIContent:
@@ -195,6 +311,12 @@ class ShieldAIProvider:
             "available": False,
             "configured": False,
             "model": None,
+            "routing_strategy": "disabled",
+            "single_model_override": False,
+            "fast_model": None,
+            "complex_model": None,
+            "top_model": None,
+            "top_tier_enabled": False,
             "timeout_seconds": None,
             "max_chars": None,
             "status": "AI review is unavailable because no provider is configured.",
@@ -212,7 +334,11 @@ class OpenAIShieldAIProvider(ShieldAIProvider):
 
     def __init__(self):
         self.api_key = os.getenv("OPENAI_API_KEY", "").strip()
-        self.model = os.getenv("SHIELD_AI_MODEL", "").strip() or DEFAULT_SHIELD_AI_MODEL
+        self.single_model_override = os.getenv("SHIELD_AI_MODEL", "").strip()
+        self.fast_model = normalize_shield_ai_model_name(os.getenv("SHIELD_AI_FAST_MODEL")) or DEFAULT_SHIELD_AI_FAST_MODEL
+        self.complex_model = normalize_shield_ai_model_name(os.getenv("SHIELD_AI_COMPLEX_MODEL")) or DEFAULT_SHIELD_AI_COMPLEX_MODEL
+        self.top_model = normalize_shield_ai_model_name(os.getenv("SHIELD_AI_TOP_MODEL")) or DEFAULT_SHIELD_AI_TOP_MODEL
+        self.top_tier_enabled = _read_bool_env("SHIELD_AI_ENABLE_TOP_TIER", DEFAULT_SHIELD_AI_ENABLE_TOP_TIER)
         self.timeout_seconds = _read_float_env(
             "SHIELD_AI_TIMEOUT_SECONDS",
             DEFAULT_SHIELD_AI_TIMEOUT_SECONDS,
@@ -231,22 +357,34 @@ class OpenAIShieldAIProvider(ShieldAIProvider):
             "Shield AI init: "
             f"provider={OPENAI_PROVIDER_NAME.lower()}, "
             f"configured={'yes' if self.api_key else 'no'}, "
-            f"model={self.model}, "
+            f"fast_model={self.fast_model}, "
+            f"complex_model={self.complex_model}, "
+            f"top_model={self.top_model}, "
+            f"top_tier_enabled={'yes' if self.top_tier_enabled else 'no'}, "
+            f"single_model_override={self.single_model_override or 'none'}, "
             f"timeout_seconds={self.timeout_seconds}, "
             f"max_chars={self.max_chars}, "
-            f"allowed_guild_id={SHIELD_AI_ALLOWED_GUILD_ID}"
+            f"support_default_guild_id={SHIELD_AI_SUPPORT_GUILD_ID}"
         )
 
     def diagnostics(self) -> dict[str, Any]:
         available = bool(self.api_key)
+        status = "Ready." if available else "OpenAI API key is not configured."
+        routing_strategy = "single_model_override" if self.single_model_override else "two_tier_with_dormant_top"
         return {
             "provider": OPENAI_PROVIDER_NAME,
             "available": available,
             "configured": available,
-            "model": self.model,
+            "model": self.single_model_override or self.fast_model,
+            "routing_strategy": routing_strategy,
+            "single_model_override": bool(self.single_model_override),
+            "fast_model": self.fast_model,
+            "complex_model": self.complex_model,
+            "top_model": self.top_model,
+            "top_tier_enabled": self.top_tier_enabled,
             "timeout_seconds": self.timeout_seconds,
             "max_chars": self.max_chars,
-            "status": "Ready." if available else "OpenAI API key is not configured.",
+            "status": status,
         }
 
     async def close(self):
@@ -260,6 +398,7 @@ class OpenAIShieldAIProvider(ShieldAIProvider):
         if not request.sanitized_content and not request.domains and not request.attachment_extensions:
             return None
 
+        route = self._route_request(request)
         acquired = False
         try:
             await asyncio.wait_for(self._semaphore.acquire(), timeout=0.05)
@@ -269,34 +408,40 @@ class OpenAIShieldAIProvider(ShieldAIProvider):
             return None
 
         try:
-            session = await self._get_session()
-            async with session.post(
-                OPENAI_CHAT_COMPLETIONS_URL,
-                headers={
-                    "Authorization": f"Bearer {self.api_key}",
-                    "Content-Type": "application/json",
-                },
-                json=self._build_payload(request),
-            ) as response:
-                if response.status == 429:
-                    print("Shield AI review skipped: provider rate limit.")
+            payload = None
+            final_model = route.selected_model
+            for attempt_index, model in enumerate(route.attempted_models):
+                final_model = model
+                try:
+                    payload = await self._request_completion(request, model=model)
+                    break
+                except _RetryableProviderFailure:
+                    if attempt_index + 1 >= len(route.attempted_models):
+                        print("Shield AI review skipped: retryable provider failure with no fallback remaining.")
+                        return None
+                    continue
+                except _TimeoutProviderFailure:
+                    print("Shield AI review skipped: provider timeout.")
                     return None
-                if response.status >= 500:
-                    print(f"Shield AI review skipped: provider server error ({response.status}).")
+                except _NonRetryableProviderFailure:
                     return None
-                if response.status >= 400:
-                    print(f"Shield AI review skipped: provider request error ({response.status}).")
-                    return None
-                payload = await response.json(content_type=None)
-        except (aiohttp.ClientError, asyncio.TimeoutError, json.JSONDecodeError) as exc:
-            print(f"Shield AI review skipped: {type(exc).__name__}.")
-            return None
+            if payload is None:
+                return None
         finally:
             if acquired:
                 self._semaphore.release()
 
         try:
-            return self._parse_response(payload)
+            return self._parse_response(
+                payload,
+                model=final_model,
+                tier=_tier_for_model(final_model),
+                target_tier=route.target_tier,
+                route_reasons=route.route_reasons,
+                attempted_models=route.attempted_models,
+                fallback_used=len(route.attempted_models) > 1,
+                policy_capped=route.policy_capped,
+            )
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
             print(f"Shield AI review skipped: malformed provider output ({type(exc).__name__}).")
             return None
@@ -308,9 +453,100 @@ class OpenAIShieldAIProvider(ShieldAIProvider):
             self._session = aiohttp.ClientSession(timeout=timeout, connector=connector)
         return self._session
 
-    def _build_payload(self, request: ShieldAIReviewRequest) -> dict[str, Any]:
+    async def _request_completion(self, request: ShieldAIReviewRequest, *, model: str) -> dict[str, Any]:
+        session = await self._get_session()
+        try:
+            async with session.post(
+                OPENAI_CHAT_COMPLETIONS_URL,
+                headers={
+                    "Authorization": f"Bearer {self.api_key}",
+                    "Content-Type": "application/json",
+                },
+                json=self._build_payload(request, model=model),
+            ) as response:
+                if response.status == 429:
+                    print("Shield AI review retryable: provider rate limit.")
+                    raise _RetryableProviderFailure("rate_limit")
+                if response.status >= 500:
+                    print(f"Shield AI review retryable: provider server error ({response.status}).")
+                    raise _RetryableProviderFailure("server_error")
+                if response.status >= 400:
+                    print(f"Shield AI review skipped: provider request error ({response.status}).")
+                    raise _NonRetryableProviderFailure("request_error")
+                try:
+                    return await response.json(content_type=None)
+                except json.JSONDecodeError as exc:
+                    print("Shield AI review skipped: provider returned non-JSON output.")
+                    raise _NonRetryableProviderFailure("malformed_json") from exc
+        except asyncio.TimeoutError as exc:
+            raise _TimeoutProviderFailure("timeout") from exc
+        except aiohttp.ClientError as exc:
+            print(f"Shield AI review retryable: transport failure ({type(exc).__name__}).")
+            raise _RetryableProviderFailure("client_error") from exc
+
+    def _route_request(self, request: ShieldAIReviewRequest) -> ShieldAIRoutePlan:
+        if self.single_model_override:
+            return ShieldAIRoutePlan(
+                target_tier=_tier_for_model(self.single_model_override),
+                selected_tier=_tier_for_model(self.single_model_override),
+                selected_model=self.single_model_override,
+                route_reasons=("single_model_override",),
+                attempted_models=(self.single_model_override,),
+                policy_capped=False,
+                single_model_override=True,
+            )
+
+        allowed_models = tuple(
+            model
+            for model in (
+                normalize_shield_ai_model_name(item)
+                for item in (request.allowed_models or SHIELD_AI_MODEL_ORDER)
+            )
+            if model is not None
+        )
+        if not allowed_models:
+            allowed_models = (self.fast_model,)
+        route_reasons = _route_reasons_for_request(request)
+        target_tier = _target_tier_for_request(request, route_reasons, top_tier_enabled=self.top_tier_enabled)
+        selected_model, selected_tier, policy_capped = self._select_model_for_tier(target_tier, allowed_models)
+        attempted_models = [selected_model]
+        fallback_model = self._fallback_model(selected_model, allowed_models)
+        if fallback_model is not None:
+            attempted_models.append(fallback_model)
+        return ShieldAIRoutePlan(
+            target_tier=target_tier,
+            selected_tier=selected_tier,
+            selected_model=selected_model,
+            route_reasons=tuple(route_reasons),
+            attempted_models=tuple(attempted_models),
+            policy_capped=policy_capped,
+        )
+
+    def _select_model_for_tier(self, target_tier: str, allowed_models: Sequence[str]) -> tuple[str, str, bool]:
+        tier_models = {
+            "fast": self.fast_model,
+            "complex": self.complex_model,
+            "frontier": self.top_model,
+        }
+        target_rank = SHIELD_AI_ROUTING_TIERS.index(target_tier)
+        allowed = tuple(sorted({normalize_shield_ai_model_name(item) for item in allowed_models if normalize_shield_ai_model_name(item)}, key=_model_rank))
+        satisfying = [model for model in allowed if _tier_rank(_tier_for_model(model)) >= target_rank]
+        if satisfying:
+            selected = satisfying[0]
+            return selected, _tier_for_model(selected), False
+        selected = allowed[-1]
+        return selected, _tier_for_model(selected), True
+
+    def _fallback_model(self, current_model: str, allowed_models: Sequence[str]) -> str | None:
+        current_rank = _model_rank(current_model)
+        lower_models = [model for model in allowed_models if _model_rank(model) < current_rank]
+        if not lower_models:
+            return None
+        return max(lower_models, key=_model_rank)
+
+    def _build_payload(self, request: ShieldAIReviewRequest, *, model: str) -> dict[str, Any]:
         return {
-            "model": self.model,
+            "model": model,
             "temperature": 0,
             "max_tokens": 180,
             "response_format": {"type": "json_object"},
@@ -334,12 +570,25 @@ class OpenAIShieldAIProvider(ShieldAIProvider):
                 "has_suspicious_attachment": request.has_suspicious_attachment,
                 "attachment_extensions": list(request.attachment_extensions[:3]),
                 "repetitive_promo": request.repetitive_promo,
+                "sanitized_redaction_count": request.sanitized_redaction_count,
+                "sanitized_truncated": request.sanitized_truncated,
             },
             "sanitized_excerpt": request.sanitized_content or "[no text excerpt]",
         }
         return json.dumps(body, ensure_ascii=True)
 
-    def _parse_response(self, payload: dict[str, Any]) -> ShieldAIReviewResult:
+    def _parse_response(
+        self,
+        payload: dict[str, Any],
+        *,
+        model: str,
+        tier: str,
+        target_tier: str,
+        route_reasons: Sequence[str],
+        attempted_models: Sequence[str],
+        fallback_used: bool,
+        policy_capped: bool,
+    ) -> ShieldAIReviewResult:
         choices = payload.get("choices")
         if not isinstance(choices, list) or not choices:
             raise ValueError("Missing choices.")
@@ -374,8 +623,64 @@ class OpenAIShieldAIProvider(ShieldAIProvider):
             priority=priority,
             false_positive=false_positive,
             explanation=explanation,
-            model=self.model,
+            model=model,
+            tier=tier,
+            target_tier=target_tier,
+            route_reasons=tuple(route_reasons),
+            attempted_models=tuple(attempted_models),
+            fallback_used=fallback_used,
+            policy_capped=policy_capped,
         )
+
+
+def _tier_for_model(model: str) -> str:
+    normalized = normalize_shield_ai_model_name(model)
+    if normalized == "gpt-5.4":
+        return "frontier"
+    if normalized == "gpt-5.4-mini":
+        return "complex"
+    return "fast"
+
+
+def _tier_rank(tier: str) -> int:
+    try:
+        return SHIELD_AI_ROUTING_TIERS.index(tier)
+    except ValueError:
+        return 0
+
+
+def _route_reasons_for_request(request: ShieldAIReviewRequest) -> list[str]:
+    reasons: list[str] = []
+    if request.pack in {"scam", "severe"}:
+        reasons.append("high_risk_pack")
+    if request.local_confidence != "high":
+        reasons.append("local_confidence_below_high")
+    if request.local_action in {"timeout_log", "delete_escalate"}:
+        reasons.append("high_severity_action")
+    if len(request.local_labels) >= 2:
+        reasons.append("multiple_local_labels")
+    if request.has_suspicious_attachment:
+        reasons.append("suspicious_attachment")
+    if request.sanitized_truncated:
+        reasons.append("sanitized_excerpt_truncated")
+    if request.sanitized_redaction_count >= 3:
+        reasons.append("heavy_redaction")
+    compound_link_context = request.invite_detected or request.repetitive_promo or len(request.domains) >= 2
+    if compound_link_context:
+        reasons.append("compound_link_context")
+    return reasons
+
+
+def _target_tier_for_request(request: ShieldAIReviewRequest, route_reasons: Sequence[str], *, top_tier_enabled: bool) -> str:
+    if not route_reasons:
+        return "fast"
+    target = "complex"
+    if not top_tier_enabled:
+        return target
+    has_frontier_trigger = "high_risk_pack" in route_reasons or "high_severity_action" in route_reasons
+    if has_frontier_trigger and len(route_reasons) >= 3:
+        return "frontier"
+    return target
 
 
 def build_shield_ai_provider() -> ShieldAIProvider:

@@ -1390,7 +1390,7 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await cog.service.close()
 
-    async def test_shield_ai_command_reports_guild_restriction_cleanly(self):
+    async def test_shield_ai_command_updates_scope_without_owner_access_toggle(self):
         bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
         cog = ShieldCog(bot)
         try:
@@ -1402,11 +1402,20 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
                 author=FakeAuthor(manage_guild=True),
             )
 
-            await ShieldCog.shield_ai_command.callback(cog, ctx, enabled=True, min_confidence=None, privacy=None, promo=None, scam=None)
+            await ShieldCog.shield_ai_command.callback(
+                cog,
+                ctx,
+                min_confidence="medium",
+                privacy=True,
+                promo=None,
+                scam=None,
+                adult=None,
+                severe=None,
+            )
 
             self.assertEqual(len(ctx.send_calls), 1)
             self.assertTrue(ctx.send_calls[0]["ephemeral"])
-            self.assertIn("not available", ctx.send_calls[0]["embed"].description.lower())
+            self.assertIn("review scope", ctx.send_calls[0]["embed"].description.lower())
         finally:
             await cog.service.close()
 
@@ -1852,7 +1861,7 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await cog.service.close()
 
-    async def test_hidden_shield_ai_override_ignores_guild_invocation(self):
+    async def test_hidden_shield_ai_owner_command_rejects_guild_invocation(self):
         bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
         cog = ShieldCog(bot)
         try:
@@ -1864,13 +1873,14 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
                 author=FakeAuthor(user_id=1266444952779620413, manage_guild=True),
             )
 
-            await ShieldCog.shield_ai_global_override_command.callback(cog, ctx, "status")
+            await ShieldCog.shield_ai_owner_command.callback(cog, ctx, "status")
 
-            self.assertEqual(ctx.send_calls, [])
+            self.assertEqual(len(ctx.send_calls), 1)
+            self.assertEqual(ctx.send_calls[0]["content"], "That command is only available in DM.")
         finally:
             await cog.service.close()
 
-    async def test_hidden_shield_ai_override_rejects_unauthorized_dm(self):
+    async def test_hidden_shield_ai_owner_command_rejects_unauthorized_dm(self):
         bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
         cog = ShieldCog(bot)
         try:
@@ -1882,14 +1892,14 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
                 author=FakeAuthor(user_id=777),
             )
 
-            await ShieldCog.shield_ai_global_override_command.callback(cog, ctx, "status")
+            await ShieldCog.shield_ai_owner_command.callback(cog, ctx, "status")
 
             self.assertEqual(len(ctx.send_calls), 1)
             self.assertEqual(ctx.send_calls[0]["content"], "That command is unavailable.")
         finally:
             await cog.service.close()
 
-    async def test_hidden_shield_ai_override_status_and_toggle_work_in_dm_for_owner(self):
+    async def test_hidden_shield_ai_owner_command_updates_global_and_guild_policy(self):
         bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
         cog = ShieldCog(bot)
         try:
@@ -1897,16 +1907,20 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             owner = FakeAuthor(user_id=1266444952779620413)
             ctx = FakeContext(interaction=None, guild=None, channel=FakeChannel(), author=owner)
 
-            await ShieldCog.shield_ai_global_override_command.callback(cog, ctx, "status")
-            await ShieldCog.shield_ai_global_override_command.callback(cog, ctx, "on")
-            await ShieldCog.shield_ai_global_override_command.callback(cog, ctx, "off")
+            await ShieldCog.shield_ai_owner_command.callback(cog, ctx, "status")
+            await ShieldCog.shield_ai_owner_command.callback(cog, ctx, "global", "enable", "nano")
+            await ShieldCog.shield_ai_owner_command.callback(cog, ctx, "guild", "10", "enable", "nano,mini")
+            await ShieldCog.shield_ai_owner_command.callback(cog, ctx, "guild", "10", "inherit")
+            await ShieldCog.shield_ai_owner_command.callback(cog, ctx, "support", "defaults")
 
-            self.assertEqual(len(ctx.send_calls), 3)
-            self.assertEqual(ctx.send_calls[0]["embed"].title, "Shield AI Override")
+            self.assertEqual(len(ctx.send_calls), 5)
+            self.assertEqual(ctx.send_calls[0]["embed"].title, "Shield AI Owner Policy")
             self.assertIn("Private maintainer status", ctx.send_calls[0]["embed"].description)
-            self.assertIn("now on", ctx.send_calls[1]["embed"].description.lower())
-            self.assertIn("now off", ctx.send_calls[2]["embed"].description.lower())
-            self.assertFalse(cog.service.get_meta()["global_ai_override_enabled"])
+            self.assertIn("enabled", ctx.send_calls[1]["embed"].description.lower())
+            self.assertIn("guild shield ai access", ctx.send_calls[2]["embed"].description.lower())
+            self.assertIn("inherits", ctx.send_calls[3]["embed"].description.lower())
+            self.assertIn("restored", ctx.send_calls[4]["embed"].description.lower())
+            self.assertTrue(cog.service.get_meta()["ordinary_ai_enabled"])
         finally:
             await cog.service.close()
 
@@ -2258,5 +2272,5 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
     def test_hidden_override_command_is_not_in_public_help_pages(self):
         serialized_help = " ".join(page["body"] + " " + page.get("try", "") for page in HELP_PAGES).casefold()
 
-        self.assertNotIn("shieldaiglobal", serialized_help)
+        self.assertNotIn("shieldai", serialized_help)
         self.assertNotIn("dropscelebaiglobal", serialized_help)

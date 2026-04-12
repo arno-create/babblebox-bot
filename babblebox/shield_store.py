@@ -10,12 +10,17 @@ from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 from babblebox.postgres_json import decode_postgres_json_array, decode_postgres_json_object
-from babblebox.shield_ai import SHIELD_AI_MIN_CONFIDENCE_CHOICES, SHIELD_AI_REVIEW_PACKS
+from babblebox.shield_ai import (
+    DEFAULT_SHIELD_AI_FAST_MODEL,
+    SHIELD_AI_MIN_CONFIDENCE_CHOICES,
+    SHIELD_AI_REVIEW_PACKS,
+    parse_shield_ai_model_list,
+)
 
 
 DEFAULT_DATABASE_URL_ENV_ORDER = ("UTILITY_DATABASE_URL", "SUPABASE_DB_URL", "DATABASE_URL")
 DEFAULT_BACKEND = "postgres"
-DEFAULT_VERSION = 5
+DEFAULT_VERSION = 6
 VALID_SCAN_MODES = {"all", "only_included"}
 VALID_SHIELD_ACTIONS = {"disabled", "detect", "log", "delete_log", "delete_escalate", "timeout_log"}
 VALID_SHIELD_SENSITIVITIES = {"low", "normal", "high"}
@@ -34,6 +39,8 @@ MEDIUM_CONFIDENCE_ACTIONS = {"detect", "log", "delete_log"}
 HIGH_CONFIDENCE_ACTIONS = VALID_SHIELD_ACTIONS - {"disabled"}
 CONFIDENCE_TIERS = ("low", "medium", "high")
 SHIELD_META_GLOBAL_AI_OVERRIDE_KEY = "global_ai_override"
+SHIELD_META_ORDINARY_AI_POLICY_KEY = "ordinary_ai_policy"
+VALID_SHIELD_AI_ACCESS_MODES = {"inherit", "enabled", "disabled"}
 
 
 class ShieldStorageUnavailable(RuntimeError):
@@ -42,9 +49,10 @@ class ShieldStorageUnavailable(RuntimeError):
 
 def default_shield_meta() -> dict[str, Any]:
     return {
-        "global_ai_override_enabled": False,
-        "global_ai_override_updated_by": None,
-        "global_ai_override_updated_at": None,
+        "ordinary_ai_enabled": False,
+        "ordinary_ai_allowed_models": [DEFAULT_SHIELD_AI_FAST_MODEL],
+        "ordinary_ai_updated_by": None,
+        "ordinary_ai_updated_at": None,
     }
 
 
@@ -129,6 +137,10 @@ def default_guild_shield_config(guild_id: int | None = None) -> dict[str, Any]:
         "link_policy_medium_action": "log",
         "link_policy_high_action": "log",
         "ai_enabled": False,
+        "ai_access_mode": "inherit",
+        "ai_allowed_models_override": [],
+        "ai_access_updated_by": None,
+        "ai_access_updated_at": None,
         "ai_min_confidence": "high",
         "ai_enabled_packs": list(SHIELD_AI_REVIEW_PACKS),
         "escalation_threshold": 3,
@@ -152,6 +164,13 @@ def _clean_text_list(values: Any) -> list[str]:
     if not isinstance(values, (list, tuple, set)):
         return []
     return sorted({str(value).strip().casefold() for value in values if isinstance(value, str) and str(value).strip()})
+
+
+def _clean_model_list(values: Any) -> list[str]:
+    try:
+        return list(parse_shield_ai_model_list(values))
+    except ValueError:
+        return []
 
 
 def _clean_severe_category_list(values: Any) -> list[str]:
@@ -275,6 +294,13 @@ def normalize_guild_shield_config(guild_id: int, config: Any) -> dict[str, Any]:
     cleaned["link_policy_action"] = cleaned["link_policy_high_action"]
 
     cleaned["ai_enabled"] = bool(config.get("ai_enabled"))
+    ai_access_mode = str(config.get("ai_access_mode", "inherit")).strip().lower()
+    cleaned["ai_access_mode"] = ai_access_mode if ai_access_mode in VALID_SHIELD_AI_ACCESS_MODES else "inherit"
+    cleaned["ai_allowed_models_override"] = _clean_model_list(config.get("ai_allowed_models_override"))
+    updated_by = config.get("ai_access_updated_by")
+    cleaned["ai_access_updated_by"] = updated_by if isinstance(updated_by, int) and updated_by > 0 else None
+    updated_at = config.get("ai_access_updated_at")
+    cleaned["ai_access_updated_at"] = updated_at if isinstance(updated_at, str) and updated_at.strip() else None
     ai_min_confidence = str(config.get("ai_min_confidence", "high")).strip().lower()
     cleaned["ai_min_confidence"] = ai_min_confidence if ai_min_confidence in SHIELD_AI_MIN_CONFIDENCE_CHOICES else "high"
     raw_ai_packs = config.get("ai_enabled_packs", list(SHIELD_AI_REVIEW_PACKS))
@@ -379,11 +405,22 @@ class _BaseShieldStore:
         meta = payload.get("meta")
         if isinstance(meta, dict):
             cleaned_meta = default_shield_meta()
-            cleaned_meta["global_ai_override_enabled"] = bool(meta.get("global_ai_override_enabled"))
-            updated_by = meta.get("global_ai_override_updated_by")
-            cleaned_meta["global_ai_override_updated_by"] = updated_by if isinstance(updated_by, int) and updated_by > 0 else None
-            updated_at = meta.get("global_ai_override_updated_at")
-            cleaned_meta["global_ai_override_updated_at"] = updated_at if isinstance(updated_at, str) and updated_at.strip() else None
+            ordinary_enabled = meta.get("ordinary_ai_enabled")
+            if ordinary_enabled is None:
+                ordinary_enabled = meta.get("global_ai_override_enabled")
+            cleaned_meta["ordinary_ai_enabled"] = bool(ordinary_enabled)
+            allowed_models = meta.get("ordinary_ai_allowed_models")
+            if allowed_models is None and bool(meta.get("global_ai_override_enabled")):
+                allowed_models = [DEFAULT_SHIELD_AI_FAST_MODEL]
+            cleaned_meta["ordinary_ai_allowed_models"] = _clean_model_list(allowed_models) or [DEFAULT_SHIELD_AI_FAST_MODEL]
+            updated_by = meta.get("ordinary_ai_updated_by")
+            if updated_by is None:
+                updated_by = meta.get("global_ai_override_updated_by")
+            cleaned_meta["ordinary_ai_updated_by"] = updated_by if isinstance(updated_by, int) and updated_by > 0 else None
+            updated_at = meta.get("ordinary_ai_updated_at")
+            if updated_at is None:
+                updated_at = meta.get("global_ai_override_updated_at")
+            cleaned_meta["ordinary_ai_updated_at"] = updated_at if isinstance(updated_at, str) and updated_at.strip() else None
             normalized["meta"] = cleaned_meta
         guilds = payload.get("guilds")
         if not isinstance(guilds, dict):
@@ -541,6 +578,10 @@ class _PostgresShieldStore(_BaseShieldStore):
                 "link_policy_medium_action TEXT NOT NULL DEFAULT 'log', "
                 "link_policy_high_action TEXT NOT NULL DEFAULT 'log', "
                 "ai_enabled BOOLEAN NOT NULL DEFAULT FALSE, "
+                "ai_access_mode TEXT NOT NULL DEFAULT 'inherit', "
+                "ai_allowed_models_override JSONB NOT NULL DEFAULT '[]'::jsonb, "
+                "ai_access_updated_by BIGINT NULL, "
+                "ai_access_updated_at TEXT NULL, "
                 "ai_min_confidence TEXT NOT NULL DEFAULT 'high', "
                 "ai_enabled_packs JSONB NOT NULL DEFAULT '[\"privacy\",\"promo\",\"scam\",\"adult\",\"severe\"]'::jsonb, "
                 "escalation_threshold SMALLINT NOT NULL DEFAULT 3, "
@@ -597,6 +638,10 @@ class _PostgresShieldStore(_BaseShieldStore):
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS trusted_builtin_disabled_families JSONB NOT NULL DEFAULT '[]'::jsonb",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS trusted_builtin_disabled_domains JSONB NOT NULL DEFAULT '[]'::jsonb",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS ai_enabled BOOLEAN NOT NULL DEFAULT FALSE",
+            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS ai_access_mode TEXT NOT NULL DEFAULT 'inherit'",
+            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS ai_allowed_models_override JSONB NOT NULL DEFAULT '[]'::jsonb",
+            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS ai_access_updated_by BIGINT NULL",
+            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS ai_access_updated_at TEXT NULL",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS ai_min_confidence TEXT NOT NULL DEFAULT 'high'",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS ai_enabled_packs JSONB NOT NULL DEFAULT '[\"privacy\",\"promo\",\"scam\",\"adult\",\"severe\"]'::jsonb",
             (
@@ -745,6 +790,17 @@ class _PostgresShieldStore(_BaseShieldStore):
                 "link_policy_medium_action": row["link_policy_medium_action"] if "link_policy_medium_action" in row else "log",
                 "link_policy_high_action": row["link_policy_high_action"] if "link_policy_high_action" in row else "log",
                 "ai_enabled": bool(row["ai_enabled"]),
+                "ai_access_mode": row["ai_access_mode"] if "ai_access_mode" in row else "inherit",
+                "ai_allowed_models_override": decode_postgres_json_array(
+                    row["ai_allowed_models_override"],
+                    label="shield_guild_configs.ai_allowed_models_override",
+                )
+                if "ai_allowed_models_override" in row
+                else [],
+                "ai_access_updated_by": int(row["ai_access_updated_by"])
+                if "ai_access_updated_by" in row and row["ai_access_updated_by"] is not None
+                else None,
+                "ai_access_updated_at": row["ai_access_updated_at"] if "ai_access_updated_at" in row else None,
                 "ai_min_confidence": row["ai_min_confidence"],
                 "ai_enabled_packs": decode_postgres_json_array(
                     row["ai_enabled_packs"],
@@ -768,17 +824,25 @@ class _PostgresShieldStore(_BaseShieldStore):
                 }
             )
         for row in meta_rows:
-            if row["key"] != SHIELD_META_GLOBAL_AI_OVERRIDE_KEY:
-                continue
             value = decode_postgres_json_object(
                 row["value"],
                 label="shield_meta.value",
             )
-            loaded["meta"] = {
-                "global_ai_override_enabled": bool(value.get("enabled")),
-                "global_ai_override_updated_by": value.get("updated_by") if isinstance(value.get("updated_by"), int) and value.get("updated_by") > 0 else None,
-                "global_ai_override_updated_at": value.get("updated_at") if isinstance(value.get("updated_at"), str) and value.get("updated_at").strip() else None,
-            }
+            if row["key"] == SHIELD_META_ORDINARY_AI_POLICY_KEY:
+                loaded["meta"] = {
+                    "ordinary_ai_enabled": bool(value.get("enabled")),
+                    "ordinary_ai_allowed_models": value.get("allowed_models") if isinstance(value.get("allowed_models"), list) else [],
+                    "ordinary_ai_updated_by": value.get("updated_by") if isinstance(value.get("updated_by"), int) and value.get("updated_by") > 0 else None,
+                    "ordinary_ai_updated_at": value.get("updated_at") if isinstance(value.get("updated_at"), str) and value.get("updated_at").strip() else None,
+                }
+                continue
+            if row["key"] == SHIELD_META_GLOBAL_AI_OVERRIDE_KEY:
+                loaded["meta"] = {
+                    "ordinary_ai_enabled": bool(value.get("enabled")),
+                    "ordinary_ai_allowed_models": [DEFAULT_SHIELD_AI_FAST_MODEL] if bool(value.get("enabled")) else [DEFAULT_SHIELD_AI_FAST_MODEL],
+                    "ordinary_ai_updated_by": value.get("updated_by") if isinstance(value.get("updated_by"), int) and value.get("updated_by") > 0 else None,
+                    "ordinary_ai_updated_at": value.get("updated_at") if isinstance(value.get("updated_at"), str) and value.get("updated_at").strip() else None,
+                }
         self.state = self.normalize_state(loaded)
 
     async def _flush_snapshot(self, snapshot: dict[str, Any]):
@@ -806,15 +870,17 @@ class _PostgresShieldStore(_BaseShieldStore):
                             "INSERT INTO shield_meta (key, value, updated_at) VALUES ($1, $2::jsonb, timezone('utc', now())) "
                             "ON CONFLICT (key) DO UPDATE SET value = EXCLUDED.value, updated_at = EXCLUDED.updated_at"
                         ),
-                        SHIELD_META_GLOBAL_AI_OVERRIDE_KEY,
+                        SHIELD_META_ORDINARY_AI_POLICY_KEY,
                         json.dumps(
                             {
-                                "enabled": bool(snapshot["meta"]["global_ai_override_enabled"]),
-                                "updated_by": snapshot["meta"]["global_ai_override_updated_by"],
-                                "updated_at": snapshot["meta"]["global_ai_override_updated_at"],
+                                "enabled": bool(snapshot["meta"]["ordinary_ai_enabled"]),
+                                "allowed_models": snapshot["meta"]["ordinary_ai_allowed_models"],
+                                "updated_by": snapshot["meta"]["ordinary_ai_updated_by"],
+                                "updated_at": snapshot["meta"]["ordinary_ai_updated_at"],
                             }
                         ),
                     )
+                    await conn.execute("DELETE FROM shield_meta WHERE key = $1", SHIELD_META_GLOBAL_AI_OVERRIDE_KEY)
                 for guild_id in removed_guild_ids:
                     await conn.execute("DELETE FROM shield_guild_configs WHERE guild_id = $1", guild_id)
                 for config in changed_configs:
@@ -834,7 +900,7 @@ class _PostgresShieldStore(_BaseShieldStore):
                 "adult_enabled, adult_action, adult_low_action, adult_medium_action, adult_high_action, adult_sensitivity, adult_solicitation_enabled, adult_solicitation_excluded_channel_ids, "
                 "severe_enabled, severe_action, severe_low_action, severe_medium_action, severe_high_action, severe_sensitivity, severe_enabled_categories, severe_custom_terms, severe_removed_terms, "
                 "link_policy_mode, link_policy_action, link_policy_low_action, link_policy_medium_action, link_policy_high_action, "
-                "ai_enabled, ai_min_confidence, ai_enabled_packs, "
+                "ai_enabled, ai_access_mode, ai_allowed_models_override, ai_access_updated_by, ai_access_updated_at, ai_min_confidence, ai_enabled_packs, "
                 "escalation_threshold, escalation_window_minutes, timeout_minutes, updated_at"
                 ") VALUES ("
                 "$1, $2, $3, $4, $5, $6, "
@@ -846,7 +912,7 @@ class _PostgresShieldStore(_BaseShieldStore):
                 "$37, $38, $39, $40, $41, $42, $43, $44::jsonb, "
                 "$45, $46, $47, $48, $49, $50, $51::jsonb, $52::jsonb, $53::jsonb, "
                 "$54, $55, $56, $57, $58, "
-                "$59, $60, $61::jsonb, $62, $63, $64, timezone('utc', now())"
+                "$59, $60, $61::jsonb, $62, $63, $64, $65::jsonb, $66, $67, $68, timezone('utc', now())"
                 ") "
                 "ON CONFLICT (guild_id) DO UPDATE SET "
                 "module_enabled = EXCLUDED.module_enabled, "
@@ -907,6 +973,10 @@ class _PostgresShieldStore(_BaseShieldStore):
                 "link_policy_medium_action = EXCLUDED.link_policy_medium_action, "
                 "link_policy_high_action = EXCLUDED.link_policy_high_action, "
                 "ai_enabled = EXCLUDED.ai_enabled, "
+                "ai_access_mode = EXCLUDED.ai_access_mode, "
+                "ai_allowed_models_override = EXCLUDED.ai_allowed_models_override, "
+                "ai_access_updated_by = EXCLUDED.ai_access_updated_by, "
+                "ai_access_updated_at = EXCLUDED.ai_access_updated_at, "
                 "ai_min_confidence = EXCLUDED.ai_min_confidence, "
                 "ai_enabled_packs = EXCLUDED.ai_enabled_packs, "
                 "escalation_threshold = EXCLUDED.escalation_threshold, "
@@ -973,6 +1043,10 @@ class _PostgresShieldStore(_BaseShieldStore):
             config["link_policy_medium_action"],
             config["link_policy_high_action"],
             config["ai_enabled"],
+            config["ai_access_mode"],
+            json.dumps(config["ai_allowed_models_override"]),
+            config["ai_access_updated_by"],
+            config["ai_access_updated_at"],
             config["ai_min_confidence"],
             json.dumps(config["ai_enabled_packs"]),
             config["escalation_threshold"],

@@ -754,16 +754,20 @@ def build_watch_alert_embed(
 def build_later_marker_embed(marker: dict) -> discord.Embed:
     embed = discord.Embed(
         title="Later Marker Saved",
-        description=f"Your bookmark for **{marker['guild_name']} / #{marker['channel_name']}** is ready when you are.",
+        description=f"Saved your place in **{marker['guild_name']} / #{marker['channel_name']}**.",
         color=ge.EMBED_THEME["info"],
         timestamp=deserialize_datetime(marker.get("message_created_at")) or ge.now_utc(),
     )
-    embed.add_field(name="Spot", value=marker.get("author_name", "Unknown"), inline=True)
+    embed.add_field(name="Location", value=f"{marker['guild_name']} / #{marker['channel_name']}", inline=False)
     embed.add_field(name="Saved", value=ge.format_timestamp(deserialize_datetime(marker.get("saved_at")), "R"), inline=True)
+    embed.add_field(name="Author", value=marker.get("author_name", "Unknown"), inline=True)
     embed.add_field(name="Preview", value=marker.get("preview", "[quiet message]"), inline=False)
     attachment_lines = marker.get("attachment_labels") or []
     if attachment_lines:
-        embed.add_field(name="Attachments", value=ge.join_limited_lines(attachment_lines[:4]), inline=False)
+        shown = attachment_lines[:3]
+        if len(attachment_lines) > len(shown):
+            shown = [*shown, f"+{len(attachment_lines) - len(shown)} more"]
+        embed.add_field(name="Attachments", value=ge.join_limited_lines(shown), inline=False)
     return ge.style_embed(embed, footer="Babblebox Later | Pick up exactly where you left off")
 
 
@@ -777,15 +781,15 @@ def build_capture_delivery_embed(
     jump_url: str | None,
 ) -> tuple[discord.Embed, discord.ui.View | None]:
     embed = discord.Embed(
-        title="Capture Delivered",
-        description=f"I packed **{captured_count}** recent message(s) from **{guild_name} / #{channel_name}** into your DMs.",
+        title="Capture Ready",
+        description=f"I sent **{captured_count}** recent message(s) from **{guild_name} / #{channel_name}** to your DMs.",
         color=ge.EMBED_THEME["info"],
     )
-    embed.add_field(name="Snapshot", value=f"Asked for **{requested_count}**\nCaptured **{captured_count}**", inline=True)
-    embed.add_field(name="Archive", value="DM only\nNo long-term storage", inline=True)
+    embed.add_field(name="Source", value=f"Asked for **{requested_count}**\nCaptured **{captured_count}**", inline=True)
+    embed.add_field(name="Privacy", value="DM only\nNo long-term archive", inline=True)
     if preview_lines:
-        embed.add_field(name="Latest Stretch", value=ge.join_limited_lines(preview_lines[:6]), inline=False)
-    view = build_jump_view(jump_url, label="Jump Back to Channel") if jump_url else None
+        embed.add_field(name="Latest Messages", value=ge.join_limited_lines(preview_lines[:5]), inline=False)
+    view = build_jump_view(jump_url, label="Back to Channel") if jump_url else None
     return ge.style_embed(embed, footer="Babblebox Capture | Full transcript attached, no long-term archive"), view
 
 
@@ -837,13 +841,11 @@ def build_reminder_delivery_embed(reminder: dict, *, delayed: bool = False) -> d
     return ge.style_embed(embed, footer="Babblebox Remind | One-time reminders only.")
 
 
-def build_reminder_delivery_view(reminder: dict) -> discord.ui.View | None:
+def build_reminder_delivery_view(reminder: dict, *, delivered_in_guild_channel: bool = False) -> discord.ui.View | None:
     jump_url = reminder.get("origin_jump_url")
     if not jump_url:
         return None
-    if reminder.get("delivery") != "here":
-        return None
-    if reminder.get("guild_id") is None:
+    if not delivered_in_guild_channel:
         return None
     return build_jump_view(jump_url)
 

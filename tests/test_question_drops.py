@@ -359,8 +359,13 @@ class QuestionDropsContentTests(unittest.TestCase):
         self.assertTrue(judge_answer(multiple_choice, "C"))
         self.assertTrue(judge_answer(multiple_choice, "c) green"))
         self.assertFalse(judge_answer(multiple_choice, "c maybe"))
-        self.assertTrue(judge_answer({"type": "ordered_tokens", "tokens": ["red", "blue", "green"]}, "red, blue, green"))
-        self.assertFalse(judge_answer({"type": "ordered_tokens", "tokens": ["red", "blue", "green"]}, "green, blue, red"))
+        ordered = {"type": "ordered_tokens", "tokens": ["printing press", "telephone", "internet"]}
+        self.assertTrue(judge_answer(ordered, "printing press, telephone, internet"))
+        self.assertTrue(judge_answer(ordered, "printing press -> telephone -> internet"))
+        self.assertTrue(judge_answer(ordered, "1) printing press 2) telephone 3) internet"))
+        self.assertTrue(judge_answer(ordered, "printing press\ntelephone\ninternet"))
+        self.assertFalse(judge_answer(ordered, "telephone, printing press, internet"))
+        self.assertFalse(judge_answer(ordered, "printing press telephone internet"))
         self.assertEqual(normalize_answer_text("  Hello,  World! "), "hello world")
 
     def test_text_answer_judging_allows_bounded_typos_and_quote_normalization_only(self):
@@ -417,8 +422,11 @@ class QuestionDropsContentTests(unittest.TestCase):
         self.assertTrue(is_answer_attempt(multiple_choice, "green"))
         self.assertFalse(is_answer_attempt(multiple_choice, "which one was c again"))
 
-        ordered = {"type": "ordered_tokens", "tokens": ["red", "blue", "green"]}
-        self.assertTrue(is_answer_attempt(ordered, "green, blue, red"))
+        ordered = {"type": "ordered_tokens", "tokens": ["printing press", "telephone", "internet"]}
+        self.assertTrue(is_answer_attempt(ordered, "telephone, printing press, internet"))
+        self.assertTrue(is_answer_attempt(ordered, "1) telephone 2) printing press 3) internet"))
+        self.assertTrue(is_answer_attempt(ordered, "I think it's telephone -> printing press -> internet"))
+        self.assertFalse(is_answer_attempt(ordered, "printing press changed everything"))
         self.assertFalse(is_answer_attempt(ordered, "it is true"))
 
     def test_answer_attempt_gate_handles_hedged_payloads_without_grabbing_soft_chatter(self):
@@ -462,7 +470,9 @@ class QuestionDropsContentTests(unittest.TestCase):
         self.assertIn("1 attempt", boolean_instruction)
 
         self.assertIn("full sequence", ordered_instruction)
-        self.assertIn("3 attempts", ordered_instruction)
+        self.assertIn("1 attempt", ordered_instruction)
+        self.assertIn("using commas", ordered_instruction)
+        self.assertEqual(answer_attempt_limit({"type": "ordered_tokens", "tokens": ["red", "blue"]}), 1)
 
         self.assertIn("short clean same-channel guess", text_instruction)
         self.assertIn("3 attempts", text_instruction)
@@ -1591,24 +1601,24 @@ class QuestionDropsServiceTests(unittest.IsolatedAsyncioTestCase):
             ],
         )
 
-    async def test_ordered_tokens_third_attempt_can_still_solve(self):
+    async def test_ordered_tokens_wrong_first_attempt_locks_out_follow_up_correct(self):
         variant = QuestionDropVariant(
-            concept_id="history:ordered-three-attempts",
+            concept_id="history:ordered-one-attempt",
             category="history",
             difficulty=3,
             source_type="curated",
             generator_type="static",
             prompt="Order these from earliest to latest: Rome, Renaissance, Internet",
             answer_spec={"type": "ordered_tokens", "tokens": ["rome", "renaissance", "internet"]},
-            variant_hash="history-ordered-three-attempts",
+            variant_hash="history-ordered-one-attempt",
         )
         self.service._select_variant = lambda *args, **kwargs: variant
         active = await self._post_one_drop()
         winner = DummyUser(58)
 
         wrong_guess = "internet, rome, renaissance"
-        await self.service.handle_message(DummyMessage(guild=self.guild, channel=self.channel, author=winner, content=wrong_guess))
-        await self.service.handle_message(DummyMessage(guild=self.guild, channel=self.channel, author=winner, content=wrong_guess))
+        first_wrong = DummyMessage(guild=self.guild, channel=self.channel, author=winner, content=wrong_guess)
+        await self.service.handle_message(first_wrong)
         correct = DummyMessage(
             guild=self.guild,
             channel=self.channel,
@@ -1618,20 +1628,78 @@ class QuestionDropsServiceTests(unittest.IsolatedAsyncioTestCase):
 
         handled = await self.service.handle_message(correct)
 
+        exposure_id = int(active["exposure_id"])
+        self.assertFalse(handled)
+        first_wrong.add_reaction.assert_awaited_once_with("\u274c")
+        correct.add_reaction.assert_not_awaited()
+        self.assertEqual(self.service._attempt_counts_by_user[exposure_id], {58: 1})
+        self.assertEqual(sum(1 for item in self.channel.sent if "Out of Attempts" in item[1]["embed"].title), 1)
+        self.bot.profile_service.record_question_drop_results_batch.assert_not_awaited()
+
+    async def test_ordered_tokens_same_channel_multiword_answer_solves_cleanly(self):
+        variant = QuestionDropVariant(
+            concept_id="history:ordered-multiword",
+            category="history",
+            difficulty=3,
+            source_type="curated",
+            generator_type="static",
+            prompt="Order these from earliest to latest: Printing Press, Telephone, Internet",
+            answer_spec={"type": "ordered_tokens", "tokens": ["printing press", "telephone", "internet"]},
+            variant_hash="history-ordered-multiword",
+        )
+        self.service._select_variant = lambda *args, **kwargs: variant
+        active = await self._post_one_drop()
+        winner = DummyUser(581)
+        answer = DummyMessage(
+            guild=self.guild,
+            channel=self.channel,
+            author=winner,
+            content="printing press, telephone, internet",
+        )
+
+        handled = await self.service.handle_message(answer)
+
         self.assertTrue(handled)
-        correct.add_reaction.assert_awaited_once_with("\u2705")
+        answer.add_reaction.assert_awaited_once_with("\u2705")
         self.bot.profile_service.record_question_drop_results_batch.assert_awaited_once()
         self.assertEqual(
             self._last_batch_results(),
             [
                 {
-                    "user_id": 58,
+                    "user_id": 581,
                     "category": active["category"],
                     "correct": True,
                     "points": answer_points_for_difficulty(int(active["difficulty"])),
                 }
             ],
         )
+
+    async def test_ordered_tokens_soft_chatter_does_not_count_as_attempt(self):
+        variant = QuestionDropVariant(
+            concept_id="history:ordered-chatter",
+            category="history",
+            difficulty=2,
+            source_type="curated",
+            generator_type="static",
+            prompt="Order these from earliest to latest: Printing Press, Telephone, Internet",
+            answer_spec={"type": "ordered_tokens", "tokens": ["printing press", "telephone", "internet"]},
+            variant_hash="history-ordered-chatter",
+        )
+        self.service._select_variant = lambda *args, **kwargs: variant
+        active = await self._post_one_drop()
+        chatter = DummyMessage(
+            guild=self.guild,
+            channel=self.channel,
+            author=DummyUser(582),
+            content="printing press changed everything",
+        )
+
+        handled = await self.service.handle_message(chatter)
+
+        self.assertFalse(handled)
+        self.assertEqual(self.service._attempt_counts_by_user[int(active["exposure_id"])], {})
+        chatter.add_reaction.assert_not_awaited()
+        self.bot.profile_service.record_question_drop_results_batch.assert_not_awaited()
 
     async def test_numeric_third_wrong_locks_out_follow_up_correct(self):
         variant = QuestionDropVariant(
@@ -3326,6 +3394,25 @@ class QuestionDropsMemberRolePreferenceTests(QuestionDropsServiceTests):
         self.assertIn("3 attempts", embed.fields[1].value)
         self.assertIn("wins", embed.footer.text)
 
+    async def test_ordered_question_embed_uses_one_attempt_copy(self):
+        variant = QuestionDropVariant(
+            concept_id="history:ordered-embed-copy",
+            category="history",
+            difficulty=3,
+            source_type="curated",
+            generator_type="static",
+            prompt="Order these from earliest to latest: Printing Press, Telephone, Internet",
+            answer_spec={"type": "ordered_tokens", "tokens": ["printing press", "telephone", "internet"]},
+            variant_hash="history-ordered-embed-copy",
+        )
+        self.service._select_variant = lambda *args, **kwargs: variant
+
+        await self._post_one_drop()
+
+        embed = self.channel.sent[-1][1]["embed"]
+        self.assertIn("1 attempt", embed.fields[1].value)
+        self.assertIn("using commas", embed.fields[1].value)
+
     async def test_status_embed_honestly_notes_idle_skip_and_high_frequency_reuse(self):
         await self.service.update_config(self.guild.id, drops_per_day=10, activity_gate="light")
 
@@ -3742,6 +3829,36 @@ class QuestionDropsMemberRolePreferenceTests(QuestionDropsServiceTests):
         self.assertEqual(sum(1 for item in self.channel.sent if "Solved" in item[1]["embed"].title), 1)
         self.assertEqual(sum(1 for item in self.channel.sent if "Time's Up" in item[1]["embed"].title), 0)
 
+    async def test_ordered_multiword_answer_at_deadline_still_solves_if_processed_late(self):
+        variant = QuestionDropVariant(
+            concept_id="history:ordered-late-window",
+            category="history",
+            difficulty=3,
+            source_type="curated",
+            generator_type="static",
+            prompt="Order these from earliest to latest: Printing Press, Telephone, Internet",
+            answer_spec={"type": "ordered_tokens", "tokens": ["printing press", "telephone", "internet"]},
+            variant_hash="history-ordered-late-window",
+        )
+        self.service._select_variant = lambda *args, **kwargs: variant
+        active = await self._post_one_drop()
+        expires_at = self.service._active_drop_expires_at(active)
+        message = DummyMessage(
+            guild=self.guild,
+            channel=self.channel,
+            author=DummyUser(583),
+            content="printing press, telephone, internet",
+            created_at=expires_at,
+        )
+
+        with patch("babblebox.question_drops_service.ge.now_utc", return_value=expires_at + timedelta(seconds=1)):
+            handled = await self.service.handle_message(message)
+
+        self.assertTrue(handled)
+        message.add_reaction.assert_awaited_once_with("\u2705")
+        self.assertEqual(sum(1 for item in self.channel.sent if "Solved" in item[1]["embed"].title), 1)
+        self.assertEqual(sum(1 for item in self.channel.sent if "Time's Up" in item[1]["embed"].title), 0)
+
     async def test_timeout_sweep_at_score_deadline_keeps_exact_deadline_answer_live(self):
         base_now = datetime(2026, 4, 2, 18, 15, 0, 432100, tzinfo=timezone.utc)
         active = await self._post_one_drop(now=base_now, round_to_minute=False)
@@ -3751,6 +3868,37 @@ class QuestionDropsMemberRolePreferenceTests(QuestionDropsServiceTests):
             channel=self.channel,
             author=DummyUser(198),
             content=self._correct_attempt_content(active),
+            created_at=expires_at,
+        )
+
+        with patch("babblebox.question_drops_service.ge.now_utc", return_value=expires_at):
+            await self.service._expire_due_drops()
+            handled = await self.service.handle_message(message)
+
+        self.assertTrue(handled)
+        self.assertEqual(sum(1 for item in self.channel.sent if "Time's Up" in item[1]["embed"].title), 0)
+        self.assertEqual(sum(1 for item in self.channel.sent if "Solved" in item[1]["embed"].title), 1)
+
+    async def test_ordered_timeout_sweep_at_score_deadline_keeps_exact_deadline_answer_live(self):
+        variant = QuestionDropVariant(
+            concept_id="history:ordered-timeout-recovery",
+            category="history",
+            difficulty=3,
+            source_type="curated",
+            generator_type="static",
+            prompt="Order these from earliest to latest: Printing Press, Telephone, Internet",
+            answer_spec={"type": "ordered_tokens", "tokens": ["printing press", "telephone", "internet"]},
+            variant_hash="history-ordered-timeout-recovery",
+        )
+        self.service._select_variant = lambda *args, **kwargs: variant
+        base_now = datetime(2026, 4, 2, 18, 15, 0, 432100, tzinfo=timezone.utc)
+        active = await self._post_one_drop(now=base_now, round_to_minute=False)
+        expires_at = self.service._active_drop_expires_at(active)
+        message = DummyMessage(
+            guild=self.guild,
+            channel=self.channel,
+            author=DummyUser(584),
+            content="printing press, telephone, internet",
             created_at=expires_at,
         )
 
