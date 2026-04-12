@@ -163,15 +163,15 @@ HELP_PAGES: list[dict[str, str]] = [
         "description": "Optional server-side protection and compact admin automations with conservative defaults.",
         "body": (
             "Shield can watch for privacy leaks, invite or promo abuse, malicious or scam links, adult-domain intel plus optional solicitation / DM-ad text, and a separate Severe Harm / Hate pack for real-harm abuse only.\n"
-            "`/shield panel`, `/shield rules`, `/shield links`, `/shield filters`, `/shield allowlist`, `/shield logs`, `/shield severe category`, `/shield severe term`, `/shield ai`, and `/shield test` cover the shipped admin flow.\n"
+            "`/shield panel`, `/shield rules`, `/shield links`, `/shield trusted`, `/shield filters`, `/shield allowlist`, `/shield logs`, `/shield severe category`, `/shield severe term`, `/shield ai`, and `/shield test` cover the shipped admin flow.\n"
             "`/admin panel`, `/admin followup`, `/admin verification`, and `/admin sync` cover returned-after-ban follow-up roles and unverified cleanup.\n"
-            "Everything stays off until an admin configures it.\n"
-            "Defaults are log-first, with low/medium/high action policy, Trusted Links Only mode, allowlists, trusted-role bypasses, solicitation carve-out channels, private mod-log alerts, and safe advanced wildcard patterns instead of raw regex.\n"
-            "Repeated noisy links can stay low-confidence and log-only instead of being misread as strong promo.\n"
-            "AI assist is optional, admin-only, support-server limited by default, and only reviews messages that local Shield already flagged. It never punishes on its own.\n"
+            "Live moderation stays off until an admin enables it, and the first enable applies a recommended non-AI baseline while leaving AI off.\n"
+            "Trusted Links Only now exposes its built-in trusted families and domains under `/shield trusted`, keeps Confessions link mode separate, and still lets malicious, impersonation, adult, or suspicious-link intel override local trust exceptions.\n"
+            "Repeated noisy links can stay low-confidence and log-only instead of being misread as strong promo, and bot or webhook posts stay on a more conservative scam threshold unless the evidence is genuinely strong.\n"
+            "AI assist is optional, admin-only, support-server limited by default, and only reviews messages that local Shield already flagged across privacy, promo, scam, adult, or severe. It never punishes on its own.\n"
             "Admin lifecycle helpers stay compact: no Babblebox ban/kick command suite, no giant case archive, and no per-member task explosion."
         ),
-        "try": "`/shield panel`, `/shield links`, `/shield filters`, `/shield severe category`, `/admin panel`",
+        "try": "`/shield panel`, `/shield links`, `/shield trusted`, `/shield filters`, `/shield severe category`, `/admin panel`",
     },
     {
         "title": "Setup / Tips",

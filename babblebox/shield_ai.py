@@ -24,7 +24,7 @@ from babblebox.text_safety import (
 
 
 SHIELD_AI_ALLOWED_GUILD_ID = 1322933864360050688
-SHIELD_AI_REVIEW_PACKS = ("privacy", "promo", "scam")
+SHIELD_AI_REVIEW_PACKS = ("privacy", "promo", "scam", "adult", "severe")
 SHIELD_AI_MIN_CONFIDENCE_CHOICES = ("low", "medium", "high")
 DEFAULT_SHIELD_AI_MODEL = "gpt-4.1-mini"
 DEFAULT_SHIELD_AI_TIMEOUT_SECONDS = 4.0
@@ -41,6 +41,8 @@ AI_CLASSIFICATION_LABELS = {
     "privacy_leak": "Likely privacy leak",
     "ad_invite_promo": "Likely ad / invite / promo",
     "scam_social_engineering": "Likely scam / social engineering",
+    "adult_solicitation_or_adult_risk": "Likely adult solicitation / adult risk",
+    "severe_harm_or_hate": "Likely severe harm / hate",
     "false_positive": "Possible false positive",
     "uncertain": "Uncertain",
 }
@@ -70,7 +72,7 @@ _SYSTEM_PROMPT = (
     "If the excerpt is too redacted or too limited, return uncertain. "
     "Return only strict JSON with these keys: "
     "classification, confidence, priority, false_positive, explanation. "
-    "classification must be one of: privacy_leak, ad_invite_promo, scam_social_engineering, false_positive, uncertain. "
+    "classification must be one of: privacy_leak, ad_invite_promo, scam_social_engineering, adult_solicitation_or_adult_risk, severe_harm_or_hate, false_positive, uncertain. "
     "confidence must be one of: low, medium, high. "
     "priority must be one of: low, normal, high. "
     "false_positive must be true or false. "

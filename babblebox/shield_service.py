@@ -28,6 +28,7 @@ from babblebox.shield_ai import (
 )
 from babblebox.shield_link_safety import (
     ADULT_LINK_CATEGORY,
+    IMPERSONATION_LINK_CATEGORY,
     LINK_IN_BIO_DOMAINS,
     MALICIOUS_LINK_CATEGORY,
     MEDIA_EMBED_DOMAINS,
@@ -35,6 +36,8 @@ from babblebox.shield_link_safety import (
     SHORTENER_DOMAINS,
     SOCIAL_PROMO_DOMAINS,
     STOREFRONT_DOMAINS,
+    TRUSTED_LINK_SAFE_FAMILIES,
+    TRUSTED_MAINSTREAM_DOMAINS,
     UNKNOWN_LINK_CATEGORY,
     UNKNOWN_SUSPICIOUS_LINK_CATEGORY,
     ShieldLinkAssessment,
@@ -108,6 +111,10 @@ NEWCOMER_MESSAGE_WINDOW = 3
 CAMPAIGN_SIGNATURE_LIMIT = 256
 CAMPAIGN_USERS_PER_SIGNATURE_LIMIT = 12
 NEWCOMER_STATE_LIMIT = 512
+SHIELD_BASELINE_VERSION = 1
+TRUSTED_ONLY_BUILTIN_FAMILIES = frozenset(TRUSTED_LINK_SAFE_FAMILIES)
+TRUSTED_ONLY_BUILTIN_DOMAINS = frozenset(TRUSTED_MAINSTREAM_DOMAINS)
+AUTOMATED_AUTHOR_KINDS = frozenset({"bot", "webhook"})
 
 PACK_LABELS = {
     "privacy": "Privacy Leak",
@@ -125,6 +132,7 @@ MATCH_CLASS_LABELS = {
     "cta_promo": "Call-to-action promo",
     "repetitive_link_noise": "Repeated link pattern",
     "known_malicious_domain": "Known malicious domain",
+    "trusted_brand_impersonation_domain": "Trusted-brand impersonation domain",
     "adult_domain": "Known adult domain",
     "adult_dm_ad": "Adult-content DM ad",
     "adult_solicitation": "Sexual solicitation",
@@ -142,6 +150,7 @@ MATCH_CLASS_LABELS = {
     "untrusted_invite_link": "Untrusted invite link",
     "blocked_link_hub": "Blocked link hub or storefront",
     "link_policy_malicious": "Known malicious domain",
+    "link_policy_impersonation": "Trusted-brand impersonation domain",
     "link_policy_adult": "Known adult domain",
     "link_policy_suspicious": "Suspicious external link",
 }
@@ -200,9 +209,9 @@ MONETIZED_PROMO_RE = re.compile(
 ADULT_SOLICIT_CONTACT_RE = re.compile(r"(?i)\b(?:dm me|dm us|message me|message us|msg me|msg us|pm me|pm us|inbox me|inbox us|hit me up)\b")
 ADULT_SOLICIT_DM_GATE_RE = re.compile(r"(?i)\b(?:more in dms?|dm for|message for|ask in dms?|ask me in dms?)\b")
 ADULT_SOLICIT_SALE_RE = re.compile(
-    r"(?i)\b(?:sell(?:ing)?|buy|paid|pay|prices?|menu|subscribe|purchase|order|customs? open|taking requests|requests open)\b"
+    r"(?i)\b(?:sell(?:ing)?|buy|paid|pay|prices?|menu|subscribe|purchase|order|customs? open|taking requests|requests open|open for requests?)\b"
 )
-ADULT_SOLICIT_WEAK_OFFER_RE = re.compile(r"(?i)\b(?:available|open|taking requests|customs?)\b")
+ADULT_SOLICIT_WEAK_OFFER_RE = re.compile(r"(?i)\b(?:available|open|taking requests|open for requests?)\b")
 ADULT_SOLICIT_DISAPPROVAL_RE = re.compile(
     r"(?i)\b(?:don['’]?t say|stop posting|not allowed|against the rules|rule violation|banned phrase|keep that out)\b"
 )
@@ -450,6 +459,8 @@ class CompiledShieldConfig:
     allow_domains: frozenset[str]
     allow_invite_codes: frozenset[str]
     allow_phrases: tuple[str, ...]
+    trusted_builtin_disabled_families: frozenset[str]
+    trusted_builtin_disabled_domains: frozenset[str]
     privacy: PackSettings
     promo: PackSettings
     scam: PackSettings
@@ -568,6 +579,7 @@ class ShieldNewcomerActivityState:
 
 @dataclass(frozen=True)
 class ShieldScamContext:
+    author_kind: str = "human"
     primary_domain: str | None = None
     newcomer_early_message: bool = False
     first_message_with_link: bool = False
@@ -580,6 +592,7 @@ class ShieldScamContext:
 
 @dataclass(frozen=True)
 class ShieldScamFeatures:
+    author_kind: str
     link_risk_score: int
     suspicious_link_present: bool
     risky_link_present: bool
@@ -619,6 +632,10 @@ class ShieldScamFeatures:
             or self.fake_authority
             or self.community_post_framing
         )
+
+    @property
+    def automated_author(self) -> bool:
+        return self.author_kind in AUTOMATED_AUTHOR_KINDS
 
 
 @dataclass(frozen=True)
@@ -874,6 +891,8 @@ def _link_assessment_summary(assessment: ShieldLinkAssessment) -> str:
         if any(signal.startswith("bundled_malicious_domain_") for signal in assessment.matched_signals):
             return "matched bundled malicious intel"
         return "matched local malicious intel"
+    if assessment.category == IMPERSONATION_LINK_CATEGORY:
+        return "matched local trusted-brand impersonation intel"
     if assessment.category == ADULT_LINK_CATEGORY:
         return "matched local adult intel"
     if assessment.category == UNKNOWN_SUSPICIOUS_LINK_CATEGORY:
@@ -893,6 +912,8 @@ def _link_assessment_basis(assessment: ShieldLinkAssessment) -> str:
         if any(signal.startswith("bundled_malicious_domain_") for signal in assessment.matched_signals):
             return f"Hard intel from the bundled malicious-domain feed.{allowlist_note}"
         return f"Hard intel from local malicious-domain intelligence.{allowlist_note}"
+    if assessment.category == IMPERSONATION_LINK_CATEGORY:
+        return f"Hard local spoof-domain intel for a trusted-brand lookalike host.{allowlist_note}"
     if assessment.category == UNKNOWN_SUSPICIOUS_LINK_CATEGORY:
         return f"Combined suspicion around an unknown risky link.{allowlist_note}"
     if assessment.category == ADULT_LINK_CATEGORY:
@@ -906,8 +927,16 @@ def _scan_source_for_message(message: discord.Message, *, default: str = "new_me
     return default
 
 
+def _author_kind_for_message(message: discord.Message, *, scan_source: str) -> str:
+    if scan_source == "webhook_message" or getattr(message, "webhook_id", None) is not None:
+        return "webhook"
+    if getattr(getattr(message, "author", None), "bot", False):
+        return "bot"
+    return "human"
+
+
 def _score_link_assessment_for_scam(assessment: ShieldLinkAssessment) -> int:
-    if assessment.category == MALICIOUS_LINK_CATEGORY:
+    if assessment.category in {MALICIOUS_LINK_CATEGORY, IMPERSONATION_LINK_CATEGORY}:
         return 5
     if assessment.category != UNKNOWN_SUSPICIOUS_LINK_CATEGORY:
         return 0
@@ -1356,6 +1385,8 @@ def _build_feature_compiled_config(
         allow_domains=frozenset(),
         allow_invite_codes=frozenset(),
         allow_phrases=(),
+        trusted_builtin_disabled_families=frozenset(),
+        trusted_builtin_disabled_domains=frozenset(),
         privacy=_feature_pack_settings(enabled=privacy_enabled),
         promo=disabled,
         scam=disabled,
@@ -1541,6 +1572,51 @@ class ShieldService:
     def get_link_safety_status(self) -> dict[str, Any]:
         return self.link_safety.diagnostics()
 
+    def trusted_builtin_family_domains(self) -> dict[str, tuple[str, ...]]:
+        return {
+            family: tuple(sorted(self.link_safety.intel.safe_families.get(family, frozenset())))
+            for family in sorted(TRUSTED_ONLY_BUILTIN_FAMILIES)
+            if self.link_safety.intel.safe_families.get(family)
+        }
+
+    def trusted_builtin_domains(self) -> tuple[str, ...]:
+        return tuple(sorted(TRUSTED_ONLY_BUILTIN_DOMAINS))
+
+    def trusted_pack_state(self, guild_id: int) -> dict[str, Any]:
+        config = self.get_config(guild_id)
+        family_domains = self.trusted_builtin_family_domains()
+        effective_disabled_domains = [
+            domain
+            for domain in config.get("trusted_builtin_disabled_domains", [])
+            if self._domain_is_allowlisted(domain, frozenset(self._trusted_builtin_domain_candidates()))
+        ]
+        return {
+            "mode": config.get("link_policy_mode", DEFAULT_SHIELD_LINK_POLICY_MODE),
+            "families": [
+                {
+                    "name": family,
+                    "count": len(domains),
+                    "examples": list(domains[:4]),
+                    "disabled": family in config.get("trusted_builtin_disabled_families", []),
+                }
+                for family, domains in family_domains.items()
+            ],
+            "direct_domains": [
+                {
+                    "domain": domain,
+                    "disabled": self._domain_is_allowlisted(domain, frozenset(config.get("trusted_builtin_disabled_domains", []))),
+                }
+                for domain in self.trusted_builtin_domains()
+            ],
+            "disabled_families": [
+                family for family in config.get("trusted_builtin_disabled_families", []) if family in family_domains
+            ],
+            "disabled_domains": effective_disabled_domains,
+            "allow_domains": list(config.get("allow_domains", [])),
+            "allow_invite_codes": list(config.get("allow_invite_codes", [])),
+            "allow_phrases": list(config.get("allow_phrases", [])),
+        }
+
     def evaluate_feature_text(
         self,
         surface: str,
@@ -1642,10 +1718,100 @@ class ShieldService:
         return ShieldTestResult(matches=tuple(matches), link_assessments=link_assessments, bypass_reason=bypass_reason)
 
     async def set_module_enabled(self, guild_id: int, enabled: bool) -> tuple[bool, str]:
+        baseline_applied = False
+        current = self.get_config(guild_id)
+        first_enable = enabled and int(current.get("baseline_version", 0) or 0) < SHIELD_BASELINE_VERSION
+
+        def mutate(config: dict[str, Any]):
+            nonlocal baseline_applied
+            if enabled and int(config.get("baseline_version", 0) or 0) < SHIELD_BASELINE_VERSION:
+                baseline_applied = self._apply_first_enable_baseline(config)
+                config["baseline_version"] = SHIELD_BASELINE_VERSION
+            config["module_enabled"] = bool(enabled)
+
+        message = f"Shield live-message moderation is now {'enabled' if enabled else 'disabled'} for this server."
+        if enabled:
+            message += " AI stays off by default."
+            if first_enable:
+                message += (
+                    " On first enable, Babblebox applies its recommended non-AI baseline anywhere you had not already customized it. "
+                    "Review `/shield links`, `/shield trusted`, and `/shield logs` next."
+                )
         return await self._update_config(
             guild_id,
-            lambda config: config.__setitem__("module_enabled", bool(enabled)),
-            success_message=f"Shield live-message moderation is now {'enabled' if enabled else 'disabled'} for this server.",
+            mutate,
+            success_message=message,
+        )
+
+    def _apply_first_enable_baseline(self, config: dict[str, Any]) -> bool:
+        defaults = default_guild_shield_config(int(config.get("guild_id") or 0) or None)
+        changed = False
+        for pack in RULE_PACKS:
+            fields = (
+                f"{pack}_enabled",
+                f"{pack}_action",
+                f"{pack}_low_action",
+                f"{pack}_medium_action",
+                f"{pack}_high_action",
+                f"{pack}_sensitivity",
+            )
+            if all(config.get(field) == defaults.get(field) for field in fields):
+                config[f"{pack}_enabled"] = True
+                config[f"{pack}_action"] = "delete_log"
+                config[f"{pack}_low_action"] = "log"
+                config[f"{pack}_medium_action"] = "delete_log"
+                config[f"{pack}_high_action"] = "delete_log"
+                config[f"{pack}_sensitivity"] = "normal"
+                changed = True
+        if config.get("adult_solicitation_enabled") == defaults.get("adult_solicitation_enabled"):
+            config["adult_solicitation_enabled"] = True
+            changed = True
+        return changed
+
+    def _trusted_builtin_domain_candidates(self) -> tuple[str, ...]:
+        domains = set(TRUSTED_ONLY_BUILTIN_DOMAINS)
+        for family in TRUSTED_ONLY_BUILTIN_FAMILIES:
+            domains.update(self.link_safety.intel.safe_families.get(family, frozenset()))
+        return tuple(sorted(domains))
+
+    async def set_trusted_builtin_family_enabled(self, guild_id: int, family: str, enabled: bool) -> tuple[bool, str]:
+        cleaned_family = normalize_plain_text(family).casefold()
+        if cleaned_family not in self.trusted_builtin_family_domains():
+            return False, "That built-in trusted family is not part of Shield's trusted-only pack."
+
+        def mutate(config: dict[str, Any]):
+            values = set(_sorted_unique_text(config.get("trusted_builtin_disabled_families", [])))
+            if enabled:
+                values.discard(cleaned_family)
+            else:
+                values.add(cleaned_family)
+            config["trusted_builtin_disabled_families"] = sorted(values)
+
+        return await self._update_config(
+            guild_id,
+            mutate,
+            success_message=f"Trusted family `{cleaned_family}` is now {'enabled' if enabled else 'disabled'} for Shield trusted-only mode.",
+        )
+
+    async def set_trusted_builtin_domain_enabled(self, guild_id: int, domain: str, enabled: bool) -> tuple[bool, str]:
+        valid, cleaned_domain = self._normalize_domain(domain)
+        if not valid:
+            return False, cleaned_domain
+        if not self._domain_is_allowlisted(cleaned_domain, frozenset(self._trusted_builtin_domain_candidates())):
+            return False, "That domain is not part of Shield's built-in trusted pack."
+
+        def mutate(config: dict[str, Any]):
+            values = set(_sorted_unique_text(config.get("trusted_builtin_disabled_domains", [])))
+            if enabled:
+                values.discard(cleaned_domain)
+            else:
+                values.add(cleaned_domain)
+            config["trusted_builtin_disabled_domains"] = sorted(values)
+
+        return await self._update_config(
+            guild_id,
+            mutate,
+            success_message=f"Trusted domain `{cleaned_domain}` is now {'enabled' if enabled else 'disabled'} for Shield trusted-only mode.",
         )
 
     def _policy_summary(self, *, low_action: str, medium_action: str, high_action: str) -> str:
@@ -2007,7 +2173,7 @@ class ShieldService:
             for item in enabled_packs:
                 pack = str(item).strip().lower()
                 if pack not in AI_REVIEW_PACK_SET:
-                    return False, "AI review packs must be privacy, promo, or scam."
+                    return False, "AI review packs must be privacy, promo, scam, adult, or severe."
                 if pack not in cleaned_packs:
                     cleaned_packs.append(pack)
         if enabled is True and not self.ai_provider.diagnostics().get("available"):
@@ -2096,7 +2262,7 @@ class ShieldService:
         resolved_scan_source = _scan_source_for_message(message, default=scan_source or "new_message")
         if not self.storage_ready or message.guild is None:
             return None
-        if getattr(message.author, "bot", False) and resolved_scan_source != "webhook_message":
+        if getattr(getattr(message, "author", None), "id", None) == getattr(getattr(self.bot, "user", None), "id", None):
             return None
 
         compiled = self._compiled_configs.get(message.guild.id)
@@ -2121,7 +2287,7 @@ class ShieldService:
     async def handle_message_edit(self, before: discord.Message, after: discord.Message) -> ShieldDecision | None:
         if not self.storage_ready or getattr(after, "guild", None) is None:
             return None
-        if getattr(getattr(after, "author", None), "bot", False) and getattr(after, "webhook_id", None) is None:
+        if getattr(getattr(after, "author", None), "id", None) == getattr(getattr(self.bot, "user", None), "id", None):
             return None
 
         compiled = self._compiled_configs.get(after.guild.id)
@@ -2377,7 +2543,7 @@ class ShieldService:
         risky = [
             assessment
             for assessment in link_assessments
-            if assessment.category in {MALICIOUS_LINK_CATEGORY, UNKNOWN_SUSPICIOUS_LINK_CATEGORY}
+            if assessment.category in {MALICIOUS_LINK_CATEGORY, IMPERSONATION_LINK_CATEGORY, UNKNOWN_SUSPICIOUS_LINK_CATEGORY}
         ]
         if not risky:
             return None
@@ -2473,10 +2639,11 @@ class ShieldService:
         scan_source: str,
     ) -> ShieldScamContext:
         member = getattr(message, "author", None)
+        author_kind = _author_kind_for_message(message, scan_source=scan_source)
         primary_assessment = self._primary_risky_assessment(link_assessments)
         primary_domain = primary_assessment.normalized_domain if primary_assessment is not None else None
-        if member is None or getattr(member, "bot", False) or getattr(message, "webhook_id", None) is not None:
-            return ShieldScamContext(primary_domain=primary_domain)
+        if member is None or author_kind in AUTOMATED_AUTHOR_KINDS:
+            return ShieldScamContext(author_kind=author_kind, primary_domain=primary_domain)
         now_dt = ge.now_utc()
         created_at = _member_datetime(getattr(member, "created_at", None))
         joined_at = _member_datetime(getattr(member, "joined_at", None))
@@ -2516,6 +2683,7 @@ class ShieldService:
                 now=now,
             )
         return ShieldScamContext(
+            author_kind=author_kind,
             primary_domain=primary_domain,
             newcomer_early_message=newcomer_early_message,
             first_message_with_link=first_message_with_link,
@@ -2553,6 +2721,10 @@ class ShieldService:
             message_codes.append("malicious_link")
             message_match_class = message_match_class or "known_malicious_domain"
             message_confidence = message_confidence or "high"
+        elif any(assessment.category == IMPERSONATION_LINK_CATEGORY for assessment in link_assessments):
+            message_codes.append("trusted_brand_impersonation")
+            message_match_class = message_match_class or "trusted_brand_impersonation_domain"
+            message_confidence = message_confidence or "high"
         elif any(assessment.category == UNKNOWN_SUSPICIOUS_LINK_CATEGORY for assessment in link_assessments):
             message_codes.append("unknown_suspicious_link")
             message_confidence = message_confidence or "medium"
@@ -2584,7 +2756,16 @@ class ShieldService:
         if not deduped:
             return None
         if not any(
-            code in {"scam_high", "scam_medium", "malicious_link", "unknown_suspicious_link", "suspicious_attachment", "cta_download"}
+            code
+            in {
+                "scam_high",
+                "scam_medium",
+                "malicious_link",
+                "trusted_brand_impersonation",
+                "unknown_suspicious_link",
+                "suspicious_attachment",
+                "cta_download",
+            }
             for code in deduped
         ):
             return None
@@ -2657,7 +2838,15 @@ class ShieldService:
         matches.extend(self._detect_adult_solicitation(compiled, snapshot, channel_id=channel_id))
         matches.extend(self._detect_severe_harm(compiled, snapshot))
         matches.extend(self._detect_scam(compiled, snapshot, active_link_assessments, scan_source=scan_source, scam_context=scam_context or ShieldScamContext()))
-        matches.extend(self._detect_link_policy(compiled, snapshot, active_link_assessments, existing_matches=matches))
+        matches.extend(
+            self._detect_link_policy(
+                compiled,
+                snapshot,
+                active_link_assessments,
+                existing_matches=matches,
+                scam_context=scam_context or ShieldScamContext(),
+            )
+        )
         matches.extend(self._detect_custom_patterns(compiled, snapshot))
         matches.sort(
             key=lambda item: (
@@ -2692,6 +2881,20 @@ class ShieldService:
                         confidence="high",
                         heuristic=False,
                         match_class="known_malicious_domain",
+                    )
+                )
+            if assessment.category == IMPERSONATION_LINK_CATEGORY and compiled.scam.enabled:
+                if warning_context:
+                    continue
+                matches.append(
+                    self._make_pack_match(
+                        pack="scam",
+                        settings=compiled.scam,
+                        label="Trusted-brand impersonation domain",
+                        reason="A linked host closely impersonated a trusted brand or official destination.",
+                        confidence="high",
+                        heuristic=False,
+                        match_class="trusted_brand_impersonation_domain",
                     )
                 )
             if assessment.category == ADULT_LINK_CATEGORY and compiled.adult.enabled:
@@ -2967,13 +3170,27 @@ class ShieldService:
             return link.invite_code in compiled.allow_invite_codes
         if assessment is not None and assessment.category in {
             MALICIOUS_LINK_CATEGORY,
+            IMPERSONATION_LINK_CATEGORY,
             ADULT_LINK_CATEGORY,
             UNKNOWN_SUSPICIOUS_LINK_CATEGORY,
         }:
             return False
         if self._domain_is_allowlisted(link.domain, compiled.allow_domains):
             return True
-        return is_trusted_destination(link.domain, safe_family=assessment.safe_family if assessment is not None else None)
+        return self._domain_is_builtin_trusted_under_policy(compiled, link.domain, assessment)
+
+    def _domain_is_builtin_trusted_under_policy(
+        self,
+        compiled: CompiledShieldConfig,
+        domain: str,
+        assessment: ShieldLinkAssessment | None,
+    ) -> bool:
+        if self._domain_is_allowlisted(domain, compiled.trusted_builtin_disabled_domains):
+            return False
+        if link_domain_in_set(domain, TRUSTED_ONLY_BUILTIN_DOMAINS):
+            return True
+        safe_family = assessment.safe_family if assessment is not None else None
+        return safe_family in TRUSTED_ONLY_BUILTIN_FAMILIES and safe_family not in compiled.trusted_builtin_disabled_families
 
     def _detect_link_policy(
         self,
@@ -2982,6 +3199,7 @@ class ShieldService:
         link_assessments: Sequence[ShieldLinkAssessment],
         *,
         existing_matches: Sequence[ShieldMatch],
+        scam_context: ShieldScamContext,
     ) -> list[ShieldMatch]:
         settings = compiled.link_policy
         if not settings.enabled or compiled.link_policy_mode == DEFAULT_SHIELD_LINK_POLICY_MODE or not snapshot.links:
@@ -2996,6 +3214,21 @@ class ShieldService:
             assessment = assessments_by_domain.get(link.domain)
             if self._link_is_trusted_under_policy(compiled, link, assessment):
                 continue
+            automated_author = scam_context.author_kind in AUTOMATED_AUTHOR_KINDS
+            if automated_author:
+                if link.invite_code is not None:
+                    continue
+                if assessment is None:
+                    continue
+                if assessment.category == UNKNOWN_LINK_CATEGORY:
+                    continue
+                if assessment.category == UNKNOWN_SUSPICIOUS_LINK_CATEGORY and not assessment.provider_lookup_warranted:
+                    continue
+                if (
+                    link.category in {"shortener", "storefront"}
+                    or link_domain_in_set(link.domain, LINK_IN_BIO_DOMAINS)
+                ) and assessment.category not in {MALICIOUS_LINK_CATEGORY, IMPERSONATION_LINK_CATEGORY, ADULT_LINK_CATEGORY}:
+                    continue
 
             label = "Untrusted external link"
             reason = "Shield trusted-only mode allows only trusted destinations or admin allowlist entries. This link was neither trusted nor allowlisted."
@@ -3015,6 +3248,12 @@ class ShieldService:
                 confidence = "high"
                 heuristic = False
                 match_class = "link_policy_malicious"
+            elif assessment is not None and assessment.category == IMPERSONATION_LINK_CATEGORY:
+                label = "Trusted-brand impersonation domain"
+                reason = "Shield trusted-only mode blocked a host that locally impersonated a trusted or official destination."
+                confidence = "high"
+                heuristic = False
+                match_class = "link_policy_impersonation"
             elif assessment is not None and assessment.category == ADULT_LINK_CATEGORY:
                 label = "Known adult domain"
                 reason = "Shield trusted-only mode blocked a domain that matched local adult-domain intelligence."
@@ -3456,7 +3695,7 @@ class ShieldService:
         risky_domains = [
             assessment.normalized_domain
             for assessment in link_assessments
-            if assessment.category in {MALICIOUS_LINK_CATEGORY, UNKNOWN_SUSPICIOUS_LINK_CATEGORY}
+            if assessment.category in {MALICIOUS_LINK_CATEGORY, IMPERSONATION_LINK_CATEGORY, UNKNOWN_SUSPICIOUS_LINK_CATEGORY}
         ]
         link_risk_score = max((_score_link_assessment_for_scam(item) for item in link_assessments), default=0)
         shortener_or_punycode = any(
@@ -3481,6 +3720,7 @@ class ShieldService:
         dangerous_link_target = any(SUSPICIOUS_FILE_RE.search(url) for url in snapshot.urls)
         suspicious_attachment_combo = snapshot.has_suspicious_attachment and bool(social_engineering or cta or login_or_auth_flow)
         return ShieldScamFeatures(
+            author_kind=scam_context.author_kind,
             link_risk_score=link_risk_score,
             suspicious_link_present=link_risk_score >= 2,
             risky_link_present=link_risk_score >= 3,
@@ -3513,6 +3753,8 @@ class ShieldService:
         )
 
     def _should_emit_middle_lane_low(self, features: ShieldScamFeatures) -> bool:
+        if features.automated_author:
+            return False
         copy_signal_count = sum(
             (
                 bool(features.bait),
@@ -3548,6 +3790,31 @@ class ShieldService:
             )
         )
         return features.suspicious_link_present and copy_signal_count >= 2 and context_signal_count >= 1
+
+    def _automated_author_has_strong_scam_evidence(
+        self,
+        features: ShieldScamFeatures,
+        snapshot: ShieldSnapshot,
+        link_assessments: Sequence[ShieldLinkAssessment],
+    ) -> bool:
+        if any(assessment.category in {MALICIOUS_LINK_CATEGORY, IMPERSONATION_LINK_CATEGORY} for assessment in link_assessments):
+            return True
+        if snapshot.has_suspicious_attachment or features.dangerous_link_target or features.suspicious_attachment_combo:
+            return True
+        if features.link_risk_score < 4:
+            return False
+        if features.bait:
+            return True
+        if features.brand_bait and (
+            features.wallet_or_mint
+            or features.login_or_auth_flow
+            or features.social_engineering
+            or features.cta
+            or features.urgency
+            or features.fake_authority
+        ):
+            return True
+        return features.fake_authority and (features.login_or_auth_flow or features.social_engineering or features.cta)
 
     def _detect_scam(
         self,
@@ -3631,6 +3898,8 @@ class ShieldService:
                 )
             )
         if features.suspicious_link_present or snapshot.has_suspicious_attachment or features.dangerous_link_target:
+            if features.automated_author and not self._automated_author_has_strong_scam_evidence(features, snapshot, link_assessments):
+                return self._dedupe_matches(matches)
             weighted_score = features.link_risk_score
             reason_bits: list[str] = []
             if features.bait:
@@ -3642,10 +3911,10 @@ class ShieldService:
             if features.brand_bait:
                 weighted_score += 1
                 reason_bits.append("trusted-brand bait")
-            if features.support_framing:
+            if features.support_framing and not features.automated_author:
                 weighted_score += 1
                 reason_bits.append("support or ticket framing")
-            if features.security_notice:
+            if features.security_notice and not features.automated_author:
                 weighted_score += 1
                 reason_bits.append("security or session-warning framing")
             if features.fake_authority:
@@ -3654,16 +3923,16 @@ class ShieldService:
             if features.qr_setup_lure:
                 weighted_score += 1
                 reason_bits.append("QR, setup, or device-auth lure")
-            if features.announcement_framing:
+            if features.announcement_framing and not features.automated_author:
                 weighted_score += 1
                 reason_bits.append("announcement framing")
-            if features.partnership_framing:
+            if features.partnership_framing and not features.automated_author:
                 weighted_score += 1
                 reason_bits.append("partnership framing")
-            if features.community_post_framing:
+            if features.community_post_framing and not features.automated_author:
                 weighted_score += 1
                 reason_bits.append("community-post framing")
-            if features.official_framing and "official-looking framing" not in reason_bits:
+            if features.official_framing and "official-looking framing" not in reason_bits and not features.automated_author:
                 weighted_score += 1
                 reason_bits.append("official-looking framing")
             if features.urgency:
@@ -3674,10 +3943,7 @@ class ShieldService:
                 reason_bits.append("mint, wallet, or airdrop language")
             if features.brand_bait and features.official_like_framing and (features.urgency or features.login_or_auth_flow or features.social_engineering or features.cta):
                 weighted_score += 1
-            if features.scan_source == "webhook_message" and (features.brand_bait or features.official_like_framing or features.urgency):
-                weighted_score += 1
-                reason_bits.append("webhook or community-post delivery")
-            if features.newcomer_early_message and (
+            if not features.automated_author and features.newcomer_early_message and (
                 features.brand_bait
                 or features.official_like_framing
                 or features.cta
@@ -3690,19 +3956,19 @@ class ShieldService:
             ):
                 weighted_score += 1
                 reason_bits.append("newcomer early-message delivery")
-            if features.first_message_with_link:
+            if not features.automated_author and features.first_message_with_link:
                 weighted_score += 1
                 reason_bits.append("first newcomer message carried a link")
-            if features.first_external_link:
+            if not features.automated_author and features.first_external_link:
                 weighted_score += 1
                 reason_bits.append("first newcomer external link")
-            if features.early_risky_activity:
+            if not features.automated_author and features.early_risky_activity:
                 weighted_score += 1
                 reason_bits.append("risky activity in first few newcomer messages")
-            if features.fresh_campaign_cluster_30m >= 3:
+            if not features.automated_author and features.fresh_campaign_cluster_30m >= 3:
                 weighted_score += 2
                 reason_bits.append(f"fresh-account campaign cluster ({_cluster_reason_text(features.fresh_campaign_kinds)})")
-            elif features.fresh_campaign_cluster_20m >= 2:
+            elif not features.automated_author and features.fresh_campaign_cluster_20m >= 2:
                 weighted_score += 1
                 reason_bits.append(f"repeat fresh-account pattern ({_cluster_reason_text(features.fresh_campaign_kinds)})")
             if snapshot.has_suspicious_attachment:
@@ -3713,7 +3979,11 @@ class ShieldService:
                 reason_bits.append("download-style link target")
 
             confidence: str | None = None
-            if weighted_score >= 7:
+            if features.automated_author and weighted_score >= 7:
+                confidence = "high"
+            elif features.automated_author and weighted_score >= 6:
+                confidence = "medium"
+            elif weighted_score >= 7:
                 confidence = "high"
             elif weighted_score >= 5:
                 confidence = "medium"
@@ -4177,6 +4447,8 @@ class ShieldService:
             allow_domains=frozenset(_sorted_unique_text(raw.get("allow_domains", []))),
             allow_invite_codes=frozenset(_sorted_unique_text(raw.get("allow_invite_codes", []))),
             allow_phrases=tuple(_sorted_unique_text(raw.get("allow_phrases", []))),
+            trusted_builtin_disabled_families=frozenset(_sorted_unique_text(raw.get("trusted_builtin_disabled_families", []))),
+            trusted_builtin_disabled_domains=frozenset(_sorted_unique_text(raw.get("trusted_builtin_disabled_domains", []))),
             privacy=PackSettings(
                 enabled=bool(raw.get("privacy_enabled")),
                 low_action=str(raw.get("privacy_low_action", "log")).strip().lower(),
@@ -4556,7 +4828,7 @@ class ShieldFeatureSafetyGateway:
                 link_policy_mode=mode,
             ):
                 continue
-            if assessment.category == MALICIOUS_LINK_CATEGORY:
+            if assessment.category in {MALICIOUS_LINK_CATEGORY, IMPERSONATION_LINK_CATEGORY}:
                 flags.append("malicious_link")
             elif assessment.category == ADULT_LINK_CATEGORY:
                 flags.append("adult_link")
@@ -4579,7 +4851,12 @@ class ShieldFeatureSafetyGateway:
         block_domains: frozenset[str],
         link_policy_mode: str,
     ) -> bool:
-        if assessment.category in {MALICIOUS_LINK_CATEGORY, ADULT_LINK_CATEGORY, UNKNOWN_SUSPICIOUS_LINK_CATEGORY}:
+        if assessment.category in {
+            MALICIOUS_LINK_CATEGORY,
+            IMPERSONATION_LINK_CATEGORY,
+            ADULT_LINK_CATEGORY,
+            UNKNOWN_SUSPICIOUS_LINK_CATEGORY,
+        }:
             return False
         if _domain_in_set(domain, block_domains):
             return False

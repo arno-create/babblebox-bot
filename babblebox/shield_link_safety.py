@@ -8,7 +8,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-from babblebox.text_safety import normalize_plain_text
+from babblebox.text_safety import fold_confusable_text, normalize_plain_text
 
 
 DEFAULT_LINK_CACHE_TTL_SECONDS = 30.0 * 60.0
@@ -26,6 +26,7 @@ DEFAULT_EXTERNAL_MALICIOUS_PATHS = (
 SAFE_LINK_CATEGORY = "safe"
 MALICIOUS_LINK_CATEGORY = "malicious"
 ADULT_LINK_CATEGORY = "adult"
+IMPERSONATION_LINK_CATEGORY = "impersonation"
 UNKNOWN_LINK_CATEGORY = "unknown"
 UNKNOWN_SUSPICIOUS_LINK_CATEGORY = "unknown_suspicious"
 TRUSTED_LINK_SAFE_FAMILIES = frozenset({"social", "media", "docs", "dev", "wiki"})
@@ -50,6 +51,7 @@ LINK_CATEGORY_STRENGTH = {
     UNKNOWN_SUSPICIOUS_LINK_CATEGORY: 2,
     ADULT_LINK_CATEGORY: 3,
     MALICIOUS_LINK_CATEGORY: 4,
+    IMPERSONATION_LINK_CATEGORY: 5,
 }
 
 EXPLICIT_WARNING_DISCUSSION_RE = re.compile(
@@ -107,6 +109,45 @@ LOOKUP_CONTEXT_SIGNALS = HIGH_SEVERITY_CONTEXT_SIGNALS | frozenset(
 )
 EMBEDDED_TOKEN_LABEL_MIN_LEN = 7
 DEEP_SUBDOMAIN_LABEL_THRESHOLD = 4
+HARD_IMPERSONATION_HOST_TOKENS = frozenset(
+    {
+        "account",
+        "auth",
+        "bonus",
+        "claim",
+        "connect",
+        "download",
+        "gift",
+        "help",
+        "login",
+        "mint",
+        "qr",
+        "secure",
+        "security",
+        "session",
+        "support",
+        "ticket",
+        "verify",
+        "verification",
+        "wallet",
+    }
+)
+TRUSTED_BRAND_ALIASES: dict[str, tuple[str, ...]] = {
+    "coinbase": ("coinbase",),
+    "discord": ("discord",),
+    "epicgames": ("epicgames", "epic"),
+    "github": ("github",),
+    "gitlab": ("gitlab",),
+    "google": ("google",),
+    "instagram": ("instagram",),
+    "metamask": ("metamask",),
+    "opensea": ("opensea",),
+    "steam": ("steampowered", "steamcommunity"),
+    "tiktok": ("tiktok",),
+    "twitch": ("twitch",),
+    "walletconnect": ("walletconnect",),
+    "youtube": ("youtube", "youtu"),
+}
 
 
 def looks_like_warning_discussion(text: str) -> bool:
@@ -145,6 +186,47 @@ def is_trusted_destination(domain: str, *, safe_family: str | None = None) -> bo
     if safe_family in TRUSTED_LINK_SAFE_FAMILIES:
         return True
     return matching_domain(domain, TRUSTED_MAINSTREAM_DOMAINS) is not None
+
+
+def _decode_idna_label(label: str) -> str:
+    try:
+        return label.encode("ascii").decode("idna")
+    except UnicodeError:
+        return label
+
+
+def _brand_skeleton(value: str) -> str:
+    folded = fold_confusable_text(normalize_plain_text(value)).casefold()
+    return "".join(char for char in folded if char.isalnum())
+
+
+def _edit_distance_leq_one(left: str, right: str) -> bool:
+    if left == right:
+        return True
+    left_len = len(left)
+    right_len = len(right)
+    if abs(left_len - right_len) > 1:
+        return False
+    if left_len > right_len:
+        left, right = right, left
+        left_len, right_len = right_len, left_len
+    index = 0
+    other = 0
+    errors = 0
+    while index < left_len and other < right_len:
+        if left[index] == right[other]:
+            index += 1
+            other += 1
+            continue
+        errors += 1
+        if errors > 1:
+            return False
+        if left_len == right_len:
+            index += 1
+        other += 1
+    if other < right_len or index < left_len:
+        errors += 1
+    return errors <= 1
 
 
 def clean_url_candidate(raw_url: str) -> str | None:
@@ -270,6 +352,13 @@ class _CachedDomainProfile:
     known_category: str | None
     host_signals: tuple[str, ...]
     suspicious_base_score: int
+
+
+@dataclass(frozen=True)
+class _BrandImpersonationAssessment:
+    known_category: str | None
+    signals: tuple[str, ...]
+    suspicious_score_bonus: int
 
 
 def _clean_domain_list(values: Any) -> frozenset[str]:
@@ -640,6 +729,18 @@ class ShieldLinkSafetyEngine:
         suspicious_score = 0
         labels = [label for label in domain.split(".") if label]
         root_labels = labels[:-1] if len(labels) > 1 else labels
+        brand_impersonation = self._assess_brand_impersonation(domain, labels)
+        if brand_impersonation.known_category is not None:
+            return _CachedDomainProfile(
+                domain=domain,
+                safe_family=None,
+                known_category=brand_impersonation.known_category,
+                host_signals=brand_impersonation.signals,
+                suspicious_base_score=0,
+            )
+        if brand_impersonation.signals:
+            host_signals.extend(brand_impersonation.signals)
+            suspicious_score += brand_impersonation.suspicious_score_bonus
         if "xn--" in domain:
             host_signals.append("punycode_host")
             suspicious_score += 2
@@ -685,6 +786,57 @@ class ShieldLinkSafetyEngine:
             host_signals=tuple(dict.fromkeys(host_signals)),
             suspicious_base_score=suspicious_score,
         )
+
+    def _assess_brand_impersonation(self, domain: str, labels: Sequence[str]) -> _BrandImpersonationAssessment:
+        if len(labels) < 2:
+            return _BrandImpersonationAssessment(None, (), 0)
+        root_labels = [label for label in labels[:-1] if label]
+        if not root_labels:
+            return _BrandImpersonationAssessment(None, (), 0)
+        registrable_label = root_labels[-1]
+        registrable_skeleton = _brand_skeleton(_decode_idna_label(registrable_label))
+        joined_skeleton = "".join(_brand_skeleton(_decode_idna_label(label)) for label in root_labels)
+        root_token_text = ".".join(root_labels)
+        root_tokens = set(TOKEN_RE.findall(root_token_text))
+        dangerous_brand_tokens = root_tokens.intersection(HARD_IMPERSONATION_HOST_TOKENS)
+        punycode_present = any(label.startswith("xn--") for label in root_labels)
+
+        for brand, aliases in TRUSTED_BRAND_ALIASES.items():
+            for alias in aliases:
+                alias_skeleton = _brand_skeleton(alias)
+                if not alias_skeleton:
+                    continue
+                confusable_label_hit = any(
+                    _brand_skeleton(_decode_idna_label(label)) == alias_skeleton and label.casefold() != alias.casefold()
+                    for label in root_labels
+                )
+                split_brand_hit = len(root_labels) >= 2 and joined_skeleton == alias_skeleton and registrable_skeleton != alias_skeleton
+                if split_brand_hit or confusable_label_hit:
+                    signals = [f"impersonates:{brand}"]
+                    if split_brand_hit:
+                        signals.append("brand_split")
+                    signals.append("punycode_brand" if punycode_present else "confusable_brand")
+                    return _BrandImpersonationAssessment(IMPERSONATION_LINK_CATEGORY, tuple(signals), 0)
+                if alias in root_tokens and dangerous_brand_tokens:
+                    signals = [f"impersonates:{brand}", "brand_piggyback_host"]
+                    if punycode_present:
+                        signals.append("punycode_brand")
+                    return _BrandImpersonationAssessment(IMPERSONATION_LINK_CATEGORY, tuple(signals), 0)
+                if len(alias_skeleton) >= 6 and registrable_skeleton and _edit_distance_leq_one(registrable_skeleton, alias_skeleton):
+                    if registrable_skeleton == alias_skeleton:
+                        continue
+                    return _BrandImpersonationAssessment(
+                        IMPERSONATION_LINK_CATEGORY,
+                        (f"impersonates:{brand}", "near_brand_host"),
+                        0,
+                    )
+                if alias in root_tokens or alias_skeleton in joined_skeleton:
+                    return _BrandImpersonationAssessment(
+                        None,
+                        (f"brand_token:{brand}", "near_brand_host"),
+                        2,
+                    )
+        return _BrandImpersonationAssessment(None, (), 0)
 
     def _context_signals(
         self,

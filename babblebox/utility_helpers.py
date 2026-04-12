@@ -841,7 +841,7 @@ def build_reminder_delivery_view(reminder: dict) -> discord.ui.View | None:
     jump_url = reminder.get("origin_jump_url")
     if not jump_url:
         return None
-    if reminder.get("delivery") != "dm":
+    if reminder.get("delivery") != "here":
         return None
     if reminder.get("guild_id") is None:
         return None

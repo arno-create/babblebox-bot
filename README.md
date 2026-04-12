@@ -125,17 +125,21 @@ Babblebox is intentionally compact:
   - Babblebox's bounded cross-feature immunity layer
   - admin-only configuration for administrators or Manage Server users
   - live-message moderation remains optional and admin-configurable
+  - first enable applies a recommended non-AI baseline once, while AI stays off by default
   - always-on private feature-surface checks for Confessions unsafe-link parity, AFK reasons, reminder text plus public reminder delivery, and watch keyword setup
   - AFK reasons and reminders use privacy, adult, and severe checks; watch keyword setup stays privacy-only
   - privacy leak pack
   - promo / invite pack
 - scam / malicious-link pack with local weighted scam-language scoring
+- hard local trusted-brand impersonation blocking for spoofed or lookalike safe domains
 - `Adult Links + Solicitation` pack for adult-domain intel plus optional solicitation / DM-ad text detection
 - `Severe Harm / Hate` pack for sexual-exploitation solicitation, self-harm encouragement, eliminationist hate, and severe slur abuse
 - optional Shield link policy mode: `Default` or `Trusted Links Only`, separate from Confessions link mode
+- built-in trusted families and direct domains are visible under `/shield trusted`, with bounded per-server disable or re-enable controls
 - bundled local link safety with safe-domain families, suspicious-domain gating, and no external provider requirement
 - local-first malicious-link blocking with a feed of ~200k known malicious domains
 - in-scope Shield coverage for new messages, meaningful edits, and webhook/community-post style delivery
+- bot and webhook scam handling stays conservative by default unless the evidence is clearly dangerous
 - private suspicious-member review that only escalates when risky message signals combine with bounded account-age, avatar-state, display-name suspicion, newcomer first-link context, or fresh-campaign reuse
 - optional AI-assisted second-pass review for moderator context only
 - Shield AI stays live-message-only; AFK, reminders, watch keywords, and Confessions feature checks remain local-first and AI-free
@@ -314,17 +318,18 @@ Slash is the best fit for multi-option admin setup here. Prefix stays positional
 | `/shield panel` | `bb!shield panel` | Open the Shield admin panel |
 | `/shield rules` | `bb!shield rules true promo true log` | Configure module, packs, optional solicitation detection, severe-harm policy, and escalation |
 | `/shield links` | `bb!shield links trusted_only` | Configure Shield `Default` vs `Trusted Links Only` live-message policy |
+| `/shield trusted` | `bb!shield trusted view` | Inspect Shield's built-in trusted families/domains and local trust overrides |
 | `/shield logs` | `bb!shield logs #shield-log @Mods` | Set the mod-log channel and optional alert role |
 | `/shield filters` | `bb!shield filters` | Tune scope, includes, excludes, trusted roles, and solicitation carve-out channels |
 | `/shield allowlist` | `bb!shield allowlist` | Manage domain, invite, and phrase allowlists |
 | `/shield severe category` | `bb!shield severe category self_harm_encouragement off` | Turn severe-harm categories on or off |
 | `/shield severe term` | `bb!shield severe term add you scumlord` | Add, disable, restore, or remove bounded severe terms |
-| `/shield ai` | `bb!shield ai true high true false true` | Configure optional AI second-pass review |
+| `/shield ai` | `bb!shield ai true high true false true true true` | Configure optional AI second-pass review |
 | `/shield advanced add` | `bb!shield advanced add Gift claim*gift wildcard log` | Add a safe advanced pattern |
 | `/shield advanced list` | `bb!shield advanced list` | Review advanced patterns |
 | `/shield test` | `bb!shield test free nitro claim now https://bit.ly/x` | Dry-run a message through Shield |
 
-Shield's live-message link policy is intentionally separate from Confessions link mode. Confessions keeps `Disabled`, `Trusted Only`, and `Allow All Safe`, while Shield keeps `Default` plus the bounded `Trusted Links Only` mode. That stricter Shield mode allows trusted mainstream destinations plus admin allowlisted domains and invite codes as policy exceptions, while malicious, suspicious, and adult-domain intel still belongs to the specialized Shield packs. Shield phrase allowlists stay narrower: they suppress only targeted promo or adult-solicitation text matches. The live Shield packs are `Privacy Leak`, `Promo / Invite`, `Scam / Malicious Links`, `Adult Links + Solicitation`, and `Severe Harm / Hate`; the severe pack ships off by default and stays focused on real-harm abuse only.
+Shield's live-message link policy is intentionally separate from Confessions link mode. Confessions keeps `Disabled`, `Trusted Only`, and `Allow All Safe`, while Shield keeps `Default` plus the bounded `Trusted Links Only` mode. That stricter Shield mode allows the built-in trusted pack plus admin allowlisted domains and invite codes as policy exceptions, and `/shield trusted` now exposes the built-in families, direct domains, and any local built-in disables that affect trusted-only mode. Malicious, trusted-brand impersonation, adult-domain, and strong suspicious-link intel still wins over those trust exceptions. Shield phrase allowlists stay narrower: they suppress only targeted promo or adult-solicitation text matches. The live Shield packs are `Privacy Leak`, `Promo / Invite`, `Scam / Malicious Links`, `Adult Links + Solicitation`, and `Severe Harm / Hate`; live moderation stays opt-in, and the first enable applies a recommended non-AI baseline with AI still off by default.
 
 Shield also now governs eligible non-chat surfaces in a bounded way. Confessions keeps its own privacy, review, and workflow logic, but shares Shield link intelligence. AFK reasons plus reminder text and public reminder delivery use fixed private privacy, adult, and severe feature-surface policies. Watch keyword setup stays privacy-only. None of those private feature checks create mod-log spam or call Shield AI.
 
@@ -468,6 +473,7 @@ Babblebox Shield is intentionally compact and conservative:
 - AI review only runs after local Shield already flagged a message
 - AI review is currently limited to guild `1322933864360050688`
 - AI review is admin-only, off by default, and never punishes by itself
+- AI review can cover privacy, promo, scam, adult, and severe once admins opt those packs in
 - only minimal, sanitized, truncated flagged text from the scanned surfaces is sent to the AI provider
 
 ## Capture and Later Media Handling

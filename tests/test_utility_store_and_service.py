@@ -849,6 +849,50 @@ class UtilityStoreAndServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(delivered)
         self.assertEqual(len(channel.sent), 1)
         user.send.assert_not_awaited()
+        _args, kwargs = channel.sent[0]
+        self.assertIsNotNone(kwargs.get("embed"))
+        self.assertIsNotNone(kwargs.get("allowed_mentions"))
+
+    async def test_public_reminder_persists_origin_jump_url_from_server_message(self):
+        guild = type("Guild", (), {"id": 1, "name": "Guild"})()
+        channel = type("Channel", (), {"id": 2, "name": "general"})()
+
+        ok, reminder = await self.service.create_reminder(
+            user=DummyUser(580),
+            text="Check the thread.",
+            delay_seconds=20 * 60,
+            delivery="here",
+            guild=guild,
+            channel=channel,
+            origin_jump_url="https://discord.com/channels/1/2/3",
+        )
+
+        self.assertTrue(ok)
+        self.assertEqual(reminder["origin_jump_url"], "https://discord.com/channels/1/2/3")
+
+    async def test_dm_reminder_keeps_origin_without_showing_jump_button(self):
+        user = DummyMember(581, display_name="Ari")
+        self.bot.add_user(user)
+        guild = type("Guild", (), {"id": 1, "name": "Guild"})()
+
+        ok, reminder = await self.service.create_reminder(
+            user=user,
+            text="Deliver quietly.",
+            delay_seconds=20 * 60,
+            delivery="dm",
+            guild=guild,
+            channel=None,
+            origin_jump_url="https://discord.com/channels/1/2/3",
+        )
+
+        self.assertTrue(ok)
+        self.assertEqual(reminder["origin_jump_url"], "https://discord.com/channels/1/2/3")
+
+        delivered = await self.service._deliver_single_reminder(reminder)
+
+        self.assertTrue(delivered)
+        user.send.assert_awaited_once()
+        self.assertIsNone(user.send.await_args.kwargs.get("view"))
 
     async def test_failed_reminder_delivery_is_retried_instead_of_removed(self):
         user = DummyMember(57, display_name="Mira")

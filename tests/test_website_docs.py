@@ -36,7 +36,7 @@ class WebsiteDocsTests(unittest.TestCase):
             'id="faq"',
         ):
             self.assertIn(anchor, help_html)
-        for command in ("/support", "/daily", "/buddy", "/profile", "/vault", "/watch", "/later", "/capture", "/remind", "/afk", "/shield panel", "/shield links", "/confess", "/confessions moderate"):
+        for command in ("/support", "/daily", "/buddy", "/profile", "/vault", "/watch", "/later", "/capture", "/remind", "/afk", "/shield panel", "/shield links", "/shield trusted", "/confess", "/confessions moderate"):
             self.assertIn(command, help_html)
         self.assertIn("Broken Telephone, Exquisite Corpse, Spyfall, Word Bomb, and Pattern Hunt", help_html)
         self.assertIn("1-10 drops per day", help_html)
@@ -138,6 +138,8 @@ class WebsiteDocsTests(unittest.TestCase):
             "optional feature that only works after admins enable and configure it",
             "adult / 18+ language is blocked by default",
             "images are off by default",
+            "/shield trusted",
+            "recommended non-AI baseline",
             "Reply anonymously",
             "Create a confession",
             "private approval happens first",
@@ -211,6 +213,7 @@ class WebsiteDocsTests(unittest.TestCase):
         for text in (
             "Trusted Links Only",
             "/shield links",
+            "/shield trusted",
             "/shield logs",
             "/shield filters",
             "separate from Confessions link mode",
@@ -219,7 +222,11 @@ class WebsiteDocsTests(unittest.TestCase):
             self.assertIn(text, readme)
             self.assertIn(text, help_html)
         self.assertIn("admin allowlisted domains and invite codes as policy exceptions", readme)
-        self.assertIn("trusted mainstream destinations plus bounded domain or invite allowlists only", help_html)
+        self.assertIn("built-in trusted pack plus bounded domain or invite allowlists only", help_html)
+        self.assertIn("built-in trusted families", help_html)
+        self.assertIn("built-in trusted families", readme)
+        self.assertIn("trusted-brand impersonation", readme)
+        self.assertIn("trusted-brand impersonation", help_html)
         self.assertIn("phrase allowlists stay narrower", readme)
         self.assertIn("phrase allowlists suppress only targeted promo or adult-solicitation text matches", help_html)
         for text in ("solicitation carve-out", "optional solicitation"):
@@ -256,9 +263,10 @@ class WebsiteDocsTests(unittest.TestCase):
             "bounded feature-surface checks",
             "The toggle controls live-message moderation",
             "live-message-only",
+            "recommended non-AI baseline",
         ):
             self.assertIn(text, help_html)
-        for text in ("watch keyword setup stays privacy-only", "privacy, adult, and severe"):
+        for text in ("watch keyword setup stays privacy-only", "privacy, adult, and severe", "privacy, promo, scam, adult, and severe"):
             self.assertIn(text, help_html)
         for text in (
             "feature-surface checks",

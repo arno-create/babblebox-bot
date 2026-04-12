@@ -466,6 +466,49 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(compiled.promo.high_action, "delete_log")
         self.assertFalse(compiled.adult.enabled)
 
+    async def test_first_enable_applies_recommended_non_ai_baseline_once(self):
+        ok, message = await self.service.set_module_enabled(10, True)
+
+        self.assertTrue(ok)
+        self.assertIn("AI stays off by default", message)
+        self.assertIn("recommended non-AI baseline", message)
+        config = self.service.get_config(10)
+        self.assertTrue(config["module_enabled"])
+        self.assertEqual(config["baseline_version"], 1)
+        self.assertFalse(config["ai_enabled"])
+        self.assertTrue(config["adult_solicitation_enabled"])
+        for pack in ("privacy", "promo", "scam", "adult", "severe"):
+            with self.subTest(pack=pack):
+                self.assertTrue(config[f"{pack}_enabled"])
+                self.assertEqual(config[f"{pack}_low_action"], "log")
+                self.assertEqual(config[f"{pack}_medium_action"], "delete_log")
+                self.assertEqual(config[f"{pack}_high_action"], "delete_log")
+                self.assertEqual(config[f"{pack}_sensitivity"], "normal")
+
+    async def test_reenable_preserves_customized_rules_after_first_enable(self):
+        ok, _ = await self.service.set_pack_config(10, "severe", enabled=False, low_action="detect", medium_action="log", high_action="delete_log", sensitivity="high")
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_module_enabled(10, True)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_pack_config(10, "scam", high_action="delete_escalate")
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_module_enabled(10, False)
+        self.assertTrue(ok)
+
+        ok, message = await self.service.set_module_enabled(10, True)
+
+        self.assertTrue(ok)
+        self.assertIn("AI stays off by default", message)
+        self.assertNotIn("recommended non-AI baseline", message)
+        config = self.service.get_config(10)
+        self.assertTrue(config["module_enabled"])
+        self.assertFalse(config["severe_enabled"])
+        self.assertEqual(config["severe_low_action"], "detect")
+        self.assertEqual(config["severe_medium_action"], "log")
+        self.assertEqual(config["severe_high_action"], "delete_log")
+        self.assertEqual(config["severe_sensitivity"], "high")
+        self.assertEqual(config["scam_high_action"], "delete_escalate")
+
     async def test_allowlisted_invite_does_not_bypass_promo_match(self):
         ok, _ = await self.service.set_pack_config(10, "promo", enabled=True, action="log", sensitivity="normal")
         self.assertTrue(ok)
@@ -611,7 +654,8 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertTrue([match for match in result.matches if match.pack == "scam"])
-        self.assertEqual(result.link_assessments[0].category, "unknown_suspicious")
+        self.assertEqual(result.link_assessments[0].category, "impersonation")
+        self.assertIn("brand_piggyback_host", result.link_assessments[0].matched_signals)
 
     async def test_live_tld_mint_lure_hits_scam_pack(self):
         ok, _ = await self.service.set_pack_config(10, "scam", enabled=True, action="delete_log", sensitivity="normal")
@@ -919,6 +963,48 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
                 result = self.service.test_message_details(10, text)
                 self.assertFalse([match for match in result.matches if match.pack == "adult"])
 
+    async def test_adult_solicitation_catches_prices_customs_and_open_for_requests_variants(self):
+        ok, _ = await self.service.set_pack_config(
+            10,
+            "adult",
+            enabled=True,
+            action="delete_log",
+            sensitivity="normal",
+            adult_solicitation=True,
+        )
+        self.assertTrue(ok)
+
+        for text in (
+            "Prices in DM for custom content",
+            "Customs open, DM me",
+            "Open for requests, custom content in DM",
+        ):
+            with self.subTest(text=text):
+                result = self.service.test_message_details(10, text)
+                adult_matches = [match for match in result.matches if match.pack == "adult"]
+                self.assertTrue(adult_matches)
+                self.assertEqual(adult_matches[0].match_class, "adult_dm_ad")
+
+    async def test_adult_solicitation_stays_suppressed_for_benign_custom_content_and_requests_contexts(self):
+        ok, _ = await self.service.set_pack_config(
+            10,
+            "adult",
+            enabled=True,
+            action="delete_log",
+            sensitivity="high",
+            adult_solicitation=True,
+        )
+        self.assertTrue(ok)
+
+        for text in (
+            "Open for requests for website design.",
+            "Custom content guidelines for the art contest.",
+            'Moderation example: they said "Customs open, DM me" in another server.',
+        ):
+            with self.subTest(text=text):
+                result = self.service.test_message_details(10, text)
+                self.assertFalse([match for match in result.matches if match.pack == "adult"])
+
     async def test_adult_solicitation_channel_carve_out_only_relaxes_optional_text_detector(self):
         ok, _ = await self.service.set_pack_config(
             10,
@@ -1014,6 +1100,19 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("malicious_link", scan.flags)
         self.assertEqual(scan.link_assessments[0].normalized_domain, "dlscord-gift.com")
         self.assertEqual(scan.link_assessments[0].category, "malicious")
+
+    async def test_feature_gateway_blocks_trusted_brand_impersonation_links(self):
+        scan = self.service.assess_feature_links(
+            FEATURE_SURFACE_CONFESSIONS_LINKS,
+            text="verify here https://youtub.e.com/watch?v=1",
+            link_policy_mode="trusted_only",
+        )
+
+        self.assertIsInstance(scan, ShieldFeatureLinkScan)
+        self.assertTrue(scan.has_links)
+        self.assertIn("malicious_link", scan.flags)
+        self.assertEqual(scan.link_assessments[0].category, "impersonation")
+        self.assertIn("brand_split", scan.link_assessments[0].matched_signals)
 
     async def test_trusted_only_link_policy_allows_trusted_docs_link(self):
         ok, _ = await self.service.set_link_policy_config(10, mode="trusted_only")
@@ -1120,6 +1219,84 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("guild_allow_domain", malicious_result.link_assessments[0].matched_signals)
         self.assertIn("guild_allow_domain", adult_result.link_assessments[0].matched_signals)
         self.assertIn("guild_allow_domain", suspicious_result.link_assessments[0].matched_signals)
+
+    async def test_trusted_only_link_policy_hard_blocks_trusted_brand_impersonation(self):
+        ok, _ = await self.service.set_link_policy_config(10, mode="trusted_only")
+        self.assertTrue(ok)
+
+        result = self.service.test_message_details(10, "Use https://youtub.e.com/watch?v=1 right now")
+
+        policy_matches = [match for match in result.matches if match.pack == "link_policy"]
+        self.assertEqual(policy_matches[0].match_class, "link_policy_impersonation")
+        self.assertEqual(policy_matches[0].confidence, "high")
+        self.assertEqual(result.link_assessments[0].category, "impersonation")
+        self.assertIn("brand_split", result.link_assessments[0].matched_signals)
+
+    async def test_allowlisted_domain_does_not_override_trusted_brand_impersonation(self):
+        ok, _ = await self.service.set_link_policy_config(10, mode="trusted_only")
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_allow_entry(10, "allow_domains", "youtub.e.com", True)
+        self.assertTrue(ok)
+
+        result = self.service.test_message_details(10, "Use https://youtub.e.com/watch?v=1 right now")
+
+        policy_matches = [match for match in result.matches if match.pack == "link_policy"]
+        self.assertEqual(policy_matches[0].match_class, "link_policy_impersonation")
+        self.assertIn("guild_allow_domain", result.link_assessments[0].matched_signals)
+
+    async def test_disabling_builtin_trusted_family_blocks_that_family_until_admin_allowlisted(self):
+        ok, _ = await self.service.set_link_policy_config(10, mode="trusted_only")
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_trusted_builtin_family_enabled(10, "social", False)
+        self.assertTrue(ok)
+
+        blocked = self.service.test_message_details(10, "Read https://reddit.com/r/python")
+        blocked_matches = [match for match in blocked.matches if match.pack == "link_policy"]
+        self.assertEqual(blocked_matches[0].match_class, "untrusted_external_link")
+        self.assertEqual(blocked.link_assessments[0].category, "safe")
+        self.assertEqual(blocked.link_assessments[0].safe_family, "social")
+
+        ok, _ = await self.service.set_allow_entry(10, "allow_domains", "reddit.com", True)
+        self.assertTrue(ok)
+        allowed = self.service.test_message_details(10, "Read https://reddit.com/r/python")
+        self.assertFalse([match for match in allowed.matches if match.pack == "link_policy"])
+        self.assertIn("guild_allow_domain", allowed.link_assessments[0].matched_signals)
+
+    async def test_disabling_builtin_trusted_domain_blocks_that_domain_until_admin_allowlisted(self):
+        ok, _ = await self.service.set_link_policy_config(10, mode="trusted_only")
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_trusted_builtin_domain_enabled(10, "github.com", False)
+        self.assertTrue(ok)
+
+        blocked = self.service.test_message_details(10, "Read https://github.com/openai")
+        blocked_matches = [match for match in blocked.matches if match.pack == "link_policy"]
+        self.assertEqual(blocked_matches[0].match_class, "untrusted_external_link")
+        self.assertEqual(blocked.link_assessments[0].category, "safe")
+
+        ok, _ = await self.service.set_allow_entry(10, "allow_domains", "github.com", True)
+        self.assertTrue(ok)
+        allowed = self.service.test_message_details(10, "Read https://github.com/openai")
+        self.assertFalse([match for match in allowed.matches if match.pack == "link_policy"])
+        self.assertIn("guild_allow_domain", allowed.link_assessments[0].matched_signals)
+
+    async def test_trusted_pack_state_exposes_builtins_examples_and_local_overrides(self):
+        ok, _ = await self.service.set_trusted_builtin_family_enabled(10, "social", False)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_trusted_builtin_domain_enabled(10, "github.com", False)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_allow_entry(10, "allow_domains", "example.com", True)
+        self.assertTrue(ok)
+
+        state = self.service.trusted_pack_state(10)
+
+        social = next(item for item in state["families"] if item["name"] == "social")
+        github = next(item for item in state["direct_domains"] if item["domain"] == "github.com")
+        self.assertTrue(social["examples"])
+        self.assertTrue(social["disabled"])
+        self.assertTrue(github["disabled"])
+        self.assertIn("social", state["disabled_families"])
+        self.assertIn("github.com", state["disabled_domains"])
+        self.assertIn("example.com", state["allow_domains"])
 
     async def test_specialized_scam_and_adult_packs_still_own_matches_under_trusted_only_mode(self):
         ok, _ = await self.service.set_pack_config(10, "scam", enabled=True, action="delete_log", sensitivity="normal")
@@ -1412,6 +1589,41 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue([match for match in result.matches if match.pack == "scam"])
         self.assertEqual(result.link_assessments[0].category, "unknown_suspicious")
         self.assertTrue(result.link_assessments[0].provider_lookup_warranted)
+
+    async def test_obvious_safe_domain_impersonation_is_a_first_class_local_block(self):
+        ok, _ = await self.service.set_pack_config(10, "scam", enabled=True, action="delete_log", sensitivity="normal")
+        self.assertTrue(ok)
+
+        result = self.service.test_message_details(10, "Claim reward now https://githuub.com/login")
+
+        scam_matches = [match for match in result.matches if match.pack == "scam"]
+        self.assertTrue(scam_matches)
+        self.assertEqual(scam_matches[0].match_class, "trusted_brand_impersonation_domain")
+        self.assertEqual(result.link_assessments[0].category, "impersonation")
+        self.assertIn("near_brand_host", result.link_assessments[0].matched_signals)
+
+    async def test_confusable_brand_host_is_blocked_as_punycode_brand_impersonation(self):
+        ok, _ = await self.service.set_pack_config(10, "scam", enabled=True, action="delete_log", sensitivity="normal")
+        self.assertTrue(ok)
+        confusable_domain = "disc" + chr(0x043E) + "rd.com"
+
+        result = self.service.test_message_details(10, f"Verify here https://{confusable_domain}/login")
+
+        self.assertEqual(result.link_assessments[0].category, "impersonation")
+        self.assertIn("punycode_brand", result.link_assessments[0].matched_signals)
+        self.assertTrue([match for match in result.matches if match.pack == "scam"])
+
+    async def test_weaker_brand_overlap_stays_suspicious_only_instead_of_hard_impersonation(self):
+        result = self.service.test_message_details(10, "Reference link https://discordstatuspage.com/update")
+
+        self.assertEqual(result.link_assessments[0].category, "unknown_suspicious")
+        self.assertIn("near_brand_host", result.link_assessments[0].matched_signals)
+
+    async def test_generic_overlap_domain_does_not_false_positive_as_brand_impersonation(self):
+        result = self.service.test_message_details(10, "Reference link https://steamcleaningpros.com")
+
+        self.assertEqual(result.link_assessments[0].category, "unknown")
+        self.assertFalse(result.link_assessments[0].matched_signals)
 
     async def test_weird_query_shape_marks_unknown_domain_as_suspicious(self):
         result = self.service.test_message_details(
@@ -1836,6 +2048,104 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(decision.scan_source, "webhook_message")
         self.assertTrue(decision.deleted)
         self.assertTrue([match for match in decision.reasons if match.pack == "scam"])
+
+    async def test_legitimate_bot_embed_with_support_ticket_copy_stays_below_scam_threshold(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        author = FakeAuthor(52, bot=True)
+        message = FakeMessage(
+            guild=guild,
+            channel=channel,
+            author=author,
+            content="",
+            embeds=[
+                FakeEmbed(
+                    title="PayPal support ticket update",
+                    description="Review your case notes at https://verify-hub.live/paypal/ticket",
+                )
+            ],
+        )
+
+        ok, _ = await self.service.set_module_enabled(guild.id, True)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_pack_config(guild.id, "scam", enabled=True, action="delete_log", sensitivity="normal")
+        self.assertTrue(ok)
+
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            decision = await self.service.handle_message(message)
+
+        self.assertIsNone(decision)
+
+    async def test_human_message_keeps_medium_signal_scam_detection_that_bots_now_suppress(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        author = FakeAuthor(53)
+        message = FakeMessage(
+            guild=guild,
+            channel=channel,
+            author=author,
+            content="Official PayPal support ticket update: verify your case at https://verify-hub.live/paypal/ticket",
+        )
+
+        ok, _ = await self.service.set_module_enabled(guild.id, True)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_pack_config(guild.id, "scam", enabled=True, action="delete_log", sensitivity="normal")
+        self.assertTrue(ok)
+
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            decision = await self.service.handle_message(message)
+
+        self.assertIsNotNone(decision)
+        self.assertTrue([match for match in decision.reasons if match.pack == "scam"])
+        self.assertEqual(decision.link_assessments[0].category, "unknown_suspicious")
+
+    async def test_webhook_message_with_medium_signal_brand_ticket_copy_stays_conservative(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        author = FakeAuthor(54, bot=True)
+        message = FakeMessage(
+            guild=guild,
+            channel=channel,
+            author=author,
+            webhook_id=777,
+            content="Official community post: PayPal support ticket update. Verify your case at https://verify-hub.live/paypal/ticket",
+        )
+
+        ok, _ = await self.service.set_module_enabled(guild.id, True)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_pack_config(guild.id, "scam", enabled=True, action="delete_log", sensitivity="normal")
+        self.assertTrue(ok)
+
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            decision = await self.service.handle_message(message, scan_source="webhook_message")
+
+        self.assertIsNone(decision)
+
+    async def test_webhook_message_with_hard_impersonation_still_gets_caught(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        author = FakeAuthor(55, bot=True)
+        message = FakeMessage(
+            guild=guild,
+            channel=channel,
+            author=author,
+            webhook_id=778,
+            content="Official community post: Discord account check. Verify now at https://youtub.e.com/login",
+        )
+
+        ok, _ = await self.service.set_module_enabled(guild.id, True)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_pack_config(guild.id, "scam", enabled=True, action="delete_log", sensitivity="normal")
+        self.assertTrue(ok)
+
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            decision = await self.service.handle_message(message, scan_source="webhook_message")
+
+        self.assertIsNotNone(decision)
+        self.assertTrue(decision.deleted)
+        self.assertTrue([match for match in decision.reasons if match.match_class == "trusted_brand_impersonation_domain"])
+        self.assertEqual(decision.link_assessments[0].category, "impersonation")
+        self.assertIsNone(decision.member_risk_evidence)
 
     async def test_embed_only_scam_message_is_scanned(self):
         guild = FakeGuild(10)
@@ -2351,6 +2661,23 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(ok)
         self.assertIn("provider", message.lower())
 
+    async def test_ai_config_accepts_adult_and_severe_packs(self):
+        self.service.ai_provider = FakeAIProvider(available=True)
+
+        ok, message = await self.service.set_ai_config(
+            SHIELD_AI_ALLOWED_GUILD_ID,
+            enabled=True,
+            enabled_packs=["privacy", "adult", "severe"],
+            min_confidence="medium",
+        )
+
+        self.assertTrue(ok)
+        self.assertIn("Adult Links + Solicitation", message)
+        self.assertIn("Severe Harm / Hate", message)
+        config = self.service.get_config(SHIELD_AI_ALLOWED_GUILD_ID)
+        self.assertEqual(set(config["ai_enabled_packs"]), {"privacy", "adult", "severe"})
+        self.assertEqual(config["ai_min_confidence"], "medium")
+
     async def test_allowed_guild_flagged_message_can_enrich_alert_with_ai_review(self):
         guild = FakeGuild(SHIELD_AI_ALLOWED_GUILD_ID)
         public_channel = FakeChannel(20)
@@ -2431,6 +2758,74 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         request = self.service.ai_provider.review.await_args.args[0]
         self.assertIn("Contact me at [EMAIL]", request.sanitized_content)
         self.assertIn("embeds", decision.scan_surface_labels)
+
+    async def test_adult_pack_can_trigger_ai_review_when_enabled(self):
+        guild = FakeGuild(SHIELD_AI_ALLOWED_GUILD_ID)
+        public_channel = FakeChannel(20)
+        log_channel = FakeChannel(99, name="shield-log")
+        self.bot.register_channel(log_channel)
+        author = FakeAuthor(42, roles=[FakeRole(11, position=1)])
+        message = FakeMessage(guild=guild, channel=public_channel, author=author, content="DM me for nudes")
+        self.service.ai_provider = FakeAIProvider(
+            result=ShieldAIReviewResult(
+                classification="adult_solicitation_or_adult_risk",
+                confidence="high",
+                priority="normal",
+                false_positive=False,
+                explanation="This looks like a sexual-content sales or DM-routing pitch.",
+                model="gpt-4.1-mini",
+            )
+        )
+
+        ok, _ = await self.service.set_module_enabled(guild.id, True)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_pack_config(guild.id, "adult", enabled=True, action="log", sensitivity="normal", adult_solicitation=True)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_log_channel(guild.id, log_channel.id)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_ai_config(guild.id, enabled=True, enabled_packs=["adult"], min_confidence="medium")
+        self.assertTrue(ok)
+
+        decision = await self.service.handle_message(message)
+
+        self.assertIsNotNone(decision)
+        self.assertIsNotNone(decision.ai_review)
+        self.assertEqual(decision.ai_review.classification, "adult_solicitation_or_adult_risk")
+        self.service.ai_provider.review.assert_awaited_once()
+
+    async def test_severe_pack_can_trigger_ai_review_when_enabled(self):
+        guild = FakeGuild(SHIELD_AI_ALLOWED_GUILD_ID)
+        public_channel = FakeChannel(20)
+        log_channel = FakeChannel(99, name="shield-log")
+        self.bot.register_channel(log_channel)
+        author = FakeAuthor(42, roles=[FakeRole(11, position=1)])
+        message = FakeMessage(guild=guild, channel=public_channel, author=author, content="kill yourself")
+        self.service.ai_provider = FakeAIProvider(
+            result=ShieldAIReviewResult(
+                classification="severe_harm_or_hate",
+                confidence="high",
+                priority="high",
+                false_positive=False,
+                explanation="This is direct severe-harm abuse rather than a benign quote.",
+                model="gpt-4.1-mini",
+            )
+        )
+
+        ok, _ = await self.service.set_module_enabled(guild.id, True)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_pack_config(guild.id, "severe", enabled=True, action="log", sensitivity="normal")
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_log_channel(guild.id, log_channel.id)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_ai_config(guild.id, enabled=True, enabled_packs=["severe"], min_confidence="medium")
+        self.assertTrue(ok)
+
+        decision = await self.service.handle_message(message)
+
+        self.assertIsNotNone(decision)
+        self.assertIsNotNone(decision.ai_review)
+        self.assertEqual(decision.ai_review.classification, "severe_harm_or_hate")
+        self.service.ai_provider.review.assert_awaited_once()
 
     async def test_non_allowed_guild_never_calls_ai_provider(self):
         guild = FakeGuild(10)
