@@ -1923,6 +1923,34 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(decisions, [None, None, None, None])
 
+    async def test_multi_user_gif_pressure_is_detected_without_needing_one_spammer(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        authors = [
+            FakeAuthor(801 + index, roles=[FakeRole(11, position=1)])
+            for index in range(3)
+        ]
+
+        await self._enable_spam_pack(guild.id)
+
+        final = None
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            for author, content in (
+                (authors[0], "https://tenor.com/view/cat-dance-gif-1000"),
+                (authors[1], "https://tenor.com/view/cat-dance-gif-1000"),
+                (authors[2], "https://tenor.com/view/cat-dance-gif-1000"),
+                (authors[0], "https://tenor.com/view/hype-gif-2000"),
+                (authors[1], "https://tenor.com/view/hype-gif-2000"),
+                (authors[2], "https://tenor.com/view/hype-gif-2000"),
+            ):
+                final = await self.service.handle_message(
+                    FakeMessage(guild=guild, channel=channel, author=author, content=content)
+                )
+
+        self.assertIsNotNone(final)
+        self.assertIn("spam_group_gif_pressure", {reason.match_class for reason in final.reasons})
+        self.assertIn("gif-heavy posts from 3 members", final.alert_evidence_summary.lower())
+
     async def test_repeated_same_external_link_with_varied_captions_still_clusters(self):
         guild = FakeGuild(10)
         channel = FakeChannel(20)
@@ -2387,6 +2415,69 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("raid_fresh_join_wave", second.member_risk_evidence.signal_codes)
         self.assertIn("raid_pattern_cluster", second.member_risk_evidence.signal_codes)
         admin_service.handle_member_risk_message.assert_awaited()
+
+    async def test_guard_posture_can_hold_confirmed_newcomer_raid_spam(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        admin_service = types.SimpleNamespace(
+            handle_member_risk_message=AsyncMock(),
+            get_compiled_config=lambda _guild_id: types.SimpleNamespace(security_posture="guard"),
+        )
+        self.bot.admin_service = admin_service
+
+        await self._enable_spam_pack(guild.id)
+        members = [
+            self._make_member(
+                guild,
+                500 + index,
+                created_delta=timedelta(hours=2),
+                joined_delta=timedelta(minutes=2),
+            )
+            for index in range(5)
+        ]
+        for member in members:
+            await self.service.handle_member_join(member)
+
+        content = "@everyone <@1> <@2> <@3>"
+        with patch.object(self.service, "_timeout_member", new=AsyncMock(return_value=True)) as timeout_mock, patch.object(self.service, "_send_alert", new=AsyncMock()):
+            await self.service.handle_message(FakeMessage(guild=guild, channel=channel, author=members[0], content=content))
+            second = await self.service.handle_message(FakeMessage(guild=guild, channel=channel, author=members[1], content=content))
+
+        self.assertIsNotNone(second)
+        self.assertTrue(second.timed_out)
+        self.assertIn("raid hold", (second.action_note or "").lower())
+        timeout_mock.assert_awaited()
+
+    async def test_observe_posture_keeps_confirmed_newcomer_raid_spam_review_heavy(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        admin_service = types.SimpleNamespace(
+            handle_member_risk_message=AsyncMock(),
+            get_compiled_config=lambda _guild_id: types.SimpleNamespace(security_posture="observe"),
+        )
+        self.bot.admin_service = admin_service
+
+        await self._enable_spam_pack(guild.id)
+        members = [
+            self._make_member(
+                guild,
+                600 + index,
+                created_delta=timedelta(hours=2),
+                joined_delta=timedelta(minutes=2),
+            )
+            for index in range(5)
+        ]
+        for member in members:
+            await self.service.handle_member_join(member)
+
+        content = "@everyone <@1> <@2> <@3>"
+        with patch.object(self.service, "_timeout_member", new=AsyncMock(return_value=True)) as timeout_mock, patch.object(self.service, "_send_alert", new=AsyncMock()):
+            await self.service.handle_message(FakeMessage(guild=guild, channel=channel, author=members[0], content=content))
+            second = await self.service.handle_message(FakeMessage(guild=guild, channel=channel, author=members[1], content=content))
+
+        self.assertIsNotNone(second)
+        self.assertFalse(second.timed_out)
+        timeout_mock.assert_not_awaited()
 
     async def test_custom_wildcard_pattern_matches_safely(self):
         ok, _ = await self.service.add_custom_pattern(

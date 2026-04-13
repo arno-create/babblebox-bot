@@ -144,10 +144,11 @@ class ShieldPanelView(discord.ui.View):
             )
             return False
         if not self.cog.user_can_manage_shield(interaction.user):
+            _allowed, reason = self.cog.shield_access_reason(interaction.user, self.guild_id)
             await interaction.response.send_message(
                 embed=ge.make_status_embed(
                     "Admin Only",
-                    "You need **Manage Server** or administrator access to configure Babblebox Shield.",
+                    reason,
                     tone="warning",
                     footer="Babblebox Shield",
                 ),
@@ -223,9 +224,24 @@ class ShieldCog(commands.Cog):
             delattr(self.bot, "shield_service")
         self.bot.loop.create_task(self.service.close())
 
-    def user_can_manage_shield(self, actor: object) -> bool:
+    def shield_access_reason(self, actor: object, guild_id: int | None = None) -> tuple[bool, str]:
+        resolved_guild_id = guild_id or int(getattr(getattr(actor, "guild", None), "id", 0) or 0)
+        admin_service = getattr(self.bot, "admin_service", None)
+        if resolved_guild_id > 0 and admin_service is not None:
+            allowed, reason = admin_service.can_manage_control_plane(actor, resolved_guild_id, operation="manage")
+            if allowed:
+                return True, reason
+            perms = getattr(actor, "guild_permissions", None)
+            if bool(getattr(perms, "administrator", False) or getattr(perms, "manage_guild", False)):
+                return False, reason
         perms = getattr(actor, "guild_permissions", None)
-        return bool(getattr(perms, "administrator", False) or getattr(perms, "manage_guild", False))
+        if bool(getattr(perms, "administrator", False) or getattr(perms, "manage_guild", False)):
+            return True, "Manage Server or administrator access."
+        return False, "You need **Manage Server** or administrator access to configure Babblebox Shield."
+
+    def user_can_manage_shield(self, actor: object) -> bool:
+        allowed, _reason = self.shield_access_reason(actor)
+        return allowed
 
     @commands.Cog.listener()
     async def on_member_join(self, member: discord.Member):
@@ -242,11 +258,12 @@ class ShieldCog(commands.Cog):
             )
             return False
         if not self.user_can_manage_shield(ctx.author):
+            _allowed, reason = self.shield_access_reason(ctx.author, ctx.guild.id)
             await send_hybrid_response(
                 ctx,
                 embed=ge.make_status_embed(
                     "Admin Only",
-                    "You need **Manage Server** or administrator access to configure Babblebox Shield.",
+                    reason,
                     tone="warning",
                     footer="Babblebox Shield",
                 ),
@@ -573,6 +590,7 @@ class ShieldCog(commands.Cog):
             name="Live Moderation",
             value=(
                 f"Enabled: **{'Yes' if config['module_enabled'] else 'No'}**\n"
+                f"Security posture: **{self.service._security_posture_for(guild_id).title()}**\n"
                 f"Scan mode: `{config['scan_mode']}`\n"
                 f"Log channel: {log_channel}\n"
                 f"Alert role: {alert_role}\n"
@@ -620,7 +638,7 @@ class ShieldCog(commands.Cog):
             name="Storage Discipline",
             value=(
                 "Shield stores config and compact pattern metadata only.\n"
-                "Private feature-surface blocks stay private, join-wave state stays ephemeral, and moderator context is delivered to the log channel instead of a heavy moderation archive."
+                "Private feature-surface blocks stay private, join-wave state stays ephemeral, grouped GIF pressure stays in memory only, and moderator context is delivered to the log channel instead of a heavy moderation archive."
             ),
             inline=False,
         )

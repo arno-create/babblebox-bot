@@ -123,6 +123,7 @@ SPAM_MENTION_WINDOW_SECONDS = 20.0
 SPAM_LOW_VALUE_WINDOW_SECONDS = 60.0
 SPAM_GIF_WINDOW_SECONDS = 45.0
 SPAM_GIF_REPEAT_WINDOW_SECONDS = 30.0
+GROUP_GIF_PRESSURE_WINDOW_SECONDS = 20.0
 HEALTHY_CHAT_WINDOW_SECONDS = 20.0
 HEALTHY_CHAT_AUTHOR_THRESHOLD = 4
 GIF_EMBED_DOMAINS = frozenset({"tenor.com", "media.tenor.com", "giphy.com", "media.giphy.com"})
@@ -187,6 +188,7 @@ MATCH_CLASS_LABELS = {
     "spam_mention_flood": "Mention flood",
     "spam_emoji_flood": "Emoji flood",
     "spam_gif_flood": "GIF flood",
+    "spam_group_gif_pressure": "Coordinated GIF pressure",
     "spam_burst": "Fast burst posting",
     "spam_low_value_noise": "Repeated low-value noise",
     "spam_padding_noise": "Character-padding spam",
@@ -1740,6 +1742,7 @@ class ShieldService:
         self._recent_scam_campaigns: dict[tuple[int, str, str], list[tuple[float, int]]] = {}
         self._recent_spam_events: dict[tuple[int, int], list[ShieldSpamEvent]] = {}
         self._recent_channel_activity: dict[tuple[int, int], list[tuple[float, int, int, bool]]] = {}
+        self._recent_channel_gif_pressure: dict[tuple[int, int], list[tuple[float, int, str | None, bool, bool]]] = {}
         self._recent_join_waves: dict[int, list[tuple[float, int, bool]]] = {}
         self._recent_raid_patterns: dict[tuple[int, str, str], list[tuple[float, int]]] = {}
         self._raid_alert_dedup: dict[tuple[Any, ...], float] = {}
@@ -2887,6 +2890,99 @@ class ShieldService:
             fresh_join_wave=fresh_join_wave,
         )
 
+    def _security_posture_for(self, guild_id: int) -> str:
+        admin_service = getattr(self.bot, "admin_service", None)
+        if admin_service is None:
+            return "observe"
+        get_compiled_config = getattr(admin_service, "get_compiled_config", None)
+        if not callable(get_compiled_config):
+            return "observe"
+        compiled = get_compiled_config(guild_id)
+        posture = str(getattr(compiled, "security_posture", "observe") or "observe").strip().lower()
+        return posture if posture in {"observe", "guard", "panic"} else "observe"
+
+    def _track_channel_gif_pressure(
+        self,
+        guild_id: int,
+        channel_id: int | None,
+        user_id: int,
+        snapshot: ShieldSnapshot,
+        *,
+        now: float,
+    ):
+        if channel_id is None:
+            return
+        key = (guild_id, channel_id)
+        rows = [
+            row
+            for row in self._recent_channel_gif_pressure.get(key, [])
+            if now - row[0] <= GROUP_GIF_PRESSURE_WINDOW_SECONDS
+        ]
+        if snapshot.is_gif_message:
+            rows.append((now, user_id, snapshot.gif_signature, snapshot.gif_only, snapshot.gif_low_text))
+        if len(rows) > 100:
+            rows = rows[-100:]
+        self._recent_channel_gif_pressure[key] = rows
+
+    def _build_group_gif_pressure(
+        self,
+        guild_id: int,
+        channel_id: int | None,
+        snapshot: ShieldSnapshot,
+        *,
+        raid_evidence: ShieldRaidEvidence,
+        now: float,
+    ) -> dict[str, Any] | None:
+        if channel_id is None or not snapshot.is_gif_message:
+            return None
+        key = (guild_id, channel_id)
+        gif_rows = [
+            row
+            for row in self._recent_channel_gif_pressure.get(key, [])
+            if now - row[0] <= GROUP_GIF_PRESSURE_WINDOW_SECONDS
+        ]
+        if not gif_rows:
+            return None
+        activity_rows = [
+            row
+            for row in self._recent_channel_activity.get(key, [])
+            if now - row[0] <= GROUP_GIF_PRESSURE_WINDOW_SECONDS
+        ]
+        distinct_gif_authors = {author_id for _timestamp, author_id, _signature, _gif_only, _gif_low_text in gif_rows}
+        low_text_gifs = sum(1 for _timestamp, _author_id, _signature, gif_only, gif_low_text in gif_rows if gif_only or gif_low_text)
+        total_messages = len(activity_rows)
+        gif_ratio = len(gif_rows) / max(1, total_messages)
+        signature_counts: dict[str, int] = {}
+        for _timestamp, _author_id, signature, _gif_only, _gif_low_text in gif_rows:
+            if signature:
+                signature_counts[signature] = signature_counts.get(signature, 0) + 1
+        repeated_source = max(signature_counts.values(), default=0)
+        minimum_authors = 2 if raid_evidence.confirmed else 3
+        minimum_messages = 5 if raid_evidence.confirmed else 6
+        minimum_ratio = 0.65 if raid_evidence.confirmed else 0.75
+        if (
+            len(distinct_gif_authors) < minimum_authors
+            or len(gif_rows) < minimum_messages
+            or low_text_gifs < max(4, minimum_messages - 1)
+            or gif_ratio < minimum_ratio
+        ):
+            return None
+        summary = f"{len(gif_rows)} GIF-heavy posts from {len(distinct_gif_authors)} members drowned the channel inside 20 seconds."
+        if repeated_source >= 3:
+            summary = (
+                f"{len(gif_rows)} GIF-heavy posts from {len(distinct_gif_authors)} members repeated the same GIF source "
+                f"{repeated_source} times inside 20 seconds."
+            )
+        signature_seed = "|".join(
+            sorted(signature for signature in signature_counts)[:3]
+            or [str(author_id) for author_id in sorted(distinct_gif_authors)[:4]]
+        )
+        return {
+            "reason": summary,
+            "signature": hashlib.sha1(f"group_gif|{channel_id}|{signature_seed}".encode("utf-8")).hexdigest(),
+            "raid_confirmed": raid_evidence.confirmed,
+        }
+
     def _raid_signature_for_links(self, snapshot: ShieldSnapshot) -> str | None:
         if not snapshot.canonical_links:
             return None
@@ -2997,6 +3093,7 @@ class ShieldService:
         author_kind: str,
         distinct_channel_authors: int = 0,
         quality_channel_authors: int = 0,
+        group_gif_pressure: dict[str, Any] | None = None,
     ) -> list[ShieldMatch]:
         settings = compiled.spam
         if not settings.enabled or author_kind != "human":
@@ -3192,6 +3289,17 @@ class ShieldService:
                         "signature": snapshot.gif_signature or snapshot.near_duplicate_fingerprint,
                     }
                 )
+        if group_gif_pressure is not None:
+            facts.append(
+                {
+                    "match_class": "spam_group_gif_pressure",
+                    "label": "Coordinated GIF pressure",
+                    "reason": str(group_gif_pressure["reason"]),
+                    "base_confidence": "high" if group_gif_pressure.get("raid_confirmed") else "medium",
+                    "strong": True,
+                    "signature": group_gif_pressure.get("signature"),
+                }
+            )
 
         low_value_events = [event for event in recent_events if event.low_value_text and now - event.timestamp <= SPAM_LOW_VALUE_WINDOW_SECONDS]
         if len(low_value_events) >= 5:
@@ -3328,6 +3436,13 @@ class ShieldService:
                 snapshot,
                 now=now,
             )
+            self._track_channel_gif_pressure(
+                message.guild.id,
+                channel_id,
+                int(getattr(message.author, "id", 0) or 0),
+                snapshot,
+                now=now,
+            )
         link_assessments = self._collect_link_assessments(compiled, snapshot, now=now)
         scam_context = self._build_scam_context(
             message,
@@ -3346,6 +3461,13 @@ class ShieldService:
             newcomer_early_message=scam_context.newcomer_early_message,
             recent_account=scam_context.recent_account,
         )
+        group_gif_pressure = self._build_group_gif_pressure(
+            message.guild.id,
+            channel_id,
+            snapshot,
+            raid_evidence=raid_evidence,
+            now=now,
+        )
         matches = self._collect_matches(
             compiled,
             snapshot,
@@ -3360,6 +3482,7 @@ class ShieldService:
             channel_id=channel_id,
             distinct_channel_authors=distinct_channel_authors,
             quality_channel_authors=quality_channel_authors,
+            group_gif_pressure=group_gif_pressure,
         )
         matches, _ = self._apply_allow_phrase_suppression(matches, allow_phrase=self._matching_allow_phrase(compiled, snapshot))
         matches, raid_confidence_lifted = self._apply_raid_confidence_lift(
@@ -3407,12 +3530,16 @@ class ShieldService:
             decision.alert_evidence_signature = repetition.fingerprint
             decision.alert_evidence_summary = self._repetition_reason(repetition)
         elif best.pack == "spam":
-            decision.alert_evidence_signature = raid_evidence.pattern_signature or snapshot.near_duplicate_fingerprint or snapshot.exact_fingerprint
+            decision.alert_evidence_signature = (
+                group_gif_pressure.get("signature")
+                if best.match_class == "spam_group_gif_pressure" and group_gif_pressure is not None
+                else raid_evidence.pattern_signature or snapshot.near_duplicate_fingerprint or snapshot.exact_fingerprint
+            )
             if best.match_class == "spam_duplicate":
                 decision.alert_evidence_summary = f"Repeated duplicate spam in a short window ({best.reason.lower()})"
             elif best.match_class == "spam_near_duplicate":
                 decision.alert_evidence_summary = best.reason
-            elif best.match_class in {"spam_burst", "spam_low_value_noise", "spam_padding_noise", "spam_gif_flood", "spam_emoji_flood"}:
+            elif best.match_class in {"spam_burst", "spam_low_value_noise", "spam_padding_noise", "spam_gif_flood", "spam_group_gif_pressure", "spam_emoji_flood"}:
                 decision.alert_evidence_summary = best.reason
 
         if best.action.startswith("delete"):
@@ -3442,6 +3569,53 @@ class ShieldService:
                     decision.action_note = "Repeated-hit escalation was configured, but Babblebox could not time out that member."
         elif best.action == "delete_escalate":
             decision.action_note = "Repeated-hit escalation is reserved for high-confidence, non-noise Shield matches."
+
+        posture = self._security_posture_for(message.guild.id)
+        if (
+            author_kind == "human"
+            and scan_source == "new_message"
+            and decision.raid_evidence is not None
+            and decision.raid_evidence.confirmed
+            and scam_context.newcomer_early_message
+            and not decision.timed_out
+            and posture in {"guard", "panic"}
+        ):
+            top_reason = decision.reasons[0] if decision.reasons else None
+            confidence_rank = _confidence_rank(top_reason.confidence) if top_reason is not None else 0
+            guard_hold = (
+                posture == "guard"
+                and top_reason is not None
+                and top_reason.pack in {"spam", "scam"}
+                and confidence_rank >= _confidence_rank("high")
+            )
+            panic_hold = (
+                posture == "panic"
+                and top_reason is not None
+                and top_reason.pack in {"spam", "scam"}
+                and confidence_rank >= _confidence_rank("medium")
+                and (
+                    decision.raid_evidence.fresh_join_wave
+                    or decision.raid_evidence.pattern_cluster_size >= 2
+                    or top_reason.match_class in {
+                        "spam_group_gif_pressure",
+                        "spam_duplicate",
+                        "spam_near_duplicate",
+                        "spam_link_flood",
+                        "spam_invite_flood",
+                    }
+                )
+            )
+            if guard_hold or panic_hold:
+                decision.timed_out = await self._timeout_member(
+                    message,
+                    compiled,
+                    reason="Babblebox Shield raid hold contained a risky newcomer during an active confirmed raid.",
+                )
+                if decision.timed_out:
+                    hold_note = "Active raid hold timed out this risky newcomer."
+                    decision.action_note = f"{decision.action_note} {hold_note}".strip() if decision.action_note else hold_note
+                elif decision.action_note is None:
+                    decision.action_note = "Raid hold was allowed in this posture, but Babblebox could not time out that newcomer."
 
         if self._should_request_ai_review(compiled, decision):
             request = self._build_ai_review_request(
@@ -3908,6 +4082,7 @@ class ShieldService:
         channel_id: int | None = None,
         distinct_channel_authors: int = 0,
         quality_channel_authors: int = 0,
+        group_gif_pressure: dict[str, Any] | None = None,
     ) -> list[ShieldMatch]:
         active_link_assessments = tuple(link_assessments or ())
         matches: list[ShieldMatch] = []
@@ -3925,6 +4100,7 @@ class ShieldService:
                 author_kind=author_kind,
                 distinct_channel_authors=distinct_channel_authors,
                 quality_channel_authors=quality_channel_authors,
+                group_gif_pressure=group_gif_pressure,
             )
         )
         matches.extend(self._detect_adult_solicitation(compiled, snapshot, channel_id=channel_id))
@@ -5195,6 +5371,11 @@ class ShieldService:
             key: [row for row in values if now - row[0] <= HEALTHY_CHAT_WINDOW_SECONDS]
             for key, values in self._recent_channel_activity.items()
             if any(now - row[0] <= HEALTHY_CHAT_WINDOW_SECONDS for row in values)
+        }
+        self._recent_channel_gif_pressure = {
+            key: [row for row in values if now - row[0] <= GROUP_GIF_PRESSURE_WINDOW_SECONDS]
+            for key, values in self._recent_channel_gif_pressure.items()
+            if any(now - row[0] <= GROUP_GIF_PRESSURE_WINDOW_SECONDS for row in values)
         }
         self._recent_join_waves = {
             guild_id: [row for row in values if now - row[0] <= RAID_JOIN_WINDOW_SECONDS]

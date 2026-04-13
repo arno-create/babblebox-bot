@@ -24,6 +24,7 @@ from babblebox.admin_store import (
     VALID_EMERGENCY_PING_MODES,
     VALID_FOLLOWUP_MODES,
     VALID_MEMBER_RISK_MODES,
+    VALID_SECURITY_POSTURES,
     VALID_VERIFICATION_DEADLINE_ACTIONS,
     VALID_VERIFICATION_LOGIC,
     default_admin_config,
@@ -95,16 +96,27 @@ EMERGENCY_RELEVANT_CONFIG_FIELDS = frozenset(
         "excluded_role_ids",
         "trusted_role_ids",
         "emergency_enabled",
+        "security_posture",
         "emergency_mode",
         "emergency_strict_auto_containment",
         "emergency_ping_mode",
+        "control_lock_enabled",
+        "editor_user_ids",
+        "editor_role_ids",
+        "emergency_operator_user_ids",
+        "emergency_operator_role_ids",
+        "control_deny_user_ids",
+        "control_deny_role_ids",
         "protected_role_ids",
+        "protected_role_granter_user_ids",
+        "protected_role_granter_role_ids",
         "trusted_actor_user_ids",
         "trusted_actor_role_ids",
         "trusted_bot_ids",
         "allowlisted_target_user_ids",
         "allowlisted_target_role_ids",
         "channel_whitelist_ids",
+        "quarantine_role_id",
         "enabled_dangerous_permission_flags",
         "emergency_role_grant_threshold",
         "emergency_role_grant_target_threshold",
@@ -122,6 +134,11 @@ MEMBER_RISK_MODE_LABELS = {
     "log": "Log only",
     "review": "Moderator review",
     "review_or_kick": "Review or kick",
+}
+SECURITY_POSTURE_LABELS = {
+    "observe": "Observe",
+    "guard": "Guard",
+    "panic": "Panic",
 }
 EMERGENCY_MODE_LABELS = {
     "log": "Log only",
@@ -317,16 +334,27 @@ class CompiledAdminConfig:
     member_risk_enabled: bool
     member_risk_mode: str
     emergency_enabled: bool
+    security_posture: str
     emergency_mode: str
     emergency_strict_auto_containment: bool
     emergency_ping_mode: str
+    control_lock_enabled: bool
+    editor_user_ids: frozenset[int]
+    editor_role_ids: frozenset[int]
+    emergency_operator_user_ids: frozenset[int]
+    emergency_operator_role_ids: frozenset[int]
+    control_deny_user_ids: frozenset[int]
+    control_deny_role_ids: frozenset[int]
     protected_role_ids: frozenset[int]
+    protected_role_granter_user_ids: frozenset[int]
+    protected_role_granter_role_ids: frozenset[int]
     trusted_actor_user_ids: frozenset[int]
     trusted_actor_role_ids: frozenset[int]
     trusted_bot_ids: frozenset[int]
     allowlisted_target_user_ids: frozenset[int]
     allowlisted_target_role_ids: frozenset[int]
     channel_whitelist_ids: frozenset[int]
+    quarantine_role_id: int | None
     enabled_dangerous_permission_flags: frozenset[str]
     emergency_role_grant_threshold: int
     emergency_role_grant_target_threshold: int
@@ -488,16 +516,27 @@ def _compile_config(raw: dict[str, Any]) -> CompiledAdminConfig:
         member_risk_enabled=bool(raw.get("member_risk_enabled", False)),
         member_risk_mode=str(raw.get("member_risk_mode", "review")),
         emergency_enabled=bool(raw.get("emergency_enabled", False)),
+        security_posture=str(raw.get("security_posture", "observe")),
         emergency_mode=str(raw.get("emergency_mode", "review")),
         emergency_strict_auto_containment=bool(raw.get("emergency_strict_auto_containment", False)),
         emergency_ping_mode=str(raw.get("emergency_ping_mode", "high_only")),
+        control_lock_enabled=bool(raw.get("control_lock_enabled", False)),
+        editor_user_ids=frozenset(int(value) for value in raw.get("editor_user_ids", [])),
+        editor_role_ids=frozenset(int(value) for value in raw.get("editor_role_ids", [])),
+        emergency_operator_user_ids=frozenset(int(value) for value in raw.get("emergency_operator_user_ids", [])),
+        emergency_operator_role_ids=frozenset(int(value) for value in raw.get("emergency_operator_role_ids", [])),
+        control_deny_user_ids=frozenset(int(value) for value in raw.get("control_deny_user_ids", [])),
+        control_deny_role_ids=frozenset(int(value) for value in raw.get("control_deny_role_ids", [])),
         protected_role_ids=frozenset(int(value) for value in raw.get("protected_role_ids", [])),
+        protected_role_granter_user_ids=frozenset(int(value) for value in raw.get("protected_role_granter_user_ids", [])),
+        protected_role_granter_role_ids=frozenset(int(value) for value in raw.get("protected_role_granter_role_ids", [])),
         trusted_actor_user_ids=frozenset(int(value) for value in raw.get("trusted_actor_user_ids", [])),
         trusted_actor_role_ids=frozenset(int(value) for value in raw.get("trusted_actor_role_ids", [])),
         trusted_bot_ids=frozenset(int(value) for value in raw.get("trusted_bot_ids", [])),
         allowlisted_target_user_ids=frozenset(int(value) for value in raw.get("allowlisted_target_user_ids", [])),
         allowlisted_target_role_ids=frozenset(int(value) for value in raw.get("allowlisted_target_role_ids", [])),
         channel_whitelist_ids=frozenset(int(value) for value in raw.get("channel_whitelist_ids", [])),
+        quarantine_role_id=raw.get("quarantine_role_id"),
         enabled_dangerous_permission_flags=frozenset(
             str(value).strip().lower() for value in raw.get("enabled_dangerous_permission_flags", []) if str(value).strip()
         )
@@ -735,6 +774,8 @@ class AdminService:
             return "Verification deadline action must be `auto_kick` or `review`."
         if config.get("member_risk_mode") not in VALID_MEMBER_RISK_MODES:
             return "Member risk mode must be `log`, `review`, or `review_or_kick`."
+        if config.get("security_posture") not in VALID_SECURITY_POSTURES:
+            return "Security posture must be `observe`, `guard`, or `panic`."
         if config.get("emergency_mode") not in VALID_EMERGENCY_MODES:
             return "Emergency mode must be `log`, `review`, or `contain`."
         if config.get("emergency_ping_mode") not in VALID_EMERGENCY_PING_MODES:
@@ -747,7 +788,15 @@ class AdminService:
             "excluded_user_ids",
             "excluded_role_ids",
             "trusted_role_ids",
+            "editor_user_ids",
+            "editor_role_ids",
+            "emergency_operator_user_ids",
+            "emergency_operator_role_ids",
+            "control_deny_user_ids",
+            "control_deny_role_ids",
             "protected_role_ids",
+            "protected_role_granter_user_ids",
+            "protected_role_granter_role_ids",
             "trusted_actor_user_ids",
             "trusted_actor_role_ids",
             "trusted_bot_ids",
@@ -770,10 +819,14 @@ class AdminService:
         guild_id: int,
         *,
         enabled: bool | None = None,
+        posture: str | None = None,
         mode: str | None = None,
         strict_auto_containment: bool | None = None,
         ping_mode: str | None = None,
     ) -> tuple[bool, str]:
+        cleaned_posture = posture.strip().lower() if isinstance(posture, str) else None
+        if cleaned_posture is not None and cleaned_posture not in VALID_SECURITY_POSTURES:
+            return False, "Security posture must be `observe`, `guard`, or `panic`."
         cleaned_mode = mode.strip().lower() if isinstance(mode, str) else None
         if cleaned_mode is not None and cleaned_mode not in VALID_EMERGENCY_MODES:
             return False, "Emergency mode must be `log`, `review`, or `contain`."
@@ -784,6 +837,8 @@ class AdminService:
         def mutate(config: dict[str, Any]):
             if enabled is not None:
                 config["emergency_enabled"] = bool(enabled)
+            if cleaned_posture is not None:
+                config["security_posture"] = cleaned_posture
             if cleaned_mode is not None:
                 config["emergency_mode"] = cleaned_mode
             if strict_auto_containment is not None:
@@ -793,6 +848,7 @@ class AdminService:
 
         preview = self.get_config(guild_id)
         final_enabled = preview["emergency_enabled"] if enabled is None else bool(enabled)
+        final_posture = preview["security_posture"] if cleaned_posture is None else cleaned_posture
         final_mode = preview["emergency_mode"] if cleaned_mode is None else cleaned_mode
         final_strict = (
             preview["emergency_strict_auto_containment"]
@@ -804,6 +860,7 @@ class AdminService:
             field
             for field, supplied in (
                 ("emergency_enabled", enabled is not None),
+                ("security_posture", cleaned_posture is not None),
                 ("emergency_mode", cleaned_mode is not None),
                 ("emergency_strict_auto_containment", strict_auto_containment is not None),
                 ("emergency_ping_mode", cleaned_ping_mode is not None),
@@ -814,8 +871,9 @@ class AdminService:
             guild_id,
             mutate,
             success_message=(
-                f"Emergency protection is {'enabled' if final_enabled else 'disabled'} in `{final_mode}` mode "
-                f"with strict auto-containment {'on' if final_strict else 'off'} and `{final_ping_mode}` ping policy."
+                f"Emergency protection is {'enabled' if final_enabled else 'disabled'} in `{final_posture}` posture, "
+                f"`{final_mode}` emergency mode, strict auto-containment {'on' if final_strict else 'off'}, "
+                f"and `{final_ping_mode}` ping policy."
             ),
             requested_fields=requested_fields,
             force_post_update=bool(requested_fields),
@@ -831,6 +889,8 @@ class AdminService:
     ) -> tuple[bool, str]:
         valid_fields = {
             "protected_role_ids",
+            "protected_role_granter_user_ids",
+            "protected_role_granter_role_ids",
             "trusted_actor_user_ids",
             "trusted_actor_role_ids",
             "trusted_bot_ids",
@@ -858,6 +918,72 @@ class AdminService:
             success_message=f"Emergency {label} was {'updated' if enabled else 'trimmed'}.",
             requested_fields={field},
             force_post_update=field in EMERGENCY_RELEVANT_CONFIG_FIELDS,
+        )
+
+    async def set_emergency_access(
+        self,
+        guild_id: int,
+        *,
+        field: str | None = None,
+        target_id: int | None = None,
+        enabled: bool | None = None,
+        control_lock_enabled: bool | None = None,
+        quarantine_role_id: int | None | object = ...,
+    ) -> tuple[bool, str]:
+        valid_fields = {
+            "editor_user_ids",
+            "editor_role_ids",
+            "emergency_operator_user_ids",
+            "emergency_operator_role_ids",
+            "control_deny_user_ids",
+            "control_deny_role_ids",
+        }
+        if field is not None and field not in valid_fields:
+            return False, "Unknown emergency access bucket."
+        if field is not None and (not isinstance(target_id, int) or target_id <= 0 or enabled is None):
+            return False, "Provide a valid target and on/off state for emergency access changes."
+
+        def mutate(config: dict[str, Any]):
+            if control_lock_enabled is not None:
+                config["control_lock_enabled"] = bool(control_lock_enabled)
+            if quarantine_role_id is not ...:
+                config["quarantine_role_id"] = quarantine_role_id if isinstance(quarantine_role_id, int) and quarantine_role_id > 0 else None
+            if field is not None:
+                values = set(int(value) for value in config.get(field, []))
+                if enabled:
+                    values.add(int(target_id))
+                else:
+                    values.discard(int(target_id))
+                if len(values) > EXCLUSION_LIMIT:
+                    raise ValueError(f"You can keep up to {EXCLUSION_LIMIT} entries in `{field}`.")
+                config[field] = sorted(values)
+
+        messages: list[str] = []
+        if control_lock_enabled is not None:
+            messages.append(f"control lock {'enabled' if control_lock_enabled else 'disabled'}")
+        if quarantine_role_id is not ...:
+            messages.append("quarantine role updated")
+        if field is not None:
+            label = field.replace("_ids", "").replace("_", " ")
+            messages.append(f"{label} {'updated' if enabled else 'trimmed'}")
+        if not messages:
+            return False, "No emergency access change was requested."
+
+        requested_fields = {
+            candidate
+            for candidate, supplied in (
+                ("control_lock_enabled", control_lock_enabled is not None),
+                ("quarantine_role_id", quarantine_role_id is not ...),
+                (field, field is not None),
+            )
+            if supplied and candidate is not None
+        }
+        return await self._update_config(
+            guild_id,
+            mutate,
+            success_message="Emergency control access was updated: " + ", ".join(messages) + ".",
+            requested_fields=requested_fields,
+            force_post_update=bool(requested_fields),
         )
 
     async def set_emergency_limits(
@@ -1931,6 +2057,78 @@ class AdminService:
             if getattr(role, "id", None) is not None
         }
 
+    def _member_like_for_containment(self, actor: object) -> object | None:
+        if actor is None or getattr(actor, "guild", None) is None:
+            return None
+        if not hasattr(actor, "roles"):
+            return None
+        if not hasattr(actor, "remove_roles"):
+            return None
+        if not hasattr(actor, "add_roles"):
+            return None
+        return actor
+
+    def _is_guild_owner(self, actor: object) -> bool:
+        guild = getattr(actor, "guild", None)
+        actor_id = int(getattr(actor, "id", 0) or 0)
+        return actor_id > 0 and actor_id == int(getattr(guild, "owner_id", 0) or 0)
+
+    def _control_allowlist_configured(self, compiled: CompiledAdminConfig) -> bool:
+        return bool(
+            compiled.editor_user_ids
+            or compiled.editor_role_ids
+            or compiled.emergency_operator_user_ids
+            or compiled.emergency_operator_role_ids
+        )
+
+    def _member_has_basic_admin_access(self, actor: object) -> bool:
+        perms = getattr(actor, "guild_permissions", None)
+        return bool(getattr(perms, "administrator", False) or getattr(perms, "manage_guild", False))
+
+    def _control_access_reason(
+        self,
+        actor: object,
+        compiled: CompiledAdminConfig,
+        *,
+        operation: str,
+    ) -> str | None:
+        actor_id = int(getattr(actor, "id", 0) or 0)
+        role_ids = self._role_ids_for(actor) if hasattr(actor, "roles") else set()
+        if self._is_guild_owner(actor):
+            return "Server owner."
+        if actor_id in compiled.control_deny_user_ids:
+            return None
+        if compiled.control_deny_role_ids.intersection(role_ids):
+            return None
+        if not compiled.control_lock_enabled or not self._control_allowlist_configured(compiled):
+            return "Manage Server or administrator access." if self._member_has_basic_admin_access(actor) else None
+        if actor_id in compiled.editor_user_ids or compiled.editor_role_ids.intersection(role_ids):
+            return "Configured editor access."
+        if operation == "emergency":
+            if actor_id in compiled.emergency_operator_user_ids:
+                return "Configured emergency operator access."
+            if compiled.emergency_operator_role_ids.intersection(role_ids):
+                return "Configured emergency operator role."
+        return None
+
+    def can_manage_control_plane(self, actor: object, guild_id: int, *, operation: str = "manage") -> tuple[bool, str]:
+        compiled = self.get_compiled_config(guild_id)
+        reason = self._control_access_reason(actor, compiled, operation=operation)
+        if reason is not None:
+            return True, reason
+        if int(getattr(actor, "id", 0) or 0) in compiled.control_deny_user_ids:
+            return False, "You are explicitly denied from Babblebox safety controls in this server."
+        role_ids = self._role_ids_for(actor) if hasattr(actor, "roles") else set()
+        if compiled.control_deny_role_ids.intersection(role_ids):
+            return False, "One of your roles is explicitly denied from Babblebox safety controls in this server."
+        if compiled.control_lock_enabled and self._control_allowlist_configured(compiled):
+            if operation == "emergency":
+                return False, "Only configured Babblebox editors or emergency operators can use emergency controls here."
+            return False, "Only configured Babblebox editors can manage these safety controls here."
+        if operation == "emergency":
+            return False, "You need Manage Server or administrator access to use emergency controls."
+        return False, "You need Manage Server or administrator access to configure these safety controls."
+
     def _is_staff_member(self, member: discord.Member) -> bool:
         perms = getattr(member, "guild_permissions", None)
         if perms is None:
@@ -2026,6 +2224,31 @@ class AdminService:
         if self._is_staff_member(actor) and actor_id == getattr(getattr(actor, "guild", None), "owner_id", None):
             return "Actor is the server owner."
         return None
+
+    def _protected_role_granter_reason(
+        self,
+        actor: discord.Member | discord.abc.User | None,
+        compiled: CompiledAdminConfig,
+    ) -> str | None:
+        if actor is None:
+            return None
+        actor_id = int(getattr(actor, "id", 0) or 0)
+        if actor_id in compiled.protected_role_granter_user_ids:
+            return "Actor is explicitly allowed to grant protected roles."
+        role_ids = self._role_ids_for(actor) if hasattr(actor, "roles") else set()
+        if compiled.protected_role_granter_role_ids.intersection(role_ids):
+            return "Actor has a protected-role granter role."
+        return None
+
+    def _role_grant_actor_reason(
+        self,
+        actor: discord.Member | discord.abc.User | None,
+        compiled: CompiledAdminConfig,
+    ) -> str | None:
+        trusted_reason = self._trusted_actor_reason(actor, compiled)
+        if trusted_reason is not None:
+            return trusted_reason
+        return self._protected_role_granter_reason(actor, compiled)
 
     def _allowlisted_target_reason(
         self,
@@ -2272,7 +2495,11 @@ class AdminService:
         return None
 
     def _emergency_mode_allows_containment(self, compiled: CompiledAdminConfig) -> bool:
-        return compiled.emergency_enabled and compiled.emergency_mode == "contain" and compiled.emergency_strict_auto_containment
+        return (
+            compiled.emergency_enabled
+            and compiled.emergency_mode == "contain"
+            and compiled.emergency_strict_auto_containment
+        )
 
     def _emergency_role_grant_issue(
         self,
@@ -2289,12 +2516,12 @@ class AdminService:
                 detail="Babblebox could not resolve the actor, target member, or granted role cleanly enough for auto-containment.",
                 because_text="the actor, target, or role could not be resolved cleanly enough",
             )
-        trusted_reason = self._trusted_actor_reason(actor, compiled)
-        if trusted_reason is not None:
+        allowed_reason = self._role_grant_actor_reason(actor, compiled)
+        if allowed_reason is not None:
             return AdminActionIssue(
                 code="trusted-actor",
-                detail=trusted_reason,
-                because_text=trusted_reason.rstrip("."),
+                detail=allowed_reason,
+                because_text=allowed_reason.rstrip("."),
             )
         allowlisted_reason = self._allowlisted_target_reason(target_member, compiled)
         if allowlisted_reason is not None:
@@ -2340,6 +2567,110 @@ class AdminService:
             )
             return f"Removed {role.mention} from <@{target_member.id}> automatically.", None
         return None, "Discord rejected the automatic role rollback."
+
+    async def _attempt_auto_revert_role_permissions(
+        self,
+        guild: discord.Guild,
+        compiled: CompiledAdminConfig,
+        *,
+        actor: discord.Member | discord.abc.User | None,
+        before_role: discord.Role,
+        after_role: discord.Role,
+        gained_flags: list[str],
+    ) -> tuple[str | None, str | None]:
+        if not self._emergency_mode_allows_containment(compiled):
+            return None, "Strict auto-containment is disabled."
+        trusted_reason = self._trusted_actor_reason(actor, compiled)
+        if trusted_reason is not None:
+            return None, trusted_reason
+        me = self._bot_member(guild)
+        if me is None:
+            return None, "Babblebox could not resolve its server member for role rollback."
+        perms = getattr(me, "guild_permissions", None)
+        if perms is None or not getattr(perms, "manage_roles", False):
+            return None, "Babblebox is missing Manage Roles."
+        if getattr(after_role, "position", 0) >= getattr(getattr(me, "top_role", None), "position", 0):
+            return None, f"{after_role.mention} is at or above Babblebox's top role."
+        edit = getattr(after_role, "edit", None)
+        if not callable(edit):
+            return None, "Discord role rollback is unavailable for this role object."
+        rendered = ", ".join(
+            EMERGENCY_PERMISSION_LABELS.get(flag, flag.replace("_", " ").title()) for flag in gained_flags[:5]
+        )
+        with contextlib.suppress(discord.Forbidden, discord.HTTPException, TypeError):
+            await edit(
+                permissions=getattr(before_role, "permissions", None),
+                reason="Babblebox emergency containment reverted a dangerous role permission escalation.",
+            )
+            return f"Reverted dangerous permissions on {after_role.mention}: {rendered}.", None
+        return None, "Discord rejected the automatic dangerous-permission rollback."
+
+    async def _attempt_actor_containment(
+        self,
+        guild: discord.Guild,
+        compiled: CompiledAdminConfig,
+        *,
+        actor_member: discord.Member | None,
+        reason_text: str,
+    ) -> tuple[str | None, str | None, dict[str, Any] | None]:
+        if actor_member is None:
+            return None, "Babblebox could not resolve the actor cleanly enough for panic containment.", None
+        if compiled.security_posture != "panic" or not self._emergency_mode_allows_containment(compiled):
+            return None, "Panic actor containment is disabled.", None
+        if self._is_guild_owner(actor_member):
+            return None, "Babblebox will never auto-contain the server owner.", None
+        me = self._bot_member(guild)
+        if me is None:
+            return None, "Babblebox could not resolve its server member for panic containment.", None
+        perms = getattr(me, "guild_permissions", None)
+        if perms is None or not getattr(perms, "manage_roles", False):
+            return None, "Babblebox is missing Manage Roles for panic containment.", None
+        if getattr(getattr(actor_member, "top_role", None), "position", 0) >= getattr(getattr(me, "top_role", None), "position", 0):
+            return None, "The actor is at or above Babblebox's top role.", None
+
+        removable_roles: list[discord.Role] = []
+        for role in sorted(getattr(actor_member, "roles", []), key=lambda item: getattr(item, "position", 0), reverse=True):
+            role_id = int(getattr(role, "id", 0) or 0)
+            if role_id <= 0 or role_id == int(compiled.quarantine_role_id or 0):
+                continue
+            if getattr(role, "position", 0) >= getattr(getattr(me, "top_role", None), "position", 0):
+                continue
+            if role_id in compiled.protected_role_ids or self._permission_flags_for(role, compiled):
+                removable_roles.append(role)
+
+        quarantine_role = self._guild_role(guild, compiled.quarantine_role_id)
+        if quarantine_role is not None and getattr(quarantine_role, "position", 0) >= getattr(getattr(me, "top_role", None), "position", 0):
+            quarantine_role = None
+
+        if not removable_roles and quarantine_role is None:
+            return None, "No safely removable dangerous roles or quarantine role were available for panic containment.", None
+
+        removed_role_ids: list[int] = []
+        for role in removable_roles:
+            with contextlib.suppress(discord.Forbidden, discord.HTTPException, TypeError):
+                await actor_member.remove_roles(role, reason=f"Babblebox panic containment: {reason_text}")
+                removed_role_ids.append(int(role.id))
+
+        added_quarantine = False
+        if quarantine_role is not None:
+            with contextlib.suppress(discord.Forbidden, discord.HTTPException, TypeError):
+                await actor_member.add_roles(quarantine_role, reason=f"Babblebox panic containment: {reason_text}")
+                added_quarantine = True
+
+        if not removed_role_ids and not added_quarantine:
+            return None, "Discord rejected panic containment on the actor.", None
+
+        parts: list[str] = []
+        if removed_role_ids:
+            parts.append(f"stripped {len(removed_role_ids)} dangerous role(s) from <@{actor_member.id}>")
+        if added_quarantine and quarantine_role is not None:
+            parts.append(f"added {quarantine_role.mention} to <@{actor_member.id}>")
+        metadata = {
+            "contained_actor_user_id": actor_member.id,
+            "removed_actor_role_ids": removed_role_ids,
+            "quarantine_role_id": int(getattr(quarantine_role, "id", 0) or 0) if added_quarantine and quarantine_role is not None else None,
+        }
+        return "Panic containment " + " and ".join(parts) + ".", None, metadata
 
     async def _emit_emergency_incident(
         self,
@@ -3722,6 +4053,7 @@ class AdminService:
     def build_emergency_incident_embed(self, guild: discord.Guild, record: dict[str, Any]) -> discord.Embed:
         severity = str(record.get("severity") or "medium")
         tone = "danger" if severity in {"high", "critical"} else "warning"
+        compiled = self.get_compiled_config(guild.id)
         embed = ge.make_status_embed(
             str(record.get("title") or "Emergency Incident"),
             str(record.get("summary") or "Babblebox detected a privileged-action incident for review."),
@@ -3737,6 +4069,7 @@ class AdminService:
             f"Kind: **{str(record.get('incident_kind') or 'unknown').replace('_', ' ').title()}**",
             f"Severity: **{severity.title()}**",
             f"Status: **{str(record.get('status') or 'open').title()}**",
+            f"Posture: **{SECURITY_POSTURE_LABELS.get(compiled.security_posture, compiled.security_posture.title())}**",
         ]
         if actor_id:
             lines.append(f"Actor: <@{actor_id}>")
@@ -3765,6 +4098,23 @@ class AdminService:
             followup_lines.extend(f"Next: {line}" for line in recommended[:3])
         if followup_lines:
             embed.add_field(name="Response", value=ge.join_limited_lines(followup_lines, limit=1024), inline=False)
+        containment_lines: list[str] = []
+        metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+        contained_actor_id = int(metadata.get("contained_actor_user_id") or 0)
+        removed_actor_role_ids = [int(value) for value in metadata.get("removed_actor_role_ids", []) if isinstance(value, int)]
+        quarantine_role_id = int(metadata.get("quarantine_role_id") or 0)
+        if contained_actor_id:
+            containment_lines.append(f"Contained actor: <@{contained_actor_id}>")
+        if removed_actor_role_ids:
+            containment_lines.append(
+                "Removed roles: " + ", ".join(f"<@&{role_id}>" for role_id in removed_actor_role_ids[:6])
+            )
+        if len(removed_actor_role_ids) > 6:
+            containment_lines.append(f"Additional removed roles: {len(removed_actor_role_ids) - 6}")
+        if quarantine_role_id:
+            containment_lines.append(f"Quarantine role: <@&{quarantine_role_id}>")
+        if containment_lines:
+            embed.add_field(name="Containment", value=ge.join_limited_lines(containment_lines, limit=1024), inline=False)
         updated_at = deserialize_datetime(record.get("updated_at"))
         if updated_at is not None:
             embed.add_field(name="Updated", value=ge.format_timestamp(updated_at, "R"), inline=False)
@@ -3807,6 +4157,7 @@ class AdminService:
             version=int(record.get("review_version", 0) or 0),
             allow_revert_grant=str(record.get("reversible_action") or "") == "revert_grant",
             allow_kick_added_bot=str(record.get("reversible_action") or "") == "kick_added_bot",
+            allow_release_actor=str(record.get("reversible_action") or "") == "release_actor",
         )
         message = None
         existing_channel_id = record.get("review_message_channel_id")
@@ -3935,6 +4286,77 @@ class AdminService:
                 await self._sync_emergency_incident_message(guild, compiled, updated)
                 return True, "The added bot was removed.", updated
             return False, "Discord rejected the bot removal.", record
+        if action == "release_actor":
+            metadata = record.get("metadata") if isinstance(record.get("metadata"), dict) else {}
+            actor_member = guild.get_member(int(metadata.get("contained_actor_user_id") or 0))
+            if actor_member is None:
+                return False, "The contained actor is no longer in the server.", record
+            me = self._bot_member(guild)
+            if me is None:
+                return False, "Babblebox could not resolve its own member for release.", record
+            perms = getattr(me, "guild_permissions", None)
+            if perms is None or not getattr(perms, "manage_roles", False):
+                updated = self._close_emergency_incident_record(
+                    record,
+                    status="acknowledged",
+                    action_refused="Babblebox is missing Manage Roles for containment release.",
+                )
+                await self.store.upsert_emergency_incident(updated)
+                await self._sync_emergency_incident_message(guild, compiled, updated)
+                return False, "Babblebox is missing Manage Roles for containment release.", updated
+            restored_roles: list[discord.Role] = []
+            for role_id in metadata.get("removed_actor_role_ids", []):
+                if not isinstance(role_id, int) or role_id <= 0:
+                    continue
+                role = self._guild_role(guild, role_id)
+                if role is None:
+                    continue
+                if getattr(role, "position", 0) >= getattr(getattr(me, "top_role", None), "position", 0):
+                    continue
+                restored_roles.append(role)
+            removed_quarantine = False
+            quarantine_role = self._guild_role(guild, int(metadata.get("quarantine_role_id") or 0))
+            if quarantine_role is not None and getattr(quarantine_role, "position", 0) < getattr(getattr(me, "top_role", None), "position", 0):
+                with contextlib.suppress(discord.Forbidden, discord.HTTPException, TypeError):
+                    await actor_member.remove_roles(
+                        quarantine_role,
+                        reason=f"Babblebox emergency containment release requested by {ge.display_name_of(actor)}.",
+                    )
+                    removed_quarantine = True
+            restored_role_ids: list[int] = []
+            for role in restored_roles:
+                with contextlib.suppress(discord.Forbidden, discord.HTTPException, TypeError):
+                    await actor_member.add_roles(
+                        role,
+                        reason=f"Babblebox emergency containment release requested by {ge.display_name_of(actor)}.",
+                    )
+                    restored_role_ids.append(int(role.id))
+            if not restored_role_ids and not removed_quarantine:
+                updated = self._close_emergency_incident_record(
+                    record,
+                    status="acknowledged",
+                    action_refused="Discord rejected the containment release or nothing restorable remained.",
+                )
+                await self.store.upsert_emergency_incident(updated)
+                await self._sync_emergency_incident_message(guild, compiled, updated)
+                return False, "Discord rejected the containment release or nothing restorable remained.", updated
+            action_parts: list[str] = []
+            if restored_role_ids:
+                action_parts.append(
+                    "restored "
+                    + ", ".join(f"<@&{role_id}>" for role_id in restored_role_ids[:6])
+                    + f" to <@{actor_member.id}>"
+                )
+            if removed_quarantine and quarantine_role is not None:
+                action_parts.append(f"removed {quarantine_role.mention} from <@{actor_member.id}>")
+            updated = self._close_emergency_incident_record(
+                record,
+                status="resolved",
+                action_taken="Containment release " + " and ".join(action_parts) + ".",
+            )
+            await self.store.upsert_emergency_incident(updated)
+            await self._sync_emergency_incident_message(guild, compiled, updated)
+            return True, "The actor containment was released.", updated
         return False, "Unknown emergency action.", record
 
     def _build_verification_state(self, member: discord.Member, compiled: CompiledAdminConfig, *, now: datetime) -> dict[str, Any]:
@@ -4007,13 +4429,27 @@ class AdminService:
         recent_kinds = self._recent_emergency_kinds(guild.id, int(getattr(actor, "id", 0) or 0) or None, now=now_ts)
         if burst_count < compiled.emergency_ban_threshold and not ({"kick", "role_grant"} & recent_kinds):
             return
-        severity = "critical" if "role_grant" in recent_kinds else "high"
+        containment_taken = None
+        containment_refused = None
+        containment_meta: dict[str, Any] | None = None
+        if compiled.security_posture == "panic" and "role_grant" in recent_kinds:
+            containment_taken, containment_refused, containment_meta = await self._attempt_actor_containment(
+                guild,
+                compiled,
+                actor_member=self._member_like_for_containment(actor),
+                reason_text="kick or ban burst after dangerous privilege escalation",
+            )
+        severity = "critical" if "role_grant" in recent_kinds or containment_taken is not None else "high"
         evidence_lines = [
             f"{burst_count} bans by <@{getattr(actor, 'id', 0)}> inside 2 minutes.",
             f"Distinct targets in window: {distinct_targets}.",
         ]
         if "role_grant" in recent_kinds:
             evidence_lines.append("Recent dangerous role-grant activity from the same actor raised confidence.")
+        if containment_taken is not None:
+            evidence_lines.append(containment_taken)
+        elif containment_refused:
+            evidence_lines.append(f"Panic containment withheld: {containment_refused}")
         await self._emit_emergency_incident(
             guild,
             compiled,
@@ -4030,7 +4466,10 @@ class AdminService:
                 "Confirm the actor account is expected and uncompromised.",
                 "Review recent kicks, bans, and role grants from the same actor.",
             ],
-            metadata={"distinct_targets": distinct_targets},
+            action_taken=containment_taken,
+            action_refused=containment_refused,
+            reversible_action="release_actor" if containment_taken is not None else None,
+            metadata={"distinct_targets": distinct_targets, **(containment_meta or {})},
         )
 
     async def handle_member_join(self, member: discord.Member):
@@ -4060,26 +4499,42 @@ class AdminService:
                         now=now_ts,
                     )
                     if burst_count >= compiled.emergency_bot_add_threshold:
+                        action_taken = None
+                        action_refused = None
+                        if compiled.security_posture == "panic":
+                            issue = self._kick_issue(member.guild, member)
+                            if issue is None:
+                                with contextlib.suppress(discord.Forbidden, discord.HTTPException):
+                                    await member.kick(reason="Babblebox panic containment removed an untrusted added bot.")
+                                    action_taken = f"Kicked added bot <@{member.id}> automatically."
+                            else:
+                                action_refused = issue.detail
                         await self._emit_emergency_incident(
                             member.guild,
                             compiled,
                             incident_kind="unauthorized_bot_add",
-                            severity="high",
+                            severity="critical" if action_taken is not None else "high",
                             actor=actor,
                             target_bot_user=member,
                             title="Suspicious Bot Addition",
-                            summary="Babblebox saw a bot added by an untrusted actor and opened an emergency review incident instead of taking irreversible action.",
+                            summary=(
+                                "Babblebox saw a bot added by an untrusted actor and opened an emergency incident."
+                                if action_taken is None
+                                else "Babblebox saw a bot added by an untrusted actor and applied bounded panic containment."
+                            ),
                             trust_violation="Untrusted actor added a non-allowlisted bot.",
                             evidence_codes=["bot_add", "untrusted_actor"],
                             evidence_lines=[
                                 f"Bot <@{member.id}> joined after an audit-log-confirmed add by <@{getattr(actor, 'id', 0)}>.",
-                                "Default response is review-only because bot removal is not always safely reversible.",
+                                action_taken or action_refused or "Default response is review-only because bot removal is not always safely reversible.",
                             ],
                             recommended_actions=[
                                 "Review the bot's role and permissions immediately.",
                                 "Use Kick Added Bot if the addition was unauthorized.",
                             ],
-                            reversible_action="kick_added_bot",
+                            action_taken=action_taken,
+                            action_refused=action_refused,
+                            reversible_action=None if action_taken is not None else "kick_added_bot",
                         )
         if not compiled.member_risk_enabled:
             return
@@ -4122,13 +4577,27 @@ class AdminService:
                     )
                     recent_kinds = self._recent_emergency_kinds(member.guild.id, int(getattr(actor, "id", 0) or 0) or None, now=now_ts)
                     if burst_count >= compiled.emergency_kick_threshold or {"ban", "role_grant"} & recent_kinds:
-                        severity = "critical" if "role_grant" in recent_kinds else "high"
+                        containment_taken = None
+                        containment_refused = None
+                        containment_meta: dict[str, Any] | None = None
+                        if compiled.security_posture == "panic" and "role_grant" in recent_kinds:
+                            containment_taken, containment_refused, containment_meta = await self._attempt_actor_containment(
+                                member.guild,
+                                compiled,
+                                actor_member=self._member_like_for_containment(actor),
+                                reason_text="kick burst after dangerous privilege escalation",
+                            )
+                        severity = "critical" if "role_grant" in recent_kinds or containment_taken is not None else "high"
                         evidence_lines = [
                             f"{burst_count} kicks by <@{getattr(actor, 'id', 0)}> inside 2 minutes.",
                             f"Distinct targets in window: {distinct_targets}.",
                         ]
                         if "role_grant" in recent_kinds:
                             evidence_lines.append("Recent dangerous role-grant activity from the same actor raised confidence.")
+                        if containment_taken is not None:
+                            evidence_lines.append(containment_taken)
+                        elif containment_refused:
+                            evidence_lines.append(f"Panic containment withheld: {containment_refused}")
                         await self._emit_emergency_incident(
                             member.guild,
                             compiled,
@@ -4145,7 +4614,10 @@ class AdminService:
                                 "Confirm the actor account is expected and uncompromised.",
                                 "Review recent kicks, bans, and role grants from the same actor.",
                             ],
-                            metadata={"distinct_targets": distinct_targets},
+                            action_taken=containment_taken,
+                            action_refused=containment_refused,
+                            reversible_action="release_actor" if containment_taken is not None else None,
+                            metadata={"distinct_targets": distinct_targets, **(containment_meta or {})},
                         )
         existing = await self.store.fetch_verification_state(member.guild.id, member.id)
         member_risk = await self.store.fetch_member_risk_state(member.guild.id, member.id)
@@ -4189,7 +4661,7 @@ class AdminService:
             )
             if entry is not None:
                 actor = self._resolve_member_like(after.guild, getattr(entry, "user", None)) or getattr(entry, "user", None)
-                trusted_reason = self._trusted_actor_reason(actor, compiled)
+                trusted_reason = self._role_grant_actor_reason(actor, compiled)
                 allowlisted_reason = self._allowlisted_target_reason(after, compiled)
                 if trusted_reason is None and allowlisted_reason is None:
                     now_ts = asyncio.get_running_loop().time()
@@ -4215,19 +4687,48 @@ class AdminService:
                             role=role,
                         )
                         severe_flags = self._permission_flags_for(role, compiled)
+                        recent_kinds = self._recent_emergency_kinds(after.guild.id, int(getattr(actor, "id", 0) or 0) or None, now=now_ts)
+                        destructive_overlap = {"kick", "ban", "channel_delete", "role_delete", "webhook_churn"} & recent_kinds
+                        containment_taken = None
+                        containment_refused = None
+                        containment_meta: dict[str, Any] | None = None
+                        if compiled.security_posture == "panic" and (
+                            action_taken is not None
+                            or "administrator" in severe_flags
+                            or grant_count >= compiled.emergency_role_grant_threshold
+                            or distinct_targets >= compiled.emergency_role_grant_target_threshold
+                            or destructive_overlap
+                        ):
+                            containment_taken, containment_refused, containment_meta = await self._attempt_actor_containment(
+                                after.guild,
+                                compiled,
+                                actor_member=self._member_like_for_containment(actor),
+                                reason_text="dangerous role grant during a panic-confidence takeover sequence",
+                            )
                         severity = (
                             "critical"
-                            if action_taken is not None or "administrator" in severe_flags or grant_count >= compiled.emergency_role_grant_threshold
+                            if action_taken is not None
+                            or containment_taken is not None
+                            or "administrator" in severe_flags
+                            or grant_count >= compiled.emergency_role_grant_threshold
+                            or distinct_targets >= compiled.emergency_role_grant_target_threshold
+                            or destructive_overlap
                             else "high"
                         )
-                        recent_kinds = self._recent_emergency_kinds(after.guild.id, int(getattr(actor, "id", 0) or 0) or None, now=now_ts)
                         evidence_lines = [
                             f"{actor_mention} granted {role.mention} to {after.mention}.",
                             protected_reason,
                             f"Role grants by this actor in 2 minutes: {grant_count}; distinct targets: {distinct_targets}.",
                         ]
-                        if {"kick", "ban"} & recent_kinds:
+                        if destructive_overlap:
                             evidence_lines.append("Recent destructive moderation from the same actor raised confidence.")
+                        if containment_taken is not None:
+                            evidence_lines.append(containment_taken)
+                        elif containment_refused:
+                            evidence_lines.append(f"Panic containment withheld: {containment_refused}")
+                        metadata = {"grant_count": grant_count, "distinct_targets": distinct_targets}
+                        if containment_meta:
+                            metadata.update(containment_meta)
                         await self._emit_emergency_incident(
                             after.guild,
                             compiled,
@@ -4246,10 +4747,10 @@ class AdminService:
                                 "Confirm the actor account is expected and uncompromised.",
                                 "Review the target's current roles and any recent kicks or bans from the same actor.",
                             ],
-                            action_taken=action_taken,
-                            action_refused=action_refused,
-                            reversible_action="revert_grant",
-                            metadata={"grant_count": grant_count, "distinct_targets": distinct_targets},
+                            action_taken=containment_taken or action_taken,
+                            action_refused=containment_refused or action_refused,
+                            reversible_action="release_actor" if containment_taken is not None else "revert_grant",
+                            metadata=metadata,
                         )
         if compiled.member_risk_enabled:
             before_identity = self._member_identity_signal_codes(before, now=now)
@@ -4322,11 +4823,29 @@ class AdminService:
         if trusted_reason is not None:
             return
         actor_mention = getattr(actor, "mention", f"<@{getattr(actor, 'id', 0)}>")
+        action_taken, action_refused = await self._attempt_auto_revert_role_permissions(
+            after.guild,
+            compiled,
+            actor=actor,
+            before_role=before,
+            after_role=after,
+            gained_flags=gained_flags,
+        )
+        containment_taken = None
+        containment_refused = None
+        containment_meta: dict[str, Any] | None = None
+        if compiled.security_posture == "panic" and ("administrator" in gained_flags or len(gained_flags) >= 2):
+            containment_taken, containment_refused, containment_meta = await self._attempt_actor_containment(
+                after.guild,
+                compiled,
+                actor_member=self._member_like_for_containment(actor),
+                reason_text="dangerous role permission escalation during panic posture",
+            )
         await self._emit_emergency_incident(
             after.guild,
             compiled,
             incident_kind="dangerous_role_escalation",
-            severity="high" if "administrator" not in gained_flags else "critical",
+            severity="critical" if ("administrator" in gained_flags or action_taken is not None or containment_taken is not None) else "high",
             actor=actor,
             target_role=after,
             title="Dangerous Role Escalation",
@@ -4337,12 +4856,16 @@ class AdminService:
                 f"{actor_mention} updated {after.mention}.",
                 "New dangerous permissions: "
                 + ", ".join(EMERGENCY_PERMISSION_LABELS.get(flag, flag.replace('_', ' ').title()) for flag in gained_flags[:5]),
-                "Babblebox does not auto-revert role permission edits in this compact phase.",
+                containment_taken or action_taken or "Babblebox left the edit in review-only mode because automatic rollback was not safe enough.",
             ],
             recommended_actions=[
                 "Review the role permissions and affected staff immediately.",
                 "Remove or edit the role manually if the escalation was unauthorized.",
             ],
+            action_taken=containment_taken or action_taken,
+            action_refused=containment_refused or action_refused,
+            reversible_action="release_actor" if containment_taken is not None else None,
+            metadata=containment_meta,
         )
 
     async def handle_role_delete(self, role: discord.Role):
@@ -4374,24 +4897,42 @@ class AdminService:
         )
         if burst_count < compiled.emergency_role_delete_threshold:
             return
+        recent_kinds = self._recent_emergency_kinds(role.guild.id, int(getattr(actor, "id", 0) or 0) or None, now=now_ts)
+        containment_taken = None
+        containment_refused = None
+        containment_meta: dict[str, Any] | None = None
+        if compiled.security_posture == "panic":
+            containment_taken, containment_refused, containment_meta = await self._attempt_actor_containment(
+                role.guild,
+                compiled,
+                actor_member=self._member_like_for_containment(actor),
+                reason_text="destructive role deletion burst during panic posture",
+            )
         await self._emit_emergency_incident(
             role.guild,
             compiled,
             incident_kind="role_delete_burst",
-            severity="high",
+            severity="critical" if containment_taken is not None or "role_grant" in recent_kinds else "high",
             actor=actor,
             target_role=role,
             title="Suspicious Role Deletion Burst",
             summary="Babblebox saw repeated role deletions from an untrusted actor and grouped them into one emergency incident.",
             trust_violation="Untrusted actor crossed destructive role-delete thresholds.",
-            evidence_codes=["role_delete_burst", "untrusted_actor"],
+            evidence_codes=["role_delete_burst", "untrusted_actor", *sorted(recent_kinds)[:2]],
             evidence_lines=[
                 f"{burst_count} role deletions by <@{getattr(actor, 'id', 0)}> inside 2 minutes.",
                 f"Distinct deleted roles in window: {distinct_targets}.",
+                *(["Recent dangerous role-grant activity from the same actor raised confidence."] if "role_grant" in recent_kinds else []),
+                *([containment_taken] if containment_taken is not None else []),
+                *([f"Panic containment withheld: {containment_refused}"] if containment_taken is None and containment_refused else []),
             ],
             recommended_actions=[
                 "Review the deleted roles and the actor account immediately.",
             ],
+            action_taken=containment_taken,
+            action_refused=containment_refused,
+            reversible_action="release_actor" if containment_taken is not None else None,
+            metadata={"distinct_targets": distinct_targets, **(containment_meta or {})},
         )
 
     async def handle_channel_delete(self, channel: discord.abc.GuildChannel):
@@ -4425,24 +4966,42 @@ class AdminService:
         )
         if burst_count < compiled.emergency_channel_delete_threshold:
             return
+        recent_kinds = self._recent_emergency_kinds(channel.guild.id, int(getattr(actor, "id", 0) or 0) or None, now=now_ts)
+        containment_taken = None
+        containment_refused = None
+        containment_meta: dict[str, Any] | None = None
+        if compiled.security_posture == "panic":
+            containment_taken, containment_refused, containment_meta = await self._attempt_actor_containment(
+                channel.guild,
+                compiled,
+                actor_member=self._member_like_for_containment(actor),
+                reason_text="destructive channel deletion burst during panic posture",
+            )
         await self._emit_emergency_incident(
             channel.guild,
             compiled,
             incident_kind="channel_delete_burst",
-            severity="high",
+            severity="critical" if containment_taken is not None or "role_grant" in recent_kinds else "high",
             actor=actor,
             target_channel=channel,
             title="Suspicious Channel Deletion Burst",
             summary="Babblebox saw repeated channel deletions from an untrusted actor and grouped them into one emergency incident.",
             trust_violation="Untrusted actor crossed destructive channel-delete thresholds.",
-            evidence_codes=["channel_delete_burst", "untrusted_actor"],
+            evidence_codes=["channel_delete_burst", "untrusted_actor", *sorted(recent_kinds)[:2]],
             evidence_lines=[
                 f"{burst_count} channel deletions by <@{getattr(actor, 'id', 0)}> inside 2 minutes.",
                 f"Distinct deleted channels in window: {distinct_targets}.",
+                *(["Recent dangerous role-grant activity from the same actor raised confidence."] if "role_grant" in recent_kinds else []),
+                *([containment_taken] if containment_taken is not None else []),
+                *([f"Panic containment withheld: {containment_refused}"] if containment_taken is None and containment_refused else []),
             ],
             recommended_actions=[
                 "Review the deleted channels and the actor account immediately.",
             ],
+            action_taken=containment_taken,
+            action_refused=containment_refused,
+            reversible_action="release_actor" if containment_taken is not None else None,
+            metadata={"distinct_targets": distinct_targets, **(containment_meta or {})},
         )
 
     async def handle_webhooks_update(self, channel: discord.abc.GuildChannel):
@@ -4483,24 +5042,42 @@ class AdminService:
         )
         if burst_count < compiled.emergency_webhook_churn_threshold:
             return
+        recent_kinds = self._recent_emergency_kinds(channel.guild.id, int(getattr(actor, "id", 0) or 0) or None, now=now_ts)
+        containment_taken = None
+        containment_refused = None
+        containment_meta: dict[str, Any] | None = None
+        if compiled.security_posture == "panic" and ("role_grant" in recent_kinds or "channel_delete" in recent_kinds or "role_delete" in recent_kinds):
+            containment_taken, containment_refused, containment_meta = await self._attempt_actor_containment(
+                channel.guild,
+                compiled,
+                actor_member=self._member_like_for_containment(actor),
+                reason_text="webhook churn during a panic-confidence takeover sequence",
+            )
         await self._emit_emergency_incident(
             channel.guild,
             compiled,
             incident_kind="webhook_churn",
-            severity="high",
+            severity="critical" if containment_taken is not None or {"role_grant", "channel_delete", "role_delete"} & recent_kinds else "high",
             actor=actor,
             target_channel=channel,
             title="Suspicious Webhook Churn",
             summary="Babblebox saw repeated webhook changes from an untrusted actor and grouped them into one emergency incident.",
             trust_violation="Untrusted actor crossed webhook churn thresholds.",
-            evidence_codes=["webhook_churn", "untrusted_actor"],
+            evidence_codes=["webhook_churn", "untrusted_actor", *sorted(recent_kinds)[:2]],
             evidence_lines=[
                 f"{burst_count} webhook changes by <@{getattr(actor, 'id', 0)}> inside 2 minutes.",
                 f"Channel in scope: <#{channel.id}>.",
+                *(["Recent destructive activity from the same actor raised confidence."] if {"role_grant", "channel_delete", "role_delete"} & recent_kinds else []),
+                *([containment_taken] if containment_taken is not None else []),
+                *([f"Panic containment withheld: {containment_refused}"] if containment_taken is None and containment_refused else []),
             ],
             recommended_actions=[
                 "Review recent webhooks and webhook tokens immediately.",
             ],
+            action_taken=containment_taken,
+            action_refused=containment_refused,
+            reversible_action="release_actor" if containment_taken is not None else None,
+            metadata=containment_meta,
         )
 
     async def handle_message(self, message: discord.Message):

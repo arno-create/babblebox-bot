@@ -20,6 +20,7 @@ VALID_VERIFICATION_DEADLINE_ACTIONS = {"auto_kick", "review"}
 VALID_MEMBER_RISK_MODES = {"log", "review", "review_or_kick"}
 VALID_EMERGENCY_MODES = {"log", "review", "contain"}
 VALID_EMERGENCY_PING_MODES = {"never", "high_only", "all"}
+VALID_SECURITY_POSTURES = {"observe", "guard", "panic"}
 EMERGENCY_PERMISSION_FLAGS = {
     "administrator",
     "manage_guild",
@@ -69,16 +70,27 @@ def default_admin_config(guild_id: int | None = None) -> dict[str, Any]:
         "member_risk_enabled": False,
         "member_risk_mode": "review",
         "emergency_enabled": False,
+        "security_posture": "observe",
         "emergency_mode": "review",
         "emergency_strict_auto_containment": False,
         "emergency_ping_mode": "high_only",
+        "control_lock_enabled": False,
+        "editor_user_ids": [],
+        "editor_role_ids": [],
+        "emergency_operator_user_ids": [],
+        "emergency_operator_role_ids": [],
+        "control_deny_user_ids": [],
+        "control_deny_role_ids": [],
         "protected_role_ids": [],
+        "protected_role_granter_user_ids": [],
+        "protected_role_granter_role_ids": [],
         "trusted_actor_user_ids": [],
         "trusted_actor_role_ids": [],
         "trusted_bot_ids": [],
         "allowlisted_target_user_ids": [],
         "allowlisted_target_role_ids": [],
         "channel_whitelist_ids": [],
+        "quarantine_role_id": None,
         "enabled_dangerous_permission_flags": sorted(EMERGENCY_PERMISSION_FLAGS),
         "emergency_role_grant_threshold": 2,
         "emergency_role_grant_target_threshold": 2,
@@ -166,7 +178,7 @@ def _redact_database_url(dsn: str | None) -> str:
 
 
 def _clean_int_list(values: Any) -> list[int]:
-    if not isinstance(values, (list, tuple, set)):
+    if not isinstance(values, (list, tuple, set, frozenset)):
         return []
     return sorted({value for value in values if isinstance(value, int) and value > 0})
 
@@ -284,6 +296,8 @@ def normalize_admin_config(guild_id: int, payload: Any) -> dict[str, Any]:
         cleaned_member_risk_mode if cleaned_member_risk_mode in VALID_MEMBER_RISK_MODES else "review"
     )
     cleaned["emergency_enabled"] = bool(payload.get("emergency_enabled"))
+    security_posture = str(payload.get("security_posture", "observe")).strip().lower()
+    cleaned["security_posture"] = security_posture if security_posture in VALID_SECURITY_POSTURES else "observe"
     emergency_mode = str(payload.get("emergency_mode", "review")).strip().lower()
     cleaned["emergency_mode"] = emergency_mode if emergency_mode in VALID_EMERGENCY_MODES else "review"
     cleaned["emergency_strict_auto_containment"] = bool(payload.get("emergency_strict_auto_containment"))
@@ -291,8 +305,17 @@ def normalize_admin_config(guild_id: int, payload: Any) -> dict[str, Any]:
     cleaned["emergency_ping_mode"] = (
         emergency_ping_mode if emergency_ping_mode in VALID_EMERGENCY_PING_MODES else "high_only"
     )
+    cleaned["control_lock_enabled"] = bool(payload.get("control_lock_enabled"))
     for field in (
+        "editor_user_ids",
+        "editor_role_ids",
+        "emergency_operator_user_ids",
+        "emergency_operator_role_ids",
+        "control_deny_user_ids",
+        "control_deny_role_ids",
         "protected_role_ids",
+        "protected_role_granter_user_ids",
+        "protected_role_granter_role_ids",
         "trusted_actor_user_ids",
         "trusted_actor_role_ids",
         "trusted_bot_ids",
@@ -301,6 +324,7 @@ def normalize_admin_config(guild_id: int, payload: Any) -> dict[str, Any]:
         "channel_whitelist_ids",
     ):
         cleaned[field] = _clean_int_list(payload.get(field))
+    cleaned["quarantine_role_id"] = payload.get("quarantine_role_id") if isinstance(payload.get("quarantine_role_id"), int) else None
     enabled_flags = _clean_text_list(
         payload.get("enabled_dangerous_permission_flags"),
         allowed=EMERGENCY_PERMISSION_FLAGS,
@@ -1058,12 +1082,46 @@ def _config_from_row(row) -> dict[str, Any]:
             "member_risk_enabled": row.get("member_risk_enabled", False),
             "member_risk_mode": row.get("member_risk_mode", "review"),
             "emergency_enabled": row.get("emergency_enabled", False),
+            "security_posture": row.get("security_posture", "observe"),
             "emergency_mode": row.get("emergency_mode", "review"),
             "emergency_strict_auto_containment": row.get("emergency_strict_auto_containment", False),
             "emergency_ping_mode": row.get("emergency_ping_mode", "high_only"),
+            "control_lock_enabled": row.get("control_lock_enabled", False),
+            "editor_user_ids": decode_postgres_json_array(
+                row.get("editor_user_ids"),
+                label="admin_guild_configs.editor_user_ids",
+            ),
+            "editor_role_ids": decode_postgres_json_array(
+                row.get("editor_role_ids"),
+                label="admin_guild_configs.editor_role_ids",
+            ),
+            "emergency_operator_user_ids": decode_postgres_json_array(
+                row.get("emergency_operator_user_ids"),
+                label="admin_guild_configs.emergency_operator_user_ids",
+            ),
+            "emergency_operator_role_ids": decode_postgres_json_array(
+                row.get("emergency_operator_role_ids"),
+                label="admin_guild_configs.emergency_operator_role_ids",
+            ),
+            "control_deny_user_ids": decode_postgres_json_array(
+                row.get("control_deny_user_ids"),
+                label="admin_guild_configs.control_deny_user_ids",
+            ),
+            "control_deny_role_ids": decode_postgres_json_array(
+                row.get("control_deny_role_ids"),
+                label="admin_guild_configs.control_deny_role_ids",
+            ),
             "protected_role_ids": decode_postgres_json_array(
                 row.get("protected_role_ids"),
                 label="admin_guild_configs.protected_role_ids",
+            ),
+            "protected_role_granter_user_ids": decode_postgres_json_array(
+                row.get("protected_role_granter_user_ids"),
+                label="admin_guild_configs.protected_role_granter_user_ids",
+            ),
+            "protected_role_granter_role_ids": decode_postgres_json_array(
+                row.get("protected_role_granter_role_ids"),
+                label="admin_guild_configs.protected_role_granter_role_ids",
             ),
             "trusted_actor_user_ids": decode_postgres_json_array(
                 row.get("trusted_actor_user_ids"),
@@ -1089,6 +1147,7 @@ def _config_from_row(row) -> dict[str, Any]:
                 row.get("channel_whitelist_ids"),
                 label="admin_guild_configs.channel_whitelist_ids",
             ),
+            "quarantine_role_id": row.get("quarantine_role_id"),
             "enabled_dangerous_permission_flags": decode_postgres_json_array(
                 row.get("enabled_dangerous_permission_flags"),
                 label="admin_guild_configs.enabled_dangerous_permission_flags",
@@ -1331,16 +1390,27 @@ class _PostgresAdminStore(_BaseAdminStore):
                 "member_risk_enabled BOOLEAN NOT NULL DEFAULT FALSE, "
                 "member_risk_mode TEXT NOT NULL DEFAULT 'review', "
                 "emergency_enabled BOOLEAN NOT NULL DEFAULT FALSE, "
+                "security_posture TEXT NOT NULL DEFAULT 'observe', "
                 "emergency_mode TEXT NOT NULL DEFAULT 'review', "
                 "emergency_strict_auto_containment BOOLEAN NOT NULL DEFAULT FALSE, "
                 "emergency_ping_mode TEXT NOT NULL DEFAULT 'high_only', "
+                "control_lock_enabled BOOLEAN NOT NULL DEFAULT FALSE, "
+                "editor_user_ids JSONB NOT NULL DEFAULT '[]'::jsonb, "
+                "editor_role_ids JSONB NOT NULL DEFAULT '[]'::jsonb, "
+                "emergency_operator_user_ids JSONB NOT NULL DEFAULT '[]'::jsonb, "
+                "emergency_operator_role_ids JSONB NOT NULL DEFAULT '[]'::jsonb, "
+                "control_deny_user_ids JSONB NOT NULL DEFAULT '[]'::jsonb, "
+                "control_deny_role_ids JSONB NOT NULL DEFAULT '[]'::jsonb, "
                 "protected_role_ids JSONB NOT NULL DEFAULT '[]'::jsonb, "
+                "protected_role_granter_user_ids JSONB NOT NULL DEFAULT '[]'::jsonb, "
+                "protected_role_granter_role_ids JSONB NOT NULL DEFAULT '[]'::jsonb, "
                 "trusted_actor_user_ids JSONB NOT NULL DEFAULT '[]'::jsonb, "
                 "trusted_actor_role_ids JSONB NOT NULL DEFAULT '[]'::jsonb, "
                 "trusted_bot_ids JSONB NOT NULL DEFAULT '[]'::jsonb, "
                 "allowlisted_target_user_ids JSONB NOT NULL DEFAULT '[]'::jsonb, "
                 "allowlisted_target_role_ids JSONB NOT NULL DEFAULT '[]'::jsonb, "
                 "channel_whitelist_ids JSONB NOT NULL DEFAULT '[]'::jsonb, "
+                "quarantine_role_id BIGINT NULL, "
                 "enabled_dangerous_permission_flags JSONB NOT NULL DEFAULT '[]'::jsonb, "
                 "emergency_role_grant_threshold SMALLINT NOT NULL DEFAULT 2, "
                 "emergency_role_grant_target_threshold SMALLINT NOT NULL DEFAULT 2, "
@@ -1490,16 +1560,27 @@ class _PostgresAdminStore(_BaseAdminStore):
             "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS member_risk_enabled BOOLEAN NOT NULL DEFAULT FALSE",
             "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS member_risk_mode TEXT NOT NULL DEFAULT 'review'",
             "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS emergency_enabled BOOLEAN NOT NULL DEFAULT FALSE",
+            "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS security_posture TEXT NOT NULL DEFAULT 'observe'",
             "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS emergency_mode TEXT NOT NULL DEFAULT 'review'",
             "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS emergency_strict_auto_containment BOOLEAN NOT NULL DEFAULT FALSE",
             "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS emergency_ping_mode TEXT NOT NULL DEFAULT 'high_only'",
+            "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS control_lock_enabled BOOLEAN NOT NULL DEFAULT FALSE",
+            "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS editor_user_ids JSONB NOT NULL DEFAULT '[]'::jsonb",
+            "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS editor_role_ids JSONB NOT NULL DEFAULT '[]'::jsonb",
+            "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS emergency_operator_user_ids JSONB NOT NULL DEFAULT '[]'::jsonb",
+            "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS emergency_operator_role_ids JSONB NOT NULL DEFAULT '[]'::jsonb",
+            "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS control_deny_user_ids JSONB NOT NULL DEFAULT '[]'::jsonb",
+            "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS control_deny_role_ids JSONB NOT NULL DEFAULT '[]'::jsonb",
             "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS protected_role_ids JSONB NOT NULL DEFAULT '[]'::jsonb",
+            "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS protected_role_granter_user_ids JSONB NOT NULL DEFAULT '[]'::jsonb",
+            "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS protected_role_granter_role_ids JSONB NOT NULL DEFAULT '[]'::jsonb",
             "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS trusted_actor_user_ids JSONB NOT NULL DEFAULT '[]'::jsonb",
             "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS trusted_actor_role_ids JSONB NOT NULL DEFAULT '[]'::jsonb",
             "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS trusted_bot_ids JSONB NOT NULL DEFAULT '[]'::jsonb",
             "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS allowlisted_target_user_ids JSONB NOT NULL DEFAULT '[]'::jsonb",
             "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS allowlisted_target_role_ids JSONB NOT NULL DEFAULT '[]'::jsonb",
             "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS channel_whitelist_ids JSONB NOT NULL DEFAULT '[]'::jsonb",
+            "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS quarantine_role_id BIGINT NULL",
             "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS enabled_dangerous_permission_flags JSONB NOT NULL DEFAULT '[]'::jsonb",
             "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS emergency_role_grant_threshold SMALLINT NOT NULL DEFAULT 2",
             "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS emergency_role_grant_target_threshold SMALLINT NOT NULL DEFAULT 2",
@@ -1585,9 +1666,11 @@ class _PostgresAdminStore(_BaseAdminStore):
                         "excluded_user_ids, excluded_role_ids, trusted_role_ids, "
                         "followup_exempt_staff, verification_exempt_staff, verification_exempt_bots, "
                         "member_risk_enabled, member_risk_mode, "
-                        "emergency_enabled, emergency_mode, emergency_strict_auto_containment, emergency_ping_mode, "
-                        "protected_role_ids, trusted_actor_user_ids, trusted_actor_role_ids, trusted_bot_ids, "
-                        "allowlisted_target_user_ids, allowlisted_target_role_ids, channel_whitelist_ids, enabled_dangerous_permission_flags, "
+                        "emergency_enabled, security_posture, emergency_mode, emergency_strict_auto_containment, emergency_ping_mode, "
+                        "control_lock_enabled, editor_user_ids, editor_role_ids, emergency_operator_user_ids, emergency_operator_role_ids, "
+                        "control_deny_user_ids, control_deny_role_ids, "
+                        "protected_role_ids, protected_role_granter_user_ids, protected_role_granter_role_ids, trusted_actor_user_ids, trusted_actor_role_ids, trusted_bot_ids, "
+                        "allowlisted_target_user_ids, allowlisted_target_role_ids, channel_whitelist_ids, quarantine_role_id, enabled_dangerous_permission_flags, "
                         "emergency_role_grant_threshold, emergency_role_grant_target_threshold, emergency_kick_threshold, emergency_ban_threshold, "
                         "emergency_channel_delete_threshold, emergency_role_delete_threshold, emergency_webhook_churn_threshold, emergency_bot_add_threshold, "
                         "updated_at"
@@ -1598,10 +1681,12 @@ class _PostgresAdminStore(_BaseAdminStore):
                         "$16, $17, $18, $19, $20, "
                         "$21::jsonb, $22::jsonb, $23::jsonb, "
                         "$24, $25, $26, "
-                        "$27, $28, $29, $30, "
-                        "$31::jsonb, $32::jsonb, $33::jsonb, $34::jsonb, "
-                        "$35::jsonb, $36::jsonb, $37::jsonb, $38::jsonb, "
-                        "$39, $40, $41, $42, $43, $44, $45, $46, timezone('utc', now())"
+                        "$27, $28, $29, $30, $31, "
+                        "$32, $33::jsonb, $34::jsonb, $35::jsonb, $36::jsonb, "
+                        "$37::jsonb, $38::jsonb, "
+                        "$39::jsonb, $40::jsonb, $41::jsonb, $42::jsonb, $43::jsonb, $44::jsonb, "
+                        "$45::jsonb, $46::jsonb, $47::jsonb, $48, $49::jsonb, "
+                        "$50, $51, $52, $53, $54, $55, $56, $57, timezone('utc', now())"
                         ") "
                         "ON CONFLICT (guild_id) DO UPDATE SET "
                         "followup_enabled = EXCLUDED.followup_enabled, "
@@ -1632,16 +1717,27 @@ class _PostgresAdminStore(_BaseAdminStore):
                         "member_risk_enabled = EXCLUDED.member_risk_enabled, "
                         "member_risk_mode = EXCLUDED.member_risk_mode, "
                         "emergency_enabled = EXCLUDED.emergency_enabled, "
+                        "security_posture = EXCLUDED.security_posture, "
                         "emergency_mode = EXCLUDED.emergency_mode, "
                         "emergency_strict_auto_containment = EXCLUDED.emergency_strict_auto_containment, "
                         "emergency_ping_mode = EXCLUDED.emergency_ping_mode, "
+                        "control_lock_enabled = EXCLUDED.control_lock_enabled, "
+                        "editor_user_ids = EXCLUDED.editor_user_ids, "
+                        "editor_role_ids = EXCLUDED.editor_role_ids, "
+                        "emergency_operator_user_ids = EXCLUDED.emergency_operator_user_ids, "
+                        "emergency_operator_role_ids = EXCLUDED.emergency_operator_role_ids, "
+                        "control_deny_user_ids = EXCLUDED.control_deny_user_ids, "
+                        "control_deny_role_ids = EXCLUDED.control_deny_role_ids, "
                         "protected_role_ids = EXCLUDED.protected_role_ids, "
+                        "protected_role_granter_user_ids = EXCLUDED.protected_role_granter_user_ids, "
+                        "protected_role_granter_role_ids = EXCLUDED.protected_role_granter_role_ids, "
                         "trusted_actor_user_ids = EXCLUDED.trusted_actor_user_ids, "
                         "trusted_actor_role_ids = EXCLUDED.trusted_actor_role_ids, "
                         "trusted_bot_ids = EXCLUDED.trusted_bot_ids, "
                         "allowlisted_target_user_ids = EXCLUDED.allowlisted_target_user_ids, "
                         "allowlisted_target_role_ids = EXCLUDED.allowlisted_target_role_ids, "
                         "channel_whitelist_ids = EXCLUDED.channel_whitelist_ids, "
+                        "quarantine_role_id = EXCLUDED.quarantine_role_id, "
                         "enabled_dangerous_permission_flags = EXCLUDED.enabled_dangerous_permission_flags, "
                         "emergency_role_grant_threshold = EXCLUDED.emergency_role_grant_threshold, "
                         "emergency_role_grant_target_threshold = EXCLUDED.emergency_role_grant_target_threshold, "
@@ -1682,16 +1778,27 @@ class _PostgresAdminStore(_BaseAdminStore):
                     normalized["member_risk_enabled"],
                     normalized["member_risk_mode"],
                     normalized["emergency_enabled"],
+                    normalized["security_posture"],
                     normalized["emergency_mode"],
                     normalized["emergency_strict_auto_containment"],
                     normalized["emergency_ping_mode"],
+                    normalized["control_lock_enabled"],
+                    json.dumps(normalized["editor_user_ids"]),
+                    json.dumps(normalized["editor_role_ids"]),
+                    json.dumps(normalized["emergency_operator_user_ids"]),
+                    json.dumps(normalized["emergency_operator_role_ids"]),
+                    json.dumps(normalized["control_deny_user_ids"]),
+                    json.dumps(normalized["control_deny_role_ids"]),
                     json.dumps(normalized["protected_role_ids"]),
+                    json.dumps(normalized["protected_role_granter_user_ids"]),
+                    json.dumps(normalized["protected_role_granter_role_ids"]),
                     json.dumps(normalized["trusted_actor_user_ids"]),
                     json.dumps(normalized["trusted_actor_role_ids"]),
                     json.dumps(normalized["trusted_bot_ids"]),
                     json.dumps(normalized["allowlisted_target_user_ids"]),
                     json.dumps(normalized["allowlisted_target_role_ids"]),
                     json.dumps(normalized["channel_whitelist_ids"]),
+                    normalized["quarantine_role_id"],
                     json.dumps(normalized["enabled_dangerous_permission_flags"]),
                     normalized["emergency_role_grant_threshold"],
                     normalized["emergency_role_grant_target_threshold"],

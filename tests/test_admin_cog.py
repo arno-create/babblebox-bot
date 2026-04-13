@@ -675,10 +675,13 @@ class AdminCogSmokeTests(unittest.IsolatedAsyncioTestCase):
         ok, _ = await self.cog.service.set_emergency_config(
             self.guild.id,
             enabled=True,
+            posture="guard",
             mode="review",
             strict_auto_containment=False,
             ping_mode="high_only",
         )
+        self.assertTrue(ok)
+        ok, _ = await self.cog.service.set_emergency_access(self.guild.id, control_lock_enabled=True, quarantine_role_id=self.followup_role.id)
         self.assertTrue(ok)
 
         embed = await self.cog.build_panel_embed(self.guild.id, "emergency")
@@ -686,6 +689,11 @@ class AdminCogSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(embed.title, "Emergency Protection")
         self.assertIn("anti-nuke", embed.description.lower())
         self.assertTrue(any(field.name == "Current Policy" for field in embed.fields))
+        current_policy = next(field for field in embed.fields if field.name == "Current Policy")
+        control_access = next(field for field in embed.fields if field.name == "Control Access")
+        self.assertIn("Guard", current_policy.value)
+        self.assertIn("Control lock: **On**", control_access.value)
+        self.assertIn("<@&70>", control_access.value)
 
     async def test_admin_panel_view_has_emergency_button(self):
         ui = AdminPanelView(
@@ -697,3 +705,40 @@ class AdminCogSmokeTests(unittest.IsolatedAsyncioTestCase):
 
         labels = [child.label for child in ui.children if hasattr(child, "label")]
         self.assertIn("Emergency", labels)
+
+    async def test_emergency_command_accepts_configured_editor_without_manage_guild(self):
+        editor_role = FakeRole(701, position=5, name="Security")
+        self.guild.roles[editor_role.id] = editor_role
+        ok, _ = await self.cog.service.set_emergency_access(self.guild.id, control_lock_enabled=True)
+        self.assertTrue(ok)
+        ok, _ = await self.cog.service.set_emergency_access(
+            self.guild.id,
+            field="editor_role_ids",
+            target_id=editor_role.id,
+            enabled=True,
+        )
+        self.assertTrue(ok)
+        author = FakeMember(777, self.guild, roles=[editor_role], manage_guild=False, administrator=False)
+        self.guild.members[author.id] = author
+        ctx = FakeContext(
+            interaction=FakeInteraction(),
+            guild=self.guild,
+            channel=FakeChannel(20),
+            author=author,
+        )
+
+        await AdminCog.admin_emergency_command.callback(
+            self.cog,
+            ctx,
+            enabled=True,
+            posture="guard",
+            mode="review",
+            strict_auto_containment=False,
+            ping_mode="high_only",
+        )
+
+        self.assertEqual(len(ctx.send_calls), 1)
+        self.assertTrue(ctx.send_calls[0]["ephemeral"])
+        config = self.cog.service.get_config(self.guild.id)
+        self.assertTrue(config["emergency_enabled"])
+        self.assertEqual(config["security_posture"], "guard")

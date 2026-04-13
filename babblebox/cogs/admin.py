@@ -19,6 +19,7 @@ from babblebox.admin_service import (
     MEMBER_RISK_MODE_LABELS,
     MEMBER_RISK_REVIEW_ACTION_LABELS,
     REVIEW_ACTION_LABELS,
+    SECURITY_POSTURE_LABELS,
     VERIFICATION_DEADLINE_ACTION_LABELS,
     VERIFICATION_REVIEW_ACTION_LABELS,
     VERIFICATION_LOGIC_LABELS,
@@ -55,6 +56,11 @@ EMERGENCY_MODE_CHOICES = [
     app_commands.Choice(name="Review and guided response", value="review"),
     app_commands.Choice(name="Strict reversible containment", value="contain"),
 ]
+SECURITY_POSTURE_CHOICES = [
+    app_commands.Choice(name="Observe", value="observe"),
+    app_commands.Choice(name="Guard", value="guard"),
+    app_commands.Choice(name="Panic", value="panic"),
+]
 EMERGENCY_PING_CHOICES = [
     app_commands.Choice(name="Never ping", value="never"),
     app_commands.Choice(name="Ping high only", value="high_only"),
@@ -71,12 +77,22 @@ EXCLUSION_TARGET_CHOICES = [
 ]
 EMERGENCY_TRUST_CHOICES = [
     app_commands.Choice(name="Protected role", value="protected_role_ids"),
+    app_commands.Choice(name="Protected granter member", value="protected_role_granter_user_ids"),
+    app_commands.Choice(name="Protected granter role", value="protected_role_granter_role_ids"),
     app_commands.Choice(name="Trusted actor member", value="trusted_actor_user_ids"),
     app_commands.Choice(name="Trusted actor role", value="trusted_actor_role_ids"),
     app_commands.Choice(name="Trusted bot", value="trusted_bot_ids"),
     app_commands.Choice(name="Allowlisted target member", value="allowlisted_target_user_ids"),
     app_commands.Choice(name="Allowlisted target role", value="allowlisted_target_role_ids"),
     app_commands.Choice(name="Whitelisted channel", value="channel_whitelist_ids"),
+]
+EMERGENCY_ACCESS_CHOICES = [
+    app_commands.Choice(name="Editor member", value="editor_user_ids"),
+    app_commands.Choice(name="Editor role", value="editor_role_ids"),
+    app_commands.Choice(name="Emergency operator member", value="emergency_operator_user_ids"),
+    app_commands.Choice(name="Emergency operator role", value="emergency_operator_role_ids"),
+    app_commands.Choice(name="Denied member", value="control_deny_user_ids"),
+    app_commands.Choice(name="Denied role", value="control_deny_role_ids"),
 ]
 ADMIN_TEST_CHOICES = [
     app_commands.Choice(name="Warning DM", value="warning_dm"),
@@ -351,6 +367,7 @@ class EmergencyIncidentView(discord.ui.View):
         version: int,
         allow_revert_grant: bool = False,
         allow_kick_added_bot: bool = False,
+        allow_release_actor: bool = False,
     ):
         super().__init__(timeout=None)
         self.guild_id = guild_id
@@ -362,6 +379,8 @@ class EmergencyIncidentView(discord.ui.View):
             self.add_item(self._make_button("revert_grant", "Revert Grant", discord.ButtonStyle.danger))
         if allow_kick_added_bot:
             self.add_item(self._make_button("kick_added_bot", "Kick Added Bot", discord.ButtonStyle.danger))
+        if allow_release_actor:
+            self.add_item(self._make_button("release_actor", "Release Actor", discord.ButtonStyle.success))
 
     def _make_button(self, action: str, label: str, style: discord.ButtonStyle) -> discord.ui.Button:
         button = discord.ui.Button(
@@ -380,21 +399,21 @@ class EmergencyIncidentView(discord.ui.View):
         if interaction.guild is None or interaction.user is None:
             await interaction.response.send_message("This emergency action only works inside a server.", ephemeral=True)
             return
-        perms = getattr(interaction.user, "guild_permissions", None)
-        if not (getattr(perms, "administrator", False) or getattr(perms, "manage_guild", False)):
+        service = getattr(interaction.client, "admin_service", None)
+        if service is None:
+            await interaction.response.send_message("Babblebox admin systems are unavailable right now.", ephemeral=True)
+            return
+        allowed, reason = service.can_manage_control_plane(interaction.user, self.guild_id, operation="emergency")
+        if not allowed:
             await interaction.response.send_message(
                 embed=ge.make_status_embed(
-                    "Admin Only",
-                    "You need **Manage Server** or administrator access to use emergency actions.",
+                    "Emergency Controls Restricted",
+                    reason,
                     tone="warning",
                     footer="Babblebox Admin",
                 ),
                 ephemeral=True,
             )
-            return
-        service = getattr(interaction.client, "admin_service", None)
-        if service is None:
-            await interaction.response.send_message("Babblebox admin systems are unavailable right now.", ephemeral=True)
             return
         ok, message, record = await service.handle_emergency_incident_action(
             guild_id=self.guild_id,
@@ -412,6 +431,7 @@ class EmergencyIncidentView(discord.ui.View):
             version=int(record.get("review_version", 0) or 0),
             allow_revert_grant=str(record.get("reversible_action") or "") == "revert_grant",
             allow_kick_added_bot=str(record.get("reversible_action") or "") == "kick_added_bot",
+            allow_release_actor=str(record.get("reversible_action") or "") == "release_actor",
         )
         if str(record.get("status") or "") in {"resolved"}:
             for child in next_view.children:
@@ -745,6 +765,7 @@ class AdminCog(commands.Cog):
                         version=int(record.get("review_version", 0) or 0),
                         allow_revert_grant=str(record.get("reversible_action") or "") == "revert_grant",
                         allow_kick_added_bot=str(record.get("reversible_action") or "") == "kick_added_bot",
+                        allow_release_actor=str(record.get("reversible_action") or "") == "release_actor",
                     ),
                     message_id=message_id,
                 )
@@ -787,6 +808,37 @@ class AdminCog(commands.Cog):
             )
             return False
         return True
+
+    async def _emergency_guard(self, ctx: commands.Context) -> bool:
+        await defer_hybrid_response(ctx, ephemeral=True)
+        if ctx.guild is None:
+            await send_hybrid_response(
+                ctx,
+                embed=ge.make_status_embed("Server Only", "These emergency controls can only be configured inside a server.", tone="warning", footer="Babblebox Admin"),
+                ephemeral=True,
+            )
+            return False
+        if not self.service.storage_ready:
+            await send_hybrid_response(
+                ctx,
+                embed=ge.make_status_embed("Admin Systems Unavailable", self.service.storage_message(), tone="warning", footer="Babblebox Admin"),
+                ephemeral=True,
+            )
+            return False
+        allowed, reason = self.service.can_manage_control_plane(ctx.author, ctx.guild.id, operation="manage")
+        if allowed:
+            return True
+        await send_hybrid_response(
+            ctx,
+            embed=ge.make_status_embed(
+                "Emergency Controls Restricted",
+                reason,
+                tone="warning",
+                footer="Babblebox Admin",
+            ),
+            ephemeral=True,
+        )
+        return False
 
     def _format_mentions(self, ids: list[int], *, kind: str) -> str:
         if not ids:
@@ -1188,6 +1240,7 @@ class AdminCog(commands.Cog):
             name="Current Policy",
             value=(
                 f"Enabled: **{'Yes' if config['emergency_enabled'] else 'No'}**\n"
+                f"Posture: **{SECURITY_POSTURE_LABELS.get(config['security_posture'], str(config['security_posture']).title())}**\n"
                 f"Mode: **{EMERGENCY_MODE_LABELS.get(config['emergency_mode'], config['emergency_mode'].title())}**\n"
                 f"Strict auto-containment: **{'On' if config['emergency_strict_auto_containment'] else 'Off'}**\n"
                 f"Ping policy: **{EMERGENCY_PING_MODE_LABELS.get(config['emergency_ping_mode'], config['emergency_ping_mode'].title())}**\n"
@@ -1199,9 +1252,25 @@ class AdminCog(commands.Cog):
             name="Trust Model",
             value=(
                 f"Protected roles: {self._format_mentions(config['protected_role_ids'], kind='role')}\n"
+                f"Protected-role granter members: {self._format_mentions(config['protected_role_granter_user_ids'], kind='user')}\n"
+                f"Protected-role granter roles: {self._format_mentions(config['protected_role_granter_role_ids'], kind='role')}\n"
                 f"Trusted grant members: {self._format_mentions(config['trusted_actor_user_ids'], kind='user')}\n"
                 f"Trusted grant roles: {self._format_mentions(config['trusted_actor_role_ids'], kind='role')}\n"
                 f"Trusted bots: {self._format_mentions(config['trusted_bot_ids'], kind='user')}"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Control Access",
+            value=(
+                f"Control lock: **{'On' if config['control_lock_enabled'] else 'Off'}**\n"
+                f"Editors (members): {self._format_mentions(config['editor_user_ids'], kind='user')}\n"
+                f"Editors (roles): {self._format_mentions(config['editor_role_ids'], kind='role')}\n"
+                f"Emergency operators (members): {self._format_mentions(config['emergency_operator_user_ids'], kind='user')}\n"
+                f"Emergency operators (roles): {self._format_mentions(config['emergency_operator_role_ids'], kind='role')}\n"
+                f"Denied members: {self._format_mentions(config['control_deny_user_ids'], kind='user')}\n"
+                f"Denied roles: {self._format_mentions(config['control_deny_role_ids'], kind='role')}\n"
+                f"Quarantine role: {self._role_mention(config['quarantine_role_id'])}"
             ),
             inline=False,
         )
@@ -1251,9 +1320,10 @@ class AdminCog(commands.Cog):
         embed.add_field(
             name="Quick Use",
             value=(
-                "`/admin emergency enabled:true mode:review`\n"
-                "`/admin emergency trust target:protected_role_ids state:on role:@Admins`\n"
-                "`/admin emergency limits role_grants:2 kicks:4 bans:3`"
+                "`/admin emergency enabled:true posture:guard mode:review`\n"
+                "`/admin emergency_trust target:protected_role_ids state:on role:@Admins`\n"
+                "`/admin emergency_access control_lock:true target:editor_role_ids state:on role:@Security`\n"
+                "`/admin emergency_limits role_grants:2 kicks:4 bans:3`"
             ),
             inline=False,
         )
@@ -1699,27 +1769,30 @@ class AdminCog(commands.Cog):
     @admin_group.command(name="emergency", with_app_command=True, description="Configure emergency anti-nuke and moderator-abuse protection")
     @app_commands.describe(
         enabled="Turn emergency protection on or off",
+        posture="Choose whether Babblebox stays review-heavy, balanced, or panic-ready",
         mode="Choose whether Babblebox only logs, opens review incidents, or allows strict reversible containment",
         strict_auto_containment="Allow only exact dangerous role-grant rollback when the evidence is strong and reversible",
         ping_mode="Choose when Babblebox should ping the configured alert role for emergency incidents",
     )
-    @app_commands.choices(mode=EMERGENCY_MODE_CHOICES, ping_mode=EMERGENCY_PING_CHOICES)
+    @app_commands.choices(posture=SECURITY_POSTURE_CHOICES, mode=EMERGENCY_MODE_CHOICES, ping_mode=EMERGENCY_PING_CHOICES)
     async def admin_emergency_command(
         self,
         ctx: commands.Context,
         enabled: Optional[bool] = None,
+        posture: Optional[str] = None,
         mode: Optional[str] = None,
         strict_auto_containment: Optional[bool] = None,
         ping_mode: Optional[str] = None,
     ):
-        if not await self._guard(ctx):
+        if not await self._emergency_guard(ctx):
             return
-        if enabled is None and mode is None and strict_auto_containment is None and ping_mode is None:
+        if enabled is None and posture is None and mode is None and strict_auto_containment is None and ping_mode is None:
             await send_hybrid_response(ctx, embed=await self.build_panel_embed(ctx.guild.id, "emergency"), ephemeral=True)
             return
         ok, message = await self.service.set_emergency_config(
             ctx.guild.id,
             enabled=enabled,
+            posture=posture,
             mode=mode,
             strict_auto_containment=strict_auto_containment,
             ping_mode=ping_mode,
@@ -1737,7 +1810,7 @@ class AdminCog(commands.Cog):
         role: Optional[discord.Role] = None,
         channel: Optional[discord.TextChannel] = None,
     ):
-        if not await self._guard(ctx):
+        if not await self._emergency_guard(ctx):
             return
         if target is None and state is None and member is None and role is None and channel is None:
             await send_hybrid_response(ctx, embed=await self.build_panel_embed(ctx.guild.id, "emergency"), ephemeral=True)
@@ -1745,7 +1818,7 @@ class AdminCog(commands.Cog):
         if target is None or state is None:
             await self._send_result(ctx, "Emergency Trust", "Choose both a trust bucket and an on/off state.", ok=False)
             return
-        if target in {"trusted_actor_user_ids", "trusted_bot_ids", "allowlisted_target_user_ids"}:
+        if target in {"protected_role_granter_user_ids", "trusted_actor_user_ids", "trusted_bot_ids", "allowlisted_target_user_ids"}:
             target_id = getattr(member, "id", None)
             if not isinstance(target_id, int):
                 await self._send_result(ctx, "Emergency Trust", "Select a member for this emergency trust bucket.", ok=False)
@@ -1767,6 +1840,58 @@ class AdminCog(commands.Cog):
             enabled=state == "on",
         )
         await self._send_result(ctx, "Emergency Trust", message, ok=ok)
+
+    @admin_group.command(name="emergency_access", with_app_command=True, description="Configure who can edit Babblebox anti-nuke controls or use emergency actions")
+    @app_commands.describe(
+        target="Choose which emergency-access bucket to edit",
+        state="Turn the selected membership or role entry on or off",
+        member="Member to add or remove from an emergency-access bucket",
+        role="Role to add or remove from an emergency-access bucket, or set as quarantine role",
+        control_lock="Require Babblebox editor/operator allowlists for emergency control access",
+        clear_quarantine_role="Clear the configured quarantine role",
+    )
+    @app_commands.choices(target=EMERGENCY_ACCESS_CHOICES, state=STATE_CHOICES)
+    async def admin_emergency_access_command(
+        self,
+        ctx: commands.Context,
+        target: Optional[str] = None,
+        state: Optional[str] = None,
+        member: Optional[discord.Member] = None,
+        role: Optional[discord.Role] = None,
+        control_lock: Optional[bool] = None,
+        clear_quarantine_role: bool = False,
+    ):
+        if not await self._emergency_guard(ctx):
+            return
+        if target is None and state is None and member is None and role is None and control_lock is None and not clear_quarantine_role:
+            await send_hybrid_response(ctx, embed=await self.build_panel_embed(ctx.guild.id, "emergency"), ephemeral=True)
+            return
+        if target is not None or state is not None:
+            if target is None or state is None:
+                await self._send_result(ctx, "Emergency Access", "Choose both an access bucket and an on/off state.", ok=False)
+                return
+            if target.endswith("_user_ids"):
+                target_id = getattr(member, "id", None)
+                if not isinstance(target_id, int):
+                    await self._send_result(ctx, "Emergency Access", "Select a member for this access bucket.", ok=False)
+                    return
+            else:
+                target_id = getattr(role, "id", None)
+                if not isinstance(target_id, int):
+                    await self._send_result(ctx, "Emergency Access", "Select a role for this access bucket.", ok=False)
+                    return
+        else:
+            target_id = None
+        quarantine_role_id = None if clear_quarantine_role else (role.id if role is not None and target is None else ...)
+        ok, message = await self.service.set_emergency_access(
+            ctx.guild.id,
+            field=target,
+            target_id=target_id,
+            enabled=None if state is None else state == "on",
+            control_lock_enabled=control_lock,
+            quarantine_role_id=quarantine_role_id,
+        )
+        await self._send_result(ctx, "Emergency Access", message, ok=ok)
 
     @admin_group.command(name="emergency_limits", with_app_command=True, description="Tune emergency thresholds and dangerous permission monitoring")
     @app_commands.describe(
@@ -1793,7 +1918,7 @@ class AdminCog(commands.Cog):
         webhook_churn: Optional[int] = None,
         bot_adds: Optional[int] = None,
     ):
-        if not await self._guard(ctx):
+        if not await self._emergency_guard(ctx):
             return
         if all(
             value is None

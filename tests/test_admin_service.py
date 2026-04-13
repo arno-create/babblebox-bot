@@ -229,9 +229,14 @@ class AdminStoreNormalizationTests(unittest.TestCase):
     def test_admin_config_defaults_emergency_to_disabled_review(self):
         config = normalize_admin_config(10, {})
         self.assertFalse(config["emergency_enabled"])
+        self.assertEqual(config["security_posture"], "observe")
         self.assertEqual(config["emergency_mode"], "review")
         self.assertFalse(config["emergency_strict_auto_containment"])
         self.assertEqual(config["emergency_ping_mode"], "high_only")
+        self.assertFalse(config["control_lock_enabled"])
+        self.assertEqual(config["editor_user_ids"], [])
+        self.assertEqual(config["emergency_operator_role_ids"], [])
+        self.assertIsNone(config["quarantine_role_id"])
         self.assertGreaterEqual(len(config["enabled_dangerous_permission_flags"]), 1)
 
     def test_verification_state_normalization_keeps_review_metadata(self):
@@ -2459,6 +2464,37 @@ class AdminServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(incidents, [])
         self.assertIn(dangerous_role, target_after.roles)
 
+    async def test_protected_role_granter_allowlist_keeps_safe_grants_review_free(self):
+        await self._configure_emergency(with_logs=True, mode="contain", strict=True)
+        dangerous_role = FakeRole(50211, position=20, permissions=FakePermissions(administrator=True))
+        self.guild.roles[dangerous_role.id] = dangerous_role
+        actor = FakeMember(311, self.guild, roles=[], top_role=FakeRole(30, position=30), guild_permissions=FakePermissions(manage_roles=True))
+        target_before = FakeMember(4321, self.guild, roles=[], top_role=FakeRole(5, position=5))
+        target_after = FakeMember(4321, self.guild, roles=[dangerous_role], top_role=dangerous_role)
+        self.guild.members[actor.id] = actor
+        self.guild.members[target_after.id] = target_after
+        ok, _ = await self.service.set_emergency_trust(
+            self.guild.id,
+            field="protected_role_granter_user_ids",
+            target_id=actor.id,
+            enabled=True,
+        )
+        self.assertTrue(ok)
+        self.guild.audit_entries.insert(
+            0,
+            FakeAuditLogEntry(
+                action=discord.AuditLogAction.member_role_update,
+                user=actor,
+                target=target_after,
+            ),
+        )
+
+        await self.service.handle_member_update(target_before, target_after)
+
+        incidents = await self.store.list_emergency_incidents_for_guild(self.guild.id)
+        self.assertEqual(incidents, [])
+        self.assertIn(dangerous_role, target_after.roles)
+
     async def test_non_admin_dangerous_role_grant_still_auto_reverts(self):
         await self._configure_emergency(with_logs=True, mode="contain", strict=True)
         dangerous_role = FakeRole(
@@ -2597,6 +2633,98 @@ class AdminServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(updated["status"], "resolved")
         self.assertNotIn(dangerous_role, target_after.roles)
         self.assertIn("Removed", updated["action_taken"])
+
+    async def test_control_lock_allows_editor_roles_and_denies_explicit_admins(self):
+        editor_role = FakeRole(8801, position=8)
+        self.guild.roles[editor_role.id] = editor_role
+        ok, _ = await self.service.set_emergency_access(self.guild.id, control_lock_enabled=True)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_emergency_access(
+            self.guild.id,
+            field="editor_role_ids",
+            target_id=editor_role.id,
+            enabled=True,
+        )
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_emergency_access(
+            self.guild.id,
+            field="control_deny_user_ids",
+            target_id=8802,
+            enabled=True,
+        )
+        self.assertTrue(ok)
+
+        editor = FakeMember(8803, self.guild, roles=[editor_role], top_role=editor_role, guild_permissions=FakePermissions())
+        denied_admin = FakeMember(8802, self.guild, roles=[], top_role=FakeRole(40, position=40), guild_permissions=FakePermissions(manage_guild=True))
+
+        manage_allowed, manage_reason = self.service.can_manage_control_plane(editor, self.guild.id, operation="manage")
+        emergency_allowed, emergency_reason = self.service.can_manage_control_plane(editor, self.guild.id, operation="emergency")
+        denied_allowed, denied_reason = self.service.can_manage_control_plane(denied_admin, self.guild.id, operation="manage")
+
+        self.assertTrue(manage_allowed)
+        self.assertIn("editor", manage_reason.lower())
+        self.assertTrue(emergency_allowed)
+        self.assertIn("editor", emergency_reason.lower())
+        self.assertFalse(denied_allowed)
+        self.assertIn("explicitly denied", denied_reason.lower())
+
+    async def test_panic_containment_can_be_released_cleanly(self):
+        ok, _ = await self.service.set_logs_config(self.guild.id, channel_id=self.log_channel.id, alert_role_id=None)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_emergency_config(
+            self.guild.id,
+            enabled=True,
+            posture="panic",
+            mode="contain",
+            strict_auto_containment=True,
+            ping_mode="high_only",
+        )
+        self.assertTrue(ok)
+        dangerous_role = FakeRole(8901, position=20, permissions=FakePermissions(administrator=True))
+        actor_role = FakeRole(8902, position=18, permissions=FakePermissions(manage_roles=True, ban_members=True))
+        quarantine_role = FakeRole(8903, position=10)
+        self.guild.roles[dangerous_role.id] = dangerous_role
+        self.guild.roles[actor_role.id] = actor_role
+        self.guild.roles[quarantine_role.id] = quarantine_role
+        ok, _ = await self.service.set_emergency_access(self.guild.id, quarantine_role_id=quarantine_role.id)
+        self.assertTrue(ok)
+        actor = FakeMember(8904, self.guild, roles=[actor_role], top_role=actor_role, guild_permissions=FakePermissions(manage_roles=True))
+        moderator = FakeMember(8905, self.guild, roles=[], top_role=FakeRole(40, position=40), guild_permissions=FakePermissions(manage_guild=True))
+        target_before = FakeMember(8906, self.guild, roles=[], top_role=FakeRole(5, position=5))
+        target_after = FakeMember(8906, self.guild, roles=[dangerous_role], top_role=dangerous_role)
+        self.guild.members[actor.id] = actor
+        self.guild.members[moderator.id] = moderator
+        self.guild.members[target_after.id] = target_after
+        self.guild.audit_entries.insert(
+            0,
+            FakeAuditLogEntry(
+                action=discord.AuditLogAction.member_role_update,
+                user=actor,
+                target=target_after,
+            ),
+        )
+
+        await self.service.handle_member_update(target_before, target_after)
+
+        incident = (await self.store.list_emergency_incidents_for_guild(self.guild.id))[0]
+        self.assertEqual(incident["reversible_action"], "release_actor")
+        self.assertNotIn(actor_role, actor.roles)
+        self.assertIn(quarantine_role, actor.roles)
+
+        ok, _message, updated = await self.service.handle_emergency_incident_action(
+            guild_id=self.guild.id,
+            incident_key=str(incident["incident_key"]),
+            version=int(incident["review_version"]),
+            action="release_actor",
+            actor=moderator,
+        )
+
+        self.assertTrue(ok)
+        self.assertIsNotNone(updated)
+        self.assertEqual(updated["status"], "resolved")
+        self.assertIn(actor_role, actor.roles)
+        self.assertNotIn(quarantine_role, actor.roles)
+        self.assertIn("Containment release", updated["action_taken"])
 
     async def test_channel_delete_burst_opens_incident(self):
         await self._configure_emergency(with_logs=True, mode="review", strict=False)

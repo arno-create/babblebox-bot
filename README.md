@@ -137,8 +137,8 @@ Babblebox is intentionally compact:
 - hard local trusted-brand impersonation blocking for spoofed or lookalike safe domains
 - `Adult Links + Solicitation` pack for adult-domain intel plus optional solicitation / DM-ad text detection
 - `Severe Harm / Hate` pack for sexual-exploitation solicitation, self-harm encouragement, eliminationist hate, and severe slur abuse
-- serious `Emergency` protection for anti-nuke / moderator-abuse coverage with protected roles, trusted granters, dangerous permission classes, destructive burst review, and narrowly reversible containment for fresh dangerous role grants
-- configurable emergency trust model under `/admin emergency`, `/admin emergency_trust`, and `/admin emergency_limits` for protected roles, trusted actor members or roles, trusted bots, allowlisted targets, whitelisted channels, dangerous permission classes, and per-trigger thresholds
+- serious `Emergency` protection for anti-nuke / moderator-abuse coverage with `Observe`, `Guard`, and `Panic` posture choices; protected roles; trusted granters; dangerous permission classes; grouped destructive-burst review; exact dangerous-grant rollback; grouped destructive-actor incidents; and bounded panic containment that can be released cleanly
+- configurable emergency trust and control model under `/admin emergency`, `/admin emergency_trust`, `/admin emergency_access`, and `/admin emergency_limits` for protected roles, protected-role granters, trusted actor members or roles, trusted bots, allowlisted targets, whitelisted channels, dangerous permission classes, explicit editor or operator allowlists, explicit denies, quarantine-role configuration, and per-trigger thresholds
 - optional Shield link policy mode: `Default` or `Trusted Links Only`, separate from Confessions link mode
 - built-in trusted families and direct domains are visible under `/shield trusted`, with bounded per-server disable or re-enable controls
 - bundled local link safety with safe-domain families, suspicious-domain gating, and no external provider requirement
@@ -353,15 +353,16 @@ Slash is recommended for the heavier config flows here. Prefix stays positional,
 | `/admin followup` | `bb!admin followup true @Probation review 30d` | Configure returned-after-ban follow-up roles |
 | `/admin verification` | `bb!admin verification true @Verified must_have_role review 7d 2d` | Configure warning-before-kick verification cleanup and the shared review queue |
 | `/admin risk` | `bb!admin risk true review` | Configure private suspicious-member note, review, or review-or-kick handling |
-| `/admin emergency` | `bb!admin emergency true contain true high_only` | Configure emergency detection, review, and strict reversible containment mode |
-| `/admin emergency_trust` | `bb!admin emergency_trust protected_role_ids on @ModCore` | Configure protected roles, trusted granters, trusted bots, allowlisted targets, and channel exemptions |
+| `/admin emergency` | `bb!admin emergency true guard contain true high_only` | Configure emergency posture, review policy, and strict reversible containment mode |
+| `/admin emergency_trust` | `bb!admin emergency_trust protected_role_ids on @ModCore` | Configure protected roles, protected-role granters, trusted actors, trusted bots, allowlisted targets, and channel exemptions |
+| `/admin emergency_access` | `bb!admin emergency_access editor_role_ids on @Security true` | Configure editor or operator allowlists, explicit denies, control lock, and the quarantine role |
 | `/admin emergency_limits` | `bb!admin emergency_limits administrator,manage_roles 2 2 4 3 2 2 3 1` | Tune dangerous permission classes and destructive burst thresholds |
 | `/admin logs` | `bb!admin logs #admin-log @Mods` | Set the shared admin log channel and alert role |
 | `/admin exclusions` | `bb!admin exclusions` | Configure shared exclusions and trusted roles |
 | `/admin templates` | `bb!admin templates` | Configure warning/kick DMs and optional rejoin link |
 | `/admin sync` | `bb!admin sync` | One-time catch-up scan for current unverified members |
 
-Verification cleanup stays batch-first, suspicious-member review stays private, and emergency handling stays tiered: routine sweeps emit grouped summaries, review mode uses one persistent queue message per lane, startup reconciliation resumes quietly, and Babblebox does not post public channel reactions or reply callouts for weak evidence. Emergency incidents are audit-log-backed, grouped by signature, and only use strict reversible containment for fresh untrusted dangerous role grants when admins explicitly turn that mode on. Destructive moderation bursts, dangerous role edits, webhook churn, and suspicious bot additions still degrade to review or guided response instead of reckless auto-punishment.
+Verification cleanup stays batch-first, suspicious-member review stays private, and emergency handling stays tiered: routine sweeps emit grouped summaries, review mode uses one persistent queue message per lane, startup reconciliation resumes quietly, and Babblebox does not post public channel reactions or reply callouts for weak evidence. Emergency incidents are audit-log-backed, grouped by signature, and split across `Observe`, `Guard`, and `Panic` postures. Observe keeps the system calm while still allowing exact reversible rollback for overwhelming-confidence dangerous grants. Guard keeps grouped review plus bounded newcomer raid hold and exact rollback. Panic adds optional actor containment for extreme-confidence takeover sequences, with explicit release buttons instead of silent irreversible punishment.
 
 ### Daily Arcade
 
