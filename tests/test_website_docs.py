@@ -223,6 +223,25 @@ class WebsiteDocsTests(unittest.TestCase):
         self.assertIn("compact smart antispam", index_html)
         self.assertIn("bounded raid-watch windows", index_html)
 
+    def test_shield_and_admin_docs_cover_gif_spam_and_emergency_foundation(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        index_html = (ROOT / "index.html").read_text(encoding="utf-8")
+        help_html = (ROOT / "help.html").read_text(encoding="utf-8")
+
+        for text in (
+            "smart GIF spam",
+            "/admin emergency",
+            "/admin emergency_trust",
+            "/admin emergency_limits",
+            "protected roles",
+            "trusted granters",
+            "strict reversible containment",
+        ):
+            self.assertIn(text, readme)
+            self.assertIn(text, help_html)
+        self.assertIn("smart GIF spam handling", index_html)
+        self.assertIn("strict reversible containment", index_html)
+
     def test_shield_docs_cover_trusted_link_mode_and_optional_adult_solicitation(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         help_html = (ROOT / "help.html").read_text(encoding="utf-8")

@@ -12,6 +12,9 @@ from discord.ext import commands
 from babblebox.app_command_hardening import harden_admin_root_group
 from babblebox import game_engine as ge
 from babblebox.admin_service import (
+    EMERGENCY_REVIEW_PREVIEW_LIMIT,
+    EMERGENCY_MODE_LABELS,
+    EMERGENCY_PING_MODE_LABELS,
     FOLLOWUP_MODE_LABELS,
     MEMBER_RISK_MODE_LABELS,
     MEMBER_RISK_REVIEW_ACTION_LABELS,
@@ -47,6 +50,16 @@ MEMBER_RISK_MODE_CHOICES = [
     app_commands.Choice(name="Private review", value="review"),
     app_commands.Choice(name="Review or kick", value="review_or_kick"),
 ]
+EMERGENCY_MODE_CHOICES = [
+    app_commands.Choice(name="Log only", value="log"),
+    app_commands.Choice(name="Review and guided response", value="review"),
+    app_commands.Choice(name="Strict reversible containment", value="contain"),
+]
+EMERGENCY_PING_CHOICES = [
+    app_commands.Choice(name="Never ping", value="never"),
+    app_commands.Choice(name="Ping high only", value="high_only"),
+    app_commands.Choice(name="Ping all incidents", value="all"),
+]
 STATE_CHOICES = [
     app_commands.Choice(name="On", value="on"),
     app_commands.Choice(name="Off", value="off"),
@@ -55,6 +68,15 @@ EXCLUSION_TARGET_CHOICES = [
     app_commands.Choice(name="Exclude member", value="excluded_user_ids"),
     app_commands.Choice(name="Exclude role", value="excluded_role_ids"),
     app_commands.Choice(name="Trusted role", value="trusted_role_ids"),
+]
+EMERGENCY_TRUST_CHOICES = [
+    app_commands.Choice(name="Protected role", value="protected_role_ids"),
+    app_commands.Choice(name="Trusted actor member", value="trusted_actor_user_ids"),
+    app_commands.Choice(name="Trusted actor role", value="trusted_actor_role_ids"),
+    app_commands.Choice(name="Trusted bot", value="trusted_bot_ids"),
+    app_commands.Choice(name="Allowlisted target member", value="allowlisted_target_user_ids"),
+    app_commands.Choice(name="Allowlisted target role", value="allowlisted_target_role_ids"),
+    app_commands.Choice(name="Whitelisted channel", value="channel_whitelist_ids"),
 ]
 ADMIN_TEST_CHOICES = [
     app_commands.Choice(name="Warning DM", value="warning_dm"),
@@ -320,6 +342,95 @@ class MemberRiskReviewView(discord.ui.View):
         await self._refresh_queue_message(interaction, service, note=message)
 
 
+class EmergencyIncidentView(discord.ui.View):
+    def __init__(
+        self,
+        *,
+        guild_id: int,
+        incident_key: str,
+        version: int,
+        allow_revert_grant: bool = False,
+        allow_kick_added_bot: bool = False,
+    ):
+        super().__init__(timeout=None)
+        self.guild_id = guild_id
+        self.incident_key = incident_key
+        self.version = version
+        self.add_item(self._make_button("ack", "Acknowledge", discord.ButtonStyle.secondary))
+        self.add_item(self._make_button("snooze", "Snooze", discord.ButtonStyle.secondary))
+        if allow_revert_grant:
+            self.add_item(self._make_button("revert_grant", "Revert Grant", discord.ButtonStyle.danger))
+        if allow_kick_added_bot:
+            self.add_item(self._make_button("kick_added_bot", "Kick Added Bot", discord.ButtonStyle.danger))
+
+    def _make_button(self, action: str, label: str, style: discord.ButtonStyle) -> discord.ui.Button:
+        button = discord.ui.Button(
+            label=label,
+            style=style,
+            custom_id=f"bb-admin-emergency:{action}:{self.guild_id}:{self.incident_key}:{self.version}",
+        )
+
+        async def _callback(interaction: discord.Interaction):
+            await self._handle_action(interaction, action)
+
+        button.callback = _callback
+        return button
+
+    async def _handle_action(self, interaction: discord.Interaction, action: str):
+        if interaction.guild is None or interaction.user is None:
+            await interaction.response.send_message("This emergency action only works inside a server.", ephemeral=True)
+            return
+        perms = getattr(interaction.user, "guild_permissions", None)
+        if not (getattr(perms, "administrator", False) or getattr(perms, "manage_guild", False)):
+            await interaction.response.send_message(
+                embed=ge.make_status_embed(
+                    "Admin Only",
+                    "You need **Manage Server** or administrator access to use emergency actions.",
+                    tone="warning",
+                    footer="Babblebox Admin",
+                ),
+                ephemeral=True,
+            )
+            return
+        service = getattr(interaction.client, "admin_service", None)
+        if service is None:
+            await interaction.response.send_message("Babblebox admin systems are unavailable right now.", ephemeral=True)
+            return
+        ok, message, record = await service.handle_emergency_incident_action(
+            guild_id=self.guild_id,
+            incident_key=self.incident_key,
+            version=self.version,
+            action=action,
+            actor=interaction.user,
+        )
+        if record is None:
+            await interaction.response.send_message(message, ephemeral=True)
+            return
+        next_view = EmergencyIncidentView(
+            guild_id=self.guild_id,
+            incident_key=self.incident_key,
+            version=int(record.get("review_version", 0) or 0),
+            allow_revert_grant=str(record.get("reversible_action") or "") == "revert_grant",
+            allow_kick_added_bot=str(record.get("reversible_action") or "") == "kick_added_bot",
+        )
+        if str(record.get("status") or "") in {"resolved"}:
+            for child in next_view.children:
+                child.disabled = True
+        if interaction.response.is_done():
+            with contextlib.suppress(discord.HTTPException):
+                await interaction.edit_original_response(
+                    embed=service.build_emergency_incident_embed(interaction.guild, record),
+                    view=next_view,
+                )
+        else:
+            await interaction.response.edit_message(
+                embed=service.build_emergency_incident_embed(interaction.guild, record),
+                view=next_view,
+            )
+        if not ok:
+            await interaction.followup.send(message, ephemeral=True)
+
+
 class AdminPanelView(discord.ui.View):
     def __init__(self, cog: "AdminCog", *, guild_id: int, author_id: int, section: str = "overview"):
         super().__init__(timeout=180)
@@ -339,6 +450,7 @@ class AdminPanelView(discord.ui.View):
             "followup": self.followup_button,
             "verification": self.verification_button,
             "risk": self.risk_button,
+            "emergency": self.emergency_button,
             "exclusions": self.exclusions_button,
             "logs": self.logs_button,
             "templates": self.templates_button,
@@ -404,22 +516,27 @@ class AdminPanelView(discord.ui.View):
         self.section = "risk"
         await self._render(interaction)
 
+    @discord.ui.button(label="Emergency", style=discord.ButtonStyle.secondary, row=1)
+    async def emergency_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.section = "emergency"
+        await self._render(interaction)
+
     @discord.ui.button(label="Exclusions", style=discord.ButtonStyle.secondary, row=1)
     async def exclusions_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.section = "exclusions"
         await self._render(interaction)
 
-    @discord.ui.button(label="Logs", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="Logs", style=discord.ButtonStyle.secondary, row=2)
     async def logs_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.section = "logs"
         await self._render(interaction)
 
-    @discord.ui.button(label="Templates", style=discord.ButtonStyle.secondary, row=1)
+    @discord.ui.button(label="Templates", style=discord.ButtonStyle.secondary, row=2)
     async def templates_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.section = "templates"
         await self._render(interaction)
 
-    @discord.ui.button(label="Refresh", style=discord.ButtonStyle.secondary, row=2)
+    @discord.ui.button(label="Refresh", style=discord.ButtonStyle.secondary, row=3)
     async def refresh_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         await self._render(interaction, note="Admin panel refreshed.")
 
@@ -616,6 +733,21 @@ class AdminCog(commands.Cog):
                     ),
                     message_id=message_id,
                 )
+        for record in await self.service.list_emergency_review_views():
+            message_id = record.get("review_message_id")
+            if not isinstance(message_id, int):
+                continue
+            with contextlib.suppress(Exception):
+                self.bot.add_view(
+                    EmergencyIncidentView(
+                        guild_id=int(record["guild_id"]),
+                        incident_key=str(record["incident_key"]),
+                        version=int(record.get("review_version", 0) or 0),
+                        allow_revert_grant=str(record.get("reversible_action") or "") == "revert_grant",
+                        allow_kick_added_bot=str(record.get("reversible_action") or "") == "kick_added_bot",
+                    ),
+                    message_id=message_id,
+                )
 
     def cog_unload(self):
         if getattr(self.bot, "admin_service", None) is self.service:
@@ -791,6 +923,18 @@ class AdminCog(commands.Cog):
                 add("Warning: Review-mode verification cleanup needs an admin log channel so Babblebox can send Kick, Delay, and Ignore buttons.")
             add("Note: Verification cleanup still cannot kick administrators or members whose top role is at or above Babblebox.")
 
+        if compiled.emergency_enabled:
+            perms = getattr(me, "guild_permissions", None)
+            if perms is None or not getattr(perms, "view_audit_log", False):
+                add("Warning: Emergency protection needs View Audit Log for clean privileged-action attribution.")
+            if compiled.emergency_mode == "contain":
+                if perms is None or not getattr(perms, "manage_roles", False):
+                    add("Warning: Strict emergency containment needs Manage Roles for dangerous role rollback.")
+                if perms is None or not getattr(perms, "kick_members", False):
+                    add("Warning: Emergency bot-removal guidance may fail because Babblebox is missing Kick Members.")
+            if compiled.admin_log_channel_id is None:
+                add("Warning: Emergency protection needs an admin log channel so Babblebox can post grouped incidents.")
+
         if compiled.admin_log_channel_id is not None:
             channel = self.service._guild_channel(guild, compiled.admin_log_channel_id)
             if channel is None:
@@ -955,6 +1099,16 @@ class AdminCog(commands.Cog):
             inline=False,
         )
         embed.add_field(
+            name="Emergency Protection",
+            value=(
+                f"Enabled: **{'Yes' if config['emergency_enabled'] else 'No'}**\n"
+                f"Mode: **{EMERGENCY_MODE_LABELS.get(config['emergency_mode'], config['emergency_mode'].title())}**\n"
+                f"Strict auto-containment: **{'On' if config['emergency_strict_auto_containment'] else 'Off'}**\n"
+                "Babblebox groups dangerous role grants, destructive bursts, and suspicious bot/admin abuse into calm incident messages."
+            ),
+            inline=False,
+        )
+        embed.add_field(
             name="Live Counts",
             value=(
                 f"Pending ban-return candidates: **{counts['ban_candidates']}**\n"
@@ -962,7 +1116,8 @@ class AdminCog(commands.Cog):
                 f"Pending follow-up reviews: **{counts['pending_reviews']}**\n"
                 f"Tracked unverified members: **{counts['verification_pending']}**\n"
                 f"Warned and waiting: **{counts['verification_warned']}**\n"
-                f"Pending suspicious-member reviews: **{counts['member_risk_pending']}**"
+                f"Pending suspicious-member reviews: **{counts['member_risk_pending']}**\n"
+                f"Open emergency incidents: **{counts['emergency_open_incidents']}**"
             ),
             inline=False,
         )
@@ -1015,6 +1170,91 @@ class AdminCog(commands.Cog):
         embed.add_field(
             name="Quick Use",
             value="`/admin risk enabled:true mode:review`",
+            inline=False,
+        )
+        return embed
+
+    async def _emergency_embed(self, guild_id: int) -> discord.Embed:
+        config = self.service.get_config(guild_id)
+        counts = await self.service.get_counts(guild_id)
+        incidents = await self.service.list_emergency_incidents_for_guild(guild_id)
+        open_incidents = [record for record in incidents if str(record.get("status") or "") in {"open", "acknowledged", "snoozed"}]
+        embed = discord.Embed(
+            title="Emergency Protection",
+            description="Trust-first anti-nuke and moderator-abuse protection built around explicit trust lists, audit-log attribution, grouped incidents, and only narrowly reversible automatic containment.",
+            color=ge.EMBED_THEME["danger"],
+        )
+        embed.add_field(
+            name="Current Policy",
+            value=(
+                f"Enabled: **{'Yes' if config['emergency_enabled'] else 'No'}**\n"
+                f"Mode: **{EMERGENCY_MODE_LABELS.get(config['emergency_mode'], config['emergency_mode'].title())}**\n"
+                f"Strict auto-containment: **{'On' if config['emergency_strict_auto_containment'] else 'Off'}**\n"
+                f"Ping policy: **{EMERGENCY_PING_MODE_LABELS.get(config['emergency_ping_mode'], config['emergency_ping_mode'].title())}**\n"
+                f"Open incidents: **{counts['emergency_open_incidents']}**"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Trust Model",
+            value=(
+                f"Protected roles: {self._format_mentions(config['protected_role_ids'], kind='role')}\n"
+                f"Trusted grant members: {self._format_mentions(config['trusted_actor_user_ids'], kind='user')}\n"
+                f"Trusted grant roles: {self._format_mentions(config['trusted_actor_role_ids'], kind='role')}\n"
+                f"Trusted bots: {self._format_mentions(config['trusted_bot_ids'], kind='user')}"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Allowlists",
+            value=(
+                f"Allowlisted target members: {self._format_mentions(config['allowlisted_target_user_ids'], kind='user')}\n"
+                f"Allowlisted target roles: {self._format_mentions(config['allowlisted_target_role_ids'], kind='role')}\n"
+                f"Channel allowlist: {', '.join(self._channel_mention(value) for value in config['channel_whitelist_ids'][:6]) if config['channel_whitelist_ids'] else 'None'}"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Thresholds",
+            value=(
+                f"Role grants: **{config['emergency_role_grant_threshold']}**\n"
+                f"Distinct grant targets: **{config['emergency_role_grant_target_threshold']}**\n"
+                f"Kicks: **{config['emergency_kick_threshold']}**\n"
+                f"Bans: **{config['emergency_ban_threshold']}**\n"
+                f"Channel deletes: **{config['emergency_channel_delete_threshold']}**\n"
+                f"Role deletes: **{config['emergency_role_delete_threshold']}**\n"
+                f"Webhook churn: **{config['emergency_webhook_churn_threshold']}**\n"
+                f"Bot adds: **{config['emergency_bot_add_threshold']}**"
+            ),
+            inline=False,
+        )
+        permission_labels = [
+            config_flag.replace("_", " ").title()
+            for config_flag in config["enabled_dangerous_permission_flags"][:6]
+        ]
+        embed.add_field(
+            name="Dangerous Permissions",
+            value=", ".join(permission_labels) if permission_labels else "None",
+            inline=False,
+        )
+        if open_incidents:
+            lines = []
+            for record in open_incidents[:EMERGENCY_REVIEW_PREVIEW_LIMIT]:
+                actor_id = int(record.get("actor_id") or 0)
+                lines.append(
+                    f"**{record.get('severity', 'medium').title()}** - {record.get('incident_kind', 'incident').replace('_', ' ').title()} "
+                    f"by <@{actor_id}>"
+                )
+            if len(open_incidents) > EMERGENCY_REVIEW_PREVIEW_LIMIT:
+                lines.append(f"... and {len(open_incidents) - EMERGENCY_REVIEW_PREVIEW_LIMIT} more open incidents.")
+            embed.add_field(name="Open Incident Preview", value="\n".join(lines), inline=False)
+        embed.add_field(
+            name="Quick Use",
+            value=(
+                "`/admin emergency enabled:true mode:review`\n"
+                "`/admin emergency trust target:protected_role_ids state:on role:@Admins`\n"
+                "`/admin emergency limits role_grants:2 kicks:4 bans:3`"
+            ),
             inline=False,
         )
         return embed
@@ -1204,6 +1444,8 @@ class AdminCog(commands.Cog):
             embed = await self._verification_embed(guild_id)
         elif section == "risk":
             embed = await self._risk_embed(guild_id)
+        elif section == "emergency":
+            embed = await self._emergency_embed(guild_id)
         elif section == "exclusions":
             embed = await self._exclusions_embed(guild_id)
         elif section == "logs":
@@ -1215,7 +1457,7 @@ class AdminCog(commands.Cog):
         operability = self._operability_lines(guild_id)
         if operability:
             embed.add_field(name="Operability", value="\n".join(operability[:6]), inline=False)
-        return ge.style_embed(embed, footer="Babblebox Admin | /admin panel, status, followup, verification, risk, logs, exclusions, templates, sync, or test")
+        return ge.style_embed(embed, footer="Babblebox Admin | /admin panel, status, followup, verification, risk, emergency, logs, exclusions, templates, sync, or test")
 
     async def _send_result(self, ctx: commands.Context, title: str, message: str, *, ok: bool):
         embed = ge.make_status_embed(title, message, tone="success" if ok else "warning", footer="Babblebox Admin")
@@ -1453,6 +1695,136 @@ class AdminCog(commands.Cog):
             mode=mode,
         )
         await self._send_result(ctx, "Suspicious-Member Review", message, ok=ok)
+
+    @admin_group.command(name="emergency", with_app_command=True, description="Configure emergency anti-nuke and moderator-abuse protection")
+    @app_commands.describe(
+        enabled="Turn emergency protection on or off",
+        mode="Choose whether Babblebox only logs, opens review incidents, or allows strict reversible containment",
+        strict_auto_containment="Allow only exact dangerous role-grant rollback when the evidence is strong and reversible",
+        ping_mode="Choose when Babblebox should ping the configured alert role for emergency incidents",
+    )
+    @app_commands.choices(mode=EMERGENCY_MODE_CHOICES, ping_mode=EMERGENCY_PING_CHOICES)
+    async def admin_emergency_command(
+        self,
+        ctx: commands.Context,
+        enabled: Optional[bool] = None,
+        mode: Optional[str] = None,
+        strict_auto_containment: Optional[bool] = None,
+        ping_mode: Optional[str] = None,
+    ):
+        if not await self._guard(ctx):
+            return
+        if enabled is None and mode is None and strict_auto_containment is None and ping_mode is None:
+            await send_hybrid_response(ctx, embed=await self.build_panel_embed(ctx.guild.id, "emergency"), ephemeral=True)
+            return
+        ok, message = await self.service.set_emergency_config(
+            ctx.guild.id,
+            enabled=enabled,
+            mode=mode,
+            strict_auto_containment=strict_auto_containment,
+            ping_mode=ping_mode,
+        )
+        await self._send_result(ctx, "Emergency Protection", message, ok=ok)
+
+    @admin_group.command(name="emergency_trust", with_app_command=True, description="Configure protected roles, trusted actors, allowlists, and channel exemptions")
+    @app_commands.choices(target=EMERGENCY_TRUST_CHOICES, state=STATE_CHOICES)
+    async def admin_emergency_trust_command(
+        self,
+        ctx: commands.Context,
+        target: Optional[str] = None,
+        state: Optional[str] = None,
+        member: Optional[discord.Member] = None,
+        role: Optional[discord.Role] = None,
+        channel: Optional[discord.TextChannel] = None,
+    ):
+        if not await self._guard(ctx):
+            return
+        if target is None and state is None and member is None and role is None and channel is None:
+            await send_hybrid_response(ctx, embed=await self.build_panel_embed(ctx.guild.id, "emergency"), ephemeral=True)
+            return
+        if target is None or state is None:
+            await self._send_result(ctx, "Emergency Trust", "Choose both a trust bucket and an on/off state.", ok=False)
+            return
+        if target in {"trusted_actor_user_ids", "trusted_bot_ids", "allowlisted_target_user_ids"}:
+            target_id = getattr(member, "id", None)
+            if not isinstance(target_id, int):
+                await self._send_result(ctx, "Emergency Trust", "Select a member for this emergency trust bucket.", ok=False)
+                return
+        elif target == "channel_whitelist_ids":
+            target_id = getattr(channel, "id", None)
+            if not isinstance(target_id, int):
+                await self._send_result(ctx, "Emergency Trust", "Select a channel for the channel allowlist.", ok=False)
+                return
+        else:
+            target_id = getattr(role, "id", None)
+            if not isinstance(target_id, int):
+                await self._send_result(ctx, "Emergency Trust", "Select a role for this emergency trust bucket.", ok=False)
+                return
+        ok, message = await self.service.set_emergency_trust(
+            ctx.guild.id,
+            field=target,
+            target_id=target_id,
+            enabled=state == "on",
+        )
+        await self._send_result(ctx, "Emergency Trust", message, ok=ok)
+
+    @admin_group.command(name="emergency_limits", with_app_command=True, description="Tune emergency thresholds and dangerous permission monitoring")
+    @app_commands.describe(
+        dangerous_permissions="Comma-separated dangerous permissions like administrator,manage_roles,ban_members",
+        role_grants="How many dangerous role grants from one actor trigger grouping",
+        role_grant_targets="How many distinct grant targets from one actor trigger grouping",
+        kicks="How many kicks from one actor in two minutes trigger grouping",
+        bans="How many bans from one actor in two minutes trigger grouping",
+        channel_deletes="How many channel deletes from one actor in two minutes trigger grouping",
+        role_deletes="How many role deletes from one actor in two minutes trigger grouping",
+        webhook_churn="How many webhook changes from one actor in two minutes trigger grouping",
+        bot_adds="How many bot adds from one actor in two minutes trigger grouping",
+    )
+    async def admin_emergency_limits_command(
+        self,
+        ctx: commands.Context,
+        dangerous_permissions: Optional[str] = None,
+        role_grants: Optional[int] = None,
+        role_grant_targets: Optional[int] = None,
+        kicks: Optional[int] = None,
+        bans: Optional[int] = None,
+        channel_deletes: Optional[int] = None,
+        role_deletes: Optional[int] = None,
+        webhook_churn: Optional[int] = None,
+        bot_adds: Optional[int] = None,
+    ):
+        if not await self._guard(ctx):
+            return
+        if all(
+            value is None
+            for value in (
+                dangerous_permissions,
+                role_grants,
+                role_grant_targets,
+                kicks,
+                bans,
+                channel_deletes,
+                role_deletes,
+                webhook_churn,
+                bot_adds,
+            )
+        ):
+            await send_hybrid_response(ctx, embed=await self.build_panel_embed(ctx.guild.id, "emergency"), ephemeral=True)
+            return
+        permission_flags = [segment.strip() for segment in dangerous_permissions.split(",")] if dangerous_permissions else None
+        ok, message = await self.service.set_emergency_limits(
+            ctx.guild.id,
+            dangerous_permission_flags=permission_flags,
+            role_grant_threshold=role_grants,
+            role_grant_target_threshold=role_grant_targets,
+            kick_threshold=kicks,
+            ban_threshold=bans,
+            channel_delete_threshold=channel_deletes,
+            role_delete_threshold=role_deletes,
+            webhook_churn_threshold=webhook_churn,
+            bot_add_threshold=bot_adds,
+        )
+        await self._send_result(ctx, "Emergency Thresholds", message, ok=ok)
 
     @admin_group.command(name="logs", with_app_command=True, description="Configure admin log delivery and alert pings")
     async def admin_logs_command(
@@ -1720,6 +2092,22 @@ class AdminCog(commands.Cog):
     @commands.Cog.listener()
     async def on_member_update(self, before: discord.Member, after: discord.Member):
         await self.service.handle_member_update(before, after)
+
+    @commands.Cog.listener()
+    async def on_guild_role_update(self, before: discord.Role, after: discord.Role):
+        await self.service.handle_role_update(before, after)
+
+    @commands.Cog.listener()
+    async def on_guild_role_delete(self, role: discord.Role):
+        await self.service.handle_role_delete(role)
+
+    @commands.Cog.listener()
+    async def on_guild_channel_delete(self, channel: discord.abc.GuildChannel):
+        await self.service.handle_channel_delete(channel)
+
+    @commands.Cog.listener()
+    async def on_webhooks_update(self, channel: discord.abc.GuildChannel):
+        await self.service.handle_webhooks_update(channel)
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):

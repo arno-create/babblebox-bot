@@ -1862,6 +1862,67 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(final.deleted)
         self.assertEqual(final.reasons[0].match_class, "repetitive_link_noise")
 
+    async def test_gif_flood_is_detected_as_distinct_spam_lane(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        author = FakeAuthor(43, roles=[FakeRole(11, position=1)])
+
+        ok, _ = await self.service.set_module_enabled(guild.id, True)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_pack_config(
+            guild.id,
+            "spam",
+            enabled=True,
+            low_action="log",
+            medium_action="delete_log",
+            high_action="delete_escalate",
+            sensitivity="normal",
+        )
+        self.assertTrue(ok)
+
+        final = None
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            for _ in range(6):
+                final = await self.service.handle_message(
+                    FakeMessage(
+                        guild=guild,
+                        channel=channel,
+                        author=author,
+                        content="https://tenor.com/view/cat-dance-gif-12345",
+                    )
+                )
+
+        self.assertIsNotNone(final)
+        self.assertEqual(final.reasons[0].match_class, "spam_gif_flood")
+        self.assertIn("GIF", final.reasons[0].label)
+
+    async def test_mixed_text_and_occasional_gifs_stay_safe(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        author = FakeAuthor(44, roles=[FakeRole(11, position=1)])
+
+        ok, _ = await self.service.set_module_enabled(guild.id, True)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_pack_config(
+            guild.id,
+            "spam",
+            enabled=True,
+            low_action="log",
+            medium_action="delete_log",
+            high_action="delete_escalate",
+            sensitivity="normal",
+        )
+        self.assertTrue(ok)
+
+        decisions = []
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            decisions.append(await self.service.handle_message(FakeMessage(guild=guild, channel=channel, author=author, content="that build finally shipped")))
+            decisions.append(await self.service.handle_message(FakeMessage(guild=guild, channel=channel, author=author, content="https://tenor.com/view/celebrate-gif-2000 nice")))
+            decisions.append(await self.service.handle_message(FakeMessage(guild=guild, channel=channel, author=author, content="lol same here")))
+            decisions.append(await self.service.handle_message(FakeMessage(guild=guild, channel=channel, author=author, content="https://tenor.com/view/thumbs-up-gif-3000 agreed")))
+
+        self.assertEqual(decisions, [None, None, None, None])
+
     async def test_repeated_same_external_link_with_varied_captions_still_clusters(self):
         guild = FakeGuild(10)
         channel = FakeChannel(20)

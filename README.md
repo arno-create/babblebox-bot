@@ -10,7 +10,7 @@ It is designed around seven clear product lanes:
 - Everyday Utilities for quiet server life
 - Daily Arcade for low-player-count return visits
 - Buddy / Profile / Vault for identity, streaks, and showable progress
-- Babblebox Shield plus compact admin lifecycle helpers for lightweight, configurable server safety
+- Babblebox Shield plus compact admin lifecycle and emergency helpers for lightweight, configurable server safety
 
 Babblebox is intentionally compact:
 
@@ -130,11 +130,15 @@ Babblebox is intentionally compact:
   - AFK reasons and reminders use privacy, adult, and severe checks; watch keyword setup stays privacy-only
   - privacy leak pack
   - promo / invite pack
-- compact `Spam / Raid` pack for duplicate or near-duplicate spam, mention or emoji floods, burst posting, invite or link floods, and bounded join-wave / newcomer-pattern watch signals
+- compact `Spam / Raid` pack for duplicate or near-duplicate spam, mention, emoji, or smart GIF floods, burst posting, invite or link floods, surface-shifting campaign spam, and bounded join-wave / newcomer-pattern watch signals
+- smart GIF spam stays separate from generic emoji or media noise, so occasional reaction GIFs stay safe while real low-text GIF flooding still gets legible evidence
+- correlated raid-watch that can combine newcomer pressure, repeated lure reuse, risky invite bursts, and GIF/media pressure without turning raid alerts into their own spam problem
 - scam / malicious-link pack with local weighted scam-language scoring
 - hard local trusted-brand impersonation blocking for spoofed or lookalike safe domains
 - `Adult Links + Solicitation` pack for adult-domain intel plus optional solicitation / DM-ad text detection
 - `Severe Harm / Hate` pack for sexual-exploitation solicitation, self-harm encouragement, eliminationist hate, and severe slur abuse
+- serious `Emergency` protection for anti-nuke / moderator-abuse coverage with protected roles, trusted granters, dangerous permission classes, destructive burst review, and narrowly reversible containment for fresh dangerous role grants
+- configurable emergency trust model under `/admin emergency`, `/admin emergency_trust`, and `/admin emergency_limits` for protected roles, trusted actor members or roles, trusted bots, allowlisted targets, whitelisted channels, dangerous permission classes, and per-trigger thresholds
 - optional Shield link policy mode: `Default` or `Trusted Links Only`, separate from Confessions link mode
 - built-in trusted families and direct domains are visible under `/shield trusted`, with bounded per-server disable or re-enable controls
 - bundled local link safety with safe-domain families, suspicious-domain gating, and no external provider requirement
@@ -156,6 +160,7 @@ Babblebox is intentionally compact:
 - Admin lifecycle helpers
   - returned-after-ban follow-up role assignment within a clear 30-day return window
   - auto-remove or moderator-review follow-up role expiry
+- grouped emergency incidents with compact review buttons instead of a panic dashboard
 - review alerts with compact action buttons instead of a case system
 - verification retention with warning-before-kick cleanup
 - verification-help channel deadline extensions with a small extension cap
@@ -348,12 +353,15 @@ Slash is recommended for the heavier config flows here. Prefix stays positional,
 | `/admin followup` | `bb!admin followup true @Probation review 30d` | Configure returned-after-ban follow-up roles |
 | `/admin verification` | `bb!admin verification true @Verified must_have_role review 7d 2d` | Configure warning-before-kick verification cleanup and the shared review queue |
 | `/admin risk` | `bb!admin risk true review` | Configure private suspicious-member note, review, or review-or-kick handling |
+| `/admin emergency` | `bb!admin emergency true contain true high_only` | Configure emergency detection, review, and strict reversible containment mode |
+| `/admin emergency_trust` | `bb!admin emergency_trust protected_role_ids on @ModCore` | Configure protected roles, trusted granters, trusted bots, allowlisted targets, and channel exemptions |
+| `/admin emergency_limits` | `bb!admin emergency_limits administrator,manage_roles 2 2 4 3 2 2 3 1` | Tune dangerous permission classes and destructive burst thresholds |
 | `/admin logs` | `bb!admin logs #admin-log @Mods` | Set the shared admin log channel and alert role |
 | `/admin exclusions` | `bb!admin exclusions` | Configure shared exclusions and trusted roles |
 | `/admin templates` | `bb!admin templates` | Configure warning/kick DMs and optional rejoin link |
 | `/admin sync` | `bb!admin sync` | One-time catch-up scan for current unverified members |
 
-Verification cleanup stays batch-first, and suspicious-member review stays private: routine sweeps emit grouped summaries, review mode uses one persistent queue message per lane, startup reconciliation resumes quietly, and Babblebox does not post public channel reactions or reply callouts for weak evidence.
+Verification cleanup stays batch-first, suspicious-member review stays private, and emergency handling stays tiered: routine sweeps emit grouped summaries, review mode uses one persistent queue message per lane, startup reconciliation resumes quietly, and Babblebox does not post public channel reactions or reply callouts for weak evidence. Emergency incidents are audit-log-backed, grouped by signature, and only use strict reversible containment for fresh untrusted dangerous role grants when admins explicitly turn that mode on. Destructive moderation bursts, dangerous role edits, webhook churn, and suspicious bot additions still degrade to review or guided response instead of reckless auto-punishment.
 
 ### Daily Arcade
 
@@ -558,6 +566,7 @@ Stored data is intentionally small:
 - escalation thresholds
 - safe advanced pattern metadata
 - the `Spam / Raid` pack config only; short-lived spam or join-wave windows stay in memory
+- smart GIF spam and correlated raid pressure live only in bounded runtime windows
 
 Not stored:
 
@@ -578,12 +587,14 @@ Admin lifecycle storage stays row-based and compact:
 - `admin_verification_review_queues`
 - `admin_member_risk_states`
 - `admin_member_risk_review_queues`
+- `admin_emergency_incidents`
 - `admin_verification_notification_snapshots`
 
 Stored data is intentionally small:
 
 - one shared config row per guild
 - short-lived ban-return candidates with a 30-day purge window
+- open or recent emergency incidents only, with aggressive pruning after the compact review window
 - active follow-up role rows only while Babblebox still manages that follow-up
 - pending verification rows only while someone is still unverified
 - active suspicious-member rows only while review remains unresolved

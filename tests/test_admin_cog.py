@@ -6,7 +6,7 @@ import unittest
 from unittest.mock import AsyncMock
 
 from babblebox import game_engine as ge
-from babblebox.cogs.admin import AdminCog, FollowupReviewView, VerificationDeadlineReviewView
+from babblebox.cogs.admin import AdminCog, AdminPanelView, FollowupReviewView, VerificationDeadlineReviewView
 from babblebox.admin_service import AdminService
 from babblebox.admin_store import AdminStore
 
@@ -73,7 +73,11 @@ class FakePermissionSnapshot:
     def __init__(self, **overrides):
         defaults = {
             "manage_roles": False,
+            "manage_channels": False,
+            "manage_webhooks": False,
+            "manage_messages": False,
             "kick_members": False,
+            "view_audit_log": True,
             "view_channel": True,
             "send_messages": True,
             "embed_links": True,
@@ -664,3 +668,32 @@ class AdminCogSmokeTests(unittest.IsolatedAsyncioTestCase):
         prechecks = next(field for field in embed.fields if field.name == "Prechecks")
         self.assertIn("Could not post", delivery.value)
         self.assertIn("cannot send messages", prechecks.value.lower())
+
+    async def test_admin_panel_includes_emergency_section(self):
+        ok, _ = await self.cog.service.set_logs_config(self.guild.id, channel_id=self.log_channel.id, alert_role_id=None)
+        self.assertTrue(ok)
+        ok, _ = await self.cog.service.set_emergency_config(
+            self.guild.id,
+            enabled=True,
+            mode="review",
+            strict_auto_containment=False,
+            ping_mode="high_only",
+        )
+        self.assertTrue(ok)
+
+        embed = await self.cog.build_panel_embed(self.guild.id, "emergency")
+
+        self.assertEqual(embed.title, "Emergency Protection")
+        self.assertIn("anti-nuke", embed.description.lower())
+        self.assertTrue(any(field.name == "Current Policy" for field in embed.fields))
+
+    async def test_admin_panel_view_has_emergency_button(self):
+        ui = AdminPanelView(
+            self.cog,
+            guild_id=self.guild.id,
+            author_id=1,
+            section="overview",
+        )
+
+        labels = [child.label for child in ui.children if hasattr(child, "label")]
+        self.assertIn("Emergency", labels)

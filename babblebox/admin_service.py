@@ -19,6 +19,9 @@ from babblebox import game_engine as ge
 from babblebox.admin_store import (
     AdminStorageUnavailable,
     AdminStore,
+    EMERGENCY_PERMISSION_FLAGS,
+    VALID_EMERGENCY_MODES,
+    VALID_EMERGENCY_PING_MODES,
     VALID_FOLLOWUP_MODES,
     VALID_MEMBER_RISK_MODES,
     VALID_VERIFICATION_DEADLINE_ACTIONS,
@@ -51,6 +54,12 @@ VERIFICATION_SUMMARY_LINE_LIMIT = 8
 MEMBER_RISK_QUEUE_PREVIEW_LIMIT = 5
 MEMBER_RISK_DELAY_SECONDS = 24 * 3600
 MEMBER_RISK_NOTE_DEDUP_SECONDS = 12 * 3600
+EMERGENCY_REVIEW_PREVIEW_LIMIT = 5
+EMERGENCY_ACTION_WINDOW_SECONDS = 120.0
+EMERGENCY_DEDUP_SECONDS = 600.0
+EMERGENCY_SNOOZE_SECONDS = 3600.0
+EMERGENCY_INCIDENT_TTL_SECONDS = 24 * 3600.0
+EMERGENCY_AUDIT_FETCH_LIMIT = 6
 NEW_ACCOUNT_STRONG_SECONDS = 24 * 3600
 NEW_ACCOUNT_RECENT_SECONDS = 7 * 24 * 3600
 NEW_MEMBER_EARLY_SECONDS = 24 * 3600
@@ -78,12 +87,63 @@ MEMBER_RISK_QUEUE_RELEVANT_CONFIG_FIELDS = frozenset(
         "trusted_role_ids",
     }
 )
+EMERGENCY_RELEVANT_CONFIG_FIELDS = frozenset(
+    {
+        "admin_log_channel_id",
+        "admin_alert_role_id",
+        "excluded_user_ids",
+        "excluded_role_ids",
+        "trusted_role_ids",
+        "emergency_enabled",
+        "emergency_mode",
+        "emergency_strict_auto_containment",
+        "emergency_ping_mode",
+        "protected_role_ids",
+        "trusted_actor_user_ids",
+        "trusted_actor_role_ids",
+        "trusted_bot_ids",
+        "allowlisted_target_user_ids",
+        "allowlisted_target_role_ids",
+        "channel_whitelist_ids",
+        "enabled_dangerous_permission_flags",
+        "emergency_role_grant_threshold",
+        "emergency_role_grant_target_threshold",
+        "emergency_kick_threshold",
+        "emergency_ban_threshold",
+        "emergency_channel_delete_threshold",
+        "emergency_role_delete_threshold",
+        "emergency_webhook_churn_threshold",
+        "emergency_bot_add_threshold",
+    }
+)
 
 FOLLOWUP_MODE_LABELS = {"auto_remove": "Auto-remove", "review": "Moderator review"}
 MEMBER_RISK_MODE_LABELS = {
     "log": "Log only",
     "review": "Moderator review",
     "review_or_kick": "Review or kick",
+}
+EMERGENCY_MODE_LABELS = {
+    "log": "Log only",
+    "review": "Review and guided response",
+    "contain": "Strict reversible containment",
+}
+EMERGENCY_PING_MODE_LABELS = {
+    "never": "Never ping",
+    "high_only": "Ping high-confidence incidents",
+    "all": "Ping every incident",
+}
+EMERGENCY_PERMISSION_LABELS = {
+    "administrator": "Administrator",
+    "manage_guild": "Manage Server",
+    "manage_roles": "Manage Roles",
+    "manage_channels": "Manage Channels",
+    "ban_members": "Ban Members",
+    "kick_members": "Kick Members",
+    "manage_webhooks": "Manage Webhooks",
+    "manage_messages": "Manage Messages",
+    "moderate_members": "Moderate Members",
+    "mention_everyone": "Mention Everyone",
 }
 MEMBER_RISK_SIGNAL_LABELS = {
     "account_new_1d": "account under 24 hours old",
@@ -256,6 +316,26 @@ class CompiledAdminConfig:
     verification_exempt_bots: bool
     member_risk_enabled: bool
     member_risk_mode: str
+    emergency_enabled: bool
+    emergency_mode: str
+    emergency_strict_auto_containment: bool
+    emergency_ping_mode: str
+    protected_role_ids: frozenset[int]
+    trusted_actor_user_ids: frozenset[int]
+    trusted_actor_role_ids: frozenset[int]
+    trusted_bot_ids: frozenset[int]
+    allowlisted_target_user_ids: frozenset[int]
+    allowlisted_target_role_ids: frozenset[int]
+    channel_whitelist_ids: frozenset[int]
+    enabled_dangerous_permission_flags: frozenset[str]
+    emergency_role_grant_threshold: int
+    emergency_role_grant_target_threshold: int
+    emergency_kick_threshold: int
+    emergency_ban_threshold: int
+    emergency_channel_delete_threshold: int
+    emergency_role_delete_threshold: int
+    emergency_webhook_churn_threshold: int
+    emergency_bot_add_threshold: int
 
 
 @dataclass(frozen=True)
@@ -407,6 +487,29 @@ def _compile_config(raw: dict[str, Any]) -> CompiledAdminConfig:
         verification_exempt_bots=bool(raw["verification_exempt_bots"]),
         member_risk_enabled=bool(raw.get("member_risk_enabled", False)),
         member_risk_mode=str(raw.get("member_risk_mode", "review")),
+        emergency_enabled=bool(raw.get("emergency_enabled", False)),
+        emergency_mode=str(raw.get("emergency_mode", "review")),
+        emergency_strict_auto_containment=bool(raw.get("emergency_strict_auto_containment", False)),
+        emergency_ping_mode=str(raw.get("emergency_ping_mode", "high_only")),
+        protected_role_ids=frozenset(int(value) for value in raw.get("protected_role_ids", [])),
+        trusted_actor_user_ids=frozenset(int(value) for value in raw.get("trusted_actor_user_ids", [])),
+        trusted_actor_role_ids=frozenset(int(value) for value in raw.get("trusted_actor_role_ids", [])),
+        trusted_bot_ids=frozenset(int(value) for value in raw.get("trusted_bot_ids", [])),
+        allowlisted_target_user_ids=frozenset(int(value) for value in raw.get("allowlisted_target_user_ids", [])),
+        allowlisted_target_role_ids=frozenset(int(value) for value in raw.get("allowlisted_target_role_ids", [])),
+        channel_whitelist_ids=frozenset(int(value) for value in raw.get("channel_whitelist_ids", [])),
+        enabled_dangerous_permission_flags=frozenset(
+            str(value).strip().lower() for value in raw.get("enabled_dangerous_permission_flags", []) if str(value).strip()
+        )
+        or frozenset(EMERGENCY_PERMISSION_FLAGS),
+        emergency_role_grant_threshold=int(raw.get("emergency_role_grant_threshold", 2)),
+        emergency_role_grant_target_threshold=int(raw.get("emergency_role_grant_target_threshold", 2)),
+        emergency_kick_threshold=int(raw.get("emergency_kick_threshold", 4)),
+        emergency_ban_threshold=int(raw.get("emergency_ban_threshold", 3)),
+        emergency_channel_delete_threshold=int(raw.get("emergency_channel_delete_threshold", 2)),
+        emergency_role_delete_threshold=int(raw.get("emergency_role_delete_threshold", 2)),
+        emergency_webhook_churn_threshold=int(raw.get("emergency_webhook_churn_threshold", 3)),
+        emergency_bot_add_threshold=int(raw.get("emergency_bot_add_threshold", 1)),
     )
 
 
@@ -507,6 +610,8 @@ class AdminService:
         self._compiled_configs: dict[int, CompiledAdminConfig] = {}
         self._log_dedup: dict[tuple[int, str], float] = {}
         self._member_risk_note_dedup: dict[tuple[int, int, str], float] = {}
+        self._emergency_dedup: dict[tuple[int, str], float] = {}
+        self._emergency_action_windows: dict[tuple[int, int, str], list[tuple[float, int | None, int | None]]] = {}
         self._verification_sync_sessions: dict[int, VerificationSyncSession] = {}
         self._verification_sync_lock = asyncio.Lock()
         self._startup_resume_pending = True
@@ -524,6 +629,10 @@ class AdminService:
             self.storage_error = str(exc)
             print(f"Admin storage unavailable: {exc}")
             return False
+        await self.store.prune_emergency_incidents(
+            ge.now_utc() - timedelta(seconds=EMERGENCY_INCIDENT_TTL_SECONDS),
+            limit=200,
+        )
         self.storage_ready = True
         self.storage_error = None
         await self._rebuild_config_cache()
@@ -561,6 +670,7 @@ class AdminService:
                 "verification_pending": 0,
                 "verification_warned": 0,
                 "member_risk_pending": 0,
+                "emergency_open_incidents": 0,
             }
         return await self.store.fetch_guild_counts(guild_id)
 
@@ -625,15 +735,215 @@ class AdminService:
             return "Verification deadline action must be `auto_kick` or `review`."
         if config.get("member_risk_mode") not in VALID_MEMBER_RISK_MODES:
             return "Member risk mode must be `log`, `review`, or `review_or_kick`."
+        if config.get("emergency_mode") not in VALID_EMERGENCY_MODES:
+            return "Emergency mode must be `log`, `review`, or `contain`."
+        if config.get("emergency_ping_mode") not in VALID_EMERGENCY_PING_MODES:
+            return "Emergency ping mode must be `never`, `high_only`, or `all`."
         if config["followup_duration_unit"] == "months" and config["followup_duration_value"] > 12:
             return "Follow-up month durations can be at most 12 months."
         if config["verification_warning_lead_seconds"] >= config["verification_kick_after_seconds"]:
             return "Warning lead time must be shorter than the full verification kick timer."
-        for field in ("excluded_user_ids", "excluded_role_ids", "trusted_role_ids"):
+        for field in (
+            "excluded_user_ids",
+            "excluded_role_ids",
+            "trusted_role_ids",
+            "protected_role_ids",
+            "trusted_actor_user_ids",
+            "trusted_actor_role_ids",
+            "trusted_bot_ids",
+            "allowlisted_target_user_ids",
+            "allowlisted_target_role_ids",
+            "channel_whitelist_ids",
+        ):
             if len(config[field]) > EXCLUSION_LIMIT:
                 label = field.replace("_ids", "").replace("_", " ")
                 return f"You can keep up to {EXCLUSION_LIMIT} entries in `{label}`."
+        enabled_flags = {str(value).strip().lower() for value in config.get("enabled_dangerous_permission_flags", []) if str(value).strip()}
+        if not enabled_flags:
+            return "Emergency dangerous permission monitoring must keep at least one permission class enabled."
+        if not enabled_flags.issubset(EMERGENCY_PERMISSION_FLAGS):
+            return "Emergency dangerous permission flags include an unsupported value."
         return None
+
+    async def set_emergency_config(
+        self,
+        guild_id: int,
+        *,
+        enabled: bool | None = None,
+        mode: str | None = None,
+        strict_auto_containment: bool | None = None,
+        ping_mode: str | None = None,
+    ) -> tuple[bool, str]:
+        cleaned_mode = mode.strip().lower() if isinstance(mode, str) else None
+        if cleaned_mode is not None and cleaned_mode not in VALID_EMERGENCY_MODES:
+            return False, "Emergency mode must be `log`, `review`, or `contain`."
+        cleaned_ping_mode = ping_mode.strip().lower() if isinstance(ping_mode, str) else None
+        if cleaned_ping_mode is not None and cleaned_ping_mode not in VALID_EMERGENCY_PING_MODES:
+            return False, "Emergency ping mode must be `never`, `high_only`, or `all`."
+
+        def mutate(config: dict[str, Any]):
+            if enabled is not None:
+                config["emergency_enabled"] = bool(enabled)
+            if cleaned_mode is not None:
+                config["emergency_mode"] = cleaned_mode
+            if strict_auto_containment is not None:
+                config["emergency_strict_auto_containment"] = bool(strict_auto_containment)
+            if cleaned_ping_mode is not None:
+                config["emergency_ping_mode"] = cleaned_ping_mode
+
+        preview = self.get_config(guild_id)
+        final_enabled = preview["emergency_enabled"] if enabled is None else bool(enabled)
+        final_mode = preview["emergency_mode"] if cleaned_mode is None else cleaned_mode
+        final_strict = (
+            preview["emergency_strict_auto_containment"]
+            if strict_auto_containment is None
+            else bool(strict_auto_containment)
+        )
+        final_ping_mode = preview["emergency_ping_mode"] if cleaned_ping_mode is None else cleaned_ping_mode
+        requested_fields = {
+            field
+            for field, supplied in (
+                ("emergency_enabled", enabled is not None),
+                ("emergency_mode", cleaned_mode is not None),
+                ("emergency_strict_auto_containment", strict_auto_containment is not None),
+                ("emergency_ping_mode", cleaned_ping_mode is not None),
+            )
+            if supplied
+        }
+        return await self._update_config(
+            guild_id,
+            mutate,
+            success_message=(
+                f"Emergency protection is {'enabled' if final_enabled else 'disabled'} in `{final_mode}` mode "
+                f"with strict auto-containment {'on' if final_strict else 'off'} and `{final_ping_mode}` ping policy."
+            ),
+            requested_fields=requested_fields,
+            force_post_update=bool(requested_fields),
+        )
+
+    async def set_emergency_trust(
+        self,
+        guild_id: int,
+        *,
+        field: str,
+        target_id: int,
+        enabled: bool,
+    ) -> tuple[bool, str]:
+        valid_fields = {
+            "protected_role_ids",
+            "trusted_actor_user_ids",
+            "trusted_actor_role_ids",
+            "trusted_bot_ids",
+            "allowlisted_target_user_ids",
+            "allowlisted_target_role_ids",
+            "channel_whitelist_ids",
+        }
+        if field not in valid_fields:
+            return False, "Unknown emergency trust bucket."
+
+        def mutate(config: dict[str, Any]):
+            values = set(int(value) for value in config.get(field, []))
+            if enabled:
+                values.add(target_id)
+            else:
+                values.discard(target_id)
+            if len(values) > EXCLUSION_LIMIT:
+                raise ValueError(f"You can keep up to {EXCLUSION_LIMIT} entries in `{field}`.")
+            config[field] = sorted(values)
+
+        label = field.replace("_ids", "").replace("_", " ")
+        return await self._update_config(
+            guild_id,
+            mutate,
+            success_message=f"Emergency {label} was {'updated' if enabled else 'trimmed'}.",
+            requested_fields={field},
+            force_post_update=field in EMERGENCY_RELEVANT_CONFIG_FIELDS,
+        )
+
+    async def set_emergency_limits(
+        self,
+        guild_id: int,
+        *,
+        dangerous_permission_flags: list[str] | None = None,
+        role_grant_threshold: int | None = None,
+        role_grant_target_threshold: int | None = None,
+        kick_threshold: int | None = None,
+        ban_threshold: int | None = None,
+        channel_delete_threshold: int | None = None,
+        role_delete_threshold: int | None = None,
+        webhook_churn_threshold: int | None = None,
+        bot_add_threshold: int | None = None,
+    ) -> tuple[bool, str]:
+        cleaned_flags: list[str] | None = None
+        if dangerous_permission_flags is not None:
+            cleaned_flags = sorted(
+                {
+                    value.strip().lower()
+                    for value in dangerous_permission_flags
+                    if isinstance(value, str) and value.strip().lower() in EMERGENCY_PERMISSION_FLAGS
+                }
+            )
+            if not cleaned_flags:
+                return False, "Choose at least one supported dangerous permission class."
+
+        def _coerce_threshold(label: str, value: int | None, *, minimum: int, maximum: int) -> int | None:
+            if value is None:
+                return None
+            if not isinstance(value, int) or not (minimum <= value <= maximum):
+                raise ValueError(f"{label} must be between {minimum} and {maximum}.")
+            return value
+
+        try:
+            role_grant_threshold = _coerce_threshold("Role grant threshold", role_grant_threshold, minimum=1, maximum=20)
+            role_grant_target_threshold = _coerce_threshold("Role grant target threshold", role_grant_target_threshold, minimum=1, maximum=20)
+            kick_threshold = _coerce_threshold("Kick burst threshold", kick_threshold, minimum=1, maximum=100)
+            ban_threshold = _coerce_threshold("Ban burst threshold", ban_threshold, minimum=1, maximum=100)
+            channel_delete_threshold = _coerce_threshold("Channel delete threshold", channel_delete_threshold, minimum=1, maximum=50)
+            role_delete_threshold = _coerce_threshold("Role delete threshold", role_delete_threshold, minimum=1, maximum=50)
+            webhook_churn_threshold = _coerce_threshold("Webhook churn threshold", webhook_churn_threshold, minimum=1, maximum=50)
+            bot_add_threshold = _coerce_threshold("Bot add threshold", bot_add_threshold, minimum=1, maximum=25)
+        except ValueError as exc:
+            return False, str(exc)
+
+        def mutate(config: dict[str, Any]):
+            if cleaned_flags is not None:
+                config["enabled_dangerous_permission_flags"] = cleaned_flags
+            updates = {
+                "emergency_role_grant_threshold": role_grant_threshold,
+                "emergency_role_grant_target_threshold": role_grant_target_threshold,
+                "emergency_kick_threshold": kick_threshold,
+                "emergency_ban_threshold": ban_threshold,
+                "emergency_channel_delete_threshold": channel_delete_threshold,
+                "emergency_role_delete_threshold": role_delete_threshold,
+                "emergency_webhook_churn_threshold": webhook_churn_threshold,
+                "emergency_bot_add_threshold": bot_add_threshold,
+            }
+            for field, value in updates.items():
+                if value is not None:
+                    config[field] = value
+
+        requested_fields = {
+            field
+            for field, supplied in (
+                ("enabled_dangerous_permission_flags", cleaned_flags is not None),
+                ("emergency_role_grant_threshold", role_grant_threshold is not None),
+                ("emergency_role_grant_target_threshold", role_grant_target_threshold is not None),
+                ("emergency_kick_threshold", kick_threshold is not None),
+                ("emergency_ban_threshold", ban_threshold is not None),
+                ("emergency_channel_delete_threshold", channel_delete_threshold is not None),
+                ("emergency_role_delete_threshold", role_delete_threshold is not None),
+                ("emergency_webhook_churn_threshold", webhook_churn_threshold is not None),
+                ("emergency_bot_add_threshold", bot_add_threshold is not None),
+            )
+            if supplied
+        }
+        return await self._update_config(
+            guild_id,
+            mutate,
+            success_message="Emergency trust thresholds and dangerous-permission monitoring were updated.",
+            requested_fields=requested_fields,
+            force_post_update=bool(requested_fields),
+        )
 
     async def set_member_risk_config(
         self,
@@ -1685,6 +1995,414 @@ class AdminService:
         if self._is_staff_member(member):
             return "Member has staff permissions."
         return None
+
+    def _permission_flags_for(self, subject: object, compiled: CompiledAdminConfig) -> set[str]:
+        permissions = getattr(subject, "permissions", None) or getattr(subject, "guild_permissions", None)
+        if permissions is None:
+            return set()
+        return {
+            flag
+            for flag in compiled.enabled_dangerous_permission_flags
+            if getattr(permissions, flag, False)
+        }
+
+    def _trusted_actor_reason(
+        self,
+        actor: discord.Member | discord.abc.User | None,
+        compiled: CompiledAdminConfig,
+    ) -> str | None:
+        if actor is None:
+            return "Audit actor was unavailable."
+        actor_id = int(getattr(actor, "id", 0) or 0)
+        if actor_id in compiled.trusted_actor_user_ids:
+            return "Actor is explicitly trusted."
+        if getattr(actor, "bot", False) and actor_id in compiled.trusted_bot_ids:
+            return "Actor is a trusted bot."
+        role_ids = self._role_ids_for(actor) if hasattr(actor, "roles") else set()
+        if compiled.trusted_actor_role_ids.intersection(role_ids):
+            return "Actor has a trusted grant role."
+        if compiled.trusted_role_ids.intersection(role_ids):
+            return "Actor has a trusted staff role."
+        if self._is_staff_member(actor) and actor_id == getattr(getattr(actor, "guild", None), "owner_id", None):
+            return "Actor is the server owner."
+        return None
+
+    def _allowlisted_target_reason(
+        self,
+        member: discord.Member | discord.abc.User | None,
+        compiled: CompiledAdminConfig,
+    ) -> str | None:
+        if member is None:
+            return None
+        member_id = int(getattr(member, "id", 0) or 0)
+        if member_id in compiled.allowlisted_target_user_ids:
+            return "Target member is explicitly allowlisted."
+        role_ids = self._role_ids_for(member) if hasattr(member, "roles") else set()
+        if compiled.allowlisted_target_role_ids.intersection(role_ids):
+            return "Target member has an allowlisted role."
+        return None
+
+    def _protected_role_reason(self, role: discord.Role | None, compiled: CompiledAdminConfig) -> str | None:
+        if role is None:
+            return None
+        if int(role.id) in compiled.protected_role_ids:
+            return "Role is explicitly protected."
+        dangerous = self._permission_flags_for(role, compiled)
+        if dangerous:
+            rendered = ", ".join(EMERGENCY_PERMISSION_LABELS.get(flag, flag.replace("_", " ").title()) for flag in sorted(dangerous))
+            return f"Role carries dangerous permissions: {rendered}."
+        return None
+
+    def _emergency_incident_key(
+        self,
+        *,
+        kind: str,
+        actor_id: int | None,
+        target_user_id: int | None = None,
+        target_role_id: int | None = None,
+        target_channel_id: int | None = None,
+        target_bot_user_id: int | None = None,
+    ) -> str:
+        if kind in {"ban_burst", "kick_burst", "role_delete_burst", "channel_delete_burst", "webhook_churn"}:
+            target_user_id = None
+            target_role_id = None
+            target_channel_id = None
+            target_bot_user_id = None
+        return ":".join(
+            [
+                kind,
+                str(actor_id or 0),
+                str(target_user_id or 0),
+                str(target_role_id or 0),
+                str(target_channel_id or 0),
+                str(target_bot_user_id or 0),
+            ]
+        )
+
+    def _emergency_should_ping(self, compiled: CompiledAdminConfig, severity: str) -> bool:
+        if compiled.emergency_ping_mode == "all":
+            return True
+        if compiled.emergency_ping_mode == "high_only":
+            return severity in {"high", "critical"}
+        return False
+
+    def _record_emergency_action(
+        self,
+        guild_id: int,
+        actor_id: int | None,
+        kind: str,
+        *,
+        target_id: int | None,
+        aux_id: int | None,
+        now: float,
+    ) -> tuple[int, int]:
+        if not isinstance(actor_id, int) or actor_id <= 0:
+            return 0, 0
+        key = (guild_id, actor_id, kind)
+        rows = [
+            row
+            for row in self._emergency_action_windows.get(key, [])
+            if now - row[0] <= EMERGENCY_ACTION_WINDOW_SECONDS
+        ]
+        rows.append((now, target_id, aux_id))
+        if len(rows) > 50:
+            rows = rows[-50:]
+        self._emergency_action_windows[key] = rows
+        distinct_targets = {value for _timestamp, value, _aux in rows if isinstance(value, int) and value > 0}
+        return len(rows), len(distinct_targets)
+
+    def _recent_emergency_kinds(self, guild_id: int, actor_id: int | None, *, now: float) -> set[str]:
+        if not isinstance(actor_id, int) or actor_id <= 0:
+            return set()
+        kinds: set[str] = set()
+        for (seen_guild_id, seen_actor_id, kind), rows in self._emergency_action_windows.items():
+            if seen_guild_id != guild_id or seen_actor_id != actor_id:
+                continue
+            if any(now - row[0] <= EMERGENCY_ACTION_WINDOW_SECONDS for row in rows):
+                kinds.add(kind)
+        return kinds
+
+    def _prune_runtime_state(self, *, now: float):
+        self._log_dedup = {
+            key: seen_at
+            for key, seen_at in self._log_dedup.items()
+            if now - seen_at <= LOG_DEDUP_SECONDS
+        }
+        self._member_risk_note_dedup = {
+            key: seen_at
+            for key, seen_at in self._member_risk_note_dedup.items()
+            if now - seen_at <= MEMBER_RISK_NOTE_DEDUP_SECONDS
+        }
+        self._emergency_dedup = {
+            key: seen_at
+            for key, seen_at in self._emergency_dedup.items()
+            if now - seen_at <= EMERGENCY_DEDUP_SECONDS
+        }
+        pruned_windows: dict[tuple[int, int, str], list[tuple[float, int | None, int | None]]] = {}
+        for key, rows in self._emergency_action_windows.items():
+            kept = [row for row in rows if now - row[0] <= EMERGENCY_ACTION_WINDOW_SECONDS]
+            if kept:
+                pruned_windows[key] = kept[-50:]
+        self._emergency_action_windows = pruned_windows
+
+    async def _iter_audit_entries(
+        self,
+        guild: discord.Guild,
+        *,
+        action: discord.AuditLogAction | None,
+        limit: int = EMERGENCY_AUDIT_FETCH_LIMIT,
+    ) -> list[Any]:
+        audit_logs = getattr(guild, "audit_logs", None)
+        if not callable(audit_logs):
+            return []
+        entries: list[Any] = []
+        with contextlib.suppress(discord.Forbidden, discord.HTTPException, TypeError, AttributeError):
+            iterator = audit_logs(limit=limit, action=action)
+            async for entry in iterator:
+                entries.append(entry)
+                if len(entries) >= limit:
+                    break
+        return entries
+
+    def _audit_entry_is_fresh(self, entry: Any, *, now: datetime, max_age_seconds: int = 120) -> bool:
+        created_at = getattr(entry, "created_at", None)
+        if not isinstance(created_at, datetime):
+            return True
+        return abs((now - created_at).total_seconds()) <= max_age_seconds
+
+    async def _find_recent_audit_entry(
+        self,
+        guild: discord.Guild,
+        *,
+        action: discord.AuditLogAction | None,
+        matcher,
+        now: datetime,
+    ) -> Any | None:
+        for entry in await self._iter_audit_entries(guild, action=action):
+            if not self._audit_entry_is_fresh(entry, now=now):
+                continue
+            with contextlib.suppress(Exception):
+                if matcher(entry):
+                    return entry
+        return None
+
+    async def _upsert_emergency_incident(
+        self,
+        guild: discord.Guild,
+        compiled: CompiledAdminConfig,
+        *,
+        incident_kind: str,
+        severity: str,
+        actor: discord.Member | discord.abc.User | None,
+        target_user: discord.Member | discord.abc.User | None = None,
+        target_role: discord.Role | None = None,
+        target_channel: discord.abc.GuildChannel | None = None,
+        target_bot_user: discord.Member | discord.abc.User | None = None,
+        role_grant_role: discord.Role | None = None,
+        title: str,
+        summary: str,
+        trust_violation: str | None,
+        evidence_codes: list[str],
+        evidence_lines: list[str],
+        recommended_actions: list[str],
+        action_taken: str | None = None,
+        action_refused: str | None = None,
+        reversible_action: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        now_dt = ge.now_utc()
+        incident_key = self._emergency_incident_key(
+            kind=incident_kind,
+            actor_id=int(getattr(actor, "id", 0) or 0) or None,
+            target_user_id=int(getattr(target_user, "id", 0) or 0) or None,
+            target_role_id=int(getattr(target_role, "id", 0) or 0) or None,
+            target_channel_id=int(getattr(target_channel, "id", 0) or 0) or None,
+            target_bot_user_id=int(getattr(target_bot_user, "id", 0) or 0) or None,
+        )
+        existing = await self.store.fetch_emergency_incident(guild.id, incident_key)
+        merged_codes = list(dict.fromkeys([*(existing.get("evidence_codes", []) if existing else []), *evidence_codes]))
+        merged_lines = list(dict.fromkeys([*(existing.get("evidence_lines", []) if existing else []), *evidence_lines]))
+        merged_actions = list(
+            dict.fromkeys([*(existing.get("recommended_actions", []) if existing else []), *recommended_actions])
+        )
+        record = {
+            "guild_id": guild.id,
+            "incident_key": incident_key,
+            "incident_kind": incident_kind,
+            "severity": severity,
+            "status": (
+                "snoozed"
+                if existing and existing.get("status") == "snoozed" and deserialize_datetime(existing.get("snooze_until")) and deserialize_datetime(existing.get("snooze_until")) > now_dt
+                else "open"
+            ),
+            "opened_at": existing.get("opened_at") if existing else serialize_datetime(now_dt),
+            "updated_at": serialize_datetime(now_dt),
+            "snooze_until": existing.get("snooze_until") if existing and existing.get("status") == "snoozed" else None,
+            "resolved_at": None,
+            "review_version": int(existing.get("review_version", 0) or 0) if existing else 0,
+            "review_message_channel_id": existing.get("review_message_channel_id") if existing else None,
+            "review_message_id": existing.get("review_message_id") if existing else None,
+            "event_count": int(existing.get("event_count", 0) or 0) + 1 if existing else 1,
+            "actor_id": int(getattr(actor, "id", 0) or 0) or None,
+            "target_user_id": int(getattr(target_user, "id", 0) or 0) or None,
+            "target_role_id": int(getattr(target_role, "id", 0) or 0) or None,
+            "target_channel_id": int(getattr(target_channel, "id", 0) or 0) or None,
+            "target_bot_user_id": int(getattr(target_bot_user, "id", 0) or 0) or None,
+            "role_grant_role_id": int(getattr(role_grant_role, "id", 0) or 0) or None,
+            "action_taken": action_taken or (existing.get("action_taken") if existing else None),
+            "action_refused": action_refused or (existing.get("action_refused") if existing else None),
+            "reversible_action": reversible_action or (existing.get("reversible_action") if existing else None),
+            "title": title,
+            "summary": summary,
+            "trust_violation": trust_violation,
+            "evidence_codes": merged_codes[:12],
+            "evidence_lines": merged_lines[:8],
+            "recommended_actions": merged_actions[:6],
+            "metadata": {**(existing.get("metadata") if existing and isinstance(existing.get("metadata"), dict) else {}), **(metadata or {})},
+        }
+        await self.store.upsert_emergency_incident(record)
+        return record
+
+    def _resolve_member_like(self, guild: discord.Guild, value: object) -> discord.Member | None:
+        if isinstance(value, discord.Member):
+            return value
+        value_id = getattr(value, "id", None)
+        if isinstance(value_id, int):
+            return guild.get_member(value_id)
+        return None
+
+    def _emergency_mode_allows_containment(self, compiled: CompiledAdminConfig) -> bool:
+        return compiled.emergency_enabled and compiled.emergency_mode == "contain" and compiled.emergency_strict_auto_containment
+
+    def _emergency_role_grant_issue(
+        self,
+        guild: discord.Guild,
+        compiled: CompiledAdminConfig,
+        *,
+        actor: discord.Member | discord.abc.User | None,
+        target_member: discord.Member | None,
+        role: discord.Role | None,
+    ) -> AdminActionIssue | None:
+        if actor is None or target_member is None or role is None:
+            return AdminActionIssue(
+                code="missing-context",
+                detail="Babblebox could not resolve the actor, target member, or granted role cleanly enough for auto-containment.",
+                because_text="the actor, target, or role could not be resolved cleanly enough",
+            )
+        trusted_reason = self._trusted_actor_reason(actor, compiled)
+        if trusted_reason is not None:
+            return AdminActionIssue(
+                code="trusted-actor",
+                detail=trusted_reason,
+                because_text=trusted_reason.rstrip("."),
+            )
+        allowlisted_reason = self._allowlisted_target_reason(target_member, compiled)
+        if allowlisted_reason is not None:
+            return AdminActionIssue(
+                code="allowlisted-target",
+                detail=allowlisted_reason,
+                because_text=allowlisted_reason.rstrip("."),
+            )
+        protected_reason = self._protected_role_reason(role, compiled)
+        if protected_reason is None:
+            return AdminActionIssue(
+                code="not-dangerous",
+                detail="The granted role is not protected and does not carry an enabled dangerous permission class.",
+                because_text="the granted role is not protected or dangerous enough for automatic containment",
+            )
+        return self._followup_role_issue(guild, target_member, role)
+
+    async def _attempt_auto_revert_role_grant(
+        self,
+        guild: discord.Guild,
+        compiled: CompiledAdminConfig,
+        *,
+        actor: discord.Member | discord.abc.User | None,
+        target_member: discord.Member | None,
+        role: discord.Role | None,
+    ) -> tuple[str | None, str | None]:
+        if not self._emergency_mode_allows_containment(compiled):
+            return None, "Strict auto-containment is disabled."
+        issue = self._emergency_role_grant_issue(
+            guild,
+            compiled,
+            actor=actor,
+            target_member=target_member,
+            role=role,
+        )
+        if issue is not None:
+            return None, issue.detail
+        assert target_member is not None and role is not None
+        with contextlib.suppress(discord.Forbidden, discord.HTTPException):
+            await target_member.remove_roles(
+                role,
+                reason="Babblebox emergency containment reverted a dangerous untrusted role grant.",
+            )
+            return f"Removed {role.mention} from <@{target_member.id}> automatically.", None
+        return None, "Discord rejected the automatic role rollback."
+
+    async def _emit_emergency_incident(
+        self,
+        guild: discord.Guild,
+        compiled: CompiledAdminConfig,
+        *,
+        incident_kind: str,
+        severity: str,
+        actor: discord.Member | discord.abc.User | None,
+        target_user: discord.Member | discord.abc.User | None = None,
+        target_role: discord.Role | None = None,
+        target_channel: discord.abc.GuildChannel | None = None,
+        target_bot_user: discord.Member | discord.abc.User | None = None,
+        role_grant_role: discord.Role | None = None,
+        title: str,
+        summary: str,
+        trust_violation: str | None,
+        evidence_codes: list[str],
+        evidence_lines: list[str],
+        recommended_actions: list[str],
+        action_taken: str | None = None,
+        action_refused: str | None = None,
+        reversible_action: str | None = None,
+        metadata: dict[str, Any] | None = None,
+    ) -> dict[str, Any]:
+        dedup_key = (guild.id, self._emergency_incident_key(
+            kind=incident_kind,
+            actor_id=int(getattr(actor, "id", 0) or 0) or None,
+            target_user_id=int(getattr(target_user, "id", 0) or 0) or None,
+            target_role_id=int(getattr(target_role, "id", 0) or 0) or None,
+            target_channel_id=int(getattr(target_channel, "id", 0) or 0) or None,
+            target_bot_user_id=int(getattr(target_bot_user, "id", 0) or 0) or None,
+        ))
+        now = asyncio.get_running_loop().time()
+        existing = await self.store.fetch_emergency_incident(guild.id, dedup_key[1])
+        record = await self._upsert_emergency_incident(
+            guild,
+            compiled,
+            incident_kind=incident_kind,
+            severity=severity,
+            actor=actor,
+            target_user=target_user,
+            target_role=target_role,
+            target_channel=target_channel,
+            target_bot_user=target_bot_user,
+            role_grant_role=role_grant_role,
+            title=title,
+            summary=summary,
+            trust_violation=trust_violation,
+            evidence_codes=evidence_codes,
+            evidence_lines=evidence_lines,
+            recommended_actions=recommended_actions,
+            action_taken=action_taken,
+            action_refused=action_refused,
+            reversible_action=reversible_action,
+            metadata=metadata,
+        )
+        if existing is None or now - self._emergency_dedup.get(dedup_key, 0.0) >= EMERGENCY_DEDUP_SECONDS:
+            self._emergency_dedup[dedup_key] = now
+            await self._sync_emergency_incident_message(guild, compiled, record)
+        elif existing.get("review_message_id"):
+            await self._sync_emergency_incident_message(guild, compiled, record)
+        return record
 
     def _member_created_at(self, member: discord.Member) -> datetime | None:
         created_at = getattr(member, "created_at", None)
@@ -2986,6 +3704,239 @@ class AdminService:
         if not sent:
             print(f"Admin automation warning for guild {guild.id}: {message}")
 
+    async def list_emergency_review_views(self) -> list[dict[str, Any]]:
+        if not self.storage_ready:
+            return []
+        return await self.store.list_emergency_review_views()
+
+    async def list_emergency_incidents_for_guild(self, guild_id: int) -> list[dict[str, Any]]:
+        if not self.storage_ready:
+            return []
+        return await self.store.list_emergency_incidents_for_guild(guild_id)
+
+    async def fetch_emergency_incident(self, guild_id: int, incident_key: str) -> dict[str, Any] | None:
+        if not self.storage_ready:
+            return None
+        return await self.store.fetch_emergency_incident(guild_id, incident_key)
+
+    def build_emergency_incident_embed(self, guild: discord.Guild, record: dict[str, Any]) -> discord.Embed:
+        severity = str(record.get("severity") or "medium")
+        tone = "danger" if severity in {"high", "critical"} else "warning"
+        embed = ge.make_status_embed(
+            str(record.get("title") or "Emergency Incident"),
+            str(record.get("summary") or "Babblebox detected a privileged-action incident for review."),
+            tone=tone,
+            footer="Babblebox Admin | Emergency protection",
+        )
+        actor_id = int(record.get("actor_id") or 0)
+        target_user_id = int(record.get("target_user_id") or 0)
+        target_role_id = int(record.get("target_role_id") or 0)
+        target_channel_id = int(record.get("target_channel_id") or 0)
+        target_bot_user_id = int(record.get("target_bot_user_id") or 0)
+        lines = [
+            f"Kind: **{str(record.get('incident_kind') or 'unknown').replace('_', ' ').title()}**",
+            f"Severity: **{severity.title()}**",
+            f"Status: **{str(record.get('status') or 'open').title()}**",
+        ]
+        if actor_id:
+            lines.append(f"Actor: <@{actor_id}>")
+        if target_user_id:
+            lines.append(f"Target member: <@{target_user_id}>")
+        if target_role_id:
+            lines.append(f"Target role: <@&{target_role_id}>")
+        if target_channel_id:
+            lines.append(f"Target channel: <#{target_channel_id}>")
+        if target_bot_user_id:
+            lines.append(f"Target bot: <@{target_bot_user_id}>")
+        trust_violation = str(record.get("trust_violation") or "").strip()
+        if trust_violation:
+            lines.append(f"Trust model: {trust_violation}")
+        embed.add_field(name="Incident", value="\n".join(lines), inline=False)
+        evidence_lines = [str(line) for line in record.get("evidence_lines", []) if str(line).strip()]
+        if evidence_lines:
+            embed.add_field(name="Why Babblebox Reacted", value=ge.join_limited_lines(evidence_lines, limit=1024), inline=False)
+        followup_lines: list[str] = []
+        if record.get("action_taken"):
+            followup_lines.append(f"Auto action: {record['action_taken']}")
+        if record.get("action_refused"):
+            followup_lines.append(f"Auto action withheld: {record['action_refused']}")
+        recommended = [str(line) for line in record.get("recommended_actions", []) if str(line).strip()]
+        if recommended:
+            followup_lines.extend(f"Next: {line}" for line in recommended[:3])
+        if followup_lines:
+            embed.add_field(name="Response", value=ge.join_limited_lines(followup_lines, limit=1024), inline=False)
+        updated_at = deserialize_datetime(record.get("updated_at"))
+        if updated_at is not None:
+            embed.add_field(name="Updated", value=ge.format_timestamp(updated_at, "R"), inline=False)
+        return embed
+
+    async def _sync_emergency_incident_message(
+        self,
+        guild: discord.Guild,
+        compiled: CompiledAdminConfig,
+        record: dict[str, Any],
+    ):
+        from babblebox.cogs.admin import EmergencyIncidentView
+
+        if compiled.admin_log_channel_id is None:
+            await self.log_operability_warning_once(
+                guild,
+                compiled,
+                key="emergency-no-log-channel",
+                message="Babblebox detected an emergency incident but no admin log channel is configured.",
+                title="Emergency Delivery Warning",
+                footer="Babblebox Admin | Emergency protection",
+                alert=False,
+            )
+            return
+        channel = self._guild_channel(guild, compiled.admin_log_channel_id)
+        if channel is None:
+            await self.log_operability_warning_once(
+                guild,
+                compiled,
+                key="emergency-missing-log-channel",
+                message="Babblebox detected an emergency incident but could not access the configured admin log channel.",
+                title="Emergency Delivery Warning",
+                footer="Babblebox Admin | Emergency protection",
+                alert=False,
+            )
+            return
+        view = EmergencyIncidentView(
+            guild_id=guild.id,
+            incident_key=str(record["incident_key"]),
+            version=int(record.get("review_version", 0) or 0),
+            allow_revert_grant=str(record.get("reversible_action") or "") == "revert_grant",
+            allow_kick_added_bot=str(record.get("reversible_action") or "") == "kick_added_bot",
+        )
+        message = None
+        existing_channel_id = record.get("review_message_channel_id")
+        existing_message_id = record.get("review_message_id")
+        if isinstance(existing_channel_id, int) and isinstance(existing_message_id, int) and existing_channel_id == channel.id:
+            message = await self._verification_queue_message(channel, message_id=existing_message_id)
+        embed = self.build_emergency_incident_embed(guild, record)
+        if message is None:
+            content = None
+            if self._emergency_should_ping(compiled, str(record.get("severity") or "medium")) and compiled.admin_alert_role_id is not None and self.can_ping_alert_role(guild, compiled):
+                content = f"<@&{compiled.admin_alert_role_id}>"
+            with contextlib.suppress(discord.Forbidden, discord.HTTPException):
+                message = await channel.send(
+                    content=content,
+                    embed=embed,
+                    view=view,
+                    allowed_mentions=discord.AllowedMentions(users=False, roles=True, everyone=False),
+                )
+        else:
+            with contextlib.suppress(discord.Forbidden, discord.HTTPException):
+                await message.edit(embed=embed, view=view)
+        if message is None:
+            return
+        record = dict(record)
+        record["review_message_channel_id"] = channel.id
+        record["review_message_id"] = message.id
+        await self.store.upsert_emergency_incident(record)
+        with contextlib.suppress(Exception):
+            self.bot.add_view(view, message_id=message.id)
+
+    def _close_emergency_incident_record(
+        self,
+        record: dict[str, Any],
+        *,
+        status: str,
+        action_taken: str | None = None,
+        action_refused: str | None = None,
+    ) -> dict[str, Any]:
+        now = ge.now_utc()
+        updated = dict(record)
+        updated["status"] = status
+        updated["updated_at"] = serialize_datetime(now)
+        updated["resolved_at"] = serialize_datetime(now) if status == "resolved" else None
+        updated["review_version"] = int(updated.get("review_version", 0) or 0) + 1
+        if action_taken is not None:
+            updated["action_taken"] = action_taken
+        if action_refused is not None:
+            updated["action_refused"] = action_refused
+        return updated
+
+    async def handle_emergency_incident_action(
+        self,
+        *,
+        guild_id: int,
+        incident_key: str,
+        version: int,
+        action: str,
+        actor: discord.Member,
+    ) -> tuple[bool, str, dict[str, Any] | None]:
+        record = await self.fetch_emergency_incident(guild_id, incident_key)
+        if record is None:
+            return False, "This emergency incident no longer exists.", None
+        if int(record.get("review_version", 0) or 0) != version:
+            return False, "This emergency incident is stale. Refresh the message first.", record
+        guild = actor.guild if getattr(actor, "guild", None) and int(getattr(actor.guild, "id", 0) or 0) == guild_id else self.bot.get_guild(guild_id)
+        if guild is None:
+            return False, "This server is no longer available to Babblebox.", record
+        compiled = self.get_compiled_config(guild_id)
+        if action == "ack":
+            updated = self._close_emergency_incident_record(record, status="acknowledged")
+            await self.store.upsert_emergency_incident(updated)
+            await self._sync_emergency_incident_message(guild, compiled, updated)
+            return True, "Emergency incident acknowledged.", updated
+        if action == "snooze":
+            updated = dict(record)
+            updated["status"] = "snoozed"
+            updated["updated_at"] = serialize_datetime(ge.now_utc())
+            updated["snooze_until"] = serialize_datetime(ge.now_utc() + timedelta(seconds=EMERGENCY_SNOOZE_SECONDS))
+            updated["review_version"] = int(updated.get("review_version", 0) or 0) + 1
+            await self.store.upsert_emergency_incident(updated)
+            await self._sync_emergency_incident_message(guild, compiled, updated)
+            return True, "Emergency incident snoozed for one hour.", updated
+        if action == "revert_grant":
+            target_member = guild.get_member(int(record.get("target_user_id") or 0))
+            target_role = self._guild_role(guild, int(record.get("role_grant_role_id") or 0))
+            if target_member is None or target_role is None:
+                return False, "The granted role or target member is no longer available.", record
+            issue = self._followup_role_issue(guild, target_member, target_role)
+            if issue is not None:
+                updated = self._close_emergency_incident_record(record, status="acknowledged", action_refused=issue.detail)
+                await self.store.upsert_emergency_incident(updated)
+                await self._sync_emergency_incident_message(guild, compiled, updated)
+                return False, issue.detail, updated
+            with contextlib.suppress(discord.Forbidden, discord.HTTPException):
+                await target_member.remove_roles(
+                    target_role,
+                    reason=f"Babblebox emergency review revert requested by {ge.display_name_of(actor)}.",
+                )
+                updated = self._close_emergency_incident_record(
+                    record,
+                    status="resolved",
+                    action_taken=f"Removed {target_role.mention} from <@{target_member.id}> by moderator request.",
+                )
+                await self.store.upsert_emergency_incident(updated)
+                await self._sync_emergency_incident_message(guild, compiled, updated)
+                return True, "The dangerous role grant was reverted.", updated
+            return False, "Discord rejected the role removal.", record
+        if action == "kick_added_bot":
+            target_member = guild.get_member(int(record.get("target_bot_user_id") or 0))
+            if target_member is None:
+                return False, "The added bot is no longer in the server.", record
+            issue = self._kick_issue(guild, target_member)
+            if issue is not None:
+                updated = self._close_emergency_incident_record(record, status="acknowledged", action_refused=issue.detail)
+                await self.store.upsert_emergency_incident(updated)
+                await self._sync_emergency_incident_message(guild, compiled, updated)
+                return False, issue.detail, updated
+            with contextlib.suppress(discord.Forbidden, discord.HTTPException):
+                await target_member.kick(reason=f"Babblebox emergency bot removal requested by {ge.display_name_of(actor)}.")
+                updated = self._close_emergency_incident_record(
+                    record,
+                    status="resolved",
+                    action_taken=f"Kicked added bot <@{target_member.id}> by moderator request.",
+                )
+                await self.store.upsert_emergency_incident(updated)
+                await self._sync_emergency_incident_message(guild, compiled, updated)
+                return True, "The added bot was removed.", updated
+            return False, "Discord rejected the bot removal.", record
+        return False, "Unknown emergency action.", record
+
     def _build_verification_state(self, member: discord.Member, compiled: CompiledAdminConfig, *, now: datetime) -> dict[str, Any]:
         joined_at = getattr(member, "joined_at", None) or now
         warning_lead = timedelta(seconds=compiled.verification_warning_lead_seconds)
@@ -3018,17 +3969,68 @@ class AdminService:
             return
         compiled = self.get_compiled_config(guild.id)
         if not compiled.followup_enabled or compiled.followup_role_id is None:
+            pass
+        elif user.id not in compiled.excluded_user_ids:
+            now = ge.now_utc()
+            await self.store.upsert_ban_candidate(
+                {
+                    "guild_id": guild.id,
+                    "user_id": user.id,
+                    "banned_at": serialize_datetime(now),
+                    "expires_at": serialize_datetime(now + timedelta(days=FOLLOWUP_BAN_RETURN_WINDOW_DAYS)),
+                }
+            )
+        if not compiled.emergency_enabled:
             return
-        if user.id in compiled.excluded_user_ids:
+        now_dt = ge.now_utc()
+        entry = await self._find_recent_audit_entry(
+            guild,
+            action=discord.AuditLogAction.ban,
+            now=now_dt,
+            matcher=lambda item: int(getattr(getattr(item, "target", None), "id", 0) or 0) == int(getattr(user, "id", 0) or 0),
+        )
+        if entry is None:
             return
-        now = ge.now_utc()
-        await self.store.upsert_ban_candidate(
-            {
-                "guild_id": guild.id,
-                "user_id": user.id,
-                "banned_at": serialize_datetime(now),
-                "expires_at": serialize_datetime(now + timedelta(days=FOLLOWUP_BAN_RETURN_WINDOW_DAYS)),
-            }
+        actor = self._resolve_member_like(guild, getattr(entry, "user", None)) or getattr(entry, "user", None)
+        trusted_reason = self._trusted_actor_reason(actor, compiled)
+        if trusted_reason is not None:
+            return
+        now_ts = asyncio.get_running_loop().time()
+        burst_count, distinct_targets = self._record_emergency_action(
+            guild.id,
+            int(getattr(actor, "id", 0) or 0) or None,
+            "ban",
+            target_id=int(getattr(user, "id", 0) or 0) or None,
+            aux_id=None,
+            now=now_ts,
+        )
+        recent_kinds = self._recent_emergency_kinds(guild.id, int(getattr(actor, "id", 0) or 0) or None, now=now_ts)
+        if burst_count < compiled.emergency_ban_threshold and not ({"kick", "role_grant"} & recent_kinds):
+            return
+        severity = "critical" if "role_grant" in recent_kinds else "high"
+        evidence_lines = [
+            f"{burst_count} bans by <@{getattr(actor, 'id', 0)}> inside 2 minutes.",
+            f"Distinct targets in window: {distinct_targets}.",
+        ]
+        if "role_grant" in recent_kinds:
+            evidence_lines.append("Recent dangerous role-grant activity from the same actor raised confidence.")
+        await self._emit_emergency_incident(
+            guild,
+            compiled,
+            incident_kind="ban_burst",
+            severity=severity,
+            actor=actor,
+            target_user=user,
+            title="Suspicious Ban Burst",
+            summary="Babblebox saw a burst of bans from an untrusted actor and grouped it as an emergency moderation-abuse incident.",
+            trust_violation="Untrusted actor triggered destructive moderation thresholds.",
+            evidence_codes=["ban_burst", "untrusted_actor", *sorted(recent_kinds)[:2]],
+            evidence_lines=evidence_lines,
+            recommended_actions=[
+                "Confirm the actor account is expected and uncompromised.",
+                "Review recent kicks, bans, and role grants from the same actor.",
+            ],
+            metadata={"distinct_targets": distinct_targets},
         )
 
     async def handle_member_join(self, member: discord.Member):
@@ -3037,6 +4039,48 @@ class AdminService:
         await self._maybe_handle_return_followup(member)
         await self._ensure_verification_state(member, reason="join")
         compiled = self.get_compiled_config(member.guild.id)
+        if compiled.emergency_enabled and getattr(member, "bot", False):
+            now_dt = ge.now_utc()
+            entry = await self._find_recent_audit_entry(
+                member.guild,
+                action=discord.AuditLogAction.bot_add,
+                now=now_dt,
+                matcher=lambda item: int(getattr(getattr(item, "target", None), "id", 0) or 0) == int(member.id),
+            )
+            if entry is not None:
+                actor = self._resolve_member_like(member.guild, getattr(entry, "user", None)) or getattr(entry, "user", None)
+                if self._trusted_actor_reason(actor, compiled) is None and int(member.id) not in compiled.trusted_bot_ids:
+                    now_ts = asyncio.get_running_loop().time()
+                    burst_count, _distinct_targets = self._record_emergency_action(
+                        member.guild.id,
+                        int(getattr(actor, "id", 0) or 0) or None,
+                        "bot_add",
+                        target_id=member.id,
+                        aux_id=None,
+                        now=now_ts,
+                    )
+                    if burst_count >= compiled.emergency_bot_add_threshold:
+                        await self._emit_emergency_incident(
+                            member.guild,
+                            compiled,
+                            incident_kind="unauthorized_bot_add",
+                            severity="high",
+                            actor=actor,
+                            target_bot_user=member,
+                            title="Suspicious Bot Addition",
+                            summary="Babblebox saw a bot added by an untrusted actor and opened an emergency review incident instead of taking irreversible action.",
+                            trust_violation="Untrusted actor added a non-allowlisted bot.",
+                            evidence_codes=["bot_add", "untrusted_actor"],
+                            evidence_lines=[
+                                f"Bot <@{member.id}> joined after an audit-log-confirmed add by <@{getattr(actor, 'id', 0)}>.",
+                                "Default response is review-only because bot removal is not always safely reversible.",
+                            ],
+                            recommended_actions=[
+                                "Review the bot's role and permissions immediately.",
+                                "Use Kick Added Bot if the addition was unauthorized.",
+                            ],
+                            reversible_action="kick_added_bot",
+                        )
         if not compiled.member_risk_enabled:
             return
         exempt_reason = self._member_risk_exempt_reason(member, compiled)
@@ -3054,6 +4098,55 @@ class AdminService:
     async def handle_member_remove(self, member: discord.Member):
         if not self.storage_ready:
             return
+        compiled = self.get_compiled_config(member.guild.id)
+        if compiled.emergency_enabled:
+            now_dt = ge.now_utc()
+            entry = await self._find_recent_audit_entry(
+                member.guild,
+                action=discord.AuditLogAction.kick,
+                now=now_dt,
+                matcher=lambda item: int(getattr(getattr(item, "target", None), "id", 0) or 0) == int(member.id),
+            )
+            if entry is not None:
+                actor = self._resolve_member_like(member.guild, getattr(entry, "user", None)) or getattr(entry, "user", None)
+                trusted_reason = self._trusted_actor_reason(actor, compiled)
+                if trusted_reason is None:
+                    now_ts = asyncio.get_running_loop().time()
+                    burst_count, distinct_targets = self._record_emergency_action(
+                        member.guild.id,
+                        int(getattr(actor, "id", 0) or 0) or None,
+                        "kick",
+                        target_id=member.id,
+                        aux_id=None,
+                        now=now_ts,
+                    )
+                    recent_kinds = self._recent_emergency_kinds(member.guild.id, int(getattr(actor, "id", 0) or 0) or None, now=now_ts)
+                    if burst_count >= compiled.emergency_kick_threshold or {"ban", "role_grant"} & recent_kinds:
+                        severity = "critical" if "role_grant" in recent_kinds else "high"
+                        evidence_lines = [
+                            f"{burst_count} kicks by <@{getattr(actor, 'id', 0)}> inside 2 minutes.",
+                            f"Distinct targets in window: {distinct_targets}.",
+                        ]
+                        if "role_grant" in recent_kinds:
+                            evidence_lines.append("Recent dangerous role-grant activity from the same actor raised confidence.")
+                        await self._emit_emergency_incident(
+                            member.guild,
+                            compiled,
+                            incident_kind="kick_burst",
+                            severity=severity,
+                            actor=actor,
+                            target_user=member,
+                            title="Suspicious Kick Burst",
+                            summary="Babblebox saw a burst of kicks from an untrusted actor and grouped it as an emergency moderation-abuse incident.",
+                            trust_violation="Untrusted actor triggered destructive moderation thresholds.",
+                            evidence_codes=["kick_burst", "untrusted_actor", *sorted(recent_kinds)[:2]],
+                            evidence_lines=evidence_lines,
+                            recommended_actions=[
+                                "Confirm the actor account is expected and uncompromised.",
+                                "Review recent kicks, bans, and role grants from the same actor.",
+                            ],
+                            metadata={"distinct_targets": distinct_targets},
+                        )
         existing = await self.store.fetch_verification_state(member.guild.id, member.id)
         member_risk = await self.store.fetch_member_risk_state(member.guild.id, member.id)
         await self.store.delete_verification_state(member.guild.id, member.id)
@@ -3082,10 +4175,82 @@ class AdminService:
         before_role_ids = self._role_ids_for(before)
         after_role_ids = self._role_ids_for(after)
         roles_changed = before_role_ids != after_role_ids
+        added_role_ids = sorted(after_role_ids.difference(before_role_ids))
         before_status, _ = self._verification_status(before, compiled)
         after_status, _ = self._verification_status(after, compiled)
         verification_changed = before_status != after_status
         identity_changed = False
+        if compiled.emergency_enabled and added_role_ids:
+            entry = await self._find_recent_audit_entry(
+                after.guild,
+                action=discord.AuditLogAction.member_role_update,
+                now=now,
+                matcher=lambda item: int(getattr(getattr(item, "target", None), "id", 0) or 0) == int(after.id),
+            )
+            if entry is not None:
+                actor = self._resolve_member_like(after.guild, getattr(entry, "user", None)) or getattr(entry, "user", None)
+                trusted_reason = self._trusted_actor_reason(actor, compiled)
+                allowlisted_reason = self._allowlisted_target_reason(after, compiled)
+                if trusted_reason is None and allowlisted_reason is None:
+                    now_ts = asyncio.get_running_loop().time()
+                    for role_id in added_role_ids:
+                        role = self._guild_role(after.guild, role_id)
+                        protected_reason = self._protected_role_reason(role, compiled)
+                        if protected_reason is None:
+                            continue
+                        actor_mention = getattr(actor, "mention", f"<@{getattr(actor, 'id', 0)}>")
+                        grant_count, distinct_targets = self._record_emergency_action(
+                            after.guild.id,
+                            int(getattr(actor, "id", 0) or 0) or None,
+                            "role_grant",
+                            target_id=after.id,
+                            aux_id=role_id,
+                            now=now_ts,
+                        )
+                        action_taken, action_refused = await self._attempt_auto_revert_role_grant(
+                            after.guild,
+                            compiled,
+                            actor=actor,
+                            target_member=after,
+                            role=role,
+                        )
+                        severe_flags = self._permission_flags_for(role, compiled)
+                        severity = (
+                            "critical"
+                            if action_taken is not None or "administrator" in severe_flags or grant_count >= compiled.emergency_role_grant_threshold
+                            else "high"
+                        )
+                        recent_kinds = self._recent_emergency_kinds(after.guild.id, int(getattr(actor, "id", 0) or 0) or None, now=now_ts)
+                        evidence_lines = [
+                            f"{actor_mention} granted {role.mention} to {after.mention}.",
+                            protected_reason,
+                            f"Role grants by this actor in 2 minutes: {grant_count}; distinct targets: {distinct_targets}.",
+                        ]
+                        if {"kick", "ban"} & recent_kinds:
+                            evidence_lines.append("Recent destructive moderation from the same actor raised confidence.")
+                        await self._emit_emergency_incident(
+                            after.guild,
+                            compiled,
+                            incident_kind="dangerous_role_grant",
+                            severity=severity,
+                            actor=actor,
+                            target_user=after,
+                            target_role=role,
+                            role_grant_role=role,
+                            title="Dangerous Role Grant",
+                            summary="Babblebox saw an untrusted dangerous role grant and treated it as a potential privilege-escalation incident.",
+                            trust_violation="Protected or dangerous role granted by an untrusted actor.",
+                            evidence_codes=["dangerous_role_grant", "untrusted_actor", *sorted(severe_flags)[:3]],
+                            evidence_lines=evidence_lines,
+                            recommended_actions=[
+                                "Confirm the actor account is expected and uncompromised.",
+                                "Review the target's current roles and any recent kicks or bans from the same actor.",
+                            ],
+                            action_taken=action_taken,
+                            action_refused=action_refused,
+                            reversible_action="revert_grant",
+                            metadata={"grant_count": grant_count, "distinct_targets": distinct_targets},
+                        )
         if compiled.member_risk_enabled:
             before_identity = self._member_identity_signal_codes(before, now=now)
             after_identity = self._member_identity_signal_codes(after, now=now)
@@ -3131,6 +4296,212 @@ class AdminService:
         )
         if assessment.level == "note":
             await self._log_member_risk_note(after.guild, compiled, after, assessment)
+
+    async def handle_role_update(self, before: discord.Role, after: discord.Role):
+        if not self.storage_ready or getattr(after, "guild", None) is None:
+            return
+        compiled = self.get_compiled_config(after.guild.id)
+        if not compiled.emergency_enabled:
+            return
+        before_flags = self._permission_flags_for(before, compiled)
+        after_flags = self._permission_flags_for(after, compiled)
+        gained_flags = sorted(after_flags.difference(before_flags))
+        if not gained_flags:
+            return
+        now = ge.now_utc()
+        entry = await self._find_recent_audit_entry(
+            after.guild,
+            action=discord.AuditLogAction.role_update,
+            now=now,
+            matcher=lambda item: int(getattr(getattr(item, "target", None), "id", 0) or 0) == int(after.id),
+        )
+        if entry is None:
+            return
+        actor = self._resolve_member_like(after.guild, getattr(entry, "user", None)) or getattr(entry, "user", None)
+        trusted_reason = self._trusted_actor_reason(actor, compiled)
+        if trusted_reason is not None:
+            return
+        actor_mention = getattr(actor, "mention", f"<@{getattr(actor, 'id', 0)}>")
+        await self._emit_emergency_incident(
+            after.guild,
+            compiled,
+            incident_kind="dangerous_role_escalation",
+            severity="high" if "administrator" not in gained_flags else "critical",
+            actor=actor,
+            target_role=after,
+            title="Dangerous Role Escalation",
+            summary="Babblebox saw a role gain dangerous permissions and opened an emergency review incident.",
+            trust_violation="Untrusted actor escalated a role into a protected or dangerous permission class.",
+            evidence_codes=["dangerous_role_escalation", *gained_flags[:4]],
+            evidence_lines=[
+                f"{actor_mention} updated {after.mention}.",
+                "New dangerous permissions: "
+                + ", ".join(EMERGENCY_PERMISSION_LABELS.get(flag, flag.replace('_', ' ').title()) for flag in gained_flags[:5]),
+                "Babblebox does not auto-revert role permission edits in this compact phase.",
+            ],
+            recommended_actions=[
+                "Review the role permissions and affected staff immediately.",
+                "Remove or edit the role manually if the escalation was unauthorized.",
+            ],
+        )
+
+    async def handle_role_delete(self, role: discord.Role):
+        if not self.storage_ready or getattr(role, "guild", None) is None:
+            return
+        compiled = self.get_compiled_config(role.guild.id)
+        if not compiled.emergency_enabled:
+            return
+        now = ge.now_utc()
+        entry = await self._find_recent_audit_entry(
+            role.guild,
+            action=discord.AuditLogAction.role_delete,
+            now=now,
+            matcher=lambda item: int(getattr(getattr(item, "target", None), "id", 0) or 0) == int(role.id),
+        )
+        if entry is None:
+            return
+        actor = self._resolve_member_like(role.guild, getattr(entry, "user", None)) or getattr(entry, "user", None)
+        if self._trusted_actor_reason(actor, compiled) is not None:
+            return
+        now_ts = asyncio.get_running_loop().time()
+        burst_count, distinct_targets = self._record_emergency_action(
+            role.guild.id,
+            int(getattr(actor, "id", 0) or 0) or None,
+            "role_delete",
+            target_id=role.id,
+            aux_id=None,
+            now=now_ts,
+        )
+        if burst_count < compiled.emergency_role_delete_threshold:
+            return
+        await self._emit_emergency_incident(
+            role.guild,
+            compiled,
+            incident_kind="role_delete_burst",
+            severity="high",
+            actor=actor,
+            target_role=role,
+            title="Suspicious Role Deletion Burst",
+            summary="Babblebox saw repeated role deletions from an untrusted actor and grouped them into one emergency incident.",
+            trust_violation="Untrusted actor crossed destructive role-delete thresholds.",
+            evidence_codes=["role_delete_burst", "untrusted_actor"],
+            evidence_lines=[
+                f"{burst_count} role deletions by <@{getattr(actor, 'id', 0)}> inside 2 minutes.",
+                f"Distinct deleted roles in window: {distinct_targets}.",
+            ],
+            recommended_actions=[
+                "Review the deleted roles and the actor account immediately.",
+            ],
+        )
+
+    async def handle_channel_delete(self, channel: discord.abc.GuildChannel):
+        if not self.storage_ready or getattr(channel, "guild", None) is None:
+            return
+        compiled = self.get_compiled_config(channel.guild.id)
+        if not compiled.emergency_enabled:
+            return
+        if int(getattr(channel, "id", 0) or 0) in compiled.channel_whitelist_ids:
+            return
+        now = ge.now_utc()
+        entry = await self._find_recent_audit_entry(
+            channel.guild,
+            action=discord.AuditLogAction.channel_delete,
+            now=now,
+            matcher=lambda item: int(getattr(getattr(item, "target", None), "id", 0) or 0) == int(channel.id),
+        )
+        if entry is None:
+            return
+        actor = self._resolve_member_like(channel.guild, getattr(entry, "user", None)) or getattr(entry, "user", None)
+        if self._trusted_actor_reason(actor, compiled) is not None:
+            return
+        now_ts = asyncio.get_running_loop().time()
+        burst_count, distinct_targets = self._record_emergency_action(
+            channel.guild.id,
+            int(getattr(actor, "id", 0) or 0) or None,
+            "channel_delete",
+            target_id=channel.id,
+            aux_id=None,
+            now=now_ts,
+        )
+        if burst_count < compiled.emergency_channel_delete_threshold:
+            return
+        await self._emit_emergency_incident(
+            channel.guild,
+            compiled,
+            incident_kind="channel_delete_burst",
+            severity="high",
+            actor=actor,
+            target_channel=channel,
+            title="Suspicious Channel Deletion Burst",
+            summary="Babblebox saw repeated channel deletions from an untrusted actor and grouped them into one emergency incident.",
+            trust_violation="Untrusted actor crossed destructive channel-delete thresholds.",
+            evidence_codes=["channel_delete_burst", "untrusted_actor"],
+            evidence_lines=[
+                f"{burst_count} channel deletions by <@{getattr(actor, 'id', 0)}> inside 2 minutes.",
+                f"Distinct deleted channels in window: {distinct_targets}.",
+            ],
+            recommended_actions=[
+                "Review the deleted channels and the actor account immediately.",
+            ],
+        )
+
+    async def handle_webhooks_update(self, channel: discord.abc.GuildChannel):
+        if not self.storage_ready or getattr(channel, "guild", None) is None:
+            return
+        compiled = self.get_compiled_config(channel.guild.id)
+        if not compiled.emergency_enabled:
+            return
+        if int(getattr(channel, "id", 0) or 0) in compiled.channel_whitelist_ids:
+            return
+        now = ge.now_utc()
+        entries: list[Any] = []
+        for action in (discord.AuditLogAction.webhook_create, discord.AuditLogAction.webhook_update, discord.AuditLogAction.webhook_delete):
+            entries.extend(await self._iter_audit_entries(channel.guild, action=action))
+        matched = None
+        for entry in entries:
+            if not self._audit_entry_is_fresh(entry, now=now):
+                continue
+            target_channel = getattr(getattr(entry, "target", None), "channel", None)
+            target_channel_id = getattr(target_channel, "id", None) or getattr(getattr(entry, "extra", None), "channel", None)
+            if isinstance(target_channel_id, int) and int(target_channel_id) != int(channel.id):
+                continue
+            matched = entry
+            break
+        if matched is None:
+            return
+        actor = self._resolve_member_like(channel.guild, getattr(matched, "user", None)) or getattr(matched, "user", None)
+        if self._trusted_actor_reason(actor, compiled) is not None:
+            return
+        now_ts = asyncio.get_running_loop().time()
+        burst_count, _distinct_targets = self._record_emergency_action(
+            channel.guild.id,
+            int(getattr(actor, "id", 0) or 0) or None,
+            "webhook_churn",
+            target_id=channel.id,
+            aux_id=None,
+            now=now_ts,
+        )
+        if burst_count < compiled.emergency_webhook_churn_threshold:
+            return
+        await self._emit_emergency_incident(
+            channel.guild,
+            compiled,
+            incident_kind="webhook_churn",
+            severity="high",
+            actor=actor,
+            target_channel=channel,
+            title="Suspicious Webhook Churn",
+            summary="Babblebox saw repeated webhook changes from an untrusted actor and grouped them into one emergency incident.",
+            trust_violation="Untrusted actor crossed webhook churn thresholds.",
+            evidence_codes=["webhook_churn", "untrusted_actor"],
+            evidence_lines=[
+                f"{burst_count} webhook changes by <@{getattr(actor, 'id', 0)}> inside 2 minutes.",
+                f"Channel in scope: <#{channel.id}>.",
+            ],
+            recommended_actions=[
+                "Review recent webhooks and webhook tokens immediately.",
+            ],
+        )
 
     async def handle_message(self, message: discord.Message):
         if not self.storage_ready or message.guild is None or message.author.bot or message.webhook_id is not None:
@@ -4108,9 +5479,15 @@ class AdminService:
         if not self.storage_ready:
             return False
         now = ge.now_utc()
+        self._prune_runtime_state(now=asyncio.get_running_loop().time())
         run_context = "startup_resume" if self._startup_resume_pending else "scheduled"
         processed = False
         if await self.store.prune_expired_ban_candidates(now, limit=200):
+            processed = True
+        if await self.store.prune_emergency_incidents(
+            now - timedelta(seconds=EMERGENCY_INCIDENT_TTL_SECONDS),
+            limit=200,
+        ):
             processed = True
         if await self._process_due_followups(now):
             processed = True

@@ -26,7 +26,11 @@ class FakePermissions:
     def __init__(self, **overrides):
         defaults = {
             "manage_roles": False,
+            "manage_channels": False,
+            "manage_webhooks": False,
+            "manage_messages": False,
             "kick_members": False,
+            "view_audit_log": True,
             "view_channel": True,
             "send_messages": True,
             "embed_links": True,
@@ -42,11 +46,21 @@ class FakePermissions:
 
 
 class FakeRole:
-    def __init__(self, role_id: int, *, position: int = 1, mentionable: bool = True):
+    def __init__(self, role_id: int, *, position: int = 1, mentionable: bool = True, permissions: FakePermissions | None = None):
         self.id = role_id
         self.position = position
         self.mention = f"<@&{role_id}>"
         self.mentionable = mentionable
+        self.permissions = permissions or FakePermissions()
+
+
+class FakeAuditLogEntry:
+    def __init__(self, *, action, user, target, extra=None, created_at=None):
+        self.action = action
+        self.user = user
+        self.target = target
+        self.extra = extra
+        self.created_at = created_at or ge.now_utc()
 
 
 class FakeSentMessage:
@@ -145,12 +159,25 @@ class FakeGuild:
         self.members: dict[int, FakeMember] = {}
         self.roles: dict[int, FakeRole] = {}
         self.channels: dict[int, FakeChannel] = {}
+        self.audit_entries: list[FakeAuditLogEntry] = []
         self.me = FakeMember(
             999,
             self,
             roles=[FakeRole(900, position=100)],
             top_role=FakeRole(900, position=100),
-            guild_permissions=FakePermissions(manage_roles=True, kick_members=True, view_channel=True, send_messages=True, embed_links=True, mention_everyone=True),
+            guild_permissions=FakePermissions(
+                manage_roles=True,
+                manage_channels=True,
+                manage_webhooks=True,
+                manage_messages=True,
+                kick_members=True,
+                ban_members=True,
+                view_audit_log=True,
+                view_channel=True,
+                send_messages=True,
+                embed_links=True,
+                mention_everyone=True,
+            ),
         )
 
     def get_member(self, user_id: int):
@@ -163,6 +190,16 @@ class FakeGuild:
 
     def get_channel(self, channel_id: int):
         return self.channels.get(channel_id)
+
+    async def audit_logs(self, *, limit=None, action=None):
+        count = 0
+        for entry in list(self.audit_entries):
+            if action is not None and entry.action != action:
+                continue
+            yield entry
+            count += 1
+            if limit is not None and count >= limit:
+                break
 
 
 class FakeBot:
@@ -188,6 +225,14 @@ class AdminStoreNormalizationTests(unittest.TestCase):
         self.assertFalse(config["member_risk_enabled"])
         self.assertEqual(config["member_risk_mode"], "review")
         self.assertEqual(default_admin_config(10)["member_risk_mode"], "review")
+
+    def test_admin_config_defaults_emergency_to_disabled_review(self):
+        config = normalize_admin_config(10, {})
+        self.assertFalse(config["emergency_enabled"])
+        self.assertEqual(config["emergency_mode"], "review")
+        self.assertFalse(config["emergency_strict_auto_containment"])
+        self.assertEqual(config["emergency_ping_mode"], "high_only")
+        self.assertGreaterEqual(len(config["enabled_dangerous_permission_flags"]), 1)
 
     def test_verification_state_normalization_keeps_review_metadata(self):
         normalized = normalize_verification_state(
@@ -468,6 +513,19 @@ class AdminServiceTests(unittest.IsolatedAsyncioTestCase):
             ok, _ = await self.service.set_logs_config(self.guild.id, channel_id=self.log_channel.id, alert_role_id=None)
             self.assertTrue(ok)
         ok, _ = await self.service.set_member_risk_config(self.guild.id, enabled=True, mode=mode)
+        self.assertTrue(ok)
+
+    async def _configure_emergency(self, *, with_logs: bool = False, mode: str = "review", strict: bool = False):
+        if with_logs:
+            ok, _ = await self.service.set_logs_config(self.guild.id, channel_id=self.log_channel.id, alert_role_id=None)
+            self.assertTrue(ok)
+        ok, _ = await self.service.set_emergency_config(
+            self.guild.id,
+            enabled=True,
+            mode=mode,
+            strict_auto_containment=strict,
+            ping_mode="high_only",
+        )
         self.assertTrue(ok)
 
     def _member_risk_decision(
@@ -2316,3 +2374,311 @@ class AdminServiceTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(assessment.level, "note")
+
+    async def test_untrusted_dangerous_role_grant_auto_reverts_when_strict_enabled(self):
+        await self._configure_emergency(with_logs=True, mode="contain", strict=True)
+        dangerous_role = FakeRole(501, position=20, permissions=FakePermissions(administrator=True))
+        self.guild.roles[dangerous_role.id] = dangerous_role
+        actor = FakeMember(2, self.guild, roles=[], top_role=FakeRole(30, position=30), guild_permissions=FakePermissions(manage_guild=True))
+        target_before = FakeMember(42, self.guild, roles=[], top_role=FakeRole(5, position=5))
+        target_after = FakeMember(42, self.guild, roles=[dangerous_role], top_role=dangerous_role)
+        self.guild.members[actor.id] = actor
+        self.guild.members[target_after.id] = target_after
+        self.guild.audit_entries.insert(
+            0,
+            FakeAuditLogEntry(
+                action=discord.AuditLogAction.member_role_update,
+                user=actor,
+                target=target_after,
+            ),
+        )
+
+        await self.service.handle_member_update(target_before, target_after)
+
+        self.assertNotIn(dangerous_role, target_after.roles)
+        incidents = await self.store.list_emergency_incidents_for_guild(self.guild.id)
+        self.assertEqual(len(incidents), 1)
+        self.assertEqual(incidents[0]["incident_kind"], "dangerous_role_grant")
+        self.assertIn("Removed", incidents[0]["action_taken"])
+        self.assertEqual(len(self.log_channel.sent), 1)
+
+    async def test_trusted_actor_dangerous_role_grant_stays_safe(self):
+        await self._configure_emergency(with_logs=True, mode="contain", strict=True)
+        dangerous_role = FakeRole(502, position=20, permissions=FakePermissions(administrator=True))
+        self.guild.roles[dangerous_role.id] = dangerous_role
+        actor = FakeMember(3, self.guild, roles=[], top_role=FakeRole(30, position=30), guild_permissions=FakePermissions(manage_guild=True))
+        target_before = FakeMember(43, self.guild, roles=[], top_role=FakeRole(5, position=5))
+        target_after = FakeMember(43, self.guild, roles=[dangerous_role], top_role=dangerous_role)
+        self.guild.members[actor.id] = actor
+        self.guild.members[target_after.id] = target_after
+        ok, _ = await self.service.set_emergency_trust(self.guild.id, field="trusted_actor_user_ids", target_id=actor.id, enabled=True)
+        self.assertTrue(ok)
+        self.guild.audit_entries.insert(
+            0,
+            FakeAuditLogEntry(
+                action=discord.AuditLogAction.member_role_update,
+                user=actor,
+                target=target_after,
+            ),
+        )
+
+        await self.service.handle_member_update(target_before, target_after)
+
+        incidents = await self.store.list_emergency_incidents_for_guild(self.guild.id)
+        self.assertEqual(incidents, [])
+        self.assertIn(dangerous_role, target_after.roles)
+
+    async def test_allowlisted_target_dangerous_role_grant_stays_safe(self):
+        await self._configure_emergency(with_logs=True, mode="contain", strict=True)
+        dangerous_role = FakeRole(5021, position=20, permissions=FakePermissions(administrator=True))
+        self.guild.roles[dangerous_role.id] = dangerous_role
+        actor = FakeMember(31, self.guild, roles=[], top_role=FakeRole(30, position=30), guild_permissions=FakePermissions(manage_guild=True))
+        target_before = FakeMember(431, self.guild, roles=[], top_role=FakeRole(5, position=5))
+        target_after = FakeMember(431, self.guild, roles=[dangerous_role], top_role=dangerous_role)
+        self.guild.members[actor.id] = actor
+        self.guild.members[target_after.id] = target_after
+        ok, _ = await self.service.set_emergency_trust(
+            self.guild.id,
+            field="allowlisted_target_user_ids",
+            target_id=target_after.id,
+            enabled=True,
+        )
+        self.assertTrue(ok)
+        self.guild.audit_entries.insert(
+            0,
+            FakeAuditLogEntry(
+                action=discord.AuditLogAction.member_role_update,
+                user=actor,
+                target=target_after,
+            ),
+        )
+
+        await self.service.handle_member_update(target_before, target_after)
+
+        incidents = await self.store.list_emergency_incidents_for_guild(self.guild.id)
+        self.assertEqual(incidents, [])
+        self.assertIn(dangerous_role, target_after.roles)
+
+    async def test_non_admin_dangerous_role_grant_still_auto_reverts(self):
+        await self._configure_emergency(with_logs=True, mode="contain", strict=True)
+        dangerous_role = FakeRole(
+            5022,
+            position=20,
+            permissions=FakePermissions(manage_roles=True, ban_members=True),
+        )
+        self.guild.roles[dangerous_role.id] = dangerous_role
+        actor = FakeMember(32, self.guild, roles=[], top_role=FakeRole(30, position=30), guild_permissions=FakePermissions(manage_roles=True))
+        target_before = FakeMember(432, self.guild, roles=[], top_role=FakeRole(5, position=5))
+        target_after = FakeMember(432, self.guild, roles=[dangerous_role], top_role=dangerous_role)
+        self.guild.members[actor.id] = actor
+        self.guild.members[target_after.id] = target_after
+        self.guild.audit_entries.insert(
+            0,
+            FakeAuditLogEntry(
+                action=discord.AuditLogAction.member_role_update,
+                user=actor,
+                target=target_after,
+            ),
+        )
+
+        await self.service.handle_member_update(target_before, target_after)
+
+        self.assertNotIn(dangerous_role, target_after.roles)
+        incidents = await self.store.list_emergency_incidents_for_guild(self.guild.id)
+        self.assertEqual(len(incidents), 1)
+        self.assertIn("Manage Roles", incidents[0]["evidence_lines"][1])
+
+    async def test_role_permission_escalation_opens_review_incident(self):
+        await self._configure_emergency(with_logs=True, mode="review", strict=False)
+        actor = FakeMember(4, self.guild, roles=[], top_role=FakeRole(30, position=30), guild_permissions=FakePermissions(manage_roles=True))
+        before = FakeRole(503, position=15, permissions=FakePermissions())
+        after = FakeRole(503, position=15, permissions=FakePermissions(administrator=True, manage_roles=True))
+        self.guild.members[actor.id] = actor
+        self.guild.roles[after.id] = after
+        setattr(before, "guild", self.guild)
+        setattr(after, "guild", self.guild)
+        self.guild.audit_entries.insert(
+            0,
+            FakeAuditLogEntry(
+                action=discord.AuditLogAction.role_update,
+                user=actor,
+                target=after,
+            ),
+        )
+
+        await self.service.handle_role_update(before, after)
+
+        incidents = await self.store.list_emergency_incidents_for_guild(self.guild.id)
+        self.assertEqual(len(incidents), 1)
+        self.assertEqual(incidents[0]["incident_kind"], "dangerous_role_escalation")
+        self.assertIsNone(incidents[0]["action_taken"])
+
+    async def test_kick_burst_groups_by_actor(self):
+        await self._configure_emergency(with_logs=True, mode="review", strict=False)
+        actor = FakeMember(5, self.guild, roles=[], top_role=FakeRole(30, position=30), guild_permissions=FakePermissions(kick_members=True))
+        self.guild.members[actor.id] = actor
+        for offset in range(4):
+            target = FakeMember(600 + offset, self.guild, roles=[], top_role=FakeRole(5, position=5))
+            self.guild.members[target.id] = target
+            self.guild.audit_entries.insert(
+                0,
+                FakeAuditLogEntry(
+                    action=discord.AuditLogAction.kick,
+                    user=actor,
+                    target=target,
+                ),
+            )
+            await self.service.handle_member_remove(target)
+
+        incidents = await self.store.list_emergency_incidents_for_guild(self.guild.id)
+        kick_incidents = [record for record in incidents if record["incident_kind"] == "kick_burst"]
+        self.assertEqual(len(kick_incidents), 1)
+        self.assertGreaterEqual(kick_incidents[0]["event_count"], 1)
+        self.assertEqual(len(self.log_channel.sent), 1)
+
+    async def test_untrusted_bot_add_opens_review_incident(self):
+        await self._configure_emergency(with_logs=True, mode="review", strict=False)
+        actor = FakeMember(6, self.guild, roles=[], top_role=FakeRole(30, position=30), guild_permissions=FakePermissions(manage_guild=True))
+        added_bot = FakeMember(700, self.guild, roles=[], top_role=FakeRole(5, position=5), bot=True)
+        self.guild.members[actor.id] = actor
+        self.guild.members[added_bot.id] = added_bot
+        self.guild.audit_entries.insert(
+            0,
+            FakeAuditLogEntry(
+                action=discord.AuditLogAction.bot_add,
+                user=actor,
+                target=added_bot,
+            ),
+        )
+
+        await self.service.handle_member_join(added_bot)
+
+        incidents = await self.store.list_emergency_incidents_for_guild(self.guild.id)
+        self.assertEqual(len(incidents), 1)
+        self.assertEqual(incidents[0]["incident_kind"], "unauthorized_bot_add")
+        self.assertEqual(incidents[0]["reversible_action"], "kick_added_bot")
+
+    async def test_revert_grant_review_action_resolves_incident(self):
+        await self._configure_emergency(with_logs=True, mode="review", strict=False)
+        dangerous_role = FakeRole(702, position=20, permissions=FakePermissions(administrator=True))
+        self.guild.roles[dangerous_role.id] = dangerous_role
+        actor = FakeMember(61, self.guild, roles=[], top_role=FakeRole(30, position=30), guild_permissions=FakePermissions(manage_guild=True))
+        moderator = FakeMember(62, self.guild, roles=[], top_role=FakeRole(30, position=30), guild_permissions=FakePermissions(manage_guild=True))
+        target_before = FakeMember(703, self.guild, roles=[], top_role=FakeRole(5, position=5))
+        target_after = FakeMember(703, self.guild, roles=[dangerous_role], top_role=dangerous_role)
+        self.guild.members[actor.id] = actor
+        self.guild.members[moderator.id] = moderator
+        self.guild.members[target_after.id] = target_after
+        self.guild.audit_entries.insert(
+            0,
+            FakeAuditLogEntry(
+                action=discord.AuditLogAction.member_role_update,
+                user=actor,
+                target=target_after,
+            ),
+        )
+
+        await self.service.handle_member_update(target_before, target_after)
+
+        incident = (await self.store.list_emergency_incidents_for_guild(self.guild.id))[0]
+        self.assertEqual(incident["reversible_action"], "revert_grant")
+        self.assertIn(dangerous_role, target_after.roles)
+
+        ok, _message, updated = await self.service.handle_emergency_incident_action(
+            guild_id=self.guild.id,
+            incident_key=str(incident["incident_key"]),
+            version=int(incident["review_version"]),
+            action="revert_grant",
+            actor=moderator,
+        )
+
+        self.assertTrue(ok)
+        self.assertIsNotNone(updated)
+        self.assertEqual(updated["status"], "resolved")
+        self.assertNotIn(dangerous_role, target_after.roles)
+        self.assertIn("Removed", updated["action_taken"])
+
+    async def test_channel_delete_burst_opens_incident(self):
+        await self._configure_emergency(with_logs=True, mode="review", strict=False)
+        ok, _ = await self.service.set_emergency_limits(self.guild.id, channel_delete_threshold=1)
+        self.assertTrue(ok)
+        actor = FakeMember(71, self.guild, roles=[], top_role=FakeRole(30, position=30), guild_permissions=FakePermissions(manage_channels=True))
+        channel = FakeChannel(801)
+        channel.guild = self.guild
+        self.guild.members[actor.id] = actor
+        self.guild.channels[channel.id] = channel
+        self.guild.audit_entries.insert(
+            0,
+            FakeAuditLogEntry(
+                action=discord.AuditLogAction.channel_delete,
+                user=actor,
+                target=channel,
+            ),
+        )
+
+        await self.service.handle_channel_delete(channel)
+
+        incidents = await self.store.list_emergency_incidents_for_guild(self.guild.id)
+        self.assertEqual(len(incidents), 1)
+        self.assertEqual(incidents[0]["incident_kind"], "channel_delete_burst")
+
+    async def test_channel_whitelist_suppresses_webhook_churn_incident(self):
+        await self._configure_emergency(with_logs=True, mode="review", strict=False)
+        ok, _ = await self.service.set_emergency_limits(self.guild.id, webhook_churn_threshold=1)
+        self.assertTrue(ok)
+        actor = FakeMember(72, self.guild, roles=[], top_role=FakeRole(30, position=30), guild_permissions=FakePermissions(manage_webhooks=True))
+        channel = FakeChannel(802)
+        channel.guild = self.guild
+        self.guild.members[actor.id] = actor
+        self.guild.channels[channel.id] = channel
+        ok, _ = await self.service.set_emergency_trust(
+            self.guild.id,
+            field="channel_whitelist_ids",
+            target_id=channel.id,
+            enabled=True,
+        )
+        self.assertTrue(ok)
+        self.guild.audit_entries.insert(
+            0,
+            FakeAuditLogEntry(
+                action=discord.AuditLogAction.webhook_create,
+                user=actor,
+                target=types.SimpleNamespace(channel=channel),
+            ),
+        )
+
+        await self.service.handle_webhooks_update(channel)
+
+        incidents = await self.store.list_emergency_incidents_for_guild(self.guild.id)
+        self.assertEqual(incidents, [])
+
+    async def test_run_sweep_prunes_stale_emergency_incidents(self):
+        await self._configure_emergency(with_logs=True, mode="review", strict=False)
+        actor = FakeMember(73, self.guild, roles=[], top_role=FakeRole(30, position=30), guild_permissions=FakePermissions(manage_guild=True))
+        added_bot = FakeMember(803, self.guild, roles=[], top_role=FakeRole(5, position=5), bot=True)
+        self.guild.members[actor.id] = actor
+        self.guild.members[added_bot.id] = added_bot
+        self.guild.audit_entries.insert(
+            0,
+            FakeAuditLogEntry(
+                action=discord.AuditLogAction.bot_add,
+                user=actor,
+                target=added_bot,
+            ),
+        )
+
+        await self.service.handle_member_join(added_bot)
+
+        incident = (await self.store.list_emergency_incidents_for_guild(self.guild.id))[0]
+        stale_incident = dict(incident)
+        stale_time = serialize_datetime(ge.now_utc() - timedelta(days=2))
+        stale_incident["updated_at"] = stale_time
+        stale_incident["opened_at"] = stale_time
+        stale_incident["resolved_at"] = stale_time
+        stale_incident["status"] = "resolved"
+        await self.store.upsert_emergency_incident(stale_incident)
+
+        processed = await self.service._run_sweep()
+
+        self.assertTrue(processed)
+        self.assertEqual(await self.store.list_emergency_incidents_for_guild(self.guild.id), [])
