@@ -950,7 +950,7 @@ class AdminCog(commands.Cog):
                 f"Enabled: **{'Yes' if config['member_risk_enabled'] else 'No'}**\n"
                 f"Mode: **{MEMBER_RISK_MODE_LABELS.get(config['member_risk_mode'], config['member_risk_mode'].title())}**\n"
                 "Weak profile signals only add suspicion.\n"
-                "Review and kick decisions require risky message evidence, with newcomer first-link or campaign context acting only as private multipliers."
+                "Review and kick decisions require risky message evidence, with newcomer, join-wave, and campaign context acting only as private multipliers."
             ),
             inline=False,
         )
@@ -981,7 +981,7 @@ class AdminCog(commands.Cog):
         counts = await self.service.get_counts(guild_id)
         embed = discord.Embed(
             title="Suspicious-Member Review",
-            description="Babblebox combines bounded account suspicion with locally flagged risky messages to create a private review lane for likely scammer accounts.",
+            description="Babblebox combines bounded account suspicion with locally flagged risky messages to create a private review lane for likely scammer or raid accounts.",
             color=ge.EMBED_THEME["warning"],
         )
         embed.add_field(
@@ -997,7 +997,7 @@ class AdminCog(commands.Cog):
             name="Signals",
             value=(
                 "Uses compact account-age, avatar-state, and display-name risk hints only as suspicion multipliers.\n"
-                "Babblebox only escalates when those hints combine with risky link, scam-copy, newcomer first-link, or fresh-campaign evidence.\n"
+                "Babblebox only escalates when those hints combine with risky link, scam-copy, spam / raid signals, newcomer first-link, join-wave pressure, or fresh-campaign evidence.\n"
                 "Discord profile bios or about-me text are not inspected in the current runtime."
             ),
             inline=False,

@@ -1765,6 +1765,46 @@ class AdminServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(queue)
         self.assertEqual(self.log_channel.sent[0]["embed"].title, "Member Risk Review Queue")
 
+    async def test_member_risk_spam_raid_context_reuses_private_review_queue(self):
+        await self._configure_member_risk(with_logs=True, mode="review")
+        member = FakeMember(
+            2035,
+            self.guild,
+            roles=[],
+            top_role=FakeRole(5, position=5),
+            created_at=ge.now_utc() - timedelta(hours=4),
+            joined_at=ge.now_utc() - timedelta(minutes=10),
+            avatar=None,
+            display_name="Support Desk",
+        )
+        self.guild.members[member.id] = member
+        message = types.SimpleNamespace(guild=self.guild, author=member, webhook_id=None)
+
+        await self.service.handle_member_risk_message(
+            message,
+            self._member_risk_decision(
+                "spam_high",
+                "raid_join_wave",
+                "raid_fresh_join_wave",
+                "raid_pattern_cluster",
+                "newcomer_early_message",
+                message_codes=("spam_high",),
+                context_codes=("raid_join_wave", "raid_fresh_join_wave", "raid_pattern_cluster", "newcomer_early_message"),
+                match_class="spam_mention_flood",
+                confidence="high",
+            ),
+        )
+
+        record = await self.store.fetch_member_risk_state(self.guild.id, member.id)
+        queue = await self.store.fetch_member_risk_review_queue(self.guild.id)
+        self.assertIsNotNone(record)
+        self.assertEqual(record["latest_message_basis"], "Mention flood")
+        self.assertEqual(record["latest_message_confidence"], "high")
+        self.assertTrue(record["review_pending"])
+        self.assertIsNotNone(queue)
+        self.assertEqual(self.log_channel.sent[0]["embed"].title, "Member Risk Review Queue")
+        self.assertIn("message, join-wave, and account signals", self.log_channel.sent[0]["embed"].description)
+
     async def test_member_risk_review_persists_latest_message_metadata_and_updates_event_count(self):
         await self._configure_member_risk(with_logs=True, mode="review")
         member = FakeMember(

@@ -162,12 +162,12 @@ HELP_PAGES: list[dict[str, str]] = [
         "emoji": "\U0001f6e1\ufe0f",
         "description": "Optional server-side protection and compact admin automations with conservative defaults.",
         "body": (
-            "Shield can watch for privacy leaks, invite or promo abuse, malicious or scam links, adult-domain intel plus optional solicitation / DM-ad text, and a separate Severe Harm / Hate pack for real-harm abuse only.\n"
+            "Shield can watch for privacy leaks, invite or promo abuse, compact Spam / Raid patterns like duplicates, mention floods, burst abuse, and bounded join-wave pressure, malicious or scam links, adult-domain intel plus optional solicitation / DM-ad text, and a separate Severe Harm / Hate pack for real-harm abuse only.\n"
             "`/shield panel`, `/shield rules`, `/shield links`, `/shield trusted`, `/shield filters`, `/shield allowlist`, `/shield logs`, `/shield severe category`, `/shield severe term`, `/shield ai`, and `/shield test` cover the shipped admin flow.\n"
             "`/admin panel`, `/admin followup`, `/admin verification`, and `/admin sync` cover returned-after-ban follow-up roles and unverified cleanup.\n"
             "Live moderation stays off until an admin enables it, and the first enable applies a recommended non-AI baseline while Shield AI access stays owner-managed.\n"
             "Trusted Links Only now exposes its built-in trusted families and domains under `/shield trusted`, keeps Confessions link mode separate, and still lets malicious, impersonation, adult, or suspicious-link intel override local trust exceptions.\n"
-            "Repeated noisy links can stay low-confidence and log-only instead of being misread as strong promo, and bot or webhook posts stay on a more conservative scam threshold unless the evidence is genuinely strong.\n"
+            "Repeated noisy links can stay low-confidence and log-only instead of being misread as strong promo, raid-watch alerts stay deduped instead of storming the log, and bot or webhook posts stay on a more conservative scam threshold unless the evidence is genuinely strong.\n"
             "Shield AI is second-pass only, live-message-only, and owner-managed. The support server has full AI access by default, ordinary guilds stay off by default, `/shield ai` only configures review scope, and AI never punishes on its own.\n"
             "Admin lifecycle helpers stay compact: no Babblebox ban/kick command suite, no giant case archive, and no per-member task explosion."
         ),

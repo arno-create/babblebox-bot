@@ -20,7 +20,7 @@ from babblebox.shield_ai import (
 
 DEFAULT_DATABASE_URL_ENV_ORDER = ("UTILITY_DATABASE_URL", "SUPABASE_DB_URL", "DATABASE_URL")
 DEFAULT_BACKEND = "postgres"
-DEFAULT_VERSION = 6
+DEFAULT_VERSION = 7
 VALID_SCAN_MODES = {"all", "only_included"}
 VALID_SHIELD_ACTIONS = {"disabled", "detect", "log", "delete_log", "delete_escalate", "timeout_log"}
 VALID_SHIELD_SENSITIVITIES = {"low", "normal", "high"}
@@ -114,6 +114,12 @@ def default_guild_shield_config(guild_id: int | None = None) -> dict[str, Any]:
         "scam_medium_action": "log",
         "scam_high_action": "log",
         "scam_sensitivity": "normal",
+        "spam_enabled": False,
+        "spam_action": "log",
+        "spam_low_action": "log",
+        "spam_medium_action": "log",
+        "spam_high_action": "log",
+        "spam_sensitivity": "normal",
         "adult_enabled": False,
         "adult_action": "log",
         "adult_low_action": "log",
@@ -235,7 +241,7 @@ def normalize_guild_shield_config(guild_id: int, config: Any) -> dict[str, Any]:
     ):
         cleaned[field] = _clean_text_list(config.get(field))
 
-    for pack in ("privacy", "promo", "scam", "adult", "severe"):
+    for pack in ("privacy", "promo", "scam", "spam", "adult", "severe"):
         enabled_field = f"{pack}_enabled"
         action_field = f"{pack}_action"
         low_action_field = f"{pack}_low_action"
@@ -555,6 +561,12 @@ class _PostgresShieldStore(_BaseShieldStore):
                 "scam_medium_action TEXT NOT NULL DEFAULT 'log', "
                 "scam_high_action TEXT NOT NULL DEFAULT 'log', "
                 "scam_sensitivity TEXT NOT NULL DEFAULT 'normal', "
+                "spam_enabled BOOLEAN NOT NULL DEFAULT FALSE, "
+                "spam_action TEXT NOT NULL DEFAULT 'log', "
+                "spam_low_action TEXT NOT NULL DEFAULT 'log', "
+                "spam_medium_action TEXT NOT NULL DEFAULT 'log', "
+                "spam_high_action TEXT NOT NULL DEFAULT 'log', "
+                "spam_sensitivity TEXT NOT NULL DEFAULT 'normal', "
                 "adult_enabled BOOLEAN NOT NULL DEFAULT FALSE, "
                 "adult_action TEXT NOT NULL DEFAULT 'log', "
                 "adult_low_action TEXT NOT NULL DEFAULT 'log', "
@@ -610,6 +622,12 @@ class _PostgresShieldStore(_BaseShieldStore):
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS scam_low_action TEXT NOT NULL DEFAULT 'log'",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS scam_medium_action TEXT NOT NULL DEFAULT 'log'",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS scam_high_action TEXT NOT NULL DEFAULT 'log'",
+            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS spam_enabled BOOLEAN NOT NULL DEFAULT FALSE",
+            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS spam_action TEXT NOT NULL DEFAULT 'log'",
+            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS spam_low_action TEXT NOT NULL DEFAULT 'log'",
+            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS spam_medium_action TEXT NOT NULL DEFAULT 'log'",
+            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS spam_high_action TEXT NOT NULL DEFAULT 'log'",
+            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS spam_sensitivity TEXT NOT NULL DEFAULT 'normal'",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS adult_enabled BOOLEAN NOT NULL DEFAULT FALSE",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS adult_action TEXT NOT NULL DEFAULT 'log'",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS adult_low_action TEXT NOT NULL DEFAULT 'log'",
@@ -747,6 +765,12 @@ class _PostgresShieldStore(_BaseShieldStore):
                 "scam_medium_action": row["scam_medium_action"],
                 "scam_high_action": row["scam_high_action"],
                 "scam_sensitivity": row["scam_sensitivity"],
+                "spam_enabled": bool(row["spam_enabled"]) if "spam_enabled" in row else False,
+                "spam_action": row["spam_action"] if "spam_action" in row else "log",
+                "spam_low_action": row["spam_low_action"] if "spam_low_action" in row else "log",
+                "spam_medium_action": row["spam_medium_action"] if "spam_medium_action" in row else "log",
+                "spam_high_action": row["spam_high_action"] if "spam_high_action" in row else "log",
+                "spam_sensitivity": row["spam_sensitivity"] if "spam_sensitivity" in row else "normal",
                 "adult_enabled": bool(row["adult_enabled"]) if "adult_enabled" in row else False,
                 "adult_action": row["adult_action"] if "adult_action" in row else "log",
                 "adult_low_action": row["adult_low_action"] if "adult_low_action" in row else "log",
@@ -897,6 +921,7 @@ class _PostgresShieldStore(_BaseShieldStore):
                 "privacy_enabled, privacy_action, privacy_low_action, privacy_medium_action, privacy_high_action, privacy_sensitivity, "
                 "promo_enabled, promo_action, promo_low_action, promo_medium_action, promo_high_action, promo_sensitivity, "
                 "scam_enabled, scam_action, scam_low_action, scam_medium_action, scam_high_action, scam_sensitivity, "
+                "spam_enabled, spam_action, spam_low_action, spam_medium_action, spam_high_action, spam_sensitivity, "
                 "adult_enabled, adult_action, adult_low_action, adult_medium_action, adult_high_action, adult_sensitivity, adult_solicitation_enabled, adult_solicitation_excluded_channel_ids, "
                 "severe_enabled, severe_action, severe_low_action, severe_medium_action, severe_high_action, severe_sensitivity, severe_enabled_categories, severe_custom_terms, severe_removed_terms, "
                 "link_policy_mode, link_policy_action, link_policy_low_action, link_policy_medium_action, link_policy_high_action, "
@@ -909,10 +934,11 @@ class _PostgresShieldStore(_BaseShieldStore):
                 "$19, $20, $21, $22, $23, $24, "
                 "$25, $26, $27, $28, $29, $30, "
                 "$31, $32, $33, $34, $35, $36, "
-                "$37, $38, $39, $40, $41, $42, $43, $44::jsonb, "
-                "$45, $46, $47, $48, $49, $50, $51::jsonb, $52::jsonb, $53::jsonb, "
-                "$54, $55, $56, $57, $58, "
-                "$59, $60, $61::jsonb, $62, $63, $64, $65::jsonb, $66, $67, $68, timezone('utc', now())"
+                "$37, $38, $39, $40, $41, $42, "
+                "$43, $44, $45, $46, $47, $48, $49, $50::jsonb, "
+                "$51, $52, $53, $54, $55, $56, $57::jsonb, $58::jsonb, $59::jsonb, "
+                "$60, $61, $62, $63, $64, "
+                "$65, $66, $67::jsonb, $68, $69, $70, $71::jsonb, $72, $73, $74, timezone('utc', now())"
                 ") "
                 "ON CONFLICT (guild_id) DO UPDATE SET "
                 "module_enabled = EXCLUDED.module_enabled, "
@@ -950,6 +976,12 @@ class _PostgresShieldStore(_BaseShieldStore):
                 "scam_medium_action = EXCLUDED.scam_medium_action, "
                 "scam_high_action = EXCLUDED.scam_high_action, "
                 "scam_sensitivity = EXCLUDED.scam_sensitivity, "
+                "spam_enabled = EXCLUDED.spam_enabled, "
+                "spam_action = EXCLUDED.spam_action, "
+                "spam_low_action = EXCLUDED.spam_low_action, "
+                "spam_medium_action = EXCLUDED.spam_medium_action, "
+                "spam_high_action = EXCLUDED.spam_high_action, "
+                "spam_sensitivity = EXCLUDED.spam_sensitivity, "
                 "adult_enabled = EXCLUDED.adult_enabled, "
                 "adult_action = EXCLUDED.adult_action, "
                 "adult_low_action = EXCLUDED.adult_low_action, "
@@ -1020,6 +1052,12 @@ class _PostgresShieldStore(_BaseShieldStore):
             config["scam_medium_action"],
             config["scam_high_action"],
             config["scam_sensitivity"],
+            config["spam_enabled"],
+            config["spam_action"],
+            config["spam_low_action"],
+            config["spam_medium_action"],
+            config["spam_high_action"],
+            config["spam_sensitivity"],
             config["adult_enabled"],
             config["adult_action"],
             config["adult_low_action"],

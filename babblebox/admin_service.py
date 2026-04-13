@@ -97,7 +97,10 @@ MEMBER_RISK_SIGNAL_LABELS = {
     "name_mixed_script": "mixed-script display name",
     "scam_high": "high-confidence scam message",
     "scam_medium": "medium-confidence scam message",
+    "spam_high": "high-confidence spam or raid message",
+    "spam_medium": "medium-confidence spam or raid message",
     "malicious_link": "known malicious link",
+    "trusted_brand_impersonation": "trusted-brand impersonation link",
     "unknown_suspicious_link": "unknown risky link",
     "suspicious_attachment": "suspicious attachment + CTA",
     "cta_download": "download or login CTA",
@@ -105,6 +108,9 @@ MEMBER_RISK_SIGNAL_LABELS = {
     "first_message_link": "first newcomer message carried a link",
     "first_external_link": "first newcomer external link",
     "newcomer_first_messages_risky": "risky activity in first newcomer messages",
+    "raid_join_wave": "join-wave pressure",
+    "raid_fresh_join_wave": "fresh-account join-wave pressure",
+    "raid_pattern_cluster": "shared newcomer spam pattern",
     "fresh_campaign_cluster_2": "repeat fresh-account campaign",
     "fresh_campaign_cluster_3": "multi-account fresh campaign",
     "campaign_path_shape": "shared risky link shape",
@@ -150,7 +156,10 @@ MEMBER_RISK_MESSAGE_SIGNAL_CODES = frozenset(
     {
         "scam_high",
         "scam_medium",
+        "spam_high",
+        "spam_medium",
         "malicious_link",
+        "trusted_brand_impersonation",
         "unknown_suspicious_link",
         "suspicious_attachment",
         "cta_download",
@@ -169,7 +178,10 @@ MEMBER_RISK_CORE_MESSAGE_SIGNAL_CODES = frozenset(
     {
         "scam_high",
         "scam_medium",
+        "spam_high",
+        "spam_medium",
         "malicious_link",
+        "trusted_brand_impersonation",
         "unknown_suspicious_link",
         "suspicious_attachment",
         "cta_download",
@@ -203,10 +215,13 @@ MEMBER_RISK_CRITICAL_MESSAGE_AMPLIFIER_CODES = frozenset(
         "cta_download",
         "fresh_campaign_cluster_2",
         "fresh_campaign_cluster_3",
+        "raid_pattern_cluster",
         "campaign_path_shape",
         "campaign_host_family",
         "campaign_lure_reuse",
         "newcomer_first_messages_risky",
+        "raid_join_wave",
+        "raid_fresh_join_wave",
     }
 )
 
@@ -1747,7 +1762,10 @@ class AdminService:
             "name_mixed_script": 1,
             "scam_high": 4,
             "scam_medium": 3,
+            "spam_high": 4,
+            "spam_medium": 3,
             "malicious_link": 4,
+            "trusted_brand_impersonation": 4,
             "unknown_suspicious_link": 2,
             "suspicious_attachment": 2,
             "cta_download": 2,
@@ -1755,6 +1773,9 @@ class AdminService:
             "first_message_link": 1,
             "first_external_link": 1,
             "newcomer_first_messages_risky": 1,
+            "raid_join_wave": 1,
+            "raid_fresh_join_wave": 2,
+            "raid_pattern_cluster": 2,
             "fresh_campaign_cluster_2": 1,
             "fresh_campaign_cluster_3": 2,
             "campaign_path_shape": 1,
@@ -1784,9 +1805,11 @@ class AdminService:
         message_code_set = set(message_codes)
         if "malicious_link" in message_code_set:
             return "Known malicious-link intel contributed to this case."
+        if "trusted_brand_impersonation" in message_code_set:
+            return "Trusted-brand impersonation intel contributed to this case."
         if "unknown_suspicious_link" in message_code_set:
             return "An unknown risky link only escalated after combined local scam evidence."
-        if message_code_set & {"scam_high", "scam_medium", "suspicious_attachment", "cta_download"}:
+        if message_code_set & {"scam_high", "scam_medium", "spam_high", "spam_medium", "suspicious_attachment", "cta_download"}:
             return "Combined local message heuristics drove this case."
         return "This case is based on low-confidence member context only."
 
@@ -1804,6 +1827,7 @@ class AdminService:
         match_class = str(getattr(evidence, "message_match_class", "") or "").strip()
         labels = {
             "known_malicious_domain": "Known malicious domain",
+            "trusted_brand_impersonation_domain": "Trusted-brand impersonation domain",
             "scam_attachment": "Executable or archive lure",
             "scam_bait_attachment": "Scam bait + suspicious file",
             "scam_bait_link": "Scam bait + link",
@@ -1813,6 +1837,15 @@ class AdminService:
             "scam_mint_wallet_lure": "Mint or wallet lure",
             "scam_risky_unknown_link": "Risky unknown-link lure",
             "scam_shortener": "Shortened or punycode lure",
+            "spam_duplicate": "Repeated duplicate spam",
+            "spam_near_duplicate": "Repeated near-duplicate spam",
+            "spam_link_flood": "Repeated link flood",
+            "spam_invite_flood": "Repeated invite flood",
+            "spam_mention_flood": "Mention flood",
+            "spam_emoji_flood": "Emoji flood",
+            "spam_burst": "Fast burst posting",
+            "spam_low_value_noise": "Repeated low-value noise",
+            "spam_padding_noise": "Character-padding spam",
         }
         if match_class:
             return labels.get(match_class, match_class.replace("_", " ").title())
@@ -1841,7 +1874,7 @@ class AdminService:
         message_score = sum(self._member_risk_signal_weight(code) for code in (*message_codes, *context_codes))
         signal_codes = tuple(order_member_risk_signal_codes([*message_codes, *context_codes, *identity_codes]))
         level = "low"
-        has_strong_message = any(code in {"scam_high", "malicious_link"} for code in message_codes)
+        has_strong_message = any(code in {"scam_high", "spam_high", "malicious_link", "trusted_brand_impersonation"} for code in message_codes)
         has_core_message = any(code in MEMBER_RISK_CORE_MESSAGE_SIGNAL_CODES for code in message_codes)
         if message_score <= 0 or not has_core_message:
             if identity_score >= 3 and any(code in MEMBER_RISK_STRONG_IDENTITY_HINT_CODES for code in identity_codes):
@@ -2165,7 +2198,18 @@ class AdminService:
         core_message_codes = [
             code
             for code in message_codes
-            if code in {"malicious_link", "unknown_suspicious_link", "scam_high", "scam_medium", "suspicious_attachment", "cta_download"}
+            if code
+            in {
+                "malicious_link",
+                "trusted_brand_impersonation",
+                "unknown_suspicious_link",
+                "scam_high",
+                "scam_medium",
+                "spam_high",
+                "spam_medium",
+                "suspicious_attachment",
+                "cta_download",
+            }
         ]
         context_codes = [code for code in message_codes if code not in core_message_codes]
         if other_codes:
@@ -2258,7 +2302,7 @@ class AdminService:
         embed = discord.Embed(
             title="Member Risk Review Queue",
             description=(
-                "Suspicious-member cases are queued here when message and account signals combine strongly enough for private staff review."
+                "Suspicious-member cases are queued here when bounded message, join-wave, and account signals combine strongly enough for private staff review."
                 if pending_rows
                 else "No pending suspicious-member reviews remain."
             ),

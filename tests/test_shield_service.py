@@ -19,6 +19,7 @@ from babblebox.shield_service import (
     ShieldDecision,
     ShieldFeatureLinkScan,
     ShieldMatch,
+    ShieldRaidEvidence,
     ShieldService,
     _alert_content_fingerprint,
     _build_snapshot,
@@ -107,8 +108,9 @@ class FakeChannel:
 
 
 class FakeGuild:
-    def __init__(self, guild_id: int = 10):
+    def __init__(self, guild_id: int = 10, *, name: Optional[str] = None):
         self.id = guild_id
+        self.name = name or f"Guild {guild_id}"
         self.me = FakeBotMember()
 
     def get_member(self, user_id: int):
@@ -385,6 +387,47 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
     def _content_fingerprint(self, content: str, *, attachments=None) -> str:
         return _alert_content_fingerprint(_build_snapshot(content, attachments))
 
+    async def _enable_spam_pack(
+        self,
+        guild_id: int,
+        *,
+        sensitivity: str = "normal",
+        low_action: str = "log",
+        medium_action: str = "delete_log",
+        high_action: str = "delete_escalate",
+    ):
+        ok, _ = await self.service.set_module_enabled(guild_id, True)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_pack_config(
+            guild_id,
+            "spam",
+            enabled=True,
+            low_action=low_action,
+            medium_action=medium_action,
+            high_action=high_action,
+            sensitivity=sensitivity,
+        )
+        self.assertTrue(ok)
+
+    def _make_member(
+        self,
+        guild: FakeGuild,
+        user_id: int,
+        *,
+        created_delta: timedelta = timedelta(days=30),
+        joined_delta: timedelta = timedelta(days=30),
+        bot: bool = False,
+    ) -> FakeAuthor:
+        member = FakeAuthor(
+            user_id,
+            roles=[FakeRole(11, position=1)],
+            bot=bot,
+            created_at=ge.now_utc() - created_delta,
+            joined_at=ge.now_utc() - joined_delta,
+        )
+        member.guild = guild
+        return member
+
     def test_campaign_kind_labels_stay_operator_friendly(self):
         self.assertEqual(_campaign_kind_label("path_shape"), "shared risky link shape")
         self.assertEqual(_campaign_kind_label("host_family"), "shared risky host pattern")
@@ -480,7 +523,7 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("recommended non-AI baseline", message)
         config = self.service.get_config(10)
         self.assertTrue(config["module_enabled"])
-        self.assertEqual(config["baseline_version"], 1)
+        self.assertEqual(config["baseline_version"], 2)
         self.assertTrue(config["adult_solicitation_enabled"])
         for pack in ("privacy", "promo", "scam", "adult", "severe"):
             with self.subTest(pack=pack):
@@ -489,6 +532,32 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(config[f"{pack}_medium_action"], "delete_log")
                 self.assertEqual(config[f"{pack}_high_action"], "delete_log")
                 self.assertEqual(config[f"{pack}_sensitivity"], "normal")
+        self.assertTrue(config["spam_enabled"])
+        self.assertEqual(config["spam_low_action"], "log")
+        self.assertEqual(config["spam_medium_action"], "delete_log")
+        self.assertEqual(config["spam_high_action"], "delete_escalate")
+        self.assertEqual(config["spam_sensitivity"], "normal")
+
+    async def test_startup_baseline_upgrade_backfills_spam_pack_for_existing_live_guilds(self):
+        self.service.store.state["guilds"]["10"] = {
+            "module_enabled": True,
+            "baseline_version": 1,
+            "privacy_enabled": True,
+            "promo_enabled": True,
+            "scam_enabled": True,
+            "adult_enabled": True,
+            "severe_enabled": True,
+        }
+
+        changed = self.service._apply_startup_baseline_upgrades()
+
+        self.assertTrue(changed)
+        config = self.service.get_config(10)
+        self.assertEqual(config["baseline_version"], 2)
+        self.assertTrue(config["spam_enabled"])
+        self.assertEqual(config["spam_low_action"], "log")
+        self.assertEqual(config["spam_medium_action"], "delete_log")
+        self.assertEqual(config["spam_high_action"], "delete_escalate")
 
     async def test_reenable_preserves_customized_rules_after_first_enable(self):
         ok, _ = await self.service.set_pack_config(10, "severe", enabled=False, low_action="detect", medium_action="log", high_action="delete_log", sensitivity="high")
@@ -1984,6 +2053,280 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(third.timed_out)
         timeout_mock.assert_not_awaited()
 
+    async def test_identical_duplicate_spam_escalates_after_corroborated_hits(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        author = self._make_member(guild, 42)
+
+        await self._enable_spam_pack(guild.id, sensitivity="high")
+
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            decisions = [
+                await self.service.handle_message(
+                    FakeMessage(guild=guild, channel=channel, author=author, content="claim your starter pack now")
+                )
+                for _ in range(4)
+            ]
+
+        self.assertEqual(decisions[:2], [None, None])
+        self.assertIsNotNone(decisions[2])
+        self.assertEqual(decisions[2].action, "delete_log")
+        self.assertIsNotNone(decisions[3])
+        self.assertEqual(decisions[3].pack, "spam")
+        self.assertEqual(decisions[3].action, "delete_escalate")
+        self.assertTrue(decisions[3].deleted)
+        self.assertTrue({reason.match_class for reason in decisions[3].reasons}.issuperset({"spam_duplicate", "spam_near_duplicate"}))
+
+    async def test_near_duplicate_spam_detection_handles_spacing_and_punctuation_variants(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        author = self._make_member(guild, 52)
+
+        await self._enable_spam_pack(guild.id, sensitivity="normal")
+        variants = (
+            "join my stream right now!!!",
+            "join my stream right now!!",
+            "join my stream right now!",
+            "join my stream right now ?",
+            "join my stream right now...",
+        )
+
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            decisions = [
+                await self.service.handle_message(FakeMessage(guild=guild, channel=channel, author=author, content=text))
+                for text in variants
+            ]
+
+        self.assertEqual(decisions[:4], [None, None, None, None])
+        self.assertIsNotNone(decisions[4])
+        self.assertEqual(decisions[4].pack, "spam")
+        self.assertEqual(decisions[4].action, "delete_log")
+        self.assertIn("spam_near_duplicate", {reason.match_class for reason in decisions[4].reasons})
+
+    async def test_repeated_link_flood_uses_spam_pack_when_promo_is_disabled(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        author = self._make_member(guild, 62)
+
+        await self._enable_spam_pack(guild.id)
+        ok, _ = await self.service.set_pack_config(guild.id, "promo", enabled=False)
+        self.assertTrue(ok)
+
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            decisions = [
+                await self.service.handle_message(
+                    FakeMessage(guild=guild, channel=channel, author=author, content=f"https://example.com/docs/{index}")
+                )
+                for index in range(4)
+            ]
+
+        self.assertEqual(decisions[:3], [None, None, None])
+        self.assertIsNotNone(decisions[3])
+        self.assertEqual(decisions[3].pack, "spam")
+        self.assertEqual(decisions[3].action, "delete_log")
+        self.assertIn("spam_link_flood", {reason.match_class for reason in decisions[3].reasons})
+
+    async def test_repeated_invite_flood_detects_rotating_codes_in_spam_pack(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        author = self._make_member(guild, 72)
+
+        await self._enable_spam_pack(guild.id)
+        ok, _ = await self.service.set_pack_config(guild.id, "promo", enabled=False)
+        self.assertTrue(ok)
+        invites = (
+            "join https://discord.gg/alpha111",
+            "join https://discord.gg/beta222",
+            "join https://discord.gg/alpha111",
+            "join https://discord.gg/beta222",
+        )
+
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            decisions = [
+                await self.service.handle_message(FakeMessage(guild=guild, channel=channel, author=author, content=text))
+                for text in invites
+            ]
+
+        self.assertEqual(decisions[:2], [None, None])
+        self.assertIsNotNone(decisions[2])
+        self.assertIsNotNone(decisions[3])
+        self.assertEqual(decisions[3].pack, "spam")
+        self.assertEqual(decisions[3].action, "delete_escalate")
+        self.assertIn("spam_invite_flood", {reason.match_class for reason in decisions[3].reasons})
+
+    async def test_mention_flood_is_detected_without_needing_rate_history(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        author = self._make_member(guild, 82)
+
+        await self._enable_spam_pack(guild.id)
+
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            decision = await self.service.handle_message(
+                FakeMessage(
+                    guild=guild,
+                    channel=channel,
+                    author=author,
+                    content="@everyone <@1> <@2> <@3>",
+                )
+            )
+
+        self.assertIsNotNone(decision)
+        self.assertEqual(decision.pack, "spam")
+        self.assertEqual(decision.action, "delete_log")
+        self.assertIn("spam_mention_flood", {reason.match_class for reason in decision.reasons})
+
+    async def test_emoji_flood_detects_but_normal_emoji_use_stays_allowed(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        author = self._make_member(guild, 92)
+
+        await self._enable_spam_pack(guild.id)
+
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            flood = await self.service.handle_message(
+                FakeMessage(guild=guild, channel=channel, author=author, content="😀" * 20)
+            )
+            normal = await self.service.handle_message(
+                FakeMessage(guild=guild, channel=channel, author=author, content="great round 😀😀😀")
+            )
+
+        self.assertIsNotNone(flood)
+        self.assertEqual(flood.pack, "spam")
+        self.assertIn("spam_emoji_flood", {reason.match_class for reason in flood.reasons})
+        self.assertIsNone(normal)
+
+    async def test_burst_posting_detects_low_value_noise_but_not_normal_conversation(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        spammer = self._make_member(guild, 102)
+        chatter = self._make_member(guild, 103)
+
+        await self._enable_spam_pack(guild.id)
+        low_value_posts = ("lol", "lmao", "haha", "yo", "ok", "???", "bruh")
+        normal_posts = tuple(f"I think we should queue round {index} after the break." for index in range(7))
+
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            spam_decisions = [
+                await self.service.handle_message(FakeMessage(guild=guild, channel=channel, author=spammer, content=text))
+                for text in low_value_posts
+            ]
+            normal_decisions = [
+                await self.service.handle_message(FakeMessage(guild=guild, channel=channel, author=chatter, content=text))
+                for text in normal_posts
+            ]
+
+        self.assertIsNotNone(spam_decisions[-1])
+        self.assertEqual(spam_decisions[-1].pack, "spam")
+        self.assertIn("spam_burst", {reason.match_class for reason in spam_decisions[-1].reasons})
+        self.assertTrue(all(item is None for item in normal_decisions))
+
+    async def test_bot_messages_stay_conservative_for_generic_spam_signals(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        bot_author = self._make_member(guild, 112, bot=True)
+
+        await self._enable_spam_pack(guild.id, sensitivity="high")
+
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            decisions = [
+                await self.service.handle_message(
+                    FakeMessage(guild=guild, channel=channel, author=bot_author, content="claim your starter pack now")
+                )
+                for _ in range(8)
+            ]
+
+        self.assertTrue(all(item is None for item in decisions))
+
+    async def test_normal_growth_below_join_wave_threshold_stays_quiet(self):
+        guild = FakeGuild(10)
+        log_channel = FakeChannel(99, name="shield-log")
+        self.bot.register_channel(log_channel)
+
+        await self._enable_spam_pack(guild.id)
+        ok, _ = await self.service.set_log_channel(guild.id, log_channel.id)
+        self.assertTrue(ok)
+
+        for index in range(4):
+            await self.service.handle_member_join(
+                self._make_member(
+                    guild,
+                    200 + index,
+                    created_delta=timedelta(days=60),
+                    joined_delta=timedelta(minutes=1),
+                )
+            )
+
+        self.assertEqual(log_channel.sent, [])
+
+    async def test_join_wave_watch_alert_stays_compact_and_deduped(self):
+        guild = FakeGuild(10)
+        log_channel = FakeChannel(99, name="shield-log")
+        self.bot.register_channel(log_channel)
+
+        await self._enable_spam_pack(guild.id)
+        ok, _ = await self.service.set_log_channel(guild.id, log_channel.id)
+        self.assertTrue(ok)
+
+        for index in range(6):
+            evidence = await self.service.handle_member_join(
+                self._make_member(
+                    guild,
+                    300 + index,
+                    created_delta=timedelta(days=45),
+                    joined_delta=timedelta(minutes=1),
+                )
+            )
+
+        self.assertIsNotNone(evidence)
+        self.assertTrue(evidence.join_wave)
+        self.assertFalse(evidence.fresh_join_wave)
+        self.assertEqual(len(log_channel.sent), 1)
+        self.assertEqual(log_channel.sent[0]["embed"].title, "Shield Alert | Spam / Raid")
+        self.assertIn("Raid Watch", log_channel.sent[0]["embed"].fields[0].value)
+
+    async def test_fresh_join_wave_plus_shared_newcomer_spam_pattern_confirms_raid(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        admin_service = types.SimpleNamespace(handle_member_risk_message=AsyncMock())
+        self.bot.admin_service = admin_service
+
+        await self._enable_spam_pack(guild.id)
+        members = [
+            self._make_member(
+                guild,
+                400 + index,
+                created_delta=timedelta(hours=2),
+                joined_delta=timedelta(minutes=2),
+            )
+            for index in range(5)
+        ]
+        for member in members:
+            await self.service.handle_member_join(member)
+
+        content = "@everyone <@1> <@2> <@3>"
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            first = await self.service.handle_message(FakeMessage(guild=guild, channel=channel, author=members[0], content=content))
+            second = await self.service.handle_message(FakeMessage(guild=guild, channel=channel, author=members[1], content=content))
+
+        self.assertIsNotNone(first)
+        self.assertIsNotNone(second)
+        self.assertIsNotNone(first.raid_evidence)
+        self.assertIsNotNone(second.raid_evidence)
+        self.assertTrue(first.raid_evidence.join_wave)
+        self.assertTrue(first.raid_evidence.fresh_join_wave)
+        self.assertFalse(first.raid_evidence.confirmed)
+        self.assertTrue(second.raid_evidence.confirmed)
+        self.assertTrue(second.raid_evidence.confidence_lifted)
+        self.assertEqual(second.pack, "spam")
+        self.assertEqual(second.action, "delete_escalate")
+        self.assertTrue(second.deleted)
+        self.assertIn("spam_high", second.member_risk_evidence.signal_codes)
+        self.assertIn("raid_join_wave", second.member_risk_evidence.signal_codes)
+        self.assertIn("raid_fresh_join_wave", second.member_risk_evidence.signal_codes)
+        self.assertIn("raid_pattern_cluster", second.member_risk_evidence.signal_codes)
+        admin_service.handle_member_risk_message.assert_awaited()
+
     async def test_custom_wildcard_pattern_matches_safely(self):
         ok, _ = await self.service.add_custom_pattern(
             10,
@@ -2541,6 +2884,70 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
             await self.service._send_alert(second, compiled, decision, content_fingerprint=fingerprint)
 
         self.assertEqual(len(log_channel.sent), 2)
+
+    async def test_confirmed_raid_signature_dedup_suppresses_followup_alerts(self):
+        guild = FakeGuild(10)
+        public_channel = FakeChannel(20)
+        log_channel = FakeChannel(99, name="shield-log")
+        self.bot.register_channel(log_channel)
+        first_author = self._make_member(guild, 501, created_delta=timedelta(hours=2), joined_delta=timedelta(minutes=3))
+        second_author = self._make_member(guild, 502, created_delta=timedelta(hours=2), joined_delta=timedelta(minutes=2))
+        first = FakeMessage(guild=guild, channel=public_channel, author=first_author, content="@everyone <@1> <@2> <@3>")
+        second = FakeMessage(guild=guild, channel=public_channel, author=second_author, content="@everyone <@4> <@5> <@6>")
+
+        ok, _ = await self.service.set_log_channel(guild.id, log_channel.id)
+        self.assertTrue(ok)
+        compiled = self.service._compiled_configs[guild.id]
+        reason = ShieldMatch(
+            pack="spam",
+            label="Mention flood",
+            reason="The message tagged 4 accounts in one shot. Active raid corroboration raised confidence.",
+            action="delete_escalate",
+            confidence="high",
+            heuristic=True,
+            match_class="spam_mention_flood",
+        )
+        raid_evidence = ShieldRaidEvidence(
+            join_count_60s=5,
+            join_count_5m=5,
+            fresh_join_count_60s=4,
+            fresh_join_count_5m=4,
+            join_wave=True,
+            fresh_join_wave=True,
+            pattern_cluster_size=2,
+            pattern_kind="exact",
+            pattern_signature="raid-sig",
+            confirmed=True,
+            confidence_lifted=True,
+        )
+        first_decision = ShieldDecision(
+            matched=True,
+            action="delete_escalate",
+            pack="spam",
+            reasons=(reason,),
+            deleted=True,
+            raid_evidence=raid_evidence,
+            alert_evidence_signature="raid-sig",
+        )
+        second_decision = ShieldDecision(
+            matched=True,
+            action="delete_escalate",
+            pack="spam",
+            reasons=(reason,),
+            deleted=True,
+            raid_evidence=raid_evidence,
+            alert_evidence_signature="raid-sig",
+        )
+
+        await self.service._send_alert(first, compiled, first_decision, content_fingerprint="raid-a")
+        await self.service._send_alert(second, compiled, second_decision, content_fingerprint="raid-b")
+
+        self.assertEqual(len(log_channel.sent), 1)
+        embed = log_channel.sent[0]["embed"]
+        self.assertEqual(embed.title, "Shield Alert | Spam / Raid")
+        evidence_field = next(field for field in embed.fields if field.name == "Evidence Basis")
+        self.assertIn("Join wave: 5 in 60s / 5 in 5m", evidence_field.value)
+        self.assertIn("Shared newcomer pattern: 2 accounts (exact)", evidence_field.value)
 
     async def test_low_confidence_repetition_alert_is_compact_and_does_not_ping(self):
         guild = FakeGuild(10)
@@ -3245,3 +3652,25 @@ class ShieldStoreNormalizationTests(unittest.TestCase):
         self.assertEqual(config["severe_enabled_categories"], ["self_harm_encouragement", "severe_slur_abuse"])
         self.assertEqual(config["severe_custom_terms"], ["you scumlord"])
         self.assertEqual(config["severe_removed_terms"], ["retard"])
+
+    def test_normalize_state_preserves_spam_pack_fields(self):
+        store = _MemoryShieldStore()
+        snapshot = {
+            "version": 7,
+            "guilds": {
+                "123": {
+                    "spam_enabled": True,
+                    "spam_action": "delete_escalate",
+                    "spam_sensitivity": "high",
+                }
+            },
+        }
+
+        normalized = store.normalize_state(deepcopy(snapshot))
+        config = normalized["guilds"]["123"]
+
+        self.assertTrue(config["spam_enabled"])
+        self.assertEqual(config["spam_low_action"], "log")
+        self.assertEqual(config["spam_medium_action"], "delete_log")
+        self.assertEqual(config["spam_high_action"], "delete_escalate")
+        self.assertEqual(config["spam_sensitivity"], "high")

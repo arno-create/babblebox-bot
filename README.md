@@ -130,6 +130,7 @@ Babblebox is intentionally compact:
   - AFK reasons and reminders use privacy, adult, and severe checks; watch keyword setup stays privacy-only
   - privacy leak pack
   - promo / invite pack
+- compact `Spam / Raid` pack for duplicate or near-duplicate spam, mention or emoji floods, burst posting, invite or link floods, and bounded join-wave / newcomer-pattern watch signals
 - scam / malicious-link pack with local weighted scam-language scoring
 - hard local trusted-brand impersonation blocking for spoofed or lookalike safe domains
 - `Adult Links + Solicitation` pack for adult-domain intel plus optional solicitation / DM-ad text detection
@@ -331,7 +332,7 @@ Slash is the best fit for multi-option admin setup here. Prefix stays positional
 | `/shield advanced list` | `bb!shield advanced list` | Review advanced patterns |
 | `/shield test` | `bb!shield test free nitro claim now https://bit.ly/x` | Dry-run a message through Shield |
 
-Shield's live-message link policy is intentionally separate from Confessions link mode. Confessions keeps `Disabled`, `Trusted Only`, and `Allow All Safe`, while Shield keeps `Default` plus the bounded `Trusted Links Only` mode. That stricter Shield mode allows the built-in trusted pack plus admin allowlisted domains and invite codes as policy exceptions, and `/shield trusted` now exposes the built-in families, direct domains, and any local built-in disables that affect trusted-only mode. Malicious, trusted-brand impersonation, adult-domain, and strong suspicious-link intel still wins over those trust exceptions. Shield phrase allowlists stay narrower: they suppress only targeted promo or adult-solicitation text matches. The live Shield packs are `Privacy Leak`, `Promo / Invite`, `Scam / Malicious Links`, `Adult Links + Solicitation`, and `Severe Harm / Hate`; live moderation stays opt-in, the first enable applies a recommended non-AI baseline, and Shield AI remains owner-managed second-pass review only.
+Shield's live-message link policy is intentionally separate from Confessions link mode. Confessions keeps `Disabled`, `Trusted Only`, and `Allow All Safe`, while Shield keeps `Default` plus the bounded `Trusted Links Only` mode. That stricter Shield mode allows the built-in trusted pack plus admin allowlisted domains and invite codes as policy exceptions, and `/shield trusted` now exposes the built-in families, direct domains, and any local built-in disables that affect trusted-only mode. Malicious, trusted-brand impersonation, adult-domain, and strong suspicious-link intel still wins over those trust exceptions. Shield phrase allowlists stay narrower: they suppress only targeted promo or adult-solicitation text matches. The live Shield packs are `Privacy Leak`, `Promo / Invite`, `Spam / Raid`, `Scam / Malicious Links`, `Adult Links + Solicitation`, and `Severe Harm / Hate`; live moderation stays opt-in, the first enable applies a recommended non-AI baseline, and Shield AI remains owner-managed second-pass review only.
 
 Shield also now governs eligible non-chat surfaces in a bounded way. Confessions keeps its own privacy, review, and workflow logic, but shares Shield link intelligence. AFK reasons plus reminder text and public reminder delivery use fixed private privacy, adult, and severe feature-surface policies. Watch keyword setup stays privacy-only. None of those private feature checks create mod-log spam or call Shield AI.
 
@@ -463,6 +464,7 @@ Babblebox Shield is intentionally compact and conservative:
 - no full message-body retention in Postgres
 - moderator context goes to a configured log channel instead of a heavy database log
 - low-confidence repeated-link notes stay compact, no-ping, and cohort-deduped instead of repeatedly blasting the mod log
+- compact antispam uses short-lived per-user and per-guild windows for duplicate spam, burst abuse, link or invite floods, and bounded raid-watch state instead of keeping a moderation archive
 - repeated-hit escalation is in-memory and bounded
 - custom regex is intentionally not accepted; advanced mode uses safe text matching only
 - in-scope scans can cover new posts, meaningful edits, embed text, attachment labels, forwarded message snapshots, and webhook/community-post style delivery
@@ -555,6 +557,7 @@ Stored data is intentionally small:
 - compact bounded allowlists
 - escalation thresholds
 - safe advanced pattern metadata
+- the `Spam / Raid` pack config only; short-lived spam or join-wave windows stay in memory
 
 Not stored:
 

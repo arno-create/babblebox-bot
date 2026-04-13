@@ -26,6 +26,7 @@ PACK_CHOICES = [
     app_commands.Choice(name="Privacy Leak", value="privacy"),
     app_commands.Choice(name="Promo / Invite", value="promo"),
     app_commands.Choice(name="Scam / Malicious Links", value="scam"),
+    app_commands.Choice(name="Spam / Raid", value="spam"),
     app_commands.Choice(name="Adult Links + Solicitation", value="adult"),
     app_commands.Choice(name="Severe Harm / Hate", value="severe"),
 ]
@@ -128,10 +129,7 @@ class ShieldPanelView(discord.ui.View):
         for name, button in statuses.items():
             button.style = discord.ButtonStyle.primary if self.section == name else discord.ButtonStyle.secondary
         config = self.cog.service.get_config(self.guild_id)
-        ai_status = self.cog.service.get_ai_status(self.guild_id)
         self.toggle_shield_button.label = "Disable Live Moderation" if config["module_enabled"] else "Enable Live Moderation"
-        self.toggle_ai_button.label = "Owner-Managed Access"
-        self.toggle_ai_button.disabled = True
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
         if interaction.user.id != self.author_id:
@@ -209,13 +207,6 @@ class ShieldPanelView(discord.ui.View):
         ok, message = await self.cog.service.set_module_enabled(self.guild_id, not current["module_enabled"])
         await self._rerender(interaction, note=message if ok else message)
 
-    @discord.ui.button(label="Enable AI", style=discord.ButtonStyle.success, row=1)
-    async def toggle_ai_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await interaction.response.send_message(
-            "Shield AI access is owner-managed privately. This panel only shows the resolved access policy and review scope.",
-            ephemeral=True,
-        )
-
 
 class ShieldCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
@@ -235,6 +226,11 @@ class ShieldCog(commands.Cog):
     def user_can_manage_shield(self, actor: object) -> bool:
         perms = getattr(actor, "guild_permissions", None)
         return bool(getattr(perms, "administrator", False) or getattr(perms, "manage_guild", False))
+
+    @commands.Cog.listener()
+    async def on_member_join(self, member: discord.Member):
+        with contextlib.suppress(Exception):
+            await self.service.handle_member_join(member)
 
     async def _guard(self, ctx: commands.Context) -> bool:
         await defer_hybrid_response(ctx, ephemeral=True)
@@ -520,12 +516,12 @@ class ShieldCog(commands.Cog):
         delete_actions_enabled = any(
             config.get(f"{pack}_enabled")
             and bool(set(self._pack_policy_actions(config, pack)).intersection({"delete_log", "delete_escalate"}))
-            for pack in ("privacy", "promo", "scam", "adult", "severe")
+            for pack in ("privacy", "promo", "scam", "spam", "adult", "severe")
         )
         timeout_actions_enabled = any(
             config.get(f"{pack}_enabled")
             and bool(set(self._pack_policy_actions(config, pack)).intersection({"timeout_log", "delete_escalate"}))
-            for pack in ("privacy", "promo", "scam", "adult", "severe")
+            for pack in ("privacy", "promo", "scam", "spam", "adult", "severe")
         )
 
         focus_channel = self._channel_from_guild(guild, channel_id)
@@ -568,7 +564,7 @@ class ShieldCog(commands.Cog):
         ai_status = self.service.get_ai_status(guild_id)
         embed = discord.Embed(
             title="Shield Control Panel",
-            description="Shield is Babblebox's bounded immunity layer. Live-message moderation stays toggleable here, while private feature-surface checks stay always on for Confessions unsafe-link parity, AFK reasons, reminder text plus public reminder delivery, and watch keyword setup. AFK and reminder text use privacy, adult, and severe checks; watch keywords stay privacy-only. Those feature checks keep local validation first, stay private, and never trigger Shield AI.",
+            description="Shield is Babblebox's bounded immunity layer. Live-message moderation stays toggleable here, while private feature-surface checks stay always on for Confessions unsafe-link parity, AFK reasons, reminder text plus public reminder delivery, and watch keyword setup. AFK and reminder text use privacy, adult, and severe checks; watch keywords stay privacy-only. The Spam / Raid pack adds compact antispam and bounded join-wave defense without turning Babblebox into a moderation archive, and none of those feature checks trigger Shield AI.",
             color=ge.EMBED_THEME["warning"] if config["module_enabled"] else ge.EMBED_THEME["info"],
         )
         log_channel = f"<#{config['log_channel_id']}>" if config.get("log_channel_id") else "Not set"
@@ -581,12 +577,12 @@ class ShieldCog(commands.Cog):
                 f"Log channel: {log_channel}\n"
                 f"Alert role: {alert_role}\n"
                 "First enable: Babblebox applies its recommended non-AI baseline once, then leaves your edits alone.\n"
-                "Feature checks: AFK + reminders use privacy/adult/severe, Watch stays privacy-only, and Confessions shares link checks"
+                "Feature checks: AFK + reminders use privacy/adult/severe, Watch stays privacy-only, Confessions shares link checks, and Spam / Raid stays live-message only"
             ),
             inline=False,
         )
         protection_lines = []
-        for pack in ("privacy", "promo"):
+        for pack in ("privacy", "promo", "spam"):
             protection_lines.append(
                 f"**{PACK_LABELS[pack]}**\n"
                 f"Enabled: {'Yes' if config[f'{pack}_enabled'] else 'No'} | Sensitivity: {SENSITIVITY_LABELS[config[f'{pack}_sensitivity']]}\n"
@@ -624,7 +620,7 @@ class ShieldCog(commands.Cog):
             name="Storage Discipline",
             value=(
                 "Shield stores config and compact pattern metadata only.\n"
-                "Private feature-surface blocks stay private, and moderator context is delivered to the log channel instead of a heavy moderation archive."
+                "Private feature-surface blocks stay private, join-wave state stays ephemeral, and moderator context is delivered to the log channel instead of a heavy moderation archive."
             ),
             inline=False,
         )
@@ -634,11 +630,11 @@ class ShieldCog(commands.Cog):
         config = self.service.get_config(guild_id)
         embed = discord.Embed(
             title="Shield Rules",
-            description="Confidence-tier local policy. Local malicious, trusted-brand impersonation, and adult-domain matches can act hard, the adult solicitation detector stays optional and narrowly scoped, the severe pack stays targeted to real-harm abuse only, and unknown suspicious links stay link-only unless local scam signals, newcomer context, or campaign repetition justify escalation.",
+            description="Confidence-tier local policy. Local malicious, trusted-brand impersonation, and adult-domain matches can act hard, the Spam / Raid pack stays compact and bounded, the adult solicitation detector stays optional and narrowly scoped, the severe pack stays targeted to real-harm abuse only, and unknown suspicious links stay link-only unless local scam signals, newcomer context, or campaign repetition justify escalation.",
             color=ge.EMBED_THEME["info"],
         )
         pack_lines = []
-        for pack in ("privacy", "promo"):
+        for pack in ("privacy", "promo", "spam"):
             pack_lines.append(
                 f"**{PACK_LABELS[pack]}**\n"
                 f"{self._pack_policy_detail(config, pack)}"
@@ -677,6 +673,7 @@ class ShieldCog(commands.Cog):
             name="Quick Use",
             value=(
                 "`/shield rules pack:promo enabled:true low_action:log medium_action:delete_log high_action:delete_escalate sensitivity:high`\n"
+                "`/shield rules pack:spam enabled:true low_action:log medium_action:delete_log high_action:delete_escalate sensitivity:normal`\n"
                 "`/shield rules pack:adult enabled:true adult_solicitation:true low_action:log medium_action:delete_log high_action:delete_log`\n"
                 "`/shield rules pack:severe enabled:true low_action:detect medium_action:delete_log high_action:delete_log`\n"
                 "`/shield severe category category:self_harm_encouragement state:on`\n"
@@ -833,7 +830,8 @@ class ShieldCog(commands.Cog):
                 f"Local-confidence threshold: `{config['ai_min_confidence']}`\n"
                 f"Eligible packs: {self._format_ai_pack_summary(ai_status['enabled_packs'])}\n"
                 "Live-message only: Yes\n"
-                "Punishment engine: Never"
+                "Punishment engine: Never\n"
+                "Spam / Raid stays local and non-AI"
             ),
             inline=False,
         )
@@ -869,7 +867,8 @@ class ShieldCog(commands.Cog):
                 f"Log channel: {log_channel}\n"
                 f"Alert role: {alert_role}\n"
                 "Alerts are deduped so one message does not spam repeated mod notices.\n"
-                "Low-confidence repeated-link notes stay compact and do not ping the alert role."
+                "Low-confidence repeated-link notes stay compact and do not ping the alert role.\n"
+                "Raid watch notices and confirmed raid-pattern alerts are deduped per guild and signature."
             ),
             inline=False,
         )
@@ -877,7 +876,7 @@ class ShieldCog(commands.Cog):
             name="What Alerts Include",
             value=(
                 "Full alerts cover meaningful actions or clearly dangerous matches. Low-confidence heuristics are downgraded to compact notes with precise evidence wording.\n"
-                "Moderator notes include the resolved action, compact preview, optional attachment summary, and optional AI second-pass note.\n"
+                "Moderator notes include the resolved action, compact preview, optional attachment summary, optional join-wave evidence, and optional AI second-pass note.\n"
                 "Babblebox does not keep a heavy deleted-message archive in Shield storage."
             ),
             inline=False,
