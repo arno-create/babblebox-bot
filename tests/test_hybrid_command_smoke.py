@@ -18,7 +18,7 @@ from babblebox.cogs.gameplay import GameplayCog
 from babblebox.cogs.identity import IdentityCog
 from babblebox.cogs.meta import HELP_PAGES, MetaCog, build_help_embed, build_help_page_embed
 from babblebox.cogs.question_drops import QuestionDropsCog
-from babblebox.cogs.shield import ShieldCog
+from babblebox.cogs.shield import ShieldCog, ShieldPanelView
 from babblebox.cogs.utilities import AfkReturnWatchDurationSelect, UtilityCog
 from babblebox.profile_service import ProfileService
 from babblebox.profile_store import ProfileStore
@@ -476,6 +476,7 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/shield severe category", shield_page["body"])
         self.assertIn("/shield severe term", shield_page["body"])
         self.assertIn("Trusted Links Only", shield_page["body"])
+        self.assertIn("Spam / Raid", shield_page["body"])
         self.assertIn("Severe Harm / Hate", shield_page["body"])
         self.assertNotIn("experimental scam heuristics", shield_page["body"])
 
@@ -1461,12 +1462,65 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Enabled: Yes | Sensitivity: High", protection_field.value)
             self.assertIn("Low / Medium / High: `log` / `delete_log` / `delete_log`", protection_field.value)
             self.assertIn("**Promo / Invite**", protection_field.value)
+            self.assertIn("**Spam / Raid**", protection_field.value)
             self.assertIn("Enabled: Yes | Sensitivity: Normal", protection_field.value)
             self.assertIn("Low / Medium / High: `log` / `log` / `log`", protection_field.value)
             self.assertIn("**Scam / Malicious Links**", link_safety_field.value)
             self.assertIn("**Adult Links + Solicitation**", link_safety_field.value)
             self.assertIn("**Severe Harm / Hate**", link_safety_field.value)
             self.assertIn("Mode: **Default**", link_policy_field.value)
+        finally:
+            await cog.service.close()
+
+    async def test_shield_panel_view_does_not_render_dead_owner_managed_button(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
+        cog = ShieldCog(bot)
+        try:
+            cog.service.storage_ready = True
+            view = ShieldPanelView(cog, guild_id=10, author_id=1)
+
+            labels = [child.label for child in view.children if hasattr(child, "label")]
+            self.assertEqual(labels, ["Overview", "Rules", "Links", "Scope", "AI", "Logs", "Refresh", "Enable Live Moderation"])
+            self.assertNotIn("Owner-Managed Access", labels)
+        finally:
+            await cog.service.close()
+
+    async def test_shield_ai_panel_embed_keeps_owner_policy_explanation_without_extra_control(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
+        cog = ShieldCog(bot)
+        try:
+            cog.service.storage_ready = True
+
+            embed = cog.build_panel_embed(10, "ai")
+            fields = {field.name: field.value for field in embed.fields}
+
+            self.assertEqual(embed.title, "Shield AI Assist")
+            self.assertIn("owner-managed", embed.description.lower())
+            self.assertIn("Access Policy", fields)
+            self.assertIn("Provider and Routing", fields)
+            self.assertIn("Runtime Policy", fields)
+            self.assertIn("Policy source", fields["Access Policy"])
+            self.assertIn("Allowed models", fields["Access Policy"])
+            self.assertIn("Ordinary-guild default", fields["Access Policy"])
+            self.assertIn("Review scope is admin-configurable; access is owner-managed", embed.footer.text)
+        finally:
+            await cog.service.close()
+
+    async def test_shield_panel_view_section_switching_keeps_compact_button_set(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
+        cog = ShieldCog(bot)
+        try:
+            cog.service.storage_ready = True
+            view = ShieldPanelView(cog, guild_id=10, author_id=1, section="overview")
+            interaction = FakeInteraction(message=FakeMessage(channel=FakeChannel()))
+
+            await view._switch_section(interaction, "ai")
+
+            labels = [child.label for child in view.children if hasattr(child, "label")]
+            self.assertEqual(view.section, "ai")
+            self.assertEqual(labels, ["Overview", "Rules", "Links", "Scope", "AI", "Logs", "Refresh", "Enable Live Moderation"])
+            self.assertEqual(interaction.message.embed.title, "Shield AI Assist")
+            self.assertNotIn("Owner-Managed Access", labels)
         finally:
             await cog.service.close()
 

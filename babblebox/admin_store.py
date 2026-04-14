@@ -18,6 +18,21 @@ VALID_FOLLOWUP_DURATION_UNITS = {"days", "weeks", "months"}
 VALID_VERIFICATION_LOGIC = {"must_have_role", "must_not_have_role"}
 VALID_VERIFICATION_DEADLINE_ACTIONS = {"auto_kick", "review"}
 VALID_MEMBER_RISK_MODES = {"log", "review", "review_or_kick"}
+VALID_EMERGENCY_MODES = {"log", "review", "contain"}
+VALID_EMERGENCY_PING_MODES = {"never", "high_only", "all"}
+VALID_SECURITY_POSTURES = {"observe", "guard", "panic"}
+EMERGENCY_PERMISSION_FLAGS = {
+    "administrator",
+    "manage_guild",
+    "manage_roles",
+    "manage_channels",
+    "ban_members",
+    "kick_members",
+    "manage_webhooks",
+    "manage_messages",
+    "moderate_members",
+    "mention_everyone",
+}
 
 
 class AdminStorageUnavailable(RuntimeError):
@@ -54,25 +69,62 @@ def default_admin_config(guild_id: int | None = None) -> dict[str, Any]:
         "verification_exempt_bots": True,
         "member_risk_enabled": False,
         "member_risk_mode": "review",
+        "emergency_enabled": False,
+        "security_posture": "observe",
+        "emergency_mode": "review",
+        "emergency_strict_auto_containment": False,
+        "emergency_ping_mode": "high_only",
+        "control_lock_enabled": False,
+        "editor_user_ids": [],
+        "editor_role_ids": [],
+        "emergency_operator_user_ids": [],
+        "emergency_operator_role_ids": [],
+        "control_deny_user_ids": [],
+        "control_deny_role_ids": [],
+        "protected_role_ids": [],
+        "protected_role_granter_user_ids": [],
+        "protected_role_granter_role_ids": [],
+        "trusted_actor_user_ids": [],
+        "trusted_actor_role_ids": [],
+        "trusted_bot_ids": [],
+        "allowlisted_target_user_ids": [],
+        "allowlisted_target_role_ids": [],
+        "channel_whitelist_ids": [],
+        "quarantine_role_id": None,
+        "enabled_dangerous_permission_flags": sorted(EMERGENCY_PERMISSION_FLAGS),
+        "emergency_role_grant_threshold": 2,
+        "emergency_role_grant_target_threshold": 2,
+        "emergency_kick_threshold": 4,
+        "emergency_ban_threshold": 3,
+        "emergency_channel_delete_threshold": 2,
+        "emergency_role_delete_threshold": 2,
+        "emergency_webhook_churn_threshold": 3,
+        "emergency_bot_add_threshold": 1,
     }
 
 
 MEMBER_RISK_SIGNAL_PRIORITY = {
     "malicious_link": 10,
+    "trusted_brand_impersonation": 15,
     "scam_high": 20,
+    "spam_high": 25,
     "fresh_campaign_cluster_3": 30,
+    "raid_pattern_cluster": 35,
     "fresh_campaign_cluster_2": 40,
     "campaign_lure_reuse": 50,
     "campaign_path_shape": 60,
     "campaign_host_family": 65,
     "unknown_suspicious_link": 70,
     "scam_medium": 80,
+    "spam_medium": 85,
     "suspicious_attachment": 90,
     "cta_download": 100,
     "newcomer_first_messages_risky": 110,
     "first_external_link": 120,
     "first_message_link": 130,
     "newcomer_early_message": 140,
+    "raid_fresh_join_wave": 145,
+    "raid_join_wave": 146,
     "name_impersonation": 150,
     "name_mixed_script": 160,
     "account_new_1d": 170,
@@ -126,7 +178,7 @@ def _redact_database_url(dsn: str | None) -> str:
 
 
 def _clean_int_list(values: Any) -> list[int]:
-    if not isinstance(values, (list, tuple, set)):
+    if not isinstance(values, (list, tuple, set, frozenset)):
         return []
     return sorted({value for value in values if isinstance(value, int) and value > 0})
 
@@ -136,6 +188,43 @@ def _clean_optional_text(value: Any) -> str | None:
         return None
     cleaned = value.strip()
     return cleaned or None
+
+
+def _clean_text_list(values: Any, *, allowed: set[str] | None = None) -> list[str]:
+    if not isinstance(values, (list, tuple, set)):
+        return []
+    cleaned: set[str] = set()
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        normalized = value.strip().lower()
+        if not normalized:
+            continue
+        if allowed is not None and normalized not in allowed:
+            continue
+        cleaned.add(normalized)
+    return sorted(cleaned)
+
+
+def _clean_compact_text_list(values: Any, *, limit: int) -> list[str]:
+    if not isinstance(values, (list, tuple, set)):
+        return []
+    cleaned: list[str] = []
+    seen: set[str] = set()
+    for value in values:
+        if not isinstance(value, str):
+            continue
+        normalized = value.strip()
+        if not normalized:
+            continue
+        dedupe_key = normalized.casefold()
+        if dedupe_key in seen:
+            continue
+        seen.add(dedupe_key)
+        cleaned.append(normalized)
+        if len(cleaned) >= limit:
+            break
+    return cleaned
 
 
 def _parse_datetime(value: Any) -> datetime | None:
@@ -206,6 +295,53 @@ def normalize_admin_config(guild_id: int, payload: Any) -> dict[str, Any]:
     cleaned["member_risk_mode"] = (
         cleaned_member_risk_mode if cleaned_member_risk_mode in VALID_MEMBER_RISK_MODES else "review"
     )
+    cleaned["emergency_enabled"] = bool(payload.get("emergency_enabled"))
+    security_posture = str(payload.get("security_posture", "observe")).strip().lower()
+    cleaned["security_posture"] = security_posture if security_posture in VALID_SECURITY_POSTURES else "observe"
+    emergency_mode = str(payload.get("emergency_mode", "review")).strip().lower()
+    cleaned["emergency_mode"] = emergency_mode if emergency_mode in VALID_EMERGENCY_MODES else "review"
+    cleaned["emergency_strict_auto_containment"] = bool(payload.get("emergency_strict_auto_containment"))
+    emergency_ping_mode = str(payload.get("emergency_ping_mode", "high_only")).strip().lower()
+    cleaned["emergency_ping_mode"] = (
+        emergency_ping_mode if emergency_ping_mode in VALID_EMERGENCY_PING_MODES else "high_only"
+    )
+    cleaned["control_lock_enabled"] = bool(payload.get("control_lock_enabled"))
+    for field in (
+        "editor_user_ids",
+        "editor_role_ids",
+        "emergency_operator_user_ids",
+        "emergency_operator_role_ids",
+        "control_deny_user_ids",
+        "control_deny_role_ids",
+        "protected_role_ids",
+        "protected_role_granter_user_ids",
+        "protected_role_granter_role_ids",
+        "trusted_actor_user_ids",
+        "trusted_actor_role_ids",
+        "trusted_bot_ids",
+        "allowlisted_target_user_ids",
+        "allowlisted_target_role_ids",
+        "channel_whitelist_ids",
+    ):
+        cleaned[field] = _clean_int_list(payload.get(field))
+    cleaned["quarantine_role_id"] = payload.get("quarantine_role_id") if isinstance(payload.get("quarantine_role_id"), int) else None
+    enabled_flags = _clean_text_list(
+        payload.get("enabled_dangerous_permission_flags"),
+        allowed=EMERGENCY_PERMISSION_FLAGS,
+    )
+    cleaned["enabled_dangerous_permission_flags"] = enabled_flags or sorted(EMERGENCY_PERMISSION_FLAGS)
+    for field, default_value, minimum, maximum in (
+        ("emergency_role_grant_threshold", 2, 1, 20),
+        ("emergency_role_grant_target_threshold", 2, 1, 20),
+        ("emergency_kick_threshold", 4, 1, 100),
+        ("emergency_ban_threshold", 3, 1, 100),
+        ("emergency_channel_delete_threshold", 2, 1, 50),
+        ("emergency_role_delete_threshold", 2, 1, 50),
+        ("emergency_webhook_churn_threshold", 3, 1, 50),
+        ("emergency_bot_add_threshold", 1, 1, 25),
+    ):
+        value = payload.get(field)
+        cleaned[field] = value if isinstance(value, int) and minimum <= value <= maximum else default_value
     return cleaned
 
 
@@ -410,6 +546,83 @@ def normalize_verification_notification_snapshot(payload: Any) -> dict[str, Any]
     }
 
 
+def normalize_emergency_incident(payload: Any) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    guild_id = payload.get("guild_id")
+    incident_key = _clean_optional_text(payload.get("incident_key"))
+    incident_kind = _clean_optional_text(payload.get("incident_kind"))
+    severity = _clean_optional_text(payload.get("severity")) or "medium"
+    status = _clean_optional_text(payload.get("status")) or "open"
+    opened_at = _serialize_datetime(_parse_datetime(payload.get("opened_at")))
+    updated_at = _serialize_datetime(_parse_datetime(payload.get("updated_at")))
+    snooze_until = _serialize_datetime(_parse_datetime(payload.get("snooze_until")))
+    resolved_at = _serialize_datetime(_parse_datetime(payload.get("resolved_at")))
+    review_version = payload.get("review_version")
+    review_message_channel_id = payload.get("review_message_channel_id")
+    review_message_id = payload.get("review_message_id")
+    event_count = payload.get("event_count")
+    actor_id = payload.get("actor_id")
+    target_user_id = payload.get("target_user_id")
+    target_role_id = payload.get("target_role_id")
+    target_channel_id = payload.get("target_channel_id")
+    target_bot_user_id = payload.get("target_bot_user_id")
+    role_grant_role_id = payload.get("role_grant_role_id")
+    action_taken = _clean_optional_text(payload.get("action_taken"))
+    action_refused = _clean_optional_text(payload.get("action_refused"))
+    reversible_action = _clean_optional_text(payload.get("reversible_action"))
+    title = _clean_optional_text(payload.get("title"))
+    summary = _clean_optional_text(payload.get("summary"))
+    trust_violation = _clean_optional_text(payload.get("trust_violation"))
+    evidence_codes = _clean_text_list(payload.get("evidence_codes"))
+    evidence_lines = _clean_compact_text_list(payload.get("evidence_lines"), limit=8)
+    recommended_actions = _clean_compact_text_list(payload.get("recommended_actions"), limit=6)
+    metadata = payload.get("metadata")
+    if not isinstance(guild_id, int) or guild_id <= 0:
+        return None
+    if not incident_key or not incident_kind or updated_at is None:
+        return None
+    if opened_at is None:
+        opened_at = updated_at
+    if severity not in {"low", "medium", "high", "critical"}:
+        severity = "medium"
+    if status not in {"open", "acknowledged", "snoozed", "resolved"}:
+        status = "open"
+    if not isinstance(metadata, dict):
+        metadata = {}
+    return {
+        "guild_id": guild_id,
+        "incident_key": incident_key,
+        "incident_kind": incident_kind,
+        "severity": severity,
+        "status": status,
+        "opened_at": opened_at,
+        "updated_at": updated_at,
+        "snooze_until": snooze_until,
+        "resolved_at": resolved_at,
+        "review_version": review_version if isinstance(review_version, int) and review_version >= 0 else 0,
+        "review_message_channel_id": review_message_channel_id if isinstance(review_message_channel_id, int) and review_message_channel_id > 0 else None,
+        "review_message_id": review_message_id if isinstance(review_message_id, int) and review_message_id > 0 else None,
+        "event_count": event_count if isinstance(event_count, int) and event_count >= 0 else 1,
+        "actor_id": actor_id if isinstance(actor_id, int) and actor_id > 0 else None,
+        "target_user_id": target_user_id if isinstance(target_user_id, int) and target_user_id > 0 else None,
+        "target_role_id": target_role_id if isinstance(target_role_id, int) and target_role_id > 0 else None,
+        "target_channel_id": target_channel_id if isinstance(target_channel_id, int) and target_channel_id > 0 else None,
+        "target_bot_user_id": target_bot_user_id if isinstance(target_bot_user_id, int) and target_bot_user_id > 0 else None,
+        "role_grant_role_id": role_grant_role_id if isinstance(role_grant_role_id, int) and role_grant_role_id > 0 else None,
+        "action_taken": action_taken,
+        "action_refused": action_refused,
+        "reversible_action": reversible_action,
+        "title": title,
+        "summary": summary,
+        "trust_violation": trust_violation,
+        "evidence_codes": evidence_codes[:12],
+        "evidence_lines": evidence_lines,
+        "recommended_actions": recommended_actions,
+        "metadata": deepcopy(metadata),
+    }
+
+
 class _BaseAdminStore:
     backend_name = "unknown"
 
@@ -529,6 +742,24 @@ class _BaseAdminStore:
     async def delete_member_risk_review_queue(self, guild_id: int):
         raise NotImplementedError
 
+    async def upsert_emergency_incident(self, record: dict[str, Any]):
+        raise NotImplementedError
+
+    async def fetch_emergency_incident(self, guild_id: int, incident_key: str) -> dict[str, Any] | None:
+        raise NotImplementedError
+
+    async def delete_emergency_incident(self, guild_id: int, incident_key: str):
+        raise NotImplementedError
+
+    async def prune_emergency_incidents(self, before: datetime, *, limit: int = 200) -> int:
+        raise NotImplementedError
+
+    async def list_emergency_incidents_for_guild(self, guild_id: int) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
+    async def list_emergency_review_views(self) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
     async def fetch_guild_counts(self, guild_id: int) -> dict[str, int]:
         raise NotImplementedError
 
@@ -545,6 +776,7 @@ class _MemoryAdminStore(_BaseAdminStore):
         self.verification_notification_snapshots: dict[tuple[int, str, str, str, str], dict[str, Any]] = {}
         self.member_risk_states: dict[tuple[int, int], dict[str, Any]] = {}
         self.member_risk_review_queues: dict[int, dict[str, Any]] = {}
+        self.emergency_incidents: dict[tuple[int, str], dict[str, Any]] = {}
 
     async def load(self):
         self.configs = {}
@@ -555,6 +787,7 @@ class _MemoryAdminStore(_BaseAdminStore):
         self.verification_notification_snapshots = {}
         self.member_risk_states = {}
         self.member_risk_review_queues = {}
+        self.emergency_incidents = {}
 
     async def fetch_all_configs(self) -> dict[int, dict[str, Any]]:
         return {guild_id: deepcopy(config) for guild_id, config in self.configs.items()}
@@ -746,10 +979,53 @@ class _MemoryAdminStore(_BaseAdminStore):
     async def delete_member_risk_review_queue(self, guild_id: int):
         self.member_risk_review_queues.pop(guild_id, None)
 
+    async def upsert_emergency_incident(self, record: dict[str, Any]):
+        normalized = normalize_emergency_incident(record)
+        if normalized is not None:
+            self.emergency_incidents[(normalized["guild_id"], normalized["incident_key"])] = normalized
+
+    async def fetch_emergency_incident(self, guild_id: int, incident_key: str) -> dict[str, Any] | None:
+        record = self.emergency_incidents.get((guild_id, incident_key))
+        return deepcopy(record) if record is not None else None
+
+    async def delete_emergency_incident(self, guild_id: int, incident_key: str):
+        self.emergency_incidents.pop((guild_id, incident_key), None)
+
+    async def prune_emergency_incidents(self, before: datetime, *, limit: int = 200) -> int:
+        removed = 0
+        for key, record in list(self.emergency_incidents.items()):
+            reference_at = (
+                _parse_datetime(record.get("resolved_at"))
+                or _parse_datetime(record.get("snooze_until"))
+                or _parse_datetime(record.get("updated_at"))
+                or _parse_datetime(record.get("opened_at"))
+            )
+            if reference_at is None or reference_at > before:
+                continue
+            self.emergency_incidents.pop(key, None)
+            removed += 1
+            if removed >= limit:
+                break
+        return removed
+
+    async def list_emergency_incidents_for_guild(self, guild_id: int) -> list[dict[str, Any]]:
+        rows = [deepcopy(record) for record in self.emergency_incidents.values() if record.get("guild_id") == guild_id]
+        rows.sort(key=lambda item: ((item.get("updated_at") or ""), item.get("incident_key") or ""), reverse=True)
+        return rows
+
+    async def list_emergency_review_views(self) -> list[dict[str, Any]]:
+        rows = []
+        for record in self.emergency_incidents.values():
+            if record.get("review_message_id"):
+                rows.append(deepcopy(record))
+        rows.sort(key=lambda item: ((item.get("guild_id", 0)), item.get("incident_key") or ""))
+        return rows
+
     async def fetch_guild_counts(self, guild_id: int) -> dict[str, int]:
         followups = [record for record in self.followups.values() if record.get("guild_id") == guild_id]
         verification_rows = [record for record in self.verification_states.values() if record.get("guild_id") == guild_id]
         member_risk_rows = [record for record in self.member_risk_states.values() if record.get("guild_id") == guild_id]
+        emergency_rows = [record for record in self.emergency_incidents.values() if record.get("guild_id") == guild_id]
         return {
             "ban_candidates": sum(1 for record in self.ban_candidates.values() if record.get("guild_id") == guild_id),
             "active_followups": len(followups),
@@ -757,6 +1033,9 @@ class _MemoryAdminStore(_BaseAdminStore):
             "verification_pending": len(verification_rows),
             "verification_warned": sum(1 for record in verification_rows if record.get("warning_sent_at")),
             "member_risk_pending": sum(1 for record in member_risk_rows if record.get("review_pending")),
+            "emergency_open_incidents": sum(
+                1 for record in emergency_rows if record.get("status") in {"open", "acknowledged", "snoozed"}
+            ),
         }
 
 
@@ -802,6 +1081,85 @@ def _config_from_row(row) -> dict[str, Any]:
             "verification_exempt_bots": row["verification_exempt_bots"],
             "member_risk_enabled": row.get("member_risk_enabled", False),
             "member_risk_mode": row.get("member_risk_mode", "review"),
+            "emergency_enabled": row.get("emergency_enabled", False),
+            "security_posture": row.get("security_posture", "observe"),
+            "emergency_mode": row.get("emergency_mode", "review"),
+            "emergency_strict_auto_containment": row.get("emergency_strict_auto_containment", False),
+            "emergency_ping_mode": row.get("emergency_ping_mode", "high_only"),
+            "control_lock_enabled": row.get("control_lock_enabled", False),
+            "editor_user_ids": decode_postgres_json_array(
+                row.get("editor_user_ids"),
+                label="admin_guild_configs.editor_user_ids",
+            ),
+            "editor_role_ids": decode_postgres_json_array(
+                row.get("editor_role_ids"),
+                label="admin_guild_configs.editor_role_ids",
+            ),
+            "emergency_operator_user_ids": decode_postgres_json_array(
+                row.get("emergency_operator_user_ids"),
+                label="admin_guild_configs.emergency_operator_user_ids",
+            ),
+            "emergency_operator_role_ids": decode_postgres_json_array(
+                row.get("emergency_operator_role_ids"),
+                label="admin_guild_configs.emergency_operator_role_ids",
+            ),
+            "control_deny_user_ids": decode_postgres_json_array(
+                row.get("control_deny_user_ids"),
+                label="admin_guild_configs.control_deny_user_ids",
+            ),
+            "control_deny_role_ids": decode_postgres_json_array(
+                row.get("control_deny_role_ids"),
+                label="admin_guild_configs.control_deny_role_ids",
+            ),
+            "protected_role_ids": decode_postgres_json_array(
+                row.get("protected_role_ids"),
+                label="admin_guild_configs.protected_role_ids",
+            ),
+            "protected_role_granter_user_ids": decode_postgres_json_array(
+                row.get("protected_role_granter_user_ids"),
+                label="admin_guild_configs.protected_role_granter_user_ids",
+            ),
+            "protected_role_granter_role_ids": decode_postgres_json_array(
+                row.get("protected_role_granter_role_ids"),
+                label="admin_guild_configs.protected_role_granter_role_ids",
+            ),
+            "trusted_actor_user_ids": decode_postgres_json_array(
+                row.get("trusted_actor_user_ids"),
+                label="admin_guild_configs.trusted_actor_user_ids",
+            ),
+            "trusted_actor_role_ids": decode_postgres_json_array(
+                row.get("trusted_actor_role_ids"),
+                label="admin_guild_configs.trusted_actor_role_ids",
+            ),
+            "trusted_bot_ids": decode_postgres_json_array(
+                row.get("trusted_bot_ids"),
+                label="admin_guild_configs.trusted_bot_ids",
+            ),
+            "allowlisted_target_user_ids": decode_postgres_json_array(
+                row.get("allowlisted_target_user_ids"),
+                label="admin_guild_configs.allowlisted_target_user_ids",
+            ),
+            "allowlisted_target_role_ids": decode_postgres_json_array(
+                row.get("allowlisted_target_role_ids"),
+                label="admin_guild_configs.allowlisted_target_role_ids",
+            ),
+            "channel_whitelist_ids": decode_postgres_json_array(
+                row.get("channel_whitelist_ids"),
+                label="admin_guild_configs.channel_whitelist_ids",
+            ),
+            "quarantine_role_id": row.get("quarantine_role_id"),
+            "enabled_dangerous_permission_flags": decode_postgres_json_array(
+                row.get("enabled_dangerous_permission_flags"),
+                label="admin_guild_configs.enabled_dangerous_permission_flags",
+            ),
+            "emergency_role_grant_threshold": int(row.get("emergency_role_grant_threshold", 2) or 2),
+            "emergency_role_grant_target_threshold": int(row.get("emergency_role_grant_target_threshold", 2) or 2),
+            "emergency_kick_threshold": int(row.get("emergency_kick_threshold", 4) or 4),
+            "emergency_ban_threshold": int(row.get("emergency_ban_threshold", 3) or 3),
+            "emergency_channel_delete_threshold": int(row.get("emergency_channel_delete_threshold", 2) or 2),
+            "emergency_role_delete_threshold": int(row.get("emergency_role_delete_threshold", 2) or 2),
+            "emergency_webhook_churn_threshold": int(row.get("emergency_webhook_churn_threshold", 3) or 3),
+            "emergency_bot_add_threshold": int(row.get("emergency_bot_add_threshold", 1) or 1),
         },
     )
 
@@ -911,6 +1269,51 @@ def _member_risk_review_queue_from_row(row) -> dict[str, Any] | None:
     )
 
 
+def _emergency_incident_from_row(row) -> dict[str, Any] | None:
+    return normalize_emergency_incident(
+        {
+            "guild_id": row["guild_id"],
+            "incident_key": row["incident_key"],
+            "incident_kind": row["incident_kind"],
+            "severity": row["severity"],
+            "status": row["status"],
+            "opened_at": _serialize_datetime(row["opened_at"]),
+            "updated_at": _serialize_datetime(row["updated_at"]),
+            "snooze_until": _serialize_datetime(row["snooze_until"]),
+            "resolved_at": _serialize_datetime(row["resolved_at"]),
+            "review_version": int(row["review_version"]),
+            "review_message_channel_id": row["review_message_channel_id"],
+            "review_message_id": row["review_message_id"],
+            "event_count": int(row["event_count"]),
+            "actor_id": row["actor_id"],
+            "target_user_id": row["target_user_id"],
+            "target_role_id": row["target_role_id"],
+            "target_channel_id": row["target_channel_id"],
+            "target_bot_user_id": row["target_bot_user_id"],
+            "role_grant_role_id": row["role_grant_role_id"],
+            "action_taken": row["action_taken"],
+            "action_refused": row["action_refused"],
+            "reversible_action": row["reversible_action"],
+            "title": row["title"],
+            "summary": row["summary"],
+            "trust_violation": row["trust_violation"],
+            "evidence_codes": decode_postgres_json_array(
+                row["evidence_codes"],
+                label="admin_emergency_incidents.evidence_codes",
+            ),
+            "evidence_lines": decode_postgres_json_array(
+                row["evidence_lines"],
+                label="admin_emergency_incidents.evidence_lines",
+            ),
+            "recommended_actions": decode_postgres_json_array(
+                row["recommended_actions"],
+                label="admin_emergency_incidents.recommended_actions",
+            ),
+            "metadata": row["metadata"] if isinstance(row["metadata"], dict) else {},
+        }
+    )
+
+
 class _PostgresAdminStore(_BaseAdminStore):
     backend_name = "postgres"
 
@@ -986,6 +1389,37 @@ class _PostgresAdminStore(_BaseAdminStore):
                 "verification_exempt_bots BOOLEAN NOT NULL DEFAULT TRUE, "
                 "member_risk_enabled BOOLEAN NOT NULL DEFAULT FALSE, "
                 "member_risk_mode TEXT NOT NULL DEFAULT 'review', "
+                "emergency_enabled BOOLEAN NOT NULL DEFAULT FALSE, "
+                "security_posture TEXT NOT NULL DEFAULT 'observe', "
+                "emergency_mode TEXT NOT NULL DEFAULT 'review', "
+                "emergency_strict_auto_containment BOOLEAN NOT NULL DEFAULT FALSE, "
+                "emergency_ping_mode TEXT NOT NULL DEFAULT 'high_only', "
+                "control_lock_enabled BOOLEAN NOT NULL DEFAULT FALSE, "
+                "editor_user_ids JSONB NOT NULL DEFAULT '[]'::jsonb, "
+                "editor_role_ids JSONB NOT NULL DEFAULT '[]'::jsonb, "
+                "emergency_operator_user_ids JSONB NOT NULL DEFAULT '[]'::jsonb, "
+                "emergency_operator_role_ids JSONB NOT NULL DEFAULT '[]'::jsonb, "
+                "control_deny_user_ids JSONB NOT NULL DEFAULT '[]'::jsonb, "
+                "control_deny_role_ids JSONB NOT NULL DEFAULT '[]'::jsonb, "
+                "protected_role_ids JSONB NOT NULL DEFAULT '[]'::jsonb, "
+                "protected_role_granter_user_ids JSONB NOT NULL DEFAULT '[]'::jsonb, "
+                "protected_role_granter_role_ids JSONB NOT NULL DEFAULT '[]'::jsonb, "
+                "trusted_actor_user_ids JSONB NOT NULL DEFAULT '[]'::jsonb, "
+                "trusted_actor_role_ids JSONB NOT NULL DEFAULT '[]'::jsonb, "
+                "trusted_bot_ids JSONB NOT NULL DEFAULT '[]'::jsonb, "
+                "allowlisted_target_user_ids JSONB NOT NULL DEFAULT '[]'::jsonb, "
+                "allowlisted_target_role_ids JSONB NOT NULL DEFAULT '[]'::jsonb, "
+                "channel_whitelist_ids JSONB NOT NULL DEFAULT '[]'::jsonb, "
+                "quarantine_role_id BIGINT NULL, "
+                "enabled_dangerous_permission_flags JSONB NOT NULL DEFAULT '[]'::jsonb, "
+                "emergency_role_grant_threshold SMALLINT NOT NULL DEFAULT 2, "
+                "emergency_role_grant_target_threshold SMALLINT NOT NULL DEFAULT 2, "
+                "emergency_kick_threshold SMALLINT NOT NULL DEFAULT 4, "
+                "emergency_ban_threshold SMALLINT NOT NULL DEFAULT 3, "
+                "emergency_channel_delete_threshold SMALLINT NOT NULL DEFAULT 2, "
+                "emergency_role_delete_threshold SMALLINT NOT NULL DEFAULT 2, "
+                "emergency_webhook_churn_threshold SMALLINT NOT NULL DEFAULT 3, "
+                "emergency_bot_add_threshold SMALLINT NOT NULL DEFAULT 1, "
                 "updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc', now())"
                 ")"
             ),
@@ -1086,11 +1520,76 @@ class _PostgresAdminStore(_BaseAdminStore):
                 "PRIMARY KEY (guild_id, run_context, operation, outcome, reason_code)"
                 ")"
             ),
+            (
+                "CREATE TABLE IF NOT EXISTS admin_emergency_incidents ("
+                "guild_id BIGINT NOT NULL, "
+                "incident_key TEXT NOT NULL, "
+                "incident_kind TEXT NOT NULL, "
+                "severity TEXT NOT NULL DEFAULT 'medium', "
+                "status TEXT NOT NULL DEFAULT 'open', "
+                "opened_at TIMESTAMPTZ NOT NULL, "
+                "updated_at TIMESTAMPTZ NOT NULL, "
+                "snooze_until TIMESTAMPTZ NULL, "
+                "resolved_at TIMESTAMPTZ NULL, "
+                "review_version INTEGER NOT NULL DEFAULT 0, "
+                "review_message_channel_id BIGINT NULL, "
+                "review_message_id BIGINT NULL, "
+                "event_count INTEGER NOT NULL DEFAULT 1, "
+                "actor_id BIGINT NULL, "
+                "target_user_id BIGINT NULL, "
+                "target_role_id BIGINT NULL, "
+                "target_channel_id BIGINT NULL, "
+                "target_bot_user_id BIGINT NULL, "
+                "role_grant_role_id BIGINT NULL, "
+                "action_taken TEXT NULL, "
+                "action_refused TEXT NULL, "
+                "reversible_action TEXT NULL, "
+                "title TEXT NULL, "
+                "summary TEXT NULL, "
+                "trust_violation TEXT NULL, "
+                "evidence_codes JSONB NOT NULL DEFAULT '[]'::jsonb, "
+                "evidence_lines JSONB NOT NULL DEFAULT '[]'::jsonb, "
+                "recommended_actions JSONB NOT NULL DEFAULT '[]'::jsonb, "
+                "metadata JSONB NOT NULL DEFAULT '{}'::jsonb, "
+                "PRIMARY KEY (guild_id, incident_key)"
+                ")"
+            ),
         ]
         alter_statements = [
             "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS verification_deadline_action TEXT NOT NULL DEFAULT 'auto_kick'",
             "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS member_risk_enabled BOOLEAN NOT NULL DEFAULT FALSE",
             "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS member_risk_mode TEXT NOT NULL DEFAULT 'review'",
+            "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS emergency_enabled BOOLEAN NOT NULL DEFAULT FALSE",
+            "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS security_posture TEXT NOT NULL DEFAULT 'observe'",
+            "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS emergency_mode TEXT NOT NULL DEFAULT 'review'",
+            "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS emergency_strict_auto_containment BOOLEAN NOT NULL DEFAULT FALSE",
+            "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS emergency_ping_mode TEXT NOT NULL DEFAULT 'high_only'",
+            "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS control_lock_enabled BOOLEAN NOT NULL DEFAULT FALSE",
+            "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS editor_user_ids JSONB NOT NULL DEFAULT '[]'::jsonb",
+            "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS editor_role_ids JSONB NOT NULL DEFAULT '[]'::jsonb",
+            "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS emergency_operator_user_ids JSONB NOT NULL DEFAULT '[]'::jsonb",
+            "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS emergency_operator_role_ids JSONB NOT NULL DEFAULT '[]'::jsonb",
+            "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS control_deny_user_ids JSONB NOT NULL DEFAULT '[]'::jsonb",
+            "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS control_deny_role_ids JSONB NOT NULL DEFAULT '[]'::jsonb",
+            "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS protected_role_ids JSONB NOT NULL DEFAULT '[]'::jsonb",
+            "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS protected_role_granter_user_ids JSONB NOT NULL DEFAULT '[]'::jsonb",
+            "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS protected_role_granter_role_ids JSONB NOT NULL DEFAULT '[]'::jsonb",
+            "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS trusted_actor_user_ids JSONB NOT NULL DEFAULT '[]'::jsonb",
+            "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS trusted_actor_role_ids JSONB NOT NULL DEFAULT '[]'::jsonb",
+            "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS trusted_bot_ids JSONB NOT NULL DEFAULT '[]'::jsonb",
+            "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS allowlisted_target_user_ids JSONB NOT NULL DEFAULT '[]'::jsonb",
+            "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS allowlisted_target_role_ids JSONB NOT NULL DEFAULT '[]'::jsonb",
+            "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS channel_whitelist_ids JSONB NOT NULL DEFAULT '[]'::jsonb",
+            "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS quarantine_role_id BIGINT NULL",
+            "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS enabled_dangerous_permission_flags JSONB NOT NULL DEFAULT '[]'::jsonb",
+            "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS emergency_role_grant_threshold SMALLINT NOT NULL DEFAULT 2",
+            "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS emergency_role_grant_target_threshold SMALLINT NOT NULL DEFAULT 2",
+            "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS emergency_kick_threshold SMALLINT NOT NULL DEFAULT 4",
+            "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS emergency_ban_threshold SMALLINT NOT NULL DEFAULT 3",
+            "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS emergency_channel_delete_threshold SMALLINT NOT NULL DEFAULT 2",
+            "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS emergency_role_delete_threshold SMALLINT NOT NULL DEFAULT 2",
+            "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS emergency_webhook_churn_threshold SMALLINT NOT NULL DEFAULT 3",
+            "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS emergency_bot_add_threshold SMALLINT NOT NULL DEFAULT 1",
             "ALTER TABLE admin_followup_roles ADD COLUMN IF NOT EXISTS review_pending BOOLEAN NOT NULL DEFAULT FALSE",
             "ALTER TABLE admin_followup_roles ADD COLUMN IF NOT EXISTS review_version INTEGER NOT NULL DEFAULT 0",
             "ALTER TABLE admin_followup_roles ADD COLUMN IF NOT EXISTS review_message_channel_id BIGINT NULL",
@@ -1131,6 +1630,9 @@ class _PostgresAdminStore(_BaseAdminStore):
             "CREATE INDEX IF NOT EXISTS ix_admin_member_risk_guild ON admin_member_risk_states (guild_id)",
             "CREATE INDEX IF NOT EXISTS ix_admin_member_risk_review_pending ON admin_member_risk_states (review_pending, review_message_id)",
             "CREATE INDEX IF NOT EXISTS ix_admin_member_risk_last_notified ON admin_member_risk_states (guild_id, last_notified_at)",
+            "CREATE INDEX IF NOT EXISTS ix_admin_emergency_guild ON admin_emergency_incidents (guild_id, updated_at DESC)",
+            "CREATE INDEX IF NOT EXISTS ix_admin_emergency_status ON admin_emergency_incidents (guild_id, status, updated_at DESC)",
+            "CREATE INDEX IF NOT EXISTS ix_admin_emergency_review_message ON admin_emergency_incidents (review_message_id)",
         ]
         async with self._pool.acquire() as conn:
             for statement in table_statements:
@@ -1163,14 +1665,28 @@ class _PostgresAdminStore(_BaseAdminStore):
                         "admin_log_channel_id, admin_alert_role_id, warning_template, kick_template, invite_link, "
                         "excluded_user_ids, excluded_role_ids, trusted_role_ids, "
                         "followup_exempt_staff, verification_exempt_staff, verification_exempt_bots, "
-                        "member_risk_enabled, member_risk_mode, updated_at"
+                        "member_risk_enabled, member_risk_mode, "
+                        "emergency_enabled, security_posture, emergency_mode, emergency_strict_auto_containment, emergency_ping_mode, "
+                        "control_lock_enabled, editor_user_ids, editor_role_ids, emergency_operator_user_ids, emergency_operator_role_ids, "
+                        "control_deny_user_ids, control_deny_role_ids, "
+                        "protected_role_ids, protected_role_granter_user_ids, protected_role_granter_role_ids, trusted_actor_user_ids, trusted_actor_role_ids, trusted_bot_ids, "
+                        "allowlisted_target_user_ids, allowlisted_target_role_ids, channel_whitelist_ids, quarantine_role_id, enabled_dangerous_permission_flags, "
+                        "emergency_role_grant_threshold, emergency_role_grant_target_threshold, emergency_kick_threshold, emergency_ban_threshold, "
+                        "emergency_channel_delete_threshold, emergency_role_delete_threshold, emergency_webhook_churn_threshold, emergency_bot_add_threshold, "
+                        "updated_at"
                         ") VALUES ("
                         "$1, $2, $3, $4, $5, $6, "
                         "$7, $8, $9, $10, $11, "
                         "$12, $13, $14, $15, "
                         "$16, $17, $18, $19, $20, "
                         "$21::jsonb, $22::jsonb, $23::jsonb, "
-                        "$24, $25, $26, $27, $28, timezone('utc', now())"
+                        "$24, $25, $26, "
+                        "$27, $28, $29, $30, $31, "
+                        "$32, $33::jsonb, $34::jsonb, $35::jsonb, $36::jsonb, "
+                        "$37::jsonb, $38::jsonb, "
+                        "$39::jsonb, $40::jsonb, $41::jsonb, $42::jsonb, $43::jsonb, $44::jsonb, "
+                        "$45::jsonb, $46::jsonb, $47::jsonb, $48, $49::jsonb, "
+                        "$50, $51, $52, $53, $54, $55, $56, $57, timezone('utc', now())"
                         ") "
                         "ON CONFLICT (guild_id) DO UPDATE SET "
                         "followup_enabled = EXCLUDED.followup_enabled, "
@@ -1200,6 +1716,37 @@ class _PostgresAdminStore(_BaseAdminStore):
                         "verification_exempt_bots = EXCLUDED.verification_exempt_bots, "
                         "member_risk_enabled = EXCLUDED.member_risk_enabled, "
                         "member_risk_mode = EXCLUDED.member_risk_mode, "
+                        "emergency_enabled = EXCLUDED.emergency_enabled, "
+                        "security_posture = EXCLUDED.security_posture, "
+                        "emergency_mode = EXCLUDED.emergency_mode, "
+                        "emergency_strict_auto_containment = EXCLUDED.emergency_strict_auto_containment, "
+                        "emergency_ping_mode = EXCLUDED.emergency_ping_mode, "
+                        "control_lock_enabled = EXCLUDED.control_lock_enabled, "
+                        "editor_user_ids = EXCLUDED.editor_user_ids, "
+                        "editor_role_ids = EXCLUDED.editor_role_ids, "
+                        "emergency_operator_user_ids = EXCLUDED.emergency_operator_user_ids, "
+                        "emergency_operator_role_ids = EXCLUDED.emergency_operator_role_ids, "
+                        "control_deny_user_ids = EXCLUDED.control_deny_user_ids, "
+                        "control_deny_role_ids = EXCLUDED.control_deny_role_ids, "
+                        "protected_role_ids = EXCLUDED.protected_role_ids, "
+                        "protected_role_granter_user_ids = EXCLUDED.protected_role_granter_user_ids, "
+                        "protected_role_granter_role_ids = EXCLUDED.protected_role_granter_role_ids, "
+                        "trusted_actor_user_ids = EXCLUDED.trusted_actor_user_ids, "
+                        "trusted_actor_role_ids = EXCLUDED.trusted_actor_role_ids, "
+                        "trusted_bot_ids = EXCLUDED.trusted_bot_ids, "
+                        "allowlisted_target_user_ids = EXCLUDED.allowlisted_target_user_ids, "
+                        "allowlisted_target_role_ids = EXCLUDED.allowlisted_target_role_ids, "
+                        "channel_whitelist_ids = EXCLUDED.channel_whitelist_ids, "
+                        "quarantine_role_id = EXCLUDED.quarantine_role_id, "
+                        "enabled_dangerous_permission_flags = EXCLUDED.enabled_dangerous_permission_flags, "
+                        "emergency_role_grant_threshold = EXCLUDED.emergency_role_grant_threshold, "
+                        "emergency_role_grant_target_threshold = EXCLUDED.emergency_role_grant_target_threshold, "
+                        "emergency_kick_threshold = EXCLUDED.emergency_kick_threshold, "
+                        "emergency_ban_threshold = EXCLUDED.emergency_ban_threshold, "
+                        "emergency_channel_delete_threshold = EXCLUDED.emergency_channel_delete_threshold, "
+                        "emergency_role_delete_threshold = EXCLUDED.emergency_role_delete_threshold, "
+                        "emergency_webhook_churn_threshold = EXCLUDED.emergency_webhook_churn_threshold, "
+                        "emergency_bot_add_threshold = EXCLUDED.emergency_bot_add_threshold, "
                         "updated_at = EXCLUDED.updated_at"
                     ),
                     normalized["guild_id"],
@@ -1230,6 +1777,37 @@ class _PostgresAdminStore(_BaseAdminStore):
                     normalized["verification_exempt_bots"],
                     normalized["member_risk_enabled"],
                     normalized["member_risk_mode"],
+                    normalized["emergency_enabled"],
+                    normalized["security_posture"],
+                    normalized["emergency_mode"],
+                    normalized["emergency_strict_auto_containment"],
+                    normalized["emergency_ping_mode"],
+                    normalized["control_lock_enabled"],
+                    json.dumps(normalized["editor_user_ids"]),
+                    json.dumps(normalized["editor_role_ids"]),
+                    json.dumps(normalized["emergency_operator_user_ids"]),
+                    json.dumps(normalized["emergency_operator_role_ids"]),
+                    json.dumps(normalized["control_deny_user_ids"]),
+                    json.dumps(normalized["control_deny_role_ids"]),
+                    json.dumps(normalized["protected_role_ids"]),
+                    json.dumps(normalized["protected_role_granter_user_ids"]),
+                    json.dumps(normalized["protected_role_granter_role_ids"]),
+                    json.dumps(normalized["trusted_actor_user_ids"]),
+                    json.dumps(normalized["trusted_actor_role_ids"]),
+                    json.dumps(normalized["trusted_bot_ids"]),
+                    json.dumps(normalized["allowlisted_target_user_ids"]),
+                    json.dumps(normalized["allowlisted_target_role_ids"]),
+                    json.dumps(normalized["channel_whitelist_ids"]),
+                    normalized["quarantine_role_id"],
+                    json.dumps(normalized["enabled_dangerous_permission_flags"]),
+                    normalized["emergency_role_grant_threshold"],
+                    normalized["emergency_role_grant_target_threshold"],
+                    normalized["emergency_kick_threshold"],
+                    normalized["emergency_ban_threshold"],
+                    normalized["emergency_channel_delete_threshold"],
+                    normalized["emergency_role_delete_threshold"],
+                    normalized["emergency_webhook_churn_threshold"],
+                    normalized["emergency_bot_add_threshold"],
                 )
 
     async def upsert_ban_candidate(self, record: dict[str, Any]):
@@ -1729,6 +2307,139 @@ class _PostgresAdminStore(_BaseAdminStore):
             async with self._pool.acquire() as conn:
                 await conn.execute("DELETE FROM admin_member_risk_review_queues WHERE guild_id = $1", guild_id)
 
+    async def upsert_emergency_incident(self, record: dict[str, Any]):
+        normalized = normalize_emergency_incident(record)
+        if normalized is None:
+            return
+        async with self._io_lock:
+            async with self._pool.acquire() as conn:
+                await conn.execute(
+                    (
+                        "INSERT INTO admin_emergency_incidents ("
+                        "guild_id, incident_key, incident_kind, severity, status, opened_at, updated_at, snooze_until, resolved_at, "
+                        "review_version, review_message_channel_id, review_message_id, event_count, actor_id, target_user_id, "
+                        "target_role_id, target_channel_id, target_bot_user_id, role_grant_role_id, action_taken, action_refused, "
+                        "reversible_action, title, summary, trust_violation, evidence_codes, evidence_lines, recommended_actions, metadata"
+                        ") VALUES ("
+                        "$1, $2, $3, $4, $5, $6, $7, $8, $9, "
+                        "$10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, "
+                        "$22, $23, $24, $25, $26::jsonb, $27::jsonb, $28::jsonb, $29::jsonb"
+                        ") ON CONFLICT (guild_id, incident_key) DO UPDATE SET "
+                        "incident_kind = EXCLUDED.incident_kind, "
+                        "severity = EXCLUDED.severity, "
+                        "status = EXCLUDED.status, "
+                        "opened_at = EXCLUDED.opened_at, "
+                        "updated_at = EXCLUDED.updated_at, "
+                        "snooze_until = EXCLUDED.snooze_until, "
+                        "resolved_at = EXCLUDED.resolved_at, "
+                        "review_version = EXCLUDED.review_version, "
+                        "review_message_channel_id = EXCLUDED.review_message_channel_id, "
+                        "review_message_id = EXCLUDED.review_message_id, "
+                        "event_count = EXCLUDED.event_count, "
+                        "actor_id = EXCLUDED.actor_id, "
+                        "target_user_id = EXCLUDED.target_user_id, "
+                        "target_role_id = EXCLUDED.target_role_id, "
+                        "target_channel_id = EXCLUDED.target_channel_id, "
+                        "target_bot_user_id = EXCLUDED.target_bot_user_id, "
+                        "role_grant_role_id = EXCLUDED.role_grant_role_id, "
+                        "action_taken = EXCLUDED.action_taken, "
+                        "action_refused = EXCLUDED.action_refused, "
+                        "reversible_action = EXCLUDED.reversible_action, "
+                        "title = EXCLUDED.title, "
+                        "summary = EXCLUDED.summary, "
+                        "trust_violation = EXCLUDED.trust_violation, "
+                        "evidence_codes = EXCLUDED.evidence_codes, "
+                        "evidence_lines = EXCLUDED.evidence_lines, "
+                        "recommended_actions = EXCLUDED.recommended_actions, "
+                        "metadata = EXCLUDED.metadata"
+                    ),
+                    normalized["guild_id"],
+                    normalized["incident_key"],
+                    normalized["incident_kind"],
+                    normalized["severity"],
+                    normalized["status"],
+                    _parse_datetime(normalized["opened_at"]),
+                    _parse_datetime(normalized["updated_at"]),
+                    _parse_datetime(normalized["snooze_until"]),
+                    _parse_datetime(normalized["resolved_at"]),
+                    normalized["review_version"],
+                    normalized["review_message_channel_id"],
+                    normalized["review_message_id"],
+                    normalized["event_count"],
+                    normalized["actor_id"],
+                    normalized["target_user_id"],
+                    normalized["target_role_id"],
+                    normalized["target_channel_id"],
+                    normalized["target_bot_user_id"],
+                    normalized["role_grant_role_id"],
+                    normalized["action_taken"],
+                    normalized["action_refused"],
+                    normalized["reversible_action"],
+                    normalized["title"],
+                    normalized["summary"],
+                    normalized["trust_violation"],
+                    json.dumps(normalized["evidence_codes"]),
+                    json.dumps(normalized["evidence_lines"]),
+                    json.dumps(normalized["recommended_actions"]),
+                    json.dumps(normalized["metadata"]),
+                )
+
+    async def fetch_emergency_incident(self, guild_id: int, incident_key: str) -> dict[str, Any] | None:
+        async with self._pool.acquire() as conn:
+            row = await conn.fetchrow(
+                "SELECT * FROM admin_emergency_incidents WHERE guild_id = $1 AND incident_key = $2",
+                guild_id,
+                incident_key,
+            )
+        return _emergency_incident_from_row(row) if row is not None else None
+
+    async def delete_emergency_incident(self, guild_id: int, incident_key: str):
+        async with self._io_lock:
+            async with self._pool.acquire() as conn:
+                await conn.execute(
+                    "DELETE FROM admin_emergency_incidents WHERE guild_id = $1 AND incident_key = $2",
+                    guild_id,
+                    incident_key,
+                )
+
+    async def prune_emergency_incidents(self, before: datetime, *, limit: int = 200) -> int:
+        async with self._io_lock:
+            async with self._pool.acquire() as conn:
+                rows = await conn.fetch(
+                    (
+                        "WITH doomed AS ("
+                        "SELECT guild_id, incident_key FROM admin_emergency_incidents "
+                        "WHERE COALESCE(resolved_at, snooze_until, updated_at, opened_at) <= $1 "
+                        "ORDER BY COALESCE(resolved_at, snooze_until, updated_at, opened_at) ASC "
+                        "LIMIT $2"
+                        ") "
+                        "DELETE FROM admin_emergency_incidents target USING doomed "
+                        "WHERE target.guild_id = doomed.guild_id AND target.incident_key = doomed.incident_key "
+                        "RETURNING target.guild_id"
+                    ),
+                    before,
+                    limit,
+                )
+        return len(rows)
+
+    async def list_emergency_incidents_for_guild(self, guild_id: int) -> list[dict[str, Any]]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                "SELECT * FROM admin_emergency_incidents WHERE guild_id = $1 ORDER BY updated_at DESC, incident_key ASC",
+                guild_id,
+            )
+        return [record for row in rows if (record := _emergency_incident_from_row(row)) is not None]
+
+    async def list_emergency_review_views(self) -> list[dict[str, Any]]:
+        async with self._pool.acquire() as conn:
+            rows = await conn.fetch(
+                (
+                    "SELECT * FROM admin_emergency_incidents "
+                    "WHERE review_message_id IS NOT NULL ORDER BY guild_id ASC, updated_at DESC"
+                )
+            )
+        return [record for row in rows if (record := _emergency_incident_from_row(row)) is not None]
+
     async def fetch_guild_counts(self, guild_id: int) -> dict[str, int]:
         async with self._pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -1739,7 +2450,8 @@ class _PostgresAdminStore(_BaseAdminStore):
                     "(SELECT COUNT(*) FROM admin_followup_roles WHERE guild_id = $1 AND review_pending = TRUE) AS pending_reviews, "
                     "(SELECT COUNT(*) FROM admin_verification_states WHERE guild_id = $1) AS verification_pending, "
                     "(SELECT COUNT(*) FROM admin_verification_states WHERE guild_id = $1 AND warning_sent_at IS NOT NULL) AS verification_warned, "
-                    "(SELECT COUNT(*) FROM admin_member_risk_states WHERE guild_id = $1 AND review_pending = TRUE) AS member_risk_pending"
+                    "(SELECT COUNT(*) FROM admin_member_risk_states WHERE guild_id = $1 AND review_pending = TRUE) AS member_risk_pending, "
+                    "(SELECT COUNT(*) FROM admin_emergency_incidents WHERE guild_id = $1 AND status IN ('open', 'acknowledged', 'snoozed')) AS emergency_open_incidents"
                 ),
                 guild_id,
             )
@@ -1750,6 +2462,7 @@ class _PostgresAdminStore(_BaseAdminStore):
             "verification_pending": int(row["verification_pending"] or 0),
             "verification_warned": int(row["verification_warned"] or 0),
             "member_risk_pending": int(row["member_risk_pending"] or 0),
+            "emergency_open_incidents": int(row["emergency_open_incidents"] or 0),
         }
 
 
@@ -1910,6 +2623,24 @@ class AdminStore:
 
     async def delete_member_risk_review_queue(self, guild_id: int):
         await self._store.delete_member_risk_review_queue(guild_id)
+
+    async def upsert_emergency_incident(self, record: dict[str, Any]):
+        await self._store.upsert_emergency_incident(record)
+
+    async def fetch_emergency_incident(self, guild_id: int, incident_key: str) -> dict[str, Any] | None:
+        return await self._store.fetch_emergency_incident(guild_id, incident_key)
+
+    async def delete_emergency_incident(self, guild_id: int, incident_key: str):
+        await self._store.delete_emergency_incident(guild_id, incident_key)
+
+    async def prune_emergency_incidents(self, before: datetime, *, limit: int = 200) -> int:
+        return await self._store.prune_emergency_incidents(before, limit=limit)
+
+    async def list_emergency_incidents_for_guild(self, guild_id: int) -> list[dict[str, Any]]:
+        return await self._store.list_emergency_incidents_for_guild(guild_id)
+
+    async def list_emergency_review_views(self) -> list[dict[str, Any]]:
+        return await self._store.list_emergency_review_views()
 
     async def fetch_guild_counts(self, guild_id: int) -> dict[str, int]:
         return await self._store.fetch_guild_counts(guild_id)
