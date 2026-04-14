@@ -809,3 +809,30 @@ class AdminCogSmokeTests(unittest.IsolatedAsyncioTestCase):
         config = self.cog.service.get_config(self.guild.id)
         self.assertTrue(config["emergency_enabled"])
         self.assertEqual(config["security_posture"], "guard")
+
+    async def test_emergency_command_accepts_configured_emergency_operator_without_manage_guild(self):
+        operator_role = FakeRole(703, position=5, name="Emergency Ops")
+        self.guild.roles[operator_role.id] = operator_role
+        ok, _ = await self.cog.service.set_emergency_access(self.guild.id, control_lock_enabled=True)
+        self.assertTrue(ok)
+        ok, _ = await self.cog.service.set_emergency_access(
+            self.guild.id,
+            field="emergency_operator_role_ids",
+            target_id=operator_role.id,
+            enabled=True,
+        )
+        self.assertTrue(ok)
+        author = FakeMember(779, self.guild, roles=[operator_role], manage_guild=False, administrator=False)
+        self.guild.members[author.id] = author
+        ctx = FakeContext(
+            interaction=FakeInteraction(),
+            guild=self.guild,
+            channel=FakeChannel(20),
+            author=author,
+        )
+
+        await AdminCog.admin_emergency_command.callback(self.cog, ctx)
+
+        self.assertEqual(len(ctx.send_calls), 1)
+        self.assertTrue(ctx.send_calls[0]["ephemeral"])
+        self.assertEqual(ctx.send_calls[0]["embed"].title, "Emergency Protection")

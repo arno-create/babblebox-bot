@@ -89,7 +89,7 @@ from babblebox.text_safety import (
 from babblebox.utility_helpers import deserialize_datetime, make_attachment_labels, make_message_preview
 
 
-RULE_PACKS = ("privacy", "promo", "scam", "spam", "adult", "severe")
+RULE_PACKS = ("privacy", "promo", "scam", "spam", "gif", "adult", "severe")
 SHIELD_ACTIONS = {"disabled", "detect", "log", "delete_log", "delete_escalate", "timeout_log"}
 SHIELD_SENSITIVITIES = {"low", "normal", "high"}
 CUSTOM_PATTERN_MODES = {"contains", "word", "wildcard"}
@@ -142,7 +142,7 @@ NEWCOMER_MESSAGE_WINDOW = 3
 CAMPAIGN_SIGNATURE_LIMIT = 256
 CAMPAIGN_USERS_PER_SIGNATURE_LIMIT = 12
 NEWCOMER_STATE_LIMIT = 512
-SHIELD_BASELINE_VERSION = 2
+SHIELD_BASELINE_VERSION = 3
 TRUSTED_ONLY_BUILTIN_FAMILIES = frozenset(TRUSTED_LINK_SAFE_FAMILIES)
 TRUSTED_ONLY_BUILTIN_DOMAINS = frozenset(TRUSTED_MAINSTREAM_DOMAINS)
 AUTOMATED_AUTHOR_KINDS = frozenset({"bot", "webhook"})
@@ -152,6 +152,7 @@ PACK_LABELS = {
     "promo": "Promo / Invite",
     "scam": "Scam / Malicious Links",
     "spam": "Spam / Raid",
+    "gif": "GIF Flood / Media Pressure",
     "adult": "Adult Links + Solicitation",
     "severe": "Severe Harm / Hate",
     "link_policy": "Link Policy",
@@ -178,6 +179,7 @@ MATCH_CLASS_LABELS = {
     "scam_risky_unknown_link": "Risky unknown-link lure",
     "scam_brand_impersonation": "Brand impersonation lure",
     "scam_mint_wallet_lure": "Mint or wallet lure",
+    "scam_dm_lure": "No-link DM lure",
     "untrusted_external_link": "Untrusted external link",
     "untrusted_invite_link": "Untrusted invite link",
     "blocked_link_hub": "Blocked link hub or storefront",
@@ -199,7 +201,29 @@ MATCH_CLASS_LABELS = {
     "link_policy_adult": "Known adult domain",
     "link_policy_suspicious": "Suspicious external link",
 }
-ESCALATION_BLOCKED_MATCH_CLASSES = {"repetitive_link_noise"}
+ESCALATION_BLOCKED_MATCH_CLASSES = {"repetitive_link_noise", "spam_low_value_noise", "spam_burst", "spam_padding_noise"}
+ESCALATION_ELIGIBLE_MATCH_CLASSES = frozenset(
+    {
+        "spam_duplicate",
+        "spam_near_duplicate",
+        "spam_link_flood",
+        "spam_invite_flood",
+        "spam_mention_flood",
+        "spam_emoji_flood",
+        "spam_gif_flood",
+        "spam_group_gif_pressure",
+        "scam_bait_link",
+        "scam_bait_attachment",
+        "scam_shortener",
+        "scam_attachment",
+        "scam_download",
+        "scam_campaign_lure",
+        "scam_risky_unknown_link",
+        "scam_brand_impersonation",
+        "scam_mint_wallet_lure",
+        "scam_dm_lure",
+    }
+)
 ACTION_LABELS = {
     "disabled": "Disabled",
     "detect": "Detect only",
@@ -211,7 +235,7 @@ ACTION_LABELS = {
 SENSITIVITY_LABELS = {"low": "Low", "normal": "Normal", "high": "High"}
 ACTION_STRENGTH = {"disabled": -1, "detect": 0, "log": 1, "delete_log": 2, "timeout_log": 3, "delete_escalate": 4}
 CONFIDENCE_STRENGTH = {"low": 1, "medium": 2, "high": 3, "custom": 4}
-PACK_STRENGTH = {"privacy": 1, "spam": 1, "promo": 2, "link_policy": 2, "scam": 3, "adult": 3, "severe": 4, "advanced": 5}
+PACK_STRENGTH = {"privacy": 1, "spam": 1, "gif": 1, "promo": 2, "link_policy": 2, "scam": 3, "adult": 3, "severe": 4, "advanced": 5}
 AI_PRIORITY_LABELS = {"low": "Low", "normal": "Normal", "high": "High"}
 AI_REVIEW_PACK_SET = frozenset(SHIELD_AI_REVIEW_PACKS)
 SCAN_SOURCE_LABELS = {
@@ -361,6 +385,17 @@ SCAM_CTA_RE = re.compile(
 SCAM_URGENCY_RE = re.compile(
     r"(?i)\b(?:limited|limited spots|spots are limited|selection is limited|soon|act now|ending soon|expires|while it lasts|last chance|today only|secure your spot|first come)\b"
 )
+SCAM_DM_ROUTE_RE = re.compile(
+    r"(?i)\b(?:dm(?: me| us)?|message me|message us|msg me|msg us|pm me|pm us|inbox me|inbox us|my dms? are open|contact me privately|details? in dms?|more info in dms?|dm for (?:details?|info|more))\b"
+)
+SCAM_OFF_PLATFORM_ROUTE_RE = re.compile(
+    r"(?i)\b(?:telegram|whatsapp|signal|instagram|snap(?:chat)?|twitter|x\.com|email me|contact me on)\b"
+)
+SCAM_PRIZE_BAIT_RE = re.compile(
+    r"(?i)\b(?:free nitro|nitro|crypto|btc|bitcoin|eth|ethereum|usdt|robux|reward|prize|gift(?:away)?|giveaway|cash|money|dollars?|bucks|steam gift|skin|account)\b"
+)
+SCAM_CLAIM_OR_DETAILS_RE = re.compile(r"(?i)\b(?:claim|redeem|collect|grab|get|receive|win|details?|info|more info|more details)\b")
+SCAM_CASH_AMOUNT_RE = re.compile(r"(?i)(?:[$£€]\s?\d{2,6}|\b\d{2,6}\s?(?:usd|dollars?|bucks)\b)")
 SCAM_OFFICIAL_FRAMING_RE = re.compile(r"(?i)\b(?:official|verified|trusted)\b")
 SCAM_ANNOUNCEMENT_RE = re.compile(r"(?i)\b(?:announcement|community post|server update|news update)\b")
 SCAM_PARTNERSHIP_RE = re.compile(r"(?i)\b(?:partnership|partnered|collaboration)\b")
@@ -517,6 +552,7 @@ class CompiledShieldConfig:
     promo: PackSettings
     scam: PackSettings
     spam: PackSettings
+    gif: PackSettings
     adult: PackSettings
     adult_solicitation_enabled: bool
     adult_solicitation_excluded_channel_ids: frozenset[int]
@@ -543,6 +579,8 @@ class CompiledShieldConfig:
             return self.scam
         if pack == "spam":
             return self.spam
+        if pack == "gif":
+            return self.gif
         if pack == "adult":
             return self.adult
         if pack == "severe":
@@ -699,6 +737,21 @@ class ShieldSpamEvent:
 
 
 @dataclass(frozen=True)
+class ShieldChannelActivityEvent:
+    timestamp: float
+    user_id: int
+    author_kind: str
+    plain_word_count: int
+    low_value_text: bool
+    quality_message: bool
+    risky: bool
+    token_signature: str
+    exact_fingerprint: str | None = None
+    near_fingerprint: str | None = None
+    is_gif_message: bool = False
+
+
+@dataclass(frozen=True)
 class ShieldRaidEvidence:
     join_count_60s: int = 0
     join_count_5m: int = 0
@@ -735,6 +788,12 @@ class ShieldScamFeatures:
     urgency: bool
     wallet_or_mint: bool
     login_or_auth_flow: bool
+    dm_route: bool
+    off_platform_route: bool
+    prize_or_money_bait: bool
+    cash_amount_bait: bool
+    claim_or_details_language: bool
+    nitro_or_crypto_bait: bool
     dangerous_link_target: bool
     suspicious_attachment_combo: bool
     scan_source: str
@@ -933,6 +992,13 @@ def _is_low_value_text(text: str, *, plain_word_count: int) -> bool:
         and len(joined) <= 18
         and (unique_tokens <= 2 or unique_chars <= 4)
     )
+
+
+def _short_token_signature(text: str, *, limit: int = 3) -> str:
+    tokens = _plain_word_tokens(text)
+    if not tokens:
+        return ""
+    return " ".join(tokens[:limit])
 
 
 def _normalize_near_duplicate_text(text: str, urls: Sequence[str]) -> str:
@@ -1220,8 +1286,12 @@ def _scam_lure_fingerprint(text: str) -> str | None:
     normalized = cleaned
     replacements = (
         (BRAND_BAIT_RE, "[brand]"),
+        (SCAM_PRIZE_BAIT_RE, "[prize]"),
         (SCAM_CTA_RE, "[cta]"),
         (SCAM_LOGIN_FLOW_RE, "[auth]"),
+        (SCAM_DM_ROUTE_RE, "[dm]"),
+        (SCAM_OFF_PLATFORM_ROUTE_RE, "[offplatform]"),
+        (SCAM_CLAIM_OR_DETAILS_RE, "[claim]"),
         (SCAM_LEGITIMACY_RE, "[official]"),
         (SCAM_URGENCY_RE, "[urgency]"),
         (SCAM_CRYPTO_MINT_RE, "[wallet]"),
@@ -1233,6 +1303,21 @@ def _scam_lure_fingerprint(text: str) -> str | None:
     if len(normalized) < 16:
         return None
     return hashlib.sha1(normalized.encode("utf-8")).hexdigest()
+
+
+def _looks_like_no_link_dm_lure(text: str) -> bool:
+    cleaned = normalize_plain_text(text).casefold()
+    if not cleaned or looks_like_warning_discussion(cleaned):
+        return False
+    route = bool(SCAM_DM_ROUTE_RE.search(cleaned) or SCAM_OFF_PLATFORM_ROUTE_RE.search(cleaned))
+    bait = bool(SCAM_PRIZE_BAIT_RE.search(cleaned) or SCAM_CASH_AMOUNT_RE.search(cleaned))
+    corroboration = bool(
+        SCAM_CLAIM_OR_DETAILS_RE.search(cleaned)
+        or SCAM_URGENCY_RE.search(cleaned)
+        or SCAM_FAKE_AUTHORITY_RE.search(cleaned)
+        or SCAM_OFFICIAL_FRAMING_RE.search(cleaned)
+    )
+    return route and bait and corroboration
 
 
 def _legacy_action_policy(action: str) -> tuple[str, str, str]:
@@ -1641,6 +1726,7 @@ def _build_feature_compiled_config(
         promo=disabled,
         scam=disabled,
         spam=disabled,
+        gif=disabled,
         adult=_feature_pack_settings(enabled=adult_enabled),
         adult_solicitation_enabled=adult_solicitation_enabled,
         adult_solicitation_excluded_channel_ids=frozenset(),
@@ -1741,7 +1827,7 @@ class ShieldService:
         self._recent_promos: dict[tuple[int, int, str], list[float]] = {}
         self._recent_scam_campaigns: dict[tuple[int, str, str], list[tuple[float, int]]] = {}
         self._recent_spam_events: dict[tuple[int, int], list[ShieldSpamEvent]] = {}
-        self._recent_channel_activity: dict[tuple[int, int], list[tuple[float, int, int, bool]]] = {}
+        self._recent_channel_activity: dict[tuple[int, int], list[ShieldChannelActivityEvent]] = {}
         self._recent_channel_gif_pressure: dict[tuple[int, int], list[tuple[float, int, str | None, bool, bool]]] = {}
         self._recent_join_waves: dict[int, list[tuple[float, int, bool]]] = {}
         self._recent_raid_patterns: dict[tuple[int, str, str], list[tuple[float, int]]] = {}
@@ -2187,7 +2273,7 @@ class ShieldService:
                 f"{pack}_sensitivity",
             )
             if all(config.get(field) == defaults.get(field) for field in fields):
-                if pack == "spam":
+                if pack in {"spam", "gif"}:
                     config[f"{pack}_enabled"] = True
                     config[f"{pack}_action"] = "delete_escalate"
                     config[f"{pack}_low_action"] = "log"
@@ -2851,23 +2937,93 @@ class ShieldService:
         snapshot: ShieldSnapshot,
         *,
         now: float,
-    ) -> tuple[int, int]:
+        author_kind: str,
+    ) -> tuple[int, int, tuple[ShieldChannelActivityEvent, ...]]:
         if channel_id is None:
-            return 0, 0
+            return 0, 0, ()
         key = (guild_id, channel_id)
         rows = [
             row
             for row in self._recent_channel_activity.get(key, [])
-            if now - row[0] <= HEALTHY_CHAT_WINDOW_SECONDS
+            if now - row.timestamp <= HEALTHY_CHAT_WINDOW_SECONDS
         ]
         quality_message = snapshot.plain_word_count >= 3 and not snapshot.low_value_text
-        rows.append((now, user_id, snapshot.plain_word_count, quality_message))
+        risky = bool(
+            snapshot.has_links
+            or snapshot.has_suspicious_attachment
+            or snapshot.invite_codes
+            or snapshot.mention_count > 0
+            or snapshot.everyone_here_count > 0
+            or snapshot.repeated_char_run >= 12
+            or snapshot.emoji_count >= 25
+        )
+        rows.append(
+            ShieldChannelActivityEvent(
+                timestamp=now,
+                user_id=user_id,
+                author_kind=author_kind,
+                plain_word_count=snapshot.plain_word_count,
+                low_value_text=snapshot.low_value_text,
+                quality_message=quality_message,
+                risky=risky,
+                token_signature=_short_token_signature(snapshot.context_text),
+                exact_fingerprint=snapshot.exact_fingerprint,
+                near_fingerprint=snapshot.near_duplicate_fingerprint,
+                is_gif_message=snapshot.is_gif_message,
+            )
+        )
         if len(rows) > 100:
             rows = rows[-100:]
         self._recent_channel_activity[key] = rows
-        distinct_authors = {author_id for _timestamp, author_id, _words, _quality in rows}
-        quality_authors = {author_id for _timestamp, author_id, _words, quality in rows if quality}
-        return len(distinct_authors), len(quality_authors)
+        distinct_authors = {row.user_id for row in rows}
+        quality_authors = {row.user_id for row in rows if row.quality_message}
+        return len(distinct_authors), len(quality_authors), tuple(rows)
+
+    def _is_benign_turn_taking_context(
+        self,
+        snapshot: ShieldSnapshot,
+        channel_activity: Sequence[ShieldChannelActivityEvent],
+        *,
+        author_id: int,
+    ) -> bool:
+        if (
+            not channel_activity
+            or snapshot.has_links
+            or snapshot.has_suspicious_attachment
+            or snapshot.invite_codes
+            or snapshot.mention_count > 0
+            or snapshot.everyone_here_count > 0
+            or snapshot.repeated_char_run >= 12
+        ):
+            return False
+        safe_rows = [row for row in channel_activity if not row.risky]
+        if len(safe_rows) < 4:
+            return False
+        distinct_authors = {row.user_id for row in safe_rows}
+        if len(distinct_authors) < 2 or len(distinct_authors) > 4:
+            return False
+        author_counts: dict[int, int] = {}
+        for row in safe_rows:
+            author_counts[row.user_id] = author_counts.get(row.user_id, 0) + 1
+        if author_counts.get(author_id, 0) < 2:
+            return False
+        if max(author_counts.values(), default=0) / max(1, len(safe_rows)) > 0.65:
+            return False
+        transitions = sum(1 for left, right in zip(safe_rows, safe_rows[1:]) if left.user_id != right.user_id)
+        if transitions < len(safe_rows) - 2:
+            return False
+        short_rows = sum(1 for row in safe_rows if row.low_value_text or row.plain_word_count <= 4)
+        if short_rows < max(3, len(safe_rows) - 1):
+            return False
+        bot_turns = any(row.author_kind != "human" for row in safe_rows)
+        token_signatures = {row.token_signature for row in safe_rows if row.token_signature}
+        if not bot_turns and len(token_signatures) < 3:
+            return False
+        current_signature = _short_token_signature(snapshot.context_text)
+        repeated_current_signature = sum(1 for row in safe_rows if row.token_signature and row.token_signature == current_signature)
+        if not bot_turns and repeated_current_signature >= len(safe_rows) - 1:
+            return False
+        return True
 
     def _build_join_wave_evidence(self, guild_id: int, *, now: float) -> ShieldRaidEvidence:
         rows = [
@@ -2946,7 +3102,7 @@ class ShieldService:
         activity_rows = [
             row
             for row in self._recent_channel_activity.get(key, [])
-            if now - row[0] <= GROUP_GIF_PRESSURE_WINDOW_SECONDS
+            if now - row.timestamp <= GROUP_GIF_PRESSURE_WINDOW_SECONDS
         ]
         distinct_gif_authors = {author_id for _timestamp, author_id, _signature, _gif_only, _gif_low_text in gif_rows}
         low_text_gifs = sum(1 for _timestamp, _author_id, _signature, gif_only, gif_low_text in gif_rows if gif_only or gif_low_text)
@@ -3091,12 +3247,15 @@ class ShieldService:
         scam_context: ShieldScamContext,
         raid_evidence: ShieldRaidEvidence,
         author_kind: str,
+        author_id: int = 0,
         distinct_channel_authors: int = 0,
         quality_channel_authors: int = 0,
+        channel_activity: Sequence[ShieldChannelActivityEvent] = (),
         group_gif_pressure: dict[str, Any] | None = None,
     ) -> list[ShieldMatch]:
-        settings = compiled.spam
-        if not settings.enabled or author_kind != "human":
+        spam_settings = compiled.spam
+        gif_settings = compiled.gif
+        if author_kind != "human" or (not spam_settings.enabled and not gif_settings.enabled):
             return []
         attachment_name_text = " ".join(name for name in snapshot.attachment_names if name).strip()
         attachment_meta_only = (
@@ -3114,6 +3273,19 @@ class ShieldService:
             return []
 
         facts: list[dict[str, Any]] = []
+        benign_turn_taking = self._is_benign_turn_taking_context(
+            snapshot,
+            channel_activity,
+            author_id=author_id,
+        )
+        channel_low_value_events = [row for row in channel_activity if row.low_value_text]
+        current_author_message_count = sum(1 for row in channel_activity if row.user_id == author_id)
+        current_author_low_value_count = sum(1 for row in channel_low_value_events if row.user_id == author_id)
+        dominant_channel_presence = (
+            distinct_channel_authors <= 2
+            or current_author_message_count >= max(4, (len(channel_activity) // 2) + 1)
+            or current_author_low_value_count >= max(4, len(channel_low_value_events) - 1)
+        )
         exact_window = [
             event
             for event in recent_events
@@ -3121,8 +3293,8 @@ class ShieldService:
             and event.exact_fingerprint == snapshot.exact_fingerprint
             and now - event.timestamp <= SPAM_EXACT_WINDOW_SECONDS
         ]
-        exact_threshold = _sensitivity_threshold(settings.sensitivity, low=5, normal=4, high=3)
-        if len(exact_window) >= exact_threshold:
+        exact_threshold = _sensitivity_threshold(spam_settings.sensitivity, low=5, normal=4, high=3)
+        if spam_settings.enabled and len(exact_window) >= exact_threshold and not benign_turn_taking:
             facts.append(
                 {
                     "match_class": "spam_duplicate",
@@ -3134,7 +3306,7 @@ class ShieldService:
                 }
             )
 
-        near_threshold = _sensitivity_threshold(settings.sensitivity, low=6, normal=5, high=4)
+        near_threshold = _sensitivity_threshold(spam_settings.sensitivity, low=6, normal=5, high=4)
         near_hits = 0
         near_duplicate_context = bool(
             snapshot.low_value_text
@@ -3153,7 +3325,7 @@ class ShieldService:
                     continue
                 if difflib.SequenceMatcher(None, snapshot.near_duplicate_text, event.near_text).ratio() >= 0.88:
                     near_hits += 1
-        if near_hits >= near_threshold and near_duplicate_context:
+        if spam_settings.enabled and near_hits >= near_threshold and near_duplicate_context and not benign_turn_taking:
             facts.append(
                 {
                     "match_class": "spam_near_duplicate",
@@ -3166,7 +3338,7 @@ class ShieldService:
             )
 
         burst_events = [event for event in recent_events if now - event.timestamp <= SPAM_BURST_WINDOW_SECONDS]
-        burst_threshold = _sensitivity_threshold(settings.sensitivity, low=8, normal=7, high=6)
+        burst_threshold = _sensitivity_threshold(spam_settings.sensitivity, low=8, normal=7, high=6)
         burst_count = len(burst_events)
         burst_suspicious = any(
             event.low_value_text
@@ -3177,7 +3349,7 @@ class ShieldService:
             or event.repeated_char_run >= 12
             for event in burst_events
         )
-        if burst_count >= burst_threshold and burst_suspicious:
+        if spam_settings.enabled and burst_count >= burst_threshold and burst_suspicious and not benign_turn_taking:
             facts.append(
                 {
                     "match_class": "spam_burst",
@@ -3190,8 +3362,8 @@ class ShieldService:
             )
 
         link_events = [event for event in recent_events if event.has_links and now - event.timestamp <= SPAM_LINK_WINDOW_SECONDS]
-        link_threshold = _sensitivity_threshold(settings.sensitivity, low=5, normal=4, high=3)
-        if link_events:
+        link_threshold = _sensitivity_threshold(spam_settings.sensitivity, low=5, normal=4, high=3)
+        if spam_settings.enabled and link_events:
             if all(event.media_only_links for event in link_events):
                 link_threshold += 1
             distinct_link_signatures = {event.link_signature for event in link_events if event.link_signature and not event.invite_codes}
@@ -3209,9 +3381,9 @@ class ShieldService:
                 )
 
         invite_events = [event for event in recent_events if event.invite_codes and now - event.timestamp <= SPAM_INVITE_WINDOW_SECONDS]
-        invite_threshold = _sensitivity_threshold(settings.sensitivity, low=4, normal=3, high=3)
+        invite_threshold = _sensitivity_threshold(spam_settings.sensitivity, low=4, normal=3, high=3)
         distinct_invites = sorted({code for event in invite_events for code in event.invite_codes})
-        if len(invite_events) >= invite_threshold or (len(distinct_invites) >= 2 and len(recent_events) >= 4):
+        if spam_settings.enabled and (len(invite_events) >= invite_threshold or (len(distinct_invites) >= 2 and len(recent_events) >= 4)):
             facts.append(
                 {
                     "match_class": "spam_invite_flood",
@@ -3230,7 +3402,7 @@ class ShieldService:
         mention_window = [event for event in recent_events if event.mention_count > 0 and now - event.timestamp <= SPAM_MENTION_WINDOW_SECONDS]
         recent_mention_sum = sum(event.mention_count for event in mention_window[-3:])
         single_mention_threshold = 4 if snapshot.everyone_here_count > 0 else 8
-        if snapshot.mention_count >= single_mention_threshold or recent_mention_sum >= 12:
+        if spam_settings.enabled and (snapshot.mention_count >= single_mention_threshold or recent_mention_sum >= 12):
             facts.append(
                 {
                     "match_class": "spam_mention_flood",
@@ -3246,7 +3418,7 @@ class ShieldService:
                 }
             )
 
-        if (snapshot.plain_word_count <= 6 and snapshot.emoji_count >= 20) or snapshot.emoji_count >= 35:
+        if spam_settings.enabled and ((snapshot.plain_word_count <= 6 and snapshot.emoji_count >= 20) or snapshot.emoji_count >= 35):
             facts.append(
                 {
                     "match_class": "spam_emoji_flood",
@@ -3268,7 +3440,7 @@ class ShieldService:
         ]
         gif_low_text_events = [event for event in gif_events if event.gif_low_text]
         gif_only_events = [event for event in gif_events if event.gif_only]
-        if snapshot.is_gif_message:
+        if gif_settings.enabled and snapshot.is_gif_message:
             gif_ratio = len(gif_events) / max(1, len(recent_events))
             if (
                 len(gif_events) >= 6
@@ -3287,9 +3459,11 @@ class ShieldService:
                         "base_confidence": "medium",
                         "strong": True,
                         "signature": snapshot.gif_signature or snapshot.near_duplicate_fingerprint,
+                        "pack": "gif",
+                        "settings": compiled.gif,
                     }
                 )
-        if group_gif_pressure is not None:
+        if gif_settings.enabled and group_gif_pressure is not None:
             facts.append(
                 {
                     "match_class": "spam_group_gif_pressure",
@@ -3298,11 +3472,13 @@ class ShieldService:
                     "base_confidence": "high" if group_gif_pressure.get("raid_confirmed") else "medium",
                     "strong": True,
                     "signature": group_gif_pressure.get("signature"),
+                    "pack": "gif",
+                    "settings": compiled.gif,
                 }
             )
 
         low_value_events = [event for event in recent_events if event.low_value_text and now - event.timestamp <= SPAM_LOW_VALUE_WINDOW_SECONDS]
-        if len(low_value_events) >= 5:
+        if spam_settings.enabled and len(low_value_events) >= 5 and dominant_channel_presence and not benign_turn_taking:
             facts.append(
                 {
                     "match_class": "spam_low_value_noise",
@@ -3313,7 +3489,12 @@ class ShieldService:
                     "signature": snapshot.near_duplicate_fingerprint or snapshot.exact_fingerprint,
                 }
             )
-        if snapshot.repeated_char_run >= 12 and (burst_count >= max(2, burst_threshold - 2) or len(exact_window) >= 2 or near_hits >= 3):
+        if (
+            spam_settings.enabled
+            and snapshot.repeated_char_run >= 12
+            and not benign_turn_taking
+            and (burst_count >= max(2, burst_threshold - 2) or len(exact_window) >= 2 or near_hits >= 3)
+        ):
             facts.append(
                 {
                     "match_class": "spam_padding_noise",
@@ -3347,9 +3528,12 @@ class ShieldService:
                     confidence = "medium"
                 elif confidence == "medium":
                     confidence = "low"
+            pack = str(fact.get("pack", "spam"))
+            fact_settings = fact.get("settings")
+            resolved_settings = fact_settings if isinstance(fact_settings, PackSettings) else compiled.pack_settings(pack)
             match = self._make_pack_match(
-                pack="spam",
-                settings=settings,
+                pack=pack,
+                settings=resolved_settings,
                 label=fact["label"],
                 reason=fact["reason"],
                 confidence=confidence,
@@ -3372,7 +3556,7 @@ class ShieldService:
         boosted: list[ShieldMatch] = []
         lifted = False
         for match in matches:
-            if match.pack not in {"spam", "scam"} or _confidence_rank(match.confidence) < _confidence_rank("medium"):
+            if match.pack not in {"spam", "gif", "scam"} or _confidence_rank(match.confidence) < _confidence_rank("medium"):
                 boosted.append(match)
                 continue
             new_confidence = _boost_confidence(match.confidence)
@@ -3422,16 +3606,19 @@ class ShieldService:
         recent_spam_events: tuple[ShieldSpamEvent, ...] = ()
         distinct_channel_authors = 0
         quality_channel_authors = 0
-        if author_kind == "human" and scan_source == "new_message":
-            _spam_event, recent_spam_events = self._track_spam_event(
+        channel_activity: tuple[ShieldChannelActivityEvent, ...] = ()
+        if scan_source == "new_message":
+            distinct_channel_authors, quality_channel_authors, channel_activity = self._track_channel_activity(
                 message.guild.id,
+                channel_id,
                 int(getattr(message.author, "id", 0) or 0),
                 snapshot,
                 now=now,
+                author_kind=author_kind,
             )
-            distinct_channel_authors, quality_channel_authors = self._track_channel_activity(
+        if author_kind == "human" and scan_source == "new_message":
+            _spam_event, recent_spam_events = self._track_spam_event(
                 message.guild.id,
-                channel_id,
                 int(getattr(message.author, "id", 0) or 0),
                 snapshot,
                 now=now,
@@ -3478,10 +3665,12 @@ class ShieldService:
             raid_evidence=raid_evidence,
             recent_spam_events=recent_spam_events,
             author_kind=author_kind,
+            author_id=int(getattr(message.author, "id", 0) or 0),
             now=now,
             channel_id=channel_id,
             distinct_channel_authors=distinct_channel_authors,
             quality_channel_authors=quality_channel_authors,
+            channel_activity=channel_activity,
             group_gif_pressure=group_gif_pressure,
         )
         matches, _ = self._apply_allow_phrase_suppression(matches, allow_phrase=self._matching_allow_phrase(compiled, snapshot))
@@ -3529,7 +3718,7 @@ class ShieldService:
         if best.match_class == "repetitive_link_noise" and repetition.fingerprint is not None:
             decision.alert_evidence_signature = repetition.fingerprint
             decision.alert_evidence_summary = self._repetition_reason(repetition)
-        elif best.pack == "spam":
+        elif best.pack in {"spam", "gif"}:
             decision.alert_evidence_signature = (
                 group_gif_pressure.get("signature")
                 if best.match_class == "spam_group_gif_pressure" and group_gif_pressure is not None
@@ -3552,7 +3741,7 @@ class ShieldService:
             if not decision.timed_out:
                 decision.action_note = "Timeout was configured, but Babblebox could not time out that member."
 
-        if self._is_escalation_eligible(best):
+        if self._is_escalation_eligible(compiled, best):
             strike_count = self._record_strike(message.guild.id, message.author.id, best.pack, compiled, now)
             if strike_count >= compiled.escalation_threshold:
                 decision.timed_out = await self._timeout_member(
@@ -3568,7 +3757,7 @@ class ShieldService:
                 elif decision.action_note is None:
                     decision.action_note = "Repeated-hit escalation was configured, but Babblebox could not time out that member."
         elif best.action == "delete_escalate":
-            decision.action_note = "Repeated-hit escalation is reserved for high-confidence, non-noise Shield matches."
+            decision.action_note = "Repeated-hit escalation is reserved for actionable medium/high-confidence spam, GIF, and scam patterns."
 
         posture = self._security_posture_for(message.guild.id)
         if (
@@ -3585,13 +3774,13 @@ class ShieldService:
             guard_hold = (
                 posture == "guard"
                 and top_reason is not None
-                and top_reason.pack in {"spam", "scam"}
+                and top_reason.pack in {"spam", "gif", "scam"}
                 and confidence_rank >= _confidence_rank("high")
             )
             panic_hold = (
                 posture == "panic"
                 and top_reason is not None
-                and top_reason.pack in {"spam", "scam"}
+                and top_reason.pack in {"spam", "gif", "scam"}
                 and confidence_rank >= _confidence_rank("medium")
                 and (
                     decision.raid_evidence.fresh_join_wave
@@ -3883,23 +4072,26 @@ class ShieldService:
         fresh_campaign_cluster_20m = 0
         fresh_campaign_cluster_30m = 0
         fresh_campaign_kinds: tuple[str, ...] = ()
-        if primary_domain is not None and newcomer_early_message and scan_source == "new_message":
-            signatures: list[tuple[str, str]] = [("domain", primary_domain)]
-            path_shape_signature = _path_query_shape_signature(primary_assessment, domain=primary_domain)
-            if path_shape_signature is not None:
-                signatures.append(("path_shape", path_shape_signature))
-            host_family_signature = _host_family_signature(primary_assessment, domain=primary_domain)
-            if host_family_signature is not None:
-                signatures.append(("host_family", host_family_signature))
+        if newcomer_early_message and scan_source == "new_message":
+            signatures: list[tuple[str, str]] = []
+            if primary_domain is not None:
+                signatures.append(("domain", primary_domain))
+                path_shape_signature = _path_query_shape_signature(primary_assessment, domain=primary_domain)
+                if path_shape_signature is not None:
+                    signatures.append(("path_shape", path_shape_signature))
+                host_family_signature = _host_family_signature(primary_assessment, domain=primary_domain)
+                if host_family_signature is not None:
+                    signatures.append(("host_family", host_family_signature))
             lure_signature = _scam_lure_fingerprint(snapshot.context_text)
-            if lure_signature is not None:
+            if lure_signature is not None and (primary_domain is not None or _looks_like_no_link_dm_lure(snapshot.context_text)):
                 signatures.append(("lure", lure_signature))
-            fresh_campaign_cluster_20m, fresh_campaign_cluster_30m, fresh_campaign_kinds = self._track_fresh_campaigns(
-                message.guild.id,
-                signatures,
-                user_id=int(getattr(member, "id", 0) or 0),
-                now=now,
-            )
+            if signatures:
+                fresh_campaign_cluster_20m, fresh_campaign_cluster_30m, fresh_campaign_kinds = self._track_fresh_campaigns(
+                    message.guild.id,
+                    signatures,
+                    user_id=int(getattr(member, "id", 0) or 0),
+                    now=now,
+                )
         return ShieldScamContext(
             author_kind=author_kind,
             primary_domain=primary_domain,
@@ -3929,7 +4121,7 @@ class ShieldService:
         context_codes: list[str] = []
         message_match_class: str | None = None
         message_confidence: str | None = None
-        top_spam_reason = next((reason for reason in decision.reasons if reason.pack == "spam"), None)
+        top_spam_reason = next((reason for reason in decision.reasons if reason.pack in {"spam", "gif"}), None)
         top_scam_reason = next((reason for reason in decision.reasons if reason.pack == "scam"), None)
         if top_scam_reason is not None:
             if top_scam_reason.confidence == "high":
@@ -4059,10 +4251,13 @@ class ShieldService:
             match_class=match.match_class,
         )
 
-    def _is_escalation_eligible(self, match: ShieldMatch) -> bool:
+    def _is_escalation_eligible(self, compiled: CompiledShieldConfig, match: ShieldMatch) -> bool:
+        settings = compiled.pack_settings(match.pack)
         return (
-            match.action == "delete_escalate"
-            and match.confidence == "high"
+            settings.high_action == "delete_escalate"
+            and match.action in {"delete_log", "delete_escalate"}
+            and match.confidence in {"medium", "high"}
+            and match.match_class in ESCALATION_ELIGIBLE_MATCH_CLASSES
             and match.match_class not in ESCALATION_BLOCKED_MATCH_CLASSES
         )
 
@@ -4078,10 +4273,12 @@ class ShieldService:
         raid_evidence: ShieldRaidEvidence | None = None,
         recent_spam_events: Sequence[ShieldSpamEvent] | None = None,
         author_kind: str = "human",
+        author_id: int = 0,
         now: float | None = None,
         channel_id: int | None = None,
         distinct_channel_authors: int = 0,
         quality_channel_authors: int = 0,
+        channel_activity: Sequence[ShieldChannelActivityEvent] = (),
         group_gif_pressure: dict[str, Any] | None = None,
     ) -> list[ShieldMatch]:
         active_link_assessments = tuple(link_assessments or ())
@@ -4098,8 +4295,10 @@ class ShieldService:
                 scam_context=scam_context or ShieldScamContext(),
                 raid_evidence=raid_evidence or ShieldRaidEvidence(),
                 author_kind=author_kind,
+                author_id=author_id,
                 distinct_channel_authors=distinct_channel_authors,
                 quality_channel_authors=quality_channel_authors,
+                channel_activity=channel_activity,
                 group_gif_pressure=group_gif_pressure,
             )
         )
@@ -4985,6 +5184,19 @@ class ShieldService:
         urgency = bool(SCAM_URGENCY_RE.search(snapshot.context_text))
         wallet_or_mint = bool(SCAM_CRYPTO_MINT_RE.search(snapshot.context_text) or SCAM_CRYPTO_MINT_RE.search(snapshot.context_squashed))
         login_or_auth_flow = bool(SCAM_LOGIN_FLOW_RE.search(snapshot.context_text) or SCAM_LOGIN_FLOW_RE.search(snapshot.context_squashed))
+        dm_route = bool(SCAM_DM_ROUTE_RE.search(snapshot.context_text) or SCAM_DM_ROUTE_RE.search(snapshot.context_squashed))
+        off_platform_route = bool(
+            SCAM_OFF_PLATFORM_ROUTE_RE.search(snapshot.context_text) or SCAM_OFF_PLATFORM_ROUTE_RE.search(snapshot.context_squashed)
+        )
+        prize_or_money_bait = bool(SCAM_PRIZE_BAIT_RE.search(snapshot.context_text) or SCAM_PRIZE_BAIT_RE.search(snapshot.context_squashed))
+        cash_amount_bait = bool(SCAM_CASH_AMOUNT_RE.search(snapshot.context_text))
+        claim_or_details_language = bool(
+            SCAM_CLAIM_OR_DETAILS_RE.search(snapshot.context_text) or SCAM_CLAIM_OR_DETAILS_RE.search(snapshot.context_squashed)
+        )
+        nitro_or_crypto_bait = bool(
+            re.search(r"(?i)\b(?:nitro|crypto|btc|bitcoin|eth|ethereum|usdt)\b", snapshot.context_text)
+            or re.search(r"(?i)\b(?:nitro|crypto|btc|bitcoin|eth|ethereum|usdt)\b", snapshot.context_squashed)
+        )
         dangerous_link_target = any(SUSPICIOUS_FILE_RE.search(url) for url in snapshot.urls)
         suspicious_attachment_combo = snapshot.has_suspicious_attachment and bool(social_engineering or cta or login_or_auth_flow)
         return ShieldScamFeatures(
@@ -5008,6 +5220,12 @@ class ShieldService:
             urgency=urgency,
             wallet_or_mint=wallet_or_mint,
             login_or_auth_flow=login_or_auth_flow,
+            dm_route=dm_route,
+            off_platform_route=off_platform_route,
+            prize_or_money_bait=prize_or_money_bait,
+            cash_amount_bait=cash_amount_bait,
+            claim_or_details_language=claim_or_details_language,
+            nitro_or_crypto_bait=nitro_or_crypto_bait,
             dangerous_link_target=dangerous_link_target,
             suspicious_attachment_combo=suspicious_attachment_combo,
             scan_source=scan_source,
@@ -5165,6 +5383,64 @@ class ShieldService:
                     match_class="scam_download",
                 )
             )
+        if not snapshot.has_links and (features.dm_route or features.off_platform_route) and features.prize_or_money_bait:
+            dm_lure_score = 0
+            reason_bits: list[str] = []
+            if features.dm_route:
+                dm_lure_score += 2
+                reason_bits.append("private DM routing")
+            if features.off_platform_route:
+                dm_lure_score += 1
+                reason_bits.append("off-platform routing")
+            if features.prize_or_money_bait:
+                dm_lure_score += 2
+                reason_bits.append("prize, money, nitro, or crypto bait")
+            if features.cash_amount_bait:
+                dm_lure_score += 1
+                reason_bits.append("cash-amount promise")
+            if features.nitro_or_crypto_bait:
+                dm_lure_score += 1
+                reason_bits.append("nitro or crypto framing")
+            if features.claim_or_details_language:
+                dm_lure_score += 1
+                reason_bits.append("claim or details wording")
+            if features.urgency:
+                dm_lure_score += 1
+                reason_bits.append("urgency or scarcity")
+            if features.fake_authority or features.official_like_framing:
+                dm_lure_score += 1
+                reason_bits.append("fake authority or official framing")
+            if not features.automated_author and features.newcomer_early_message:
+                dm_lure_score += 1
+                reason_bits.append("newcomer early-message delivery")
+            if not features.automated_author and features.fresh_campaign_cluster_20m >= 2:
+                dm_lure_score += 1
+                reason_bits.append(f"repeat fresh-account pattern ({_cluster_reason_text(features.fresh_campaign_kinds)})")
+
+            dm_lure_confidence: str | None = None
+            if dm_lure_score >= 6:
+                dm_lure_confidence = "high"
+            elif dm_lure_score >= 4:
+                dm_lure_confidence = "medium"
+            elif dm_lure_score >= 3 and settings.sensitivity == "high":
+                dm_lure_confidence = "low"
+
+            if dm_lure_confidence is not None:
+                matches.append(
+                    ShieldMatch(
+                        pack="scam",
+                        label="No-link DM lure",
+                        reason=(
+                            "Prize or money bait routed members into DMs or off-platform contact without a safe public path."
+                            if not reason_bits
+                            else f"Prize or money bait routed members into DMs or off-platform contact ({', '.join(reason_bits[:4])})."
+                        ),
+                        action=settings.action_for_confidence(dm_lure_confidence),
+                        confidence=dm_lure_confidence,
+                        heuristic=True,
+                        match_class="scam_dm_lure",
+                    )
+                )
         if features.suspicious_link_present or snapshot.has_suspicious_attachment or features.dangerous_link_target:
             if features.automated_author and not self._automated_author_has_strong_scam_evidence(features, snapshot, link_assessments):
                 return self._dedupe_matches(matches)
@@ -5368,9 +5644,9 @@ class ShieldService:
             if any(now - event.timestamp <= SPAM_EVENT_WINDOW_SECONDS for event in values)
         }
         self._recent_channel_activity = {
-            key: [row for row in values if now - row[0] <= HEALTHY_CHAT_WINDOW_SECONDS]
+            key: [row for row in values if now - row.timestamp <= HEALTHY_CHAT_WINDOW_SECONDS]
             for key, values in self._recent_channel_activity.items()
-            if any(now - row[0] <= HEALTHY_CHAT_WINDOW_SECONDS for row in values)
+            if any(now - row.timestamp <= HEALTHY_CHAT_WINDOW_SECONDS for row in values)
         }
         self._recent_channel_gif_pressure = {
             key: [row for row in values if now - row[0] <= GROUP_GIF_PRESSURE_WINDOW_SECONDS]
@@ -5537,7 +5813,8 @@ class ShieldService:
         now = asyncio.get_running_loop().time()
         state = "fresh_join_wave" if raid_evidence.fresh_join_wave else "join_wave"
         dedupe_key = (guild.id, "raid_watch", state)
-        if now - self._raid_alert_dedup.get(dedupe_key, 0.0) < RAID_ALERT_DEDUP_SECONDS:
+        seen_at = self._raid_alert_dedup.get(dedupe_key)
+        if seen_at is not None and now - seen_at < RAID_ALERT_DEDUP_SECONDS:
             return
         self._raid_alert_dedup[dedupe_key] = now
 
@@ -5615,7 +5892,8 @@ class ShieldService:
                 decision.alert_evidence_signature,
                 "confirmed" if decision.raid_evidence.confirmed else "watch",
             )
-            if now - self._raid_alert_dedup.get(raid_dedupe_key, 0.0) < RAID_ALERT_DEDUP_SECONDS:
+            raid_seen_at = self._raid_alert_dedup.get(raid_dedupe_key)
+            if raid_seen_at is not None and now - raid_seen_at < RAID_ALERT_DEDUP_SECONDS:
                 return
             self._raid_alert_dedup[raid_dedupe_key] = now
         compact_alert = self._should_use_compact_alert(decision, top_reason)
@@ -5642,7 +5920,8 @@ class ShieldService:
             top_reason.match_class if top_reason is not None else "",
             content_fingerprint,
         )
-        if now - self._alert_signature_dedup.get(signature_key, 0.0) < ALERT_SIGNATURE_DEDUP_SECONDS:
+        signature_seen_at = self._alert_signature_dedup.get(signature_key)
+        if signature_seen_at is not None and now - signature_seen_at < ALERT_SIGNATURE_DEDUP_SECONDS:
             return
         self._alert_dedup[dedupe_key] = (now, content_fingerprint)
         self._alert_signature_dedup[signature_key] = now
@@ -5883,6 +6162,13 @@ class ShieldService:
                 medium_action=str(raw.get("spam_medium_action", "log")).strip().lower(),
                 high_action=str(raw.get("spam_high_action", "log")).strip().lower(),
                 sensitivity=str(raw.get("spam_sensitivity", "normal")).strip().lower(),
+            ),
+            gif=PackSettings(
+                enabled=bool(raw.get("gif_enabled")),
+                low_action=str(raw.get("gif_low_action", "log")).strip().lower(),
+                medium_action=str(raw.get("gif_medium_action", "log")).strip().lower(),
+                high_action=str(raw.get("gif_high_action", "log")).strip().lower(),
+                sensitivity=str(raw.get("gif_sensitivity", "normal")).strip().lower(),
             ),
             adult=PackSettings(
                 enabled=bool(raw.get("adult_enabled")),

@@ -229,7 +229,7 @@ class WebsiteDocsTests(unittest.TestCase):
         help_html = (ROOT / "help.html").read_text(encoding="utf-8")
 
         for text in (
-            "smart GIF spam",
+            "GIF Flood / Media Pressure",
             "/admin emergency",
             "/admin emergency_trust",
             "/admin emergency_limits",
@@ -239,8 +239,27 @@ class WebsiteDocsTests(unittest.TestCase):
         ):
             self.assertIn(text, readme)
             self.assertIn(text, help_html)
-        self.assertIn("smart GIF spam handling", index_html)
+        self.assertIn("GIF Flood / Media Pressure", index_html)
         self.assertIn("strict reversible containment", index_html)
+
+    def test_shield_docs_cover_no_link_dm_lure_and_truthful_ai_models(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        help_html = (ROOT / "help.html").read_text(encoding="utf-8")
+        index_html = (ROOT / "index.html").read_text(encoding="utf-8")
+
+        for text in (
+            "no-link DM-lure",
+            "gpt-5.4-nano",
+            "gpt-5.4-mini",
+            "gpt-5.4",
+        ):
+            self.assertIn(text, readme)
+        for text in ("no-link DM-lure", "gpt-5.4-nano", "gpt-5.4-mini", "gpt-5.4"):
+            self.assertIn(text, help_html)
+        self.assertIn("no-link DM-lure", index_html)
+        self.assertNotIn("gpt-4.1-mini", readme)
+        self.assertNotIn("gpt-4.1-mini", help_html)
+        self.assertNotIn("gpt-4.1-mini", index_html)
 
     def test_permission_orchestration_docs_cover_preview_presets_and_future_rules(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
@@ -251,6 +270,7 @@ class WebsiteDocsTests(unittest.TestCase):
             "/admin permissions",
             "preview-first",
             "future-channel auto-apply rules",
+            "saved future rule",
             "Quarantine",
             "Muted",
             "Not Verified",

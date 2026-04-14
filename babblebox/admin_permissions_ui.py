@@ -11,6 +11,7 @@ from babblebox.admin_service import (
     PERMISSION_ORCHESTRATION_PREVIEW_LIMIT,
     PermissionOrchestrationPreview,
     PermissionOrchestrationResult,
+    permission_future_rule_action_label,
 )
 from babblebox.permission_orchestration import (
     PERMISSION_SYNC_APPLY_BOTH,
@@ -135,6 +136,20 @@ def _preview_action_label(action: str) -> str:
         "skip": "Will stay untouched",
     }
     return mapping.get(action, action.replace("_", " ").title())
+
+
+def _future_rule_status_text(action: str, summary: str) -> str:
+    return f"Status: **{permission_future_rule_action_label(action)}**\n{summary}"
+
+
+def _future_rule_reason_text(action: str) -> str:
+    return {
+        "create": "This draft will create a saved future-channel rule.",
+        "replace": "This draft will replace the saved future-channel rule.",
+        "disable": "This draft will disable the saved future-channel rule.",
+        "unchanged": "This draft keeps the saved future-channel rule unchanged.",
+        "none": "This draft does not change any saved future-channel rule.",
+    }.get(action, "This draft touches saved future-channel automation.")
 
 
 class PermissionViewBase(discord.ui.View):
@@ -994,11 +1009,15 @@ class PermissionPreviewView(PermissionViewBase):
                 line += f" - {row.reason}"
             sample_lines.append(line)
         embed.add_field(
-            name="Sample",
+            name="Sample Existing Channels",
             value=ge.join_limited_lines(sample_lines, limit=1024, empty="No existing channel changes are part of this draft."),
             inline=False,
         )
-        embed.add_field(name="Future Automation", value=preview.future_rule_summary, inline=False)
+        embed.add_field(
+            name="Future Automation",
+            value=_future_rule_status_text(preview.future_rule_action, preview.future_rule_summary),
+            inline=False,
+        )
         permission_lines = summarize_permission_map(preview.request.permission_map_dict())
         if permission_lines:
             embed.add_field(
@@ -1081,7 +1100,7 @@ class PermissionConfirmView(PermissionViewBase):
         if self.preview.request.scope_mode == PERMISSION_SYNC_SCOPE_ALL_CHANNELS:
             reasons.append("This draft evaluates all current channels.")
         if self.preview.request.apply_target in {PERMISSION_SYNC_APPLY_FUTURE, PERMISSION_SYNC_APPLY_BOTH}:
-            reasons.append("This draft touches saved future-channel automation.")
+            reasons.append(_future_rule_reason_text(self.preview.future_rule_action))
         if self.preview.existing_direct_targets > 25 or self.preview.changed_count > 25:
             reasons.append("This draft touches a large current-channel set.")
         embed = discord.Embed(
@@ -1101,8 +1120,13 @@ class PermissionConfirmView(PermissionViewBase):
                 f"Scope: **{permission_scope_label(self.preview.request.scope_mode)}**\n"
                 f"Apply target: **{permission_apply_target_label(self.preview.request.apply_target)}**\n"
                 f"Existing channels to change now: **{self.preview.changed_count}**\n"
-                f"Future rule action: **{self.preview.future_rule_action.replace('_', ' ').title()}**"
+                f"Future automation: **{permission_future_rule_action_label(self.preview.future_rule_action)}**"
             ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Future Automation",
+            value=self.preview.future_rule_summary,
             inline=False,
         )
         embed.add_field(
@@ -1195,7 +1219,11 @@ class PermissionResultView(PermissionViewBase):
                 inline=False,
             )
         embed.add_field(name="Existing Scope", value=preview.existing_scope_summary, inline=False)
-        embed.add_field(name="Future Automation", value=preview.future_rule_summary, inline=False)
+        embed.add_field(
+            name="Future Automation",
+            value=_future_rule_status_text(preview.future_rule_action, preview.future_rule_summary),
+            inline=False,
+        )
         failed_lines: list[str] = []
         guild = self._guild()
         for row in result.results:
@@ -1208,6 +1236,14 @@ class PermissionResultView(PermissionViewBase):
             embed.add_field(
                 name="Failures",
                 value=ge.join_limited_lines(failed_lines[:PERMISSION_ORCHESTRATION_PREVIEW_LIMIT], limit=1024, empty="None"),
+                inline=False,
+            )
+            embed.add_field(
+                name="Operator Note",
+                value=(
+                    "Some current channels rejected the overwrite update. Review the failures above before assuming the role is fully aligned. "
+                    "The future-automation status shown here still reflects what Babblebox saved for newly created channels."
+                ),
                 inline=False,
             )
         return embed

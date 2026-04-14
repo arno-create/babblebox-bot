@@ -10,7 +10,7 @@ import aiohttp
 from babblebox.text_safety import normalize_plain_text
 
 
-DEFAULT_QUESTION_DROPS_AI_MODEL = "gpt-4.1-mini"
+DEFAULT_QUESTION_DROPS_AI_MODEL = "gpt-5.4-mini"
 DEFAULT_QUESTION_DROPS_AI_TIMEOUT_SECONDS = 4.0
 DEFAULT_QUESTION_DROPS_AI_CONCURRENCY = 1
 OPENAI_CHAT_COMPLETIONS_URL = "https://api.openai.com/v1/chat/completions"

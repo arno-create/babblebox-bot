@@ -27,6 +27,7 @@ PACK_CHOICES = [
     app_commands.Choice(name="Promo / Invite", value="promo"),
     app_commands.Choice(name="Scam / Malicious Links", value="scam"),
     app_commands.Choice(name="Spam / Raid", value="spam"),
+    app_commands.Choice(name="GIF Flood / Media Pressure", value="gif"),
     app_commands.Choice(name="Adult Links + Solicitation", value="adult"),
     app_commands.Choice(name="Severe Harm / Hate", value="severe"),
 ]
@@ -581,7 +582,7 @@ class ShieldCog(commands.Cog):
         ai_status = self.service.get_ai_status(guild_id)
         embed = discord.Embed(
             title="Shield Control Panel",
-            description="Shield is Babblebox's bounded immunity layer. Live-message moderation stays toggleable here, while private feature-surface checks stay always on for Confessions unsafe-link parity, AFK reasons, reminder text plus public reminder delivery, and watch keyword setup. AFK and reminder text use privacy, adult, and severe checks; watch keywords stay privacy-only. The Spam / Raid pack adds compact antispam and bounded join-wave defense without turning Babblebox into a moderation archive, and none of those feature checks trigger Shield AI.",
+            description="Shield is Babblebox's bounded immunity layer. Live-message moderation stays toggleable here, while private feature-surface checks stay always on for Confessions unsafe-link parity, AFK reasons, reminder text plus public reminder delivery, and watch keyword setup. AFK and reminder text use privacy, adult, and severe checks; watch keywords stay privacy-only. Spam / Raid stays focused on repeat-message, burst, link, mention, and newcomer pressure, while GIF Flood / Media Pressure handles low-text GIF disruption as its own compact lane with clear evidence and bounded windows. None of those feature checks trigger Shield AI.",
             color=ge.EMBED_THEME["warning"] if config["module_enabled"] else ge.EMBED_THEME["info"],
         )
         log_channel = f"<#{config['log_channel_id']}>" if config.get("log_channel_id") else "Not set"
@@ -595,12 +596,12 @@ class ShieldCog(commands.Cog):
                 f"Log channel: {log_channel}\n"
                 f"Alert role: {alert_role}\n"
                 "First enable: Babblebox applies its recommended non-AI baseline once, then leaves your edits alone.\n"
-                "Feature checks: AFK + reminders use privacy/adult/severe, Watch stays privacy-only, Confessions shares link checks, and Spam / Raid stays live-message only"
+                "Feature checks: AFK + reminders use privacy/adult/severe, Watch stays privacy-only, Confessions shares link checks, and Spam / Raid plus GIF Flood stay live-message only"
             ),
             inline=False,
         )
         protection_lines = []
-        for pack in ("privacy", "promo", "spam"):
+        for pack in ("privacy", "promo", "spam", "gif"):
             protection_lines.append(
                 f"**{PACK_LABELS[pack]}**\n"
                 f"Enabled: {'Yes' if config[f'{pack}_enabled'] else 'No'} | Sensitivity: {SENSITIVITY_LABELS[config[f'{pack}_sensitivity']]}\n"
@@ -648,11 +649,11 @@ class ShieldCog(commands.Cog):
         config = self.service.get_config(guild_id)
         embed = discord.Embed(
             title="Shield Rules",
-            description="Confidence-tier local policy. Local malicious, trusted-brand impersonation, and adult-domain matches can act hard, the Spam / Raid pack stays compact and bounded, the adult solicitation detector stays optional and narrowly scoped, the severe pack stays targeted to real-harm abuse only, and unknown suspicious links stay link-only unless local scam signals, newcomer context, or campaign repetition justify escalation.",
+            description="Confidence-tier local policy. Local malicious, trusted-brand impersonation, and adult-domain matches can act hard, Spam / Raid stays compact and bounded, GIF Flood / Media Pressure stays first-class instead of being buried under generic spam, the adult solicitation detector stays optional and narrowly scoped, the severe pack stays targeted to real-harm abuse only, and unknown suspicious links stay link-only unless local scam signals, newcomer context, or campaign repetition justify escalation.",
             color=ge.EMBED_THEME["info"],
         )
         pack_lines = []
-        for pack in ("privacy", "promo", "spam"):
+        for pack in ("privacy", "promo", "spam", "gif"):
             pack_lines.append(
                 f"**{PACK_LABELS[pack]}**\n"
                 f"{self._pack_policy_detail(config, pack)}"
@@ -692,6 +693,7 @@ class ShieldCog(commands.Cog):
             value=(
                 "`/shield rules pack:promo enabled:true low_action:log medium_action:delete_log high_action:delete_escalate sensitivity:high`\n"
                 "`/shield rules pack:spam enabled:true low_action:log medium_action:delete_log high_action:delete_escalate sensitivity:normal`\n"
+                "`/shield rules pack:gif enabled:true low_action:log medium_action:delete_log high_action:delete_escalate sensitivity:normal`\n"
                 "`/shield rules pack:adult enabled:true adult_solicitation:true low_action:log medium_action:delete_log high_action:delete_log`\n"
                 "`/shield rules pack:severe enabled:true low_action:detect medium_action:delete_log high_action:delete_log`\n"
                 "`/shield severe category category:self_harm_encouragement state:on`\n"

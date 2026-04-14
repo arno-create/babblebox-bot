@@ -3095,6 +3095,89 @@ class AdminServiceTests(unittest.IsolatedAsyncioTestCase):
         await self.service.handle_channel_create(other_channel)
         self.assertIsNone(other_channel.overwrites_for(role).view_channel)
 
+    async def test_permission_orchestration_future_rule_preview_and_apply_are_truthful_about_replace_and_noop(self):
+        actor = self._admin_actor()
+        role = FakeRole(9550, position=10, name="Verified")
+        category = FakeChannel(9551, name="Members", channel_type=discord.ChannelType.category)
+        category.guild = self.guild
+        self.guild.roles[role.id] = role
+        self.guild.channels[category.id] = category
+
+        create_preview = await self.service.build_permission_orchestration_preview(
+            self.guild,
+            actor=actor,
+            role_id=role.id,
+            permission_map={"view_channel": "allow", "send_messages": "allow"},
+            scope_mode=PERMISSION_SYNC_SCOPE_SELECTED_CATEGORIES,
+            apply_target=PERMISSION_SYNC_APPLY_FUTURE,
+            category_ids=[category.id],
+            future_channel_type_filters=["text"],
+            preset_key="verified",
+        )
+        self.assertEqual(create_preview.future_rule_action, "create")
+        self.assertIn("create a saved future-channel rule", create_preview.future_rule_summary.lower())
+
+        ok, message, result = await self.service.apply_permission_orchestration(
+            self.guild,
+            actor=actor,
+            role_id=role.id,
+            permission_map={"view_channel": "allow", "send_messages": "allow"},
+            scope_mode=PERMISSION_SYNC_SCOPE_SELECTED_CATEGORIES,
+            apply_target=PERMISSION_SYNC_APPLY_FUTURE,
+            category_ids=[category.id],
+            future_channel_type_filters=["text"],
+            preset_key="verified",
+            expected_signature=create_preview.signature,
+        )
+        self.assertTrue(ok)
+        self.assertIn("created", message.lower())
+        self.assertIsNotNone(result)
+
+        replace_preview = await self.service.build_permission_orchestration_preview(
+            self.guild,
+            actor=actor,
+            role_id=role.id,
+            permission_map={"view_channel": "allow", "send_messages": "deny"},
+            scope_mode=PERMISSION_SYNC_SCOPE_SELECTED_CATEGORIES,
+            apply_target=PERMISSION_SYNC_APPLY_FUTURE,
+            category_ids=[category.id],
+            future_channel_type_filters=["text"],
+            preset_key="verified",
+        )
+        self.assertEqual(replace_preview.future_rule_action, "replace")
+        self.assertIn("replace the saved future-channel rule", replace_preview.future_rule_summary.lower())
+
+        unchanged_preview = await self.service.build_permission_orchestration_preview(
+            self.guild,
+            actor=actor,
+            role_id=role.id,
+            permission_map={"view_channel": "allow", "send_messages": "allow"},
+            scope_mode=PERMISSION_SYNC_SCOPE_SELECTED_CATEGORIES,
+            apply_target=PERMISSION_SYNC_APPLY_FUTURE,
+            category_ids=[category.id],
+            future_channel_type_filters=["text"],
+            preset_key="verified",
+        )
+        self.assertEqual(unchanged_preview.future_rule_action, "unchanged")
+        self.assertIn("already matches this draft", unchanged_preview.future_rule_summary.lower())
+
+        ok, message, result = await self.service.apply_permission_orchestration(
+            self.guild,
+            actor=actor,
+            role_id=role.id,
+            permission_map={"view_channel": "allow", "send_messages": "allow"},
+            scope_mode=PERMISSION_SYNC_SCOPE_SELECTED_CATEGORIES,
+            apply_target=PERMISSION_SYNC_APPLY_FUTURE,
+            category_ids=[category.id],
+            future_channel_type_filters=["text"],
+            preset_key="verified",
+            expected_signature=unchanged_preview.signature,
+        )
+        self.assertTrue(ok)
+        self.assertIn("already matched this draft", message.lower())
+        self.assertIsNotNone(result)
+        self.assertEqual(len(self.service.get_config(self.guild.id)["permission_sync_rules"]), 1)
+
     async def test_permission_orchestration_blocks_actor_and_bot_hierarchy_issues(self):
         actor_role = FakeRole(9600, position=10, name="Moderator")
         actor = FakeMember(
@@ -3241,4 +3324,4 @@ class AdminServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.changed_count, 1)
         self.assertEqual(result.failed_count, 1)
         self.assertEqual(self.log_channel.sent[-1]["embed"].title, "Role Permission Orchestration Applied With Issues")
-        self.assertIn("Future rule: **Create**", self.log_channel.sent[-1]["embed"].description)
+        self.assertIn("Future automation: **Create saved rule**", self.log_channel.sent[-1]["embed"].description)

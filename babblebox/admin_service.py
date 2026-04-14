@@ -639,6 +639,16 @@ class PermissionOrchestrationResult:
         return sum(1 for row in self.results if row.action == "failed")
 
 
+def permission_future_rule_action_label(action: str) -> str:
+    return {
+        "create": "Create saved rule",
+        "replace": "Replace saved rule",
+        "disable": "Disable saved rule",
+        "unchanged": "Keep saved rule unchanged",
+        "none": "No saved rule change",
+    }.get(action, action.replace("_", " ").title())
+
+
 def _compile_config(raw: dict[str, Any]) -> CompiledAdminConfig:
     return CompiledAdminConfig(
         guild_id=int(raw["guild_id"]),
@@ -2699,16 +2709,18 @@ class AdminService:
             return "disable", "The saved future-channel rule for this role will be disabled."
         payload = self._permission_sync_rule_payload(request)
         if payload is None:
-            return "none", "Future-channel automation will stay unchanged."
+            if existing_rule is None:
+                return "none", "This draft does not create or change a saved future-channel rule."
+            return "none", "The saved future-channel rule will stay unchanged."
         future_scope = (
             "all new supported channels"
             if payload["scope_mode"] == PERMISSION_SYNC_RULE_SCOPE_ALL_CHANNELS
             else "new channels inside the selected categories"
         )
         type_labels = ", ".join(permission_channel_type_label(value) for value in payload["channel_type_filters"])
-        summary = f"Future automation will target {future_scope}. Channel types: {type_labels}."
+        summary = f"Target: {future_scope}. Channel types: {type_labels}."
         if existing_rule is None:
-            return "create", summary
+            return "create", f"Babblebox will create a saved future-channel rule. {summary}"
         existing_payload = {
             "role_id": existing_rule.role_id,
             "enabled": existing_rule.enabled,
@@ -2722,7 +2734,7 @@ class AdminService:
         comparable_payload.pop("updated_at", None)
         if existing_payload == comparable_payload:
             return "unchanged", "The saved future-channel rule already matches this draft."
-        return "replace", summary
+        return "replace", f"Babblebox will replace the saved future-channel rule. {summary}"
 
     async def build_permission_orchestration_preview(
         self,
@@ -2864,6 +2876,21 @@ class AdminService:
         payload = self._permission_sync_rule_payload(request)
         if payload is None:
             return True, "Future-channel automation stayed unchanged."
+        existing_rule = self.permission_sync_rule_for_role(guild_id, request.role_id)
+        if existing_rule is not None:
+            existing_payload = {
+                "role_id": existing_rule.role_id,
+                "enabled": existing_rule.enabled,
+                "scope_mode": existing_rule.scope_mode,
+                "category_ids": sorted(existing_rule.category_ids),
+                "channel_type_filters": sorted(existing_rule.channel_type_filters),
+                "permission_map": existing_rule.permission_map_dict(),
+                "preset_key": existing_rule.preset_key,
+            }
+            comparable_payload = dict(payload)
+            comparable_payload.pop("updated_at", None)
+            if existing_payload == comparable_payload:
+                return True, "Saved future-channel automation already matched this draft."
 
         def mutate(config: dict[str, Any]):
             existing_rules = [
@@ -2877,7 +2904,11 @@ class AdminService:
         return await self._update_config(
             guild_id,
             mutate,
-            success_message="Saved future-channel automation was updated.",
+            success_message=(
+                "Saved future-channel automation was created."
+                if existing_rule is None
+                else "Saved future-channel automation was replaced."
+            ),
             requested_fields={"permission_sync_rules"},
             force_post_update=True,
         )
@@ -2889,12 +2920,13 @@ class AdminService:
         result: PermissionOrchestrationResult,
     ) -> discord.Embed:
         preview = result.preview
+        future_action_label = permission_future_rule_action_label(preview.future_rule_action)
         lines = [
             f"{getattr(actor, 'mention', ge.display_name_of(actor))} applied permission orchestration for {preview.role_mention}.",
             f"Apply target: **{permission_apply_target_label(preview.request.apply_target)}**",
             f"Scope: **{permission_scope_label(preview.request.scope_mode)}**",
             f"Changed: **{result.changed_count}** | Unchanged: **{result.unchanged_count}** | Inherited: **{result.inherited_count}** | Failed: **{result.failed_count}**",
-            f"Future rule: **{preview.future_rule_action.replace('_', ' ').title()}**",
+            f"Future automation: **{future_action_label}**",
         ]
         embed = ge.make_status_embed(
             "Role Permission Orchestration Applied" if result.failed_count == 0 else "Role Permission Orchestration Applied With Issues",
@@ -4995,7 +5027,8 @@ class AdminService:
     ):
         now = asyncio.get_running_loop().time()
         dedup_key = (guild.id, key)
-        if now - self._log_dedup.get(dedup_key, 0.0) < LOG_DEDUP_SECONDS:
+        seen_at = self._log_dedup.get(dedup_key)
+        if seen_at is not None and now - seen_at < LOG_DEDUP_SECONDS:
             return
         self._log_dedup[dedup_key] = now
         embed = ge.make_status_embed(title, message, tone="warning", footer=footer)
@@ -6679,7 +6712,8 @@ class AdminService:
         signature = hashlib.sha256("|".join(assessment.signal_codes).encode("utf-8")).hexdigest()[:12]
         dedup_key = (guild.id, member.id, signature)
         now = asyncio.get_running_loop().time()
-        if now - self._member_risk_note_dedup.get(dedup_key, 0.0) < MEMBER_RISK_NOTE_DEDUP_SECONDS:
+        seen_at = self._member_risk_note_dedup.get(dedup_key)
+        if seen_at is not None and now - seen_at < MEMBER_RISK_NOTE_DEDUP_SECONDS:
             return
         self._member_risk_note_dedup[dedup_key] = now
         message_evidence, identity_hints, confidence_risers = self._member_risk_evidence_fields(assessment.signal_codes)
