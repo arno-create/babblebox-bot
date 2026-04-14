@@ -10,7 +10,7 @@ It is designed around seven clear product lanes:
 - Everyday Utilities for quiet server life
 - Daily Arcade for low-player-count return visits
 - Buddy / Profile / Vault for identity, streaks, and showable progress
-- Babblebox Shield plus compact admin lifecycle and emergency helpers for lightweight, configurable server safety
+- Babblebox Shield plus compact admin lifecycle, permission orchestration, and emergency helpers for lightweight, configurable server safety
 
 Babblebox is intentionally compact:
 
@@ -166,6 +166,10 @@ Babblebox is intentionally compact:
 - verification-help channel deadline extensions with a small extension cap
 - optional suspicious-member note, review, or review-or-kick lane under `/admin risk`
 - shared exclusions, trusted-role bypasses, templates, and compact admin logs
+- preview-first `/admin permissions` lane for one-role permission orchestration across all channels, selected channels, selected categories, channels inside selected categories, and future newly created channels
+- targeted allow / deny / clear overwrite updates that preserve unrelated channel permissions unless the admin explicitly clears them
+- strict hierarchy safety for permission orchestration: Babblebox blocks `@everyone`, managed or integration roles, roles not below the actor's highest role, and roles above the bot's manageable hierarchy
+- starter presets for `Quarantine`, `Muted`, `Not Verified`, and `Verified`, plus deterministic future-channel auto-apply rules with compact shared admin-log summaries
 
 ### Daily Arcade
 
@@ -349,6 +353,7 @@ Slash is recommended for the heavier config flows here. Prefix stays positional,
 | Slash | Prefix | Purpose |
 | --- | --- | --- |
 | `/admin panel` | `bb!admin panel` | Open the admin lifecycle control panel |
+| `/admin permissions` | `bb!admin permissions` | Preview and safely orchestrate one role's channel permissions across current and future channels |
 | `/admin status` | `bb!admin status` | View overview counts or inspect one member |
 | `/admin followup` | `bb!admin followup true @Probation review 30d` | Configure returned-after-ban follow-up roles |
 | `/admin verification` | `bb!admin verification true @Verified must_have_role review 7d 2d` | Configure warning-before-kick verification cleanup and the shared review queue |
@@ -363,6 +368,8 @@ Slash is recommended for the heavier config flows here. Prefix stays positional,
 | `/admin sync` | `bb!admin sync` | One-time catch-up scan for current unverified members |
 
 Verification cleanup stays batch-first, suspicious-member review stays private, and emergency handling stays tiered: routine sweeps emit grouped summaries, review mode uses one persistent queue message per lane, startup reconciliation resumes quietly, and Babblebox does not post public channel reactions or reply callouts for weak evidence. Emergency incidents are audit-log-backed, grouped by signature, and split across `Observe`, `Guard`, and `Panic` postures. Observe keeps the system calm while still allowing exact reversible rollback for overwhelming-confidence dangerous grants. Guard keeps grouped review plus bounded newcomer raid hold and exact rollback. Panic adds optional actor containment for extreme-confidence takeover sequences, with explicit release buttons instead of silent irreversible punishment.
+
+`/admin permissions` is preview-first and one-role-at-a-time: admins choose targeted allow, deny, or clear states for selected permission flags, review exactly how many channels would change, and can save deterministic future-channel auto-apply rules scoped to categories and channel types. Starter presets for `Quarantine`, `Muted`, `Not Verified`, and `Verified` stay editable, unrelated overwrites stay preserved unless explicitly cleared, and Babblebox refuses roles at or above the actor's highest role, roles above the bot's manageable hierarchy, `@everyone`, and managed roles.
 
 ### Daily Arcade
 
@@ -617,6 +624,7 @@ Not stored:
 .
 |-- babblebox/
 |   |-- __init__.py
+|   |-- admin_permissions_ui.py
 |   |-- admin_service.py
 |   |-- admin_store.py
 |   |-- bot.py
@@ -624,6 +632,7 @@ Not stored:
 |   |-- daily_challenges.py
 |   |-- game_engine.py
 |   |-- pattern_hunt_game.py
+|   |-- permission_orchestration.py
 |   |-- profile_service.py
 |   |-- profile_store.py
 |   |-- question_drops_ai.py
@@ -673,12 +682,14 @@ Not stored:
 - `babblebox/question_drops_service.py`: Question Drops scheduling, judging, mastery, and guild-first panels
 - `babblebox/question_drops_store.py`: Question Drops persistence and config normalization
 - `babblebox/question_drops_style.py`: Question Drops emoji and presentation helpers
-- `babblebox/admin_store.py`: compact admin lifecycle config and pending-state persistence
-- `babblebox/admin_service.py`: returned-after-ban follow-up logic, verification cleanup, and bounded sweeping
+- `babblebox/admin_store.py`: compact admin lifecycle config, permission-orchestration future-rule persistence, and pending-state persistence
+- `babblebox/admin_service.py`: returned-after-ban follow-up logic, permission orchestration, future-channel rule application, verification cleanup, and bounded sweeping
+- `babblebox/admin_permissions_ui.py`: private `/admin permissions` workflow, preview, confirmation, and future-rule controls
+- `babblebox/permission_orchestration.py`: shared permission-orchestration catalogs, presets, labels, and normalization helpers
 - `babblebox/shield_ai.py`: optional AI provider integration, redaction, truncation, and safe parsing
 - `babblebox/shield_store.py`: compact Shield config persistence
 - `babblebox/shield_service.py`: Shield matching, cache rebuilds, actions, and mod-log delivery
-- `babblebox/cogs/admin.py`: admin-facing lifecycle panel, grouped commands, and review buttons
+- `babblebox/cogs/admin.py`: admin-facing lifecycle panel, permission orchestrator entrypoints, grouped commands, and review buttons
 - `babblebox/cogs/identity.py`: Daily Arcade, Buddy, Profile, and Vault commands
 - `babblebox/cogs/meta.py`: in-bot manual and compact help surfaces
 - `babblebox/cogs/party_games.py`: Pattern Hunt private command surface

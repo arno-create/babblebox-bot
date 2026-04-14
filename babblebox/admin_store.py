@@ -9,6 +9,10 @@ from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
+from babblebox.permission_orchestration import (
+    PERMISSION_SYNC_RULE_LIMIT,
+    normalize_permission_sync_rule,
+)
 from babblebox.postgres_json import decode_postgres_json_array
 
 
@@ -92,6 +96,7 @@ def default_admin_config(guild_id: int | None = None) -> dict[str, Any]:
         "channel_whitelist_ids": [],
         "quarantine_role_id": None,
         "enabled_dangerous_permission_flags": sorted(EMERGENCY_PERMISSION_FLAGS),
+        "permission_sync_rules": [],
         "emergency_role_grant_threshold": 2,
         "emergency_role_grant_target_threshold": 2,
         "emergency_kick_threshold": 4,
@@ -330,6 +335,17 @@ def normalize_admin_config(guild_id: int, payload: Any) -> dict[str, Any]:
         allowed=EMERGENCY_PERMISSION_FLAGS,
     )
     cleaned["enabled_dangerous_permission_flags"] = enabled_flags or sorted(EMERGENCY_PERMISSION_FLAGS)
+    rules_by_role: dict[int, dict[str, Any]] = {}
+    raw_rules = payload.get("permission_sync_rules")
+    if isinstance(raw_rules, (list, tuple)):
+        for raw_rule in raw_rules:
+            normalized_rule = normalize_permission_sync_rule(raw_rule)
+            if normalized_rule is None:
+                continue
+            rules_by_role[int(normalized_rule["role_id"])] = normalized_rule
+            if len(rules_by_role) >= PERMISSION_SYNC_RULE_LIMIT:
+                break
+    cleaned["permission_sync_rules"] = [rules_by_role[role_id] for role_id in sorted(rules_by_role)]
     for field, default_value, minimum, maximum in (
         ("emergency_role_grant_threshold", 2, 1, 20),
         ("emergency_role_grant_target_threshold", 2, 1, 20),
@@ -1152,6 +1168,10 @@ def _config_from_row(row) -> dict[str, Any]:
                 row.get("enabled_dangerous_permission_flags"),
                 label="admin_guild_configs.enabled_dangerous_permission_flags",
             ),
+            "permission_sync_rules": decode_postgres_json_array(
+                row.get("permission_sync_rules"),
+                label="admin_guild_configs.permission_sync_rules",
+            ),
             "emergency_role_grant_threshold": int(row.get("emergency_role_grant_threshold", 2) or 2),
             "emergency_role_grant_target_threshold": int(row.get("emergency_role_grant_target_threshold", 2) or 2),
             "emergency_kick_threshold": int(row.get("emergency_kick_threshold", 4) or 4),
@@ -1412,6 +1432,7 @@ class _PostgresAdminStore(_BaseAdminStore):
                 "channel_whitelist_ids JSONB NOT NULL DEFAULT '[]'::jsonb, "
                 "quarantine_role_id BIGINT NULL, "
                 "enabled_dangerous_permission_flags JSONB NOT NULL DEFAULT '[]'::jsonb, "
+                "permission_sync_rules JSONB NOT NULL DEFAULT '[]'::jsonb, "
                 "emergency_role_grant_threshold SMALLINT NOT NULL DEFAULT 2, "
                 "emergency_role_grant_target_threshold SMALLINT NOT NULL DEFAULT 2, "
                 "emergency_kick_threshold SMALLINT NOT NULL DEFAULT 4, "
@@ -1582,6 +1603,7 @@ class _PostgresAdminStore(_BaseAdminStore):
             "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS channel_whitelist_ids JSONB NOT NULL DEFAULT '[]'::jsonb",
             "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS quarantine_role_id BIGINT NULL",
             "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS enabled_dangerous_permission_flags JSONB NOT NULL DEFAULT '[]'::jsonb",
+            "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS permission_sync_rules JSONB NOT NULL DEFAULT '[]'::jsonb",
             "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS emergency_role_grant_threshold SMALLINT NOT NULL DEFAULT 2",
             "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS emergency_role_grant_target_threshold SMALLINT NOT NULL DEFAULT 2",
             "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS emergency_kick_threshold SMALLINT NOT NULL DEFAULT 4",
@@ -1670,7 +1692,7 @@ class _PostgresAdminStore(_BaseAdminStore):
                         "control_lock_enabled, editor_user_ids, editor_role_ids, emergency_operator_user_ids, emergency_operator_role_ids, "
                         "control_deny_user_ids, control_deny_role_ids, "
                         "protected_role_ids, protected_role_granter_user_ids, protected_role_granter_role_ids, trusted_actor_user_ids, trusted_actor_role_ids, trusted_bot_ids, "
-                        "allowlisted_target_user_ids, allowlisted_target_role_ids, channel_whitelist_ids, quarantine_role_id, enabled_dangerous_permission_flags, "
+                        "allowlisted_target_user_ids, allowlisted_target_role_ids, channel_whitelist_ids, quarantine_role_id, enabled_dangerous_permission_flags, permission_sync_rules, "
                         "emergency_role_grant_threshold, emergency_role_grant_target_threshold, emergency_kick_threshold, emergency_ban_threshold, "
                         "emergency_channel_delete_threshold, emergency_role_delete_threshold, emergency_webhook_churn_threshold, emergency_bot_add_threshold, "
                         "updated_at"
@@ -1685,8 +1707,8 @@ class _PostgresAdminStore(_BaseAdminStore):
                         "$32, $33::jsonb, $34::jsonb, $35::jsonb, $36::jsonb, "
                         "$37::jsonb, $38::jsonb, "
                         "$39::jsonb, $40::jsonb, $41::jsonb, $42::jsonb, $43::jsonb, $44::jsonb, "
-                        "$45::jsonb, $46::jsonb, $47::jsonb, $48, $49::jsonb, "
-                        "$50, $51, $52, $53, $54, $55, $56, $57, timezone('utc', now())"
+                        "$45::jsonb, $46::jsonb, $47::jsonb, $48, $49::jsonb, $50::jsonb, "
+                        "$51, $52, $53, $54, $55, $56, $57, $58, timezone('utc', now())"
                         ") "
                         "ON CONFLICT (guild_id) DO UPDATE SET "
                         "followup_enabled = EXCLUDED.followup_enabled, "
@@ -1739,6 +1761,7 @@ class _PostgresAdminStore(_BaseAdminStore):
                         "channel_whitelist_ids = EXCLUDED.channel_whitelist_ids, "
                         "quarantine_role_id = EXCLUDED.quarantine_role_id, "
                         "enabled_dangerous_permission_flags = EXCLUDED.enabled_dangerous_permission_flags, "
+                        "permission_sync_rules = EXCLUDED.permission_sync_rules, "
                         "emergency_role_grant_threshold = EXCLUDED.emergency_role_grant_threshold, "
                         "emergency_role_grant_target_threshold = EXCLUDED.emergency_role_grant_target_threshold, "
                         "emergency_kick_threshold = EXCLUDED.emergency_kick_threshold, "
@@ -1800,6 +1823,7 @@ class _PostgresAdminStore(_BaseAdminStore):
                     json.dumps(normalized["channel_whitelist_ids"]),
                     normalized["quarantine_role_id"],
                     json.dumps(normalized["enabled_dangerous_permission_flags"]),
+                    json.dumps(normalized["permission_sync_rules"]),
                     normalized["emergency_role_grant_threshold"],
                     normalized["emergency_role_grant_target_threshold"],
                     normalized["emergency_kick_threshold"],

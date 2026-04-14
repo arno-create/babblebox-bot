@@ -30,6 +30,11 @@ from babblebox.admin_service import (
     VerificationSyncSummary,
     _followup_duration_label,
 )
+from babblebox.admin_permissions_ui import PermissionDraftState, PermissionOrchestrationView
+from babblebox.permission_orchestration import (
+    PERMISSION_SYNC_PRESETS,
+    permission_channel_type_label,
+)
 from babblebox.command_utils import defer_hybrid_response, send_hybrid_response
 from babblebox.utility_helpers import deserialize_datetime, format_duration_brief
 
@@ -471,6 +476,7 @@ class AdminPanelView(discord.ui.View):
             "verification": self.verification_button,
             "risk": self.risk_button,
             "emergency": self.emergency_button,
+            "permissions": self.permissions_button,
             "exclusions": self.exclusions_button,
             "logs": self.logs_button,
             "templates": self.templates_button,
@@ -539,6 +545,11 @@ class AdminPanelView(discord.ui.View):
     @discord.ui.button(label="Emergency", style=discord.ButtonStyle.secondary, row=1)
     async def emergency_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.section = "emergency"
+        await self._render(interaction)
+
+    @discord.ui.button(label="Permissions", style=discord.ButtonStyle.secondary, row=1)
+    async def permissions_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.section = "permissions"
         await self._render(interaction)
 
     @discord.ui.button(label="Exclusions", style=discord.ButtonStyle.secondary, row=1)
@@ -832,6 +843,42 @@ class AdminCog(commands.Cog):
             ctx,
             embed=ge.make_status_embed(
                 "Emergency Controls Restricted",
+                reason,
+                tone="warning",
+                footer="Babblebox Admin",
+            ),
+            ephemeral=True,
+        )
+        return False
+
+    async def _permissions_guard(self, ctx: commands.Context) -> bool:
+        await defer_hybrid_response(ctx, ephemeral=True)
+        if ctx.guild is None:
+            await send_hybrid_response(
+                ctx,
+                embed=ge.make_status_embed(
+                    "Server Only",
+                    "These permission controls can only be configured inside a server.",
+                    tone="warning",
+                    footer="Babblebox Admin",
+                ),
+                ephemeral=True,
+            )
+            return False
+        if not self.service.storage_ready:
+            await send_hybrid_response(
+                ctx,
+                embed=ge.make_status_embed("Admin Systems Unavailable", self.service.storage_message(), tone="warning", footer="Babblebox Admin"),
+                ephemeral=True,
+            )
+            return False
+        allowed, reason = self.service.can_manage_control_plane(ctx.author, ctx.guild.id, operation="manage")
+        if allowed:
+            return True
+        await send_hybrid_response(
+            ctx,
+            embed=ge.make_status_embed(
+                "Permission Orchestration Restricted",
                 reason,
                 tone="warning",
                 footer="Babblebox Admin",
@@ -1329,6 +1376,69 @@ class AdminCog(commands.Cog):
         )
         return embed
 
+    async def _permissions_embed(self, guild_id: int) -> discord.Embed:
+        config = self.service.get_config(guild_id)
+        embed = discord.Embed(
+            title="Role Permission Orchestration",
+            description="Preview-first bulk role overwrite orchestration for one role at a time, with future-channel automation and hierarchy safety built in.",
+            color=ge.EMBED_THEME["accent"],
+        )
+        embed.add_field(
+            name="What It Does",
+            value=(
+                "Target one role, choose allow / deny / clear per permission flag, and apply the exact draft across all channels, selected channels, selected categories, or direct child channels inside categories.\n"
+                "The same reviewed draft can also be saved for future channels."
+            ),
+            inline=False,
+        )
+        saved_rules = config.get("permission_sync_rules", [])
+        rule_lines: list[str] = []
+        for rule in saved_rules[:4]:
+            preset = PERMISSION_SYNC_PRESETS.get(rule.get("preset_key"))
+            preset_label = preset.name if preset is not None else "Custom"
+            scope_label = "All new supported channels"
+            category_ids = rule.get("category_ids", [])
+            if rule.get("scope_mode") == "selected_categories":
+                scope_label = (
+                    f"New channels inside {', '.join(self._channel_mention(value) for value in category_ids[:3])}"
+                    if category_ids
+                    else "New channels inside selected categories"
+                )
+                if len(category_ids) > 3:
+                    scope_label += f", +{len(category_ids) - 3} more"
+            type_filters = rule.get("channel_type_filters", [])
+            type_labels = ", ".join(permission_channel_type_label(value) for value in type_filters[:4]) if type_filters else "All supported"
+            if len(type_filters) > 4:
+                type_labels += f", +{len(type_filters) - 4} more"
+            rule_lines.append(f"{self._role_mention(rule.get('role_id'))} - {preset_label} - {scope_label} - {type_labels}")
+        embed.add_field(
+            name="Saved Future Rules",
+            value=ge.join_limited_lines(rule_lines, limit=1024, empty="No future-channel permission rules are saved yet."),
+            inline=False,
+        )
+        embed.add_field(
+            name="Starter Presets",
+            value=(
+                "`Quarantine` hides and heavily restricts the role.\n"
+                "`Muted` keeps visibility but blocks speaking and posting.\n"
+                "`Not Verified` fits onboarding visibility with participation limits.\n"
+                "`Verified` grants reviewed normal participation in the chosen scope."
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Safety Model",
+            value=(
+                "Only Babblebox control-plane managers can use this tool.\n"
+                "Babblebox blocks @everyone, managed roles, roles at or above the actor, and roles it cannot manage itself.\n"
+                "Only the selected permission flags are edited; unrelated overwrite bits stay preserved.\n"
+                "Every apply path is previewed first and logged to the admin log channel."
+            ),
+            inline=False,
+        )
+        embed.add_field(name="Quick Use", value="`/admin permissions`", inline=False)
+        return embed
+
     async def _followup_embed(self, guild_id: int) -> discord.Embed:
         config = self.service.get_config(guild_id)
         embed = discord.Embed(
@@ -1516,6 +1626,8 @@ class AdminCog(commands.Cog):
             embed = await self._risk_embed(guild_id)
         elif section == "emergency":
             embed = await self._emergency_embed(guild_id)
+        elif section == "permissions":
+            embed = await self._permissions_embed(guild_id)
         elif section == "exclusions":
             embed = await self._exclusions_embed(guild_id)
         elif section == "logs":
@@ -1527,7 +1639,10 @@ class AdminCog(commands.Cog):
         operability = self._operability_lines(guild_id)
         if operability:
             embed.add_field(name="Operability", value="\n".join(operability[:6]), inline=False)
-        return ge.style_embed(embed, footer="Babblebox Admin | /admin panel, status, followup, verification, risk, emergency, logs, exclusions, templates, sync, or test")
+        return ge.style_embed(
+            embed,
+            footer="Babblebox Admin | /admin panel, status, followup, verification, risk, emergency, permissions, logs, exclusions, templates, sync, or test",
+        )
 
     async def _send_result(self, ctx: commands.Context, title: str, message: str, *, ok: bool):
         embed = ge.make_status_embed(title, message, tone="success" if ok else "warning", footer="Babblebox Admin")
@@ -1538,6 +1653,12 @@ class AdminCog(commands.Cog):
 
     async def _send_panel(self, ctx: commands.Context, *, section: str = "overview"):
         view = AdminPanelView(self, guild_id=ctx.guild.id, author_id=ctx.author.id, section=section)
+        message = await send_hybrid_response(ctx, embed=await view.current_embed(), view=view, ephemeral=True)
+        if message is not None:
+            view.message = message
+
+    async def _send_permission_panel(self, ctx: commands.Context):
+        view = PermissionOrchestrationView(self, guild_id=ctx.guild.id, author_id=ctx.author.id, state=PermissionDraftState())
         message = await send_hybrid_response(ctx, embed=await view.current_embed(), view=view, ephemeral=True)
         if message is not None:
             view.message = message
@@ -1971,6 +2092,16 @@ class AdminCog(commands.Cog):
         ok, message = await self.service.set_logs_config(ctx.guild.id, channel_id=resolved_channel_id, alert_role_id=resolved_role_id)
         await self._send_result(ctx, "Admin Logs", message, ok=ok)
 
+    @admin_group.command(
+        name="permissions",
+        with_app_command=True,
+        description="Preview and safely orchestrate one role's channel permissions across current and future channels",
+    )
+    async def admin_permissions_command(self, ctx: commands.Context):
+        if not await self._permissions_guard(ctx):
+            return
+        await self._send_permission_panel(ctx)
+
     @admin_group.command(name="exclusions", with_app_command=True, description="Configure shared exclusions and trusted-role behavior")
     @app_commands.choices(target=EXCLUSION_TARGET_CHOICES, state=STATE_CHOICES)
     async def admin_exclusions_command(
@@ -2225,6 +2356,10 @@ class AdminCog(commands.Cog):
     @commands.Cog.listener()
     async def on_guild_role_delete(self, role: discord.Role):
         await self.service.handle_role_delete(role)
+
+    @commands.Cog.listener()
+    async def on_guild_channel_create(self, channel: discord.abc.GuildChannel):
+        await self.service.handle_channel_create(channel)
 
     @commands.Cog.listener()
     async def on_guild_channel_delete(self, channel: discord.abc.GuildChannel):

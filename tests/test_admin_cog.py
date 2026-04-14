@@ -695,6 +695,16 @@ class AdminCogSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Control lock: **On**", control_access.value)
         self.assertIn("<@&70>", control_access.value)
 
+    async def test_admin_panel_includes_permissions_section(self):
+        embed = await self.cog.build_panel_embed(self.guild.id, "permissions")
+
+        self.assertEqual(embed.title, "Role Permission Orchestration")
+        self.assertIn("future-channel automation", embed.description.lower())
+        self.assertTrue(any(field.name == "Safety Model" for field in embed.fields))
+        safety = next(field for field in embed.fields if field.name == "Safety Model")
+        self.assertIn("@everyone", safety.value)
+        self.assertIn("admin log channel", safety.value)
+
     async def test_admin_panel_view_has_emergency_button(self):
         ui = AdminPanelView(
             self.cog,
@@ -705,6 +715,63 @@ class AdminCogSmokeTests(unittest.IsolatedAsyncioTestCase):
 
         labels = [child.label for child in ui.children if hasattr(child, "label")]
         self.assertIn("Emergency", labels)
+
+    async def test_admin_panel_view_has_permissions_button(self):
+        ui = AdminPanelView(
+            self.cog,
+            guild_id=self.guild.id,
+            author_id=1,
+            section="overview",
+        )
+
+        labels = [child.label for child in ui.children if hasattr(child, "label")]
+        self.assertIn("Permissions", labels)
+
+    async def test_admin_permissions_command_opens_private_orchestrator(self):
+        ctx = FakeContext(
+            interaction=FakeInteraction(),
+            guild=self.guild,
+            channel=FakeChannel(20),
+            author=FakeAuthor(manage_guild=True),
+        )
+
+        await AdminCog.admin_permissions_command.callback(self.cog, ctx)
+
+        self.assertEqual(len(ctx.send_calls), 1)
+        self.assertTrue(ctx.send_calls[0]["ephemeral"])
+        self.assertEqual(ctx.send_calls[0]["embed"].title, "Role Permission Orchestrator")
+        labels = [child.label for child in ctx.send_calls[0]["view"].children if hasattr(child, "label")]
+        self.assertIn("Targets", labels)
+        self.assertIn("Permissions", labels)
+        self.assertIn("Future Rule", labels)
+        self.assertIn("Preview", labels)
+
+    async def test_permissions_command_accepts_configured_editor_without_manage_guild(self):
+        editor_role = FakeRole(702, position=5, name="Security")
+        self.guild.roles[editor_role.id] = editor_role
+        ok, _ = await self.cog.service.set_emergency_access(self.guild.id, control_lock_enabled=True)
+        self.assertTrue(ok)
+        ok, _ = await self.cog.service.set_emergency_access(
+            self.guild.id,
+            field="editor_role_ids",
+            target_id=editor_role.id,
+            enabled=True,
+        )
+        self.assertTrue(ok)
+        author = FakeMember(778, self.guild, roles=[editor_role], manage_guild=False, administrator=False)
+        self.guild.members[author.id] = author
+        ctx = FakeContext(
+            interaction=FakeInteraction(),
+            guild=self.guild,
+            channel=FakeChannel(20),
+            author=author,
+        )
+
+        await AdminCog.admin_permissions_command.callback(self.cog, ctx)
+
+        self.assertEqual(len(ctx.send_calls), 1)
+        self.assertTrue(ctx.send_calls[0]["ephemeral"])
+        self.assertEqual(ctx.send_calls[0]["embed"].title, "Role Permission Orchestrator")
 
     async def test_emergency_command_accepts_configured_editor_without_manage_guild(self):
         editor_role = FakeRole(701, position=5, name="Security")
