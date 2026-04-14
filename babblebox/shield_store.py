@@ -20,7 +20,7 @@ from babblebox.shield_ai import (
 
 DEFAULT_DATABASE_URL_ENV_ORDER = ("UTILITY_DATABASE_URL", "SUPABASE_DB_URL", "DATABASE_URL")
 DEFAULT_BACKEND = "postgres"
-DEFAULT_VERSION = 7
+DEFAULT_VERSION = 8
 VALID_SCAN_MODES = {"all", "only_included"}
 VALID_SHIELD_ACTIONS = {"disabled", "detect", "log", "delete_log", "delete_escalate", "timeout_log"}
 VALID_SHIELD_SENSITIVITIES = {"low", "normal", "high"}
@@ -120,6 +120,12 @@ def default_guild_shield_config(guild_id: int | None = None) -> dict[str, Any]:
         "spam_medium_action": "log",
         "spam_high_action": "log",
         "spam_sensitivity": "normal",
+        "gif_enabled": False,
+        "gif_action": "log",
+        "gif_low_action": "log",
+        "gif_medium_action": "log",
+        "gif_high_action": "log",
+        "gif_sensitivity": "normal",
         "adult_enabled": False,
         "adult_action": "log",
         "adult_low_action": "log",
@@ -241,7 +247,7 @@ def normalize_guild_shield_config(guild_id: int, config: Any) -> dict[str, Any]:
     ):
         cleaned[field] = _clean_text_list(config.get(field))
 
-    for pack in ("privacy", "promo", "scam", "spam", "adult", "severe"):
+    for pack in ("privacy", "promo", "scam", "spam", "gif", "adult", "severe"):
         enabled_field = f"{pack}_enabled"
         action_field = f"{pack}_action"
         low_action_field = f"{pack}_low_action"
@@ -567,6 +573,12 @@ class _PostgresShieldStore(_BaseShieldStore):
                 "spam_medium_action TEXT NOT NULL DEFAULT 'log', "
                 "spam_high_action TEXT NOT NULL DEFAULT 'log', "
                 "spam_sensitivity TEXT NOT NULL DEFAULT 'normal', "
+                "gif_enabled BOOLEAN NOT NULL DEFAULT FALSE, "
+                "gif_action TEXT NOT NULL DEFAULT 'log', "
+                "gif_low_action TEXT NOT NULL DEFAULT 'log', "
+                "gif_medium_action TEXT NOT NULL DEFAULT 'log', "
+                "gif_high_action TEXT NOT NULL DEFAULT 'log', "
+                "gif_sensitivity TEXT NOT NULL DEFAULT 'normal', "
                 "adult_enabled BOOLEAN NOT NULL DEFAULT FALSE, "
                 "adult_action TEXT NOT NULL DEFAULT 'log', "
                 "adult_low_action TEXT NOT NULL DEFAULT 'log', "
@@ -628,6 +640,12 @@ class _PostgresShieldStore(_BaseShieldStore):
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS spam_medium_action TEXT NOT NULL DEFAULT 'log'",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS spam_high_action TEXT NOT NULL DEFAULT 'log'",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS spam_sensitivity TEXT NOT NULL DEFAULT 'normal'",
+            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS gif_enabled BOOLEAN NOT NULL DEFAULT FALSE",
+            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS gif_action TEXT NOT NULL DEFAULT 'log'",
+            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS gif_low_action TEXT NOT NULL DEFAULT 'log'",
+            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS gif_medium_action TEXT NOT NULL DEFAULT 'log'",
+            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS gif_high_action TEXT NOT NULL DEFAULT 'log'",
+            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS gif_sensitivity TEXT NOT NULL DEFAULT 'normal'",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS adult_enabled BOOLEAN NOT NULL DEFAULT FALSE",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS adult_action TEXT NOT NULL DEFAULT 'log'",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS adult_low_action TEXT NOT NULL DEFAULT 'log'",
@@ -771,6 +789,12 @@ class _PostgresShieldStore(_BaseShieldStore):
                 "spam_medium_action": row["spam_medium_action"] if "spam_medium_action" in row else "log",
                 "spam_high_action": row["spam_high_action"] if "spam_high_action" in row else "log",
                 "spam_sensitivity": row["spam_sensitivity"] if "spam_sensitivity" in row else "normal",
+                "gif_enabled": bool(row["gif_enabled"]) if "gif_enabled" in row else False,
+                "gif_action": row["gif_action"] if "gif_action" in row else "log",
+                "gif_low_action": row["gif_low_action"] if "gif_low_action" in row else "log",
+                "gif_medium_action": row["gif_medium_action"] if "gif_medium_action" in row else "log",
+                "gif_high_action": row["gif_high_action"] if "gif_high_action" in row else "log",
+                "gif_sensitivity": row["gif_sensitivity"] if "gif_sensitivity" in row else "normal",
                 "adult_enabled": bool(row["adult_enabled"]) if "adult_enabled" in row else False,
                 "adult_action": row["adult_action"] if "adult_action" in row else "log",
                 "adult_low_action": row["adult_low_action"] if "adult_low_action" in row else "log",
@@ -912,185 +936,98 @@ class _PostgresShieldStore(_BaseShieldStore):
                     await self._replace_custom_patterns_for_guild(conn, config["guild_id"], config.get("custom_patterns", []))
 
     async def _upsert_guild_config(self, conn, config: dict[str, Any]):
-        await conn.execute(
-            (
-                "INSERT INTO shield_guild_configs ("
-                "guild_id, module_enabled, baseline_version, log_channel_id, alert_role_id, scan_mode, "
-                "included_channel_ids, excluded_channel_ids, included_user_ids, excluded_user_ids, "
-                "included_role_ids, excluded_role_ids, trusted_role_ids, allow_domains, allow_invite_codes, allow_phrases, trusted_builtin_disabled_families, trusted_builtin_disabled_domains, "
-                "privacy_enabled, privacy_action, privacy_low_action, privacy_medium_action, privacy_high_action, privacy_sensitivity, "
-                "promo_enabled, promo_action, promo_low_action, promo_medium_action, promo_high_action, promo_sensitivity, "
-                "scam_enabled, scam_action, scam_low_action, scam_medium_action, scam_high_action, scam_sensitivity, "
-                "spam_enabled, spam_action, spam_low_action, spam_medium_action, spam_high_action, spam_sensitivity, "
-                "adult_enabled, adult_action, adult_low_action, adult_medium_action, adult_high_action, adult_sensitivity, adult_solicitation_enabled, adult_solicitation_excluded_channel_ids, "
-                "severe_enabled, severe_action, severe_low_action, severe_medium_action, severe_high_action, severe_sensitivity, severe_enabled_categories, severe_custom_terms, severe_removed_terms, "
-                "link_policy_mode, link_policy_action, link_policy_low_action, link_policy_medium_action, link_policy_high_action, "
-                "ai_enabled, ai_access_mode, ai_allowed_models_override, ai_access_updated_by, ai_access_updated_at, ai_min_confidence, ai_enabled_packs, "
-                "escalation_threshold, escalation_window_minutes, timeout_minutes, updated_at"
-                ") VALUES ("
-                "$1, $2, $3, $4, $5, $6, "
-                "$7::jsonb, $8::jsonb, $9::jsonb, $10::jsonb, "
-                "$11::jsonb, $12::jsonb, $13::jsonb, $14::jsonb, $15::jsonb, $16::jsonb, $17::jsonb, $18::jsonb, "
-                "$19, $20, $21, $22, $23, $24, "
-                "$25, $26, $27, $28, $29, $30, "
-                "$31, $32, $33, $34, $35, $36, "
-                "$37, $38, $39, $40, $41, $42, "
-                "$43, $44, $45, $46, $47, $48, $49, $50::jsonb, "
-                "$51, $52, $53, $54, $55, $56, $57::jsonb, $58::jsonb, $59::jsonb, "
-                "$60, $61, $62, $63, $64, "
-                "$65, $66, $67::jsonb, $68, $69, $70, $71::jsonb, $72, $73, $74, timezone('utc', now())"
-                ") "
-                "ON CONFLICT (guild_id) DO UPDATE SET "
-                "module_enabled = EXCLUDED.module_enabled, "
-                "baseline_version = EXCLUDED.baseline_version, "
-                "log_channel_id = EXCLUDED.log_channel_id, "
-                "alert_role_id = EXCLUDED.alert_role_id, "
-                "scan_mode = EXCLUDED.scan_mode, "
-                "included_channel_ids = EXCLUDED.included_channel_ids, "
-                "excluded_channel_ids = EXCLUDED.excluded_channel_ids, "
-                "included_user_ids = EXCLUDED.included_user_ids, "
-                "excluded_user_ids = EXCLUDED.excluded_user_ids, "
-                "included_role_ids = EXCLUDED.included_role_ids, "
-                "excluded_role_ids = EXCLUDED.excluded_role_ids, "
-                "trusted_role_ids = EXCLUDED.trusted_role_ids, "
-                "allow_domains = EXCLUDED.allow_domains, "
-                "allow_invite_codes = EXCLUDED.allow_invite_codes, "
-                "allow_phrases = EXCLUDED.allow_phrases, "
-                "trusted_builtin_disabled_families = EXCLUDED.trusted_builtin_disabled_families, "
-                "trusted_builtin_disabled_domains = EXCLUDED.trusted_builtin_disabled_domains, "
-                "privacy_enabled = EXCLUDED.privacy_enabled, "
-                "privacy_action = EXCLUDED.privacy_action, "
-                "privacy_low_action = EXCLUDED.privacy_low_action, "
-                "privacy_medium_action = EXCLUDED.privacy_medium_action, "
-                "privacy_high_action = EXCLUDED.privacy_high_action, "
-                "privacy_sensitivity = EXCLUDED.privacy_sensitivity, "
-                "promo_enabled = EXCLUDED.promo_enabled, "
-                "promo_action = EXCLUDED.promo_action, "
-                "promo_low_action = EXCLUDED.promo_low_action, "
-                "promo_medium_action = EXCLUDED.promo_medium_action, "
-                "promo_high_action = EXCLUDED.promo_high_action, "
-                "promo_sensitivity = EXCLUDED.promo_sensitivity, "
-                "scam_enabled = EXCLUDED.scam_enabled, "
-                "scam_action = EXCLUDED.scam_action, "
-                "scam_low_action = EXCLUDED.scam_low_action, "
-                "scam_medium_action = EXCLUDED.scam_medium_action, "
-                "scam_high_action = EXCLUDED.scam_high_action, "
-                "scam_sensitivity = EXCLUDED.scam_sensitivity, "
-                "spam_enabled = EXCLUDED.spam_enabled, "
-                "spam_action = EXCLUDED.spam_action, "
-                "spam_low_action = EXCLUDED.spam_low_action, "
-                "spam_medium_action = EXCLUDED.spam_medium_action, "
-                "spam_high_action = EXCLUDED.spam_high_action, "
-                "spam_sensitivity = EXCLUDED.spam_sensitivity, "
-                "adult_enabled = EXCLUDED.adult_enabled, "
-                "adult_action = EXCLUDED.adult_action, "
-                "adult_low_action = EXCLUDED.adult_low_action, "
-                "adult_medium_action = EXCLUDED.adult_medium_action, "
-                "adult_high_action = EXCLUDED.adult_high_action, "
-                "adult_sensitivity = EXCLUDED.adult_sensitivity, "
-                "adult_solicitation_enabled = EXCLUDED.adult_solicitation_enabled, "
-                "adult_solicitation_excluded_channel_ids = EXCLUDED.adult_solicitation_excluded_channel_ids, "
-                "severe_enabled = EXCLUDED.severe_enabled, "
-                "severe_action = EXCLUDED.severe_action, "
-                "severe_low_action = EXCLUDED.severe_low_action, "
-                "severe_medium_action = EXCLUDED.severe_medium_action, "
-                "severe_high_action = EXCLUDED.severe_high_action, "
-                "severe_sensitivity = EXCLUDED.severe_sensitivity, "
-                "severe_enabled_categories = EXCLUDED.severe_enabled_categories, "
-                "severe_custom_terms = EXCLUDED.severe_custom_terms, "
-                "severe_removed_terms = EXCLUDED.severe_removed_terms, "
-                "link_policy_mode = EXCLUDED.link_policy_mode, "
-                "link_policy_action = EXCLUDED.link_policy_action, "
-                "link_policy_low_action = EXCLUDED.link_policy_low_action, "
-                "link_policy_medium_action = EXCLUDED.link_policy_medium_action, "
-                "link_policy_high_action = EXCLUDED.link_policy_high_action, "
-                "ai_enabled = EXCLUDED.ai_enabled, "
-                "ai_access_mode = EXCLUDED.ai_access_mode, "
-                "ai_allowed_models_override = EXCLUDED.ai_allowed_models_override, "
-                "ai_access_updated_by = EXCLUDED.ai_access_updated_by, "
-                "ai_access_updated_at = EXCLUDED.ai_access_updated_at, "
-                "ai_min_confidence = EXCLUDED.ai_min_confidence, "
-                "ai_enabled_packs = EXCLUDED.ai_enabled_packs, "
-                "escalation_threshold = EXCLUDED.escalation_threshold, "
-                "escalation_window_minutes = EXCLUDED.escalation_window_minutes, "
-                "timeout_minutes = EXCLUDED.timeout_minutes, "
-                "updated_at = EXCLUDED.updated_at"
-            ),
-            config["guild_id"],
-            config["module_enabled"],
-            config["baseline_version"],
-            config["log_channel_id"],
-            config["alert_role_id"],
-            config["scan_mode"],
-            json.dumps(config["included_channel_ids"]),
-            json.dumps(config["excluded_channel_ids"]),
-            json.dumps(config["included_user_ids"]),
-            json.dumps(config["excluded_user_ids"]),
-            json.dumps(config["included_role_ids"]),
-            json.dumps(config["excluded_role_ids"]),
-            json.dumps(config["trusted_role_ids"]),
-            json.dumps(config["allow_domains"]),
-            json.dumps(config["allow_invite_codes"]),
-            json.dumps(config["allow_phrases"]),
-            json.dumps(config["trusted_builtin_disabled_families"]),
-            json.dumps(config["trusted_builtin_disabled_domains"]),
-            config["privacy_enabled"],
-            config["privacy_action"],
-            config["privacy_low_action"],
-            config["privacy_medium_action"],
-            config["privacy_high_action"],
-            config["privacy_sensitivity"],
-            config["promo_enabled"],
-            config["promo_action"],
-            config["promo_low_action"],
-            config["promo_medium_action"],
-            config["promo_high_action"],
-            config["promo_sensitivity"],
-            config["scam_enabled"],
-            config["scam_action"],
-            config["scam_low_action"],
-            config["scam_medium_action"],
-            config["scam_high_action"],
-            config["scam_sensitivity"],
-            config["spam_enabled"],
-            config["spam_action"],
-            config["spam_low_action"],
-            config["spam_medium_action"],
-            config["spam_high_action"],
-            config["spam_sensitivity"],
-            config["adult_enabled"],
-            config["adult_action"],
-            config["adult_low_action"],
-            config["adult_medium_action"],
-            config["adult_high_action"],
-            config["adult_sensitivity"],
-            config["adult_solicitation_enabled"],
-            json.dumps(config["adult_solicitation_excluded_channel_ids"]),
-            config["severe_enabled"],
-            config["severe_action"],
-            config["severe_low_action"],
-            config["severe_medium_action"],
-            config["severe_high_action"],
-            config["severe_sensitivity"],
-            json.dumps(config["severe_enabled_categories"]),
-            json.dumps(config["severe_custom_terms"]),
-            json.dumps(config["severe_removed_terms"]),
-            config["link_policy_mode"],
-            config["link_policy_action"],
-            config["link_policy_low_action"],
-            config["link_policy_medium_action"],
-            config["link_policy_high_action"],
-            config["ai_enabled"],
-            config["ai_access_mode"],
-            json.dumps(config["ai_allowed_models_override"]),
-            config["ai_access_updated_by"],
-            config["ai_access_updated_at"],
-            config["ai_min_confidence"],
-            json.dumps(config["ai_enabled_packs"]),
-            config["escalation_threshold"],
-            config["escalation_window_minutes"],
-            config["timeout_minutes"],
+        columns: list[tuple[str, Any, str]] = [
+            ("guild_id", config["guild_id"], ""),
+            ("module_enabled", config["module_enabled"], ""),
+            ("baseline_version", config["baseline_version"], ""),
+            ("log_channel_id", config["log_channel_id"], ""),
+            ("alert_role_id", config["alert_role_id"], ""),
+            ("scan_mode", config["scan_mode"], ""),
+            ("included_channel_ids", json.dumps(config["included_channel_ids"]), "::jsonb"),
+            ("excluded_channel_ids", json.dumps(config["excluded_channel_ids"]), "::jsonb"),
+            ("included_user_ids", json.dumps(config["included_user_ids"]), "::jsonb"),
+            ("excluded_user_ids", json.dumps(config["excluded_user_ids"]), "::jsonb"),
+            ("included_role_ids", json.dumps(config["included_role_ids"]), "::jsonb"),
+            ("excluded_role_ids", json.dumps(config["excluded_role_ids"]), "::jsonb"),
+            ("trusted_role_ids", json.dumps(config["trusted_role_ids"]), "::jsonb"),
+            ("allow_domains", json.dumps(config["allow_domains"]), "::jsonb"),
+            ("allow_invite_codes", json.dumps(config["allow_invite_codes"]), "::jsonb"),
+            ("allow_phrases", json.dumps(config["allow_phrases"]), "::jsonb"),
+            ("trusted_builtin_disabled_families", json.dumps(config["trusted_builtin_disabled_families"]), "::jsonb"),
+            ("trusted_builtin_disabled_domains", json.dumps(config["trusted_builtin_disabled_domains"]), "::jsonb"),
+            ("privacy_enabled", config["privacy_enabled"], ""),
+            ("privacy_action", config["privacy_action"], ""),
+            ("privacy_low_action", config["privacy_low_action"], ""),
+            ("privacy_medium_action", config["privacy_medium_action"], ""),
+            ("privacy_high_action", config["privacy_high_action"], ""),
+            ("privacy_sensitivity", config["privacy_sensitivity"], ""),
+            ("promo_enabled", config["promo_enabled"], ""),
+            ("promo_action", config["promo_action"], ""),
+            ("promo_low_action", config["promo_low_action"], ""),
+            ("promo_medium_action", config["promo_medium_action"], ""),
+            ("promo_high_action", config["promo_high_action"], ""),
+            ("promo_sensitivity", config["promo_sensitivity"], ""),
+            ("scam_enabled", config["scam_enabled"], ""),
+            ("scam_action", config["scam_action"], ""),
+            ("scam_low_action", config["scam_low_action"], ""),
+            ("scam_medium_action", config["scam_medium_action"], ""),
+            ("scam_high_action", config["scam_high_action"], ""),
+            ("scam_sensitivity", config["scam_sensitivity"], ""),
+            ("spam_enabled", config["spam_enabled"], ""),
+            ("spam_action", config["spam_action"], ""),
+            ("spam_low_action", config["spam_low_action"], ""),
+            ("spam_medium_action", config["spam_medium_action"], ""),
+            ("spam_high_action", config["spam_high_action"], ""),
+            ("spam_sensitivity", config["spam_sensitivity"], ""),
+            ("gif_enabled", config["gif_enabled"], ""),
+            ("gif_action", config["gif_action"], ""),
+            ("gif_low_action", config["gif_low_action"], ""),
+            ("gif_medium_action", config["gif_medium_action"], ""),
+            ("gif_high_action", config["gif_high_action"], ""),
+            ("gif_sensitivity", config["gif_sensitivity"], ""),
+            ("adult_enabled", config["adult_enabled"], ""),
+            ("adult_action", config["adult_action"], ""),
+            ("adult_low_action", config["adult_low_action"], ""),
+            ("adult_medium_action", config["adult_medium_action"], ""),
+            ("adult_high_action", config["adult_high_action"], ""),
+            ("adult_sensitivity", config["adult_sensitivity"], ""),
+            ("adult_solicitation_enabled", config["adult_solicitation_enabled"], ""),
+            ("adult_solicitation_excluded_channel_ids", json.dumps(config["adult_solicitation_excluded_channel_ids"]), "::jsonb"),
+            ("severe_enabled", config["severe_enabled"], ""),
+            ("severe_action", config["severe_action"], ""),
+            ("severe_low_action", config["severe_low_action"], ""),
+            ("severe_medium_action", config["severe_medium_action"], ""),
+            ("severe_high_action", config["severe_high_action"], ""),
+            ("severe_sensitivity", config["severe_sensitivity"], ""),
+            ("severe_enabled_categories", json.dumps(config["severe_enabled_categories"]), "::jsonb"),
+            ("severe_custom_terms", json.dumps(config["severe_custom_terms"]), "::jsonb"),
+            ("severe_removed_terms", json.dumps(config["severe_removed_terms"]), "::jsonb"),
+            ("link_policy_mode", config["link_policy_mode"], ""),
+            ("link_policy_action", config["link_policy_action"], ""),
+            ("link_policy_low_action", config["link_policy_low_action"], ""),
+            ("link_policy_medium_action", config["link_policy_medium_action"], ""),
+            ("link_policy_high_action", config["link_policy_high_action"], ""),
+            ("ai_enabled", config["ai_enabled"], ""),
+            ("ai_access_mode", config["ai_access_mode"], ""),
+            ("ai_allowed_models_override", json.dumps(config["ai_allowed_models_override"]), "::jsonb"),
+            ("ai_access_updated_by", config["ai_access_updated_by"], ""),
+            ("ai_access_updated_at", config["ai_access_updated_at"], ""),
+            ("ai_min_confidence", config["ai_min_confidence"], ""),
+            ("ai_enabled_packs", json.dumps(config["ai_enabled_packs"]), "::jsonb"),
+            ("escalation_threshold", config["escalation_threshold"], ""),
+            ("escalation_window_minutes", config["escalation_window_minutes"], ""),
+            ("timeout_minutes", config["timeout_minutes"], ""),
+        ]
+        column_names = ", ".join(name for name, _value, _cast in columns)
+        placeholders = ", ".join(f"${index}{cast}" for index, (_name, _value, cast) in enumerate(columns, start=1))
+        update_assignments = ", ".join(f"{name} = EXCLUDED.{name}" for name, _value, _cast in columns if name != "guild_id")
+        sql = (
+            f"INSERT INTO shield_guild_configs ({column_names}, updated_at) "
+            f"VALUES ({placeholders}, timezone('utc', now())) "
+            "ON CONFLICT (guild_id) DO UPDATE SET "
+            f"{update_assignments}, updated_at = EXCLUDED.updated_at"
         )
+        await conn.execute(sql, *(value for _name, value, _cast in columns))
 
     async def _replace_custom_patterns_for_guild(self, conn, guild_id: int, patterns: list[dict[str, Any]]):
         await conn.execute("DELETE FROM shield_custom_patterns WHERE guild_id = $1", guild_id)

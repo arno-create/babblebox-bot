@@ -409,6 +409,28 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(ok)
 
+    async def _enable_gif_pack(
+        self,
+        guild_id: int,
+        *,
+        sensitivity: str = "normal",
+        low_action: str = "log",
+        medium_action: str = "delete_log",
+        high_action: str = "delete_escalate",
+    ):
+        ok, _ = await self.service.set_module_enabled(guild_id, True)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_pack_config(
+            guild_id,
+            "gif",
+            enabled=True,
+            low_action=low_action,
+            medium_action=medium_action,
+            high_action=high_action,
+            sensitivity=sensitivity,
+        )
+        self.assertTrue(ok)
+
     def _make_member(
         self,
         guild: FakeGuild,
@@ -523,7 +545,7 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("recommended non-AI baseline", message)
         config = self.service.get_config(10)
         self.assertTrue(config["module_enabled"])
-        self.assertEqual(config["baseline_version"], 2)
+        self.assertEqual(config["baseline_version"], 3)
         self.assertTrue(config["adult_solicitation_enabled"])
         for pack in ("privacy", "promo", "scam", "adult", "severe"):
             with self.subTest(pack=pack):
@@ -537,6 +559,11 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(config["spam_medium_action"], "delete_log")
         self.assertEqual(config["spam_high_action"], "delete_escalate")
         self.assertEqual(config["spam_sensitivity"], "normal")
+        self.assertTrue(config["gif_enabled"])
+        self.assertEqual(config["gif_low_action"], "log")
+        self.assertEqual(config["gif_medium_action"], "delete_log")
+        self.assertEqual(config["gif_high_action"], "delete_escalate")
+        self.assertEqual(config["gif_sensitivity"], "normal")
 
     async def test_startup_baseline_upgrade_backfills_spam_pack_for_existing_live_guilds(self):
         self.service.store.state["guilds"]["10"] = {
@@ -553,11 +580,15 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(changed)
         config = self.service.get_config(10)
-        self.assertEqual(config["baseline_version"], 2)
+        self.assertEqual(config["baseline_version"], 3)
         self.assertTrue(config["spam_enabled"])
         self.assertEqual(config["spam_low_action"], "log")
         self.assertEqual(config["spam_medium_action"], "delete_log")
         self.assertEqual(config["spam_high_action"], "delete_escalate")
+        self.assertTrue(config["gif_enabled"])
+        self.assertEqual(config["gif_low_action"], "log")
+        self.assertEqual(config["gif_medium_action"], "delete_log")
+        self.assertEqual(config["gif_high_action"], "delete_escalate")
 
     async def test_reenable_preserves_customized_rules_after_first_enable(self):
         ok, _ = await self.service.set_pack_config(10, "severe", enabled=False, low_action="detect", medium_action="log", high_action="delete_log", sensitivity="high")
@@ -1867,18 +1898,7 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         channel = FakeChannel(20)
         author = FakeAuthor(43, roles=[FakeRole(11, position=1)])
 
-        ok, _ = await self.service.set_module_enabled(guild.id, True)
-        self.assertTrue(ok)
-        ok, _ = await self.service.set_pack_config(
-            guild.id,
-            "spam",
-            enabled=True,
-            low_action="log",
-            medium_action="delete_log",
-            high_action="delete_escalate",
-            sensitivity="normal",
-        )
-        self.assertTrue(ok)
+        await self._enable_gif_pack(guild.id)
 
         final = None
         with patch.object(self.service, "_send_alert", new=AsyncMock()):
@@ -1893,6 +1913,7 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         self.assertIsNotNone(final)
+        self.assertEqual(final.pack, "gif")
         self.assertEqual(final.reasons[0].match_class, "spam_gif_flood")
         self.assertIn("GIF", final.reasons[0].label)
 
@@ -1901,18 +1922,7 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         channel = FakeChannel(20)
         author = FakeAuthor(44, roles=[FakeRole(11, position=1)])
 
-        ok, _ = await self.service.set_module_enabled(guild.id, True)
-        self.assertTrue(ok)
-        ok, _ = await self.service.set_pack_config(
-            guild.id,
-            "spam",
-            enabled=True,
-            low_action="log",
-            medium_action="delete_log",
-            high_action="delete_escalate",
-            sensitivity="normal",
-        )
-        self.assertTrue(ok)
+        await self._enable_gif_pack(guild.id)
 
         decisions = []
         with patch.object(self.service, "_send_alert", new=AsyncMock()):
@@ -1931,7 +1941,7 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
             for index in range(3)
         ]
 
-        await self._enable_spam_pack(guild.id)
+        await self._enable_gif_pack(guild.id)
 
         final = None
         with patch.object(self.service, "_send_alert", new=AsyncMock()):
@@ -1948,8 +1958,48 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         self.assertIsNotNone(final)
+        self.assertEqual(final.pack, "gif")
         self.assertIn("spam_group_gif_pressure", {reason.match_class for reason in final.reasons})
         self.assertIn("gif-heavy posts from 3 members", final.alert_evidence_summary.lower())
+
+    async def test_gif_pack_runs_even_when_spam_pack_is_disabled(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        author = FakeAuthor(901, roles=[FakeRole(11, position=1)])
+
+        await self._enable_gif_pack(guild.id)
+        ok, _ = await self.service.set_pack_config(guild.id, "spam", enabled=False)
+        self.assertTrue(ok)
+
+        final = None
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            for _ in range(6):
+                final = await self.service.handle_message(
+                    FakeMessage(guild=guild, channel=channel, author=author, content="https://tenor.com/view/cat-dance-gif-12345")
+                )
+
+        self.assertIsNotNone(final)
+        self.assertEqual(final.pack, "gif")
+        self.assertEqual(final.reasons[0].match_class, "spam_gif_flood")
+
+    async def test_gif_flood_stays_off_when_gif_pack_is_disabled_even_if_spam_is_on(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        author = FakeAuthor(902, roles=[FakeRole(11, position=1)])
+
+        await self._enable_spam_pack(guild.id)
+        ok, _ = await self.service.set_pack_config(guild.id, "gif", enabled=False)
+        self.assertTrue(ok)
+
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            decisions = [
+                await self.service.handle_message(
+                    FakeMessage(guild=guild, channel=channel, author=author, content="https://tenor.com/view/cat-dance-gif-12345")
+                )
+                for _ in range(6)
+            ]
+
+        self.assertEqual(decisions, [None, None, None, None, None, None])
 
     async def test_repeated_same_external_link_with_varied_captions_still_clusters(self):
         guild = FakeGuild(10)
@@ -2309,6 +2359,52 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(spam_decisions[-1].pack, "spam")
         self.assertIn("spam_burst", {reason.match_class for reason in spam_decisions[-1].reasons})
         self.assertTrue(all(item is None for item in normal_decisions))
+
+    async def test_bot_turn_taking_game_loop_does_not_trigger_duplicate_spam(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        player = self._make_member(guild, 104)
+        game_bot = self._make_member(guild, 105, bot=True)
+
+        await self._enable_spam_pack(guild.id, sensitivity="high")
+
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            decisions = [
+                await self.service.handle_message(FakeMessage(guild=guild, channel=channel, author=author, content=text))
+                for author, text in (
+                    (player, "accepted"),
+                    (game_bot, "round 1 locked"),
+                    (player, "accepted"),
+                    (game_bot, "round 2 locked"),
+                    (player, "accepted"),
+                    (game_bot, "round 3 locked"),
+                )
+            ]
+
+        self.assertEqual(decisions, [None, None, None, None, None, None])
+
+    async def test_short_human_turn_taking_loop_does_not_trigger_low_value_noise(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        player_one = self._make_member(guild, 106)
+        player_two = self._make_member(guild, 107)
+
+        await self._enable_spam_pack(guild.id, sensitivity="high")
+
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            decisions = [
+                await self.service.handle_message(FakeMessage(guild=guild, channel=channel, author=author, content=text))
+                for author, text in (
+                    (player_one, "cat"),
+                    (player_two, "hat"),
+                    (player_one, "bat"),
+                    (player_two, "mat"),
+                    (player_one, "rat"),
+                    (player_two, "gnat"),
+                )
+            ]
+
+        self.assertEqual(decisions, [None, None, None, None, None, None])
 
     async def test_bot_messages_stay_conservative_for_generic_spam_signals(self):
         guild = FakeGuild(10)
@@ -2704,6 +2800,45 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         match_classes = {match.match_class for match in result.matches if match.pack == "scam"}
         self.assertIn("scam_bait_attachment", match_classes)
         self.assertNotIn("scam_bait_link", match_classes)
+
+    async def test_no_link_nitro_dm_lure_is_caught(self):
+        ok, _ = await self.service.set_pack_config(10, "scam", enabled=True, action="delete_log", sensitivity="normal")
+        self.assertTrue(ok)
+
+        result = self.service.test_message_details(10, "I'm giving away free nitro, DM me for more info")
+
+        scam_matches = [match for match in result.matches if match.pack == "scam"]
+        self.assertTrue(scam_matches)
+        self.assertEqual(scam_matches[0].match_class, "scam_dm_lure")
+        self.assertIn(scam_matches[0].confidence, {"medium", "high"})
+
+    async def test_no_link_crypto_dm_lure_is_caught(self):
+        ok, _ = await self.service.set_pack_config(10, "scam", enabled=True, action="delete_log", sensitivity="normal")
+        self.assertTrue(ok)
+
+        result = self.service.test_message_details(10, "Free crypto drop, DM me now to claim it")
+
+        scam_matches = [match for match in result.matches if match.pack == "scam"]
+        self.assertTrue(scam_matches)
+        self.assertEqual(scam_matches[0].match_class, "scam_dm_lure")
+
+    async def test_no_link_prize_dm_lure_is_caught(self):
+        ok, _ = await self.service.set_pack_config(10, "scam", enabled=True, action="delete_log", sensitivity="normal")
+        self.assertTrue(ok)
+
+        result = self.service.test_message_details(10, "$1000 giveaway, DM me for details")
+
+        scam_matches = [match for match in result.matches if match.pack == "scam"]
+        self.assertTrue(scam_matches)
+        self.assertEqual(scam_matches[0].match_class, "scam_dm_lure")
+
+    async def test_benign_dm_chatter_does_not_false_positive_as_scam_lure(self):
+        ok, _ = await self.service.set_pack_config(10, "scam", enabled=True, action="delete_log", sensitivity="high")
+        self.assertTrue(ok)
+
+        result = self.service.test_message_details(10, "DM me later about the build notes from tonight's game.")
+
+        self.assertFalse([match for match in result.matches if match.pack == "scam"])
 
     async def test_forwarded_snapshot_content_is_scanned(self):
         guild = FakeGuild(10)
@@ -3808,7 +3943,7 @@ class ShieldStoreNormalizationTests(unittest.TestCase):
     def test_normalize_state_preserves_spam_pack_fields(self):
         store = _MemoryShieldStore()
         snapshot = {
-            "version": 7,
+            "version": 8,
             "guilds": {
                 "123": {
                     "spam_enabled": True,
@@ -3826,3 +3961,25 @@ class ShieldStoreNormalizationTests(unittest.TestCase):
         self.assertEqual(config["spam_medium_action"], "delete_log")
         self.assertEqual(config["spam_high_action"], "delete_escalate")
         self.assertEqual(config["spam_sensitivity"], "high")
+
+    def test_normalize_state_preserves_gif_pack_fields(self):
+        store = _MemoryShieldStore()
+        snapshot = {
+            "version": 8,
+            "guilds": {
+                "123": {
+                    "gif_enabled": True,
+                    "gif_action": "delete_escalate",
+                    "gif_sensitivity": "high",
+                }
+            },
+        }
+
+        normalized = store.normalize_state(deepcopy(snapshot))
+        config = normalized["guilds"]["123"]
+
+        self.assertTrue(config["gif_enabled"])
+        self.assertEqual(config["gif_low_action"], "log")
+        self.assertEqual(config["gif_medium_action"], "delete_log")
+        self.assertEqual(config["gif_high_action"], "delete_escalate")
+        self.assertEqual(config["gif_sensitivity"], "high")

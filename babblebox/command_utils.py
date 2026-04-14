@@ -68,22 +68,69 @@ async def send_hybrid_panel_response(
     delete_after: float | None = None,
 ) -> HybridPanelSendResult:
     path = "context_send"
+    kwargs = _build_hybrid_send_kwargs(
+        content,
+        embed=embed,
+        view=view,
+        ephemeral=ephemeral,
+        delete_after=delete_after,
+    )
     try:
-        message = await send_hybrid_response(
-            ctx,
-            content,
-            embed=embed,
-            view=view,
-            ephemeral=ephemeral,
-            delete_after=delete_after,
-        )
+        message = await send_hybrid_response(ctx, content, embed=embed, view=view, ephemeral=ephemeral, delete_after=delete_after)
         return _successful_panel_send(
             path=path,
             message=message,
             handle_status="available" if message is not None else "missing",
         )
     except (discord.ClientException, discord.HTTPException, discord.NotFound, TypeError, ValueError) as exc:
-        return HybridPanelSendResult(delivered=False, path=path, error=exc)
+        recovered = await _recover_deferred_original_response(ctx, kwargs, send_error=exc)
+        if recovered.delivered:
+            return recovered
+        return HybridPanelSendResult(delivered=False, path=recovered.path or path, error=recovered.error or exc)
+
+
+async def _recover_deferred_original_response(
+    ctx: commands.Context,
+    kwargs: dict[str, Any],
+    *,
+    send_error: Exception,
+) -> HybridPanelSendResult:
+    interaction = getattr(ctx, "interaction", None)
+    if interaction is None or interaction.is_expired() or not interaction.response.is_done():
+        return HybridPanelSendResult(delivered=False, path="edit_original_response", error=send_error)
+
+    edit_kwargs = {key: value for key, value in kwargs.items() if key not in {"ephemeral", "delete_after"}}
+    if not edit_kwargs:
+        return HybridPanelSendResult(delivered=False, path="edit_original_response", error=send_error)
+
+    message: discord.Message | None = None
+    try:
+        edit_original_response = getattr(interaction, "edit_original_response", None)
+        if callable(edit_original_response):
+            message = await edit_original_response(**edit_kwargs)
+        else:
+            original_response = getattr(interaction, "original_response", None)
+            if not callable(original_response):
+                raise discord.ClientException("Original response unavailable")
+            original_message = await original_response()
+            if original_message is None or not hasattr(original_message, "edit"):
+                raise discord.ClientException("Original response unavailable")
+            message = await original_message.edit(**edit_kwargs)
+    except (discord.ClientException, discord.HTTPException, discord.NotFound, TypeError, ValueError, AttributeError) as exc:
+        return HybridPanelSendResult(delivered=False, path="edit_original_response", error=exc)
+
+    if message is None:
+        original_response = getattr(interaction, "original_response", None)
+        if callable(original_response):
+            try:
+                message = await original_response()
+            except (discord.ClientException, discord.HTTPException, discord.NotFound, TypeError, ValueError):
+                message = None
+    return _successful_panel_send(
+        path="edit_original_response",
+        message=message,
+        handle_status="available" if message is not None else "missing",
+    )
 
 
 async def defer_hybrid_response(
@@ -117,7 +164,13 @@ async def send_hybrid_response(
         ephemeral=ephemeral,
         delete_after=delete_after,
     )
-    return await ctx.send(**kwargs)
+    try:
+        return await ctx.send(**kwargs)
+    except (discord.ClientException, discord.HTTPException, discord.NotFound, TypeError, ValueError) as exc:
+        recovered = await _recover_deferred_original_response(ctx, kwargs, send_error=exc)
+        if recovered.delivered:
+            return recovered.message
+        raise recovered.error or exc
 
 
 async def require_channel_permissions(

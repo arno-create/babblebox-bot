@@ -10,7 +10,7 @@ It is designed around seven clear product lanes:
 - Everyday Utilities for quiet server life
 - Daily Arcade for low-player-count return visits
 - Buddy / Profile / Vault for identity, streaks, and showable progress
-- Babblebox Shield plus compact admin lifecycle and emergency helpers for lightweight, configurable server safety
+- Babblebox Shield plus compact admin lifecycle, permission orchestration, and emergency helpers for lightweight, configurable server safety
 
 Babblebox is intentionally compact:
 
@@ -130,10 +130,10 @@ Babblebox is intentionally compact:
   - AFK reasons and reminders use privacy, adult, and severe checks; watch keyword setup stays privacy-only
   - privacy leak pack
   - promo / invite pack
-- compact `Spam / Raid` pack for duplicate or near-duplicate spam, mention, emoji, or smart GIF floods, burst posting, invite or link floods, surface-shifting campaign spam, and bounded join-wave / newcomer-pattern watch signals
-- smart GIF spam stays separate from generic emoji or media noise, so occasional reaction GIFs stay safe while real low-text GIF flooding still gets legible evidence
+- compact `Spam / Raid` pack for duplicate or near-duplicate spam, mention, emoji, burst posting, invite or link floods, surface-shifting campaign spam, and bounded join-wave / newcomer-pattern watch signals
+- first-class `GIF Flood / Media Pressure` pack for one-user GIF floods, repeated GIF reuse, and coordinated low-text GIF pressure without punishing ordinary reaction GIFs or healthy mixed chat
 - correlated raid-watch that can combine newcomer pressure, repeated lure reuse, risky invite bursts, and GIF/media pressure without turning raid alerts into their own spam problem
-- scam / malicious-link pack with local weighted scam-language scoring
+- scam / malicious-link pack with local weighted scam-language scoring plus no-link DM-lure detection for nitro, crypto, prize, and cash bait routed into DMs or off-platform contact
 - hard local trusted-brand impersonation blocking for spoofed or lookalike safe domains
 - `Adult Links + Solicitation` pack for adult-domain intel plus optional solicitation / DM-ad text detection
 - `Severe Harm / Hate` pack for sexual-exploitation solicitation, self-harm encouragement, eliminationist hate, and severe slur abuse
@@ -148,7 +148,7 @@ Babblebox is intentionally compact:
 - private suspicious-member review that only escalates when risky message signals combine with bounded account-age, avatar-state, display-name suspicion, newcomer first-link context, or fresh-campaign reuse
 - optional AI-assisted second-pass review for moderator context only
 - Shield AI stays live-message-only; AFK, reminders, watch keywords, and Confessions feature checks remain local-first and AI-free
-- support server AI is on by default with `gpt-5.4-nano`, `gpt-5.4-mini`, and `gpt-5.4`
+- support server AI is on by default with routed `gpt-5.4-nano`, `gpt-5.4-mini`, and `gpt-5.4`, and Shield diagnostics report the actual model tier used
 - ordinary guild AI stays off by default until the owner enables it globally or per guild
 - `/shield ai` only configures review scope; owner-only private policy controls real AI access and allowed models
 - log-first defaults
@@ -166,6 +166,10 @@ Babblebox is intentionally compact:
 - verification-help channel deadline extensions with a small extension cap
 - optional suspicious-member note, review, or review-or-kick lane under `/admin risk`
 - shared exclusions, trusted-role bypasses, templates, and compact admin logs
+- preview-first `/admin permissions` lane for one-role permission orchestration across all channels, selected channels, selected categories, channels inside selected categories, and future newly created channels
+- targeted allow / deny / clear overwrite updates that preserve unrelated channel permissions unless the admin explicitly clears them
+- strict hierarchy safety for permission orchestration: Babblebox blocks `@everyone`, managed or integration roles, roles not below the actor's highest role, and roles above the bot's manageable hierarchy
+- starter presets for `Quarantine`, `Muted`, `Not Verified`, and `Verified`, plus deterministic future-channel auto-apply rules with compact shared admin-log summaries
 
 ### Daily Arcade
 
@@ -337,7 +341,7 @@ Slash is the best fit for multi-option admin setup here. Prefix stays positional
 | `/shield advanced list` | `bb!shield advanced list` | Review advanced patterns |
 | `/shield test` | `bb!shield test free nitro claim now https://bit.ly/x` | Dry-run a message through Shield |
 
-Shield's live-message link policy is intentionally separate from Confessions link mode. Confessions keeps `Disabled`, `Trusted Only`, and `Allow All Safe`, while Shield keeps `Default` plus the bounded `Trusted Links Only` mode. That stricter Shield mode allows the built-in trusted pack plus admin allowlisted domains and invite codes as policy exceptions, and `/shield trusted` now exposes the built-in families, direct domains, and any local built-in disables that affect trusted-only mode. Malicious, trusted-brand impersonation, adult-domain, and strong suspicious-link intel still wins over those trust exceptions. Shield phrase allowlists stay narrower: they suppress only targeted promo or adult-solicitation text matches. The live Shield packs are `Privacy Leak`, `Promo / Invite`, `Spam / Raid`, `Scam / Malicious Links`, `Adult Links + Solicitation`, and `Severe Harm / Hate`; live moderation stays opt-in, the first enable applies a recommended non-AI baseline, and Shield AI remains owner-managed second-pass review only.
+Shield's live-message link policy is intentionally separate from Confessions link mode. Confessions keeps `Disabled`, `Trusted Only`, and `Allow All Safe`, while Shield keeps `Default` plus the bounded `Trusted Links Only` mode. That stricter Shield mode allows the built-in trusted pack plus admin allowlisted domains and invite codes as policy exceptions, and `/shield trusted` now exposes the built-in families, direct domains, and any local built-in disables that affect trusted-only mode. Malicious, trusted-brand impersonation, adult-domain, and strong suspicious-link intel still wins over those trust exceptions. Shield phrase allowlists stay narrower: they suppress only targeted promo or adult-solicitation text matches. The live Shield packs are `Privacy Leak`, `Promo / Invite`, `Spam / Raid`, `GIF Flood / Media Pressure`, `Scam / Malicious Links`, `Adult Links + Solicitation`, and `Severe Harm / Hate`; no-link DM-lure bait now lives under the scam pack, live moderation stays opt-in, the first enable applies a recommended non-AI baseline, and Shield AI remains owner-managed second-pass review only.
 
 Shield also now governs eligible non-chat surfaces in a bounded way. Confessions keeps its own privacy, review, and workflow logic, but shares Shield link intelligence. AFK reasons plus reminder text and public reminder delivery use fixed private privacy, adult, and severe feature-surface policies. Watch keyword setup stays privacy-only. None of those private feature checks create mod-log spam or call Shield AI.
 
@@ -349,6 +353,7 @@ Slash is recommended for the heavier config flows here. Prefix stays positional,
 | Slash | Prefix | Purpose |
 | --- | --- | --- |
 | `/admin panel` | `bb!admin panel` | Open the admin lifecycle control panel |
+| `/admin permissions` | `bb!admin permissions` | Preview and safely orchestrate one role's channel permissions across current and future channels |
 | `/admin status` | `bb!admin status` | View overview counts or inspect one member |
 | `/admin followup` | `bb!admin followup true @Probation review 30d` | Configure returned-after-ban follow-up roles |
 | `/admin verification` | `bb!admin verification true @Verified must_have_role review 7d 2d` | Configure warning-before-kick verification cleanup and the shared review queue |
@@ -363,6 +368,8 @@ Slash is recommended for the heavier config flows here. Prefix stays positional,
 | `/admin sync` | `bb!admin sync` | One-time catch-up scan for current unverified members |
 
 Verification cleanup stays batch-first, suspicious-member review stays private, and emergency handling stays tiered: routine sweeps emit grouped summaries, review mode uses one persistent queue message per lane, startup reconciliation resumes quietly, and Babblebox does not post public channel reactions or reply callouts for weak evidence. Emergency incidents are audit-log-backed, grouped by signature, and split across `Observe`, `Guard`, and `Panic` postures. Observe keeps the system calm while still allowing exact reversible rollback for overwhelming-confidence dangerous grants. Guard keeps grouped review plus bounded newcomer raid hold and exact rollback. Panic adds optional actor containment for extreme-confidence takeover sequences, with explicit release buttons instead of silent irreversible punishment.
+
+`/admin permissions` is preview-first and one-role-at-a-time: admins choose targeted allow, deny, or clear states for selected permission flags, review exactly how many channels would change, see whether Babblebox will create, replace, keep, or disable the saved future rule, and can save deterministic future-channel auto-apply rules scoped to categories and channel types. Starter presets for `Quarantine`, `Muted`, `Not Verified`, and `Verified` stay editable, unrelated overwrites stay preserved unless explicitly cleared, partial channel failures stay explicit, and Babblebox refuses roles at or above the actor's highest role, roles above the bot's manageable hierarchy, `@everyone`, and managed roles.
 
 ### Daily Arcade
 
@@ -617,6 +624,7 @@ Not stored:
 .
 |-- babblebox/
 |   |-- __init__.py
+|   |-- admin_permissions_ui.py
 |   |-- admin_service.py
 |   |-- admin_store.py
 |   |-- bot.py
@@ -624,6 +632,7 @@ Not stored:
 |   |-- daily_challenges.py
 |   |-- game_engine.py
 |   |-- pattern_hunt_game.py
+|   |-- permission_orchestration.py
 |   |-- profile_service.py
 |   |-- profile_store.py
 |   |-- question_drops_ai.py
@@ -673,12 +682,14 @@ Not stored:
 - `babblebox/question_drops_service.py`: Question Drops scheduling, judging, mastery, and guild-first panels
 - `babblebox/question_drops_store.py`: Question Drops persistence and config normalization
 - `babblebox/question_drops_style.py`: Question Drops emoji and presentation helpers
-- `babblebox/admin_store.py`: compact admin lifecycle config and pending-state persistence
-- `babblebox/admin_service.py`: returned-after-ban follow-up logic, verification cleanup, and bounded sweeping
+- `babblebox/admin_store.py`: compact admin lifecycle config, permission-orchestration future-rule persistence, and pending-state persistence
+- `babblebox/admin_service.py`: returned-after-ban follow-up logic, permission orchestration, future-channel rule application, verification cleanup, and bounded sweeping
+- `babblebox/admin_permissions_ui.py`: private `/admin permissions` workflow, preview, confirmation, and future-rule controls
+- `babblebox/permission_orchestration.py`: shared permission-orchestration catalogs, presets, labels, and normalization helpers
 - `babblebox/shield_ai.py`: optional AI provider integration, redaction, truncation, and safe parsing
 - `babblebox/shield_store.py`: compact Shield config persistence
 - `babblebox/shield_service.py`: Shield matching, cache rebuilds, actions, and mod-log delivery
-- `babblebox/cogs/admin.py`: admin-facing lifecycle panel, grouped commands, and review buttons
+- `babblebox/cogs/admin.py`: admin-facing lifecycle panel, permission orchestrator entrypoints, grouped commands, and review buttons
 - `babblebox/cogs/identity.py`: Daily Arcade, Buddy, Profile, and Vault commands
 - `babblebox/cogs/meta.py`: in-bot manual and compact help surfaces
 - `babblebox/cogs/party_games.py`: Pattern Hunt private command surface
@@ -751,6 +762,7 @@ Environment variable notes:
 - `CONFESSIONS_CONTENT_LEGACY_KEYS` and `CONFESSIONS_IDENTITY_LEGACY_KEYS` are optional comma-separated `key_id=secret` lists used only during key rotation or compatibility windows so Babblebox can read old Confessions rows while writing with the new active key
 - `OPENAI_API_KEY` is optional and only needed for Shield AI assist
 - `SHIELD_AI_FAST_MODEL`, `SHIELD_AI_COMPLEX_MODEL`, `SHIELD_AI_TOP_MODEL`, `SHIELD_AI_ENABLE_TOP_TIER`, `SHIELD_AI_MODEL`, `SHIELD_AI_TIMEOUT_SECONDS`, and `SHIELD_AI_MAX_CHARS` are optional Shield AI tuning knobs
+  `SHIELD_AI_MODEL` accepts `nano`, `mini`, `full`, or the canonical GPT-5.4 model names. Invalid overrides are ignored so diagnostics stay truthful.
 - `UTILITY_STORAGE_BACKEND=memory` is for explicit local/test work only
 - `ADMIN_STORAGE_BACKEND=memory` is optional for local/test admin lifecycle work
 - `SHIELD_STORAGE_BACKEND=memory` is optional for local/test Shield work

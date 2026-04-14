@@ -11,6 +11,8 @@ from discord.ext import commands
 
 from babblebox.app_command_hardening import harden_admin_root_group
 from babblebox import game_engine as ge
+from babblebox.admin_service import AdminService
+from babblebox.admin_store import AdminStore
 from babblebox.command_utils import HybridPanelSendResult
 from babblebox.cogs.admin import AdminCog
 from babblebox.cogs.confessions import ConfessionsCog
@@ -352,6 +354,8 @@ class FakeContext:
         self.defer_calls.append(kwargs)
         if self.interaction is not None:
             self.interaction.response._done = True
+            if getattr(self.interaction, "_original_response_message", None) is None:
+                self.interaction._original_response_message = self.interaction.create_message({"ephemeral": kwargs.get("ephemeral", False)})
 
 
 class FakeLobbyView:
@@ -409,6 +413,22 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             total += len(field.name) + len(field.value)
 
         self.assertLessEqual(total, 6000)
+
+    async def _build_admin_cog(self, guild: FakeGuild):
+        bot = types.SimpleNamespace(
+            loop=asyncio.get_running_loop(),
+            user=types.SimpleNamespace(id=999),
+            get_guild=lambda guild_id: guild if guild_id == guild.id else None,
+            get_channel=lambda channel_id: None,
+        )
+        cog = AdminCog(bot)
+        original_service = cog.service
+        store = AdminStore(backend="memory")
+        await store.load()
+        cog.service = AdminService(bot, store=store)
+        cog.service.storage_ready = True
+        bot.admin_service = cog.service
+        return cog, original_service
 
     def test_help_pages_reflect_five_game_party_copy(self):
         party_page = next(page for page in HELP_PAGES if page["title"] == "Party Games")
@@ -477,6 +497,8 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/shield severe term", shield_page["body"])
         self.assertIn("Trusted Links Only", shield_page["body"])
         self.assertIn("Spam / Raid", shield_page["body"])
+        self.assertIn("GIF Flood / Media Pressure", shield_page["body"])
+        self.assertIn("no-link DM-lure", shield_page["body"])
         self.assertIn("Severe Harm / Hate", shield_page["body"])
         self.assertNotIn("experimental scam heuristics", shield_page["body"])
 
@@ -485,6 +507,7 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/shield links", shield_field.value)
         self.assertIn("/shield filters", shield_field.value)
         self.assertIn("/shield severe category", shield_field.value)
+        self.assertIn("/admin permissions", shield_field.value)
 
     def test_help_embeds_stay_within_discord_limits(self):
         for index, _page in enumerate(HELP_PAGES):
@@ -1463,6 +1486,7 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Low / Medium / High: `log` / `delete_log` / `delete_log`", protection_field.value)
             self.assertIn("**Promo / Invite**", protection_field.value)
             self.assertIn("**Spam / Raid**", protection_field.value)
+            self.assertIn("**GIF Flood / Media Pressure**", protection_field.value)
             self.assertIn("Enabled: Yes | Sensitivity: Normal", protection_field.value)
             self.assertIn("Low / Medium / High: `log` / `log` / `log`", protection_field.value)
             self.assertIn("**Scam / Malicious Links**", link_safety_field.value)
@@ -2322,6 +2346,77 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Use `status`, `off`, `rare`, or `event_only`.", ctx.send_calls[0]["embed"].description)
         finally:
             await cog.service.close()
+
+    async def test_admin_risk_recovers_deferred_followup_failure_without_hanging(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel()
+        interaction = FakeInteraction(followup_exception=TypeError("broken followup"))
+        ctx = FakeContext(interaction=interaction, guild=guild, channel=channel, author=FakeAuthor(manage_guild=True))
+        cog, original_service = await self._build_admin_cog(guild)
+        try:
+            await AdminCog.admin_risk_command.callback(cog, ctx)
+
+            self.assertEqual(len(ctx.defer_calls), 1)
+            self.assertEqual(len(interaction.followup_calls), 1)
+            self.assertEqual(len(interaction.edit_original_response_calls), 1)
+            self.assertEqual(interaction._original_response_message.embed.title, "Suspicious-Member Review")
+        finally:
+            await cog.service.close()
+            await original_service.close()
+
+    async def test_admin_emergency_recovers_deferred_followup_failure_without_hanging(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel()
+        interaction = FakeInteraction(followup_exception=TypeError("broken followup"))
+        ctx = FakeContext(interaction=interaction, guild=guild, channel=channel, author=FakeAuthor(manage_guild=True))
+        cog, original_service = await self._build_admin_cog(guild)
+        try:
+            await AdminCog.admin_emergency_command.callback(cog, ctx)
+
+            self.assertEqual(len(ctx.defer_calls), 1)
+            self.assertEqual(len(interaction.followup_calls), 1)
+            self.assertEqual(len(interaction.edit_original_response_calls), 1)
+            self.assertEqual(interaction._original_response_message.embed.title, "Emergency Protection")
+        finally:
+            await cog.service.close()
+            await original_service.close()
+
+    async def test_admin_risk_permission_denied_path_recovers_after_defer(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel()
+        interaction = FakeInteraction(followup_exception=TypeError("broken followup"))
+        ctx = FakeContext(interaction=interaction, guild=guild, channel=channel, author=FakeAuthor(manage_guild=False))
+        cog, original_service = await self._build_admin_cog(guild)
+        try:
+            await AdminCog.admin_risk_command.callback(cog, ctx)
+
+            self.assertEqual(len(ctx.defer_calls), 1)
+            self.assertEqual(len(interaction.followup_calls), 1)
+            self.assertEqual(len(interaction.edit_original_response_calls), 1)
+            self.assertEqual(interaction._original_response_message.embed.title, "Admin Only")
+        finally:
+            await cog.service.close()
+            await original_service.close()
+
+    async def test_admin_risk_storage_unavailable_path_recovers_after_defer(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel()
+        interaction = FakeInteraction(followup_exception=TypeError("broken followup"))
+        ctx = FakeContext(interaction=interaction, guild=guild, channel=channel, author=FakeAuthor(manage_guild=True))
+        cog, original_service = await self._build_admin_cog(guild)
+        try:
+            cog.service.storage_ready = False
+            cog.service.storage_error = "db down"
+
+            await AdminCog.admin_risk_command.callback(cog, ctx)
+
+            self.assertEqual(len(ctx.defer_calls), 1)
+            self.assertEqual(len(interaction.followup_calls), 1)
+            self.assertEqual(len(interaction.edit_original_response_calls), 1)
+            self.assertEqual(interaction._original_response_message.embed.title, "Admin Systems Unavailable")
+        finally:
+            await cog.service.close()
+            await original_service.close()
 
     def test_hidden_override_command_is_not_in_public_help_pages(self):
         serialized_help = " ".join(page["body"] + " " + page.get("try", "") for page in HELP_PAGES).casefold()

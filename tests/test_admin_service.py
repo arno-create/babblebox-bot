@@ -19,6 +19,16 @@ from babblebox.admin_store import (
     normalize_member_risk_state,
     normalize_verification_state,
 )
+from babblebox.permission_orchestration import (
+    PERMISSION_SYNC_APPLY_BOTH,
+    PERMISSION_SYNC_APPLY_EXISTING,
+    PERMISSION_SYNC_APPLY_FUTURE,
+    PERMISSION_SYNC_PRESETS,
+    PERMISSION_SYNC_SCOPE_ALL_CHANNELS,
+    PERMISSION_SYNC_SCOPE_CATEGORY_CHILDREN,
+    PERMISSION_SYNC_SCOPE_SELECTED_CATEGORIES,
+    PERMISSION_SYNC_SCOPE_SELECTED_CHANNELS,
+)
 from babblebox.utility_helpers import deserialize_datetime, serialize_datetime
 
 
@@ -46,12 +56,28 @@ class FakePermissions:
 
 
 class FakeRole:
-    def __init__(self, role_id: int, *, position: int = 1, mentionable: bool = True, permissions: FakePermissions | None = None):
+    def __init__(
+        self,
+        role_id: int,
+        *,
+        position: int = 1,
+        mentionable: bool = True,
+        permissions: FakePermissions | None = None,
+        name: str | None = None,
+        managed: bool = False,
+        default: bool = False,
+    ):
         self.id = role_id
+        self.name = name or f"Role {role_id}"
         self.position = position
         self.mention = f"<@&{role_id}>"
         self.mentionable = mentionable
         self.permissions = permissions or FakePermissions()
+        self.managed = managed
+        self._default = default
+
+    def is_default(self):
+        return self._default
 
 
 class FakeAuditLogEntry:
@@ -83,15 +109,53 @@ class FakeSentMessage:
 
 
 class FakeChannel:
-    def __init__(self, channel_id: int, *, permissions: FakePermissions | None = None):
+    def __init__(
+        self,
+        channel_id: int,
+        *,
+        permissions: FakePermissions | None = None,
+        name: str = "general",
+        channel_type=discord.ChannelType.text,
+        category=None,
+        position: int = 0,
+        permissions_synced: bool = False,
+    ):
         self.id = channel_id
+        self.name = name
         self.mention = f"<#{channel_id}>"
         self.sent = []
         self._permissions = permissions or FakePermissions()
         self._messages: dict[int, FakeSentMessage] = {}
+        self.type = channel_type
+        self.category = category
+        self.category_id = getattr(category, "id", None)
+        self.position = position
+        self.permissions_synced = permissions_synced
+        self._role_overwrites: dict[int, discord.PermissionOverwrite] = {}
+        self.permission_edits: list[dict[str, object]] = []
+        self.raise_forbidden_on_set_permissions = False
 
     def permissions_for(self, member):
         return self._permissions
+
+    def overwrites_for(self, role):
+        overwrite = self._role_overwrites.get(int(getattr(role, "id", 0) or 0))
+        if overwrite is None:
+            return discord.PermissionOverwrite()
+        allow, deny = overwrite.pair()
+        return discord.PermissionOverwrite.from_pair(allow, deny)
+
+    async def set_permissions(self, role, *, overwrite=None, reason=None):
+        if self.raise_forbidden_on_set_permissions:
+            response = types.SimpleNamespace(status=403, reason="Forbidden", headers={})
+            raise discord.Forbidden(response=response, message="missing permissions")
+        role_id = int(getattr(role, "id", 0) or 0)
+        self.permission_edits.append({"role_id": role_id, "overwrite": overwrite, "reason": reason})
+        if overwrite is None:
+            self._role_overwrites.pop(role_id, None)
+            return
+        allow, deny = overwrite.pair()
+        self._role_overwrites[role_id] = discord.PermissionOverwrite.from_pair(allow, deny)
 
     async def send(self, **kwargs):
         message = FakeSentMessage(1000 + len(self.sent), kwargs)
@@ -532,6 +596,24 @@ class AdminServiceTests(unittest.IsolatedAsyncioTestCase):
             ping_mode="high_only",
         )
         self.assertTrue(ok)
+
+    def _admin_actor(self, user_id: int = 9001, *, top_position: int = 40) -> FakeMember:
+        top_role = FakeRole(user_id + 1000, position=top_position, name="Admin")
+        actor = FakeMember(
+            user_id,
+            self.guild,
+            roles=[top_role],
+            top_role=top_role,
+            guild_permissions=FakePermissions(manage_guild=True),
+        )
+        self.guild.members[actor.id] = actor
+        return actor
+
+    def _set_role_overwrite(self, channel: FakeChannel, role: FakeRole, **states):
+        overwrite = discord.PermissionOverwrite()
+        for flag, value in states.items():
+            setattr(overwrite, flag, value)
+        channel._role_overwrites[role.id] = overwrite
 
     def _member_risk_decision(
         self,
@@ -2810,3 +2892,436 @@ class AdminServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(processed)
         self.assertEqual(await self.store.list_emergency_incidents_for_guild(self.guild.id), [])
+
+    async def test_permission_orchestration_targeted_allow_preserves_unrelated_overwrites(self):
+        actor = self._admin_actor()
+        role = FakeRole(9100, position=10, name="Muted")
+        channel = FakeChannel(9101, name="general")
+        self.guild.roles[role.id] = role
+        self.guild.channels[channel.id] = channel
+        self._set_role_overwrite(channel, role, send_messages=False, add_reactions=False)
+
+        preview = await self.service.build_permission_orchestration_preview(
+            self.guild,
+            actor=actor,
+            role_id=role.id,
+            permission_map={"view_channel": "allow"},
+            scope_mode=PERMISSION_SYNC_SCOPE_SELECTED_CHANNELS,
+            apply_target=PERMISSION_SYNC_APPLY_EXISTING,
+            channel_ids=[channel.id],
+        )
+
+        self.assertEqual(preview.blocked_reasons, ())
+        self.assertEqual(preview.changed_count, 1)
+
+        ok, _message, result = await self.service.apply_permission_orchestration(
+            self.guild,
+            actor=actor,
+            role_id=role.id,
+            permission_map={"view_channel": "allow"},
+            scope_mode=PERMISSION_SYNC_SCOPE_SELECTED_CHANNELS,
+            apply_target=PERMISSION_SYNC_APPLY_EXISTING,
+            channel_ids=[channel.id],
+            expected_signature=preview.signature,
+        )
+
+        self.assertTrue(ok)
+        self.assertIsNotNone(result)
+        overwrite = channel.overwrites_for(role)
+        self.assertIs(overwrite.view_channel, True)
+        self.assertIs(overwrite.send_messages, False)
+        self.assertIs(overwrite.add_reactions, False)
+
+    async def test_permission_orchestration_targeted_deny_and_clear_work(self):
+        actor = self._admin_actor()
+        role = FakeRole(9200, position=10, name="Not Verified")
+        channel = FakeChannel(9201, name="rules")
+        self.guild.roles[role.id] = role
+        self.guild.channels[channel.id] = channel
+        self._set_role_overwrite(channel, role, view_channel=False, send_messages=True)
+
+        preview = await self.service.build_permission_orchestration_preview(
+            self.guild,
+            actor=actor,
+            role_id=role.id,
+            permission_map={"add_reactions": "deny", "view_channel": "clear"},
+            scope_mode=PERMISSION_SYNC_SCOPE_SELECTED_CHANNELS,
+            apply_target=PERMISSION_SYNC_APPLY_EXISTING,
+            channel_ids=[channel.id],
+        )
+
+        self.assertEqual(preview.changed_count, 1)
+        ok, _message, result = await self.service.apply_permission_orchestration(
+            self.guild,
+            actor=actor,
+            role_id=role.id,
+            permission_map={"add_reactions": "deny", "view_channel": "clear"},
+            scope_mode=PERMISSION_SYNC_SCOPE_SELECTED_CHANNELS,
+            apply_target=PERMISSION_SYNC_APPLY_EXISTING,
+            channel_ids=[channel.id],
+            expected_signature=preview.signature,
+        )
+
+        self.assertTrue(ok)
+        self.assertIsNotNone(result)
+        overwrite = channel.overwrites_for(role)
+        self.assertIsNone(overwrite.view_channel)
+        self.assertIs(overwrite.send_messages, True)
+        self.assertIs(overwrite.add_reactions, False)
+
+    async def test_permission_orchestration_selected_categories_preview_marks_inherit_and_skip(self):
+        actor = self._admin_actor()
+        role = FakeRole(9300, position=10, name="Quarantine")
+        category = FakeChannel(9301, name="Onboarding", channel_type=discord.ChannelType.category)
+        synced_child = FakeChannel(9302, name="welcome", category=category, permissions_synced=True)
+        unsynced_child = FakeChannel(9303, name="rules", category=category, permissions_synced=False)
+        for channel in (category, synced_child, unsynced_child):
+            channel.guild = self.guild
+            self.guild.channels[channel.id] = channel
+        self.guild.roles[role.id] = role
+
+        preview = await self.service.build_permission_orchestration_preview(
+            self.guild,
+            actor=actor,
+            role_id=role.id,
+            permission_map={"view_channel": "deny"},
+            scope_mode=PERMISSION_SYNC_SCOPE_SELECTED_CATEGORIES,
+            apply_target=PERMISSION_SYNC_APPLY_EXISTING,
+            category_ids=[category.id],
+        )
+
+        actions_by_channel = {row.channel_id: row.action for row in preview.results}
+        self.assertEqual(actions_by_channel[category.id], "change")
+        self.assertEqual(actions_by_channel[synced_child.id], "inherit")
+        self.assertEqual(actions_by_channel[unsynced_child.id], "skip")
+
+    async def test_permission_orchestration_category_children_scope_edits_children_directly(self):
+        actor = self._admin_actor()
+        role = FakeRole(9400, position=10, name="Muted")
+        category = FakeChannel(9401, name="Voice", channel_type=discord.ChannelType.category)
+        child = FakeChannel(9402, name="lobby", category=category, permissions_synced=False, channel_type=discord.ChannelType.voice)
+        for channel in (category, child):
+            channel.guild = self.guild
+            self.guild.channels[channel.id] = channel
+        self.guild.roles[role.id] = role
+
+        preview = await self.service.build_permission_orchestration_preview(
+            self.guild,
+            actor=actor,
+            role_id=role.id,
+            permission_map={"speak": "deny"},
+            scope_mode=PERMISSION_SYNC_SCOPE_CATEGORY_CHILDREN,
+            apply_target=PERMISSION_SYNC_APPLY_EXISTING,
+            category_ids=[category.id],
+        )
+
+        self.assertEqual([row.channel_id for row in preview.results if row.action == "change"], [child.id])
+
+        ok, _message, result = await self.service.apply_permission_orchestration(
+            self.guild,
+            actor=actor,
+            role_id=role.id,
+            permission_map={"speak": "deny"},
+            scope_mode=PERMISSION_SYNC_SCOPE_CATEGORY_CHILDREN,
+            apply_target=PERMISSION_SYNC_APPLY_EXISTING,
+            category_ids=[category.id],
+            expected_signature=preview.signature,
+        )
+
+        self.assertTrue(ok)
+        self.assertIsNotNone(result)
+        self.assertIsNone(category.overwrites_for(role).speak)
+        self.assertIs(child.overwrites_for(role).speak, False)
+
+    async def test_permission_orchestration_future_rule_persists_and_applies_on_channel_create(self):
+        actor = self._admin_actor()
+        role = FakeRole(9500, position=10, name="Verified")
+        category = FakeChannel(9501, name="Members", channel_type=discord.ChannelType.category)
+        category.guild = self.guild
+        self.guild.roles[role.id] = role
+        self.guild.channels[category.id] = category
+
+        preview = await self.service.build_permission_orchestration_preview(
+            self.guild,
+            actor=actor,
+            role_id=role.id,
+            permission_map={"view_channel": "allow", "send_messages": "allow"},
+            scope_mode=PERMISSION_SYNC_SCOPE_SELECTED_CATEGORIES,
+            apply_target=PERMISSION_SYNC_APPLY_FUTURE,
+            category_ids=[category.id],
+            future_channel_type_filters=["text"],
+            preset_key="verified",
+        )
+
+        self.assertEqual(preview.blocked_reasons, ())
+        self.assertEqual(preview.future_rule_action, "create")
+
+        ok, _message, result = await self.service.apply_permission_orchestration(
+            self.guild,
+            actor=actor,
+            role_id=role.id,
+            permission_map={"view_channel": "allow", "send_messages": "allow"},
+            scope_mode=PERMISSION_SYNC_SCOPE_SELECTED_CATEGORIES,
+            apply_target=PERMISSION_SYNC_APPLY_FUTURE,
+            category_ids=[category.id],
+            future_channel_type_filters=["text"],
+            preset_key="verified",
+            expected_signature=preview.signature,
+        )
+
+        self.assertTrue(ok)
+        self.assertIsNotNone(result)
+        config = self.service.get_config(self.guild.id)
+        self.assertEqual(len(config["permission_sync_rules"]), 1)
+        self.assertEqual(config["permission_sync_rules"][0]["role_id"], role.id)
+        matching = FakeChannel(9502, name="chat", category=category)
+        matching.guild = self.guild
+        self.guild.channels[matching.id] = matching
+
+        await self.service.handle_channel_create(matching)
+        self.assertIs(matching.overwrites_for(role).view_channel, True)
+        self.assertIs(matching.overwrites_for(role).send_messages, True)
+        self.assertEqual(len(matching.permission_edits), 1)
+
+        await self.service.handle_channel_create(matching)
+        self.assertEqual(len(matching.permission_edits), 1)
+
+        other_category = FakeChannel(9503, name="Offtopic", channel_type=discord.ChannelType.category)
+        other_category.guild = self.guild
+        other_channel = FakeChannel(9504, name="offtopic-chat", category=other_category)
+        other_channel.guild = self.guild
+        self.guild.channels[other_category.id] = other_category
+        self.guild.channels[other_channel.id] = other_channel
+        await self.service.handle_channel_create(other_channel)
+        self.assertIsNone(other_channel.overwrites_for(role).view_channel)
+
+    async def test_permission_orchestration_future_rule_preview_and_apply_are_truthful_about_replace_and_noop(self):
+        actor = self._admin_actor()
+        role = FakeRole(9550, position=10, name="Verified")
+        category = FakeChannel(9551, name="Members", channel_type=discord.ChannelType.category)
+        category.guild = self.guild
+        self.guild.roles[role.id] = role
+        self.guild.channels[category.id] = category
+
+        create_preview = await self.service.build_permission_orchestration_preview(
+            self.guild,
+            actor=actor,
+            role_id=role.id,
+            permission_map={"view_channel": "allow", "send_messages": "allow"},
+            scope_mode=PERMISSION_SYNC_SCOPE_SELECTED_CATEGORIES,
+            apply_target=PERMISSION_SYNC_APPLY_FUTURE,
+            category_ids=[category.id],
+            future_channel_type_filters=["text"],
+            preset_key="verified",
+        )
+        self.assertEqual(create_preview.future_rule_action, "create")
+        self.assertIn("create a saved future-channel rule", create_preview.future_rule_summary.lower())
+
+        ok, message, result = await self.service.apply_permission_orchestration(
+            self.guild,
+            actor=actor,
+            role_id=role.id,
+            permission_map={"view_channel": "allow", "send_messages": "allow"},
+            scope_mode=PERMISSION_SYNC_SCOPE_SELECTED_CATEGORIES,
+            apply_target=PERMISSION_SYNC_APPLY_FUTURE,
+            category_ids=[category.id],
+            future_channel_type_filters=["text"],
+            preset_key="verified",
+            expected_signature=create_preview.signature,
+        )
+        self.assertTrue(ok)
+        self.assertIn("created", message.lower())
+        self.assertIsNotNone(result)
+
+        replace_preview = await self.service.build_permission_orchestration_preview(
+            self.guild,
+            actor=actor,
+            role_id=role.id,
+            permission_map={"view_channel": "allow", "send_messages": "deny"},
+            scope_mode=PERMISSION_SYNC_SCOPE_SELECTED_CATEGORIES,
+            apply_target=PERMISSION_SYNC_APPLY_FUTURE,
+            category_ids=[category.id],
+            future_channel_type_filters=["text"],
+            preset_key="verified",
+        )
+        self.assertEqual(replace_preview.future_rule_action, "replace")
+        self.assertIn("replace the saved future-channel rule", replace_preview.future_rule_summary.lower())
+
+        unchanged_preview = await self.service.build_permission_orchestration_preview(
+            self.guild,
+            actor=actor,
+            role_id=role.id,
+            permission_map={"view_channel": "allow", "send_messages": "allow"},
+            scope_mode=PERMISSION_SYNC_SCOPE_SELECTED_CATEGORIES,
+            apply_target=PERMISSION_SYNC_APPLY_FUTURE,
+            category_ids=[category.id],
+            future_channel_type_filters=["text"],
+            preset_key="verified",
+        )
+        self.assertEqual(unchanged_preview.future_rule_action, "unchanged")
+        self.assertIn("already matches this draft", unchanged_preview.future_rule_summary.lower())
+
+        ok, message, result = await self.service.apply_permission_orchestration(
+            self.guild,
+            actor=actor,
+            role_id=role.id,
+            permission_map={"view_channel": "allow", "send_messages": "allow"},
+            scope_mode=PERMISSION_SYNC_SCOPE_SELECTED_CATEGORIES,
+            apply_target=PERMISSION_SYNC_APPLY_FUTURE,
+            category_ids=[category.id],
+            future_channel_type_filters=["text"],
+            preset_key="verified",
+            expected_signature=unchanged_preview.signature,
+        )
+        self.assertTrue(ok)
+        self.assertIn("already matched this draft", message.lower())
+        self.assertIsNotNone(result)
+        self.assertEqual(len(self.service.get_config(self.guild.id)["permission_sync_rules"]), 1)
+
+    async def test_permission_orchestration_blocks_actor_and_bot_hierarchy_issues(self):
+        actor_role = FakeRole(9600, position=10, name="Moderator")
+        actor = FakeMember(
+            9601,
+            self.guild,
+            roles=[actor_role],
+            top_role=actor_role,
+            guild_permissions=FakePermissions(manage_guild=True),
+        )
+        target_equal = FakeRole(9602, position=10, name="Equal")
+        target_above_bot = FakeRole(9603, position=150, name="Too High")
+        self.guild.members[actor.id] = actor
+        self.guild.roles[target_equal.id] = target_equal
+        self.guild.roles[target_above_bot.id] = target_above_bot
+
+        actor_preview = await self.service.build_permission_orchestration_preview(
+            self.guild,
+            actor=actor,
+            role_id=target_equal.id,
+            permission_map={"view_channel": "deny"},
+            scope_mode=PERMISSION_SYNC_SCOPE_ALL_CHANNELS,
+            apply_target=PERMISSION_SYNC_APPLY_EXISTING,
+        )
+        bot_preview = await self.service.build_permission_orchestration_preview(
+            self.guild,
+            actor=self._admin_actor(user_id=9604, top_position=200),
+            role_id=target_above_bot.id,
+            permission_map={"view_channel": "deny"},
+            scope_mode=PERMISSION_SYNC_SCOPE_ALL_CHANNELS,
+            apply_target=PERMISSION_SYNC_APPLY_EXISTING,
+        )
+
+        self.assertTrue(any("strictly below your highest role" in reason for reason in actor_preview.blocked_reasons))
+        self.assertTrue(any("Babblebox cannot manage" in reason for reason in bot_preview.blocked_reasons))
+
+    async def test_permission_orchestration_blocks_managed_and_default_roles(self):
+        actor = self._admin_actor()
+        managed_role = FakeRole(9700, position=10, managed=True, name="Managed")
+        everyone_role = FakeRole(self.guild.id, position=0, default=True, name="@everyone")
+        self.guild.roles[managed_role.id] = managed_role
+        self.guild.roles[everyone_role.id] = everyone_role
+
+        managed_preview = await self.service.build_permission_orchestration_preview(
+            self.guild,
+            actor=actor,
+            role_id=managed_role.id,
+            permission_map={"view_channel": "deny"},
+            scope_mode=PERMISSION_SYNC_SCOPE_ALL_CHANNELS,
+            apply_target=PERMISSION_SYNC_APPLY_EXISTING,
+        )
+        everyone_preview = await self.service.build_permission_orchestration_preview(
+            self.guild,
+            actor=actor,
+            role_id=everyone_role.id,
+            permission_map={"view_channel": "deny"},
+            scope_mode=PERMISSION_SYNC_SCOPE_ALL_CHANNELS,
+            apply_target=PERMISSION_SYNC_APPLY_EXISTING,
+        )
+
+        self.assertTrue(any("Managed or integration roles" in reason for reason in managed_preview.blocked_reasons))
+        self.assertTrue(any("@everyone" in reason for reason in everyone_preview.blocked_reasons))
+
+    async def test_permission_orchestration_presets_stay_sane(self):
+        self.assertEqual(PERMISSION_SYNC_PRESETS["quarantine"].permission_map["view_channel"], "deny")
+        self.assertEqual(PERMISSION_SYNC_PRESETS["muted"].permission_map["send_messages"], "deny")
+        self.assertEqual(PERMISSION_SYNC_PRESETS["not_verified"].permission_map["view_channel"], "allow")
+        self.assertEqual(PERMISSION_SYNC_PRESETS["verified"].permission_map["send_messages"], "allow")
+        self.assertEqual(PERMISSION_SYNC_PRESETS["verified"].permission_map["connect"], "allow")
+        self.assertNotIn("view_channel", PERMISSION_SYNC_PRESETS["muted"].permission_map)
+
+    async def test_permission_orchestration_preview_signature_blocks_stale_apply(self):
+        actor = self._admin_actor()
+        role = FakeRole(9800, position=10, name="Muted")
+        channel = FakeChannel(9801, name="general")
+        self.guild.roles[role.id] = role
+        self.guild.channels[channel.id] = channel
+
+        preview = await self.service.build_permission_orchestration_preview(
+            self.guild,
+            actor=actor,
+            role_id=role.id,
+            permission_map={"send_messages": "deny"},
+            scope_mode=PERMISSION_SYNC_SCOPE_SELECTED_CHANNELS,
+            apply_target=PERMISSION_SYNC_APPLY_EXISTING,
+            channel_ids=[channel.id],
+        )
+
+        ok, message, result = await self.service.apply_permission_orchestration(
+            self.guild,
+            actor=actor,
+            role_id=role.id,
+            permission_map={"send_messages": "allow"},
+            scope_mode=PERMISSION_SYNC_SCOPE_SELECTED_CHANNELS,
+            apply_target=PERMISSION_SYNC_APPLY_EXISTING,
+            channel_ids=[channel.id],
+            expected_signature=preview.signature,
+        )
+
+        self.assertFalse(ok)
+        self.assertIn("stale", message.lower())
+        self.assertIsNone(result)
+        self.assertIsNone(channel.overwrites_for(role).send_messages)
+
+    async def test_permission_orchestration_logs_summary_and_surfaces_partial_failures(self):
+        actor = self._admin_actor()
+        role = FakeRole(9900, position=10, name="Verified")
+        category = FakeChannel(9900 + 10, name="Members", channel_type=discord.ChannelType.category)
+        first = FakeChannel(9901, name="alpha", category=category)
+        second = FakeChannel(9902, name="beta", category=category)
+        second.raise_forbidden_on_set_permissions = True
+        self.guild.roles[role.id] = role
+        self.guild.channels[category.id] = category
+        self.guild.channels[first.id] = first
+        self.guild.channels[second.id] = second
+        ok, _ = await self.service.set_logs_config(self.guild.id, channel_id=self.log_channel.id, alert_role_id=None)
+        self.assertTrue(ok)
+
+        preview = await self.service.build_permission_orchestration_preview(
+            self.guild,
+            actor=actor,
+            role_id=role.id,
+            permission_map={"view_channel": "allow"},
+            scope_mode=PERMISSION_SYNC_SCOPE_CATEGORY_CHILDREN,
+            apply_target=PERMISSION_SYNC_APPLY_BOTH,
+            category_ids=[category.id],
+            preset_key="verified",
+        )
+
+        ok, message, result = await self.service.apply_permission_orchestration(
+            self.guild,
+            actor=actor,
+            role_id=role.id,
+            permission_map={"view_channel": "allow"},
+            scope_mode=PERMISSION_SYNC_SCOPE_CATEGORY_CHILDREN,
+            apply_target=PERMISSION_SYNC_APPLY_BOTH,
+            category_ids=[category.id],
+            preset_key="verified",
+            expected_signature=preview.signature,
+        )
+
+        self.assertTrue(ok)
+        self.assertIn("failed", message.lower())
+        self.assertIsNotNone(result)
+        self.assertEqual(result.changed_count, 1)
+        self.assertEqual(result.failed_count, 1)
+        self.assertEqual(self.log_channel.sent[-1]["embed"].title, "Role Permission Orchestration Applied With Issues")
+        self.assertIn("Future automation: **Create saved rule**", self.log_channel.sent[-1]["embed"].description)

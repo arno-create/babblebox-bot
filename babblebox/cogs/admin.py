@@ -30,7 +30,16 @@ from babblebox.admin_service import (
     VerificationSyncSummary,
     _followup_duration_label,
 )
-from babblebox.command_utils import defer_hybrid_response, send_hybrid_response
+from babblebox.admin_permissions_ui import PermissionDraftState, PermissionOrchestrationView
+from babblebox.permission_orchestration import (
+    PERMISSION_SYNC_PRESETS,
+    permission_channel_type_label,
+)
+from babblebox.command_utils import (
+    HybridPanelSendResult,
+    defer_hybrid_response,
+    send_hybrid_panel_response,
+)
 from babblebox.utility_helpers import deserialize_datetime, format_duration_brief
 
 
@@ -471,6 +480,7 @@ class AdminPanelView(discord.ui.View):
             "verification": self.verification_button,
             "risk": self.risk_button,
             "emergency": self.emergency_button,
+            "permissions": self.permissions_button,
             "exclusions": self.exclusions_button,
             "logs": self.logs_button,
             "templates": self.templates_button,
@@ -539,6 +549,11 @@ class AdminPanelView(discord.ui.View):
     @discord.ui.button(label="Emergency", style=discord.ButtonStyle.secondary, row=1)
     async def emergency_button(self, interaction: discord.Interaction, button: discord.ui.Button):
         self.section = "emergency"
+        await self._render(interaction)
+
+    @discord.ui.button(label="Permissions", style=discord.ButtonStyle.secondary, row=1)
+    async def permissions_button(self, interaction: discord.Interaction, button: discord.ui.Button):
+        self.section = "permissions"
         await self._render(interaction)
 
     @discord.ui.button(label="Exclusions", style=discord.ButtonStyle.secondary, row=1)
@@ -782,14 +797,15 @@ class AdminCog(commands.Cog):
     async def _guard(self, ctx: commands.Context) -> bool:
         await defer_hybrid_response(ctx, ephemeral=True)
         if ctx.guild is None:
-            await send_hybrid_response(
+            await self._send_admin_response(
                 ctx,
                 embed=ge.make_status_embed("Server Only", "These admin systems can only be configured inside a server.", tone="warning", footer="Babblebox Admin"),
-                ephemeral=True,
+                recovery_title="Admin Systems Unavailable",
+                recovery_description="Babblebox could not complete the admin permission check just now. Please try again inside a server.",
             )
             return False
         if not self.user_can_manage_admin(ctx.author):
-            await send_hybrid_response(
+            await self._send_admin_response(
                 ctx,
                 embed=ge.make_status_embed(
                     "Admin Only",
@@ -797,14 +813,16 @@ class AdminCog(commands.Cog):
                     tone="warning",
                     footer="Babblebox Admin",
                 ),
-                ephemeral=True,
+                recovery_title="Admin Access Check Unavailable",
+                recovery_description="Babblebox could not finish the admin access check just now. Please try the command again in a moment.",
             )
             return False
         if not self.service.storage_ready:
-            await send_hybrid_response(
+            await self._send_admin_response(
                 ctx,
                 embed=ge.make_status_embed("Admin Systems Unavailable", self.service.storage_message(), tone="warning", footer="Babblebox Admin"),
-                ephemeral=True,
+                recovery_title="Admin Systems Unavailable",
+                recovery_description="Babblebox could not complete the admin storage check just now. Please try again in a moment.",
             )
             return False
         return True
@@ -812,23 +830,25 @@ class AdminCog(commands.Cog):
     async def _emergency_guard(self, ctx: commands.Context) -> bool:
         await defer_hybrid_response(ctx, ephemeral=True)
         if ctx.guild is None:
-            await send_hybrid_response(
+            await self._send_admin_response(
                 ctx,
                 embed=ge.make_status_embed("Server Only", "These emergency controls can only be configured inside a server.", tone="warning", footer="Babblebox Admin"),
-                ephemeral=True,
+                recovery_title="Emergency Controls Unavailable",
+                recovery_description="Babblebox could not complete the emergency access check just now. Please try again inside a server.",
             )
             return False
         if not self.service.storage_ready:
-            await send_hybrid_response(
+            await self._send_admin_response(
                 ctx,
                 embed=ge.make_status_embed("Admin Systems Unavailable", self.service.storage_message(), tone="warning", footer="Babblebox Admin"),
-                ephemeral=True,
+                recovery_title="Emergency Controls Unavailable",
+                recovery_description="Babblebox could not complete the emergency storage check just now. Please try again in a moment.",
             )
             return False
-        allowed, reason = self.service.can_manage_control_plane(ctx.author, ctx.guild.id, operation="manage")
+        allowed, reason = self.service.can_manage_control_plane(ctx.author, ctx.guild.id, operation="emergency")
         if allowed:
             return True
-        await send_hybrid_response(
+        await self._send_admin_response(
             ctx,
             embed=ge.make_status_embed(
                 "Emergency Controls Restricted",
@@ -836,7 +856,47 @@ class AdminCog(commands.Cog):
                 tone="warning",
                 footer="Babblebox Admin",
             ),
-            ephemeral=True,
+            recovery_title="Emergency Controls Unavailable",
+            recovery_description="Babblebox could not finish the emergency access response just now. Please try again in a moment.",
+        )
+        return False
+
+    async def _permissions_guard(self, ctx: commands.Context) -> bool:
+        await defer_hybrid_response(ctx, ephemeral=True)
+        if ctx.guild is None:
+            await self._send_admin_response(
+                ctx,
+                embed=ge.make_status_embed(
+                    "Server Only",
+                    "These permission controls can only be configured inside a server.",
+                    tone="warning",
+                    footer="Babblebox Admin",
+                ),
+                recovery_title="Permission Controls Unavailable",
+                recovery_description="Babblebox could not complete the permission-panel check just now. Please try again inside a server.",
+            )
+            return False
+        if not self.service.storage_ready:
+            await self._send_admin_response(
+                ctx,
+                embed=ge.make_status_embed("Admin Systems Unavailable", self.service.storage_message(), tone="warning", footer="Babblebox Admin"),
+                recovery_title="Permission Controls Unavailable",
+                recovery_description="Babblebox could not complete the permission storage check just now. Please try again in a moment.",
+            )
+            return False
+        allowed, reason = self.service.can_manage_control_plane(ctx.author, ctx.guild.id, operation="manage")
+        if allowed:
+            return True
+        await self._send_admin_response(
+            ctx,
+            embed=ge.make_status_embed(
+                "Permission Orchestration Restricted",
+                reason,
+                tone="warning",
+                footer="Babblebox Admin",
+            ),
+            recovery_title="Permission Controls Unavailable",
+            recovery_description="Babblebox could not finish the permission-access response just now. Please try again in a moment.",
         )
         return False
 
@@ -1329,6 +1389,69 @@ class AdminCog(commands.Cog):
         )
         return embed
 
+    async def _permissions_embed(self, guild_id: int) -> discord.Embed:
+        config = self.service.get_config(guild_id)
+        embed = discord.Embed(
+            title="Role Permission Orchestration",
+            description="Preview-first bulk role overwrite orchestration for one role at a time, with future-channel automation and hierarchy safety built in.",
+            color=ge.EMBED_THEME["accent"],
+        )
+        embed.add_field(
+            name="What It Does",
+            value=(
+                "Target one role, choose allow / deny / clear per permission flag, and apply the exact draft across all channels, selected channels, selected categories, or direct child channels inside categories.\n"
+                "The same reviewed draft can also be saved for future channels."
+            ),
+            inline=False,
+        )
+        saved_rules = config.get("permission_sync_rules", [])
+        rule_lines: list[str] = []
+        for rule in saved_rules[:4]:
+            preset = PERMISSION_SYNC_PRESETS.get(rule.get("preset_key"))
+            preset_label = preset.name if preset is not None else "Custom"
+            scope_label = "All new supported channels"
+            category_ids = rule.get("category_ids", [])
+            if rule.get("scope_mode") == "selected_categories":
+                scope_label = (
+                    f"New channels inside {', '.join(self._channel_mention(value) for value in category_ids[:3])}"
+                    if category_ids
+                    else "New channels inside selected categories"
+                )
+                if len(category_ids) > 3:
+                    scope_label += f", +{len(category_ids) - 3} more"
+            type_filters = rule.get("channel_type_filters", [])
+            type_labels = ", ".join(permission_channel_type_label(value) for value in type_filters[:4]) if type_filters else "All supported"
+            if len(type_filters) > 4:
+                type_labels += f", +{len(type_filters) - 4} more"
+            rule_lines.append(f"{self._role_mention(rule.get('role_id'))} - {preset_label} - {scope_label} - {type_labels}")
+        embed.add_field(
+            name="Saved Future Rules",
+            value=ge.join_limited_lines(rule_lines, limit=1024, empty="No future-channel permission rules are saved yet."),
+            inline=False,
+        )
+        embed.add_field(
+            name="Starter Presets",
+            value=(
+                "`Quarantine` hides and heavily restricts the role.\n"
+                "`Muted` keeps visibility but blocks speaking and posting.\n"
+                "`Not Verified` fits onboarding visibility with participation limits.\n"
+                "`Verified` grants reviewed normal participation in the chosen scope."
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Safety Model",
+            value=(
+                "Only Babblebox control-plane managers can use this tool.\n"
+                "Babblebox blocks @everyone, managed roles, roles at or above the actor, and roles it cannot manage itself.\n"
+                "Only the selected permission flags are edited; unrelated overwrite bits stay preserved.\n"
+                "Every apply path is previewed first and logged to the admin log channel."
+            ),
+            inline=False,
+        )
+        embed.add_field(name="Quick Use", value="`/admin permissions`", inline=False)
+        return embed
+
     async def _followup_embed(self, guild_id: int) -> discord.Embed:
         config = self.service.get_config(guild_id)
         embed = discord.Embed(
@@ -1516,6 +1639,8 @@ class AdminCog(commands.Cog):
             embed = await self._risk_embed(guild_id)
         elif section == "emergency":
             embed = await self._emergency_embed(guild_id)
+        elif section == "permissions":
+            embed = await self._permissions_embed(guild_id)
         elif section == "exclusions":
             embed = await self._exclusions_embed(guild_id)
         elif section == "logs":
@@ -1527,26 +1652,87 @@ class AdminCog(commands.Cog):
         operability = self._operability_lines(guild_id)
         if operability:
             embed.add_field(name="Operability", value="\n".join(operability[:6]), inline=False)
-        return ge.style_embed(embed, footer="Babblebox Admin | /admin panel, status, followup, verification, risk, emergency, logs, exclusions, templates, sync, or test")
+        return ge.style_embed(
+            embed,
+            footer="Babblebox Admin | /admin panel, status, followup, verification, risk, emergency, permissions, logs, exclusions, templates, sync, or test",
+        )
+
+    async def _send_admin_response(
+        self,
+        ctx: commands.Context,
+        *,
+        embed: discord.Embed,
+        view: discord.ui.View | None = None,
+        retry_without_view: bool = False,
+        recovery_title: str = "Admin Response Unavailable",
+        recovery_description: str = "Babblebox could not finish this admin response just now. Please try the command again in a moment.",
+    ) -> HybridPanelSendResult:
+        result = await send_hybrid_panel_response(ctx, embed=embed, view=view, ephemeral=True)
+        if not result.delivered and retry_without_view and view is not None:
+            fallback = await send_hybrid_panel_response(ctx, embed=embed, ephemeral=True)
+            if fallback.delivered:
+                return fallback
+            result = HybridPanelSendResult(delivered=False, path=fallback.path, error=fallback.error or result.error)
+        if result.delivered:
+            return result
+
+        recovery_embed = ge.make_status_embed(recovery_title, recovery_description, tone="warning", footer="Babblebox Admin")
+        with contextlib.suppress(discord.ClientException, discord.HTTPException, discord.NotFound, TypeError, ValueError):
+            recovery = await send_hybrid_panel_response(ctx, embed=recovery_embed, ephemeral=True)
+            if recovery.delivered:
+                return recovery
+        return result
 
     async def _send_result(self, ctx: commands.Context, title: str, message: str, *, ok: bool):
         embed = ge.make_status_embed(title, message, tone="success" if ok else "warning", footer="Babblebox Admin")
         operability = self._operability_lines(ctx.guild.id)
         if operability:
             embed.add_field(name="Operability", value="\n".join(operability[:6]), inline=False)
-        await send_hybrid_response(ctx, embed=embed, ephemeral=True)
+        await self._send_admin_response(
+            ctx,
+            embed=embed,
+            recovery_title=f"{title} Unavailable",
+            recovery_description="Babblebox could not finish the admin update response just now. No additional admin changes were applied after this point.",
+        )
 
     async def _send_panel(self, ctx: commands.Context, *, section: str = "overview"):
         view = AdminPanelView(self, guild_id=ctx.guild.id, author_id=ctx.author.id, section=section)
-        message = await send_hybrid_response(ctx, embed=await view.current_embed(), view=view, ephemeral=True)
-        if message is not None:
-            view.message = message
+        result = await self._send_admin_response(
+            ctx,
+            embed=await view.current_embed(),
+            view=view,
+            retry_without_view=True,
+            recovery_title="Admin Panel Unavailable",
+            recovery_description="Babblebox could not open the admin panel just now. Please try `/admin panel` again in a moment.",
+        )
+        if result.message is not None:
+            view.message = result.message
+
+    async def _send_permission_panel(self, ctx: commands.Context):
+        view = PermissionOrchestrationView(self, guild_id=ctx.guild.id, author_id=ctx.author.id, state=PermissionDraftState())
+        result = await self._send_admin_response(
+            ctx,
+            embed=await view.current_embed(),
+            view=view,
+            retry_without_view=True,
+            recovery_title="Permission Orchestrator Unavailable",
+            recovery_description="Babblebox could not open the permission orchestrator just now. Please try `/admin permissions` again in a moment.",
+        )
+        if result.message is not None:
+            view.message = result.message
 
     async def _send_sync_panel(self, ctx: commands.Context):
         view = VerificationSyncView(self, guild_id=ctx.guild.id, author_id=ctx.author.id)
-        message = await send_hybrid_response(ctx, embed=await view.current_embed(), view=view, ephemeral=True)
-        if message is not None:
-            view.message = message
+        result = await self._send_admin_response(
+            ctx,
+            embed=await view.current_embed(),
+            view=view,
+            retry_without_view=True,
+            recovery_title="Verification Sync Unavailable",
+            recovery_description="Babblebox could not open the verification sync preview just now. Please try `/admin sync` again in a moment.",
+        )
+        if result.message is not None:
+            view.message = result.message
 
     async def _member_status_embed(self, member: discord.Member) -> discord.Embed:
         status = await self.service.get_member_status(member)
@@ -1646,9 +1832,19 @@ class AdminCog(commands.Cog):
         if not await self._guard(ctx):
             return
         if member is None:
-            await send_hybrid_response(ctx, embed=await self.build_panel_embed(ctx.guild.id, "overview"), ephemeral=True)
+            await self._send_admin_response(
+                ctx,
+                embed=await self.build_panel_embed(ctx.guild.id, "overview"),
+                recovery_title="Admin Overview Unavailable",
+                recovery_description="Babblebox could not open the admin overview just now. Please try `/admin status` again in a moment.",
+            )
             return
-        await send_hybrid_response(ctx, embed=await self._member_status_embed(member), ephemeral=True)
+        await self._send_admin_response(
+            ctx,
+            embed=await self._member_status_embed(member),
+            recovery_title="Admin Member Status Unavailable",
+            recovery_description="Babblebox could not finish the member status response just now. Please try `/admin status` again in a moment.",
+        )
 
     @admin_group.command(name="panel", with_app_command=True, description="Open the private admin panel")
     async def admin_panel_command(self, ctx: commands.Context):
@@ -1677,7 +1873,12 @@ class AdminCog(commands.Cog):
         if not await self._guard(ctx):
             return
         if all(value is None for value in (enabled, role, mode, duration)) and not clear_role:
-            await send_hybrid_response(ctx, embed=await self.build_panel_embed(ctx.guild.id, "followup"), ephemeral=True)
+            await self._send_admin_response(
+                ctx,
+                embed=await self.build_panel_embed(ctx.guild.id, "followup"),
+                recovery_title="Punishment Follow-up Unavailable",
+                recovery_description="Babblebox could not open the follow-up settings just now. Please try `/admin followup` again in a moment.",
+            )
             return
         current = self.service.get_config(ctx.guild.id)
         resolved_role_id = None if clear_role else (role.id if role is not None else current["followup_role_id"])
@@ -1723,7 +1924,12 @@ class AdminCog(commands.Cog):
         if not await self._guard(ctx):
             return
         if all(value is None for value in (enabled, role, logic, deadline_action, kick_after, warning_lead, help_channel, help_extension, max_extensions)) and not clear_role and not clear_help_channel:
-            await send_hybrid_response(ctx, embed=await self.build_panel_embed(ctx.guild.id, "verification"), ephemeral=True)
+            await self._send_admin_response(
+                ctx,
+                embed=await self.build_panel_embed(ctx.guild.id, "verification"),
+                recovery_title="Verification Cleanup Unavailable",
+                recovery_description="Babblebox could not open the verification settings just now. Please try `/admin verification` again in a moment.",
+            )
             return
         current = self.service.get_config(ctx.guild.id)
         resolved_role_id = None if clear_role else (role.id if role is not None else current["verification_role_id"])
@@ -1757,7 +1963,12 @@ class AdminCog(commands.Cog):
         if not await self._guard(ctx):
             return
         if enabled is None and mode is None:
-            await send_hybrid_response(ctx, embed=await self.build_panel_embed(ctx.guild.id, "risk"), ephemeral=True)
+            await self._send_admin_response(
+                ctx,
+                embed=await self.build_panel_embed(ctx.guild.id, "risk"),
+                recovery_title="Suspicious-Member Review Unavailable",
+                recovery_description="Babblebox could not open the suspicious-member review settings just now. Please try `/admin risk` again in a moment.",
+            )
             return
         ok, message = await self.service.set_member_risk_config(
             ctx.guild.id,
@@ -1787,7 +1998,12 @@ class AdminCog(commands.Cog):
         if not await self._emergency_guard(ctx):
             return
         if enabled is None and posture is None and mode is None and strict_auto_containment is None and ping_mode is None:
-            await send_hybrid_response(ctx, embed=await self.build_panel_embed(ctx.guild.id, "emergency"), ephemeral=True)
+            await self._send_admin_response(
+                ctx,
+                embed=await self.build_panel_embed(ctx.guild.id, "emergency"),
+                recovery_title="Emergency Protection Unavailable",
+                recovery_description="Babblebox could not open the emergency protection settings just now. Please try `/admin emergency` again in a moment.",
+            )
             return
         ok, message = await self.service.set_emergency_config(
             ctx.guild.id,
@@ -1813,7 +2029,12 @@ class AdminCog(commands.Cog):
         if not await self._emergency_guard(ctx):
             return
         if target is None and state is None and member is None and role is None and channel is None:
-            await send_hybrid_response(ctx, embed=await self.build_panel_embed(ctx.guild.id, "emergency"), ephemeral=True)
+            await self._send_admin_response(
+                ctx,
+                embed=await self.build_panel_embed(ctx.guild.id, "emergency"),
+                recovery_title="Emergency Trust Unavailable",
+                recovery_description="Babblebox could not open the emergency trust settings just now. Please try `/admin emergency_trust` again in a moment.",
+            )
             return
         if target is None or state is None:
             await self._send_result(ctx, "Emergency Trust", "Choose both a trust bucket and an on/off state.", ok=False)
@@ -1864,7 +2085,12 @@ class AdminCog(commands.Cog):
         if not await self._emergency_guard(ctx):
             return
         if target is None and state is None and member is None and role is None and control_lock is None and not clear_quarantine_role:
-            await send_hybrid_response(ctx, embed=await self.build_panel_embed(ctx.guild.id, "emergency"), ephemeral=True)
+            await self._send_admin_response(
+                ctx,
+                embed=await self.build_panel_embed(ctx.guild.id, "emergency"),
+                recovery_title="Emergency Access Unavailable",
+                recovery_description="Babblebox could not open the emergency access settings just now. Please try `/admin emergency_access` again in a moment.",
+            )
             return
         if target is not None or state is not None:
             if target is None or state is None:
@@ -1934,7 +2160,12 @@ class AdminCog(commands.Cog):
                 bot_adds,
             )
         ):
-            await send_hybrid_response(ctx, embed=await self.build_panel_embed(ctx.guild.id, "emergency"), ephemeral=True)
+            await self._send_admin_response(
+                ctx,
+                embed=await self.build_panel_embed(ctx.guild.id, "emergency"),
+                recovery_title="Emergency Thresholds Unavailable",
+                recovery_description="Babblebox could not open the emergency thresholds just now. Please try `/admin emergency_limits` again in a moment.",
+            )
             return
         permission_flags = [segment.strip() for segment in dangerous_permissions.split(",")] if dangerous_permissions else None
         ok, message = await self.service.set_emergency_limits(
@@ -1963,13 +2194,28 @@ class AdminCog(commands.Cog):
         if not await self._guard(ctx):
             return
         if channel is None and role is None and not clear_channel and not clear_role:
-            await send_hybrid_response(ctx, embed=await self.build_panel_embed(ctx.guild.id, "logs"), ephemeral=True)
+            await self._send_admin_response(
+                ctx,
+                embed=await self.build_panel_embed(ctx.guild.id, "logs"),
+                recovery_title="Admin Logs Unavailable",
+                recovery_description="Babblebox could not open the admin log settings just now. Please try `/admin logs` again in a moment.",
+            )
             return
         current = self.service.get_config(ctx.guild.id)
         resolved_channel_id = None if clear_channel else (channel.id if channel is not None else current["admin_log_channel_id"])
         resolved_role_id = None if clear_role else (role.id if role is not None else current["admin_alert_role_id"])
         ok, message = await self.service.set_logs_config(ctx.guild.id, channel_id=resolved_channel_id, alert_role_id=resolved_role_id)
         await self._send_result(ctx, "Admin Logs", message, ok=ok)
+
+    @admin_group.command(
+        name="permissions",
+        with_app_command=True,
+        description="Preview and safely orchestrate one role's channel permissions across current and future channels",
+    )
+    async def admin_permissions_command(self, ctx: commands.Context):
+        if not await self._permissions_guard(ctx):
+            return
+        await self._send_permission_panel(ctx)
 
     @admin_group.command(name="exclusions", with_app_command=True, description="Configure shared exclusions and trusted-role behavior")
     @app_commands.choices(target=EXCLUSION_TARGET_CHOICES, state=STATE_CHOICES)
@@ -1993,7 +2239,12 @@ class AdminCog(commands.Cog):
             and verification_exempt_staff is None
             and verification_exempt_bots is None
         ):
-            await send_hybrid_response(ctx, embed=await self.build_panel_embed(ctx.guild.id, "exclusions"), ephemeral=True)
+            await self._send_admin_response(
+                ctx,
+                embed=await self.build_panel_embed(ctx.guild.id, "exclusions"),
+                recovery_title="Admin Exclusions Unavailable",
+                recovery_description="Babblebox could not open the exclusions settings just now. Please try `/admin exclusions` again in a moment.",
+            )
             return
         messages: list[str] = []
         ok = True
@@ -2046,7 +2297,12 @@ class AdminCog(commands.Cog):
         if not await self._guard(ctx):
             return
         if warning_template is None and kick_template is None and invite_link is None and not clear_warning and not clear_kick and not clear_invite:
-            await send_hybrid_response(ctx, embed=await self.build_panel_embed(ctx.guild.id, "templates"), ephemeral=True)
+            await self._send_admin_response(
+                ctx,
+                embed=await self.build_panel_embed(ctx.guild.id, "templates"),
+                recovery_title="Admin Templates Unavailable",
+                recovery_description="Babblebox could not open the verification template settings just now. Please try `/admin templates` again in a moment.",
+            )
             return
         ok, message = await self.service.set_templates(
             ctx.guild.id,
@@ -2094,7 +2350,12 @@ class AdminCog(commands.Cog):
                 value="These tests do not mark members as warned, do not start a sync, and do not kick or mass-DM anyone.",
                 inline=False,
             )
-            await send_hybrid_response(ctx, embed=ge.style_embed(embed, footer="Babblebox Admin | /admin test"), ephemeral=True)
+            await self._send_admin_response(
+                ctx,
+                embed=ge.style_embed(embed, footer="Babblebox Admin | /admin test"),
+                recovery_title="Verification Test Tools Unavailable",
+                recovery_description="Babblebox could not open the verification test tools just now. Please try `/admin test` again in a moment.",
+            )
             return
 
         compiled = self.service.get_compiled_config(ctx.guild.id)
@@ -2144,7 +2405,12 @@ class AdminCog(commands.Cog):
                 inline=False,
             )
             preview_embed.add_field(name="Prechecks", value=self._format_precheck_lines(checks), inline=False)
-            await send_hybrid_response(ctx, embed=preview_embed, ephemeral=True)
+            await self._send_admin_response(
+                ctx,
+                embed=preview_embed,
+                recovery_title="Verification Log Test Unavailable",
+                recovery_description="Babblebox could not finish the verification log preview just now. Please try `/admin test` again in a moment.",
+            )
             return
 
         final = kind == "kick_dm"
@@ -2191,7 +2457,12 @@ class AdminCog(commands.Cog):
             inline=False,
         )
         preview_embed.add_field(name="Prechecks", value=self._format_precheck_lines(checks), inline=False)
-        await send_hybrid_response(ctx, embed=preview_embed, ephemeral=True)
+        await self._send_admin_response(
+            ctx,
+            embed=preview_embed,
+            recovery_title="Verification DM Preview Unavailable",
+            recovery_description="Babblebox could not finish the verification DM preview just now. Please try `/admin test` again in a moment.",
+        )
 
     @admin_group.command(name="sync", with_app_command=True, description="Review, preview, and safely run a verification catch-up sync")
     async def admin_sync_command(self, ctx: commands.Context):
@@ -2225,6 +2496,10 @@ class AdminCog(commands.Cog):
     @commands.Cog.listener()
     async def on_guild_role_delete(self, role: discord.Role):
         await self.service.handle_role_delete(role)
+
+    @commands.Cog.listener()
+    async def on_guild_channel_create(self, channel: discord.abc.GuildChannel):
+        await self.service.handle_channel_create(channel)
 
     @commands.Cog.listener()
     async def on_guild_channel_delete(self, channel: discord.abc.GuildChannel):

@@ -153,15 +153,25 @@ class ShieldAITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(route.selected_model, "gpt-5.4-nano")
         self.assertTrue(route.policy_capped)
 
-    def test_single_model_override_bypasses_routing(self):
-        with patch.dict(os.environ, {"SHIELD_AI_MODEL": "gpt-4.1-mini"}, clear=False):
+    def test_single_model_override_bypasses_routing_with_supported_model(self):
+        with patch.dict(os.environ, {"SHIELD_AI_MODEL": "mini"}, clear=False):
             provider = shield_ai.OpenAIShieldAIProvider()
 
         route = provider._route_request(_request())
 
         self.assertTrue(route.single_model_override)
-        self.assertEqual(route.selected_model, "gpt-4.1-mini")
+        self.assertEqual(route.selected_model, "gpt-5.4-mini")
         self.assertEqual(route.route_reasons, ("single_model_override",))
+
+    def test_invalid_single_model_override_is_ignored_and_reported_truthfully(self):
+        with patch.dict(os.environ, {"SHIELD_AI_MODEL": "gpt-4.1-mini"}, clear=False):
+            provider = shield_ai.OpenAIShieldAIProvider()
+
+        diagnostics = provider.diagnostics()
+
+        self.assertFalse(diagnostics["single_model_override"])
+        self.assertEqual(diagnostics["model"], "gpt-5.4-nano")
+        self.assertIn("ignored", diagnostics["status"].lower())
 
     async def test_retryable_failure_falls_back_once(self):
         with patch.dict(os.environ, {"OPENAI_API_KEY": "test"}, clear=False):

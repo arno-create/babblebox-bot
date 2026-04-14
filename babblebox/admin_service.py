@@ -31,6 +31,32 @@ from babblebox.admin_store import (
     normalize_admin_config,
     order_member_risk_signal_codes,
 )
+from babblebox.permission_orchestration import (
+    PERMISSION_SYNC_APPLY_BOTH,
+    PERMISSION_SYNC_APPLY_EXISTING,
+    PERMISSION_SYNC_APPLY_FUTURE,
+    PERMISSION_SYNC_PRESET_KEYS,
+    PERMISSION_SYNC_PRESETS,
+    PERMISSION_SYNC_RULE_SCOPE_ALL_CHANNELS,
+    PERMISSION_SYNC_RULE_SCOPE_SELECTED_CATEGORIES,
+    PERMISSION_SYNC_SCOPE_ALL_CHANNELS,
+    PERMISSION_SYNC_SCOPE_CATEGORY_CHILDREN,
+    PERMISSION_SYNC_SCOPE_SELECTED_CATEGORIES,
+    PERMISSION_SYNC_SCOPE_SELECTED_CHANNELS,
+    PERMISSION_SYNC_RULE_LIMIT,
+    VALID_PERMISSION_SYNC_APPLY_TARGETS,
+    VALID_PERMISSION_SYNC_CHANNEL_TYPES,
+    VALID_PERMISSION_SYNC_FLAGS,
+    VALID_PERMISSION_SYNC_RULE_SCOPE_MODES,
+    VALID_PERMISSION_SYNC_SCOPE_MODES,
+    VALID_PERMISSION_SYNC_STATES,
+    permission_apply_target_label,
+    permission_channel_type_label,
+    permission_flag_label,
+    permission_scope_label,
+    permission_state_label,
+    summarize_permission_map,
+)
 from babblebox.text_safety import normalize_plain_text
 from babblebox.utility_helpers import deserialize_datetime, format_duration_brief, parse_duration_string, serialize_datetime
 
@@ -61,6 +87,7 @@ EMERGENCY_DEDUP_SECONDS = 600.0
 EMERGENCY_SNOOZE_SECONDS = 3600.0
 EMERGENCY_INCIDENT_TTL_SECONDS = 24 * 3600.0
 EMERGENCY_AUDIT_FETCH_LIMIT = 6
+PERMISSION_ORCHESTRATION_PREVIEW_LIMIT = 8
 NEW_ACCOUNT_STRONG_SECONDS = 24 * 3600
 NEW_ACCOUNT_RECENT_SECONDS = 7 * 24 * 3600
 NEW_MEMBER_EARLY_SECONDS = 24 * 3600
@@ -356,6 +383,7 @@ class CompiledAdminConfig:
     channel_whitelist_ids: frozenset[int]
     quarantine_role_id: int | None
     enabled_dangerous_permission_flags: frozenset[str]
+    permission_sync_rules: tuple["CompiledPermissionSyncRule", ...]
     emergency_role_grant_threshold: int
     emergency_role_grant_target_threshold: int
     emergency_kick_threshold: int
@@ -485,6 +513,142 @@ class MemberRiskAssessment:
     latest_scan_source: str | None = None
 
 
+@dataclass(frozen=True)
+class CompiledPermissionSyncRule:
+    role_id: int
+    enabled: bool
+    scope_mode: str
+    category_ids: frozenset[int]
+    channel_type_filters: frozenset[str]
+    permission_map: tuple[tuple[str, str], ...]
+    preset_key: str | None
+    updated_at: str | None
+
+    def permission_map_dict(self) -> dict[str, str]:
+        return dict(self.permission_map)
+
+
+@dataclass(frozen=True)
+class PermissionOrchestrationRequest:
+    guild_id: int
+    role_id: int
+    permission_map: tuple[tuple[str, str], ...]
+    scope_mode: str
+    apply_target: str
+    channel_ids: tuple[int, ...]
+    category_ids: tuple[int, ...]
+    future_channel_type_filters: tuple[str, ...]
+    preset_key: str | None = None
+    disable_future_rule: bool = False
+
+    def permission_map_dict(self) -> dict[str, str]:
+        return dict(self.permission_map)
+
+
+@dataclass(frozen=True)
+class PermissionChannelPreviewRow:
+    channel_id: int
+    action: str
+    target_kind: str
+    reason: str | None = None
+
+
+@dataclass(frozen=True)
+class PermissionOrchestrationPreview:
+    request: PermissionOrchestrationRequest
+    role_mention: str
+    role_name: str
+    preset_name: str | None
+    preset_edited: bool
+    results: tuple[PermissionChannelPreviewRow, ...]
+    blocked_reasons: tuple[str, ...]
+    warnings: tuple[str, ...]
+    existing_scope_summary: str
+    future_scope_summary: str | None
+    future_rule_action: str
+    future_rule_summary: str
+    existing_direct_targets: int
+    signature: str
+
+    @property
+    def changed_count(self) -> int:
+        return sum(1 for row in self.results if row.action == "change")
+
+    @property
+    def unchanged_count(self) -> int:
+        return sum(1 for row in self.results if row.action == "unchanged")
+
+    @property
+    def inherited_count(self) -> int:
+        return sum(1 for row in self.results if row.action == "inherit")
+
+    @property
+    def skipped_count(self) -> int:
+        return sum(1 for row in self.results if row.action == "skip")
+
+    @property
+    def existing_change_required(self) -> bool:
+        return self.changed_count > 0
+
+    @property
+    def future_change_required(self) -> bool:
+        return self.future_rule_action in {"create", "replace", "disable"}
+
+    @property
+    def requires_heightened_confirmation(self) -> bool:
+        return bool(
+            self.future_change_required
+            or self.request.apply_target == PERMISSION_SYNC_APPLY_BOTH
+            or self.request.scope_mode == PERMISSION_SYNC_SCOPE_ALL_CHANNELS
+            or self.existing_direct_targets > 25
+            or self.changed_count > 25
+        )
+
+
+@dataclass(frozen=True)
+class PermissionChannelApplyRow:
+    channel_id: int
+    action: str
+    reason: str | None = None
+
+
+@dataclass(frozen=True)
+class PermissionOrchestrationResult:
+    preview: PermissionOrchestrationPreview
+    results: tuple[PermissionChannelApplyRow, ...]
+    future_rule_action: str
+
+    @property
+    def changed_count(self) -> int:
+        return sum(1 for row in self.results if row.action == "changed")
+
+    @property
+    def unchanged_count(self) -> int:
+        return sum(1 for row in self.results if row.action == "unchanged")
+
+    @property
+    def inherited_count(self) -> int:
+        return sum(1 for row in self.results if row.action == "inherited")
+
+    @property
+    def skipped_count(self) -> int:
+        return sum(1 for row in self.results if row.action == "skipped")
+
+    @property
+    def failed_count(self) -> int:
+        return sum(1 for row in self.results if row.action == "failed")
+
+
+def permission_future_rule_action_label(action: str) -> str:
+    return {
+        "create": "Create saved rule",
+        "replace": "Replace saved rule",
+        "disable": "Disable saved rule",
+        "unchanged": "Keep saved rule unchanged",
+        "none": "No saved rule change",
+    }.get(action, action.replace("_", " ").title())
+
+
 def _compile_config(raw: dict[str, Any]) -> CompiledAdminConfig:
     return CompiledAdminConfig(
         guild_id=int(raw["guild_id"]),
@@ -541,6 +705,35 @@ def _compile_config(raw: dict[str, Any]) -> CompiledAdminConfig:
             str(value).strip().lower() for value in raw.get("enabled_dangerous_permission_flags", []) if str(value).strip()
         )
         or frozenset(EMERGENCY_PERMISSION_FLAGS),
+        permission_sync_rules=tuple(
+            CompiledPermissionSyncRule(
+                role_id=int(rule["role_id"]),
+                enabled=bool(rule.get("enabled", True)),
+                scope_mode=str(rule.get("scope_mode", PERMISSION_SYNC_RULE_SCOPE_ALL_CHANNELS)),
+                category_ids=frozenset(int(value) for value in rule.get("category_ids", [])),
+                channel_type_filters=frozenset(
+                    str(value).strip().lower()
+                    for value in rule.get("channel_type_filters", [])
+                    if str(value).strip().lower() in VALID_PERMISSION_SYNC_CHANNEL_TYPES
+                )
+                or frozenset(VALID_PERMISSION_SYNC_CHANNEL_TYPES),
+                permission_map=tuple(
+                    sorted(
+                        (
+                            str(flag).strip().lower(),
+                            str(state).strip().lower(),
+                        )
+                        for flag, state in dict(rule.get("permission_map", {})).items()
+                        if str(flag).strip().lower() in VALID_PERMISSION_SYNC_FLAGS
+                        and str(state).strip().lower() in VALID_PERMISSION_SYNC_STATES
+                    )
+                ),
+                preset_key=str(rule.get("preset_key")).strip().lower() if str(rule.get("preset_key") or "").strip().lower() in PERMISSION_SYNC_PRESET_KEYS else None,
+                updated_at=rule.get("updated_at"),
+            )
+            for rule in raw.get("permission_sync_rules", [])
+            if isinstance(rule, dict) and isinstance(rule.get("role_id"), int) and rule.get("permission_map")
+        ),
         emergency_role_grant_threshold=int(raw.get("emergency_role_grant_threshold", 2)),
         emergency_role_grant_target_threshold=int(raw.get("emergency_role_grant_target_threshold", 2)),
         emergency_kick_threshold=int(raw.get("emergency_kick_threshold", 4)),
@@ -698,7 +891,21 @@ class AdminService:
         compiled = self._compiled_configs.get(guild_id)
         if compiled is None:
             return default_admin_config(guild_id)
-        return normalize_admin_config(guild_id, compiled.__dict__)
+        raw = dict(compiled.__dict__)
+        raw["permission_sync_rules"] = [
+            {
+                "role_id": rule.role_id,
+                "enabled": rule.enabled,
+                "scope_mode": rule.scope_mode,
+                "category_ids": sorted(rule.category_ids),
+                "channel_type_filters": sorted(rule.channel_type_filters),
+                "permission_map": dict(rule.permission_map),
+                "preset_key": rule.preset_key,
+                "updated_at": rule.updated_at,
+            }
+            for rule in compiled.permission_sync_rules
+        ]
+        return normalize_admin_config(guild_id, raw)
 
     async def get_counts(self, guild_id: int) -> dict[str, int]:
         if not self.storage_ready:
@@ -812,6 +1019,11 @@ class AdminService:
             return "Emergency dangerous permission monitoring must keep at least one permission class enabled."
         if not enabled_flags.issubset(EMERGENCY_PERMISSION_FLAGS):
             return "Emergency dangerous permission flags include an unsupported value."
+        rules = config.get("permission_sync_rules", [])
+        if not isinstance(rules, (list, tuple)):
+            return "Permission orchestration rules must be a compact list."
+        if len(rules) > PERMISSION_SYNC_RULE_LIMIT:
+            return f"You can keep up to {PERMISSION_SYNC_RULE_LIMIT} saved future permission rules."
         return None
 
     async def set_emergency_config(
@@ -2128,6 +2340,794 @@ class AdminService:
         if operation == "emergency":
             return False, "You need Manage Server or administrator access to use emergency controls."
         return False, "You need Manage Server or administrator access to configure these safety controls."
+
+    def permission_sync_rule_for_role(self, guild_id: int, role_id: int) -> CompiledPermissionSyncRule | None:
+        compiled = self.get_compiled_config(guild_id)
+        for rule in compiled.permission_sync_rules:
+            if rule.role_id == role_id:
+                return rule
+        return None
+
+    def _iter_guild_channels(self, guild: discord.Guild):
+        channels = getattr(guild, "channels", [])
+        iterable = channels.values() if isinstance(channels, dict) else channels
+        for channel in iterable:
+            if getattr(channel, "id", None) is None:
+                continue
+            yield channel
+
+    def _sorted_guild_channels(self, guild: discord.Guild) -> list[object]:
+        return sorted(
+            self._iter_guild_channels(guild),
+            key=lambda channel: (
+                0 if self._channel_type_key(channel) == "category" else 1,
+                int(getattr(channel, "position", 0) or 0),
+                int(getattr(channel, "id", 0) or 0),
+            ),
+        )
+
+    def _channel_type_key(self, channel: object) -> str | None:
+        channel_type = getattr(channel, "type", None)
+        mapping = {
+            discord.ChannelType.text: "text",
+            discord.ChannelType.news: "announcement",
+            discord.ChannelType.voice: "voice",
+            discord.ChannelType.stage_voice: "stage",
+            discord.ChannelType.forum: "forum",
+            discord.ChannelType.category: "category",
+        }
+        if channel_type in mapping:
+            return mapping[channel_type]
+        kind = str(channel_type or "").lower()
+        if kind in VALID_PERMISSION_SYNC_CHANNEL_TYPES:
+            return kind
+        class_name = type(channel).__name__.casefold()
+        if "category" in class_name:
+            return "category"
+        if "forum" in class_name:
+            return "forum"
+        if "stage" in class_name:
+            return "stage"
+        if "voice" in class_name:
+            return "voice"
+        return "text" if hasattr(channel, "set_permissions") else None
+
+    def _channel_supports_permission_sync(self, channel: object) -> bool:
+        return bool(
+            self._channel_type_key(channel) in VALID_PERMISSION_SYNC_CHANNEL_TYPES
+            and hasattr(channel, "overwrites_for")
+            and hasattr(channel, "set_permissions")
+        )
+
+    def _channel_is_category(self, channel: object) -> bool:
+        return self._channel_type_key(channel) == "category"
+
+    def _channel_category_id(self, channel: object) -> int | None:
+        category_id = getattr(channel, "category_id", None)
+        if isinstance(category_id, int) and category_id > 0:
+            return category_id
+        category = getattr(channel, "category", None)
+        category_id = getattr(category, "id", None)
+        return category_id if isinstance(category_id, int) and category_id > 0 else None
+
+    def _channel_permissions_synced(self, channel: object) -> bool:
+        return bool(getattr(channel, "permissions_synced", False))
+
+    def _channel_label(self, channel: object) -> str:
+        mention = getattr(channel, "mention", None)
+        if isinstance(mention, str) and mention:
+            return mention
+        name = getattr(channel, "name", None)
+        if isinstance(name, str) and name:
+            return f"`{name}`"
+        return f"<#{int(getattr(channel, 'id', 0) or 0)}>"
+
+    def _permission_sync_copy_overwrite(self, overwrite: discord.PermissionOverwrite) -> discord.PermissionOverwrite:
+        allow, deny = overwrite.pair()
+        return discord.PermissionOverwrite.from_pair(allow, deny)
+
+    def _permission_sync_overwrite_signature(self, overwrite: discord.PermissionOverwrite) -> tuple[tuple[str, bool | None], ...]:
+        return tuple(
+            sorted(
+                (flag, value)
+                for flag in VALID_PERMISSION_SYNC_FLAGS
+                if (value := getattr(overwrite, flag)) is not None
+            )
+        )
+
+    def _permission_sync_updated_overwrite(
+        self,
+        channel: object,
+        role: discord.Role,
+        permission_map: dict[str, str],
+    ) -> tuple[discord.PermissionOverwrite, discord.PermissionOverwrite, bool]:
+        before = channel.overwrites_for(role)
+        after = self._permission_sync_copy_overwrite(before)
+        for flag, state in permission_map.items():
+            setattr(after, flag, True if state == "allow" else False if state == "deny" else None)
+        changed = self._permission_sync_overwrite_signature(before) != self._permission_sync_overwrite_signature(after)
+        return before, after, changed
+
+    def _build_permission_orchestration_request(
+        self,
+        guild_id: int,
+        *,
+        role_id: int,
+        permission_map: dict[str, str] | None,
+        scope_mode: str,
+        apply_target: str,
+        channel_ids: list[int] | tuple[int, ...] | None = None,
+        category_ids: list[int] | tuple[int, ...] | None = None,
+        future_channel_type_filters: list[str] | tuple[str, ...] | None = None,
+        preset_key: str | None = None,
+        disable_future_rule: bool = False,
+    ) -> PermissionOrchestrationRequest:
+        cleaned_permission_map = {
+            str(flag).strip().lower(): str(state).strip().lower()
+            for flag, state in dict(permission_map or {}).items()
+            if str(flag).strip().lower() in VALID_PERMISSION_SYNC_FLAGS
+            and str(state).strip().lower() in VALID_PERMISSION_SYNC_STATES
+        }
+        cleaned_scope = str(scope_mode).strip().lower()
+        if cleaned_scope not in VALID_PERMISSION_SYNC_SCOPE_MODES:
+            cleaned_scope = PERMISSION_SYNC_SCOPE_ALL_CHANNELS
+        cleaned_target = str(apply_target).strip().lower()
+        if cleaned_target not in VALID_PERMISSION_SYNC_APPLY_TARGETS:
+            cleaned_target = PERMISSION_SYNC_APPLY_EXISTING
+        cleaned_channel_ids = tuple(sorted({int(value) for value in channel_ids or [] if isinstance(value, int) and value > 0}))
+        cleaned_category_ids = tuple(sorted({int(value) for value in category_ids or [] if isinstance(value, int) and value > 0}))
+        cleaned_types = tuple(
+            sorted(
+                {
+                    str(value).strip().lower()
+                    for value in future_channel_type_filters or VALID_PERMISSION_SYNC_CHANNEL_TYPES
+                    if str(value).strip().lower() in VALID_PERMISSION_SYNC_CHANNEL_TYPES
+                }
+            )
+        ) or tuple(sorted(VALID_PERMISSION_SYNC_CHANNEL_TYPES))
+        cleaned_preset = str(preset_key).strip().lower() if isinstance(preset_key, str) else None
+        if cleaned_preset not in PERMISSION_SYNC_PRESET_KEYS:
+            cleaned_preset = None
+        return PermissionOrchestrationRequest(
+            guild_id=guild_id,
+            role_id=int(role_id),
+            permission_map=tuple(sorted(cleaned_permission_map.items())),
+            scope_mode=cleaned_scope,
+            apply_target=cleaned_target,
+            channel_ids=cleaned_channel_ids,
+            category_ids=cleaned_category_ids,
+            future_channel_type_filters=cleaned_types,
+            preset_key=cleaned_preset,
+            disable_future_rule=bool(disable_future_rule),
+        )
+
+    def _permission_sync_role_issue(
+        self,
+        guild: discord.Guild,
+        actor: object,
+        role: discord.Role,
+        *,
+        for_future_rule: bool = False,
+    ) -> str | None:
+        if getattr(role, "managed", False):
+            return "Managed or integration roles cannot be orchestrated here."
+        is_default = False
+        role_is_default = getattr(role, "is_default", None)
+        if callable(role_is_default):
+            with contextlib.suppress(Exception):
+                is_default = bool(role_is_default())
+        if not is_default and int(getattr(role, "id", 0) or 0) == int(getattr(guild, "id", 0) or 0):
+            is_default = True
+        if is_default:
+            return "Babblebox intentionally blocks @everyone here. Create or choose a dedicated role instead."
+        actor_top_role = getattr(actor, "top_role", None)
+        if actor_top_role is None or int(getattr(actor_top_role, "position", 0) or 0) <= int(getattr(role, "position", 0) or 0):
+            return f"You can only configure roles strictly below your highest role. {getattr(role, 'mention', 'That role')} is too high."
+        bot_member = self._bot_member(guild)
+        if bot_member is None:
+            return "Babblebox could not resolve its own server member for permission orchestration."
+        bot_top_role = getattr(bot_member, "top_role", None)
+        if bot_top_role is None or int(getattr(bot_top_role, "position", 0) or 0) <= int(getattr(role, "position", 0) or 0):
+            return f"Babblebox cannot manage {getattr(role, 'mention', 'that role')} because it is at or above Babblebox's top role."
+        if not for_future_rule:
+            bot_perms = getattr(bot_member, "guild_permissions", None)
+            if bot_perms is None or not getattr(bot_perms, "manage_channels", False):
+                return "Babblebox needs **Manage Channels** before it can edit channel permission overwrites."
+        return None
+
+    def _permission_sync_target_channels(
+        self,
+        guild: discord.Guild,
+        request: PermissionOrchestrationRequest,
+    ) -> tuple[list[PermissionChannelPreviewRow], str, int, tuple[str, ...]]:
+        role = self._guild_role(guild, request.role_id)
+        if role is None:
+            return [], "Target role unavailable.", 0, ()
+        permission_map = request.permission_map_dict()
+        channels_by_id = {int(getattr(channel, "id", 0) or 0): channel for channel in self._sorted_guild_channels(guild)}
+        warnings: list[str] = []
+        rows: list[PermissionChannelPreviewRow] = []
+        direct_target_count = 0
+
+        def preview_direct(channel: object) -> PermissionChannelPreviewRow:
+            nonlocal direct_target_count
+            direct_target_count += 1
+            if not self._channel_supports_permission_sync(channel):
+                return PermissionChannelPreviewRow(
+                    channel_id=int(getattr(channel, "id", 0) or 0),
+                    action="skip",
+                    target_kind="category" if self._channel_is_category(channel) else "channel",
+                    reason="Unsupported channel type.",
+                )
+            _before, _after, changed = self._permission_sync_updated_overwrite(channel, role, permission_map)
+            return PermissionChannelPreviewRow(
+                channel_id=int(getattr(channel, "id", 0) or 0),
+                action="change" if changed else "unchanged",
+                target_kind="category" if self._channel_is_category(channel) else "channel",
+            )
+
+        if request.scope_mode == PERMISSION_SYNC_SCOPE_SELECTED_CHANNELS:
+            selected_channels = [channels_by_id[channel_id] for channel_id in request.channel_ids if channel_id in channels_by_id]
+            missing_count = len(request.channel_ids) - len(selected_channels)
+            if missing_count:
+                suffix = "" if missing_count == 1 else "s"
+                warnings.append(f"{missing_count} selected channel{suffix} could not be resolved and will be ignored.")
+            rows.extend(preview_direct(channel) for channel in selected_channels)
+            return rows, "Only the selected existing channels are targeted.", direct_target_count, tuple(warnings)
+
+        if request.scope_mode == PERMISSION_SYNC_SCOPE_ALL_CHANNELS:
+            category_ids = {
+                int(getattr(channel, "id", 0) or 0)
+                for channel in channels_by_id.values()
+                if self._channel_is_category(channel)
+            }
+        else:
+            category_ids = {category_id for category_id in request.category_ids if category_id in channels_by_id}
+            missing_categories = len(request.category_ids) - len(category_ids)
+            if missing_categories:
+                suffix = "y" if missing_categories == 1 else "ies"
+                warnings.append(f"{missing_categories} selected categor{suffix} could not be resolved and will be ignored.")
+
+        category_rows: dict[int, PermissionChannelPreviewRow] = {}
+        if request.scope_mode in {PERMISSION_SYNC_SCOPE_ALL_CHANNELS, PERMISSION_SYNC_SCOPE_SELECTED_CATEGORIES}:
+            for category_id in sorted(category_ids):
+                category = channels_by_id.get(category_id)
+                if category is None:
+                    continue
+                row = preview_direct(category)
+                category_rows[category_id] = row
+                rows.append(row)
+
+        for channel in self._sorted_guild_channels(guild):
+            channel_id = int(getattr(channel, "id", 0) or 0)
+            if channel_id in category_ids and self._channel_is_category(channel):
+                continue
+            if request.scope_mode == PERMISSION_SYNC_SCOPE_CATEGORY_CHILDREN:
+                if self._channel_category_id(channel) not in category_ids:
+                    continue
+                rows.append(preview_direct(channel))
+                continue
+            if request.scope_mode == PERMISSION_SYNC_SCOPE_SELECTED_CATEGORIES:
+                category_id = self._channel_category_id(channel)
+                if category_id not in category_ids:
+                    continue
+                if self._channel_permissions_synced(channel):
+                    category_row = category_rows.get(category_id)
+                    if category_row is not None and category_row.action == "change":
+                        rows.append(
+                            PermissionChannelPreviewRow(
+                                channel_id=channel_id,
+                                action="inherit",
+                                target_kind="channel",
+                                reason="Synced child channel will inherit the category overwrite.",
+                            )
+                        )
+                    else:
+                        rows.append(
+                            PermissionChannelPreviewRow(
+                                channel_id=channel_id,
+                                action="unchanged",
+                                target_kind="channel",
+                                reason="Synced child channel already matches because the category needed no direct change.",
+                            )
+                        )
+                    continue
+                rows.append(
+                    PermissionChannelPreviewRow(
+                        channel_id=channel_id,
+                        action="skip",
+                        target_kind="channel",
+                        reason="This child channel is unsynced, so category-only scope will not edit it directly.",
+                    )
+                )
+                continue
+            if request.scope_mode == PERMISSION_SYNC_SCOPE_ALL_CHANNELS:
+                category_id = self._channel_category_id(channel)
+                if category_id in category_ids and self._channel_permissions_synced(channel):
+                    category_row = category_rows.get(category_id)
+                    if category_row is not None and category_row.action == "change":
+                        rows.append(
+                            PermissionChannelPreviewRow(
+                                channel_id=channel_id,
+                                action="inherit",
+                                target_kind="channel",
+                                reason="Synced child channel will inherit the category overwrite.",
+                            )
+                        )
+                        continue
+                    if category_row is not None and category_row.action == "unchanged":
+                        rows.append(
+                            PermissionChannelPreviewRow(
+                                channel_id=channel_id,
+                                action="unchanged",
+                                target_kind="channel",
+                                reason="Synced child channel already matches because its category already matched.",
+                            )
+                        )
+                        continue
+                rows.append(preview_direct(channel))
+
+        if request.scope_mode == PERMISSION_SYNC_SCOPE_ALL_CHANNELS:
+            scope_summary = "Every current category is evaluated first, and synced child channels inherit category changes instead of being unsynced one by one."
+        elif request.scope_mode == PERMISSION_SYNC_SCOPE_SELECTED_CATEGORIES:
+            scope_summary = "Only the selected categories are edited directly. Synced child channels inherit the category result, and unsynced children are left alone."
+        else:
+            scope_summary = "Only channels inside the selected categories are edited directly."
+        return rows, scope_summary, direct_target_count, tuple(warnings)
+
+    def _permission_sync_rule_payload(self, request: PermissionOrchestrationRequest) -> dict[str, Any] | None:
+        if request.apply_target not in {PERMISSION_SYNC_APPLY_FUTURE, PERMISSION_SYNC_APPLY_BOTH} or request.disable_future_rule:
+            return None
+        if request.scope_mode == PERMISSION_SYNC_SCOPE_SELECTED_CHANNELS:
+            return None
+        scope_mode = (
+            PERMISSION_SYNC_RULE_SCOPE_ALL_CHANNELS
+            if request.scope_mode == PERMISSION_SYNC_SCOPE_ALL_CHANNELS
+            else PERMISSION_SYNC_RULE_SCOPE_SELECTED_CATEGORIES
+        )
+        category_ids = list(request.category_ids) if scope_mode == PERMISSION_SYNC_RULE_SCOPE_SELECTED_CATEGORIES else []
+        return {
+            "role_id": request.role_id,
+            "enabled": True,
+            "scope_mode": scope_mode,
+            "category_ids": category_ids,
+            "channel_type_filters": list(request.future_channel_type_filters),
+            "permission_map": request.permission_map_dict(),
+            "preset_key": request.preset_key,
+            "updated_at": serialize_datetime(ge.now_utc()),
+        }
+
+    def _permission_sync_future_rule_preview(
+        self,
+        guild_id: int,
+        request: PermissionOrchestrationRequest,
+    ) -> tuple[str, str]:
+        existing_rule = self.permission_sync_rule_for_role(guild_id, request.role_id)
+        if request.disable_future_rule:
+            if existing_rule is None:
+                return "none", "No saved future-channel rule exists for this role."
+            return "disable", "The saved future-channel rule for this role will be disabled."
+        payload = self._permission_sync_rule_payload(request)
+        if payload is None:
+            if existing_rule is None:
+                return "none", "This draft does not create or change a saved future-channel rule."
+            return "none", "The saved future-channel rule will stay unchanged."
+        future_scope = (
+            "all new supported channels"
+            if payload["scope_mode"] == PERMISSION_SYNC_RULE_SCOPE_ALL_CHANNELS
+            else "new channels inside the selected categories"
+        )
+        type_labels = ", ".join(permission_channel_type_label(value) for value in payload["channel_type_filters"])
+        summary = f"Target: {future_scope}. Channel types: {type_labels}."
+        if existing_rule is None:
+            return "create", f"Babblebox will create a saved future-channel rule. {summary}"
+        existing_payload = {
+            "role_id": existing_rule.role_id,
+            "enabled": existing_rule.enabled,
+            "scope_mode": existing_rule.scope_mode,
+            "category_ids": sorted(existing_rule.category_ids),
+            "channel_type_filters": sorted(existing_rule.channel_type_filters),
+            "permission_map": existing_rule.permission_map_dict(),
+            "preset_key": existing_rule.preset_key,
+        }
+        comparable_payload = dict(payload)
+        comparable_payload.pop("updated_at", None)
+        if existing_payload == comparable_payload:
+            return "unchanged", "The saved future-channel rule already matches this draft."
+        return "replace", f"Babblebox will replace the saved future-channel rule. {summary}"
+
+    async def build_permission_orchestration_preview(
+        self,
+        guild: discord.Guild,
+        *,
+        actor: object,
+        role_id: int,
+        permission_map: dict[str, str] | None,
+        scope_mode: str,
+        apply_target: str,
+        channel_ids: list[int] | tuple[int, ...] | None = None,
+        category_ids: list[int] | tuple[int, ...] | None = None,
+        future_channel_type_filters: list[str] | tuple[str, ...] | None = None,
+        preset_key: str | None = None,
+        disable_future_rule: bool = False,
+    ) -> PermissionOrchestrationPreview:
+        request = self._build_permission_orchestration_request(
+            guild.id,
+            role_id=role_id,
+            permission_map=permission_map,
+            scope_mode=scope_mode,
+            apply_target=apply_target,
+            channel_ids=channel_ids,
+            category_ids=category_ids,
+            future_channel_type_filters=future_channel_type_filters,
+            preset_key=preset_key,
+            disable_future_rule=disable_future_rule,
+        )
+        blocked_reasons: list[str] = []
+        warnings: list[str] = []
+        allowed, reason = self.can_manage_control_plane(actor, guild.id, operation="manage")
+        if not allowed:
+            blocked_reasons.append(reason)
+        if request.scope_mode == PERMISSION_SYNC_SCOPE_SELECTED_CHANNELS and request.apply_target in {PERMISSION_SYNC_APPLY_FUTURE, PERMISSION_SYNC_APPLY_BOTH}:
+            blocked_reasons.append("Future-channel automation cannot be scoped to specific existing channels. Use all channels or selected categories instead.")
+        if request.scope_mode == PERMISSION_SYNC_SCOPE_SELECTED_CHANNELS and not request.channel_ids:
+            blocked_reasons.append("Choose at least one channel for selected-channel scope.")
+        if request.scope_mode in {PERMISSION_SYNC_SCOPE_SELECTED_CATEGORIES, PERMISSION_SYNC_SCOPE_CATEGORY_CHILDREN} and not request.category_ids:
+            blocked_reasons.append("Choose at least one category for this scope.")
+        if not request.disable_future_rule and not request.permission_map:
+            blocked_reasons.append("Choose at least one permission change before previewing this draft.")
+
+        role = self._guild_role(guild, request.role_id)
+        role_mention = getattr(role, "mention", f"<@&{request.role_id}>")
+        role_name = str(getattr(role, "name", "") or role_mention)
+        if role is None:
+            blocked_reasons.append("That role no longer exists in this server.")
+        else:
+            existing_channel_edits_requested = (
+                request.apply_target in {PERMISSION_SYNC_APPLY_EXISTING, PERMISSION_SYNC_APPLY_BOTH}
+                and not request.disable_future_rule
+            )
+            role_issue = self._permission_sync_role_issue(
+                guild,
+                actor,
+                role,
+                for_future_rule=not existing_channel_edits_requested,
+            )
+            if role_issue is not None:
+                blocked_reasons.append(role_issue)
+
+        future_rule_action, future_rule_summary = self._permission_sync_future_rule_preview(guild.id, request)
+        future_scope_summary = None
+        if request.apply_target in {PERMISSION_SYNC_APPLY_FUTURE, PERMISSION_SYNC_APPLY_BOTH} and not request.disable_future_rule:
+            if request.scope_mode == PERMISSION_SYNC_SCOPE_ALL_CHANNELS:
+                future_scope_summary = "Future scope: all new supported channels."
+            elif request.scope_mode in {PERMISSION_SYNC_SCOPE_SELECTED_CATEGORIES, PERMISSION_SYNC_SCOPE_CATEGORY_CHILDREN}:
+                future_scope_summary = "Future scope: new channels inside the selected categories."
+
+        preset = PERMISSION_SYNC_PRESETS.get(request.preset_key) if request.preset_key else None
+        preset_name = preset.name if preset is not None else None
+        preset_edited = bool(preset is not None and preset.permission_map != request.permission_map_dict())
+
+        results: tuple[PermissionChannelPreviewRow, ...] = ()
+        existing_scope_summary = "Existing channels are not part of this draft."
+        existing_direct_targets = 0
+        if request.apply_target in {PERMISSION_SYNC_APPLY_EXISTING, PERMISSION_SYNC_APPLY_BOTH} and not request.disable_future_rule:
+            preview_rows, existing_scope_summary, existing_direct_targets, preview_warnings = self._permission_sync_target_channels(guild, request)
+            results = tuple(preview_rows)
+            warnings.extend(preview_warnings)
+        if (
+            request.apply_target in {PERMISSION_SYNC_APPLY_EXISTING, PERMISSION_SYNC_APPLY_BOTH}
+            and not request.disable_future_rule
+            and not any(row.action == "change" for row in results)
+            and future_rule_action in {"none", "unchanged"}
+        ):
+            blocked_reasons.append("This draft would not change any existing channel or saved future rule.")
+
+        signature_payload = {
+            "request": request,
+            "rows": tuple((row.channel_id, row.action, row.target_kind, row.reason) for row in results),
+            "future": (future_rule_action, future_rule_summary),
+            "blocked": tuple(blocked_reasons),
+        }
+        signature = hashlib.sha1(repr(signature_payload).encode("utf-8"), usedforsecurity=False).hexdigest()
+        return PermissionOrchestrationPreview(
+            request=request,
+            role_mention=role_mention,
+            role_name=role_name,
+            preset_name=preset_name,
+            preset_edited=preset_edited,
+            results=results,
+            blocked_reasons=tuple(blocked_reasons),
+            warnings=tuple(dict.fromkeys(warnings)),
+            existing_scope_summary=existing_scope_summary,
+            future_scope_summary=future_scope_summary,
+            future_rule_action=future_rule_action,
+            future_rule_summary=future_rule_summary,
+            existing_direct_targets=existing_direct_targets,
+            signature=signature,
+        )
+
+    async def _apply_permission_sync_rule_update(
+        self,
+        guild_id: int,
+        *,
+        request: PermissionOrchestrationRequest,
+    ) -> tuple[bool, str]:
+        if request.disable_future_rule:
+            existing_rule = self.permission_sync_rule_for_role(guild_id, request.role_id)
+            if existing_rule is None:
+                return True, "No saved future-channel rule existed for this role."
+
+            def mutate(config: dict[str, Any]):
+                config["permission_sync_rules"] = [
+                    rule
+                    for rule in config.get("permission_sync_rules", [])
+                    if int(rule.get("role_id", 0) or 0) != request.role_id
+                ]
+
+            return await self._update_config(
+                guild_id,
+                mutate,
+                success_message="Saved future-channel automation was disabled.",
+                requested_fields={"permission_sync_rules"},
+                force_post_update=True,
+            )
+
+        payload = self._permission_sync_rule_payload(request)
+        if payload is None:
+            return True, "Future-channel automation stayed unchanged."
+        existing_rule = self.permission_sync_rule_for_role(guild_id, request.role_id)
+        if existing_rule is not None:
+            existing_payload = {
+                "role_id": existing_rule.role_id,
+                "enabled": existing_rule.enabled,
+                "scope_mode": existing_rule.scope_mode,
+                "category_ids": sorted(existing_rule.category_ids),
+                "channel_type_filters": sorted(existing_rule.channel_type_filters),
+                "permission_map": existing_rule.permission_map_dict(),
+                "preset_key": existing_rule.preset_key,
+            }
+            comparable_payload = dict(payload)
+            comparable_payload.pop("updated_at", None)
+            if existing_payload == comparable_payload:
+                return True, "Saved future-channel automation already matched this draft."
+
+        def mutate(config: dict[str, Any]):
+            existing_rules = [
+                rule
+                for rule in config.get("permission_sync_rules", [])
+                if int(rule.get("role_id", 0) or 0) != request.role_id
+            ]
+            existing_rules.append(payload)
+            config["permission_sync_rules"] = sorted(existing_rules, key=lambda item: int(item.get("role_id", 0) or 0))
+
+        return await self._update_config(
+            guild_id,
+            mutate,
+            success_message=(
+                "Saved future-channel automation was created."
+                if existing_rule is None
+                else "Saved future-channel automation was replaced."
+            ),
+            requested_fields={"permission_sync_rules"},
+            force_post_update=True,
+        )
+
+    def _permission_sync_log_embed(
+        self,
+        guild: discord.Guild,
+        actor: object,
+        result: PermissionOrchestrationResult,
+    ) -> discord.Embed:
+        preview = result.preview
+        future_action_label = permission_future_rule_action_label(preview.future_rule_action)
+        lines = [
+            f"{getattr(actor, 'mention', ge.display_name_of(actor))} applied permission orchestration for {preview.role_mention}.",
+            f"Apply target: **{permission_apply_target_label(preview.request.apply_target)}**",
+            f"Scope: **{permission_scope_label(preview.request.scope_mode)}**",
+            f"Changed: **{result.changed_count}** | Unchanged: **{result.unchanged_count}** | Inherited: **{result.inherited_count}** | Failed: **{result.failed_count}**",
+            f"Future automation: **{future_action_label}**",
+        ]
+        embed = ge.make_status_embed(
+            "Role Permission Orchestration Applied" if result.failed_count == 0 else "Role Permission Orchestration Applied With Issues",
+            "\n".join(lines),
+            tone="success" if result.failed_count == 0 else "warning",
+            footer="Babblebox Admin | Permission orchestration",
+        )
+        permission_lines = summarize_permission_map(preview.request.permission_map_dict())
+        if permission_lines:
+            embed.add_field(
+                name="Permissions",
+                value=ge.join_limited_lines(permission_lines, limit=1024, empty="No permission changes."),
+                inline=False,
+            )
+        embed.add_field(name="Existing Scope", value=preview.existing_scope_summary, inline=False)
+        embed.add_field(name="Future Scope", value=preview.future_rule_summary, inline=False)
+        failed_lines = []
+        for row in result.results:
+            if row.action != "failed" or not row.reason:
+                continue
+            channel = self._guild_channel(guild, row.channel_id)
+            label = self._channel_label(channel) if channel is not None else f"<#{row.channel_id}>"
+            failed_lines.append(f"{label}: {row.reason}")
+        if failed_lines:
+            embed.add_field(
+                name="Failures",
+                value=ge.join_limited_lines(failed_lines[:PERMISSION_ORCHESTRATION_PREVIEW_LIMIT], limit=1024, empty="None"),
+                inline=False,
+            )
+        return embed
+
+    async def apply_permission_orchestration(
+        self,
+        guild: discord.Guild,
+        *,
+        actor: object,
+        role_id: int,
+        permission_map: dict[str, str] | None,
+        scope_mode: str,
+        apply_target: str,
+        channel_ids: list[int] | tuple[int, ...] | None = None,
+        category_ids: list[int] | tuple[int, ...] | None = None,
+        future_channel_type_filters: list[str] | tuple[str, ...] | None = None,
+        preset_key: str | None = None,
+        disable_future_rule: bool = False,
+        expected_signature: str | None = None,
+    ) -> tuple[bool, str, PermissionOrchestrationResult | None]:
+        preview = await self.build_permission_orchestration_preview(
+            guild,
+            actor=actor,
+            role_id=role_id,
+            permission_map=permission_map,
+            scope_mode=scope_mode,
+            apply_target=apply_target,
+            channel_ids=channel_ids,
+            category_ids=category_ids,
+            future_channel_type_filters=future_channel_type_filters,
+            preset_key=preset_key,
+            disable_future_rule=disable_future_rule,
+        )
+        if preview.blocked_reasons:
+            return False, "\n".join(preview.blocked_reasons), None
+        if expected_signature is not None and preview.signature != expected_signature:
+            return False, "The preview is stale. Refresh the preview before confirming this change.", None
+        role = self._guild_role(guild, preview.request.role_id)
+        if role is None:
+            return False, "That role no longer exists in this server.", None
+        permission_map_dict = preview.request.permission_map_dict()
+        results: list[PermissionChannelApplyRow] = []
+        if preview.request.apply_target in {PERMISSION_SYNC_APPLY_EXISTING, PERMISSION_SYNC_APPLY_BOTH} and not preview.request.disable_future_rule:
+            for row in preview.results:
+                channel = self._guild_channel(guild, row.channel_id)
+                if row.action == "change":
+                    if channel is None:
+                        results.append(PermissionChannelApplyRow(channel_id=row.channel_id, action="failed", reason="Channel disappeared before apply."))
+                        continue
+                    if not self._channel_supports_permission_sync(channel):
+                        results.append(PermissionChannelApplyRow(channel_id=row.channel_id, action="failed", reason="Unsupported channel type."))
+                        continue
+                    _before, after, changed = self._permission_sync_updated_overwrite(channel, role, permission_map_dict)
+                    if not changed:
+                        results.append(PermissionChannelApplyRow(channel_id=row.channel_id, action="unchanged"))
+                        continue
+                    try:
+                        await channel.set_permissions(
+                            role,
+                            overwrite=None if after.is_empty() else after,
+                            reason=f"Babblebox role permission orchestration by {ge.display_name_of(actor)}",
+                        )
+                    except (discord.Forbidden, discord.HTTPException):
+                        results.append(
+                            PermissionChannelApplyRow(
+                                channel_id=row.channel_id,
+                                action="failed",
+                                reason="Discord rejected the overwrite update for this channel.",
+                            )
+                        )
+                        continue
+                    results.append(PermissionChannelApplyRow(channel_id=row.channel_id, action="changed"))
+                elif row.action == "inherit":
+                    results.append(PermissionChannelApplyRow(channel_id=row.channel_id, action="inherited", reason=row.reason))
+                elif row.action == "skip":
+                    results.append(PermissionChannelApplyRow(channel_id=row.channel_id, action="skipped", reason=row.reason))
+                else:
+                    results.append(PermissionChannelApplyRow(channel_id=row.channel_id, action="unchanged", reason=row.reason))
+        future_ok, future_message = await self._apply_permission_sync_rule_update(guild.id, request=preview.request)
+        if not future_ok:
+            return False, future_message, None
+        result = PermissionOrchestrationResult(
+            preview=preview,
+            results=tuple(results),
+            future_rule_action=preview.future_rule_action,
+        )
+        compiled = self.get_compiled_config(guild.id)
+        await self.send_log(guild, compiled, embed=self._permission_sync_log_embed(guild, actor, result), alert=False)
+        summary_parts = []
+        if preview.request.apply_target in {PERMISSION_SYNC_APPLY_EXISTING, PERMISSION_SYNC_APPLY_BOTH} and not preview.request.disable_future_rule:
+            summary_parts.append(
+                f"Changed {result.changed_count} channel{'s' if result.changed_count != 1 else ''}, "
+                f"left {result.unchanged_count} unchanged, "
+                f"and preserved sync on {result.inherited_count} child channel{'s' if result.inherited_count != 1 else ''}."
+            )
+            if result.failed_count:
+                summary_parts.append(f"{result.failed_count} channel update{'s' if result.failed_count != 1 else ''} failed.")
+        summary_parts.append(future_message)
+        return True, " ".join(part for part in summary_parts if part).strip(), result
+
+    def _permission_sync_rule_matches_channel(self, rule: CompiledPermissionSyncRule, channel: object) -> bool:
+        if not rule.enabled:
+            return False
+        channel_type = self._channel_type_key(channel)
+        if channel_type not in rule.channel_type_filters:
+            return False
+        if rule.scope_mode == PERMISSION_SYNC_RULE_SCOPE_SELECTED_CATEGORIES:
+            return self._channel_category_id(channel) in rule.category_ids
+        return True
+
+    async def handle_channel_create(self, channel: discord.abc.GuildChannel):
+        guild = getattr(channel, "guild", None)
+        if guild is None or not self.storage_ready or not self._channel_supports_permission_sync(channel):
+            return
+        compiled = self.get_compiled_config(guild.id)
+        if not compiled.permission_sync_rules:
+            return
+        bot_member = self._bot_member(guild)
+        if bot_member is None or not getattr(getattr(bot_member, "guild_permissions", None), "manage_channels", False):
+            await self.log_operability_warning_once(
+                guild,
+                compiled,
+                key="permission-sync-future-missing-manage-channels",
+                message="Babblebox skipped future permission automation because it is missing Manage Channels.",
+                title="Permission Automation Warning",
+                footer="Babblebox Admin | Permission orchestration",
+            )
+            return
+        for rule in compiled.permission_sync_rules:
+            if not self._permission_sync_rule_matches_channel(rule, channel):
+                continue
+            role = self._guild_role(guild, rule.role_id)
+            if role is None:
+                await self.log_operability_warning_once(
+                    guild,
+                    compiled,
+                    key=f"permission-sync-future-missing-role:{rule.role_id}",
+                    message=f"Babblebox skipped a saved future permission rule because role <@&{rule.role_id}> no longer exists.",
+                    title="Permission Automation Warning",
+                    footer="Babblebox Admin | Permission orchestration",
+                )
+                continue
+            role_issue = self._permission_sync_role_issue(guild, bot_member, role, for_future_rule=True)
+            if role_issue is not None:
+                await self.log_operability_warning_once(
+                    guild,
+                    compiled,
+                    key=f"permission-sync-future-role-issue:{role.id}",
+                    message=role_issue,
+                    title="Permission Automation Warning",
+                    footer="Babblebox Admin | Permission orchestration",
+                )
+                continue
+            _before, after, changed = self._permission_sync_updated_overwrite(channel, role, rule.permission_map_dict())
+            if not changed:
+                continue
+            try:
+                await channel.set_permissions(
+                    role,
+                    overwrite=None if after.is_empty() else after,
+                    reason="Babblebox future permission orchestration",
+                )
+            except (discord.Forbidden, discord.HTTPException):
+                await self.log_operability_warning_once(
+                    guild,
+                    compiled,
+                    key=f"permission-sync-future-apply-failed:{int(getattr(channel, 'id', 0) or 0)}:{role.id}",
+                    message=(
+                        f"Babblebox could not auto-apply the saved permission rule for {role.mention} "
+                        f"to {self._channel_label(channel)}."
+                    ),
+                    title="Permission Automation Warning",
+                    footer="Babblebox Admin | Permission orchestration",
+                )
 
     def _is_staff_member(self, member: discord.Member) -> bool:
         perms = getattr(member, "guild_permissions", None)
@@ -4027,7 +5027,8 @@ class AdminService:
     ):
         now = asyncio.get_running_loop().time()
         dedup_key = (guild.id, key)
-        if now - self._log_dedup.get(dedup_key, 0.0) < LOG_DEDUP_SECONDS:
+        seen_at = self._log_dedup.get(dedup_key)
+        if seen_at is not None and now - seen_at < LOG_DEDUP_SECONDS:
             return
         self._log_dedup[dedup_key] = now
         embed = ge.make_status_embed(title, message, tone="warning", footer=footer)
@@ -5711,7 +6712,8 @@ class AdminService:
         signature = hashlib.sha256("|".join(assessment.signal_codes).encode("utf-8")).hexdigest()[:12]
         dedup_key = (guild.id, member.id, signature)
         now = asyncio.get_running_loop().time()
-        if now - self._member_risk_note_dedup.get(dedup_key, 0.0) < MEMBER_RISK_NOTE_DEDUP_SECONDS:
+        seen_at = self._member_risk_note_dedup.get(dedup_key)
+        if seen_at is not None and now - seen_at < MEMBER_RISK_NOTE_DEDUP_SECONDS:
             return
         self._member_risk_note_dedup[dedup_key] = now
         message_evidence, identity_hints, confidence_risers = self._member_risk_evidence_fields(assessment.signal_codes)

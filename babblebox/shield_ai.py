@@ -42,10 +42,10 @@ SHIELD_AI_MODEL_SHORT_NAMES = {
     "gpt-5.4-mini": "mini",
     "gpt-5.4": "full",
 }
-DEFAULT_SHIELD_AI_MODEL = "gpt-4.1-mini"
 DEFAULT_SHIELD_AI_FAST_MODEL = "gpt-5.4-nano"
 DEFAULT_SHIELD_AI_COMPLEX_MODEL = "gpt-5.4-mini"
 DEFAULT_SHIELD_AI_TOP_MODEL = "gpt-5.4"
+DEFAULT_SHIELD_AI_MODEL = DEFAULT_SHIELD_AI_FAST_MODEL
 DEFAULT_SHIELD_AI_ENABLE_TOP_TIER = False
 DEFAULT_SHIELD_AI_TIMEOUT_SECONDS = 4.0
 DEFAULT_SHIELD_AI_MAX_CHARS = 340
@@ -334,7 +334,8 @@ class OpenAIShieldAIProvider(ShieldAIProvider):
 
     def __init__(self):
         self.api_key = os.getenv("OPENAI_API_KEY", "").strip()
-        self.single_model_override = os.getenv("SHIELD_AI_MODEL", "").strip()
+        self.single_model_override_raw = os.getenv("SHIELD_AI_MODEL", "").strip()
+        self.single_model_override = normalize_shield_ai_model_name(self.single_model_override_raw)
         self.fast_model = normalize_shield_ai_model_name(os.getenv("SHIELD_AI_FAST_MODEL")) or DEFAULT_SHIELD_AI_FAST_MODEL
         self.complex_model = normalize_shield_ai_model_name(os.getenv("SHIELD_AI_COMPLEX_MODEL")) or DEFAULT_SHIELD_AI_COMPLEX_MODEL
         self.top_model = normalize_shield_ai_model_name(os.getenv("SHIELD_AI_TOP_MODEL")) or DEFAULT_SHIELD_AI_TOP_MODEL
@@ -353,6 +354,9 @@ class OpenAIShieldAIProvider(ShieldAIProvider):
         )
         self._session: aiohttp.ClientSession | None = None
         self._semaphore = asyncio.Semaphore(DEFAULT_SHIELD_AI_CONCURRENCY)
+        invalid_override_note = ""
+        if self.single_model_override_raw and self.single_model_override is None:
+            invalid_override_note = f", ignored_single_model_override={self.single_model_override_raw}"
         print(
             "Shield AI init: "
             f"provider={OPENAI_PROVIDER_NAME.lower()}, "
@@ -361,7 +365,8 @@ class OpenAIShieldAIProvider(ShieldAIProvider):
             f"complex_model={self.complex_model}, "
             f"top_model={self.top_model}, "
             f"top_tier_enabled={'yes' if self.top_tier_enabled else 'no'}, "
-            f"single_model_override={self.single_model_override or 'none'}, "
+            f"single_model_override={self.single_model_override or 'none'}"
+            f"{invalid_override_note}, "
             f"timeout_seconds={self.timeout_seconds}, "
             f"max_chars={self.max_chars}, "
             f"support_default_guild_id={SHIELD_AI_SUPPORT_GUILD_ID}"
@@ -370,6 +375,8 @@ class OpenAIShieldAIProvider(ShieldAIProvider):
     def diagnostics(self) -> dict[str, Any]:
         available = bool(self.api_key)
         status = "Ready." if available else "OpenAI API key is not configured."
+        if self.single_model_override_raw and self.single_model_override is None:
+            status += " Invalid SHIELD_AI_MODEL override was ignored."
         routing_strategy = "single_model_override" if self.single_model_override else "two_tier_with_dormant_top"
         return {
             "provider": OPENAI_PROVIDER_NAME,
