@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import contextlib
 from typing import Optional
@@ -114,112 +114,1022 @@ SEVERE_TERM_ACTION_CHOICES = [
     app_commands.Choice(name="Remove custom", value="remove_custom"),
 ]
 SHIELD_AI_OVERRIDE_OWNER_IDS = {1266444952779620413, 1345860619836063754}
+RULE_PANEL_PACKS = ("privacy", "promo", "scam", "spam", "gif", "adult", "severe")
+CORE_RULE_PANEL_PACKS = ("privacy", "promo", "spam", "gif")
+HIGH_RISK_RULE_PANEL_PACKS = ("scam", "adult", "severe")
+PACK_PANEL_DESCRIPTIONS = {
+    "privacy": "Catches phone numbers, email drops, payment handles, and similar private-info leaks.",
+    "promo": "Handles invite spam, promo blasts, and repetitive self-promotion without overfiring on normal info links.",
+    "scam": "Catches malicious domains, impersonation hosts, and suspicious lure patterns with stronger action lanes.",
+    "spam": "Handles rate spam, duplicate floods, emoji clutter, capitals spam, and moderator handling for live-message raids.",
+    "gif": "Controls GIF-heavy flood pressure, repeat loops, and same-asset bursts without polluting unrelated packs.",
+    "adult": "Blocks adult domains and can optionally catch DM-gated adult solicitation text with a bounded carve-out lane.",
+    "severe": "Targets severe harm, self-harm encouragement, eliminationist hate, and server-specific severe phrase tuning.",
+    "link_policy": "Controls the separate trusted-link policy lane for broad link posting without weakening hard malicious intel.",
+}
+TIMEOUT_PRESET_CHOICES = (
+    ("inherit", "Inherit global timeout"),
+    ("5", "5 minutes"),
+    ("10", "10 minutes"),
+    ("15", "15 minutes"),
+    ("30", "30 minutes"),
+    ("60", "60 minutes"),
+)
+SPAM_RATE_PRESETS = {
+    "strict": (6, 5, "Strict: 6 messages in 5s"),
+    "balanced": (7, 5, "Balanced: 7 messages in 5s"),
+    "relaxed": (9, 6, "Relaxed: 9 messages in 6s"),
+}
+SPAM_BURST_PRESETS = {
+    "tight": (4, 8, "Tight: 4 messages in 8s"),
+    "balanced": (5, 10, "Balanced: 5 messages in 10s"),
+    "wide": (6, 12, "Wide: 6 messages in 12s"),
+}
+SPAM_DUPLICATE_PRESETS = {
+    "tight": (4, 8, "Tight: 4 near-duplicates in 8s"),
+    "balanced": (5, 10, "Balanced: 5 near-duplicates in 10s"),
+    "wide": (6, 12, "Wide: 6 near-duplicates in 12s"),
+}
+GIF_RATE_PRESETS = {
+    "tight": (3, 15, "Tight: 3 GIF-heavy posts in 15s"),
+    "balanced": (4, 20, "Balanced: 4 GIF-heavy posts in 20s"),
+    "wide": (5, 25, "Wide: 5 GIF-heavy posts in 25s"),
+}
+SPAM_EMOTE_THRESHOLDS = (12, 18, 24, 30)
+SPAM_CAPS_THRESHOLDS = (20, 28, 40, 60)
+GIF_REPEAT_THRESHOLDS = (2, 3, 4, 5)
+GIF_SAME_ASSET_THRESHOLDS = (2, 3, 4, 5)
+GIF_RATIO_THRESHOLDS = (60, 70, 80, 90)
 
 
-class ShieldPanelView(discord.ui.View):
-    def __init__(self, cog: "ShieldCog", *, guild_id: int, author_id: int, channel_id: int | None = None, section: str = "overview"):
-        super().__init__(timeout=180)
+class ShieldManagedView(discord.ui.View):
+    panel_title = "Shield Panel"
+    stale_message = "That Shield panel expired. Run `/shield panel` again to open a fresh one."
+
+    def __init__(self, cog: "ShieldCog", *, guild_id: int, author_id: int, timeout: float | None = 180):
+        super().__init__(timeout=timeout)
         self.cog = cog
         self.guild_id = guild_id
         self.author_id = author_id
-        self.channel_id = channel_id
-        self.section = section
         self.message: discord.Message | None = None
-        self._refresh_buttons()
-
-    def current_embed(self) -> discord.Embed:
-        return self.cog.build_panel_embed(self.guild_id, self.section, channel_id=self.channel_id)
-
-    def _refresh_buttons(self):
-        statuses = {
-            "overview": self.overview_button,
-            "rules": self.rules_button,
-            "links": self.links_button,
-            "scope": self.scope_button,
-            "ai": self.ai_button,
-            "logs": self.logs_button,
-        }
-        for name, button in statuses.items():
-            button.style = discord.ButtonStyle.primary if self.section == name else discord.ButtonStyle.secondary
-        config = self.cog.service.get_config(self.guild_id)
-        self.toggle_shield_button.label = "Disable Live Moderation" if config["module_enabled"] else "Enable Live Moderation"
+        self._expired = False
 
     async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if self._expired or interaction.is_expired():
+            await self.cog._send_private_interaction(
+                interaction,
+                embed=self.cog._shield_status_embed(self.panel_title, self.stale_message, ok=False),
+            )
+            return False
         if interaction.user.id != self.author_id:
-            await interaction.response.send_message(
+            await self.cog._send_private_interaction(
+                interaction,
                 embed=ge.make_status_embed(
                     "This Panel Is Locked",
                     "Use `/shield panel` to open your own Shield admin panel.",
                     tone="info",
                     footer="Babblebox Shield",
                 ),
-                ephemeral=True,
             )
             return False
         if not self.cog.user_can_manage_shield(interaction.user):
             _allowed, reason = self.cog.shield_access_reason(interaction.user, self.guild_id)
-            await interaction.response.send_message(
+            await self.cog._send_private_interaction(
+                interaction,
                 embed=ge.make_status_embed(
                     "Admin Only",
                     reason,
                     tone="warning",
                     footer="Babblebox Shield",
                 ),
-                ephemeral=True,
             )
             return False
         return True
 
     async def on_timeout(self):
+        self._expired = True
         for child in self.children:
             child.disabled = True
         if self.message is not None:
             with contextlib.suppress(discord.HTTPException):
                 await self.message.edit(view=self)
 
-    async def _rerender(self, interaction: discord.Interaction, note: str | None = None):
-        self._refresh_buttons()
-        await interaction.response.edit_message(embed=self.current_embed(), view=self)
+    async def on_error(self, interaction: discord.Interaction, error: Exception, item):
+        await self.cog._send_private_interaction(
+            interaction,
+            embed=self.cog._shield_status_embed(
+                self.panel_title,
+                "Babblebox could not finish that Shield panel action. Run `/shield panel` again if this panel feels stale.",
+                ok=False,
+            ),
+        )
+
+    async def _safe_action(
+        self,
+        interaction: discord.Interaction,
+        *,
+        stage: str,
+        failure_message: str,
+        action,
+    ):
+        try:
+            if not await self.cog._defer_component_interaction(
+                interaction,
+                stage=stage,
+                failure_title=self.panel_title,
+                failure_message=failure_message,
+                guild_id=self.guild_id,
+            ):
+                return None
+            return await action()
+        except Exception:
+            await self.cog._send_private_interaction(
+                interaction,
+                embed=self.cog._shield_status_embed(self.panel_title, failure_message, ok=False),
+            )
+            return None
+
+
+class ShieldPanelView(ShieldManagedView):
+    panel_title = "Shield Panel"
+    stale_message = "That Shield panel expired. Run `/shield panel` again to open a fresh one."
+
+    def __init__(
+        self,
+        cog: "ShieldCog",
+        *,
+        guild_id: int,
+        author_id: int,
+        channel_id: int | None = None,
+        section: str = "overview",
+        selected_pack: str | None = None,
+    ):
+        super().__init__(cog, guild_id=guild_id, author_id=author_id)
+        self.channel_id = channel_id
+        self.section = section
+        self.selected_pack = selected_pack or self.cog._default_rule_pack(guild_id)
+        self._refresh_items()
+
+    def current_embed(self) -> discord.Embed:
+        return self.cog.build_panel_embed(
+            self.guild_id,
+            self.section,
+            channel_id=self.channel_id,
+            selected_pack=self.selected_pack,
+        )
+
+    async def refresh_message(self):
+        self._refresh_items()
+        if self.message is not None:
+            with contextlib.suppress(discord.HTTPException, discord.NotFound):
+                await self.message.edit(embed=self.current_embed(), view=self)
+
+    async def _rerender(self, interaction: discord.Interaction, *, note: str | None = None, note_ok: bool = True):
+        self._refresh_items()
+        updated = await self.cog._edit_interaction_message(interaction, embed=self.current_embed(), view=self)
+        if not updated:
+            await self.cog._send_private_interaction(
+                interaction,
+                embed=self.cog._shield_status_embed(self.panel_title, self.stale_message, ok=False),
+            )
+            return
         if note:
-            await interaction.followup.send(note, ephemeral=True)
+            await self.cog._send_private_interaction(
+                interaction,
+                embed=self.cog._shield_status_embed(self.panel_title, note, ok=note_ok),
+            )
 
     async def _switch_section(self, interaction: discord.Interaction, section: str):
-        self.section = section
-        await self._rerender(interaction)
+        async def action():
+            self.section = section
+            await self._rerender(interaction)
 
-    @discord.ui.button(label="Overview", style=discord.ButtonStyle.primary, row=0)
-    async def overview_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._switch_section(interaction, "overview")
+        await self._safe_action(
+            interaction,
+            stage=f"shield_panel_{section}",
+            failure_message="Babblebox could not refresh that Shield panel section right now.",
+            action=action,
+        )
 
-    @discord.ui.button(label="Rules", style=discord.ButtonStyle.secondary, row=0)
-    async def rules_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._switch_section(interaction, "rules")
+    async def _open_pack_editor(self, interaction: discord.Interaction, editor_kind: str):
+        pack_label = PACK_LABELS.get(self.selected_pack, self.selected_pack.replace("_", " ").title())
 
-    @discord.ui.button(label="Links", style=discord.ButtonStyle.secondary, row=0)
-    async def links_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._switch_section(interaction, "links")
+        async def action():
+            if editor_kind == "actions":
+                view: ShieldManagedView = ShieldPackActionEditorView(
+                    self.cog,
+                    guild_id=self.guild_id,
+                    author_id=self.author_id,
+                    pack=self.selected_pack,
+                    panel_view=self,
+                )
+            elif editor_kind == "options":
+                view = ShieldPackOptionsEditorView(
+                    self.cog,
+                    guild_id=self.guild_id,
+                    author_id=self.author_id,
+                    pack=self.selected_pack,
+                    panel_view=self,
+                )
+            else:
+                view = ShieldPackExemptionsEditorView(
+                    self.cog,
+                    guild_id=self.guild_id,
+                    author_id=self.author_id,
+                    pack=self.selected_pack,
+                    panel_view=self,
+                )
+            sent = await self.cog._send_private_interaction(interaction, embed=view.current_embed(), view=view)
+            if sent is not None:
+                view.message = sent
 
-    @discord.ui.button(label="Scope", style=discord.ButtonStyle.secondary, row=0)
-    async def scope_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._switch_section(interaction, "scope")
+        await self._safe_action(
+            interaction,
+            stage=f"shield_panel_open_{editor_kind}",
+            failure_message=f"Babblebox could not open the {pack_label} editor right now.",
+            action=action,
+        )
 
-    @discord.ui.button(label="AI", style=discord.ButtonStyle.secondary, row=0)
-    async def ai_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._switch_section(interaction, "ai")
+    async def _open_link_policy_editor(self, interaction: discord.Interaction):
+        async def action():
+            view = ShieldLinkPolicyEditorView(
+                self.cog,
+                guild_id=self.guild_id,
+                author_id=self.author_id,
+                panel_view=self,
+            )
+            sent = await self.cog._send_private_interaction(interaction, embed=view.current_embed(), view=view)
+            if sent is not None:
+                view.message = sent
 
-    @discord.ui.button(label="Logs", style=discord.ButtonStyle.secondary, row=1)
-    async def logs_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._switch_section(interaction, "logs")
+        await self._safe_action(
+            interaction,
+            stage="shield_panel_open_link_policy",
+            failure_message="Babblebox could not open the trusted-link editor right now.",
+            action=action,
+        )
 
-    @discord.ui.button(label="Refresh", style=discord.ButtonStyle.secondary, row=1)
-    async def refresh_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        await self._rerender(interaction, note="Shield panel refreshed.")
+    def _refresh_items(self):
+        self.clear_items()
 
-    @discord.ui.button(label="Enable Live Moderation", style=discord.ButtonStyle.success, row=1)
-    async def toggle_shield_button(self, interaction: discord.Interaction, button: discord.ui.Button):
-        current = self.cog.service.get_config(self.guild_id)
-        ok, message = await self.cog.service.set_module_enabled(self.guild_id, not current["module_enabled"])
-        await self._rerender(interaction, note=message if ok else message)
+        def add_button(*, label: str, style: discord.ButtonStyle, row: int, callback):
+            button = discord.ui.Button(label=label, style=style, row=row)
+            button.callback = callback
+            self.add_item(button)
+
+        for label, section, row in (
+            ("Overview", "overview", 0),
+            ("Rules", "rules", 0),
+            ("Links", "links", 0),
+            ("Scope", "scope", 0),
+            ("AI", "ai", 0),
+            ("Logs", "logs", 1),
+        ):
+            async def nav_callback(interaction: discord.Interaction, *, target: str = section):
+                await self._switch_section(interaction, target)
+
+            add_button(
+                label=label,
+                style=discord.ButtonStyle.primary if self.section == section else discord.ButtonStyle.secondary,
+                row=row,
+                callback=nav_callback,
+            )
+
+        async def refresh_callback(interaction: discord.Interaction):
+            await self._switch_section(interaction, self.section)
+
+        add_button(label="Refresh", style=discord.ButtonStyle.secondary, row=1, callback=refresh_callback)
+
+        config = self.cog.service.get_config(self.guild_id)
+
+        async def toggle_callback(interaction: discord.Interaction):
+            async def action():
+                ok, message = await self.cog.service.set_module_enabled(self.guild_id, not bool(config.get("module_enabled")))
+                await self._rerender(interaction, note=message, note_ok=ok)
+
+            await self._safe_action(
+                interaction,
+                stage="shield_panel_toggle_module",
+                failure_message="Babblebox could not update live moderation right now.",
+                action=action,
+            )
+
+        add_button(
+            label="Disable Live Moderation" if config["module_enabled"] else "Enable Live Moderation",
+            style=discord.ButtonStyle.danger if config["module_enabled"] else discord.ButtonStyle.success,
+            row=1,
+            callback=toggle_callback,
+        )
+
+        if self.section == "rules":
+            pack_select = discord.ui.Select(
+                placeholder="Select a Shield pack",
+                row=2,
+                options=[
+                    discord.SelectOption(
+                        label=PACK_LABELS[pack],
+                        value=pack,
+                        description=PACK_PANEL_DESCRIPTIONS[pack][:100],
+                        default=pack == self.selected_pack,
+                    )
+                    for pack in RULE_PANEL_PACKS
+                ],
+            )
+
+            async def pack_callback(interaction: discord.Interaction):
+                async def action():
+                    self.selected_pack = pack_select.values[0]
+                    await self._rerender(interaction)
+
+                await self._safe_action(
+                    interaction,
+                    stage="shield_panel_pack_select",
+                    failure_message="Babblebox could not switch that Shield pack right now.",
+                    action=action,
+                )
+
+            pack_select.callback = pack_callback
+            self.add_item(pack_select)
+
+            for label, editor_kind in (("Actions", "actions"), ("Options", "options"), ("Exemptions", "exemptions")):
+                async def editor_callback(interaction: discord.Interaction, *, kind: str = editor_kind):
+                    await self._open_pack_editor(interaction, kind)
+
+                add_button(label=label, style=discord.ButtonStyle.secondary, row=3, callback=editor_callback)
+
+        if self.section == "links":
+            async def link_editor_callback(interaction: discord.Interaction):
+                await self._open_link_policy_editor(interaction)
+
+            add_button(label="Edit Link Policy", style=discord.ButtonStyle.secondary, row=2, callback=link_editor_callback)
+
+
+class ShieldPackActionEditorView(ShieldManagedView):
+    panel_title = "Shield Pack Actions"
+    stale_message = "That pack editor expired. Open it again from `/shield panel`."
+
+    def __init__(
+        self,
+        cog: "ShieldCog",
+        *,
+        guild_id: int,
+        author_id: int,
+        pack: str,
+        panel_view: ShieldPanelView | None = None,
+    ):
+        super().__init__(cog, guild_id=guild_id, author_id=author_id)
+        self.pack = pack
+        self.panel_view = panel_view
+        self._refresh_items()
+
+    def current_embed(self) -> discord.Embed:
+        return self.cog._pack_action_editor_embed(self.guild_id, self.pack)
+
+    async def _sync_parent_panel(self):
+        if self.panel_view is not None:
+            await self.panel_view.refresh_message()
+
+    async def _rerender(self, interaction: discord.Interaction, *, note: str | None = None, note_ok: bool = True):
+        self._refresh_items()
+        updated = await self.cog._edit_interaction_message(interaction, embed=self.current_embed(), view=self)
+        await self._sync_parent_panel()
+        if not updated:
+            await self.cog._send_private_interaction(
+                interaction,
+                embed=self.cog._shield_status_embed(self.panel_title, self.stale_message, ok=False),
+            )
+            return
+        if note:
+            await self.cog._send_private_interaction(
+                interaction,
+                embed=self.cog._shield_status_embed(self.panel_title, note, ok=note_ok),
+            )
+
+    def _refresh_items(self):
+        self.clear_items()
+        config = self.cog.service.get_config(self.guild_id)
+        pack_label = PACK_LABELS.get(self.pack, self.pack.replace("_", " ").title())
+
+        enabled_value = bool(config.get(f"{self.pack}_enabled", True))
+        sensitivity_value = str(config.get(f"{self.pack}_sensitivity", "normal"))
+        status_select = discord.ui.Select(
+            placeholder=f"{pack_label}: enable state and sensitivity",
+            row=0,
+            options=[
+                discord.SelectOption(
+                    label=f"{'On' if enabled else 'Off'} - {SENSITIVITY_LABELS[sensitivity]}",
+                    value=f"{'on' if enabled else 'off'}:{sensitivity}",
+                    default=enabled == enabled_value and sensitivity == sensitivity_value,
+                )
+                for enabled in (True, False)
+                for sensitivity in ("low", "normal", "high")
+            ],
+        )
+
+        async def status_callback(interaction: discord.Interaction):
+            async def action():
+                enabled_token, sensitivity_token = status_select.values[0].split(":", 1)
+                ok, message = await self.cog.service.set_pack_config(
+                    self.guild_id,
+                    self.pack,
+                    enabled=enabled_token == "on",
+                    sensitivity=sensitivity_token,
+                )
+                await self._rerender(interaction, note=message, note_ok=ok)
+
+            await self._safe_action(
+                interaction,
+                stage=f"shield_{self.pack}_status",
+                failure_message=f"Babblebox could not update {pack_label} state right now.",
+                action=action,
+            )
+
+        status_select.callback = status_callback
+        self.add_item(status_select)
+
+        for row, lane, choices in (
+            (1, "low_action", LOW_ACTION_CHOICES),
+            (2, "medium_action", MEDIUM_ACTION_CHOICES),
+            (3, "high_action", ACTION_CHOICES),
+        ):
+            current_value = str(config.get(f"{self.pack}_{lane}", config.get(f"{self.pack}_action", "log")))
+            select = discord.ui.Select(
+                placeholder=f"{pack_label}: {lane.replace('_', ' ')}",
+                row=row,
+                options=[
+                    discord.SelectOption(label=choice.name, value=str(choice.value), default=str(choice.value) == current_value)
+                    for choice in choices
+                ],
+            )
+
+            async def lane_callback(interaction: discord.Interaction, *, field: str = lane, component: discord.ui.Select = select):
+                async def action():
+                    ok, message = await self.cog.service.set_pack_config(self.guild_id, self.pack, **{field: component.values[0]})
+                    await self._rerender(interaction, note=message, note_ok=ok)
+
+                await self._safe_action(
+                    interaction,
+                    stage=f"shield_{self.pack}_{field}",
+                    failure_message=f"Babblebox could not update {pack_label} actions right now.",
+                    action=action,
+                )
+
+            select.callback = lane_callback
+            self.add_item(select)
+
+        pack_timeout_minutes = config.get("pack_timeout_minutes", {})
+        timeout_override = pack_timeout_minutes.get(self.pack) if isinstance(pack_timeout_minutes, dict) else None
+        timeout_select = discord.ui.Select(
+            placeholder=f"{pack_label}: timeout profile",
+            row=4,
+            options=[
+                discord.SelectOption(
+                    label=label,
+                    value=value,
+                    default=(value == "inherit" and not isinstance(timeout_override, int))
+                    or (isinstance(timeout_override, int) and value == str(timeout_override)),
+                )
+                for value, label in TIMEOUT_PRESET_CHOICES
+            ],
+        )
+
+        async def timeout_callback(interaction: discord.Interaction):
+            async def action():
+                selected = timeout_select.values[0]
+                timeout_value = None if selected == "inherit" else int(selected)
+                ok, message = await self.cog.service.set_pack_timeout_override(self.guild_id, self.pack, timeout_value)
+                await self._rerender(interaction, note=message, note_ok=ok)
+
+            await self._safe_action(
+                interaction,
+                stage=f"shield_{self.pack}_timeout",
+                failure_message=f"Babblebox could not update the {pack_label} timeout profile right now.",
+                action=action,
+            )
+
+        timeout_select.callback = timeout_callback
+        self.add_item(timeout_select)
+
+
+class ShieldPackOptionsEditorView(ShieldManagedView):
+    panel_title = "Shield Pack Options"
+    stale_message = "That pack-options editor expired. Open it again from `/shield panel`."
+
+    def __init__(
+        self,
+        cog: "ShieldCog",
+        *,
+        guild_id: int,
+        author_id: int,
+        pack: str,
+        panel_view: ShieldPanelView | None = None,
+    ):
+        super().__init__(cog, guild_id=guild_id, author_id=author_id)
+        self.pack = pack
+        self.panel_view = panel_view
+        self._refresh_items()
+
+    def current_embed(self) -> discord.Embed:
+        return self.cog._pack_options_editor_embed(self.guild_id, self.pack)
+
+    async def _sync_parent_panel(self):
+        if self.panel_view is not None:
+            await self.panel_view.refresh_message()
+
+    async def _rerender(self, interaction: discord.Interaction, *, note: str | None = None, note_ok: bool = True):
+        self._refresh_items()
+        updated = await self.cog._edit_interaction_message(interaction, embed=self.current_embed(), view=self)
+        await self._sync_parent_panel()
+        if not updated:
+            await self.cog._send_private_interaction(
+                interaction,
+                embed=self.cog._shield_status_embed(self.panel_title, self.stale_message, ok=False),
+            )
+            return
+        if note:
+            await self.cog._send_private_interaction(
+                interaction,
+                embed=self.cog._shield_status_embed(self.panel_title, note, ok=note_ok),
+            )
+
+    def _refresh_items(self):
+        self.clear_items()
+        config = self.cog.service.get_config(self.guild_id)
+        pack_label = PACK_LABELS.get(self.pack, self.pack.replace("_", " ").title())
+
+        if self.pack == "spam":
+            for row, name, presets, args in (
+                (0, "rate", SPAM_RATE_PRESETS, ("message_threshold", "window_seconds")),
+                (1, "burst", SPAM_BURST_PRESETS, ("burst_threshold", "burst_window_seconds")),
+                (2, "duplicate", SPAM_DUPLICATE_PRESETS, ("duplicate_threshold", "duplicate_window_seconds")),
+            ):
+                current = tuple(int(config.get(f"spam_{suffix}", 0)) for suffix in args)
+                selected_key = next((key for key, value in presets.items() if value[:2] == current), "balanced")
+                select = discord.ui.Select(
+                    placeholder=f"Anti-Spam {name} preset",
+                    row=row,
+                    options=[
+                        discord.SelectOption(label=value[2], value=key, default=key == selected_key)
+                        for key, value in presets.items()
+                    ],
+                )
+
+                async def preset_callback(
+                    interaction: discord.Interaction,
+                    *,
+                    component: discord.ui.Select = select,
+                    preset_map: dict[str, tuple[int, int, str]] = presets,
+                    suffixes: tuple[str, str] = args,
+                    stage_name: str = name,
+                ):
+                    async def action():
+                        first, second, _label = preset_map[component.values[0]]
+                        ok, message = await self.cog.service.set_pack_config(
+                            self.guild_id,
+                            "spam",
+                            **{suffixes[0]: first, suffixes[1]: second},
+                        )
+                        await self._rerender(interaction, note=message, note_ok=ok)
+
+                    await self._safe_action(
+                        interaction,
+                        stage=f"shield_spam_{stage_name}_preset",
+                        failure_message="Babblebox could not update that anti-spam preset right now.",
+                        action=action,
+                    )
+
+                select.callback = preset_callback
+                self.add_item(select)
+
+            for row, enabled_field, threshold_field, values, placeholder in (
+                (3, "spam_emote_enabled", "spam_emote_threshold", SPAM_EMOTE_THRESHOLDS, "Emoji / emote lane + threshold"),
+                (4, "spam_caps_enabled", "spam_caps_threshold", SPAM_CAPS_THRESHOLDS, "Capitals lane + threshold"),
+            ):
+                current_enabled = bool(config.get(enabled_field))
+                current_threshold = int(config.get(threshold_field, values[0]))
+                select = discord.ui.Select(
+                    placeholder=placeholder,
+                    row=row,
+                    options=[
+                        discord.SelectOption(label="Off", value="off", default=not current_enabled),
+                        *[
+                            discord.SelectOption(
+                                label=f"On at {value}+",
+                                value=str(value),
+                                default=current_enabled and value == current_threshold,
+                            )
+                            for value in values
+                        ],
+                    ],
+                )
+
+                async def lane_callback(
+                    interaction: discord.Interaction,
+                    *,
+                    component: discord.ui.Select = select,
+                    enabled_key: str = enabled_field,
+                    threshold_key: str = threshold_field,
+                    default_threshold: int = values[0],
+                ):
+                    async def action():
+                        selected = component.values[0]
+                        ok, message = await self.cog.service.set_pack_config(
+                            self.guild_id,
+                            "spam",
+                            **{
+                                enabled_key.replace("spam_", ""): selected != "off",
+                                threshold_key.replace("spam_", ""): int(selected) if selected != "off" else int(config.get(threshold_key, default_threshold)),
+                            },
+                        )
+                        await self._rerender(interaction, note=message, note_ok=ok)
+
+                    await self._safe_action(
+                        interaction,
+                        stage=f"shield_{enabled_key}",
+                        failure_message="Babblebox could not update that anti-spam lane right now.",
+                        action=action,
+                    )
+
+                select.callback = lane_callback
+                self.add_item(select)
+            return
+
+        if self.pack == "gif":
+            current_rate = (int(config.get("gif_message_threshold", 4)), int(config.get("gif_window_seconds", 20)))
+            selected_rate = next((key for key, value in GIF_RATE_PRESETS.items() if value[:2] == current_rate), "balanced")
+            rate_select = discord.ui.Select(
+                placeholder="GIF pressure preset",
+                row=0,
+                options=[
+                    discord.SelectOption(label=value[2], value=key, default=key == selected_rate)
+                    for key, value in GIF_RATE_PRESETS.items()
+                ],
+            )
+
+            async def rate_callback(interaction: discord.Interaction):
+                async def action():
+                    threshold, window_seconds, _label = GIF_RATE_PRESETS[rate_select.values[0]]
+                    ok, message = await self.cog.service.set_pack_config(
+                        self.guild_id,
+                        "gif",
+                        message_threshold=threshold,
+                        window_seconds=window_seconds,
+                    )
+                    await self._rerender(interaction, note=message, note_ok=ok)
+
+                await self._safe_action(
+                    interaction,
+                    stage="shield_gif_rate",
+                    failure_message=f"Babblebox could not update {pack_label} rate settings right now.",
+                    action=action,
+                )
+
+            rate_select.callback = rate_callback
+            self.add_item(rate_select)
+
+            for row, field, values, placeholder in (
+                (1, "repeat_threshold", GIF_REPEAT_THRESHOLDS, "Repeat threshold"),
+                (2, "same_asset_threshold", GIF_SAME_ASSET_THRESHOLDS, "Same-asset threshold"),
+                (3, "ratio_percent", GIF_RATIO_THRESHOLDS, "Minimum GIF ratio"),
+            ):
+                current = int(config.get(f"gif_{'min_' if field == 'ratio_percent' else ''}{field}", 70 if field == "ratio_percent" else values[0]))
+                select = discord.ui.Select(
+                    placeholder=placeholder,
+                    row=row,
+                    options=[discord.SelectOption(label=str(value), value=str(value), default=value == current) for value in values],
+                )
+
+                async def gif_option_callback(
+                    interaction: discord.Interaction,
+                    *,
+                    component: discord.ui.Select = select,
+                    key: str = field,
+                ):
+                    async def action():
+                        ok, message = await self.cog.service.set_pack_config(self.guild_id, "gif", **{key: int(component.values[0])})
+                        await self._rerender(interaction, note=message, note_ok=ok)
+
+                    await self._safe_action(
+                        interaction,
+                        stage=f"shield_gif_{key}",
+                        failure_message=f"Babblebox could not update {pack_label} pressure settings right now.",
+                        action=action,
+                    )
+
+                select.callback = gif_option_callback
+                self.add_item(select)
+            return
+
+        if self.pack == "adult":
+            current = bool(config.get("adult_solicitation_enabled"))
+            select = discord.ui.Select(
+                placeholder="Adult solicitation text detector",
+                row=0,
+                options=[
+                    discord.SelectOption(label="On", value="on", default=current),
+                    discord.SelectOption(label="Off", value="off", default=not current),
+                ],
+            )
+
+            async def adult_callback(interaction: discord.Interaction):
+                async def action():
+                    ok, message = await self.cog.service.set_pack_config(self.guild_id, "adult", adult_solicitation=select.values[0] == "on")
+                    await self._rerender(interaction, note=message, note_ok=ok)
+
+                await self._safe_action(
+                    interaction,
+                    stage="shield_adult_solicitation",
+                    failure_message="Babblebox could not update the adult solicitation lane right now.",
+                    action=action,
+                )
+
+            select.callback = adult_callback
+            self.add_item(select)
+            return
+
+        if self.pack == "severe":
+            current_categories = set(config.get("severe_enabled_categories", []))
+            select = discord.ui.Select(
+                placeholder="Active severe categories",
+                min_values=0,
+                max_values=len(SEVERE_CATEGORY_LABELS),
+                row=0,
+                options=[
+                    discord.SelectOption(label=label, value=category, default=category in current_categories)
+                    for category, label in SEVERE_CATEGORY_LABELS.items()
+                ],
+            )
+
+            async def severe_callback(interaction: discord.Interaction):
+                async def action():
+                    target = set(select.values)
+                    messages: list[str] = []
+                    ok = True
+                    for category in SEVERE_CATEGORY_LABELS:
+                        should_enable = category in target
+                        if should_enable == (category in current_categories):
+                            continue
+                        change_ok, change_message = await self.cog.service.set_severe_category(self.guild_id, category, should_enable)
+                        ok = ok and change_ok
+                        messages.append(change_message)
+                    if not messages:
+                        messages.append("Severe categories already matched that selection.")
+                    await self._rerender(interaction, note="\n".join(messages), note_ok=ok)
+
+                await self._safe_action(
+                    interaction,
+                    stage="shield_severe_categories",
+                    failure_message="Babblebox could not update severe categories right now.",
+                    action=action,
+                )
+
+            select.callback = severe_callback
+            self.add_item(select)
+            return
+
+        self.add_item(discord.ui.Button(label="No Extra Pack Options", style=discord.ButtonStyle.secondary, disabled=True, row=0))
+
+
+class ShieldPackExemptionsEditorView(ShieldManagedView):
+    panel_title = "Shield Pack Exemptions"
+    stale_message = "That pack-exemptions editor expired. Open it again from `/shield panel`."
+
+    def __init__(
+        self,
+        cog: "ShieldCog",
+        *,
+        guild_id: int,
+        author_id: int,
+        pack: str,
+        panel_view: ShieldPanelView | None = None,
+    ):
+        super().__init__(cog, guild_id=guild_id, author_id=author_id)
+        self.pack = pack
+        self.panel_view = panel_view
+        self._refresh_items()
+
+    def current_embed(self) -> discord.Embed:
+        return self.cog._pack_exemptions_editor_embed(self.guild_id, self.pack)
+
+    async def _sync_parent_panel(self):
+        if self.panel_view is not None:
+            await self.panel_view.refresh_message()
+
+    async def _rerender(self, interaction: discord.Interaction, *, note: str | None = None, note_ok: bool = True):
+        self._refresh_items()
+        updated = await self.cog._edit_interaction_message(interaction, embed=self.current_embed(), view=self)
+        await self._sync_parent_panel()
+        if not updated:
+            await self.cog._send_private_interaction(
+                interaction,
+                embed=self.cog._shield_status_embed(self.panel_title, self.stale_message, ok=False),
+            )
+            return
+        if note:
+            await self.cog._send_private_interaction(
+                interaction,
+                embed=self.cog._shield_status_embed(self.panel_title, note, ok=note_ok),
+            )
+
+    def _refresh_items(self):
+        self.clear_items()
+        pack_label = PACK_LABELS.get(self.pack, self.pack.replace("_", " ").title())
+
+        async def replace_targets(interaction: discord.Interaction, target_kind: str, target_ids: list[int], *, stage: str):
+            async def action():
+                ok, message = await self.cog.service.replace_pack_exemptions(self.guild_id, self.pack, target_kind, target_ids)
+                await self._rerender(interaction, note=message, note_ok=ok)
+
+            await self._safe_action(
+                interaction,
+                stage=stage,
+                failure_message=f"Babblebox could not update {pack_label} {target_kind} exemptions right now.",
+                action=action,
+            )
+
+        channel_select = discord.ui.ChannelSelect(
+            placeholder=f"{pack_label}: exempt channels",
+            min_values=0,
+            max_values=25,
+            row=0,
+        )
+
+        async def channel_callback(interaction: discord.Interaction):
+            await replace_targets(interaction, "channel", [int(item.id) for item in channel_select.values], stage=f"shield_{self.pack}_channel_exemptions")
+
+        channel_select.callback = channel_callback
+        self.add_item(channel_select)
+
+        role_select = discord.ui.RoleSelect(
+            placeholder=f"{pack_label}: exempt roles",
+            min_values=0,
+            max_values=25,
+            row=1,
+        )
+
+        async def role_callback(interaction: discord.Interaction):
+            await replace_targets(interaction, "role", [int(item.id) for item in role_select.values], stage=f"shield_{self.pack}_role_exemptions")
+
+        role_select.callback = role_callback
+        self.add_item(role_select)
+
+        user_select = discord.ui.UserSelect(
+            placeholder=f"{pack_label}: exempt members",
+            min_values=0,
+            max_values=25,
+            row=2,
+        )
+
+        async def user_callback(interaction: discord.Interaction):
+            await replace_targets(interaction, "user", [int(item.id) for item in user_select.values], stage=f"shield_{self.pack}_user_exemptions")
+
+        user_select.callback = user_callback
+        self.add_item(user_select)
+
+        for row, label, target_kind in (
+            (3, "Clear Channels", "channel"),
+            (3, "Clear Roles", "role"),
+            (3, "Clear Members", "user"),
+        ):
+            button = discord.ui.Button(label=label, style=discord.ButtonStyle.secondary, row=row)
+
+            async def button_callback(interaction: discord.Interaction, *, kind: str = target_kind):
+                await replace_targets(interaction, kind, [], stage=f"shield_{self.pack}_{kind}_clear")
+
+            button.callback = button_callback
+            self.add_item(button)
+
+
+class ShieldLinkPolicyEditorView(ShieldManagedView):
+    panel_title = "Shield Link Policy"
+    stale_message = "That link-policy editor expired. Open it again from `/shield panel`."
+
+    def __init__(
+        self,
+        cog: "ShieldCog",
+        *,
+        guild_id: int,
+        author_id: int,
+        panel_view: ShieldPanelView | None = None,
+    ):
+        super().__init__(cog, guild_id=guild_id, author_id=author_id)
+        self.panel_view = panel_view
+        self._refresh_items()
+
+    def current_embed(self) -> discord.Embed:
+        return self.cog._link_policy_editor_embed(self.guild_id)
+
+    async def _sync_parent_panel(self):
+        if self.panel_view is not None:
+            await self.panel_view.refresh_message()
+
+    async def _rerender(self, interaction: discord.Interaction, *, note: str | None = None, note_ok: bool = True):
+        self._refresh_items()
+        updated = await self.cog._edit_interaction_message(interaction, embed=self.current_embed(), view=self)
+        await self._sync_parent_panel()
+        if not updated:
+            await self.cog._send_private_interaction(
+                interaction,
+                embed=self.cog._shield_status_embed(self.panel_title, self.stale_message, ok=False),
+            )
+            return
+        if note:
+            await self.cog._send_private_interaction(
+                interaction,
+                embed=self.cog._shield_status_embed(self.panel_title, note, ok=note_ok),
+            )
+
+    def _refresh_items(self):
+        self.clear_items()
+        config = self.cog.service.get_config(self.guild_id)
+        mode_value = str(config.get("link_policy_mode", "default"))
+
+        mode_select = discord.ui.Select(
+            placeholder="Trusted-link mode",
+            row=0,
+            options=[
+                discord.SelectOption(label=choice.name, value=str(choice.value), default=str(choice.value) == mode_value)
+                for choice in LINK_POLICY_MODE_CHOICES
+            ],
+        )
+
+        async def mode_callback(interaction: discord.Interaction):
+            async def action():
+                ok, message = await self.cog.service.set_link_policy_config(self.guild_id, mode=mode_select.values[0])
+                await self._rerender(interaction, note=message, note_ok=ok)
+
+            await self._safe_action(
+                interaction,
+                stage="shield_link_policy_mode",
+                failure_message="Babblebox could not update the trusted-link mode right now.",
+                action=action,
+            )
+
+        mode_select.callback = mode_callback
+        self.add_item(mode_select)
+
+        for row, lane, choices in (
+            (1, "low_action", LOW_ACTION_CHOICES),
+            (2, "medium_action", MEDIUM_ACTION_CHOICES),
+            (3, "high_action", ACTION_CHOICES),
+        ):
+            current_value = str(config.get(f"link_policy_{lane}", "log"))
+            select = discord.ui.Select(
+                placeholder=f"Trusted-link {lane.replace('_', ' ')}",
+                row=row,
+                options=[
+                    discord.SelectOption(label=choice.name, value=str(choice.value), default=str(choice.value) == current_value)
+                    for choice in choices
+                ],
+            )
+
+            async def callback(interaction: discord.Interaction, *, field: str = lane, component: discord.ui.Select = select):
+                async def action():
+                    ok, message = await self.cog.service.set_link_policy_config(self.guild_id, **{field: component.values[0]})
+                    await self._rerender(interaction, note=message, note_ok=ok)
+
+                await self._safe_action(
+                    interaction,
+                    stage=f"shield_link_policy_{field}",
+                    failure_message="Babblebox could not update the trusted-link action ladder right now.",
+                    action=action,
+                )
+
+            select.callback = callback
+            self.add_item(select)
+
+        pack_timeout_minutes = config.get("pack_timeout_minutes", {})
+        timeout_override = pack_timeout_minutes.get("link_policy") if isinstance(pack_timeout_minutes, dict) else None
+        timeout_select = discord.ui.Select(
+            placeholder="Trusted-link timeout profile",
+            row=4,
+            options=[
+                discord.SelectOption(
+                    label=label,
+                    value=value,
+                    default=(value == "inherit" and not isinstance(timeout_override, int))
+                    or (isinstance(timeout_override, int) and value == str(timeout_override)),
+                )
+                for value, label in TIMEOUT_PRESET_CHOICES
+            ],
+        )
+
+        async def timeout_callback(interaction: discord.Interaction):
+            async def action():
+                selected = timeout_select.values[0]
+                timeout_value = None if selected == "inherit" else int(selected)
+                ok, message = await self.cog.service.set_link_policy_timeout_override(self.guild_id, timeout_value)
+                await self._rerender(interaction, note=message, note_ok=ok)
+
+            await self._safe_action(
+                interaction,
+                stage="shield_link_policy_timeout",
+                failure_message="Babblebox could not update the trusted-link timeout profile right now.",
+                action=action,
+            )
+
+        timeout_select.callback = timeout_callback
+        self.add_item(timeout_select)
 
 
 class ShieldCog(commands.Cog):
@@ -277,6 +1187,73 @@ class ShieldCog(commands.Cog):
             )
             return False
         return True
+
+    def _shield_status_embed(self, title: str, message: str, *, ok: bool) -> discord.Embed:
+        return ge.make_status_embed(title, message, tone="success" if ok else "warning", footer="Babblebox Shield")
+
+    async def _send_private_interaction(self, interaction: discord.Interaction, **kwargs):
+        if interaction.guild is not None:
+            kwargs["ephemeral"] = True
+        else:
+            kwargs.pop("ephemeral", None)
+        try:
+            if interaction.response.is_done():
+                return await interaction.followup.send(**kwargs)
+            return await interaction.response.send_message(**kwargs)
+        except discord.InteractionResponded:
+            with contextlib.suppress(discord.NotFound, discord.HTTPException):
+                return await interaction.followup.send(**kwargs)
+            return None
+        except (discord.NotFound, discord.HTTPException):
+            return None
+
+    async def _edit_interaction_message(self, interaction: discord.Interaction, **kwargs) -> bool:
+        if not interaction.response.is_done():
+            await interaction.response.edit_message(**kwargs)
+            return True
+        edit_original_response = getattr(interaction, "edit_original_response", None)
+        if callable(edit_original_response):
+            with contextlib.suppress(discord.NotFound, discord.HTTPException, discord.ClientException):
+                await edit_original_response(**kwargs)
+                return True
+        message = getattr(interaction, "message", None)
+        edit_message = getattr(message, "edit", None)
+        if callable(edit_message):
+            with contextlib.suppress(discord.NotFound, discord.HTTPException):
+                await edit_message(**kwargs)
+                return True
+        return False
+
+    async def _defer_component_interaction(
+        self,
+        interaction: discord.Interaction,
+        *,
+        stage: str,
+        failure_title: str,
+        failure_message: str,
+        guild_id: int | None = None,
+    ) -> bool:
+        if interaction.response.is_done():
+            return True
+        defer = getattr(interaction.response, "defer", None)
+        if not callable(defer):
+            return True
+        try:
+            await defer(ephemeral=interaction.guild is not None, thinking=False)
+            return True
+        except Exception:
+            await self._send_private_interaction(
+                interaction,
+                embed=self._shield_status_embed(failure_title, failure_message, ok=False),
+            )
+            return False
+
+    def _default_rule_pack(self, guild_id: int) -> str:
+        config = self.service.get_config(guild_id)
+        for pack in RULE_PANEL_PACKS:
+            if config.get(f"{pack}_enabled"):
+                return pack
+        return "spam"
 
     def _format_mentions(self, ids: list[int], *, kind: str) -> str:
         if not ids:
@@ -441,8 +1418,208 @@ class ShieldCog(commands.Cog):
             f"Low confidence: {self._action_label(low_action)}\n"
             f"Medium confidence: {self._action_label(medium_action)}\n"
             f"High confidence: {self._action_label(high_action)}\n"
+            f"Timeout profile: {self._pack_timeout_summary(config, 'link_policy')}\n"
             f"{detail}"
         )
+
+    def _truncate_text(self, value: object, limit: int) -> str:
+        text = str(value or "")
+        if not text:
+            return "None"
+        if len(text) <= limit:
+            return text
+        suffix = "..."
+        return text[: max(1, limit - len(suffix))].rstrip() + suffix
+
+    def _embed_char_count(self, embed: discord.Embed) -> int:
+        total = len(embed.title or "") + len(embed.description or "")
+        total += len(getattr(embed.footer, "text", "") or "")
+        for field in embed.fields:
+            total += len(field.name or "") + len(field.value or "")
+        return total
+
+    def _finalize_shield_embed(self, embed: discord.Embed, *, footer: str) -> discord.Embed:
+        embed = ge.style_embed(embed, footer=footer)
+        if embed.title:
+            embed.title = self._truncate_text(embed.title, 256)
+        if embed.description:
+            embed.description = self._truncate_text(embed.description, 4096)
+        if getattr(embed.footer, "text", None):
+            embed.set_footer(text=self._truncate_text(embed.footer.text, 2048))
+        for index, field in enumerate(list(embed.fields)):
+            embed.set_field_at(
+                index,
+                name=self._truncate_text(field.name, 256),
+                value=self._truncate_text(field.value, 1024),
+                inline=field.inline,
+            )
+        total = self._embed_char_count(embed)
+        if total > 6000 and embed.description:
+            embed.description = self._truncate_text(embed.description, max(64, len(embed.description) - (total - 6000)))
+            total = self._embed_char_count(embed)
+        if total > 6000:
+            for index in range(len(embed.fields) - 1, -1, -1):
+                if total <= 6000:
+                    break
+                field = embed.fields[index]
+                embed.set_field_at(
+                    index,
+                    name=field.name,
+                    value=self._truncate_text(field.value, max(64, len(field.value) - (total - 6000))),
+                    inline=field.inline,
+                )
+                total = self._embed_char_count(embed)
+        return embed
+
+    def _pack_timeout_summary(self, config: dict[str, object], pack: str) -> str:
+        pack_timeout_minutes = config.get("pack_timeout_minutes", {})
+        override = pack_timeout_minutes.get(pack) if isinstance(pack_timeout_minutes, dict) else None
+        global_timeout = int(config.get("timeout_minutes", 10))
+        if isinstance(override, int) and override >= 1:
+            return f"Dedicated `{override}` minute timeout"
+        return f"Inherits global `{global_timeout}` minute timeout"
+
+    def _pack_timeout_badge(self, config: dict[str, object], pack: str) -> str:
+        pack_timeout_minutes = config.get("pack_timeout_minutes", {})
+        override = pack_timeout_minutes.get(pack) if isinstance(pack_timeout_minutes, dict) else None
+        if isinstance(override, int) and override >= 1:
+            return f"{override}m dedicated"
+        return f"{int(config.get('timeout_minutes', 10))}m global"
+
+    def _pack_exemption_counts(self, config: dict[str, object], pack: str) -> tuple[int, int, int]:
+        pack_exemptions = config.get("pack_exemptions", {})
+        if not isinstance(pack_exemptions, dict):
+            return (0, 0, 0)
+        entry = pack_exemptions.get(pack, {})
+        if not isinstance(entry, dict):
+            return (0, 0, 0)
+        return (
+            len(entry.get("channel_ids", [])),
+            len(entry.get("role_ids", [])),
+            len(entry.get("user_ids", [])),
+        )
+
+    def _pack_option_lines(self, config: dict[str, object], pack: str) -> list[str]:
+        if pack == "spam":
+            return [
+                f"Rate rule: {config.get('spam_message_threshold', 7)} messages in {config.get('spam_message_window_seconds', 5)}s",
+                f"Burst rule: {config.get('spam_burst_threshold', 5)} messages in {config.get('spam_burst_window_seconds', 10)}s",
+                f"Near-duplicates: {config.get('spam_near_duplicate_threshold', 5)} in {config.get('spam_near_duplicate_window_seconds', 10)}s",
+                f"Emoji / emote lane: {'On' if config.get('spam_emote_enabled') else 'Off'}"
+                + (f" at {config.get('spam_emote_threshold', 18)}+" if config.get('spam_emote_enabled') else ""),
+                f"Capitals lane: {'On' if config.get('spam_caps_enabled') else 'Off'}"
+                + (f" at {config.get('spam_caps_threshold', 28)}+" if config.get('spam_caps_enabled') else ""),
+                f"Moderator handling: {self._moderator_policy_label(str(config.get('spam_moderator_policy', 'exempt')))}",
+            ]
+        if pack == "gif":
+            return [
+                f"GIF-heavy rate: {config.get('gif_message_threshold', 4)} posts in {config.get('gif_window_seconds', 20)}s",
+                f"Repeat pressure: {config.get('gif_repeat_threshold', 3)}+ repeats at {config.get('gif_min_ratio_percent', 70)}% GIF ratio",
+                f"Same asset: {config.get('gif_same_asset_threshold', 3)}+ repeats",
+            ]
+        if pack == "adult":
+            return [
+                f"Solicitation text detector: {'On' if config.get('adult_solicitation_enabled') else 'Off'}",
+                f"Solicitation carve-out channels: {self._format_mentions(config.get('adult_solicitation_excluded_channel_ids', []), kind='channel')}",
+            ]
+        if pack == "severe":
+            category_labels = [
+                SEVERE_CATEGORY_LABELS.get(str(value), str(value).replace("_", " ").title())
+                for value in config.get("severe_enabled_categories", [])
+            ]
+            return [
+                f"Categories: {', '.join(category_labels) if category_labels else 'None'}",
+                f"Custom terms: {self._format_text_list(config.get('severe_custom_terms', []), limit=4)}",
+                f"Removed bundled terms: {self._format_text_list(config.get('severe_removed_terms', []), limit=4)}",
+            ]
+        return ["No extra pack-local thresholds on this pack."]
+
+    def _pack_overview_line(self, config: dict[str, object], pack: str) -> str:
+        low_action, medium_action, high_action = self._pack_policy_actions(config, pack)
+        status = "On" if config.get(f"{pack}_enabled") else "Off"
+        sensitivity = SENSITIVITY_LABELS[config.get(f"{pack}_sensitivity", "normal")]
+        return (
+            f"**{PACK_LABELS[pack]}**\n"
+            f"{status} | {sensitivity} | "
+            f"{self._action_label(low_action)} / {self._action_label(medium_action)} / {self._action_label(high_action)}\n"
+            f"Timeout: {self._pack_timeout_badge(config, pack)}"
+        )
+
+    def _pack_detail_text(self, config: dict[str, object], pack: str) -> str:
+        low_action, medium_action, high_action = self._pack_policy_actions(config, pack)
+        channels, roles, users = self._pack_exemption_counts(config, pack)
+        lines = [
+            PACK_PANEL_DESCRIPTIONS.get(pack, PACK_LABELS.get(pack, pack.title())),
+            f"Enabled: {'Yes' if config.get(f'{pack}_enabled') else 'No'} | Sensitivity: {SENSITIVITY_LABELS[config.get(f'{pack}_sensitivity', 'normal')]}",
+            f"Low confidence: {self._action_label(low_action)}",
+            f"Medium confidence: {self._action_label(medium_action)}",
+            f"High confidence: {self._action_label(high_action)}",
+            f"Timeout profile: {self._pack_timeout_summary(config, pack)}",
+            *self._pack_option_lines(config, pack),
+            f"Pack exemptions: {channels} channel(s), {roles} role(s), {users} member(s)",
+        ]
+        return "\n".join(lines)
+
+    def _pack_action_editor_embed(self, guild_id: int, pack: str) -> discord.Embed:
+        config = self.service.get_config(guild_id)
+        embed = discord.Embed(
+            title=f"{PACK_LABELS.get(pack, pack.title())} Actions",
+            description="Only action lanes, sensitivity, enable state, and this pack's timeout profile live here.",
+            color=ge.EMBED_THEME["info"],
+        )
+        embed.add_field(name="Current Profile", value=self._pack_detail_text(config, pack), inline=False)
+        embed.add_field(
+            name="Why This Is Separate",
+            value="Action tuning stays compact here so unrelated spam or GIF thresholds do not crowd every pack.",
+            inline=False,
+        )
+        return self._finalize_shield_embed(embed, footer="Babblebox Shield | Pack-local action editor")
+
+    def _pack_options_editor_embed(self, guild_id: int, pack: str) -> discord.Embed:
+        config = self.service.get_config(guild_id)
+        embed = discord.Embed(
+            title=f"{PACK_LABELS.get(pack, pack.title())} Options",
+            description="Only the controls relevant to this pack are shown here.",
+            color=ge.EMBED_THEME["info"],
+        )
+        embed.add_field(name="Current Options", value="\n".join(self._pack_option_lines(config, pack)), inline=False)
+        if pack == "severe":
+            embed.add_field(
+                name="Term Editing",
+                value="Bundled and custom severe phrases stay under `/shield severe term` so this panel can stay compact.",
+                inline=False,
+            )
+        return self._finalize_shield_embed(embed, footer="Babblebox Shield | Pack-local options editor")
+
+    def _pack_exemptions_editor_embed(self, guild_id: int, pack: str) -> discord.Embed:
+        config = self.service.get_config(guild_id)
+        embed = discord.Embed(
+            title=f"{PACK_LABELS.get(pack, pack.title())} Exemptions",
+            description="Channel, role, and member exemptions here affect only this pack. Global filters stay under Scope.",
+            color=ge.EMBED_THEME["info"],
+        )
+        embed.add_field(name="Current Exemptions", value=self._pack_exemption_summary(config, pack), inline=False)
+        embed.add_field(
+            name="Editing Model",
+            value="Each selector replaces that pack's saved set for channels, roles, or members so the state stays predictable.",
+            inline=False,
+        )
+        return self._finalize_shield_embed(embed, footer="Babblebox Shield | Pack-local exemptions editor")
+
+    def _link_policy_editor_embed(self, guild_id: int) -> discord.Embed:
+        config = self.service.get_config(guild_id)
+        embed = discord.Embed(
+            title="Shield Link Policy",
+            description="Trusted-link policy is edited separately from the rule packs so it stays obvious and bounded.",
+            color=ge.EMBED_THEME["info"],
+        )
+        embed.add_field(name="Current Policy", value=self._link_policy_detail(config), inline=False)
+        embed.add_field(
+            name="Precedence",
+            value="Built-in trusted pack -> local trusted overrides -> admin allowlists. Hard malicious, impersonation, adult, and suspicious-link intel still wins.",
+            inline=False,
+        )
+        return self._finalize_shield_embed(embed, footer="Babblebox Shield | Trusted-link policy editor")
 
     def _format_trusted_family_lines(self, families: list[dict[str, object]], *, limit: int) -> str:
         if not families:
@@ -707,85 +1884,57 @@ class ShieldCog(commands.Cog):
             ),
             inline=False,
         )
-        return ge.style_embed(embed, footer="Babblebox Shield | Use /shield panel, rules, exemptions, links, trusted, filters, logs, allowlist, ai, or test")
+        return self._finalize_shield_embed(
+            embed,
+            footer="Babblebox Shield | Use /shield panel, rules, exemptions, links, trusted, filters, logs, allowlist, ai, or test",
+        )
 
-    def _rules_embed(self, guild_id: int) -> discord.Embed:
+    def _rules_embed(self, guild_id: int, *, selected_pack: str | None = None) -> discord.Embed:
         config = self.service.get_config(guild_id)
+        active_pack = selected_pack if selected_pack in RULE_PANEL_PACKS else self._default_rule_pack(guild_id)
         embed = discord.Embed(
             title="Shield Rules",
-            description="Low, medium, and high confidence actions stay local and explicit. Known-malicious, impersonation, and adult-domain matches can still act hard, while anti-spam and anti-GIF stay understandable, configurable, and evidence-driven.",
+            description="Select a pack below in `/shield panel` and Babblebox only shows the controls relevant to that pack. Slash commands stay available as exact fallbacks, not the primary editing surface.",
             color=ge.EMBED_THEME["info"],
         )
-        pack_lines = []
-        for pack in ("privacy", "promo", "spam", "gif"):
-            pack_lines.append(
-                f"**{PACK_LABELS[pack]}**\n"
-                f"{self._pack_policy_detail(config, pack)}"
-            )
-        embed.add_field(name="Confidence Actions", value="\n\n".join(pack_lines), inline=False)
-        high_risk_lines = []
-        for pack in ("scam", "adult", "severe"):
-            high_risk_lines.append(
-                f"**{PACK_LABELS[pack]}**\n"
-                f"{self._pack_policy_detail(config, pack)}"
-            )
-        embed.add_field(name="High-Risk Packs", value="\n\n".join(high_risk_lines), inline=False)
         embed.add_field(
-            name="Recommended Safe Use",
+            name="Core Packs",
+            value="\n\n".join(self._pack_overview_line(config, pack) for pack in CORE_RULE_PANEL_PACKS),
+            inline=False,
+        )
+        embed.add_field(
+            name="High-Risk Packs",
+            value="\n\n".join(self._pack_overview_line(config, pack) for pack in HIGH_RISK_RULE_PANEL_PACKS),
+            inline=False,
+        )
+        embed.add_field(name=f"{PACK_LABELS[active_pack]} Details", value=self._pack_detail_text(config, active_pack), inline=False)
+        embed.add_field(
+            name="Panel Flow",
             value=(
-                "Low confidence stays intentionally capped to detect or log-only behavior.\n"
-                "Medium confidence is the right lane for delete + log once the evidence is clear.\n"
-                "Reserve Delete + Timeout + log or repeated-hit escalation for high-confidence lanes after you have watched the logs and tuned scope or exemptions."
+                "Use **Actions** for enable state, sensitivity, low/medium/high actions, and this pack's timeout profile.\n"
+                "Use **Options** for pack-local thresholds only when that pack supports them.\n"
+                "Use **Exemptions** for channels, roles, or members that should bypass only this pack."
             ),
             inline=False,
         )
         embed.add_field(
-            name="Trusted-Link Policy",
-            value=self._link_policy_detail(config),
-            inline=False,
-        )
-        embed.add_field(
-            name="Timeout Window",
+            name="Global Fallbacks",
             value=(
                 f"Repeated-hit escalation: `{config['escalation_threshold']}` hits in `{config['escalation_window_minutes']}` minutes\n"
-                f"Timeout: `{config['timeout_minutes']}` minutes"
-            ),
-            inline=True,
-        )
-        embed.add_field(
-            name="Advanced Patterns",
-            value=(
+                f"Global timeout fallback: `{config['timeout_minutes']}` minutes\n"
                 f"{len(config['custom_patterns'])}/{CUSTOM_PATTERN_LIMIT} configured\n"
                 "Advanced patterns stay safe-text only. Raw user regex is intentionally unsupported."
             ),
-            inline=True,
-        )
-        embed.add_field(
-            name="Quick Use",
-            value=(
-                "`/shield rules pack:promo enabled:true low_action:log medium_action:delete_log high_action:delete_log sensitivity:high`\n"
-                "`/shield rules pack:spam enabled:true low_action:log medium_action:delete_log high_action:delete_timeout_log message_threshold:7 window_seconds:5 burst_threshold:5 burst_window_seconds:10 duplicate_threshold:5 duplicate_window_seconds:10 moderator_policy:exempt`\n"
-                "`/shield rules pack:spam emote_enabled:true emote_threshold:18 caps_enabled:true caps_threshold:28`\n"
-                "`/shield rules pack:gif enabled:true low_action:log medium_action:delete_log high_action:delete_timeout_log message_threshold:4 window_seconds:20 repeat_threshold:3 same_asset_threshold:3 ratio_percent:70`\n"
-                "`/shield rules pack:adult enabled:true adult_solicitation:true low_action:log medium_action:delete_log high_action:delete_log`\n"
-                "`/shield rules pack:severe enabled:true low_action:detect medium_action:delete_log high_action:delete_log`\n"
-                "`/shield severe category category:self_harm_encouragement state:on`\n"
-                "`/shield links mode:trusted_only low_action:log medium_action:delete_log high_action:delete_log`\n"
-                "`/shield exemptions pack:spam target:channel state:on channel:#bot-games`\n"
-                "`/shield trusted view`\n"
-                "`/shield rules module:true escalation_threshold:3 timeout_minutes:10`\n"
-                "`bb!shield advanced list` for safe custom patterns"
-            ),
             inline=False,
         )
-        return ge.style_embed(embed, footer="Babblebox Shield | Confidence actions stay local, explicit, and evidence-driven")
+        return self._finalize_shield_embed(embed, footer="Babblebox Shield | Pack-aware rules editor")
 
     def _links_embed(self, guild_id: int) -> discord.Embed:
         config = self.service.get_config(guild_id)
         trusted_state = self.service.trusted_pack_state(guild_id)
         embed = discord.Embed(
-            title="Shield Links and Trust",
-            description="Trusted-link policy is a separate live-message lane. It stays distinct from Confessions link mode, and hard malicious, impersonation, adult, or suspicious-link evidence still wins over policy exceptions.",
+            title="Shield Link Policy",
+            description="Trusted-link policy is a separate live-message lane, separate from Confessions link mode, and hard malicious, impersonation, adult, or suspicious-link evidence still wins over policy exceptions.",
             color=ge.EMBED_THEME["info"],
         )
         embed.add_field(name="Current Policy", value=self._link_policy_detail(config), inline=False)
@@ -818,16 +1967,11 @@ class ShieldCog(commands.Cog):
             inline=False,
         )
         embed.add_field(
-            name="Quick Use",
-            value=(
-                "`/shield links mode:trusted_only low_action:log medium_action:delete_log high_action:delete_log`\n"
-                "`/shield trusted view`\n"
-                "`/shield trusted family family:docs state:off`\n"
-                "`/shield trusted domain domain:docs.python.org state:off`"
-            ),
+            name="Panel Flow",
+            value="Use **Edit Link Policy** in `/shield panel` to tune mode, action ladder, and timeout profile. Built-in trusted families and domains still live under `/shield trusted`.",
             inline=False,
         )
-        return ge.style_embed(embed, footer="Babblebox Shield | Trust stays visible, bounded, and override-aware")
+        return self._finalize_shield_embed(embed, footer="Babblebox Shield | Trust stays visible, bounded, and override-aware")
 
     def _scope_embed(self, guild_id: int) -> discord.Embed:
         config = self.service.get_config(guild_id)
@@ -874,25 +2018,23 @@ class ShieldCog(commands.Cog):
         embed.add_field(
             name="Pack-Specific Exemptions",
             value="\n".join(
-                f"**{PACK_LABELS[pack]}**\n{self._pack_exemption_summary(config, pack)}"
-                for pack in ("spam", "gif", "scam", "promo", "privacy", "adult", "severe")
+                f"**{PACK_LABELS[pack]}** | "
+                f"{self._pack_exemption_counts(config, pack)[0]} channel(s), "
+                f"{self._pack_exemption_counts(config, pack)[1]} role(s), "
+                f"{self._pack_exemption_counts(config, pack)[2]} member(s)"
+                for pack in RULE_PANEL_PACKS
             ),
             inline=False,
         )
         embed.add_field(
-            name="Quick Use",
+            name="Editing Model",
             value=(
-                "`/shield filters mode:only_included`\n"
-                "`/shield filters target:trusted_role_ids state:on role:@Mods`\n"
-                "`/shield filters target:adult_solicitation_excluded_channel_ids state:on channel:#adult-market`\n"
-                "`/shield allowlist bucket:allow_domains state:on value:example.com`\n"
-                "`/shield exemptions pack:gif target:channel state:on channel:#media`\n"
-                "`/shield exemptions pack:spam target:role state:on role:@Trusted Bots`\n"
-                "`/shield trusted view`"
+                "Global includes, excludes, trusted roles, and allowlists stay here.\n"
+                "Pack-local exemptions now live in Rules -> Exemptions so unrelated scope settings do not clutter every pack."
             ),
             inline=False,
         )
-        return ge.style_embed(embed, footer="Babblebox Shield | Global filters stay separate from pack-specific exemptions")
+        return self._finalize_shield_embed(embed, footer="Babblebox Shield | Global filters stay separate from pack-specific exemptions")
 
     def _ai_embed(self, guild_id: int) -> discord.Embed:
         config = self.service.get_config(guild_id)
@@ -954,7 +2096,7 @@ class ShieldCog(commands.Cog):
             value="`/shield ai min_confidence:high privacy:true promo:false scam:true adult:true severe:true`",
             inline=False,
         )
-        return ge.style_embed(embed, footer="Babblebox Shield AI | Review scope is admin-configurable; access is owner-managed")
+        return self._finalize_shield_embed(embed, footer="Babblebox Shield AI | Review scope is admin-configurable; access is owner-managed")
 
     def _logs_embed(self, guild_id: int) -> discord.Embed:
         config = self.service.get_config(guild_id)
@@ -990,11 +2132,18 @@ class ShieldCog(commands.Cog):
             value="`/shield logs channel:#shield-log role:@Mods`\n`/shield logs clear_channel:true clear_role:true`",
             inline=False,
         )
-        return ge.style_embed(embed, footer="Babblebox Shield | Log-first and compact by design")
+        return self._finalize_shield_embed(embed, footer="Babblebox Shield | Log-first and compact by design")
 
-    def build_panel_embed(self, guild_id: int, section: str, *, channel_id: int | None = None) -> discord.Embed:
+    def build_panel_embed(
+        self,
+        guild_id: int,
+        section: str,
+        *,
+        channel_id: int | None = None,
+        selected_pack: str | None = None,
+    ) -> discord.Embed:
         if section == "rules":
-            embed = self._rules_embed(guild_id)
+            embed = self._rules_embed(guild_id, selected_pack=selected_pack)
         elif section == "links":
             embed = self._links_embed(guild_id)
         elif section == "scope":
@@ -1005,7 +2154,10 @@ class ShieldCog(commands.Cog):
             embed = self._logs_embed(guild_id)
         else:
             embed = self._overview_embed(guild_id)
-        return self._add_operability_field(embed, guild_id, channel_id=channel_id)
+        return self._finalize_shield_embed(
+            self._add_operability_field(embed, guild_id, channel_id=channel_id),
+            footer=getattr(embed.footer, "text", None) or "Babblebox Shield",
+        )
 
     async def _send_result(self, ctx: commands.Context, title: str, message: str, *, ok: bool):
         embed = ge.make_status_embed(title, message, tone="success" if ok else "warning", footer="Babblebox Shield")
@@ -1092,7 +2244,7 @@ class ShieldCog(commands.Cog):
         ratio_percent="Minimum GIF-share ratio for the GIF pack",
         escalation_threshold="Repeated-hit threshold for delete_escalate",
         escalation_window_minutes="Strike window used for delete_escalate",
-        timeout_minutes="Timeout length used when escalation or timeout actions fire",
+        timeout_minutes="Timeout length used when escalation or timeout actions fire. With a pack selected, this becomes that pack's dedicated timeout override.",
     )
     @app_commands.choices(
         pack=PACK_CHOICES,
@@ -1170,7 +2322,7 @@ class ShieldCog(commands.Cog):
         if pack_fields_used and pack is None:
             ok = False
             messages.append("Choose a pack when changing pack enabled, action policy, sensitivity, or explicit thresholds.")
-        elif pack is not None:
+        elif pack is not None and pack_fields_used:
             pack_ok, pack_message = await self.service.set_pack_config(
                 ctx.guild.id,
                 pack,
@@ -1198,17 +2350,21 @@ class ShieldCog(commands.Cog):
             )
             ok = ok and pack_ok
             messages.append(pack_message)
-        if any(value is not None for value in (escalation_threshold, escalation_window_minutes, timeout_minutes)):
+        if pack is not None and timeout_minutes is not None:
+            timeout_ok, timeout_message = await self.service.set_pack_timeout_override(ctx.guild.id, pack, timeout_minutes)
+            ok = ok and timeout_ok
+            messages.append(timeout_message)
+        if any(value is not None for value in (escalation_threshold, escalation_window_minutes)) or (timeout_minutes is not None and pack is None):
             escalation_ok, escalation_message = await self.service.set_escalation(
                 ctx.guild.id,
                 threshold=escalation_threshold,
                 window_minutes=escalation_window_minutes,
-                timeout_minutes=timeout_minutes,
+                timeout_minutes=timeout_minutes if pack is None else None,
             )
             ok = ok and escalation_ok
             messages.append(escalation_message)
         if not messages:
-            await send_hybrid_response(ctx, embed=self._rules_embed(ctx.guild.id), ephemeral=True)
+            await send_hybrid_response(ctx, embed=self._rules_embed(ctx.guild.id, selected_pack=pack), ephemeral=True)
             return
         await self._send_result(ctx, "Shield Rules", "\n".join(messages), ok=ok)
 
@@ -1219,6 +2375,7 @@ class ShieldCog(commands.Cog):
         low_action="Action for safe-but-untrusted low-confidence policy matches",
         medium_action="Action for medium-confidence policy matches such as invites or link hubs",
         high_action="Action for dangerous high-confidence policy matches that still fall through to the policy lane",
+        timeout_minutes="Optional dedicated timeout override for the trusted-link lane; omit it to keep using the global Shield timeout.",
     )
     @app_commands.choices(
         mode=LINK_POLICY_MODE_CHOICES,
@@ -1235,34 +2392,14 @@ class ShieldCog(commands.Cog):
         low_action: Optional[str] = None,
         medium_action: Optional[str] = None,
         high_action: Optional[str] = None,
+        timeout_minutes: Optional[int] = None,
     ):
         if not await self._guard(ctx):
             return
-        if all(value is None for value in (mode, action, low_action, medium_action, high_action)):
-            embed = discord.Embed(
-                title="Shield Link Policy",
-                description="Shield link policy is a live-message-only policy lane. It stays separate from Confessions link mode, and `/shield trusted` shows the built-in trusted pack plus local trust overrides.",
-                color=ge.EMBED_THEME["info"],
-            )
-            embed.add_field(name="Current Policy", value=self._link_policy_detail(self.service.get_config(ctx.guild.id)), inline=False)
-            embed.add_field(
-                name="Trust Precedence",
-                value=(
-                    "Built-in trusted pack -> local trusted-only overrides -> admin allowlisted domains or invites.\n"
-                    "Hard malicious, impersonation, adult, and suspicious-link evidence still wins."
-                ),
-                inline=False,
-            )
-            embed.add_field(
-                name="Quick Use",
-                value=(
-                    "`/shield links mode:trusted_only low_action:log medium_action:delete_log high_action:delete_log`\n"
-                    "`/shield trusted view`"
-                ),
-                inline=False,
-            )
-            await send_hybrid_response(ctx, embed=ge.style_embed(embed, footer="Babblebox Shield | Trusted-link policy"), ephemeral=True)
+        if all(value is None for value in (mode, action, low_action, medium_action, high_action, timeout_minutes)):
+            await send_hybrid_response(ctx, embed=self._links_embed(ctx.guild.id), ephemeral=True)
             return
+        messages: list[str] = []
         ok, message = await self.service.set_link_policy_config(
             ctx.guild.id,
             mode=mode,
@@ -1271,7 +2408,12 @@ class ShieldCog(commands.Cog):
             medium_action=medium_action,
             high_action=high_action,
         )
-        await self._send_result(ctx, "Shield Link Policy", message, ok=ok)
+        messages.append(message)
+        if timeout_minutes is not None:
+            timeout_ok, timeout_message = await self.service.set_link_policy_timeout_override(ctx.guild.id, timeout_minutes)
+            ok = ok and timeout_ok
+            messages.append(timeout_message)
+        await self._send_result(ctx, "Shield Link Policy", "\n".join(messages), ok=ok)
 
     @shield_group.group(
         name="trusted",
@@ -1317,7 +2459,7 @@ class ShieldCog(commands.Cog):
     async def shield_severe_group(self, ctx: commands.Context):
         if not await self._guard(ctx):
             return
-        await send_hybrid_response(ctx, embed=self._rules_embed(ctx.guild.id), ephemeral=True)
+        await send_hybrid_response(ctx, embed=self._rules_embed(ctx.guild.id, selected_pack="severe"), ephemeral=True)
 
     @shield_severe_group.command(name="category", description="Turn a severe-harm category on or off")
     @app_commands.describe(category="Which severe-harm category to change", state="Turn that category on or off")
@@ -1742,3 +2884,4 @@ class ShieldCog(commands.Cog):
 
 async def setup(bot: commands.Bot):
     await bot.add_cog(ShieldCog(bot))
+

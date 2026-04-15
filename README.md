@@ -137,6 +137,7 @@ Babblebox is intentionally compact:
 - `Adult Links + Solicitation` pack for adult-domain intel plus optional solicitation / DM-ad text detection
 - `Severe Harm / Hate` pack for sexual-exploitation solicitation, self-harm encouragement, eliminationist hate, and severe slur abuse
 - optional Shield link policy mode: `Default` or `Trusted Links Only`, separate from Confessions link mode
+- panel-first `/shield panel` editing with pack-aware `Actions`, `Options`, and `Exemptions` lanes so spam-only or GIF-only controls do not spill into unrelated packs, while each pack can inherit the global timeout or keep a dedicated timeout profile
 - built-in trusted families and direct domains are visible under `/shield trusted`, with bounded per-server disable or re-enable controls
 - bundled local link safety with safe-domain families, suspicious-domain gating, and no external provider requirement
 - local-first malicious-link blocking with a feed of ~200k known malicious domains
@@ -316,17 +317,18 @@ Shield now backs the bounded safety lane for stored or fan-out utility text as w
 ### Shield / Safety
 
 Shield commands are private/admin-facing by default. The streamlined slash surface is centered on `/shield panel`.
+Use `/shield panel` first: pick a pack, then Babblebox splits editing into `Actions`, `Options`, and `Exemptions` so only the relevant controls show up.
 Slash is the best fit for multi-option admin setup here. Prefix stays positional, so the examples below stay intentionally short.
 
 | Slash | Prefix | Purpose |
 | --- | --- | --- |
-| `/shield panel` | `bb!shield panel` | Open the Shield admin panel |
-| `/shield rules` | `bb!shield rules true promo true log` | Configure pack confidence actions, explicit Anti-Spam and GIF thresholds, optional emote or capitals lanes, moderator anti-spam policy, solicitation detection, and escalation |
-| `/shield links` | `bb!shield links trusted_only` | Configure Shield `Default` vs `Trusted Links Only` live-message policy |
+| `/shield panel` | `bb!shield panel` | Open the panel-first Shield editor for rules, scope, links, AI, logs, and trust state |
+| `/shield rules` | `bb!shield rules true promo true log` | Use the precise slash fallback for one pack's actions, relevant thresholds, escalation, or that pack's dedicated timeout override |
+| `/shield links` | `bb!shield links trusted_only` | Configure Shield `Default` vs `Trusted Links Only` live-message policy, action ladder, and the trusted-link timeout profile |
 | `/shield trusted` | `bb!shield trusted view` | Inspect Shield's built-in trusted families/domains and local trust overrides |
 | `/shield logs` | `bb!shield logs #shield-log @Mods` | Set the mod-log channel and optional alert role |
-| `/shield filters` | `bb!shield filters` | Tune scope, includes, excludes, trusted roles, and solicitation carve-out channels |
-| `/shield exemptions` | `bb!shield exemptions` | Exempt a member, role, or channel from one specific Shield pack without weakening the rest |
+| `/shield filters` | `bb!shield filters` | Tune global scope, includes, excludes, trusted roles, and solicitation carve-out channels |
+| `/shield exemptions` | `bb!shield exemptions` | Use the quick slash fallback for one pack-local member, role, or channel exemption without weakening the rest |
 | `/shield allowlist` | `bb!shield allowlist` | Manage domain, invite, and phrase allowlists |
 | `/shield severe category` | `bb!shield severe category self_harm_encouragement off` | Turn severe-harm categories on or off |
 | `/shield severe term` | `bb!shield severe term add you scumlord` | Add, disable, restore, or remove bounded severe terms |
@@ -335,7 +337,7 @@ Slash is the best fit for multi-option admin setup here. Prefix stays positional
 | `/shield advanced list` | `bb!shield advanced list` | Review advanced patterns |
 | `/shield test` | `bb!shield test free nitro claim now https://bit.ly/x` | Dry-run a message through Shield |
 
-Shield's live-message link policy is intentionally separate from Confessions link mode. Confessions keeps `Disabled`, `Trusted Only`, and `Allow All Safe`, while Shield keeps `Default` plus the bounded `Trusted Links Only` mode. That stricter Shield mode allows the built-in trusted pack plus admin allowlisted domains and invite codes as policy exceptions, and `/shield trusted` now exposes the built-in families, direct domains, and any local built-in disables that affect trusted-only mode. Malicious, trusted-brand impersonation, adult-domain, and strong suspicious-link intel still wins over those trust exceptions. Shield phrase allowlists stay narrower: they suppress only targeted promo or adult-solicitation text matches. The live Shield packs are `Privacy Leak`, `Promo / Invite`, `Anti-Spam`, `GIF Flood / Media Pressure`, `Scam / Malicious Links`, `Adult Links + Solicitation`, and `Severe Harm / Hate`; no-link DM-lure bait lives under the scam pack, Anti-Spam stays grounded in explicit rate and duplicate rules with bounded corroboration, GIF delete actions remove the matched burst instead of only the last post, optional emote and capitals lanes stay off until an admin enables them, moderators are exempt from Anti-Spam by default unless admins choose a stricter policy, pack-specific exemptions live under `/shield exemptions`, live moderation stays opt-in, the first enable applies a recommended non-AI baseline, and Shield AI remains owner-managed second-pass review only.
+Shield's live-message link policy is intentionally separate from Confessions link mode. Confessions keeps `Disabled`, `Trusted Only`, and `Allow All Safe`, while Shield keeps `Default` plus the bounded `Trusted Links Only` mode. That stricter Shield mode allows the built-in trusted pack plus admin allowlisted domains and invite codes as policy exceptions, and `/shield trusted` now exposes the built-in families, direct domains, and any local built-in disables that affect trusted-only mode. Malicious, trusted-brand impersonation, adult-domain, and strong suspicious-link intel still wins over those trust exceptions. Shield phrase allowlists stay narrower: they suppress only targeted promo or adult-solicitation text matches. The live Shield packs are `Privacy Leak`, `Promo / Invite`, `Anti-Spam`, `GIF Flood / Media Pressure`, `Scam / Malicious Links`, `Adult Links + Solicitation`, and `Severe Harm / Hate`; no-link DM-lure bait lives under the scam pack, Anti-Spam stays grounded in explicit rate and duplicate rules with bounded corroboration, GIF delete actions remove the matched burst instead of only the last post, optional emote and capitals lanes stay off until an admin enables them, moderators are exempt from Anti-Spam by default unless admins choose a stricter policy, `/shield panel` now keeps pack-local `Actions`, `Options`, and `Exemptions` together without mixing unrelated controls, `/shield exemptions` stays the quick slash fallback, each pack can inherit the global timeout or keep a dedicated timeout override, the trusted-link lane can do the same, live moderation stays opt-in, the first enable applies a recommended non-AI baseline, and Shield AI remains owner-managed second-pass review only.
 
 Shield also now governs eligible non-chat surfaces in a bounded way. Confessions keeps its own privacy, review, and workflow logic, but shares Shield link intelligence. AFK reasons plus reminder text and public reminder delivery use fixed private privacy, adult, and severe feature-surface policies. Watch keyword setup stays privacy-only. None of those private feature checks create mod-log spam or call Shield AI.
 

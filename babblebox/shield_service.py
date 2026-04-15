@@ -62,6 +62,7 @@ from babblebox.shield_store import (
     DEFAULT_SHIELD_LINK_POLICY_MODE,
     LOW_CONFIDENCE_ACTIONS,
     MEDIUM_CONFIDENCE_ACTIONS,
+    PACK_TIMEOUT_PACKS,
     SHIELD_SEVERE_TERM_LIMIT,
     ShieldStateStore,
     ShieldStorageUnavailable,
@@ -600,6 +601,7 @@ class CompiledShieldConfig:
     trusted_builtin_disabled_families: frozenset[str]
     trusted_builtin_disabled_domains: frozenset[str]
     pack_exemptions: dict[str, PackExemptionScope]
+    pack_timeout_minutes: dict[str, int | None]
     privacy: PackSettings
     promo: PackSettings
     scam: PackSettings
@@ -642,6 +644,13 @@ class CompiledShieldConfig:
         if pack == "link_policy":
             return self.link_policy
         return PackSettings(enabled=True, low_action="log", medium_action="log", high_action="log", sensitivity="normal")
+
+    def timeout_minutes_for_pack(self, pack: str | None) -> int:
+        if pack:
+            override = self.pack_timeout_minutes.get(pack)
+            if isinstance(override, int) and override >= 1:
+                return override
+        return self.timeout_minutes
 
 
 @dataclass(frozen=True)
@@ -1780,6 +1789,7 @@ def _build_feature_compiled_config(
         trusted_builtin_disabled_families=frozenset(),
         trusted_builtin_disabled_domains=frozenset(),
         pack_exemptions={pack: PackExemptionScope(channel_ids=frozenset(), role_ids=frozenset(), user_ids=frozenset()) for pack in RULE_PACKS},
+        pack_timeout_minutes={},
         privacy=_feature_pack_settings(enabled=privacy_enabled),
         promo=disabled,
         scam=disabled,
@@ -2904,6 +2914,87 @@ class ShieldService:
             ),
         )
 
+    async def replace_pack_exemptions(
+        self,
+        guild_id: int,
+        pack: str,
+        target_kind: str,
+        target_ids: Sequence[int],
+    ) -> tuple[bool, str]:
+        cleaned_pack = normalize_plain_text(pack).casefold()
+        cleaned_kind = normalize_plain_text(target_kind).casefold()
+        if cleaned_pack not in RULE_PACKS:
+            return False, "Unknown Shield pack."
+        bucket = {"channel": "channel_ids", "role": "role_ids", "user": "user_ids"}.get(cleaned_kind)
+        if bucket is None:
+            return False, "Pack exemptions must target a channel, role, or member."
+        cleaned_ids = _sorted_unique_ints(target_ids)
+        if len(cleaned_ids) > FILTER_LIMIT:
+            return False, f"You can keep up to {FILTER_LIMIT} {cleaned_kind} exemptions on a single Shield pack."
+
+        def mutate(config: dict[str, Any]):
+            pack_exemptions = dict(config.get("pack_exemptions", {}))
+            pack_entry = dict(pack_exemptions.get(cleaned_pack, {}))
+            pack_entry[bucket] = list(cleaned_ids)
+            pack_exemptions[cleaned_pack] = pack_entry
+            config["pack_exemptions"] = pack_exemptions
+
+        summary = "None configured" if not cleaned_ids else f"{len(cleaned_ids)} saved"
+        return await self._update_config(
+            guild_id,
+            mutate,
+            success_message=(
+                f"{PACK_LABELS[cleaned_pack]} {cleaned_kind} exemptions were replaced. "
+                f"Current set: {summary}."
+            ),
+        )
+
+    async def set_pack_timeout_override(
+        self,
+        guild_id: int,
+        pack: str,
+        timeout_minutes: int | None,
+    ) -> tuple[bool, str]:
+        cleaned_pack = normalize_plain_text(pack).casefold()
+        if cleaned_pack not in RULE_PACKS:
+            return False, "Unknown Shield pack."
+        return await self._set_timeout_override(guild_id, cleaned_pack, timeout_minutes)
+
+    async def set_link_policy_timeout_override(
+        self,
+        guild_id: int,
+        timeout_minutes: int | None,
+    ) -> tuple[bool, str]:
+        return await self._set_timeout_override(guild_id, "link_policy", timeout_minutes)
+
+    async def _set_timeout_override(
+        self,
+        guild_id: int,
+        pack: str,
+        timeout_minutes: int | None,
+    ) -> tuple[bool, str]:
+        if pack not in PACK_TIMEOUT_PACKS:
+            return False, "Unknown Shield timeout target."
+        if timeout_minutes is not None and not (1 <= timeout_minutes <= 60):
+            return False, "Timeout length must be between 1 and 60 minutes."
+
+        def mutate(config: dict[str, Any]):
+            pack_timeout_minutes = dict(config.get("pack_timeout_minutes", {}))
+            pack_timeout_minutes[pack] = timeout_minutes
+            config["pack_timeout_minutes"] = pack_timeout_minutes
+
+        preview = self.get_config(guild_id)
+        global_timeout = int(preview.get("timeout_minutes", 10))
+        if timeout_minutes is None:
+            message = (
+                f"{PACK_LABELS.get(pack, pack.replace('_', ' ').title())} now inherits the global `{global_timeout}` minute timeout."
+            )
+        else:
+            message = (
+                f"{PACK_LABELS.get(pack, pack.replace('_', ' ').title())} now uses a dedicated `{timeout_minutes}` minute timeout."
+            )
+        return await self._update_config(guild_id, mutate, success_message=message)
+
     async def set_allow_entry(self, guild_id: int, field: str, value: str, enabled: bool) -> tuple[bool, str]:
         if field == "allow_domains":
             valid, cleaned = self._normalize_domain(value)
@@ -3967,7 +4058,12 @@ class ShieldService:
                 decision.action_note = f"Deleted the full {attempt_count}-message incident burst."
 
         if best.action in {"timeout_log", "delete_timeout_log"}:
-            decision.timed_out = await self._timeout_member(message, compiled, reason=f"Babblebox Shield matched {PACK_LABELS.get(best.pack, 'Shield')}.")
+            decision.timed_out = await self._timeout_member(
+                message,
+                compiled,
+                pack=best.pack,
+                reason=f"Babblebox Shield matched {PACK_LABELS.get(best.pack, 'Shield')}.",
+            )
             if not decision.timed_out:
                 decision.action_note = "Timeout was configured, but Babblebox could not time out that member."
 
@@ -3977,6 +4073,7 @@ class ShieldService:
                 decision.timed_out = await self._timeout_member(
                     message,
                     compiled,
+                    pack=best.pack,
                     reason=f"Babblebox Shield escalation after repeated {PACK_LABELS.get(best.pack, 'Shield').lower()} hits.",
                 )
                 decision.escalated = decision.timed_out
@@ -6012,7 +6109,14 @@ class ShieldService:
             return False
         return False
 
-    async def _timeout_member(self, message: discord.Message, compiled: CompiledShieldConfig, *, reason: str) -> bool:
+    async def _timeout_member(
+        self,
+        message: discord.Message,
+        compiled: CompiledShieldConfig,
+        *,
+        pack: str | None = None,
+        reason: str,
+    ) -> bool:
         member = message.author if isinstance(message.author, discord.Member) else None
         me = self._guild_member(message.guild, getattr(self.bot, "user", None))
         if member is None or me is None:
@@ -6025,7 +6129,7 @@ class ShieldService:
         if getattr(member, "top_role", None) is not None and getattr(me, "top_role", None) is not None:
             if member.top_role >= me.top_role:
                 return False
-        until = ge.now_utc() + timedelta(minutes=compiled.timeout_minutes)
+        until = ge.now_utc() + timedelta(minutes=compiled.timeout_minutes_for_pack(pack))
         with contextlib.suppress(discord.Forbidden, discord.HTTPException):
             await member.timeout(until, reason=reason)
             return True
@@ -6401,6 +6505,13 @@ class ShieldService:
             )
             for pack in RULE_PACKS
         }
+        raw_pack_timeout_minutes = raw.get("pack_timeout_minutes", {})
+        compiled_pack_timeout_minutes = {
+            pack: value
+            for pack in PACK_TIMEOUT_PACKS
+            for value in [raw_pack_timeout_minutes.get(pack) if isinstance(raw_pack_timeout_minutes, dict) else None]
+            if isinstance(value, int) and 1 <= value <= 60
+        }
 
         return CompiledShieldConfig(
             guild_id=guild_id,
@@ -6421,6 +6532,7 @@ class ShieldService:
             trusted_builtin_disabled_families=frozenset(_sorted_unique_text(raw.get("trusted_builtin_disabled_families", []))),
             trusted_builtin_disabled_domains=frozenset(_sorted_unique_text(raw.get("trusted_builtin_disabled_domains", []))),
             pack_exemptions=compiled_pack_exemptions,
+            pack_timeout_minutes=compiled_pack_timeout_minutes,
             privacy=PackSettings(
                 enabled=bool(raw.get("privacy_enabled")),
                 low_action=str(raw.get("privacy_low_action", "log")).strip().lower(),

@@ -43,6 +43,7 @@ SHIELD_META_ORDINARY_AI_POLICY_KEY = "ordinary_ai_policy"
 VALID_SHIELD_AI_ACCESS_MODES = {"inherit", "enabled", "disabled"}
 VALID_SPAM_MODERATOR_POLICIES = {"exempt", "delete_only", "full"}
 PACK_EXEMPTION_PACKS = ("privacy", "promo", "scam", "spam", "gif", "adult", "severe")
+PACK_TIMEOUT_PACKS = PACK_EXEMPTION_PACKS + ("link_policy",)
 
 
 class ShieldStorageUnavailable(RuntimeError):
@@ -67,6 +68,10 @@ def _default_pack_exemptions() -> dict[str, dict[str, list[int]]]:
         }
         for pack in PACK_EXEMPTION_PACKS
     }
+
+
+def _default_pack_timeout_minutes() -> dict[str, int | None]:
+    return {pack: None for pack in PACK_TIMEOUT_PACKS}
 
 
 def _legacy_action_policy(action: str) -> tuple[str, str, str]:
@@ -112,6 +117,7 @@ def default_guild_shield_config(guild_id: int | None = None) -> dict[str, Any]:
         "trusted_builtin_disabled_families": [],
         "trusted_builtin_disabled_domains": [],
         "pack_exemptions": _default_pack_exemptions(),
+        "pack_timeout_minutes": _default_pack_timeout_minutes(),
         "privacy_enabled": False,
         "privacy_action": "log",
         "privacy_low_action": "log",
@@ -240,6 +246,16 @@ def _clean_pack_exemptions(values: Any) -> dict[str, dict[str, list[int]]]:
     return cleaned
 
 
+def _clean_pack_timeout_minutes(values: Any) -> dict[str, int | None]:
+    cleaned = _default_pack_timeout_minutes()
+    if not isinstance(values, dict):
+        return cleaned
+    for pack in PACK_TIMEOUT_PACKS:
+        value = values.get(pack)
+        cleaned[pack] = value if isinstance(value, int) and 1 <= value <= 60 else None
+    return cleaned
+
+
 def _legacy_pack_payload(config: dict[str, Any], pack: str) -> dict[str, Any]:
     payload: dict[str, Any] = {}
     sources = []
@@ -298,6 +314,7 @@ def normalize_guild_shield_config(guild_id: int, config: Any) -> dict[str, Any]:
     ):
         cleaned[field] = _clean_text_list(config.get(field))
     cleaned["pack_exemptions"] = _clean_pack_exemptions(config.get("pack_exemptions"))
+    cleaned["pack_timeout_minutes"] = _clean_pack_timeout_minutes(config.get("pack_timeout_minutes"))
 
     for pack in ("privacy", "promo", "scam", "spam", "gif", "adult", "severe"):
         enabled_field = f"{pack}_enabled"
@@ -621,6 +638,7 @@ class _PostgresShieldStore(_BaseShieldStore):
                 "trusted_builtin_disabled_families JSONB NOT NULL DEFAULT '[]'::jsonb, "
                 "trusted_builtin_disabled_domains JSONB NOT NULL DEFAULT '[]'::jsonb, "
                 "pack_exemptions JSONB NOT NULL DEFAULT '{}'::jsonb, "
+                "pack_timeout_minutes JSONB NOT NULL DEFAULT '{}'::jsonb, "
                 "privacy_enabled BOOLEAN NOT NULL DEFAULT FALSE, "
                 "privacy_action TEXT NOT NULL DEFAULT 'log', "
                 "privacy_low_action TEXT NOT NULL DEFAULT 'log', "
@@ -762,6 +780,7 @@ class _PostgresShieldStore(_BaseShieldStore):
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS trusted_builtin_disabled_families JSONB NOT NULL DEFAULT '[]'::jsonb",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS trusted_builtin_disabled_domains JSONB NOT NULL DEFAULT '[]'::jsonb",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS pack_exemptions JSONB NOT NULL DEFAULT '{}'::jsonb",
+            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS pack_timeout_minutes JSONB NOT NULL DEFAULT '{}'::jsonb",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS spam_message_threshold SMALLINT NOT NULL DEFAULT 7",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS spam_message_window_seconds SMALLINT NOT NULL DEFAULT 5",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS spam_burst_threshold SMALLINT NOT NULL DEFAULT 5",
@@ -876,6 +895,12 @@ class _PostgresShieldStore(_BaseShieldStore):
                 )
                 if "pack_exemptions" in row
                 else _default_pack_exemptions(),
+                "pack_timeout_minutes": decode_postgres_json_object(
+                    row["pack_timeout_minutes"],
+                    label="shield_guild_configs.pack_timeout_minutes",
+                )
+                if "pack_timeout_minutes" in row
+                else _default_pack_timeout_minutes(),
                 "privacy_enabled": bool(row["privacy_enabled"]),
                 "privacy_action": row["privacy_action"],
                 "privacy_low_action": row["privacy_low_action"],
@@ -1083,6 +1108,7 @@ class _PostgresShieldStore(_BaseShieldStore):
             ("trusted_builtin_disabled_families", json.dumps(config["trusted_builtin_disabled_families"]), "::jsonb"),
             ("trusted_builtin_disabled_domains", json.dumps(config["trusted_builtin_disabled_domains"]), "::jsonb"),
             ("pack_exemptions", json.dumps(config["pack_exemptions"]), "::jsonb"),
+            ("pack_timeout_minutes", json.dumps(config["pack_timeout_minutes"]), "::jsonb"),
             ("privacy_enabled", config["privacy_enabled"], ""),
             ("privacy_action", config["privacy_action"], ""),
             ("privacy_low_action", config["privacy_low_action"], ""),

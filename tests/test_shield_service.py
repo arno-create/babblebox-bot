@@ -3953,6 +3953,83 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(decision.ai_review)
         self.assertEqual(len(log_channel.sent), 1)
 
+    async def test_replace_pack_exemptions_replaces_sets_without_bleeding(self):
+        ok, _ = await self.service.replace_pack_exemptions(10, "spam", "channel", [11, 12])
+        self.assertTrue(ok)
+        ok, _ = await self.service.replace_pack_exemptions(10, "spam", "role", [21])
+        self.assertTrue(ok)
+        ok, _ = await self.service.replace_pack_exemptions(10, "spam", "user", [31, 32])
+        self.assertTrue(ok)
+
+        config = self.service.get_config(10)
+
+        self.assertEqual(config["pack_exemptions"]["spam"]["channel_ids"], [11, 12])
+        self.assertEqual(config["pack_exemptions"]["spam"]["role_ids"], [21])
+        self.assertEqual(config["pack_exemptions"]["spam"]["user_ids"], [31, 32])
+        self.assertEqual(config["pack_exemptions"]["severe"]["channel_ids"], [])
+
+    async def test_pack_timeout_overrides_compile_with_global_fallback(self):
+        ok, _ = await self.service.set_escalation(10, timeout_minutes=9)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_pack_timeout_override(10, "spam", 25)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_link_policy_timeout_override(10, 14)
+        self.assertTrue(ok)
+
+        compiled = self.service._compiled_configs[10]
+
+        self.assertEqual(compiled.timeout_minutes_for_pack("spam"), 25)
+        self.assertEqual(compiled.timeout_minutes_for_pack("link_policy"), 14)
+        self.assertEqual(compiled.timeout_minutes_for_pack("severe"), 9)
+
+    async def test_pack_timeout_override_is_passed_into_timeout_actions(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        author = FakeAuthor(42, created_at=ge.now_utc() - timedelta(hours=3), joined_at=ge.now_utc() - timedelta(hours=1))
+        message = FakeMessage(guild=guild, channel=channel, author=author, content="hello there")
+
+        ok, _ = await self.service.set_module_enabled(guild.id, True)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_pack_timeout_override(guild.id, "spam", 27)
+        self.assertTrue(ok)
+
+        with (
+            patch.object(
+                self.service,
+                "_collect_matches",
+                return_value=[
+                    ShieldMatch(
+                        pack="spam",
+                        label="Spam burst",
+                        reason="Synthetic test hit",
+                        action="delete_timeout_log",
+                        confidence="high",
+                        heuristic=True,
+                        match_class="spam_message_rate",
+                    )
+                ],
+            ),
+            patch.object(self.service, "_timeout_member", new=AsyncMock(return_value=True)) as timeout_mock,
+            patch.object(self.service, "_send_alert", new=AsyncMock()),
+        ):
+            await self.service.handle_message(message)
+
+        self.assertTrue(timeout_mock.await_args)
+        self.assertEqual(timeout_mock.await_args.kwargs["pack"], "spam")
+
+    async def test_link_policy_timeout_override_persists_separately_from_pack_timeouts(self):
+        ok, _ = await self.service.set_pack_timeout_override(10, "scam", 18)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_link_policy_timeout_override(10, 12)
+        self.assertTrue(ok)
+
+        config = self.service.get_config(10)
+
+        self.assertEqual(config["pack_timeout_minutes"]["scam"], 18)
+        self.assertEqual(config["pack_timeout_minutes"]["link_policy"], 12)
+        self.assertIsNone(config["pack_timeout_minutes"]["spam"])
+
+
 class ShieldStoreNormalizationTests(unittest.TestCase):
     def test_normalize_state_migrates_legacy_nested_pack_config(self):
         store = _MemoryShieldStore()
