@@ -20,7 +20,7 @@ from babblebox.shield_ai import (
 
 DEFAULT_DATABASE_URL_ENV_ORDER = ("UTILITY_DATABASE_URL", "SUPABASE_DB_URL", "DATABASE_URL")
 DEFAULT_BACKEND = "postgres"
-DEFAULT_VERSION = 8
+DEFAULT_VERSION = 9
 VALID_SCAN_MODES = {"all", "only_included"}
 VALID_SHIELD_ACTIONS = {"disabled", "detect", "log", "delete_log", "delete_escalate", "timeout_log", "delete_timeout_log"}
 VALID_SHIELD_SENSITIVITIES = {"low", "normal", "high"}
@@ -41,6 +41,8 @@ CONFIDENCE_TIERS = ("low", "medium", "high")
 SHIELD_META_GLOBAL_AI_OVERRIDE_KEY = "global_ai_override"
 SHIELD_META_ORDINARY_AI_POLICY_KEY = "ordinary_ai_policy"
 VALID_SHIELD_AI_ACCESS_MODES = {"inherit", "enabled", "disabled"}
+VALID_SPAM_MODERATOR_POLICIES = {"exempt", "delete_only", "full"}
+PACK_EXEMPTION_PACKS = ("privacy", "promo", "scam", "spam", "gif", "adult", "severe")
 
 
 class ShieldStorageUnavailable(RuntimeError):
@@ -53,6 +55,17 @@ def default_shield_meta() -> dict[str, Any]:
         "ordinary_ai_allowed_models": [DEFAULT_SHIELD_AI_FAST_MODEL],
         "ordinary_ai_updated_by": None,
         "ordinary_ai_updated_at": None,
+    }
+
+
+def _default_pack_exemptions() -> dict[str, dict[str, list[int]]]:
+    return {
+        pack: {
+            "channel_ids": [],
+            "role_ids": [],
+            "user_ids": [],
+        }
+        for pack in PACK_EXEMPTION_PACKS
     }
 
 
@@ -98,6 +111,7 @@ def default_guild_shield_config(guild_id: int | None = None) -> dict[str, Any]:
         "allow_phrases": [],
         "trusted_builtin_disabled_families": [],
         "trusted_builtin_disabled_domains": [],
+        "pack_exemptions": _default_pack_exemptions(),
         "privacy_enabled": False,
         "privacy_action": "log",
         "privacy_low_action": "log",
@@ -124,8 +138,15 @@ def default_guild_shield_config(guild_id: int | None = None) -> dict[str, Any]:
         "spam_sensitivity": "normal",
         "spam_message_threshold": 7,
         "spam_message_window_seconds": 5,
+        "spam_burst_threshold": 5,
+        "spam_burst_window_seconds": 10,
         "spam_near_duplicate_threshold": 5,
         "spam_near_duplicate_window_seconds": 10,
+        "spam_emote_enabled": False,
+        "spam_emote_threshold": 18,
+        "spam_caps_enabled": False,
+        "spam_caps_threshold": 28,
+        "spam_moderator_policy": "exempt",
         "gif_enabled": False,
         "gif_action": "log",
         "gif_low_action": "log",
@@ -200,6 +221,25 @@ def _clean_severe_category_list(values: Any) -> list[str]:
     return [value for value in _clean_text_list(values) if value in VALID_SHIELD_SEVERE_CATEGORIES]
 
 
+def _clean_pack_exemption_entry(value: Any) -> dict[str, list[int]]:
+    if not isinstance(value, dict):
+        return {"channel_ids": [], "role_ids": [], "user_ids": []}
+    return {
+        "channel_ids": _clean_int_list(value.get("channel_ids")),
+        "role_ids": _clean_int_list(value.get("role_ids")),
+        "user_ids": _clean_int_list(value.get("user_ids")),
+    }
+
+
+def _clean_pack_exemptions(values: Any) -> dict[str, dict[str, list[int]]]:
+    cleaned = _default_pack_exemptions()
+    if not isinstance(values, dict):
+        return cleaned
+    for pack in PACK_EXEMPTION_PACKS:
+        cleaned[pack] = _clean_pack_exemption_entry(values.get(pack))
+    return cleaned
+
+
 def _legacy_pack_payload(config: dict[str, Any], pack: str) -> dict[str, Any]:
     payload: dict[str, Any] = {}
     sources = []
@@ -257,6 +297,7 @@ def normalize_guild_shield_config(guild_id: int, config: Any) -> dict[str, Any]:
         "trusted_builtin_disabled_domains",
     ):
         cleaned[field] = _clean_text_list(config.get(field))
+    cleaned["pack_exemptions"] = _clean_pack_exemptions(config.get("pack_exemptions"))
 
     for pack in ("privacy", "promo", "scam", "spam", "gif", "adult", "severe"):
         enabled_field = f"{pack}_enabled"
@@ -344,8 +385,12 @@ def normalize_guild_shield_config(guild_id: int, config: Any) -> dict[str, Any]:
         ("timeout_minutes", 1, 60, 10),
         ("spam_message_threshold", 4, 12, 7),
         ("spam_message_window_seconds", 3, 30, 5),
+        ("spam_burst_threshold", 4, 10, 5),
+        ("spam_burst_window_seconds", 5, 30, 10),
         ("spam_near_duplicate_threshold", 3, 10, 5),
         ("spam_near_duplicate_window_seconds", 5, 45, 10),
+        ("spam_emote_threshold", 8, 40, 18),
+        ("spam_caps_threshold", 12, 80, 28),
         ("gif_message_threshold", 3, 8, 4),
         ("gif_window_seconds", 10, 45, 20),
         ("gif_repeat_threshold", 2, 6, 3),
@@ -354,6 +399,12 @@ def normalize_guild_shield_config(guild_id: int, config: Any) -> dict[str, Any]:
     ):
         value = config.get(field)
         cleaned[field] = value if isinstance(value, int) and minimum <= value <= maximum else default
+    cleaned["spam_emote_enabled"] = bool(config.get("spam_emote_enabled"))
+    cleaned["spam_caps_enabled"] = bool(config.get("spam_caps_enabled"))
+    moderator_policy = str(config.get("spam_moderator_policy", "exempt")).strip().lower()
+    cleaned["spam_moderator_policy"] = (
+        moderator_policy if moderator_policy in VALID_SPAM_MODERATOR_POLICIES else "exempt"
+    )
 
     patterns = []
     for item in config.get("custom_patterns", []):
@@ -569,6 +620,7 @@ class _PostgresShieldStore(_BaseShieldStore):
                 "allow_phrases JSONB NOT NULL DEFAULT '[]'::jsonb, "
                 "trusted_builtin_disabled_families JSONB NOT NULL DEFAULT '[]'::jsonb, "
                 "trusted_builtin_disabled_domains JSONB NOT NULL DEFAULT '[]'::jsonb, "
+                "pack_exemptions JSONB NOT NULL DEFAULT '{}'::jsonb, "
                 "privacy_enabled BOOLEAN NOT NULL DEFAULT FALSE, "
                 "privacy_action TEXT NOT NULL DEFAULT 'log', "
                 "privacy_low_action TEXT NOT NULL DEFAULT 'log', "
@@ -593,12 +645,28 @@ class _PostgresShieldStore(_BaseShieldStore):
                 "spam_medium_action TEXT NOT NULL DEFAULT 'log', "
                 "spam_high_action TEXT NOT NULL DEFAULT 'log', "
                 "spam_sensitivity TEXT NOT NULL DEFAULT 'normal', "
+                "spam_message_threshold SMALLINT NOT NULL DEFAULT 7, "
+                "spam_message_window_seconds SMALLINT NOT NULL DEFAULT 5, "
+                "spam_burst_threshold SMALLINT NOT NULL DEFAULT 5, "
+                "spam_burst_window_seconds SMALLINT NOT NULL DEFAULT 10, "
+                "spam_near_duplicate_threshold SMALLINT NOT NULL DEFAULT 5, "
+                "spam_near_duplicate_window_seconds SMALLINT NOT NULL DEFAULT 10, "
+                "spam_emote_enabled BOOLEAN NOT NULL DEFAULT FALSE, "
+                "spam_emote_threshold SMALLINT NOT NULL DEFAULT 18, "
+                "spam_caps_enabled BOOLEAN NOT NULL DEFAULT FALSE, "
+                "spam_caps_threshold SMALLINT NOT NULL DEFAULT 28, "
+                "spam_moderator_policy TEXT NOT NULL DEFAULT 'exempt', "
                 "gif_enabled BOOLEAN NOT NULL DEFAULT FALSE, "
                 "gif_action TEXT NOT NULL DEFAULT 'log', "
                 "gif_low_action TEXT NOT NULL DEFAULT 'log', "
                 "gif_medium_action TEXT NOT NULL DEFAULT 'log', "
                 "gif_high_action TEXT NOT NULL DEFAULT 'log', "
                 "gif_sensitivity TEXT NOT NULL DEFAULT 'normal', "
+                "gif_message_threshold SMALLINT NOT NULL DEFAULT 4, "
+                "gif_window_seconds SMALLINT NOT NULL DEFAULT 20, "
+                "gif_repeat_threshold SMALLINT NOT NULL DEFAULT 3, "
+                "gif_same_asset_threshold SMALLINT NOT NULL DEFAULT 3, "
+                "gif_min_ratio_percent SMALLINT NOT NULL DEFAULT 70, "
                 "adult_enabled BOOLEAN NOT NULL DEFAULT FALSE, "
                 "adult_action TEXT NOT NULL DEFAULT 'log', "
                 "adult_low_action TEXT NOT NULL DEFAULT 'log', "
@@ -693,6 +761,23 @@ class _PostgresShieldStore(_BaseShieldStore):
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS link_policy_high_action TEXT NOT NULL DEFAULT 'log'",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS trusted_builtin_disabled_families JSONB NOT NULL DEFAULT '[]'::jsonb",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS trusted_builtin_disabled_domains JSONB NOT NULL DEFAULT '[]'::jsonb",
+            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS pack_exemptions JSONB NOT NULL DEFAULT '{}'::jsonb",
+            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS spam_message_threshold SMALLINT NOT NULL DEFAULT 7",
+            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS spam_message_window_seconds SMALLINT NOT NULL DEFAULT 5",
+            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS spam_burst_threshold SMALLINT NOT NULL DEFAULT 5",
+            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS spam_burst_window_seconds SMALLINT NOT NULL DEFAULT 10",
+            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS spam_near_duplicate_threshold SMALLINT NOT NULL DEFAULT 5",
+            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS spam_near_duplicate_window_seconds SMALLINT NOT NULL DEFAULT 10",
+            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS spam_emote_enabled BOOLEAN NOT NULL DEFAULT FALSE",
+            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS spam_emote_threshold SMALLINT NOT NULL DEFAULT 18",
+            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS spam_caps_enabled BOOLEAN NOT NULL DEFAULT FALSE",
+            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS spam_caps_threshold SMALLINT NOT NULL DEFAULT 28",
+            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS spam_moderator_policy TEXT NOT NULL DEFAULT 'exempt'",
+            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS gif_message_threshold SMALLINT NOT NULL DEFAULT 4",
+            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS gif_window_seconds SMALLINT NOT NULL DEFAULT 20",
+            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS gif_repeat_threshold SMALLINT NOT NULL DEFAULT 3",
+            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS gif_same_asset_threshold SMALLINT NOT NULL DEFAULT 3",
+            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS gif_min_ratio_percent SMALLINT NOT NULL DEFAULT 70",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS ai_enabled BOOLEAN NOT NULL DEFAULT FALSE",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS ai_access_mode TEXT NOT NULL DEFAULT 'inherit'",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS ai_allowed_models_override JSONB NOT NULL DEFAULT '[]'::jsonb",
@@ -785,6 +870,12 @@ class _PostgresShieldStore(_BaseShieldStore):
                 )
                 if "trusted_builtin_disabled_domains" in row
                 else [],
+                "pack_exemptions": decode_postgres_json_object(
+                    row["pack_exemptions"],
+                    label="shield_guild_configs.pack_exemptions",
+                )
+                if "pack_exemptions" in row
+                else _default_pack_exemptions(),
                 "privacy_enabled": bool(row["privacy_enabled"]),
                 "privacy_action": row["privacy_action"],
                 "privacy_low_action": row["privacy_low_action"],
@@ -809,12 +900,28 @@ class _PostgresShieldStore(_BaseShieldStore):
                 "spam_medium_action": row["spam_medium_action"] if "spam_medium_action" in row else "log",
                 "spam_high_action": row["spam_high_action"] if "spam_high_action" in row else "log",
                 "spam_sensitivity": row["spam_sensitivity"] if "spam_sensitivity" in row else "normal",
+                "spam_message_threshold": int(row["spam_message_threshold"]) if "spam_message_threshold" in row else 7,
+                "spam_message_window_seconds": int(row["spam_message_window_seconds"]) if "spam_message_window_seconds" in row else 5,
+                "spam_burst_threshold": int(row["spam_burst_threshold"]) if "spam_burst_threshold" in row else 5,
+                "spam_burst_window_seconds": int(row["spam_burst_window_seconds"]) if "spam_burst_window_seconds" in row else 10,
+                "spam_near_duplicate_threshold": int(row["spam_near_duplicate_threshold"]) if "spam_near_duplicate_threshold" in row else 5,
+                "spam_near_duplicate_window_seconds": int(row["spam_near_duplicate_window_seconds"]) if "spam_near_duplicate_window_seconds" in row else 10,
+                "spam_emote_enabled": bool(row["spam_emote_enabled"]) if "spam_emote_enabled" in row else False,
+                "spam_emote_threshold": int(row["spam_emote_threshold"]) if "spam_emote_threshold" in row else 18,
+                "spam_caps_enabled": bool(row["spam_caps_enabled"]) if "spam_caps_enabled" in row else False,
+                "spam_caps_threshold": int(row["spam_caps_threshold"]) if "spam_caps_threshold" in row else 28,
+                "spam_moderator_policy": row["spam_moderator_policy"] if "spam_moderator_policy" in row else "exempt",
                 "gif_enabled": bool(row["gif_enabled"]) if "gif_enabled" in row else False,
                 "gif_action": row["gif_action"] if "gif_action" in row else "log",
                 "gif_low_action": row["gif_low_action"] if "gif_low_action" in row else "log",
                 "gif_medium_action": row["gif_medium_action"] if "gif_medium_action" in row else "log",
                 "gif_high_action": row["gif_high_action"] if "gif_high_action" in row else "log",
                 "gif_sensitivity": row["gif_sensitivity"] if "gif_sensitivity" in row else "normal",
+                "gif_message_threshold": int(row["gif_message_threshold"]) if "gif_message_threshold" in row else 4,
+                "gif_window_seconds": int(row["gif_window_seconds"]) if "gif_window_seconds" in row else 20,
+                "gif_repeat_threshold": int(row["gif_repeat_threshold"]) if "gif_repeat_threshold" in row else 3,
+                "gif_same_asset_threshold": int(row["gif_same_asset_threshold"]) if "gif_same_asset_threshold" in row else 3,
+                "gif_min_ratio_percent": int(row["gif_min_ratio_percent"]) if "gif_min_ratio_percent" in row else 70,
                 "adult_enabled": bool(row["adult_enabled"]) if "adult_enabled" in row else False,
                 "adult_action": row["adult_action"] if "adult_action" in row else "log",
                 "adult_low_action": row["adult_low_action"] if "adult_low_action" in row else "log",
@@ -975,6 +1082,7 @@ class _PostgresShieldStore(_BaseShieldStore):
             ("allow_phrases", json.dumps(config["allow_phrases"]), "::jsonb"),
             ("trusted_builtin_disabled_families", json.dumps(config["trusted_builtin_disabled_families"]), "::jsonb"),
             ("trusted_builtin_disabled_domains", json.dumps(config["trusted_builtin_disabled_domains"]), "::jsonb"),
+            ("pack_exemptions", json.dumps(config["pack_exemptions"]), "::jsonb"),
             ("privacy_enabled", config["privacy_enabled"], ""),
             ("privacy_action", config["privacy_action"], ""),
             ("privacy_low_action", config["privacy_low_action"], ""),
@@ -999,12 +1107,28 @@ class _PostgresShieldStore(_BaseShieldStore):
             ("spam_medium_action", config["spam_medium_action"], ""),
             ("spam_high_action", config["spam_high_action"], ""),
             ("spam_sensitivity", config["spam_sensitivity"], ""),
+            ("spam_message_threshold", config["spam_message_threshold"], ""),
+            ("spam_message_window_seconds", config["spam_message_window_seconds"], ""),
+            ("spam_burst_threshold", config["spam_burst_threshold"], ""),
+            ("spam_burst_window_seconds", config["spam_burst_window_seconds"], ""),
+            ("spam_near_duplicate_threshold", config["spam_near_duplicate_threshold"], ""),
+            ("spam_near_duplicate_window_seconds", config["spam_near_duplicate_window_seconds"], ""),
+            ("spam_emote_enabled", config["spam_emote_enabled"], ""),
+            ("spam_emote_threshold", config["spam_emote_threshold"], ""),
+            ("spam_caps_enabled", config["spam_caps_enabled"], ""),
+            ("spam_caps_threshold", config["spam_caps_threshold"], ""),
+            ("spam_moderator_policy", config["spam_moderator_policy"], ""),
             ("gif_enabled", config["gif_enabled"], ""),
             ("gif_action", config["gif_action"], ""),
             ("gif_low_action", config["gif_low_action"], ""),
             ("gif_medium_action", config["gif_medium_action"], ""),
             ("gif_high_action", config["gif_high_action"], ""),
             ("gif_sensitivity", config["gif_sensitivity"], ""),
+            ("gif_message_threshold", config["gif_message_threshold"], ""),
+            ("gif_window_seconds", config["gif_window_seconds"], ""),
+            ("gif_repeat_threshold", config["gif_repeat_threshold"], ""),
+            ("gif_same_asset_threshold", config["gif_same_asset_threshold"], ""),
+            ("gif_min_ratio_percent", config["gif_min_ratio_percent"], ""),
             ("adult_enabled", config["adult_enabled"], ""),
             ("adult_action", config["adult_action"], ""),
             ("adult_low_action", config["adult_low_action"], ""),

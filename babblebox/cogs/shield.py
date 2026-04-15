@@ -13,6 +13,7 @@ from babblebox.command_utils import defer_hybrid_response, send_hybrid_response
 from babblebox.shield_ai import SHIELD_AI_SUPPORT_GUILD_ID, format_shield_ai_model_list
 from babblebox.shield_service import (
     ACTION_LABELS,
+    CONFIDENCE_LABELS,
     CUSTOM_PATTERN_LIMIT,
     MATCH_CLASS_LABELS,
     PACK_LABELS,
@@ -35,9 +36,9 @@ ACTION_CHOICES = [
     app_commands.Choice(name="Detect only", value="detect"),
     app_commands.Choice(name="Log only", value="log"),
     app_commands.Choice(name="Delete + log", value="delete_log"),
-    app_commands.Choice(name="Delete + timeout + log", value="delete_timeout_log"),
+    app_commands.Choice(name="Delete + Timeout + log", value="delete_timeout_log"),
     app_commands.Choice(name="Delete + log + escalate", value="delete_escalate"),
-    app_commands.Choice(name="Timeout + log", value="timeout_log"),
+    app_commands.Choice(name="Timeout + log (keep message)", value="timeout_log"),
 ]
 LOW_ACTION_CHOICES = [
     app_commands.Choice(name="Detect only", value="detect"),
@@ -75,6 +76,16 @@ FILTER_TARGET_CHOICES = [
     app_commands.Choice(name="Include role", value="included_role_ids"),
     app_commands.Choice(name="Exclude role", value="excluded_role_ids"),
     app_commands.Choice(name="Trust role", value="trusted_role_ids"),
+]
+PACK_EXEMPTION_TARGET_CHOICES = [
+    app_commands.Choice(name="Channel", value="channel"),
+    app_commands.Choice(name="Role", value="role"),
+    app_commands.Choice(name="Member", value="user"),
+]
+SPAM_MODERATOR_POLICY_CHOICES = [
+    app_commands.Choice(name="Exempt moderators", value="exempt"),
+    app_commands.Choice(name="Delete only", value="delete_only"),
+    app_commands.Choice(name="Full policy", value="full"),
 ]
 ALLOWLIST_BUCKET_CHOICES = [
     app_commands.Choice(name="Domain", value="allow_domains"),
@@ -299,6 +310,30 @@ class ShieldCog(commands.Cog):
         }
         return labels.get(source, source.replace("_", " ").title())
 
+    def _action_label(self, action: str) -> str:
+        return ACTION_LABELS.get(str(action), str(action).replace("_", " ").title())
+
+    def _moderator_policy_label(self, policy: str) -> str:
+        labels = {
+            "exempt": "Exempt moderators",
+            "delete_only": "Delete only",
+            "full": "Full anti-spam policy",
+        }
+        return labels.get(str(policy), str(policy).replace("_", " ").title())
+
+    def _pack_exemption_summary(self, config: dict[str, object], pack: str) -> str:
+        pack_exemptions = config.get("pack_exemptions", {})
+        if not isinstance(pack_exemptions, dict):
+            return "Channels: None | Roles: None | Members: None"
+        entry = pack_exemptions.get(pack, {})
+        if not isinstance(entry, dict):
+            return "Channels: None | Roles: None | Members: None"
+        return (
+            f"Channels: {self._format_mentions(entry.get('channel_ids', []), kind='channel')} | "
+            f"Roles: {self._format_mentions(entry.get('role_ids', []), kind='role')} | "
+            f"Members: {self._format_mentions(entry.get('user_ids', []), kind='user')}"
+        )
+
     def _pack_policy_actions(self, config: dict[str, object], pack: str) -> tuple[str, str, str]:
         return (
             str(config.get(f"{pack}_low_action", "log")),
@@ -309,14 +344,23 @@ class ShieldCog(commands.Cog):
     def _pack_rule_summary(self, config: dict[str, object], pack: str) -> str:
         if pack == "spam":
             return (
-                f"Rule: {config.get('spam_message_threshold', 7)} messages in {config.get('spam_message_window_seconds', 5)}s\n"
-                f"Near-duplicates: {config.get('spam_near_duplicate_threshold', 5)} in {config.get('spam_near_duplicate_window_seconds', 10)}s"
+                f"Recommended rate rule: {config.get('spam_message_threshold', 7)} messages in {config.get('spam_message_window_seconds', 5)}s\n"
+                f"Fast burst rule: {config.get('spam_burst_threshold', 5)} messages in {config.get('spam_burst_window_seconds', 10)}s\n"
+                f"Near-duplicates: {config.get('spam_near_duplicate_threshold', 5)} in {config.get('spam_near_duplicate_window_seconds', 10)}s\n"
+                f"Emote spam: {'On' if config.get('spam_emote_enabled') else 'Off'}"
+                + (f" at {config.get('spam_emote_threshold', 18)}+" if config.get('spam_emote_enabled') else "")
+                + "\n"
+                + f"Capitals spam: {'On' if config.get('spam_caps_enabled') else 'Off'}"
+                + (f" at {config.get('spam_caps_threshold', 28)}+ uppercase letters" if config.get('spam_caps_enabled') else "")
+                + "\n"
+                + f"Moderator anti-spam: {self._moderator_policy_label(str(config.get('spam_moderator_policy', 'exempt')))}"
             )
         if pack == "gif":
             return (
                 f"Rule: {config.get('gif_message_threshold', 4)} GIF-heavy posts in {config.get('gif_window_seconds', 20)}s\n"
                 f"Repeat pressure: {config.get('gif_repeat_threshold', 3)}+ with {config.get('gif_min_ratio_percent', 70)}% GIF ratio\n"
-                f"Same asset: {config.get('gif_same_asset_threshold', 3)}+ repeats"
+                f"Same asset: {config.get('gif_same_asset_threshold', 3)}+ repeats\n"
+                "Delete actions remove the matched GIF burst, not just the last message"
             )
         return ""
 
@@ -324,9 +368,15 @@ class ShieldCog(commands.Cog):
         low_action, medium_action, high_action = self._pack_policy_actions(config, pack)
         rule_summary = self._pack_rule_summary(config, pack)
         if not rule_summary:
-            return f"Low / Medium / High: `{low_action}` / `{medium_action}` / `{high_action}`"
+            return (
+                f"Low confidence: {self._action_label(low_action)}\n"
+                f"Medium confidence: {self._action_label(medium_action)}\n"
+                f"High confidence: {self._action_label(high_action)}"
+            )
         return (
-            f"Low / Medium / High: `{low_action}` / `{medium_action}` / `{high_action}`\n"
+            f"Low confidence: {self._action_label(low_action)}\n"
+            f"Medium confidence: {self._action_label(medium_action)}\n"
+            f"High confidence: {self._action_label(high_action)}\n"
             f"{rule_summary}"
         )
 
@@ -334,6 +384,7 @@ class ShieldCog(commands.Cog):
         low_action, medium_action, high_action = self._pack_policy_actions(config, pack)
         rule_summary = self._pack_rule_summary(config, pack)
         rule_line = f"\n{rule_summary}" if rule_summary else ""
+        exemption_line = f"\nPack-specific exemptions: {self._pack_exemption_summary(config, pack)}"
         adult_solicit_line = ""
         if pack == "adult":
             adult_solicit_line = (
@@ -354,10 +405,11 @@ class ShieldCog(commands.Cog):
         return (
             f"Enabled: {'Yes' if config[f'{pack}_enabled'] else 'No'} | "
             f"Sensitivity: {SENSITIVITY_LABELS[config[f'{pack}_sensitivity']]}\n"
-            f"Low action: `{low_action}`\n"
-            f"Medium action: `{medium_action}`\n"
-            f"High action: `{high_action}`"
+            f"Low confidence action: {self._action_label(low_action)}\n"
+            f"Medium confidence action: {self._action_label(medium_action)}\n"
+            f"High confidence action: {self._action_label(high_action)}"
             f"{rule_line}"
+            f"{exemption_line}"
             f"{adult_solicit_line}"
             f"{severe_line}"
         )
@@ -386,7 +438,9 @@ class ShieldCog(commands.Cog):
             )
         return (
             f"Mode: **{self._link_policy_label(config)}**\n"
-            f"Low / Medium / High: `{low_action}` / `{medium_action}` / `{high_action}`\n"
+            f"Low confidence: {self._action_label(low_action)}\n"
+            f"Medium confidence: {self._action_label(medium_action)}\n"
+            f"High confidence: {self._action_label(high_action)}\n"
             f"{detail}"
         )
 
@@ -544,12 +598,12 @@ class ShieldCog(commands.Cog):
         delete_actions_enabled = any(
             config.get(f"{pack}_enabled")
             and bool(set(self._pack_policy_actions(config, pack)).intersection({"delete_log", "delete_escalate", "delete_timeout_log"}))
-            for pack in ("privacy", "promo", "scam", "spam", "adult", "severe")
+            for pack in ("privacy", "promo", "scam", "spam", "gif", "adult", "severe")
         )
         timeout_actions_enabled = any(
             config.get(f"{pack}_enabled")
             and bool(set(self._pack_policy_actions(config, pack)).intersection({"timeout_log", "delete_escalate", "delete_timeout_log"}))
-            for pack in ("privacy", "promo", "scam", "spam", "adult", "severe")
+            for pack in ("privacy", "promo", "scam", "spam", "gif", "adult", "severe")
         )
 
         focus_channel = self._channel_from_guild(guild, channel_id)
@@ -592,7 +646,7 @@ class ShieldCog(commands.Cog):
         ai_status = self.service.get_ai_status(guild_id)
         embed = discord.Embed(
             title="Shield Control Panel",
-            description="Shield is Babblebox's compact live-message moderation layer. It focuses on understandable anti-spam, first-class anti-GIF moderation, and strong local scam or safety checks. Private feature-surface checks still stay bounded and non-AI.",
+            description="Shield is Babblebox's compact live-message moderation layer. It combines explicit spam rules, first-class anti-GIF moderation, stronger local scam detection, and bounded safety checks with clear evidence and compact moderator UX.",
             color=ge.EMBED_THEME["warning"] if config["module_enabled"] else ge.EMBED_THEME["info"],
         )
         log_channel = f"<#{config['log_channel_id']}>" if config.get("log_channel_id") else "Not set"
@@ -605,7 +659,8 @@ class ShieldCog(commands.Cog):
                 f"Log channel: {log_channel}\n"
                 f"Alert role: {alert_role}\n"
                 "First enable: Babblebox applies its recommended non-AI baseline once, then leaves your edits alone.\n"
-                "Feature checks: AFK + reminders use privacy/adult/severe, Watch stays privacy-only, Confessions shares link checks, and spam plus GIF moderation stay live-message only."
+                "Feature checks: AFK + reminders use privacy/adult/severe, Watch stays privacy-only, Confessions shares link checks, and spam plus GIF moderation stay live-message only.\n"
+                "Delete actions on spam and GIF incidents remove the matched burst, not only the last post."
             ),
             inline=False,
         )
@@ -652,13 +707,13 @@ class ShieldCog(commands.Cog):
             ),
             inline=False,
         )
-        return ge.style_embed(embed, footer="Babblebox Shield | Use /shield panel, rules, links, trusted, filters, logs, allowlist, ai, or test")
+        return ge.style_embed(embed, footer="Babblebox Shield | Use /shield panel, rules, exemptions, links, trusted, filters, logs, allowlist, ai, or test")
 
     def _rules_embed(self, guild_id: int) -> discord.Embed:
         config = self.service.get_config(guild_id)
         embed = discord.Embed(
             title="Shield Rules",
-            description="Confidence-tier local policy with explicit spam and GIF thresholds. Known-malicious, impersonation, and adult-domain matches can still act hard, while anti-spam and anti-GIF stay understandable, configurable, and evidence-driven.",
+            description="Low, medium, and high confidence actions stay local and explicit. Known-malicious, impersonation, and adult-domain matches can still act hard, while anti-spam and anti-GIF stay understandable, configurable, and evidence-driven.",
             color=ge.EMBED_THEME["info"],
         )
         pack_lines = []
@@ -667,14 +722,23 @@ class ShieldCog(commands.Cog):
                 f"**{PACK_LABELS[pack]}**\n"
                 f"{self._pack_policy_detail(config, pack)}"
             )
-        embed.add_field(name="Low / Medium / High Action Policy", value="\n\n".join(pack_lines), inline=False)
+        embed.add_field(name="Confidence Actions", value="\n\n".join(pack_lines), inline=False)
         high_risk_lines = []
         for pack in ("scam", "adult", "severe"):
             high_risk_lines.append(
                 f"**{PACK_LABELS[pack]}**\n"
                 f"{self._pack_policy_detail(config, pack)}"
             )
-        embed.add_field(name="High-Risk Policy", value="\n\n".join(high_risk_lines), inline=False)
+        embed.add_field(name="High-Risk Packs", value="\n\n".join(high_risk_lines), inline=False)
+        embed.add_field(
+            name="Recommended Safe Use",
+            value=(
+                "Low confidence stays intentionally capped to detect or log-only behavior.\n"
+                "Medium confidence is the right lane for delete + log once the evidence is clear.\n"
+                "Reserve Delete + Timeout + log or repeated-hit escalation for high-confidence lanes after you have watched the logs and tuned scope or exemptions."
+            ),
+            inline=False,
+        )
         embed.add_field(
             name="Trusted-Link Policy",
             value=self._link_policy_detail(config),
@@ -700,19 +764,21 @@ class ShieldCog(commands.Cog):
             name="Quick Use",
             value=(
                 "`/shield rules pack:promo enabled:true low_action:log medium_action:delete_log high_action:delete_log sensitivity:high`\n"
-                "`/shield rules pack:spam enabled:true low_action:log medium_action:delete_log high_action:delete_timeout_log message_threshold:7 window_seconds:5 duplicate_threshold:5 duplicate_window_seconds:10`\n"
+                "`/shield rules pack:spam enabled:true low_action:log medium_action:delete_log high_action:delete_timeout_log message_threshold:7 window_seconds:5 burst_threshold:5 burst_window_seconds:10 duplicate_threshold:5 duplicate_window_seconds:10 moderator_policy:exempt`\n"
+                "`/shield rules pack:spam emote_enabled:true emote_threshold:18 caps_enabled:true caps_threshold:28`\n"
                 "`/shield rules pack:gif enabled:true low_action:log medium_action:delete_log high_action:delete_timeout_log message_threshold:4 window_seconds:20 repeat_threshold:3 same_asset_threshold:3 ratio_percent:70`\n"
                 "`/shield rules pack:adult enabled:true adult_solicitation:true low_action:log medium_action:delete_log high_action:delete_log`\n"
                 "`/shield rules pack:severe enabled:true low_action:detect medium_action:delete_log high_action:delete_log`\n"
                 "`/shield severe category category:self_harm_encouragement state:on`\n"
                 "`/shield links mode:trusted_only low_action:log medium_action:delete_log high_action:delete_log`\n"
+                "`/shield exemptions pack:spam target:channel state:on channel:#bot-games`\n"
                 "`/shield trusted view`\n"
                 "`/shield rules module:true escalation_threshold:3 timeout_minutes:10`\n"
                 "`bb!shield advanced list` for safe custom patterns"
             ),
             inline=False,
         )
-        return ge.style_embed(embed, footer="Babblebox Shield | Low / Medium / High policy stays local and explicit")
+        return ge.style_embed(embed, footer="Babblebox Shield | Confidence actions stay local, explicit, and evidence-driven")
 
     def _links_embed(self, guild_id: int) -> discord.Embed:
         config = self.service.get_config(guild_id)
@@ -767,7 +833,7 @@ class ShieldCog(commands.Cog):
         config = self.service.get_config(guild_id)
         embed = discord.Embed(
             title="Shield Scope and Allowlists",
-            description="Control where Shield scans, who it skips, which domains or invites can bypass only trusted-link policy, which phrases suppress only targeted promo or adult-solicitation text matches, and which channels relax only the optional solicitation / DM-ad detector.",
+            description="Control where Shield scans, who it skips globally, which entries are allowlisted, and which members, roles, or channels are exempted from a specific protection pack.",
             color=ge.EMBED_THEME["info"],
         )
         embed.add_field(
@@ -806,17 +872,27 @@ class ShieldCog(commands.Cog):
             inline=False,
         )
         embed.add_field(
+            name="Pack-Specific Exemptions",
+            value="\n".join(
+                f"**{PACK_LABELS[pack]}**\n{self._pack_exemption_summary(config, pack)}"
+                for pack in ("spam", "gif", "scam", "promo", "privacy", "adult", "severe")
+            ),
+            inline=False,
+        )
+        embed.add_field(
             name="Quick Use",
             value=(
                 "`/shield filters mode:only_included`\n"
                 "`/shield filters target:trusted_role_ids state:on role:@Mods`\n"
                 "`/shield filters target:adult_solicitation_excluded_channel_ids state:on channel:#adult-market`\n"
                 "`/shield allowlist bucket:allow_domains state:on value:example.com`\n"
+                "`/shield exemptions pack:gif target:channel state:on channel:#media`\n"
+                "`/shield exemptions pack:spam target:role state:on role:@Trusted Bots`\n"
                 "`/shield trusted view`"
             ),
             inline=False,
         )
-        return ge.style_embed(embed, footer="Babblebox Shield | Tune scope before moving beyond log-only")
+        return ge.style_embed(embed, footer="Babblebox Shield | Global filters stay separate from pack-specific exemptions")
 
     def _ai_embed(self, guild_id: int) -> discord.Embed:
         config = self.service.get_config(guild_id)
@@ -1002,8 +1078,15 @@ class ShieldCog(commands.Cog):
         adult_solicitation="Enable the adult pack's optional solicitation / DM-ad text detector",
         message_threshold="Spam or GIF message count threshold inside the configured window",
         window_seconds="Window size in seconds for spam or GIF threshold checks",
+        burst_threshold="Fast-burst message count threshold for the spam pack",
+        burst_window_seconds="Fast-burst window in seconds for the spam pack",
         duplicate_threshold="Near-duplicate threshold for the spam pack",
         duplicate_window_seconds="Near-duplicate window in seconds for the spam pack",
+        emote_enabled="Enable or disable the spam pack's optional emote clutter lane",
+        emote_threshold="Emoji or emote token threshold for the spam pack",
+        caps_enabled="Enable or disable the spam pack's optional excessive-capitals lane",
+        caps_threshold="Uppercase-letter threshold for the spam pack",
+        moderator_policy="How the spam pack should treat moderators by default",
         repeat_threshold="Low-text GIF repeat threshold for the GIF pack",
         same_asset_threshold="Same-GIF asset repeat threshold for the GIF pack",
         ratio_percent="Minimum GIF-share ratio for the GIF pack",
@@ -1018,6 +1101,7 @@ class ShieldCog(commands.Cog):
         medium_action=MEDIUM_ACTION_CHOICES,
         high_action=ACTION_CHOICES,
         sensitivity=SENSITIVITY_CHOICES,
+        moderator_policy=SPAM_MODERATOR_POLICY_CHOICES,
     )
     async def shield_rules_command(
         self,
@@ -1033,8 +1117,15 @@ class ShieldCog(commands.Cog):
         adult_solicitation: Optional[bool] = None,
         message_threshold: Optional[int] = None,
         window_seconds: Optional[int] = None,
+        burst_threshold: Optional[int] = None,
+        burst_window_seconds: Optional[int] = None,
         duplicate_threshold: Optional[int] = None,
         duplicate_window_seconds: Optional[int] = None,
+        emote_enabled: Optional[bool] = None,
+        emote_threshold: Optional[int] = None,
+        caps_enabled: Optional[bool] = None,
+        caps_threshold: Optional[int] = None,
+        moderator_policy: Optional[str] = None,
         repeat_threshold: Optional[int] = None,
         same_asset_threshold: Optional[int] = None,
         ratio_percent: Optional[int] = None,
@@ -1062,8 +1153,15 @@ class ShieldCog(commands.Cog):
                 adult_solicitation,
                 message_threshold,
                 window_seconds,
+                burst_threshold,
+                burst_window_seconds,
                 duplicate_threshold,
                 duplicate_window_seconds,
+                emote_enabled,
+                emote_threshold,
+                caps_enabled,
+                caps_threshold,
+                moderator_policy,
                 repeat_threshold,
                 same_asset_threshold,
                 ratio_percent,
@@ -1085,8 +1183,15 @@ class ShieldCog(commands.Cog):
                 adult_solicitation=adult_solicitation,
                 message_threshold=message_threshold,
                 window_seconds=window_seconds,
+                burst_threshold=burst_threshold,
+                burst_window_seconds=burst_window_seconds,
                 duplicate_threshold=duplicate_threshold,
                 duplicate_window_seconds=duplicate_window_seconds,
+                emote_enabled=emote_enabled,
+                emote_threshold=emote_threshold,
+                caps_enabled=caps_enabled,
+                caps_threshold=caps_threshold,
+                moderator_policy=moderator_policy,
                 repeat_threshold=repeat_threshold,
                 same_asset_threshold=same_asset_threshold,
                 ratio_percent=ratio_percent,
@@ -1316,6 +1421,46 @@ class ShieldCog(commands.Cog):
             return
         await self._send_result(ctx, "Shield Filters", "\n".join(messages), ok=ok)
 
+    @shield_group.command(name="exemptions", with_app_command=True, description="Configure pack-specific member, role, or channel exemptions")
+    @app_commands.describe(
+        pack="Which Shield pack should ignore this target",
+        target="What kind of target to exempt on that pack",
+        state="Turn that pack exemption on or off",
+        channel="Channel target for channel exemptions",
+        role="Role target for role exemptions",
+        user="Member target for member exemptions",
+    )
+    @app_commands.choices(pack=PACK_CHOICES, target=PACK_EXEMPTION_TARGET_CHOICES, state=STATE_CHOICES)
+    async def shield_exemptions_command(
+        self,
+        ctx: commands.Context,
+        pack: str,
+        target: str,
+        state: str,
+        channel: Optional[discord.TextChannel] = None,
+        role: Optional[discord.Role] = None,
+        user: Optional[discord.Member] = None,
+    ):
+        if not await self._guard(ctx):
+            return
+        if target == "channel":
+            resolved_target = channel or ctx.channel
+        elif target == "role":
+            resolved_target = role
+        else:
+            resolved_target = user
+        target_id = getattr(resolved_target, "id", None)
+        if not isinstance(target_id, int):
+            await self._send_result(
+                ctx,
+                "Shield Exemptions",
+                "Select the member, role, or channel that should be exempted on that pack.",
+                ok=False,
+            )
+            return
+        ok, message = await self.service.set_pack_exemption(ctx.guild.id, pack, target, target_id, state == "on")
+        await self._send_result(ctx, "Shield Exemptions", message, ok=ok)
+
     @shield_group.command(name="allowlist", with_app_command=True, description="Configure Shield's bounded domain, invite, and phrase carve-outs")
     @app_commands.describe(
         bucket="Which bounded allowlist bucket to change",
@@ -1535,7 +1680,7 @@ class ShieldCog(commands.Cog):
                 value="\n".join(
                     f"**{PACK_LABELS.get(item.pack, item.pack.title())}** | {item.label} | "
                     f"{MATCH_CLASS_LABELS.get(item.match_class, item.match_class.replace('_', ' ').title() if item.match_class else 'Match')} | "
-                    f"`{item.action}` | {item.confidence}"
+                    f"{self._action_label(item.action)} | {CONFIDENCE_LABELS.get(item.confidence, item.confidence)}"
                     for item in result.matches[:5]
                 ),
                 inline=False,
