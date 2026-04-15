@@ -36,7 +36,7 @@ class WebsiteDocsTests(unittest.TestCase):
             'id="faq"',
         ):
             self.assertIn(anchor, help_html)
-        for command in ("/support", "/daily", "/buddy", "/profile", "/vault", "/watch", "/later", "/capture", "/remind", "/afk", "/shield panel", "/shield links", "/shield trusted", "/admin panel", "/admin followup", "/admin verification", "/confess", "/confessions moderate"):
+        for command in ("/support", "/daily", "/buddy", "/profile", "/vault", "/watch", "/later", "/capture", "/remind", "/afk", "/shield panel", "/shield links", "/shield trusted", "/lock channel", "/lock remove", "/lock settings", "/admin panel", "/admin followup", "/admin verification", "/admin permissions", "/confess", "/confessions moderate"):
             self.assertIn(command, help_html)
         self.assertIn("Broken Telephone, Exquisite Corpse, Spyfall, Word Bomb, and Pattern Hunt", help_html)
         self.assertIn("1-10 drops per day", help_html)
@@ -81,7 +81,6 @@ class WebsiteDocsTests(unittest.TestCase):
         self.assertNotIn("jump-nav", help_html)
         self.assertIn("guide-band", help_html)
         self.assertIn("Anti-Spam", help_html)
-        self.assertNotIn("/admin permissions", help_html)
         self.assertNotIn("/admin risk", help_html)
         self.assertNotIn("/admin emergency", help_html)
 
@@ -140,6 +139,10 @@ class WebsiteDocsTests(unittest.TestCase):
             "/confess reply-to-user",
             "/confessions moderate",
             "/support",
+            "/lock channel",
+            "/lock remove",
+            "/lock settings",
+            "/admin permissions",
             "PYTHONPATH=. pytest -q",
             "optional feature that only works after admins enable and configure it",
             "adult / 18+ language is blocked by default",
@@ -179,6 +182,8 @@ class WebsiteDocsTests(unittest.TestCase):
             "/drops roles status",
             "/dropsadmin config",
             "/dropsadmin mastery category",
+            "/lock channel",
+            "/admin permissions",
             "{user.mention}",
             "{category.name}",
             "Pattern Hunt coders need server DMs open before the round starts.",
@@ -235,16 +240,20 @@ class WebsiteDocsTests(unittest.TestCase):
 
         for text in (
             "GIF Flood / Media Pressure",
+            "/lock channel",
+            "/lock remove",
+            "/lock settings",
             "/admin panel",
             "/admin followup",
             "/admin verification",
             "/admin logs",
             "/admin templates",
+            "/admin permissions",
         ):
             self.assertIn(text, readme)
             self.assertIn(text, help_html)
-        self.assertIn("GIF Flood / Media Pressure", index_html)
-        self.assertIn("/admin panel", index_html)
+        for text in ("GIF Flood / Media Pressure", "/admin panel", "/lock channel", "/admin permissions"):
+            self.assertIn(text, index_html)
 
     def test_shield_docs_cover_no_link_dm_lure_and_truthful_ai_models(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
@@ -273,7 +282,6 @@ class WebsiteDocsTests(unittest.TestCase):
         privacy_html = (ROOT / "privacy.html").read_text(encoding="utf-8")
 
         for text in (
-            "/admin permissions",
             "/admin risk",
             "/admin emergency",
             "one-role permission orchestration",

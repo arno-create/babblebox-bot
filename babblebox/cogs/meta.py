@@ -164,7 +164,8 @@ HELP_PAGES: list[dict[str, str]] = [
         "body": (
             "Shield can watch for privacy leaks, invite or promo abuse, explicit Anti-Spam rules for fast bursts and near-duplicate floods, optional emote and excessive-capitals lanes, a separate GIF Flood / Media Pressure lane for disruptive low-text GIF floods, malicious or scam links, no-link DM-lure bait, adult-domain intel plus optional solicitation / DM-ad text, and a separate Severe Harm / Hate pack for real-harm abuse only.\n"
             "`/shield panel`, `/shield rules`, `/shield links`, `/shield trusted`, `/shield filters`, `/shield exemptions`, `/shield allowlist`, `/shield logs`, `/shield severe category`, `/shield severe term`, `/shield ai`, and `/shield test` cover the shipped admin flow.\n"
-            "`/admin panel`, `/admin followup`, `/admin verification`, `/admin logs`, `/admin exclusions`, `/admin templates`, and `/admin sync` cover returned-after-ban follow-up roles, verification cleanup, and compact admin operations.\n"
+            "`/lock channel` and `/lock remove` are Babblebox's direct emergency moderator lane for calm channel lockdowns. `/lock settings` lets admins tune the default notice and optionally limit the lane to admins only.\n"
+            "`/admin panel`, `/admin followup`, `/admin verification`, `/admin logs`, `/admin exclusions`, `/admin templates`, `/admin permissions`, and `/admin sync` cover returned-after-ban follow-up roles, verification cleanup, permission diagnostics, and compact admin operations.\n"
             "Live moderation stays off until an admin enables it, and the first enable applies a recommended non-AI baseline while Shield AI access stays owner-managed.\n"
             "Trusted Links Only now exposes its built-in trusted families and domains under `/shield trusted`, keeps Confessions link mode separate, and still lets malicious, impersonation, adult, or suspicious-link intel override local trust exceptions.\n"
             "Configured anti-spam stays explainable: admins set message and near-duplicate thresholds, optional emote or capitals lanes stay off until enabled, moderators are exempt from Anti-Spam by default unless you opt into delete-only or full enforcement, pack-specific exemptions stay separate from global filters, GIF incidents are grouped per offender and window, spam and GIF delete actions remove the matched burst, and bot or webhook posts stay on a more conservative scam threshold unless the evidence is genuinely strong.\n"
@@ -311,7 +312,8 @@ def build_help_embed() -> discord.Embed:
         name="Shield / Admin",
         value=(
             "`/shield panel`, `/shield rules`, `/shield exemptions`, `/shield links`, `/shield filters`, `/shield severe category`, "
-            "`/shield severe term`, `/shield ai`, `/admin panel`, `/admin followup`, `/admin verification`, and `/admin sync` "
+            "`/shield severe term`, `/shield ai`, `/lock channel`, `/lock remove`, `/admin panel`, `/admin followup`, `/admin verification`, "
+            "`/admin permissions`, and `/admin sync` "
             "cover focused safety setup and compact admin automation."
         ),
         inline=False,

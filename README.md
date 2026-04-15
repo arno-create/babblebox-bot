@@ -154,12 +154,15 @@ Babblebox is intentionally compact:
   - compact advanced patterns with `contains`, `word`, and safe `wildcard` matching
   - raw custom regex intentionally unsupported to avoid unsafe hot-path backtracking
 - Admin lifecycle helpers
+  - direct emergency channel lock lane with `/lock channel` and `/lock remove`
+  - configurable default lock notice plus an admin-only access option for the `/lock` lane
+  - bounded overwrite restore that only reverts the `@everyone` flags Babblebox changed and intentionally refuses category-synced direct locks
   - returned-after-ban follow-up role assignment within a clear 30-day return window
   - auto-remove or moderator-review follow-up role expiry
 - review alerts with compact action buttons instead of a case system
 - verification retention with warning-before-kick cleanup
 - verification-help channel deadline extensions with a small extension cap
-- shared exclusions, trusted-role bypasses, templates, and compact admin logs
+- shared exclusions, trusted-role bypasses, templates, permission diagnostics, and compact admin logs
 
 ### Daily Arcade
 
@@ -336,9 +339,22 @@ Shield's live-message link policy is intentionally separate from Confessions lin
 
 Shield also now governs eligible non-chat surfaces in a bounded way. Confessions keeps its own privacy, review, and workflow logic, but shares Shield link intelligence. AFK reasons plus reminder text and public reminder delivery use fixed private privacy, adult, and severe feature-surface policies. Watch keyword setup stays privacy-only. None of those private feature checks create mod-log spam or call Shield AI.
 
+### Emergency Locks
+
+`/lock` is Babblebox's only direct moderator command lane. Moderators with `Manage Channels` can use it by default, and admins can switch the lane to admins-only when they want tighter control.
+Direct locks only target normal text channels. Babblebox intentionally refuses category-synced channels, only changes the bounded `@everyone` send/thread/reaction flags it owns, and only restores those same flags later. Timed locks persist through restart reconciliation.
+
+| Slash | Prefix | Purpose |
+| --- | --- | --- |
+| `/lock channel` | `bb!lock channel #ops 30m` | Safely lock one normal text channel, optionally with a timer |
+| `/lock remove` | `bb!lock remove #ops` | Safely remove one Babblebox-tracked emergency lock |
+| `/lock settings` | `bb!lock settings` | Review or configure the default lock notice and access model |
+
+The default lock notice is configurable, one-off notice overrides stay optional per lock, notice posting can be suppressed per run, and every lock or unlock is logged cleanly to the shared admin log lane when one is configured.
+
 ### Admin Lifecycle
 
-Admin lifecycle commands are private/admin-facing by default. The streamlined surface is centered on `/admin panel`.
+Admin lifecycle commands stay private/admin-facing. The streamlined admin surface is centered on `/admin panel`, while `/admin permissions` gives one truthful place to inspect Babblebox's missing permissions and the feature lanes they degrade.
 Slash is recommended for the heavier config flows here. Prefix stays positional, so the examples below show the safest compact forms.
 
 | Slash | Prefix | Purpose |
@@ -350,9 +366,10 @@ Slash is recommended for the heavier config flows here. Prefix stays positional,
 | `/admin logs` | `bb!admin logs #admin-log @Mods` | Set the shared admin log channel and alert role |
 | `/admin exclusions` | `bb!admin exclusions` | Configure shared exclusions and trusted roles |
 | `/admin templates` | `bb!admin templates` | Configure warning/kick DMs and optional rejoin link |
+| `/admin permissions` | `bb!admin permissions` | Diagnose missing bot permissions and the affected feature lanes |
 | `/admin sync` | `bb!admin sync` | One-time catch-up scan for current unverified members |
 
-Follow-up and verification stay batch-first and review-lane focused: routine sweeps emit grouped summaries, review mode uses one persistent queue message per lane, startup reconciliation resumes quietly, and Babblebox does not post public channel reactions or reply callouts for weak evidence. The admin surface is intentionally narrower now: follow-up, verification, exclusions, logs, templates, and sync only.
+Follow-up and verification stay batch-first and review-lane focused: routine sweeps emit grouped summaries, review mode uses one persistent queue message per lane, startup reconciliation resumes quietly, and Babblebox does not post public channel reactions or reply callouts for weak evidence. The admin surface is intentionally narrower now: follow-up, verification, exclusions, logs, templates, permission diagnostics, and sync only.
 
 ### Daily Arcade
 

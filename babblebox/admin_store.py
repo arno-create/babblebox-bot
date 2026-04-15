@@ -16,6 +16,15 @@ VALID_FOLLOWUP_MODES = {"auto_remove", "review"}
 VALID_FOLLOWUP_DURATION_UNITS = {"days", "weeks", "months"}
 VALID_VERIFICATION_LOGIC = {"must_have_role", "must_not_have_role"}
 VALID_VERIFICATION_DEADLINE_ACTIONS = {"auto_kick", "review"}
+VALID_CHANNEL_LOCK_PERMISSION_NAMES = frozenset(
+    {
+        "send_messages",
+        "create_public_threads",
+        "create_private_threads",
+        "send_messages_in_threads",
+        "add_reactions",
+    }
+)
 
 
 class AdminStorageUnavailable(RuntimeError):
@@ -44,6 +53,8 @@ def default_admin_config(guild_id: int | None = None) -> dict[str, Any]:
         "warning_template": None,
         "kick_template": None,
         "invite_link": None,
+        "lock_notice_template": None,
+        "lock_admin_only": False,
         "excluded_user_ids": [],
         "excluded_role_ids": [],
         "trusted_role_ids": [],
@@ -93,6 +104,30 @@ def _clean_optional_text(value: Any) -> str | None:
         return None
     cleaned = value.strip()
     return cleaned or None
+
+
+def _clean_permission_name_list(values: Any) -> list[str]:
+    if not isinstance(values, (list, tuple, set, frozenset)):
+        return []
+    cleaned = {
+        str(value).strip()
+        for value in values
+        if str(value).strip() in VALID_CHANNEL_LOCK_PERMISSION_NAMES
+    }
+    return sorted(cleaned)
+
+
+def _clean_permission_state_map(value: Any) -> dict[str, bool | None]:
+    if not isinstance(value, dict):
+        return {}
+    cleaned: dict[str, bool | None] = {}
+    for key, raw_state in value.items():
+        name = str(key).strip()
+        if name not in VALID_CHANNEL_LOCK_PERMISSION_NAMES:
+            continue
+        if raw_state is None or isinstance(raw_state, bool):
+            cleaned[name] = raw_state
+    return cleaned
 
 
 def _parse_datetime(value: Any) -> datetime | None:
@@ -149,6 +184,8 @@ def normalize_admin_config(guild_id: int, payload: Any) -> dict[str, Any]:
     cleaned["warning_template"] = _clean_optional_text(payload.get("warning_template"))
     cleaned["kick_template"] = _clean_optional_text(payload.get("kick_template"))
     cleaned["invite_link"] = _clean_optional_text(payload.get("invite_link"))
+    cleaned["lock_notice_template"] = _clean_optional_text(payload.get("lock_notice_template"))
+    cleaned["lock_admin_only"] = bool(payload.get("lock_admin_only", False))
     for field in ("excluded_user_ids", "excluded_role_ids", "trusted_role_ids"):
         cleaned[field] = _clean_int_list(payload.get(field))
     cleaned["followup_exempt_staff"] = bool(payload.get("followup_exempt_staff", True))
@@ -282,6 +319,36 @@ def normalize_verification_notification_snapshot(payload: Any) -> dict[str, Any]
     }
 
 
+def normalize_channel_lock(payload: Any) -> dict[str, Any] | None:
+    if not isinstance(payload, dict):
+        return None
+    guild_id = payload.get("guild_id")
+    channel_id = payload.get("channel_id")
+    actor_id = payload.get("actor_id")
+    created_at = _serialize_datetime(_parse_datetime(payload.get("created_at")))
+    due_at = _serialize_datetime(_parse_datetime(payload.get("due_at")))
+    category_id = payload.get("category_id")
+    locked_permissions = _clean_permission_name_list(payload.get("locked_permissions"))
+    original_permissions = _clean_permission_state_map(payload.get("original_permissions"))
+    if not isinstance(guild_id, int) or guild_id <= 0:
+        return None
+    if not isinstance(channel_id, int) or channel_id <= 0:
+        return None
+    if created_at is None or not locked_permissions:
+        return None
+    return {
+        "guild_id": guild_id,
+        "channel_id": channel_id,
+        "actor_id": actor_id if isinstance(actor_id, int) and actor_id > 0 else None,
+        "created_at": created_at,
+        "due_at": due_at,
+        "category_id": category_id if isinstance(category_id, int) and category_id > 0 else None,
+        "permissions_synced": bool(payload.get("permissions_synced")),
+        "locked_permissions": locked_permissions,
+        "original_permissions": {name: original_permissions.get(name) for name in locked_permissions},
+    }
+
+
 class _BaseAdminStore:
     backend_name = "unknown"
 
@@ -356,6 +423,18 @@ class _BaseAdminStore:
     async def upsert_verification_notification_snapshot(self, record: dict[str, Any]):
         raise NotImplementedError
 
+    async def upsert_channel_lock(self, record: dict[str, Any]):
+        raise NotImplementedError
+
+    async def fetch_channel_lock(self, guild_id: int, channel_id: int) -> dict[str, Any] | None:
+        raise NotImplementedError
+
+    async def delete_channel_lock(self, guild_id: int, channel_id: int):
+        raise NotImplementedError
+
+    async def list_due_channel_locks(self, now: datetime, *, limit: int = 50) -> list[dict[str, Any]]:
+        raise NotImplementedError
+
     async def list_followups_for_guild(self, guild_id: int) -> list[dict[str, Any]]:
         raise NotImplementedError
 
@@ -391,6 +470,7 @@ class _MemoryAdminStore(_BaseAdminStore):
         self.verification_review_queues: dict[int, dict[str, Any]] = {}
         self.verification_notification_snapshots: dict[tuple[int, str, str, str, str], dict[str, Any]] = {}
         self.verification_states: dict[tuple[int, int], dict[str, Any]] = {}
+        self.channel_locks: dict[tuple[int, int], dict[str, Any]] = {}
 
     async def load(self):
         return None
@@ -498,6 +578,28 @@ class _MemoryAdminStore(_BaseAdminStore):
             key = (normalized["guild_id"], normalized["run_context"], normalized["operation"], normalized["outcome"], normalized["reason_code"])
             self.verification_notification_snapshots[key] = normalized
 
+    async def upsert_channel_lock(self, record: dict[str, Any]):
+        normalized = normalize_channel_lock(record)
+        if normalized is not None:
+            self.channel_locks[(normalized["guild_id"], normalized["channel_id"])] = normalized
+
+    async def fetch_channel_lock(self, guild_id: int, channel_id: int) -> dict[str, Any] | None:
+        record = self.channel_locks.get((guild_id, channel_id))
+        return deepcopy(record) if record is not None else None
+
+    async def delete_channel_lock(self, guild_id: int, channel_id: int):
+        self.channel_locks.pop((guild_id, channel_id), None)
+
+    async def list_due_channel_locks(self, now: datetime, *, limit: int = 50) -> list[dict[str, Any]]:
+        rows = []
+        for record in self.channel_locks.values():
+            due_at = _parse_datetime(record.get("due_at"))
+            if due_at is None or due_at > now:
+                continue
+            rows.append(deepcopy(record))
+        rows.sort(key=lambda record: (_parse_datetime(record.get("due_at")) or now, int(record.get("channel_id", 0) or 0)))
+        return rows[:limit]
+
     async def list_followups_for_guild(self, guild_id: int) -> list[dict[str, Any]]:
         rows = [deepcopy(record) for record in self.followups.values() if record.get("guild_id") == guild_id]
         rows.sort(key=lambda record: (record.get("assigned_at") or "", int(record.get("user_id", 0) or 0)))
@@ -551,6 +653,7 @@ class _MemoryAdminStore(_BaseAdminStore):
             "pending_reviews": sum(1 for record in followup_rows if record.get("review_pending")),
             "verification_pending": len(verification_rows),
             "verification_warned": sum(1 for record in verification_rows if record.get("warning_sent_at") is not None),
+            "active_channel_locks": sum(1 for record in self.channel_locks.values() if record.get("guild_id") == guild_id),
         }
 
 
@@ -576,6 +679,8 @@ def _config_from_row(row) -> dict[str, Any]:
         "warning_template": row.get("warning_template"),
         "kick_template": row.get("kick_template"),
         "invite_link": row.get("invite_link"),
+        "lock_notice_template": row.get("lock_notice_template"),
+        "lock_admin_only": row.get("lock_admin_only", False),
         "excluded_user_ids": decode_postgres_json_array(row.get("excluded_user_ids"), label="admin_guild_configs.excluded_user_ids"),
         "excluded_role_ids": decode_postgres_json_array(row.get("excluded_role_ids"), label="admin_guild_configs.excluded_role_ids"),
         "trusted_role_ids": decode_postgres_json_array(row.get("trusted_role_ids"), label="admin_guild_configs.trusted_role_ids"),
@@ -650,6 +755,34 @@ def _verification_notification_snapshot_from_row(row) -> dict[str, Any] | None:
     )
 
 
+def _channel_lock_from_row(row) -> dict[str, Any] | None:
+    if row is None:
+        return None
+    locked_permissions = decode_postgres_json_array(
+        row.get("locked_permissions"),
+        label="admin_channel_locks.locked_permissions",
+    )
+    original_permissions = row.get("original_permissions")
+    if isinstance(original_permissions, str):
+        try:
+            original_permissions = json.loads(original_permissions)
+        except json.JSONDecodeError:
+            original_permissions = {}
+    return normalize_channel_lock(
+        {
+            "guild_id": row.get("guild_id"),
+            "channel_id": row.get("channel_id"),
+            "actor_id": row.get("actor_id"),
+            "created_at": row.get("created_at"),
+            "due_at": row.get("due_at"),
+            "category_id": row.get("category_id"),
+            "permissions_synced": row.get("permissions_synced", False),
+            "locked_permissions": locked_permissions,
+            "original_permissions": original_permissions,
+        }
+    )
+
+
 class _PostgresAdminStore(_BaseAdminStore):
     backend_name = "postgres"
 
@@ -690,6 +823,7 @@ class _PostgresAdminStore(_BaseAdminStore):
             "verification_warning_lead_seconds INTEGER NOT NULL DEFAULT 86400, verification_help_channel_id BIGINT NULL, "
             "verification_help_extension_seconds INTEGER NOT NULL DEFAULT 259200, verification_max_extensions SMALLINT NOT NULL DEFAULT 1, "
             "admin_log_channel_id BIGINT NULL, admin_alert_role_id BIGINT NULL, warning_template TEXT NULL, kick_template TEXT NULL, invite_link TEXT NULL, "
+            "lock_notice_template TEXT NULL, lock_admin_only BOOLEAN NOT NULL DEFAULT FALSE, "
             "excluded_user_ids JSONB NOT NULL DEFAULT '[]'::jsonb, excluded_role_ids JSONB NOT NULL DEFAULT '[]'::jsonb, trusted_role_ids JSONB NOT NULL DEFAULT '[]'::jsonb, "
             "followup_exempt_staff BOOLEAN NOT NULL DEFAULT TRUE, verification_exempt_staff BOOLEAN NOT NULL DEFAULT TRUE, verification_exempt_bots BOOLEAN NOT NULL DEFAULT TRUE, "
             "updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc', now()))",
@@ -698,6 +832,7 @@ class _PostgresAdminStore(_BaseAdminStore):
             "CREATE TABLE IF NOT EXISTS admin_verification_states (guild_id BIGINT NOT NULL, user_id BIGINT NOT NULL, joined_at TIMESTAMPTZ NOT NULL, warning_at TIMESTAMPTZ NOT NULL, kick_at TIMESTAMPTZ NOT NULL, warning_sent_at TIMESTAMPTZ NULL, extension_count SMALLINT NOT NULL DEFAULT 0, review_pending BOOLEAN NOT NULL DEFAULT FALSE, review_version INTEGER NOT NULL DEFAULT 0, review_message_channel_id BIGINT NULL, review_message_id BIGINT NULL, last_result_code TEXT NULL, last_result_at TIMESTAMPTZ NULL, last_notified_code TEXT NULL, last_notified_at TIMESTAMPTZ NULL, PRIMARY KEY (guild_id, user_id))",
             "CREATE TABLE IF NOT EXISTS admin_verification_review_queues (guild_id BIGINT PRIMARY KEY, channel_id BIGINT NULL, message_id BIGINT NULL, updated_at TIMESTAMPTZ NULL)",
             "CREATE TABLE IF NOT EXISTS admin_verification_notification_snapshots (guild_id BIGINT NOT NULL, run_context TEXT NOT NULL, operation TEXT NOT NULL, outcome TEXT NOT NULL, reason_code TEXT NOT NULL, signature TEXT NULL, notified_at TIMESTAMPTZ NULL, PRIMARY KEY (guild_id, run_context, operation, outcome, reason_code))",
+            "CREATE TABLE IF NOT EXISTS admin_channel_locks (guild_id BIGINT NOT NULL, channel_id BIGINT NOT NULL, actor_id BIGINT NULL, created_at TIMESTAMPTZ NOT NULL, due_at TIMESTAMPTZ NULL, category_id BIGINT NULL, permissions_synced BOOLEAN NOT NULL DEFAULT FALSE, locked_permissions JSONB NOT NULL DEFAULT '[]'::jsonb, original_permissions JSONB NOT NULL DEFAULT '{}'::jsonb, PRIMARY KEY (guild_id, channel_id))",
         ]
         alter_statements = [
             "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS followup_enabled BOOLEAN NOT NULL DEFAULT FALSE",
@@ -719,6 +854,8 @@ class _PostgresAdminStore(_BaseAdminStore):
             "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS warning_template TEXT NULL",
             "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS kick_template TEXT NULL",
             "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS invite_link TEXT NULL",
+            "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS lock_notice_template TEXT NULL",
+            "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS lock_admin_only BOOLEAN NOT NULL DEFAULT FALSE",
             "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS excluded_user_ids JSONB NOT NULL DEFAULT '[]'::jsonb",
             "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS excluded_role_ids JSONB NOT NULL DEFAULT '[]'::jsonb",
             "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS trusted_role_ids JSONB NOT NULL DEFAULT '[]'::jsonb",
@@ -737,6 +874,13 @@ class _PostgresAdminStore(_BaseAdminStore):
             "ALTER TABLE admin_verification_states ADD COLUMN IF NOT EXISTS last_result_at TIMESTAMPTZ NULL",
             "ALTER TABLE admin_verification_states ADD COLUMN IF NOT EXISTS last_notified_code TEXT NULL",
             "ALTER TABLE admin_verification_states ADD COLUMN IF NOT EXISTS last_notified_at TIMESTAMPTZ NULL",
+            "ALTER TABLE admin_channel_locks ADD COLUMN IF NOT EXISTS actor_id BIGINT NULL",
+            "ALTER TABLE admin_channel_locks ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc', now())",
+            "ALTER TABLE admin_channel_locks ADD COLUMN IF NOT EXISTS due_at TIMESTAMPTZ NULL",
+            "ALTER TABLE admin_channel_locks ADD COLUMN IF NOT EXISTS category_id BIGINT NULL",
+            "ALTER TABLE admin_channel_locks ADD COLUMN IF NOT EXISTS permissions_synced BOOLEAN NOT NULL DEFAULT FALSE",
+            "ALTER TABLE admin_channel_locks ADD COLUMN IF NOT EXISTS locked_permissions JSONB NOT NULL DEFAULT '[]'::jsonb",
+            "ALTER TABLE admin_channel_locks ADD COLUMN IF NOT EXISTS original_permissions JSONB NOT NULL DEFAULT '{}'::jsonb",
             "DROP TABLE IF EXISTS admin_member_risk_states",
             "DROP TABLE IF EXISTS admin_member_risk_review_queues",
             "DROP TABLE IF EXISTS admin_emergency_incidents",
@@ -785,6 +929,7 @@ class _PostgresAdminStore(_BaseAdminStore):
             "CREATE INDEX IF NOT EXISTS ix_admin_verification_review_pending ON admin_verification_states (review_pending, review_message_id)",
             "CREATE INDEX IF NOT EXISTS ix_admin_verification_last_notified ON admin_verification_states (guild_id, last_notified_at)",
             "CREATE INDEX IF NOT EXISTS ix_admin_verification_snapshot_notified ON admin_verification_notification_snapshots (guild_id, notified_at)",
+            "CREATE INDEX IF NOT EXISTS ix_admin_channel_locks_due ON admin_channel_locks (due_at)",
         ]
         async with self.pool.acquire() as conn:
             for statement in table_statements:
@@ -808,8 +953,8 @@ class _PostgresAdminStore(_BaseAdminStore):
         normalized = normalize_admin_config(int(config["guild_id"]), config)
         async with self.pool.acquire() as conn:
             await conn.execute(
-                "INSERT INTO admin_guild_configs (guild_id, followup_enabled, followup_role_id, followup_mode, followup_duration_value, followup_duration_unit, verification_enabled, verification_role_id, verification_logic, verification_deadline_action, verification_kick_after_seconds, verification_warning_lead_seconds, verification_help_channel_id, verification_help_extension_seconds, verification_max_extensions, admin_log_channel_id, admin_alert_role_id, warning_template, kick_template, invite_link, excluded_user_ids, excluded_role_ids, trusted_role_ids, followup_exempt_staff, verification_exempt_staff, verification_exempt_bots, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21::jsonb, $22::jsonb, $23::jsonb, $24, $25, $26, timezone('utc', now())) ON CONFLICT (guild_id) DO UPDATE SET followup_enabled = EXCLUDED.followup_enabled, followup_role_id = EXCLUDED.followup_role_id, followup_mode = EXCLUDED.followup_mode, followup_duration_value = EXCLUDED.followup_duration_value, followup_duration_unit = EXCLUDED.followup_duration_unit, verification_enabled = EXCLUDED.verification_enabled, verification_role_id = EXCLUDED.verification_role_id, verification_logic = EXCLUDED.verification_logic, verification_deadline_action = EXCLUDED.verification_deadline_action, verification_kick_after_seconds = EXCLUDED.verification_kick_after_seconds, verification_warning_lead_seconds = EXCLUDED.verification_warning_lead_seconds, verification_help_channel_id = EXCLUDED.verification_help_channel_id, verification_help_extension_seconds = EXCLUDED.verification_help_extension_seconds, verification_max_extensions = EXCLUDED.verification_max_extensions, admin_log_channel_id = EXCLUDED.admin_log_channel_id, admin_alert_role_id = EXCLUDED.admin_alert_role_id, warning_template = EXCLUDED.warning_template, kick_template = EXCLUDED.kick_template, invite_link = EXCLUDED.invite_link, excluded_user_ids = EXCLUDED.excluded_user_ids, excluded_role_ids = EXCLUDED.excluded_role_ids, trusted_role_ids = EXCLUDED.trusted_role_ids, followup_exempt_staff = EXCLUDED.followup_exempt_staff, verification_exempt_staff = EXCLUDED.verification_exempt_staff, verification_exempt_bots = EXCLUDED.verification_exempt_bots, updated_at = EXCLUDED.updated_at",
-                normalized["guild_id"], normalized["followup_enabled"], normalized["followup_role_id"], normalized["followup_mode"], normalized["followup_duration_value"], normalized["followup_duration_unit"], normalized["verification_enabled"], normalized["verification_role_id"], normalized["verification_logic"], normalized["verification_deadline_action"], normalized["verification_kick_after_seconds"], normalized["verification_warning_lead_seconds"], normalized["verification_help_channel_id"], normalized["verification_help_extension_seconds"], normalized["verification_max_extensions"], normalized["admin_log_channel_id"], normalized["admin_alert_role_id"], normalized["warning_template"], normalized["kick_template"], normalized["invite_link"], json.dumps(normalized["excluded_user_ids"]), json.dumps(normalized["excluded_role_ids"]), json.dumps(normalized["trusted_role_ids"]), normalized["followup_exempt_staff"], normalized["verification_exempt_staff"], normalized["verification_exempt_bots"],
+                "INSERT INTO admin_guild_configs (guild_id, followup_enabled, followup_role_id, followup_mode, followup_duration_value, followup_duration_unit, verification_enabled, verification_role_id, verification_logic, verification_deadline_action, verification_kick_after_seconds, verification_warning_lead_seconds, verification_help_channel_id, verification_help_extension_seconds, verification_max_extensions, admin_log_channel_id, admin_alert_role_id, warning_template, kick_template, invite_link, lock_notice_template, lock_admin_only, excluded_user_ids, excluded_role_ids, trusted_role_ids, followup_exempt_staff, verification_exempt_staff, verification_exempt_bots, updated_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20, $21, $22, $23::jsonb, $24::jsonb, $25::jsonb, $26, $27, $28, timezone('utc', now())) ON CONFLICT (guild_id) DO UPDATE SET followup_enabled = EXCLUDED.followup_enabled, followup_role_id = EXCLUDED.followup_role_id, followup_mode = EXCLUDED.followup_mode, followup_duration_value = EXCLUDED.followup_duration_value, followup_duration_unit = EXCLUDED.followup_duration_unit, verification_enabled = EXCLUDED.verification_enabled, verification_role_id = EXCLUDED.verification_role_id, verification_logic = EXCLUDED.verification_logic, verification_deadline_action = EXCLUDED.verification_deadline_action, verification_kick_after_seconds = EXCLUDED.verification_kick_after_seconds, verification_warning_lead_seconds = EXCLUDED.verification_warning_lead_seconds, verification_help_channel_id = EXCLUDED.verification_help_channel_id, verification_help_extension_seconds = EXCLUDED.verification_help_extension_seconds, verification_max_extensions = EXCLUDED.verification_max_extensions, admin_log_channel_id = EXCLUDED.admin_log_channel_id, admin_alert_role_id = EXCLUDED.admin_alert_role_id, warning_template = EXCLUDED.warning_template, kick_template = EXCLUDED.kick_template, invite_link = EXCLUDED.invite_link, lock_notice_template = EXCLUDED.lock_notice_template, lock_admin_only = EXCLUDED.lock_admin_only, excluded_user_ids = EXCLUDED.excluded_user_ids, excluded_role_ids = EXCLUDED.excluded_role_ids, trusted_role_ids = EXCLUDED.trusted_role_ids, followup_exempt_staff = EXCLUDED.followup_exempt_staff, verification_exempt_staff = EXCLUDED.verification_exempt_staff, verification_exempt_bots = EXCLUDED.verification_exempt_bots, updated_at = EXCLUDED.updated_at",
+                normalized["guild_id"], normalized["followup_enabled"], normalized["followup_role_id"], normalized["followup_mode"], normalized["followup_duration_value"], normalized["followup_duration_unit"], normalized["verification_enabled"], normalized["verification_role_id"], normalized["verification_logic"], normalized["verification_deadline_action"], normalized["verification_kick_after_seconds"], normalized["verification_warning_lead_seconds"], normalized["verification_help_channel_id"], normalized["verification_help_extension_seconds"], normalized["verification_max_extensions"], normalized["admin_log_channel_id"], normalized["admin_alert_role_id"], normalized["warning_template"], normalized["kick_template"], normalized["invite_link"], normalized["lock_notice_template"], normalized["lock_admin_only"], json.dumps(normalized["excluded_user_ids"]), json.dumps(normalized["excluded_role_ids"]), json.dumps(normalized["trusted_role_ids"]), normalized["followup_exempt_staff"], normalized["verification_exempt_staff"], normalized["verification_exempt_bots"],
             )
 
     async def upsert_ban_candidate(self, record: dict[str, Any]):
@@ -897,6 +1042,38 @@ class _PostgresAdminStore(_BaseAdminStore):
         async with self.pool.acquire() as conn:
             await conn.execute("INSERT INTO admin_verification_notification_snapshots (guild_id, run_context, operation, outcome, reason_code, signature, notified_at) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (guild_id, run_context, operation, outcome, reason_code) DO UPDATE SET signature = EXCLUDED.signature, notified_at = EXCLUDED.notified_at", normalized["guild_id"], normalized["run_context"], normalized["operation"], normalized["outcome"], normalized["reason_code"], normalized["signature"], normalized["notified_at"])
 
+    async def upsert_channel_lock(self, record: dict[str, Any]):
+        normalized = normalize_channel_lock(record)
+        if normalized is None:
+            return
+        async with self.pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO admin_channel_locks (guild_id, channel_id, actor_id, created_at, due_at, category_id, permissions_synced, locked_permissions, original_permissions) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb) ON CONFLICT (guild_id, channel_id) DO UPDATE SET actor_id = EXCLUDED.actor_id, created_at = EXCLUDED.created_at, due_at = EXCLUDED.due_at, category_id = EXCLUDED.category_id, permissions_synced = EXCLUDED.permissions_synced, locked_permissions = EXCLUDED.locked_permissions, original_permissions = EXCLUDED.original_permissions",
+                normalized["guild_id"],
+                normalized["channel_id"],
+                normalized["actor_id"],
+                normalized["created_at"],
+                normalized["due_at"],
+                normalized["category_id"],
+                normalized["permissions_synced"],
+                json.dumps(normalized["locked_permissions"]),
+                json.dumps(normalized["original_permissions"]),
+            )
+
+    async def fetch_channel_lock(self, guild_id: int, channel_id: int) -> dict[str, Any] | None:
+        async with self.pool.acquire() as conn:
+            row = await conn.fetchrow("SELECT * FROM admin_channel_locks WHERE guild_id = $1 AND channel_id = $2", guild_id, channel_id)
+        return _channel_lock_from_row(row)
+
+    async def delete_channel_lock(self, guild_id: int, channel_id: int):
+        async with self.pool.acquire() as conn:
+            await conn.execute("DELETE FROM admin_channel_locks WHERE guild_id = $1 AND channel_id = $2", guild_id, channel_id)
+
+    async def list_due_channel_locks(self, now: datetime, *, limit: int = 50) -> list[dict[str, Any]]:
+        async with self.pool.acquire() as conn:
+            rows = await conn.fetch("SELECT * FROM admin_channel_locks WHERE due_at IS NOT NULL AND due_at <= $1 ORDER BY due_at ASC, channel_id ASC LIMIT $2", now, limit)
+        return [record for row in rows if (record := _channel_lock_from_row(row)) is not None]
+
     async def list_followups_for_guild(self, guild_id: int) -> list[dict[str, Any]]:
         async with self.pool.acquire() as conn:
             rows = await conn.fetch("SELECT * FROM admin_followup_roles WHERE guild_id = $1 ORDER BY assigned_at ASC, user_id ASC", guild_id)
@@ -935,8 +1112,8 @@ class _PostgresAdminStore(_BaseAdminStore):
 
     async def fetch_guild_counts(self, guild_id: int) -> dict[str, int]:
         async with self.pool.acquire() as conn:
-            row = await conn.fetchrow("SELECT (SELECT COUNT(*) FROM admin_ban_return_candidates WHERE guild_id = $1) AS ban_candidates, (SELECT COUNT(*) FROM admin_followup_roles WHERE guild_id = $1) AS active_followups, (SELECT COUNT(*) FROM admin_followup_roles WHERE guild_id = $1 AND review_pending = TRUE) AS pending_reviews, (SELECT COUNT(*) FROM admin_verification_states WHERE guild_id = $1) AS verification_pending, (SELECT COUNT(*) FROM admin_verification_states WHERE guild_id = $1 AND warning_sent_at IS NOT NULL) AS verification_warned", guild_id)
-        return {"ban_candidates": int(row["ban_candidates"] or 0), "active_followups": int(row["active_followups"] or 0), "pending_reviews": int(row["pending_reviews"] or 0), "verification_pending": int(row["verification_pending"] or 0), "verification_warned": int(row["verification_warned"] or 0)}
+            row = await conn.fetchrow("SELECT (SELECT COUNT(*) FROM admin_ban_return_candidates WHERE guild_id = $1) AS ban_candidates, (SELECT COUNT(*) FROM admin_followup_roles WHERE guild_id = $1) AS active_followups, (SELECT COUNT(*) FROM admin_followup_roles WHERE guild_id = $1 AND review_pending = TRUE) AS pending_reviews, (SELECT COUNT(*) FROM admin_verification_states WHERE guild_id = $1) AS verification_pending, (SELECT COUNT(*) FROM admin_verification_states WHERE guild_id = $1 AND warning_sent_at IS NOT NULL) AS verification_warned, (SELECT COUNT(*) FROM admin_channel_locks WHERE guild_id = $1) AS active_channel_locks", guild_id)
+        return {"ban_candidates": int(row["ban_candidates"] or 0), "active_followups": int(row["active_followups"] or 0), "pending_reviews": int(row["pending_reviews"] or 0), "verification_pending": int(row["verification_pending"] or 0), "verification_warned": int(row["verification_warned"] or 0), "active_channel_locks": int(row["active_channel_locks"] or 0)}
 
 
 class AdminStore:
@@ -1026,6 +1203,18 @@ class AdminStore:
 
     async def upsert_verification_notification_snapshot(self, record: dict[str, Any]):
         await self._store.upsert_verification_notification_snapshot(record)
+
+    async def upsert_channel_lock(self, record: dict[str, Any]):
+        await self._store.upsert_channel_lock(record)
+
+    async def fetch_channel_lock(self, guild_id: int, channel_id: int) -> dict[str, Any] | None:
+        return await self._store.fetch_channel_lock(guild_id, channel_id)
+
+    async def delete_channel_lock(self, guild_id: int, channel_id: int):
+        await self._store.delete_channel_lock(guild_id, channel_id)
+
+    async def list_due_channel_locks(self, now: datetime, *, limit: int = 50) -> list[dict[str, Any]]:
+        return await self._store.list_due_channel_locks(now, limit=limit)
 
     async def list_followups_for_guild(self, guild_id: int) -> list[dict[str, Any]]:
         return await self._store.list_followups_for_guild(guild_id)

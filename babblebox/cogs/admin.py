@@ -9,7 +9,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from babblebox.app_command_hardening import harden_admin_root_group
+from babblebox.app_command_hardening import harden_admin_root_group, harden_lock_root_group
 from babblebox import game_engine as ge
 from babblebox.admin_service import (
     FOLLOWUP_MODE_LABELS,
@@ -58,6 +58,48 @@ ADMIN_TEST_CHOICES = [
     app_commands.Choice(name="Final kick DM", value="kick_dm"),
     app_commands.Choice(name="Logs channel", value="logs"),
 ]
+PERMISSION_DIAGNOSTIC_RULES: tuple[tuple[str, str, str], ...] = (
+    (
+        "manage_channels",
+        "Manage Channels",
+        "Emergency locks cannot change the `@everyone` overwrite, so `/lock channel` and `/lock remove` will fail.",
+    ),
+    (
+        "manage_roles",
+        "Manage Roles",
+        "Returned-after-ban follow-up roles and Question Drops role grants or removals cannot manage roles.",
+    ),
+    (
+        "kick_members",
+        "Kick Members",
+        "Verification cleanup cannot auto-kick, and the verification review queue Kick action will fail.",
+    ),
+    (
+        "moderate_members",
+        "Moderate Members / Timeout Members",
+        "Shield timeout actions cannot run.",
+    ),
+    (
+        "manage_messages",
+        "Manage Messages",
+        "Shield delete and delete + timeout actions cannot remove matched messages.",
+    ),
+    (
+        "view_channel",
+        "View Channels",
+        "Babblebox may miss help cards, log channels, lock notices, or moderation surfaces in channels it cannot see.",
+    ),
+    (
+        "send_messages",
+        "Send Messages",
+        "Babblebox cannot post lock notices, moderation logs, or status cards where sending is blocked.",
+    ),
+    (
+        "embed_links",
+        "Embed Links",
+        "Rich help, support, Shield, and admin embeds may fail or fall back.",
+    ),
+)
 
 
 class FollowupReviewView(discord.ui.View):
@@ -464,6 +506,7 @@ class AdminCog(commands.Cog):
         self.bot = bot
         self.service = AdminService(bot)
         harden_admin_root_group(self.admin_group)
+        harden_lock_root_group(self.lock_group)
 
     async def cog_load(self):
         await self.service.start()
@@ -507,6 +550,14 @@ class AdminCog(commands.Cog):
         perms = getattr(actor, "guild_permissions", None)
         return bool(getattr(perms, "administrator", False) or getattr(perms, "manage_guild", False))
 
+    def user_can_manage_lock(self, actor: object, guild_id: int) -> bool:
+        perms = getattr(actor, "guild_permissions", None)
+        if bool(getattr(perms, "administrator", False) or getattr(perms, "manage_guild", False)):
+            return True
+        if self.service.get_compiled_config(guild_id).lock_admin_only:
+            return False
+        return bool(getattr(perms, "manage_channels", False))
+
     async def _guard(self, ctx: commands.Context) -> bool:
         await defer_hybrid_response(ctx, ephemeral=True)
         if ctx.guild is None:
@@ -539,6 +590,61 @@ class AdminCog(commands.Cog):
             )
             return False
         return True
+
+    async def _lock_guard(self, ctx: commands.Context, *, settings: bool = False) -> bool:
+        await defer_hybrid_response(ctx, ephemeral=True)
+        if ctx.guild is None:
+            await self._send_admin_response(
+                ctx,
+                embed=ge.make_status_embed(
+                    "Server Only",
+                    "Emergency lock tools only work inside a server.",
+                    tone="warning",
+                    footer="Babblebox Lock",
+                ),
+                recovery_title="Emergency Lock Unavailable",
+                recovery_description="Babblebox could not complete the emergency lock permission check just now. Please try again inside a server.",
+                recovery_footer="Babblebox Lock",
+            )
+            return False
+        if not self.service.storage_ready:
+            await self._send_admin_response(
+                ctx,
+                embed=ge.make_status_embed(
+                    "Emergency Lock Unavailable",
+                    self.service.storage_message("Emergency lock tools"),
+                    tone="warning",
+                    footer="Babblebox Lock",
+                ),
+                recovery_title="Emergency Lock Unavailable",
+                recovery_description="Babblebox could not complete the emergency lock storage check just now. Please try again in a moment.",
+                recovery_footer="Babblebox Lock",
+            )
+            return False
+        if settings:
+            if self.user_can_manage_admin(ctx.author):
+                return True
+            description = "You need **Manage Server** or administrator access to change emergency lock settings."
+            title = "Admin Only"
+        else:
+            if self.user_can_manage_lock(ctx.author, ctx.guild.id):
+                return True
+            if self.service.get_compiled_config(ctx.guild.id).lock_admin_only:
+                description = "This server has limited emergency locks to **Manage Server** or administrator users."
+            else:
+                description = "You need **Manage Channels** to use emergency locks in this server."
+            title = "Lock Access Denied"
+        await self._send_admin_response(
+            ctx,
+            embed=ge.make_status_embed(title, description, tone="warning", footer="Babblebox Lock"),
+            recovery_title="Emergency Lock Access Check Unavailable",
+            recovery_description="Babblebox could not finish the emergency lock access check just now. Please try again in a moment.",
+            recovery_footer="Babblebox Lock",
+        )
+        return False
+
+    def _lock_target_channel(self, ctx: commands.Context, channel: discord.TextChannel | None):
+        return channel or ctx.channel
 
     def _format_mentions(self, ids: list[int], *, kind: str) -> str:
         if not ids:
@@ -689,7 +795,161 @@ class AdminCog(commands.Cog):
                     add(f"Warning: Babblebox cannot embed admin alerts in {channel.mention}.")
         if compiled.admin_alert_role_id is not None and not self.service.can_ping_alert_role(guild, compiled):
             add("Warning: Babblebox may not be able to ping the configured admin alert role.")
+        perms = getattr(me, "guild_permissions", None)
+        if perms is None or not getattr(perms, "manage_channels", False):
+            add("Warning: Emergency locks cannot run because Babblebox is missing Manage Channels.")
         return lines
+
+    def _permission_diagnostic_rows(self, guild_id: int) -> list[tuple[str, str]]:
+        guild = self._guild(guild_id)
+        if guild is None:
+            return []
+        me = self.service._bot_member(guild)
+        if me is None:
+            return [("Bot Member", "Babblebox could not resolve its own server member, so permission diagnostics cannot finish cleanly.")]
+        perms = getattr(me, "guild_permissions", None)
+        rows: list[tuple[str, str]] = []
+        for attribute, label, impact in PERMISSION_DIAGNOSTIC_RULES:
+            if perms is not None and getattr(perms, attribute, False):
+                continue
+            rows.append((label, impact))
+        compiled = self.service.get_compiled_config(guild_id)
+        if compiled.admin_alert_role_id is not None and not bool(getattr(perms, "mention_everyone", False)):
+            rows.append(
+                (
+                    "Mention Everyone",
+                    "Configured alert-role pings may fail unless that role is already mentionable.",
+                )
+            )
+        return rows
+
+    async def _lock_embed(self, guild_id: int) -> discord.Embed:
+        config = self.service.get_config(guild_id)
+        counts = await self.service.get_counts(guild_id)
+        notice_text = self.service.lock_notice_text(guild_id)
+        notice_label = "Custom" if config["lock_notice_template"] else "Babblebox default"
+        embed = discord.Embed(
+            title="Emergency Channel Locks",
+            description="Direct moderator lane for calm, reversible emergency channel locking.",
+            color=ge.EMBED_THEME["warning"],
+        )
+        embed.add_field(
+            name="Current Policy",
+            value=(
+                f"Access: **{self.service.lock_access_summary(guild_id)}**\n"
+                f"Default notice: **{notice_label}**\n"
+                f"Post notice on lock: **Yes, unless the moderator suppresses it for one run**\n"
+                f"Active tracked locks: **{counts.get('active_channel_locks', 0)}**"
+            ),
+            inline=False,
+        )
+        embed.add_field(name="Default Notice Preview", value=notice_text, inline=False)
+        embed.add_field(
+            name="Safety Model",
+            value=(
+                "Babblebox only locks normal text channels.\n"
+                "Category-synced channels are intentionally rejected so Babblebox does not break sync.\n"
+                "Only the `@everyone` flags Babblebox changed are restored later, and manual mid-lock edits are preserved when possible.\n"
+                "Timed locks survive restarts and are reconciled by the background sweep."
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Quick Use",
+            value=(
+                "`/lock channel channel:#general duration:30m`\n"
+                "`/lock remove channel:#general`\n"
+                "`/lock settings admin_only:true`\n"
+                "`/admin permissions`"
+            ),
+            inline=False,
+        )
+        return ge.style_embed(embed, footer="Babblebox Lock | /lock channel, remove, or settings")
+
+    async def _permission_diagnostics_embed(self, guild_id: int) -> discord.Embed:
+        guild = self._guild(guild_id)
+        if guild is None:
+            return ge.make_status_embed(
+                "Permission Diagnostics Unavailable",
+                "Babblebox could not resolve that server, so permission diagnostics are unavailable right now.",
+                tone="warning",
+                footer="Babblebox Admin",
+            )
+        me = self.service._bot_member(guild)
+        if me is None:
+            return ge.make_status_embed(
+                "Permission Diagnostics Unavailable",
+                "Babblebox could not resolve its own server member, so permission diagnostics are unavailable right now.",
+                tone="warning",
+                footer="Babblebox Admin",
+            )
+        rows = self._permission_diagnostic_rows(guild_id)
+        compiled = self.service.get_compiled_config(guild_id)
+        embed = discord.Embed(
+            title="Babblebox Permission Health",
+            description="Checks Babblebox's current server permissions and maps any missing permissions to the feature lanes they directly affect.",
+            color=ge.EMBED_THEME["info"],
+        )
+        if rows:
+            embed.add_field(
+                name="Missing Server Permissions",
+                value=ge.join_limited_lines(
+                    [f"**{label}**: {impact}" for label, impact in rows],
+                    limit=1024,
+                    empty="None.",
+                ),
+                inline=False,
+            )
+            embed.add_field(
+                name="Summary",
+                value=f"Babblebox is currently missing **{len(rows)}** audited server permissions or permission-dependent capabilities in this guild.",
+                inline=False,
+            )
+        else:
+            embed.add_field(
+                name="Missing Server Permissions",
+                value="None from the audited moderation and admin feature set.",
+                inline=False,
+            )
+            embed.add_field(
+                name="Summary",
+                value="Babblebox has the audited moderation and admin permissions at the server level.",
+                inline=False,
+            )
+
+        admin_log_lines: list[str] = []
+        if compiled.admin_log_channel_id is None:
+            admin_log_lines.append("Admin log channel: **Not configured**")
+        else:
+            channel = self.service._guild_channel(guild, compiled.admin_log_channel_id)
+            if channel is None:
+                admin_log_lines.append("Admin log channel: configured, but missing or inaccessible.")
+            else:
+                channel_perms = channel.permissions_for(me)
+                admin_log_lines.append(f"Admin log channel: {channel.mention}")
+                if not getattr(channel_perms, "view_channel", False):
+                    admin_log_lines.append("Babblebox cannot view that admin log channel.")
+                if not getattr(channel_perms, "send_messages", False):
+                    admin_log_lines.append("Babblebox cannot send messages in that admin log channel.")
+                if not getattr(channel_perms, "embed_links", False):
+                    admin_log_lines.append("Babblebox cannot embed messages in that admin log channel.")
+        embed.add_field(name="Log Delivery", value="\n".join(admin_log_lines), inline=False)
+        embed.add_field(
+            name="Emergency Lock Lane",
+            value=(
+                f"Access model: **{self.service.lock_access_summary(guild_id)}**\n"
+                "Direct locks only target normal text channels and intentionally refuse category-synced channels."
+            ),
+            inline=False,
+        )
+        operability = self._operability_lines(guild_id)
+        if operability:
+            embed.add_field(
+                name="Current Blockers Or Warnings",
+                value=ge.join_limited_lines(operability[:6], limit=1024, empty="No additional blockers detected."),
+                inline=False,
+            )
+        return ge.style_embed(embed, footer="Babblebox Admin | /admin permissions")
 
     def _format_precheck_lines(self, checks: tuple[VerificationPrecheck, ...], *, include_notes: bool = True) -> str:
         labels = {
@@ -844,6 +1104,16 @@ class AdminCog(commands.Cog):
             value=(
                 f"Channel: {self._channel_mention(config['admin_log_channel_id'])}\n"
                 f"Alert role: {self._role_mention(config['admin_alert_role_id'])}"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Emergency Locks",
+            value=(
+                f"Access: **{self.service.lock_access_summary(guild_id)}**\n"
+                f"Default notice: **{'Custom' if config['lock_notice_template'] else 'Babblebox default'}**\n"
+                f"Tracked locks: **{counts.get('active_channel_locks', 0)}**\n"
+                "Direct locks only target normal text channels and intentionally refuse category-synced channels."
             ),
             inline=False,
         )
@@ -1045,7 +1315,7 @@ class AdminCog(commands.Cog):
             embed.add_field(name="Operability", value="\n".join(operability[:6]), inline=False)
         return ge.style_embed(
             embed,
-            footer="Babblebox Admin | /admin panel, status, followup, verification, logs, exclusions, templates, sync, or test",
+            footer="Babblebox Admin | /admin panel, status, followup, verification, logs, exclusions, templates, permissions, sync, or test",
         )
 
     async def _send_admin_response(
@@ -1057,6 +1327,7 @@ class AdminCog(commands.Cog):
         retry_without_view: bool = False,
         recovery_title: str = "Admin Response Unavailable",
         recovery_description: str = "Babblebox could not finish this admin response just now. Please try the command again in a moment.",
+        recovery_footer: str = "Babblebox Admin",
     ) -> HybridPanelSendResult:
         result = await send_hybrid_panel_response(ctx, embed=embed, view=view, ephemeral=True)
         if not result.delivered and retry_without_view and view is not None:
@@ -1067,15 +1338,24 @@ class AdminCog(commands.Cog):
         if result.delivered:
             return result
 
-        recovery_embed = ge.make_status_embed(recovery_title, recovery_description, tone="warning", footer="Babblebox Admin")
+        recovery_embed = ge.make_status_embed(recovery_title, recovery_description, tone="warning", footer=recovery_footer)
         with contextlib.suppress(discord.ClientException, discord.HTTPException, discord.NotFound, TypeError, ValueError):
             recovery = await send_hybrid_panel_response(ctx, embed=recovery_embed, ephemeral=True)
             if recovery.delivered:
                 return recovery
         return result
 
-    async def _send_result(self, ctx: commands.Context, title: str, message: str, *, ok: bool):
-        embed = ge.make_status_embed(title, message, tone="success" if ok else "warning", footer="Babblebox Admin")
+    async def _send_result(
+        self,
+        ctx: commands.Context,
+        title: str,
+        message: str,
+        *,
+        ok: bool,
+        footer: str = "Babblebox Admin",
+        recovery_footer: str = "Babblebox Admin",
+    ):
+        embed = ge.make_status_embed(title, message, tone="success" if ok else "warning", footer=footer)
         operability = self._operability_lines(ctx.guild.id)
         if operability:
             embed.add_field(name="Operability", value="\n".join(operability[:6]), inline=False)
@@ -1084,6 +1364,7 @@ class AdminCog(commands.Cog):
             embed=embed,
             recovery_title=f"{title} Unavailable",
             recovery_description="Babblebox could not finish the admin update response just now. No additional admin changes were applied after this point.",
+            recovery_footer=recovery_footer,
         )
 
     async def _send_panel(self, ctx: commands.Context, *, section: str = "overview"):
@@ -1172,6 +1453,145 @@ class AdminCog(commands.Cog):
 
     @app_commands.allowed_installs(guilds=True, users=False)
     @app_commands.guild_only()
+    @commands.hybrid_group(
+        name="lock",
+        with_app_command=True,
+        description="Emergency channel lock tools for moderators",
+        invoke_without_command=True,
+    )
+    async def lock_group(self, ctx: commands.Context):
+        if not await self._lock_guard(ctx):
+            return
+        await self._send_admin_response(
+            ctx,
+            embed=await self._lock_embed(ctx.guild.id),
+            recovery_title="Emergency Lock Panel Unavailable",
+            recovery_description="Babblebox could not open the emergency lock panel just now. Please try `/lock` again in a moment.",
+            recovery_footer="Babblebox Lock",
+        )
+
+    @lock_group.command(name="channel", with_app_command=True, description="Lock one text channel safely for an emergency")
+    @app_commands.describe(
+        channel="Which text channel to lock. Leave blank to lock the current channel",
+        duration="Optional timer like 30m, 2h, or 1d",
+        notice_message="Optional one-off notice to post in the locked channel",
+        post_notice="Post the configured or custom notice in the channel after locking it",
+    )
+    async def lock_channel_command(
+        self,
+        ctx: commands.Context,
+        channel: Optional[discord.TextChannel] = None,
+        duration: Optional[str] = None,
+        notice_message: Optional[str] = None,
+        post_notice: bool = True,
+    ):
+        if not await self._lock_guard(ctx):
+            return
+        target_channel = self._lock_target_channel(ctx, channel)
+        if target_channel is None:
+            await self._send_result(
+                ctx,
+                "Channel Lock",
+                "Choose a text channel or run the command inside the channel you want to lock.",
+                ok=False,
+                footer="Babblebox Lock",
+                recovery_footer="Babblebox Lock",
+            )
+            return
+        ok, message = await self.service.lock_channel(
+            ctx.guild,
+            target_channel,
+            actor=ctx.author,
+            duration_text=duration,
+            notice_message=notice_message,
+            post_notice=post_notice,
+        )
+        await self._send_result(
+            ctx,
+            "Channel Lock",
+            message,
+            ok=ok,
+            footer="Babblebox Lock",
+            recovery_footer="Babblebox Lock",
+        )
+
+    @lock_group.command(name="remove", with_app_command=True, description="Remove a Babblebox emergency lock safely")
+    @app_commands.describe(channel="Which text channel to unlock. Leave blank to unlock the current channel")
+    async def lock_remove_command(self, ctx: commands.Context, channel: Optional[discord.TextChannel] = None):
+        if not await self._lock_guard(ctx):
+            return
+        target_channel = self._lock_target_channel(ctx, channel)
+        if target_channel is None:
+            await self._send_result(
+                ctx,
+                "Channel Unlock",
+                "Choose a text channel or run the command inside the channel you want to unlock.",
+                ok=False,
+                footer="Babblebox Lock",
+                recovery_footer="Babblebox Lock",
+            )
+            return
+        ok, message = await self.service.remove_channel_lock(ctx.guild, target_channel, actor=ctx.author, automatic=False)
+        await self._send_result(
+            ctx,
+            "Channel Unlock",
+            message,
+            ok=ok,
+            footer="Babblebox Lock",
+            recovery_footer="Babblebox Lock",
+        )
+
+    @lock_group.command(name="settings", with_app_command=True, description="Review or change emergency lock defaults")
+    @app_commands.default_permissions(manage_guild=True)
+    @app_commands.describe(
+        default_notice="Default lock notice to post when a moderator does not supply a one-off notice",
+        clear_notice="Clear the custom default notice and return to Babblebox's built-in notice",
+        admin_only="Limit `/lock` use to Manage Server/admin users instead of moderators with Manage Channels",
+    )
+    async def lock_settings_command(
+        self,
+        ctx: commands.Context,
+        default_notice: Optional[str] = None,
+        clear_notice: bool = False,
+        admin_only: Optional[bool] = None,
+    ):
+        if not await self._lock_guard(ctx, settings=True):
+            return
+        if default_notice is None and not clear_notice and admin_only is None:
+            await self._send_admin_response(
+                ctx,
+                embed=await self._lock_embed(ctx.guild.id),
+                recovery_title="Emergency Lock Settings Unavailable",
+                recovery_description="Babblebox could not open the emergency lock settings just now. Please try `/lock settings` again in a moment.",
+                recovery_footer="Babblebox Lock",
+            )
+            return
+        if clear_notice and default_notice is not None:
+            await self._send_result(
+                ctx,
+                "Emergency Lock Settings",
+                "Choose either a new default notice or `clear_notice:true`, not both in the same update.",
+                ok=False,
+                footer="Babblebox Lock",
+                recovery_footer="Babblebox Lock",
+            )
+            return
+        ok, message = await self.service.set_lock_config(
+            ctx.guild.id,
+            notice_template=None if clear_notice else (default_notice if default_notice is not None else ...),
+            admin_only=admin_only,
+        )
+        await self._send_result(
+            ctx,
+            "Emergency Lock Settings",
+            message,
+            ok=ok,
+            footer="Babblebox Lock",
+            recovery_footer="Babblebox Lock",
+        )
+
+    @app_commands.allowed_installs(guilds=True, users=False)
+    @app_commands.guild_only()
     @app_commands.default_permissions(manage_guild=True)
     @commands.hybrid_group(
         name="admin",
@@ -1208,6 +1628,17 @@ class AdminCog(commands.Cog):
         if not await self._guard(ctx):
             return
         await self._send_panel(ctx, section="overview")
+
+    @admin_group.command(name="permissions", with_app_command=True, description="See which bot permissions are missing and which features they affect")
+    async def admin_permissions_command(self, ctx: commands.Context):
+        if not await self._guard(ctx):
+            return
+        await self._send_admin_response(
+            ctx,
+            embed=await self._permission_diagnostics_embed(ctx.guild.id),
+            recovery_title="Permission Diagnostics Unavailable",
+            recovery_description="Babblebox could not open permission diagnostics just now. Please try `/admin permissions` again in a moment.",
+        )
 
     @admin_group.command(name="followup", with_app_command=True, description="Configure returned-after-ban follow-up roles")
     @app_commands.describe(

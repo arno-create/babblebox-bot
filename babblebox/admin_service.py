@@ -19,6 +19,7 @@ from babblebox import game_engine as ge
 from babblebox.admin_store import (
     AdminStorageUnavailable,
     AdminStore,
+    VALID_CHANNEL_LOCK_PERMISSION_NAMES,
     VALID_FOLLOWUP_MODES,
     VALID_VERIFICATION_DEADLINE_ACTIONS,
     VALID_VERIFICATION_LOGIC,
@@ -38,6 +39,8 @@ OPERATION_BACKOFF_SECONDS = 3600
 TEMPLATE_MAX_LEN = 700
 EXCLUSION_LIMIT = 20
 HELP_MIN_CONTENT_LEN = 4
+LOCK_MAX_DURATION_SECONDS = 30 * 24 * 3600
+LOCK_NOTICE_MAX_LEN = 700
 VERIFICATION_SYNC_DM_PACE_SECONDS = 1.0
 VERIFICATION_SYNC_PROGRESS_INTERVAL = 10
 VERIFICATION_SYNC_YIELD_INTERVAL = 25
@@ -81,6 +84,22 @@ VERIFICATION_REVIEW_ACTION_LABELS = {
     "delay": "Delay",
     "ignore": "Ignore",
 }
+LOCK_PERMISSION_NAMES = tuple(
+    name
+    for name in (
+        "send_messages",
+        "create_public_threads",
+        "create_private_threads",
+        "send_messages_in_threads",
+        "add_reactions",
+    )
+    if name in VALID_CHANNEL_LOCK_PERMISSION_NAMES
+)
+LOCK_NOTICE_FALLBACK = (
+    "Dear members, due to an emergency this channel is temporarily locked. "
+    "It will be unlocked as soon as we resolve the issue. "
+    "Thank you for your patience and understanding."
+)
 FOLLOWUP_DURATION_RE = re.compile(r"(?ix)^\s*(\d+)\s*(d|day|days|w|week|weeks|mo|mon|month|months|y|yr|year|years)\s*$")
 VERIFICATION_REVIEW_DELAY_SECONDS = 24 * 3600
 
@@ -107,6 +126,8 @@ class CompiledAdminConfig:
     warning_template: str | None
     kick_template: str | None
     invite_link: str | None
+    lock_notice_template: str | None
+    lock_admin_only: bool
     excluded_user_ids: frozenset[int]
     excluded_role_ids: frozenset[int]
     trusted_role_ids: frozenset[int]
@@ -241,6 +262,8 @@ def _compile_config(raw: dict[str, Any]) -> CompiledAdminConfig:
         warning_template=raw["warning_template"],
         kick_template=raw["kick_template"],
         invite_link=raw["invite_link"],
+        lock_notice_template=raw["lock_notice_template"],
+        lock_admin_only=bool(raw["lock_admin_only"]),
         excluded_user_ids=frozenset(int(value) for value in raw.get("excluded_user_ids", [])),
         excluded_role_ids=frozenset(int(value) for value in raw.get("excluded_role_ids", [])),
         trusted_role_ids=frozenset(int(value) for value in raw.get("trusted_role_ids", [])),
@@ -308,6 +331,30 @@ def _parse_template_text(raw: str | None, *, label: str) -> tuple[bool, str | No
         return True, None
     if len(cleaned) > TEMPLATE_MAX_LEN:
         return False, f"{label} must be {TEMPLATE_MAX_LEN} characters or fewer."
+    return True, cleaned
+
+
+def _parse_lock_duration(raw: str | None) -> tuple[bool, int | None | str]:
+    if raw is None:
+        return True, None
+    parsed = parse_duration_string(raw)
+    if parsed is None:
+        return False, "Lock duration must use a value like `30m`, `2h`, or `1d`."
+    if parsed <= 0:
+        return False, "Lock duration must be greater than zero."
+    if parsed > LOCK_MAX_DURATION_SECONDS:
+        return False, f"Lock duration can be at most {format_duration_brief(LOCK_MAX_DURATION_SECONDS)}."
+    return True, parsed
+
+
+def _parse_lock_notice_text(raw: str | None, *, label: str) -> tuple[bool, str | None]:
+    if raw is None:
+        return True, None
+    cleaned = normalize_plain_text(raw)
+    if not cleaned:
+        return True, None
+    if len(cleaned) > LOCK_NOTICE_MAX_LEN:
+        return False, f"{label} must be {LOCK_NOTICE_MAX_LEN} characters or fewer."
     return True, cleaned
 
 
@@ -399,6 +446,7 @@ class AdminService:
                 "pending_reviews": 0,
                 "verification_pending": 0,
                 "verification_warned": 0,
+                "active_channel_locks": 0,
             }
         return await self.store.fetch_guild_counts(guild_id)
 
@@ -465,6 +513,8 @@ class AdminService:
             return "Follow-up month durations can be at most 12 months."
         if config["verification_warning_lead_seconds"] >= config["verification_kick_after_seconds"]:
             return "Warning lead time must be shorter than the full verification kick timer."
+        if config.get("lock_notice_template") and len(str(config["lock_notice_template"])) > LOCK_NOTICE_MAX_LEN:
+            return f"Lock notice must be {LOCK_NOTICE_MAX_LEN} characters or fewer."
         for field in ("excluded_user_ids", "excluded_role_ids", "trusted_role_ids"):
             if len(config[field]) > EXCLUSION_LIMIT:
                 label = field.replace("_ids", "").replace("_", " ")
@@ -707,6 +757,377 @@ class AdminService:
             mutate,
             success_message="Verification templates and invite link updated.",
         )
+
+    def lock_notice_text(self, guild_id: int) -> str:
+        compiled = self.get_compiled_config(guild_id)
+        return (compiled.lock_notice_template or LOCK_NOTICE_FALLBACK).strip()
+
+    def lock_access_summary(self, guild_id: int) -> str:
+        compiled = self.get_compiled_config(guild_id)
+        if compiled.lock_admin_only:
+            return "Admins only"
+        return "Moderators with Manage Channels, plus admins"
+
+    async def set_lock_config(
+        self,
+        guild_id: int,
+        *,
+        notice_template: str | None | object = ...,
+        admin_only: bool | None = None,
+    ) -> tuple[bool, str]:
+        if notice_template is not ...:
+            ok, notice_or_message = _parse_lock_notice_text(notice_template, label="Lock notice")
+            if not ok:
+                return False, str(notice_or_message)
+            notice_value = notice_or_message
+        else:
+            notice_value = ...
+
+        def mutate(config: dict[str, Any]):
+            if notice_value is not ...:
+                config["lock_notice_template"] = notice_value
+            if admin_only is not None:
+                config["lock_admin_only"] = bool(admin_only)
+
+        preview = self.get_config(guild_id)
+        final_notice = preview["lock_notice_template"] if notice_value is ... else notice_value
+        final_admin_only = preview["lock_admin_only"] if admin_only is None else bool(admin_only)
+        notice_label = "Custom" if final_notice else "Babblebox default"
+        access_label = "Admins only" if final_admin_only else "Moderators with Manage Channels, plus admins"
+        return await self._update_config(
+            guild_id,
+            mutate,
+            success_message=f"Emergency lock settings updated. Default notice: **{notice_label}**. Access: **{access_label}**.",
+        )
+
+    def _default_role(self, guild: discord.Guild | None):
+        if guild is None:
+            return None
+        role = getattr(guild, "default_role", None)
+        if role is not None:
+            return role
+        get_role = getattr(guild, "get_role", None)
+        guild_id = getattr(guild, "id", None)
+        if callable(get_role) and isinstance(guild_id, int):
+            return get_role(guild_id)
+        return None
+
+    def _copy_overwrite(self, overwrite: discord.PermissionOverwrite) -> discord.PermissionOverwrite:
+        allow, deny = overwrite.pair()
+        return discord.PermissionOverwrite.from_pair(allow, deny)
+
+    def _overwrite_is_empty(self, overwrite: discord.PermissionOverwrite) -> bool:
+        allow, deny = overwrite.pair()
+        return int(getattr(allow, "value", 0) or 0) == 0 and int(getattr(deny, "value", 0) or 0) == 0
+
+    def _lock_manage_issue(self, guild: discord.Guild, channel) -> AdminActionIssue | None:
+        me = self._bot_member(guild)
+        if me is None:
+            return AdminActionIssue(
+                code="bot_member_unavailable",
+                detail="Babblebox could not resolve its own server member for channel locks.",
+                because_text="Babblebox could not resolve its own server member for channel locks",
+            )
+        guild_perms = getattr(me, "guild_permissions", None)
+        if guild_perms is None or not getattr(guild_perms, "manage_channels", False):
+            return AdminActionIssue(
+                code="missing_manage_channels",
+                detail="Babblebox is missing Manage Channels.",
+                because_text="Babblebox is missing Manage Channels",
+            )
+        channel_perms = channel.permissions_for(me)
+        if not getattr(channel_perms, "view_channel", False):
+            return AdminActionIssue(
+                code="missing_view_channel",
+                detail=f"Babblebox cannot view {getattr(channel, 'mention', 'that channel')}.",
+                because_text="Babblebox cannot view that channel",
+            )
+        if not getattr(channel_perms, "manage_channels", False):
+            return AdminActionIssue(
+                code="channel_manage_denied",
+                detail=f"Manage Channels is denied for Babblebox in {getattr(channel, 'mention', 'that channel')}.",
+                because_text="Manage Channels is denied in that channel",
+            )
+        return None
+
+    def _channel_lock_supported(self, channel) -> bool:
+        if isinstance(channel, discord.TextChannel):
+            return True
+        channel_type = getattr(channel, "type", None)
+        supported_types = {discord.ChannelType.text}
+        news_type = getattr(discord.ChannelType, "news", None)
+        if news_type is not None:
+            supported_types.add(news_type)
+        return channel_type in supported_types
+
+    def _lock_restore_blocker(self, channel, record: dict[str, Any]) -> str | None:
+        if bool(getattr(channel, "permissions_synced", False)):
+            return "The channel is synced to its category, so Babblebox will not guess at a safe overwrite restore."
+        stored_category_id = record.get("category_id")
+        current_category_id = getattr(channel, "category_id", None)
+        if stored_category_id != current_category_id:
+            return "The channel moved to a different category while it was locked, so Babblebox will not guess which overwrite should win now."
+        return None
+
+    def _lock_reason_text(self, *, actor: discord.Member | None, automatic: bool, action: str) -> str:
+        if automatic or actor is None:
+            return f"Babblebox timed emergency channel {action}"
+        return f"Babblebox emergency channel {action} by {ge.display_name_of(actor)}"
+
+    async def _post_lock_notice(self, channel, text: str) -> tuple[bool, str]:
+        try:
+            await channel.send(
+                content=text,
+                allowed_mentions=discord.AllowedMentions(users=False, roles=False, everyone=False),
+            )
+            return True, "Posted in the locked channel."
+        except (discord.Forbidden, discord.HTTPException):
+            return False, "Babblebox could not post the lock notice in that channel."
+
+    def _build_lock_log_embed(
+        self,
+        *,
+        title: str,
+        description: str,
+        tone: str,
+        channel,
+        timer_label: str,
+        notice_status: str | None = None,
+        restore_status: str | None = None,
+    ) -> discord.Embed:
+        embed = ge.make_status_embed(title, description, tone=tone, footer="Babblebox Lock")
+        embed.add_field(name="Channel", value=getattr(channel, "mention", f"<#{getattr(channel, 'id', 0)}>"), inline=True)
+        embed.add_field(name="Timer", value=timer_label, inline=True)
+        embed.add_field(
+            name="Restrictions",
+            value="@everyone cannot send messages, create threads, send in threads, or add reactions.",
+            inline=False,
+        )
+        if notice_status is not None:
+            embed.add_field(name="Notice", value=notice_status, inline=False)
+        if restore_status is not None:
+            embed.add_field(name="Restore", value=restore_status, inline=False)
+        return embed
+
+    async def lock_channel(
+        self,
+        guild: discord.Guild,
+        channel,
+        *,
+        actor: discord.Member,
+        duration_text: str | None = None,
+        notice_message: str | None = None,
+        post_notice: bool = True,
+    ) -> tuple[bool, str]:
+        if not self.storage_ready:
+            return False, self.storage_message("Emergency lock tools")
+        if not self._channel_lock_supported(channel):
+            return False, "Babblebox only supports direct emergency locks for normal text channels."
+        if bool(getattr(channel, "permissions_synced", False)):
+            return False, "Babblebox will not lock a category-synced channel because that would break sync and make restore less trustworthy."
+        lock_issue = self._lock_manage_issue(guild, channel)
+        if lock_issue is not None:
+            return False, lock_issue.detail
+        ok, duration_or_message = _parse_lock_duration(duration_text)
+        if not ok:
+            return False, str(duration_or_message)
+        ok, notice_or_message = _parse_lock_notice_text(notice_message, label="Lock notice")
+        if not ok:
+            return False, str(notice_or_message)
+        duration_seconds = duration_or_message if isinstance(duration_or_message, int) else None
+        compiled = self.get_compiled_config(guild.id)
+        everyone_role = self._default_role(guild)
+        if everyone_role is None:
+            return False, "Babblebox could not resolve the server's @everyone role for this lock."
+        current_record = await self.store.fetch_channel_lock(guild.id, channel.id)
+        current_overwrite = channel.overwrites_for(everyone_role)
+        now = ge.now_utc()
+
+        if current_record is not None:
+            tracked_flags = tuple(current_record.get("locked_permissions", ()))
+            if any(getattr(current_overwrite, name, None) is not False for name in tracked_flags):
+                return False, "Babblebox already tracks a lock here, but the overwrite changed while it was active. Review the channel and use `/lock remove` before locking it again."
+            due_at = deserialize_datetime(current_record.get("due_at"))
+            updated_due_at = now + timedelta(seconds=duration_seconds) if duration_seconds is not None else due_at
+            if duration_seconds is not None:
+                current_record["due_at"] = serialize_datetime(updated_due_at)
+                current_record["actor_id"] = actor.id
+                await self.store.upsert_channel_lock(current_record)
+                self._wake_event.set()
+            notice_status = "Suppressed for this run."
+            if post_notice:
+                final_notice = notice_or_message or self.lock_notice_text(guild.id)
+                posted, notice_status = await self._post_lock_notice(channel, final_notice)
+                if not posted:
+                    notice_status = "Timer updated, but the notice could not be posted."
+            timer_label = format_duration_brief(duration_seconds) if duration_seconds is not None else (f"Until {ge.format_timestamp(updated_due_at, 'R')}" if updated_due_at is not None else "Manual unlock required")
+            log_sent = await self.send_log(
+                guild,
+                compiled,
+                embed=self._build_lock_log_embed(
+                    title="Channel Lock Updated",
+                    description=f"{actor.mention} refreshed the emergency lock for {channel.mention}.",
+                    tone="info",
+                    channel=channel,
+                    timer_label=timer_label,
+                    notice_status=notice_status,
+                ),
+                alert=False,
+            )
+            status_lines = [f"{channel.mention} is already locked by Babblebox."]
+            if duration_seconds is not None:
+                status_lines.append(f"Timer updated to **{format_duration_brief(duration_seconds)}** from now.")
+            elif due_at is not None:
+                status_lines.append(f"Current timer ends {ge.format_timestamp(due_at, 'R')}.")
+            else:
+                status_lines.append("This lock stays in place until someone removes it.")
+            if post_notice:
+                status_lines.append(notice_status)
+            status_lines.append("Admin log updated." if log_sent else "Admin log delivery was unavailable.")
+            return True, " ".join(status_lines)
+
+        previous_values = {name: getattr(current_overwrite, name, None) for name in LOCK_PERMISSION_NAMES}
+        locked_permissions = [name for name, value in previous_values.items() if value is not False]
+        if not locked_permissions:
+            return False, "That channel already denies Babblebox's emergency-lock permissions. Babblebox will not create a timed lock it cannot safely restore later."
+        updated_overwrite = self._copy_overwrite(current_overwrite)
+        for name in locked_permissions:
+            setattr(updated_overwrite, name, False)
+        reason = self._lock_reason_text(actor=actor, automatic=False, action="lock")
+        try:
+            await channel.set_permissions(everyone_role, overwrite=updated_overwrite, reason=reason)
+        except (discord.Forbidden, discord.HTTPException):
+            return False, "Babblebox could not apply the channel overwrite. No emergency lock was recorded."
+
+        due_at = now + timedelta(seconds=duration_seconds) if duration_seconds is not None else None
+        await self.store.upsert_channel_lock(
+            {
+                "guild_id": guild.id,
+                "channel_id": channel.id,
+                "actor_id": actor.id,
+                "created_at": serialize_datetime(now),
+                "due_at": serialize_datetime(due_at),
+                "category_id": getattr(channel, "category_id", None),
+                "permissions_synced": bool(getattr(channel, "permissions_synced", False)),
+                "locked_permissions": locked_permissions,
+                "original_permissions": {name: previous_values.get(name) for name in locked_permissions},
+            }
+        )
+        self._wake_event.set()
+
+        notice_status = "Notice suppressed for this run."
+        if post_notice:
+            final_notice = notice_or_message or self.lock_notice_text(guild.id)
+            posted, notice_status = await self._post_lock_notice(channel, final_notice)
+            if not posted:
+                notice_status = "Lock applied, but the notice could not be posted."
+        timer_label = format_duration_brief(duration_seconds) if duration_seconds is not None else "Manual unlock required"
+        log_sent = await self.send_log(
+            guild,
+            compiled,
+            embed=self._build_lock_log_embed(
+                title="Channel Locked",
+                description=f"{actor.mention} applied an emergency lock to {channel.mention}.",
+                tone="warning",
+                channel=channel,
+                timer_label=timer_label,
+                notice_status=notice_status,
+                restore_status="Babblebox will only restore the @everyone flags it changed, and only if they still match the Babblebox lock state.",
+            ),
+            alert=False,
+        )
+        message_parts = [f"Locked {channel.mention}."]
+        if due_at is not None:
+            message_parts.append(f"Timer: **{format_duration_brief(duration_seconds)}**.")
+        else:
+            message_parts.append("Timer: **manual unlock required**.")
+        message_parts.append(notice_status)
+        message_parts.append("Admin log updated." if log_sent else "Admin log delivery was unavailable.")
+        return True, " ".join(message_parts)
+
+    async def remove_channel_lock(
+        self,
+        guild: discord.Guild,
+        channel,
+        *,
+        actor: discord.Member | None = None,
+        automatic: bool = False,
+    ) -> tuple[bool, str]:
+        if not self.storage_ready:
+            return False, self.storage_message("Emergency lock tools")
+        if not self._channel_lock_supported(channel):
+            return False, "Babblebox only supports direct emergency locks for normal text channels."
+        compiled = self.get_compiled_config(guild.id)
+        everyone_role = self._default_role(guild)
+        if everyone_role is None:
+            return False, "Babblebox could not resolve the server's @everyone role for this unlock."
+        record = await self.store.fetch_channel_lock(guild.id, channel.id)
+        if record is None:
+            current_overwrite = channel.overwrites_for(everyone_role)
+            if any(getattr(current_overwrite, name, None) is False for name in LOCK_PERMISSION_NAMES):
+                return False, "Babblebox is not tracking this lock record and will not guess at restoring the overwrite."
+            return False, "Babblebox is not tracking an active emergency lock for that channel."
+        lock_issue = self._lock_manage_issue(guild, channel)
+        if lock_issue is not None:
+            return False, lock_issue.detail
+
+        current_overwrite = channel.overwrites_for(everyone_role)
+        tracked_permissions = tuple(record.get("locked_permissions", ()))
+        still_locked = [name for name in tracked_permissions if getattr(current_overwrite, name, None) is False]
+        if not still_locked:
+            await self.store.delete_channel_lock(guild.id, channel.id)
+            return True, "Babblebox cleared the stale lock record because the channel was already unlocked manually."
+
+        blocker = self._lock_restore_blocker(channel, record)
+        if blocker is not None:
+            return False, blocker
+
+        restored_overwrite = self._copy_overwrite(current_overwrite)
+        restored_flags: list[str] = []
+        preserved_flags: list[str] = []
+        original_permissions = dict(record.get("original_permissions", {}))
+        for name in tracked_permissions:
+            current_value = getattr(current_overwrite, name, None)
+            if current_value is False:
+                setattr(restored_overwrite, name, original_permissions.get(name))
+                restored_flags.append(name)
+            else:
+                preserved_flags.append(name)
+        overwrite_to_apply = None if self._overwrite_is_empty(restored_overwrite) else restored_overwrite
+        reason = self._lock_reason_text(actor=actor, automatic=automatic, action="unlock")
+        try:
+            await channel.set_permissions(everyone_role, overwrite=overwrite_to_apply, reason=reason)
+        except (discord.Forbidden, discord.HTTPException):
+            return False, "Babblebox could not restore the @everyone overwrite for that channel."
+
+        await self.store.delete_channel_lock(guild.id, channel.id)
+        restore_notes = "Restored every Babblebox-applied flag."
+        if preserved_flags:
+            labels = ", ".join(sorted(name.replace("_", " ") for name in preserved_flags))
+            restore_notes = f"Restored the remaining Babblebox-applied flags and preserved manual changes to: {labels}."
+        timer_label = "Automatic unlock" if automatic else "Manual unlock"
+        log_description = (
+            f"Babblebox automatically removed the emergency lock from {channel.mention}."
+            if automatic or actor is None
+            else f"{actor.mention} removed the emergency lock from {channel.mention}."
+        )
+        log_sent = await self.send_log(
+            guild,
+            compiled,
+            embed=self._build_lock_log_embed(
+                title="Channel Unlocked",
+                description=log_description,
+                tone="success",
+                channel=channel,
+                timer_label=timer_label,
+                restore_status=restore_notes,
+            ),
+            alert=False,
+        )
+        summary = f"Unlocked {channel.mention}. {restore_notes}"
+        if not log_sent:
+            summary += " Admin log delivery was unavailable."
+        return True, summary
 
     async def list_review_views(self) -> list[dict[str, Any]]:
         if not self.storage_ready:
@@ -2953,6 +3374,50 @@ class AdminService:
                 continue
             await self._sync_verification_review_queue(guild, compiled, now=now)
 
+    async def _process_due_channel_locks(self, now: datetime) -> bool:
+        processed = False
+        for record in await self.store.list_due_channel_locks(now, limit=50):
+            guild = self.bot.get_guild(int(record["guild_id"]))
+            if guild is None:
+                continue
+            channel = self._guild_channel(guild, int(record["channel_id"]))
+            compiled = self.get_compiled_config(guild.id)
+            if channel is None:
+                await self.store.delete_channel_lock(guild.id, int(record["channel_id"]))
+                await self.send_log(
+                    guild,
+                    compiled,
+                    embed=ge.make_status_embed(
+                        "Channel Lock Record Cleared",
+                        f"Babblebox removed a timed lock record for <#{record['channel_id']}> because the channel is gone or inaccessible.",
+                        tone="info",
+                        footer="Babblebox Lock",
+                    ),
+                    alert=False,
+                )
+                processed = True
+                continue
+
+            ok, message = await self.remove_channel_lock(guild, channel, actor=None, automatic=True)
+            if ok:
+                processed = True
+                continue
+
+            updated = dict(record)
+            updated["due_at"] = serialize_datetime(now + timedelta(seconds=OPERATION_BACKOFF_SECONDS))
+            await self.store.upsert_channel_lock(updated)
+            await self.log_operability_warning_once(
+                guild,
+                compiled,
+                key=f"channel-lock-unlock:{channel.id}",
+                title="Channel Unlock Needs Review",
+                message=f"{channel.mention} is still carrying a Babblebox lock because the timed unlock could not complete safely. {message}",
+                footer="Babblebox Lock",
+                alert=False,
+            )
+            processed = True
+        return processed
+
 
     async def _run_sweep(self) -> bool:
         if not self.storage_ready:
@@ -2964,6 +3429,8 @@ class AdminService:
         if await self.store.prune_expired_ban_candidates(now, limit=200):
             processed = True
         if await self._process_due_followups(now):
+            processed = True
+        if await self._process_due_channel_locks(now):
             processed = True
         verification_batch = VerificationSweepBatch(run_context=run_context)
         if await self._process_due_verification_warnings(now, batch=verification_batch):

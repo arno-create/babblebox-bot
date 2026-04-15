@@ -113,7 +113,12 @@ class FakeChannel:
         self.name = name
         self.mention = f"<#{channel_id}>"
         self.sent = []
-        self._permissions = permissions or FakePermissions()
+        self._permissions = permissions or FakePermissions(
+            manage_channels=True,
+            view_channel=True,
+            send_messages=True,
+            embed_links=True,
+        )
         self._messages: dict[int, FakeSentMessage] = {}
         self.type = channel_type
         self.category = category
@@ -213,6 +218,8 @@ class FakeGuild:
         self.roles: dict[int, FakeRole] = {}
         self.channels: dict[int, FakeChannel] = {}
         self.audit_entries: list[FakeAuditLogEntry] = []
+        self.default_role = FakeRole(guild_id, position=0, name="@everyone", default=True)
+        self.roles[self.default_role.id] = self.default_role
         self.me = FakeMember(
             999,
             self,
@@ -592,6 +599,195 @@ class AdminServiceTests(unittest.IsolatedAsyncioTestCase):
         queue = await self.store.fetch_verification_review_queue(self.guild.id)
         self.assertIsNotNone(queue)
         return record
+
+    async def test_lock_channel_applies_expected_overwrite_notice_and_log(self):
+        ok, _ = await self.service.set_logs_config(self.guild.id, channel_id=self.log_channel.id, alert_role_id=None)
+        self.assertTrue(ok)
+        actor = self._admin_actor()
+        channel = FakeChannel(75)
+        self.guild.channels[channel.id] = channel
+
+        ok, message = await self.service.lock_channel(
+            self.guild,
+            channel,
+            actor=actor,
+            duration_text="30m",
+            notice_message=None,
+            post_notice=True,
+        )
+
+        self.assertTrue(ok)
+        self.assertIn("Locked", message)
+        overwrite = channel.overwrites_for(self.guild.default_role)
+        self.assertFalse(overwrite.send_messages)
+        self.assertFalse(overwrite.create_public_threads)
+        self.assertFalse(overwrite.create_private_threads)
+        self.assertFalse(overwrite.send_messages_in_threads)
+        self.assertFalse(overwrite.add_reactions)
+        self.assertEqual(channel.sent[0]["content"], self.service.lock_notice_text(self.guild.id))
+        record = await self.store.fetch_channel_lock(self.guild.id, channel.id)
+        self.assertIsNotNone(record)
+        self.assertIsNotNone(deserialize_datetime(record["due_at"]))
+        self.assertEqual(self._last_log_embed().title, "Channel Locked")
+
+    async def test_lock_channel_uses_custom_default_notice_and_can_suppress_post(self):
+        actor = self._admin_actor()
+        channel = FakeChannel(76)
+        self.guild.channels[channel.id] = channel
+        ok, _ = await self.service.set_lock_config(
+            self.guild.id,
+            notice_template="This channel is paused while moderators review the current issue.",
+        )
+        self.assertTrue(ok)
+
+        ok, _ = await self.service.lock_channel(self.guild, channel, actor=actor, post_notice=True)
+
+        self.assertTrue(ok)
+        self.assertEqual(len(channel.sent), 1)
+        self.assertEqual(channel.sent[0]["content"], "This channel is paused while moderators review the current issue.")
+
+        channel_two = FakeChannel(77)
+        self.guild.channels[channel_two.id] = channel_two
+        ok, message = await self.service.lock_channel(self.guild, channel_two, actor=actor, post_notice=False)
+
+        self.assertTrue(ok)
+        self.assertIn("Notice suppressed", message)
+        self.assertEqual(channel_two.sent, [])
+
+    async def test_lock_channel_repeated_attempt_only_refreshes_timer(self):
+        actor = self._admin_actor()
+        channel = FakeChannel(78)
+        self.guild.channels[channel.id] = channel
+
+        first_ok, _ = await self.service.lock_channel(self.guild, channel, actor=actor, duration_text="30m", post_notice=False)
+        first_record = await self.store.fetch_channel_lock(self.guild.id, channel.id)
+        first_due_at = deserialize_datetime(first_record["due_at"])
+
+        second_ok, message = await self.service.lock_channel(self.guild, channel, actor=actor, duration_text="2h", post_notice=False)
+        second_record = await self.store.fetch_channel_lock(self.guild.id, channel.id)
+        second_due_at = deserialize_datetime(second_record["due_at"])
+
+        self.assertTrue(first_ok)
+        self.assertTrue(second_ok)
+        self.assertIn("already locked by Babblebox", message)
+        self.assertGreater(second_due_at, first_due_at)
+        self.assertEqual(len(channel.permission_edits), 1)
+
+    async def test_lock_channel_fails_clearly_without_manage_channels(self):
+        actor = self._admin_actor()
+        channel = FakeChannel(79)
+        self.guild.channels[channel.id] = channel
+        self.guild.me.guild_permissions = FakePermissions(
+            manage_roles=True,
+            manage_channels=False,
+            manage_messages=True,
+            kick_members=True,
+            view_channel=True,
+            send_messages=True,
+            embed_links=True,
+        )
+
+        ok, message = await self.service.lock_channel(self.guild, channel, actor=actor, post_notice=False)
+
+        self.assertFalse(ok)
+        self.assertIn("Manage Channels", message)
+        self.assertIsNone(await self.store.fetch_channel_lock(self.guild.id, channel.id))
+        self.assertEqual(channel.permission_edits, [])
+
+    async def test_lock_channel_rejects_category_synced_channel_for_safety(self):
+        actor = self._admin_actor()
+        channel = FakeChannel(80, permissions_synced=True)
+        self.guild.channels[channel.id] = channel
+
+        ok, message = await self.service.lock_channel(self.guild, channel, actor=actor, post_notice=False)
+
+        self.assertFalse(ok)
+        self.assertIn("category-synced channel", message)
+        self.assertIsNone(await self.store.fetch_channel_lock(self.guild.id, channel.id))
+
+    async def test_remove_channel_lock_restores_tracked_flags_and_preserves_unrelated_overwrites(self):
+        actor = self._admin_actor()
+        channel = FakeChannel(81)
+        self.guild.channels[channel.id] = channel
+        self._set_role_overwrite(
+            channel,
+            self.guild.default_role,
+            view_channel=False,
+            add_reactions=True,
+        )
+
+        ok, _ = await self.service.lock_channel(self.guild, channel, actor=actor, post_notice=False)
+        self.assertTrue(ok)
+
+        ok, message = await self.service.remove_channel_lock(self.guild, channel, actor=actor, automatic=False)
+
+        self.assertTrue(ok)
+        self.assertIn("Unlocked", message)
+        overwrite = channel.overwrites_for(self.guild.default_role)
+        self.assertFalse(overwrite.view_channel)
+        self.assertIsNone(overwrite.send_messages)
+        self.assertTrue(overwrite.add_reactions)
+        self.assertIsNone(await self.store.fetch_channel_lock(self.guild.id, channel.id))
+
+    async def test_remove_channel_lock_preserves_manual_mid_lock_changes(self):
+        actor = self._admin_actor()
+        channel = FakeChannel(82)
+        self.guild.channels[channel.id] = channel
+
+        ok, _ = await self.service.lock_channel(self.guild, channel, actor=actor, post_notice=False)
+        self.assertTrue(ok)
+        overwrite = channel.overwrites_for(self.guild.default_role)
+        overwrite.add_reactions = True
+        channel._role_overwrites[self.guild.default_role.id] = overwrite
+
+        ok, message = await self.service.remove_channel_lock(self.guild, channel, actor=actor, automatic=False)
+
+        self.assertTrue(ok)
+        self.assertIn("preserved manual changes", message)
+        updated = channel.overwrites_for(self.guild.default_role)
+        self.assertTrue(updated.add_reactions)
+
+    async def test_timed_lock_auto_unlocks_after_restart_safe_sweep(self):
+        ok, _ = await self.service.set_logs_config(self.guild.id, channel_id=self.log_channel.id, alert_role_id=None)
+        self.assertTrue(ok)
+        actor = self._admin_actor()
+        channel = FakeChannel(83)
+        self.guild.channels[channel.id] = channel
+
+        locked, _ = await self.service.lock_channel(self.guild, channel, actor=actor, duration_text="30m", post_notice=False)
+        self.assertTrue(locked)
+        record = await self.store.fetch_channel_lock(self.guild.id, channel.id)
+        record["due_at"] = serialize_datetime(ge.now_utc() - timedelta(minutes=1))
+        await self.store.upsert_channel_lock(record)
+
+        restarted = AdminService(self.bot, store=self.store)
+        restarted.storage_ready = True
+        await restarted._rebuild_config_cache()
+
+        processed = await restarted._run_sweep()
+
+        self.assertTrue(processed)
+        self.assertIsNone(await self.store.fetch_channel_lock(self.guild.id, channel.id))
+        self.assertIsNone(channel.overwrites_for(self.guild.default_role).send_messages)
+        self.assertEqual(self._last_log_embed().title, "Channel Unlocked")
+
+    async def test_remove_channel_lock_refuses_when_category_changes(self):
+        actor = self._admin_actor()
+        category_before = types.SimpleNamespace(id=201)
+        category_after = types.SimpleNamespace(id=202)
+        channel = FakeChannel(84, category=category_before)
+        self.guild.channels[channel.id] = channel
+
+        ok, _ = await self.service.lock_channel(self.guild, channel, actor=actor, post_notice=False)
+        self.assertTrue(ok)
+        channel.category = category_after
+        channel.category_id = category_after.id
+
+        ok, message = await self.service.remove_channel_lock(self.guild, channel, actor=actor, automatic=False)
+
+        self.assertFalse(ok)
+        self.assertIn("different category", message)
+        self.assertIsNotNone(await self.store.fetch_channel_lock(self.guild.id, channel.id))
 
     async def test_ban_candidate_and_return_assign_followup_role(self):
         ok, _ = await self.service.set_logs_config(self.guild.id, channel_id=self.log_channel.id, alert_role_id=None)
