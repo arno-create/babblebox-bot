@@ -68,6 +68,7 @@ class FakeResponse:
         self._done = False
         self.send_calls = []
         self.edit_calls = []
+        self.defer_calls = []
         self.modal_calls = []
 
     def is_done(self):
@@ -83,10 +84,19 @@ class FakeResponse:
         return response
 
     async def edit_message(self, *args, **kwargs):
+        if self._interaction is not None and getattr(self._interaction, "edit_exception", None) is not None:
+            raise self._interaction.edit_exception
         self._done = True
         self.edit_calls.append((args, kwargs))
         if self._interaction is not None and getattr(self._interaction, "message", None) is not None:
             await self._interaction.message.edit(**kwargs)
+        return FakeInteractionCallbackResponse(resource=getattr(self._interaction, "message", None))
+
+    async def defer(self, *args, **kwargs):
+        self.defer_calls.append((args, kwargs))
+        if self._interaction is not None and getattr(self._interaction, "defer_exception", None) is not None:
+            raise self._interaction.defer_exception
+        self._done = True
         return FakeInteractionCallbackResponse(resource=getattr(self._interaction, "message", None))
 
     async def send_modal(self, modal):
@@ -109,6 +119,9 @@ class FakeInteraction:
         initial_send_exception: Optional[Exception] = None,
         followup_exception: Optional[Exception] = None,
         original_response_exception: Optional[Exception] = None,
+        edit_original_response_exception: Optional[Exception] = None,
+        defer_exception: Optional[Exception] = None,
+        edit_exception: Optional[Exception] = None,
     ):
         self.message = message
         self.channel = channel
@@ -122,6 +135,9 @@ class FakeInteraction:
         self.initial_send_exception = initial_send_exception
         self.followup_exception = followup_exception
         self.original_response_exception = original_response_exception
+        self.edit_original_response_exception = edit_original_response_exception
+        self.defer_exception = defer_exception
+        self.edit_exception = edit_exception
         self.original_response_calls = []
         self._original_response_message = None
         self._last_followup_message = None
@@ -181,6 +197,8 @@ class FakeInteraction:
 
     async def edit_original_response(self, **kwargs):
         self.edit_original_response_calls.append(kwargs)
+        if self.edit_original_response_exception is not None:
+            raise self.edit_original_response_exception
         target = self._original_response_message or self.message
         if target is None:
             raise discord.ClientException("Original response unavailable")
@@ -500,6 +518,9 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("GIF Flood / Media Pressure", shield_page["body"])
         self.assertIn("no-link DM-lure", shield_page["body"])
         self.assertIn("Severe Harm / Hate", shield_page["body"])
+        self.assertIn("panel-first editor", shield_page["body"])
+        self.assertIn("Actions, Options, or Exemptions", shield_page["body"])
+        self.assertIn("dedicated timeout profile", shield_page["body"])
         self.assertNotIn("experimental scam heuristics", shield_page["body"])
         self.assertIn("/lock channel", shield_page["body"])
         self.assertIn("/lock remove", shield_page["body"])

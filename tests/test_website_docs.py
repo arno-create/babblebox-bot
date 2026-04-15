@@ -274,6 +274,32 @@ class WebsiteDocsTests(unittest.TestCase):
         self.assertNotIn("gpt-4.1-mini", help_html)
         self.assertNotIn("gpt-4.1-mini", index_html)
 
+    def test_shield_docs_cover_panel_first_pack_local_editing_and_timeout_profiles(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        help_html = (ROOT / "help.html").read_text(encoding="utf-8")
+        index_html = (ROOT / "index.html").read_text(encoding="utf-8")
+
+        for text in (
+            "Actions`, `Options`, and `Exemptions`",
+            "dedicated timeout override",
+            "trusted-link timeout profile",
+            "quick slash fallback",
+        ):
+            self.assertIn(text, readme)
+        for text in (
+            "panel-first Shield admin surface",
+            "Actions, Options, and Exemptions",
+            "dedicated timeout profile",
+            "quick slash fallback",
+        ):
+            self.assertIn(text, help_html)
+        for text in (
+            "panel-first rules flow",
+            "Actions, Options, and Exemptions",
+            "dedicated timeout profile",
+        ):
+            self.assertIn(text, index_html)
+
     def test_removed_admin_control_plane_surfaces_are_absent_from_docs(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         index_html = (ROOT / "index.html").read_text(encoding="utf-8")
