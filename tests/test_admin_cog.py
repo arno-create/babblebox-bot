@@ -5,6 +5,8 @@ import types
 import unittest
 from unittest.mock import AsyncMock
 
+import discord
+
 from babblebox import game_engine as ge
 from babblebox.cogs.admin import AdminCog, AdminPanelView, FollowupReviewView, VerificationDeadlineReviewView
 from babblebox.admin_service import AdminService
@@ -77,6 +79,7 @@ class FakePermissionSnapshot:
             "manage_webhooks": False,
             "manage_messages": False,
             "kick_members": False,
+            "moderate_members": False,
             "view_audit_log": True,
             "view_channel": True,
             "send_messages": True,
@@ -100,12 +103,14 @@ class FakeRole:
 
 
 class FakeAuthor:
-    def __init__(self, user_id: int = 1, *, manage_guild: bool = False):
+    def __init__(self, user_id: int = 1, *, manage_guild: bool = False, manage_channels: bool = False, administrator: bool = False):
         self.id = user_id
         self.display_name = f"User {user_id}"
         self.mention = f"<@{user_id}>"
         self.guild_permissions = FakeGuildPermissions()
         self.guild_permissions.manage_guild = manage_guild
+        self.guild_permissions.manage_channels = manage_channels
+        self.guild_permissions.administrator = administrator
         self.sent = []
 
     async def send(self, *, embed=None):
@@ -120,29 +125,70 @@ class FakeMember(FakeAuthor):
         *,
         roles=None,
         manage_guild: bool = False,
+        manage_channels: bool = False,
         administrator: bool = False,
         joined_at=None,
     ):
-        super().__init__(user_id=user_id, manage_guild=manage_guild)
+        super().__init__(user_id=user_id, manage_guild=manage_guild, manage_channels=manage_channels, administrator=administrator)
         self.guild = guild
         self.roles = list(roles or [])
         self.top_role = self.roles[0] if self.roles else FakeRole(0, position=1)
-        self.guild_permissions = FakePermissionSnapshot(manage_guild=manage_guild, administrator=administrator)
+        self.guild_permissions = FakePermissionSnapshot(manage_guild=manage_guild, manage_channels=manage_channels, administrator=administrator)
         self.joined_at = joined_at or ge.now_utc()
         self.bot = False
 
 
 class FakeChannel:
-    def __init__(self, channel_id: int, *, name: str = "general", permissions: FakePermissionSnapshot | None = None):
+    def __init__(
+        self,
+        channel_id: int,
+        *,
+        name: str = "general",
+        permissions: FakePermissionSnapshot | None = None,
+        channel_type=discord.ChannelType.text,
+        category=None,
+        permissions_synced: bool = False,
+    ):
         self.id = channel_id
         self.name = name
         self.mention = f"<#{channel_id}>"
-        self._permissions = permissions or FakePermissionSnapshot()
+        self._permissions = permissions or FakePermissionSnapshot(
+            manage_channels=True,
+            view_channel=True,
+            send_messages=True,
+            embed_links=True,
+        )
         self.sent = []
         self._messages: dict[int, FakeMessage] = {}
+        self.type = channel_type
+        self.category = category
+        self.category_id = getattr(category, "id", None)
+        self.permissions_synced = permissions_synced
+        self._role_overwrites: dict[int, discord.PermissionOverwrite] = {}
+        self.permission_edits: list[dict[str, object]] = []
+        self.raise_forbidden_on_set_permissions = False
 
     def permissions_for(self, member):
         return self._permissions
+
+    def overwrites_for(self, role):
+        overwrite = self._role_overwrites.get(int(getattr(role, "id", 0) or 0))
+        if overwrite is None:
+            return discord.PermissionOverwrite()
+        allow, deny = overwrite.pair()
+        return discord.PermissionOverwrite.from_pair(allow, deny)
+
+    async def set_permissions(self, role, *, overwrite=None, reason=None):
+        if self.raise_forbidden_on_set_permissions:
+            response = types.SimpleNamespace(status=403, reason="Forbidden", headers={})
+            raise discord.Forbidden(response=response, message="missing permissions")
+        role_id = int(getattr(role, "id", 0) or 0)
+        self.permission_edits.append({"role_id": role_id, "overwrite": overwrite, "reason": reason})
+        if overwrite is None:
+            self._role_overwrites.pop(role_id, None)
+            return
+        allow, deny = overwrite.pair()
+        self._role_overwrites[role_id] = discord.PermissionOverwrite.from_pair(allow, deny)
 
     async def send(self, **kwargs):
         message = FakeMessage(**kwargs)
@@ -167,10 +213,22 @@ class FakeGuild:
         self.channels: dict[int, FakeChannel] = {}
         self.roles: dict[int, FakeRole] = {}
         self.members: dict[int, object] = {}
+        self.default_role = FakeRole(guild_id, position=0, name="@everyone")
+        self.roles[self.default_role.id] = self.default_role
         self.me = types.SimpleNamespace(
             id=999,
             top_role=FakeRole(900, position=50),
-            guild_permissions=FakePermissionSnapshot(manage_roles=True, kick_members=True, mention_everyone=True),
+            guild_permissions=FakePermissionSnapshot(
+                manage_roles=True,
+                manage_channels=True,
+                manage_messages=True,
+                moderate_members=True,
+                kick_members=True,
+                view_channel=True,
+                send_messages=True,
+                embed_links=True,
+                mention_everyone=True,
+            ),
         )
 
     def get_channel(self, channel_id: int):
@@ -300,6 +358,121 @@ class AdminCogSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(config["followup_mode"], "review")
         self.assertEqual(len(ctx.send_calls), 1)
         self.assertTrue(ctx.send_calls[0]["ephemeral"])
+
+    async def test_lock_channel_allows_manage_channels_moderator_by_default(self):
+        channel = FakeChannel(20)
+        self.guild.channels[channel.id] = channel
+        ctx = FakeContext(
+            interaction=FakeInteraction(),
+            guild=self.guild,
+            channel=channel,
+            author=FakeAuthor(manage_channels=True),
+        )
+
+        await AdminCog.lock_channel_command.callback(
+            self.cog,
+            ctx,
+            channel=channel,
+            duration="30m",
+            notice_message=None,
+            post_notice=False,
+        )
+
+        self.assertEqual(len(ctx.send_calls), 1)
+        self.assertTrue(ctx.send_calls[0]["ephemeral"])
+        self.assertIn("Locked", ctx.send_calls[0]["embed"].description)
+        everyone_overwrite = channel.overwrites_for(self.guild.default_role)
+        self.assertFalse(everyone_overwrite.send_messages)
+
+    async def test_lock_settings_is_admin_only(self):
+        ctx = FakeContext(
+            interaction=FakeInteraction(),
+            guild=self.guild,
+            channel=FakeChannel(20),
+            author=FakeAuthor(manage_channels=True),
+        )
+
+        await AdminCog.lock_settings_command.callback(
+            self.cog,
+            ctx,
+            default_notice="Please pause here while moderators review the situation.",
+            clear_notice=False,
+            admin_only=None,
+        )
+
+        self.assertEqual(len(ctx.send_calls), 1)
+        self.assertTrue(ctx.send_calls[0]["ephemeral"])
+        self.assertIn("Manage Server", ctx.send_calls[0]["embed"].description)
+
+    async def test_lock_settings_can_limit_lane_to_admins_only(self):
+        ctx = FakeContext(
+            interaction=FakeInteraction(),
+            guild=self.guild,
+            channel=FakeChannel(20),
+            author=FakeAuthor(manage_guild=True),
+        )
+
+        await AdminCog.lock_settings_command.callback(
+            self.cog,
+            ctx,
+            default_notice=None,
+            clear_notice=False,
+            admin_only=True,
+        )
+
+        config = self.cog.service.get_config(self.guild.id)
+        self.assertTrue(config["lock_admin_only"])
+        self.assertEqual(len(ctx.send_calls), 1)
+        self.assertTrue(ctx.send_calls[0]["ephemeral"])
+
+    async def test_lock_channel_denies_moderator_when_admin_only_is_enabled(self):
+        ok, _ = await self.cog.service.set_lock_config(self.guild.id, admin_only=True)
+        self.assertTrue(ok)
+        channel = FakeChannel(21)
+        self.guild.channels[channel.id] = channel
+        ctx = FakeContext(
+            interaction=FakeInteraction(),
+            guild=self.guild,
+            channel=channel,
+            author=FakeAuthor(manage_channels=True),
+        )
+
+        await AdminCog.lock_channel_command.callback(
+            self.cog,
+            ctx,
+            channel=channel,
+            duration=None,
+            notice_message=None,
+            post_notice=True,
+        )
+
+        self.assertEqual(len(ctx.send_calls), 1)
+        self.assertTrue(ctx.send_calls[0]["ephemeral"])
+        self.assertIn("limited emergency locks", ctx.send_calls[0]["embed"].description)
+
+    async def test_admin_permissions_surfaces_missing_manage_channels(self):
+        self.guild.me.guild_permissions = FakePermissionSnapshot(
+            manage_roles=True,
+            manage_channels=False,
+            manage_messages=True,
+            moderate_members=True,
+            kick_members=True,
+            mention_everyone=True,
+        )
+        ctx = FakeContext(
+            interaction=FakeInteraction(),
+            guild=self.guild,
+            channel=FakeChannel(20),
+            author=FakeAuthor(manage_guild=True),
+        )
+
+        await AdminCog.admin_permissions_command.callback(self.cog, ctx)
+
+        self.assertEqual(len(ctx.send_calls), 1)
+        embed = ctx.send_calls[0]["embed"]
+        missing = next(field for field in embed.fields if field.name == "Missing Server Permissions")
+        self.assertIn("Manage Channels", missing.value)
+        self.assertIn("/lock channel", missing.value)
 
     async def test_verification_panel_spells_out_verified_and_unverified_members(self):
         ok, _ = await self.cog.service.set_verification_config(

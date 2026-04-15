@@ -9,7 +9,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from babblebox.app_command_hardening import harden_admin_root_group
+from babblebox.app_command_hardening import harden_admin_root_group, harden_lock_root_group
 from babblebox import game_engine as ge
 from babblebox.admin_service import AdminService
 from babblebox.admin_store import AdminStore
@@ -501,7 +501,10 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("no-link DM-lure", shield_page["body"])
         self.assertIn("Severe Harm / Hate", shield_page["body"])
         self.assertNotIn("experimental scam heuristics", shield_page["body"])
-        self.assertNotIn("/admin permissions", shield_page["body"])
+        self.assertIn("/lock channel", shield_page["body"])
+        self.assertIn("/lock remove", shield_page["body"])
+        self.assertIn("/lock settings", shield_page["body"])
+        self.assertIn("/admin permissions", shield_page["body"])
         self.assertNotIn("/admin risk", shield_page["body"])
         self.assertNotIn("/admin emergency", shield_page["body"])
 
@@ -510,9 +513,11 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/shield links", shield_field.value)
         self.assertIn("/shield filters", shield_field.value)
         self.assertIn("/shield severe category", shield_field.value)
+        self.assertIn("/lock channel", shield_field.value)
+        self.assertIn("/lock remove", shield_field.value)
         self.assertIn("/admin followup", shield_field.value)
         self.assertIn("/admin verification", shield_field.value)
-        self.assertNotIn("/admin permissions", shield_field.value)
+        self.assertIn("/admin permissions", shield_field.value)
 
     def test_help_embeds_stay_within_discord_limits(self):
         for index, _page in enumerate(HELP_PAGES):
@@ -570,17 +575,18 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_admin_only_roots_emit_hidden_guild_only_metadata(self):
         expected = {
-            "admin": AdminCog,
-            "shield": ShieldCog,
-            "confessions": ConfessionsCog,
-            "dropsadmin": QuestionDropsCog,
+            "admin": (AdminCog, int(discord.Permissions(manage_guild=True).value)),
+            "lock": (AdminCog, int(discord.Permissions(manage_channels=True).value)),
+            "shield": (ShieldCog, int(discord.Permissions(manage_guild=True).value)),
+            "confessions": (ConfessionsCog, int(discord.Permissions(manage_guild=True).value)),
+            "dropsadmin": (QuestionDropsCog, int(discord.Permissions(manage_guild=True).value)),
         }
 
-        for name, cog_cls in expected.items():
+        for name, (cog_cls, default_permissions) in expected.items():
             with self.subTest(command=name):
                 command, payload = await self._registered_root(cog_cls, root_name=name)
 
-                self.assertEqual(payload["default_member_permissions"], 32)
+                self.assertEqual(payload["default_member_permissions"], default_permissions)
                 self.assertEqual(payload["contexts"], [0])
                 self.assertEqual(payload["integration_types"], [0])
                 self.assertFalse(payload["dm_permission"])
