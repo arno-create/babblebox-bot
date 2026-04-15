@@ -28,7 +28,6 @@ Depending on the feature being used, Babblebox may process or store:
 - Discord identifiers such as user IDs, guild IDs, channel IDs, message IDs, role IDs, and timestamps
 - compact feature configuration and state, including Watch preferences, ignored channels or users, Later markers, reminders, AFK state, AFK schedules, Daily Arcade results, Buddy or profile state, and Shield or admin configuration
 - limited message or attachment context needed to respond to commands, deliver Watch alerts, process Capture requests, or evaluate locally flagged Shield events, including visible message text, embed text, forwarded message snapshots, and attachment labels
-- if a server enables suspicious-member review, compact account-age, avatar-state, display-name, and locally flagged message or link context needed to score that review lane
 - anonymous confession or reply submission text, Confessions link fields, compact review metadata, bot-private author mappings, bot-private owner reply opportunities, and limited private appeals or reports needed to run staff-blind confession moderation when a server has Confessions enabled
 - for Confessions, Babblebox now protects sensitive content and identity linkage with application-level encryption and separate lookup domains before those fields reach durable Postgres storage
 
@@ -78,7 +77,6 @@ Babblebox intentionally uses different visibility defaults depending on the feat
 - appeals or reports can be sent privately to a configured support channel without exposing the author's Discord identity to staff
 - Babblebox hides the account behind a confession, but a self-identifying link destination or image content can still reveal the sender if they choose to include it
 - Shield and admin configuration flows are intended for administrators or moderators rather than general public display
-- suspicious-member review is private/admin-facing, uses bounded local signals, and does not read Discord profile bios or about-me text in the current implementation
 
 Server administrators still influence visibility through Discord permissions, log channels, review channels, and command usage in their own server.
 
@@ -105,7 +103,6 @@ Examples:
 
 - Daily Arcade raw result rows are designed to prune after 180 days while streak and lifetime totals remain in profile-level storage
 - short-lived admin lifecycle rows remain only while they are operationally relevant
-- short-lived suspicious-member review rows remain only while review, snooze, or queue state is still operationally relevant
 - ban-return candidate records are intended to have a bounded purge window
 - terminal anonymous confession rows scrub previews, body text, link fields, and attachment metadata after resolution while the bot-private author mapping and compact keyed duplicate signatures are retained only for moderation continuity and abuse prevention
 - keyed duplicate-abuse signals are guild-scoped instead of global across every server

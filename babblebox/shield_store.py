@@ -22,7 +22,7 @@ DEFAULT_DATABASE_URL_ENV_ORDER = ("UTILITY_DATABASE_URL", "SUPABASE_DB_URL", "DA
 DEFAULT_BACKEND = "postgres"
 DEFAULT_VERSION = 8
 VALID_SCAN_MODES = {"all", "only_included"}
-VALID_SHIELD_ACTIONS = {"disabled", "detect", "log", "delete_log", "delete_escalate", "timeout_log"}
+VALID_SHIELD_ACTIONS = {"disabled", "detect", "log", "delete_log", "delete_escalate", "timeout_log", "delete_timeout_log"}
 VALID_SHIELD_SENSITIVITIES = {"low", "normal", "high"}
 VALID_SHIELD_LINK_POLICY_MODES = {"default", "trusted_only"}
 DEFAULT_SHIELD_LINK_POLICY_MODE = "default"
@@ -66,6 +66,8 @@ def _legacy_action_policy(action: str) -> tuple[str, str, str]:
         return ("log", "delete_log", "delete_log")
     if cleaned == "timeout_log":
         return ("log", "delete_log", "timeout_log")
+    if cleaned == "delete_timeout_log":
+        return ("log", "delete_log", "delete_timeout_log")
     if cleaned == "delete_escalate":
         return ("log", "delete_log", "delete_escalate")
     return ("log", "log", "log")
@@ -120,12 +122,21 @@ def default_guild_shield_config(guild_id: int | None = None) -> dict[str, Any]:
         "spam_medium_action": "log",
         "spam_high_action": "log",
         "spam_sensitivity": "normal",
+        "spam_message_threshold": 7,
+        "spam_message_window_seconds": 5,
+        "spam_near_duplicate_threshold": 5,
+        "spam_near_duplicate_window_seconds": 10,
         "gif_enabled": False,
         "gif_action": "log",
         "gif_low_action": "log",
         "gif_medium_action": "log",
         "gif_high_action": "log",
         "gif_sensitivity": "normal",
+        "gif_message_threshold": 4,
+        "gif_window_seconds": 20,
+        "gif_repeat_threshold": 3,
+        "gif_same_asset_threshold": 3,
+        "gif_min_ratio_percent": 70,
         "adult_enabled": False,
         "adult_action": "log",
         "adult_low_action": "log",
@@ -331,6 +342,15 @@ def normalize_guild_shield_config(guild_id: int, config: Any) -> dict[str, Any]:
         ("escalation_threshold", 2, 6, 3),
         ("escalation_window_minutes", 5, 120, 15),
         ("timeout_minutes", 1, 60, 10),
+        ("spam_message_threshold", 4, 12, 7),
+        ("spam_message_window_seconds", 3, 30, 5),
+        ("spam_near_duplicate_threshold", 3, 10, 5),
+        ("spam_near_duplicate_window_seconds", 5, 45, 10),
+        ("gif_message_threshold", 3, 8, 4),
+        ("gif_window_seconds", 10, 45, 20),
+        ("gif_repeat_threshold", 2, 6, 3),
+        ("gif_same_asset_threshold", 2, 6, 3),
+        ("gif_min_ratio_percent", 50, 95, 70),
     ):
         value = config.get(field)
         cleaned[field] = value if isinstance(value, int) and minimum <= value <= maximum else default

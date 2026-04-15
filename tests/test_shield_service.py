@@ -19,7 +19,6 @@ from babblebox.shield_service import (
     ShieldDecision,
     ShieldFeatureLinkScan,
     ShieldMatch,
-    ShieldRaidEvidence,
     ShieldService,
     _alert_content_fingerprint,
     _build_snapshot,
@@ -545,7 +544,7 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("recommended non-AI baseline", message)
         config = self.service.get_config(10)
         self.assertTrue(config["module_enabled"])
-        self.assertEqual(config["baseline_version"], 3)
+        self.assertEqual(config["baseline_version"], 4)
         self.assertTrue(config["adult_solicitation_enabled"])
         for pack in ("privacy", "promo", "scam", "adult", "severe"):
             with self.subTest(pack=pack):
@@ -557,12 +556,12 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(config["spam_enabled"])
         self.assertEqual(config["spam_low_action"], "log")
         self.assertEqual(config["spam_medium_action"], "delete_log")
-        self.assertEqual(config["spam_high_action"], "delete_escalate")
+        self.assertEqual(config["spam_high_action"], "delete_timeout_log")
         self.assertEqual(config["spam_sensitivity"], "normal")
         self.assertTrue(config["gif_enabled"])
         self.assertEqual(config["gif_low_action"], "log")
         self.assertEqual(config["gif_medium_action"], "delete_log")
-        self.assertEqual(config["gif_high_action"], "delete_escalate")
+        self.assertEqual(config["gif_high_action"], "delete_timeout_log")
         self.assertEqual(config["gif_sensitivity"], "normal")
 
     async def test_startup_baseline_upgrade_backfills_spam_pack_for_existing_live_guilds(self):
@@ -580,15 +579,15 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(changed)
         config = self.service.get_config(10)
-        self.assertEqual(config["baseline_version"], 3)
+        self.assertEqual(config["baseline_version"], 4)
         self.assertTrue(config["spam_enabled"])
         self.assertEqual(config["spam_low_action"], "log")
         self.assertEqual(config["spam_medium_action"], "delete_log")
-        self.assertEqual(config["spam_high_action"], "delete_escalate")
+        self.assertEqual(config["spam_high_action"], "delete_timeout_log")
         self.assertTrue(config["gif_enabled"])
         self.assertEqual(config["gif_low_action"], "log")
         self.assertEqual(config["gif_medium_action"], "delete_log")
-        self.assertEqual(config["gif_high_action"], "delete_escalate")
+        self.assertEqual(config["gif_high_action"], "delete_timeout_log")
 
     async def test_reenable_preserves_customized_rules_after_first_enable(self):
         ok, _ = await self.service.set_pack_config(10, "severe", enabled=False, low_action="detect", medium_action="log", high_action="delete_log", sensitivity="high")
@@ -742,7 +741,6 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         categories = {item.normalized_domain: item.category for item in decision.link_assessments}
         self.assertEqual(categories["docs.google.com"], "safe")
         self.assertEqual(categories["mint-pass.live"], "unknown_suspicious")
-        self.assertEqual(decision.member_risk_evidence.primary_domain, "mint-pass.live")
 
     async def test_polished_opensea_mint_lure_hits_scam_pack(self):
         ok, _ = await self.service.set_pack_config(10, "scam", enabled=True, action="delete_log", sensitivity="normal")
@@ -1814,7 +1812,7 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertLessEqual(status["cache_entries"], status["cache_max_entries"])
 
-    async def test_repeated_tenor_link_stays_low_confidence_noise(self):
+    async def test_repeated_tenor_link_is_caught_by_gif_lane(self):
         guild = FakeGuild(10)
         channel = FakeChannel(20)
         author = FakeAuthor(42, roles=[FakeRole(11, position=1)])
@@ -1846,13 +1844,17 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
                     )
                 )
 
-        self.assertEqual(decisions[:-1], [None, None, None, None])
+        self.assertEqual(decisions[:2], [None, None])
+        self.assertIsNotNone(decisions[2])
+        self.assertEqual(decisions[2].pack, "gif")
+        self.assertEqual(decisions[2].action, "delete_log")
+        self.assertEqual(decisions[2].reasons[0].match_class, "spam_gif_flood")
         final = decisions[-1]
         self.assertIsNotNone(final)
-        self.assertEqual(final.action, "log")
-        self.assertFalse(final.deleted)
-        self.assertEqual(final.reasons[0].match_class, "repetitive_link_noise")
-        self.assertEqual(final.reasons[0].confidence, "low")
+        self.assertEqual(final.action, "delete_log")
+        self.assertTrue(final.deleted)
+        self.assertEqual(final.pack, "gif")
+        self.assertIn("spam_gif_flood", {reason.match_class for reason in final.reasons})
 
     async def test_repeated_generic_link_stays_log_only_noise(self):
         guild = FakeGuild(10)
@@ -2204,17 +2206,17 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
                 await self.service.handle_message(
                     FakeMessage(guild=guild, channel=channel, author=author, content="claim your starter pack now")
                 )
-                for _ in range(4)
+                for _ in range(5)
             ]
 
-        self.assertEqual(decisions[:2], [None, None])
-        self.assertIsNotNone(decisions[2])
-        self.assertEqual(decisions[2].action, "delete_log")
+        self.assertEqual(decisions[:3], [None, None, None])
         self.assertIsNotNone(decisions[3])
-        self.assertEqual(decisions[3].pack, "spam")
-        self.assertEqual(decisions[3].action, "delete_escalate")
-        self.assertTrue(decisions[3].deleted)
-        self.assertTrue({reason.match_class for reason in decisions[3].reasons}.issuperset({"spam_duplicate", "spam_near_duplicate"}))
+        self.assertEqual(decisions[3].action, "delete_log")
+        self.assertIsNotNone(decisions[4])
+        self.assertEqual(decisions[4].pack, "spam")
+        self.assertEqual(decisions[4].action, "delete_escalate")
+        self.assertTrue(decisions[4].deleted)
+        self.assertTrue({reason.match_class for reason in decisions[4].reasons}.issuperset({"spam_duplicate", "spam_near_duplicate"}))
 
     async def test_near_duplicate_spam_detection_handles_spacing_and_punctuation_variants(self):
         guild = FakeGuild(10)
@@ -2357,7 +2359,7 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNotNone(spam_decisions[-1])
         self.assertEqual(spam_decisions[-1].pack, "spam")
-        self.assertIn("spam_burst", {reason.match_class for reason in spam_decisions[-1].reasons})
+        self.assertIn("spam_message_rate", {reason.match_class for reason in spam_decisions[-1].reasons})
         self.assertTrue(all(item is None for item in normal_decisions))
 
     async def test_bot_turn_taking_game_loop_does_not_trigger_duplicate_spam(self):
@@ -2422,158 +2424,6 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
             ]
 
         self.assertTrue(all(item is None for item in decisions))
-
-    async def test_normal_growth_below_join_wave_threshold_stays_quiet(self):
-        guild = FakeGuild(10)
-        log_channel = FakeChannel(99, name="shield-log")
-        self.bot.register_channel(log_channel)
-
-        await self._enable_spam_pack(guild.id)
-        ok, _ = await self.service.set_log_channel(guild.id, log_channel.id)
-        self.assertTrue(ok)
-
-        for index in range(4):
-            await self.service.handle_member_join(
-                self._make_member(
-                    guild,
-                    200 + index,
-                    created_delta=timedelta(days=60),
-                    joined_delta=timedelta(minutes=1),
-                )
-            )
-
-        self.assertEqual(log_channel.sent, [])
-
-    async def test_join_wave_watch_alert_stays_compact_and_deduped(self):
-        guild = FakeGuild(10)
-        log_channel = FakeChannel(99, name="shield-log")
-        self.bot.register_channel(log_channel)
-
-        await self._enable_spam_pack(guild.id)
-        ok, _ = await self.service.set_log_channel(guild.id, log_channel.id)
-        self.assertTrue(ok)
-
-        for index in range(6):
-            evidence = await self.service.handle_member_join(
-                self._make_member(
-                    guild,
-                    300 + index,
-                    created_delta=timedelta(days=45),
-                    joined_delta=timedelta(minutes=1),
-                )
-            )
-
-        self.assertIsNotNone(evidence)
-        self.assertTrue(evidence.join_wave)
-        self.assertFalse(evidence.fresh_join_wave)
-        self.assertEqual(len(log_channel.sent), 1)
-        self.assertEqual(log_channel.sent[0]["embed"].title, "Shield Alert | Spam / Raid")
-        self.assertIn("Raid Watch", log_channel.sent[0]["embed"].fields[0].value)
-
-    async def test_fresh_join_wave_plus_shared_newcomer_spam_pattern_confirms_raid(self):
-        guild = FakeGuild(10)
-        channel = FakeChannel(20)
-        admin_service = types.SimpleNamespace(handle_member_risk_message=AsyncMock())
-        self.bot.admin_service = admin_service
-
-        await self._enable_spam_pack(guild.id)
-        members = [
-            self._make_member(
-                guild,
-                400 + index,
-                created_delta=timedelta(hours=2),
-                joined_delta=timedelta(minutes=2),
-            )
-            for index in range(5)
-        ]
-        for member in members:
-            await self.service.handle_member_join(member)
-
-        content = "@everyone <@1> <@2> <@3>"
-        with patch.object(self.service, "_send_alert", new=AsyncMock()):
-            first = await self.service.handle_message(FakeMessage(guild=guild, channel=channel, author=members[0], content=content))
-            second = await self.service.handle_message(FakeMessage(guild=guild, channel=channel, author=members[1], content=content))
-
-        self.assertIsNotNone(first)
-        self.assertIsNotNone(second)
-        self.assertIsNotNone(first.raid_evidence)
-        self.assertIsNotNone(second.raid_evidence)
-        self.assertTrue(first.raid_evidence.join_wave)
-        self.assertTrue(first.raid_evidence.fresh_join_wave)
-        self.assertFalse(first.raid_evidence.confirmed)
-        self.assertTrue(second.raid_evidence.confirmed)
-        self.assertTrue(second.raid_evidence.confidence_lifted)
-        self.assertEqual(second.pack, "spam")
-        self.assertEqual(second.action, "delete_escalate")
-        self.assertTrue(second.deleted)
-        self.assertIn("spam_high", second.member_risk_evidence.signal_codes)
-        self.assertIn("raid_join_wave", second.member_risk_evidence.signal_codes)
-        self.assertIn("raid_fresh_join_wave", second.member_risk_evidence.signal_codes)
-        self.assertIn("raid_pattern_cluster", second.member_risk_evidence.signal_codes)
-        admin_service.handle_member_risk_message.assert_awaited()
-
-    async def test_guard_posture_can_hold_confirmed_newcomer_raid_spam(self):
-        guild = FakeGuild(10)
-        channel = FakeChannel(20)
-        admin_service = types.SimpleNamespace(
-            handle_member_risk_message=AsyncMock(),
-            get_compiled_config=lambda _guild_id: types.SimpleNamespace(security_posture="guard"),
-        )
-        self.bot.admin_service = admin_service
-
-        await self._enable_spam_pack(guild.id)
-        members = [
-            self._make_member(
-                guild,
-                500 + index,
-                created_delta=timedelta(hours=2),
-                joined_delta=timedelta(minutes=2),
-            )
-            for index in range(5)
-        ]
-        for member in members:
-            await self.service.handle_member_join(member)
-
-        content = "@everyone <@1> <@2> <@3>"
-        with patch.object(self.service, "_timeout_member", new=AsyncMock(return_value=True)) as timeout_mock, patch.object(self.service, "_send_alert", new=AsyncMock()):
-            await self.service.handle_message(FakeMessage(guild=guild, channel=channel, author=members[0], content=content))
-            second = await self.service.handle_message(FakeMessage(guild=guild, channel=channel, author=members[1], content=content))
-
-        self.assertIsNotNone(second)
-        self.assertTrue(second.timed_out)
-        self.assertIn("raid hold", (second.action_note or "").lower())
-        timeout_mock.assert_awaited()
-
-    async def test_observe_posture_keeps_confirmed_newcomer_raid_spam_review_heavy(self):
-        guild = FakeGuild(10)
-        channel = FakeChannel(20)
-        admin_service = types.SimpleNamespace(
-            handle_member_risk_message=AsyncMock(),
-            get_compiled_config=lambda _guild_id: types.SimpleNamespace(security_posture="observe"),
-        )
-        self.bot.admin_service = admin_service
-
-        await self._enable_spam_pack(guild.id)
-        members = [
-            self._make_member(
-                guild,
-                600 + index,
-                created_delta=timedelta(hours=2),
-                joined_delta=timedelta(minutes=2),
-            )
-            for index in range(5)
-        ]
-        for member in members:
-            await self.service.handle_member_join(member)
-
-        content = "@everyone <@1> <@2> <@3>"
-        with patch.object(self.service, "_timeout_member", new=AsyncMock(return_value=True)) as timeout_mock, patch.object(self.service, "_send_alert", new=AsyncMock()):
-            await self.service.handle_message(FakeMessage(guild=guild, channel=channel, author=members[0], content=content))
-            second = await self.service.handle_message(FakeMessage(guild=guild, channel=channel, author=members[1], content=content))
-
-        self.assertIsNotNone(second)
-        self.assertFalse(second.timed_out)
-        timeout_mock.assert_not_awaited()
 
     async def test_custom_wildcard_pattern_matches_safely(self):
         ok, _ = await self.service.add_custom_pattern(
@@ -2741,7 +2591,6 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(decision.deleted)
         self.assertTrue([match for match in decision.reasons if match.match_class == "trusted_brand_impersonation_domain"])
         self.assertEqual(decision.link_assessments[0].category, "impersonation")
-        self.assertIsNone(decision.member_risk_evidence)
 
     async def test_embed_only_scam_message_is_scanned(self):
         guild = FakeGuild(10)
@@ -2982,7 +2831,6 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         evidence_field = next(field for field in embed.fields if field.name == "Evidence Basis")
         self.assertIn("Combined suspicion around an unknown risky link.", evidence_field.value)
         self.assertIn("Primary risky domain: `secure-auth-session.click`", evidence_field.value)
-        self.assertIn("Confidence rose with:", evidence_field.value)
 
     async def test_delete_escalate_triggers_timeout_after_threshold(self):
         guild = FakeGuild(10)
@@ -3171,70 +3019,6 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
             await self.service._send_alert(second, compiled, decision, content_fingerprint=fingerprint)
 
         self.assertEqual(len(log_channel.sent), 2)
-
-    async def test_confirmed_raid_signature_dedup_suppresses_followup_alerts(self):
-        guild = FakeGuild(10)
-        public_channel = FakeChannel(20)
-        log_channel = FakeChannel(99, name="shield-log")
-        self.bot.register_channel(log_channel)
-        first_author = self._make_member(guild, 501, created_delta=timedelta(hours=2), joined_delta=timedelta(minutes=3))
-        second_author = self._make_member(guild, 502, created_delta=timedelta(hours=2), joined_delta=timedelta(minutes=2))
-        first = FakeMessage(guild=guild, channel=public_channel, author=first_author, content="@everyone <@1> <@2> <@3>")
-        second = FakeMessage(guild=guild, channel=public_channel, author=second_author, content="@everyone <@4> <@5> <@6>")
-
-        ok, _ = await self.service.set_log_channel(guild.id, log_channel.id)
-        self.assertTrue(ok)
-        compiled = self.service._compiled_configs[guild.id]
-        reason = ShieldMatch(
-            pack="spam",
-            label="Mention flood",
-            reason="The message tagged 4 accounts in one shot. Active raid corroboration raised confidence.",
-            action="delete_escalate",
-            confidence="high",
-            heuristic=True,
-            match_class="spam_mention_flood",
-        )
-        raid_evidence = ShieldRaidEvidence(
-            join_count_60s=5,
-            join_count_5m=5,
-            fresh_join_count_60s=4,
-            fresh_join_count_5m=4,
-            join_wave=True,
-            fresh_join_wave=True,
-            pattern_cluster_size=2,
-            pattern_kind="exact",
-            pattern_signature="raid-sig",
-            confirmed=True,
-            confidence_lifted=True,
-        )
-        first_decision = ShieldDecision(
-            matched=True,
-            action="delete_escalate",
-            pack="spam",
-            reasons=(reason,),
-            deleted=True,
-            raid_evidence=raid_evidence,
-            alert_evidence_signature="raid-sig",
-        )
-        second_decision = ShieldDecision(
-            matched=True,
-            action="delete_escalate",
-            pack="spam",
-            reasons=(reason,),
-            deleted=True,
-            raid_evidence=raid_evidence,
-            alert_evidence_signature="raid-sig",
-        )
-
-        await self.service._send_alert(first, compiled, first_decision, content_fingerprint="raid-a")
-        await self.service._send_alert(second, compiled, second_decision, content_fingerprint="raid-b")
-
-        self.assertEqual(len(log_channel.sent), 1)
-        embed = log_channel.sent[0]["embed"]
-        self.assertEqual(embed.title, "Shield Alert | Spam / Raid")
-        evidence_field = next(field for field in embed.fields if field.name == "Evidence Basis")
-        self.assertIn("Join wave: 5 in 60s / 5 in 5m", evidence_field.value)
-        self.assertIn("Shared newcomer pattern: 2 accounts (exact)", evidence_field.value)
 
     async def test_low_confidence_repetition_alert_is_compact_and_does_not_ping(self):
         guild = FakeGuild(10)
@@ -3641,202 +3425,6 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(decision)
         self.assertIsNone(decision.ai_review)
         self.assertEqual(len(log_channel.sent), 1)
-
-    async def test_member_risk_handoff_runs_for_fresh_account_scam_message(self):
-        guild = FakeGuild(10)
-        channel = FakeChannel(20)
-        author = FakeAuthor(
-            42,
-            created_at=ge.now_utc() - timedelta(hours=2),
-            joined_at=ge.now_utc() - timedelta(minutes=15),
-            avatar=None,
-            display_name="Official Support",
-        )
-        admin_service = types.SimpleNamespace(handle_member_risk_message=AsyncMock())
-        self.bot.admin_service = admin_service
-        message = FakeMessage(
-            guild=guild,
-            channel=channel,
-            author=author,
-            content=(
-                "Official community post: Members are invited to secure their spot in the OpenSea mint. "
-                "Visit https://opensea-mint-event.com/claim soon because selection is limited."
-            ),
-        )
-
-        ok, _ = await self.service.set_module_enabled(guild.id, True)
-        self.assertTrue(ok)
-        ok, _ = await self.service.set_pack_config(guild.id, "scam", enabled=True, action="delete_log", sensitivity="normal")
-        self.assertTrue(ok)
-
-        with patch.object(self.service, "_send_alert", new=AsyncMock()):
-            decision = await self.service.handle_message(message)
-
-        self.assertIsNotNone(decision)
-        self.assertIsNotNone(decision.member_risk_evidence)
-        self.assertIn("scam_high", decision.member_risk_evidence.signal_codes)
-        self.assertIn("newcomer_early_message", decision.member_risk_evidence.signal_codes)
-        admin_service.handle_member_risk_message.assert_awaited_once_with(message, decision)
-
-    async def test_member_risk_handoff_skips_webhook_messages(self):
-        guild = FakeGuild(10)
-        channel = FakeChannel(20)
-        author = FakeAuthor(42, bot=True)
-        admin_service = types.SimpleNamespace(handle_member_risk_message=AsyncMock())
-        self.bot.admin_service = admin_service
-        message = FakeMessage(
-            guild=guild,
-            channel=channel,
-            author=author,
-            webhook_id=991,
-            content=(
-                "Official community post: Members are invited to participate in the mint. "
-                "Visit https://opensea-mint-event.com/claim soon because selection is limited."
-            ),
-        )
-
-        ok, _ = await self.service.set_module_enabled(guild.id, True)
-        self.assertTrue(ok)
-        ok, _ = await self.service.set_pack_config(guild.id, "scam", enabled=True, action="delete_log", sensitivity="normal")
-        self.assertTrue(ok)
-
-        with patch.object(self.service, "_send_alert", new=AsyncMock()):
-            decision = await self.service.handle_message(message, scan_source="webhook_message")
-
-        self.assertIsNotNone(decision)
-        self.assertIsNone(decision.member_risk_evidence)
-        admin_service.handle_member_risk_message.assert_not_awaited()
-
-    async def test_fresh_campaign_cluster_signal_accumulates_across_fresh_accounts(self):
-        guild = FakeGuild(10)
-        channel = FakeChannel(20)
-        ok, _ = await self.service.set_module_enabled(guild.id, True)
-        self.assertTrue(ok)
-        ok, _ = await self.service.set_pack_config(guild.id, "scam", enabled=True, action="delete_log", sensitivity="normal")
-        self.assertTrue(ok)
-
-        decisions = []
-        for user_id in (200, 201, 202):
-            author = FakeAuthor(
-                user_id,
-                created_at=ge.now_utc() - timedelta(hours=3),
-                joined_at=ge.now_utc() - timedelta(minutes=25),
-                avatar=None,
-            )
-            message = FakeMessage(
-                guild=guild,
-                channel=channel,
-                author=author,
-                content=(
-                    "Official community post: Members are invited to verify their access and keep their member slot. "
-                    "Visit https://secure-auth-session.click/login now before the window closes."
-                ),
-            )
-            with patch.object(self.service, "_send_alert", new=AsyncMock()):
-                decisions.append(await self.service.handle_message(message))
-
-        self.assertTrue(all(decision is not None for decision in decisions))
-        self.assertIsNotNone(decisions[-1].member_risk_evidence)
-        self.assertIn("fresh_campaign_cluster_3", decisions[-1].member_risk_evidence.signal_codes)
-
-    async def test_newcomer_first_link_signals_only_fire_once_for_new_messages(self):
-        guild = FakeGuild(10)
-        channel = FakeChannel(20)
-        author = FakeAuthor(
-            301,
-            created_at=ge.now_utc() - timedelta(hours=2),
-            joined_at=ge.now_utc() - timedelta(minutes=15),
-            avatar=None,
-            display_name="Support Desk",
-        )
-        ok, _ = await self.service.set_module_enabled(guild.id, True)
-        self.assertTrue(ok)
-        ok, _ = await self.service.set_pack_config(guild.id, "scam", enabled=True, action="delete_log", sensitivity="normal")
-        self.assertTrue(ok)
-        first = FakeMessage(
-            guild=guild,
-            channel=channel,
-            author=author,
-            content="Verify your slot at https://secure-auth-session.click/login before the window closes.",
-        )
-        second = FakeMessage(
-            guild=guild,
-            channel=channel,
-            author=author,
-            content="Members should still verify at https://secure-auth-session.click/login to keep access.",
-        )
-
-        with patch.object(self.service, "_send_alert", new=AsyncMock()):
-            first_decision = await self.service.handle_message(first)
-            second_decision = await self.service.handle_message(second)
-
-        self.assertIn("first_message_link", first_decision.member_risk_evidence.signal_codes)
-        self.assertIn("first_external_link", first_decision.member_risk_evidence.signal_codes)
-        self.assertNotIn("first_message_link", second_decision.member_risk_evidence.signal_codes)
-        self.assertNotIn("first_external_link", second_decision.member_risk_evidence.signal_codes)
-
-    async def test_campaign_lure_reuse_tracks_rotated_domains(self):
-        guild = FakeGuild(10)
-        channel = FakeChannel(20)
-        ok, _ = await self.service.set_module_enabled(guild.id, True)
-        self.assertTrue(ok)
-        ok, _ = await self.service.set_pack_config(guild.id, "scam", enabled=True, action="delete_log", sensitivity="normal")
-        self.assertTrue(ok)
-
-        decisions = []
-        for user_id, domain in ((401, "secure-auth-session.click"), (402, "member-access-pass.live")):
-            author = FakeAuthor(
-                user_id,
-                created_at=ge.now_utc() - timedelta(hours=3),
-                joined_at=ge.now_utc() - timedelta(minutes=20),
-                avatar=None,
-            )
-            message = FakeMessage(
-                guild=guild,
-                channel=channel,
-                author=author,
-                content=(
-                    "Official community post: Discord members should verify access before the window closes. "
-                    f"Visit https://{domain}/login now."
-                ),
-            )
-            with patch.object(self.service, "_send_alert", new=AsyncMock()):
-                decisions.append(await self.service.handle_message(message))
-
-        self.assertIn("campaign_lure_reuse", decisions[-1].member_risk_evidence.signal_codes)
-        self.assertIn("fresh_campaign_cluster_2", decisions[-1].member_risk_evidence.signal_codes)
-
-    async def test_campaign_path_shape_tracks_same_domain_login_pattern(self):
-        guild = FakeGuild(10)
-        channel = FakeChannel(20)
-        ok, _ = await self.service.set_module_enabled(guild.id, True)
-        self.assertTrue(ok)
-        ok, _ = await self.service.set_pack_config(guild.id, "scam", enabled=True, action="delete_log", sensitivity="normal")
-        self.assertTrue(ok)
-
-        decisions = []
-        for user_id, token in ((501, "abc123"), (502, "xyz789")):
-            author = FakeAuthor(
-                user_id,
-                created_at=ge.now_utc() - timedelta(hours=3),
-                joined_at=ge.now_utc() - timedelta(minutes=20),
-                avatar=None,
-            )
-            message = FakeMessage(
-                guild=guild,
-                channel=channel,
-                author=author,
-                content=(
-                    "Official community post: Members should verify access immediately. "
-                    f"Visit https://secure-auth-session.click/login?token={token} now."
-                ),
-            )
-            with patch.object(self.service, "_send_alert", new=AsyncMock()):
-                decisions.append(await self.service.handle_message(message))
-
-        self.assertIn("campaign_path_shape", decisions[-1].member_risk_evidence.signal_codes)
-        self.assertIn("fresh_campaign_cluster_2", decisions[-1].member_risk_evidence.signal_codes)
-
 
 class ShieldStoreNormalizationTests(unittest.TestCase):
     def test_normalize_state_migrates_legacy_nested_pack_config(self):

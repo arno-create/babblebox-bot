@@ -36,7 +36,7 @@ class WebsiteDocsTests(unittest.TestCase):
             'id="faq"',
         ):
             self.assertIn(anchor, help_html)
-        for command in ("/support", "/daily", "/buddy", "/profile", "/vault", "/watch", "/later", "/capture", "/remind", "/afk", "/shield panel", "/shield links", "/shield trusted", "/admin permissions", "/confess", "/confessions moderate"):
+        for command in ("/support", "/daily", "/buddy", "/profile", "/vault", "/watch", "/later", "/capture", "/remind", "/afk", "/shield panel", "/shield links", "/shield trusted", "/admin panel", "/admin followup", "/admin verification", "/confess", "/confessions moderate"):
             self.assertIn(command, help_html)
         self.assertIn("Broken Telephone, Exquisite Corpse, Spyfall, Word Bomb, and Pattern Hunt", help_html)
         self.assertIn("1-10 drops per day", help_html)
@@ -80,7 +80,10 @@ class WebsiteDocsTests(unittest.TestCase):
         self.assertIn("ordered-sequence prompts are one-shot", help_html)
         self.assertNotIn("jump-nav", help_html)
         self.assertIn("guide-band", help_html)
-        self.assertIn("Spam / Raid", help_html)
+        self.assertIn("Anti-Spam", help_html)
+        self.assertNotIn("/admin permissions", help_html)
+        self.assertNotIn("/admin risk", help_html)
+        self.assertNotIn("/admin emergency", help_html)
 
     def test_help_page_is_linked_from_site_shells(self):
         index_html = (ROOT / "index.html").read_text(encoding="utf-8")
@@ -143,7 +146,8 @@ class WebsiteDocsTests(unittest.TestCase):
             "images are off by default",
             "/shield trusted",
             "recommended non-AI baseline",
-            "Spam / Raid",
+            "Anti-Spam",
+            "GIF Flood / Media Pressure",
             "Reply anonymously",
             "Create a confession",
             "private approval happens first",
@@ -181,7 +185,8 @@ class WebsiteDocsTests(unittest.TestCase):
             "anonymous confessions",
             "admin-enabled anonymous confessions",
             "images stay off by default unless admins explicitly turn them on",
-            "compact smart antispam",
+            "explicit anti-spam thresholds",
+            "grouped incident dedupe",
         ):
             self.assertIn(text, index_html)
 
@@ -200,47 +205,46 @@ class WebsiteDocsTests(unittest.TestCase):
         self.assertIn("about 200k known malicious domains", index_html)
         self.assertIn("about 200k known malicious domains", help_html)
 
-    def test_shield_docs_describe_private_newcomer_and_campaign_context(self):
+    def test_shield_docs_describe_local_scam_corroboration(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         index_html = (ROOT / "index.html").read_text(encoding="utf-8")
         help_html = (ROOT / "help.html").read_text(encoding="utf-8")
 
         self.assertIn("newcomer first-link context", readme)
         self.assertIn("fresh-campaign reuse", readme)
-        self.assertIn("unknown risky links only escalate after combined local scam evidence", help_html)
-        self.assertIn("newcomer first-link context", help_html)
-        self.assertIn("newcomer first-link context", index_html)
+        self.assertIn("no-link DM-lure", help_html)
+        self.assertIn("no-link DM-lure", index_html)
+        self.assertIn("combined local scam evidence", help_html)
 
-    def test_shield_docs_cover_compact_antispam_and_raid_watch(self):
+    def test_shield_docs_cover_compact_antispam_and_gif_grouping(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         index_html = (ROOT / "index.html").read_text(encoding="utf-8")
         help_html = (ROOT / "help.html").read_text(encoding="utf-8")
 
-        self.assertIn("Spam / Raid", readme)
-        self.assertIn("Spam / Raid", help_html)
-        self.assertIn("short-lived per-user and per-guild windows", readme)
-        self.assertIn("raid-watch alerts stay deduped", help_html)
-        self.assertIn("compact smart antispam", index_html)
-        self.assertIn("bounded raid-watch windows", index_html)
+        self.assertIn("Anti-Spam", readme)
+        self.assertIn("Anti-Spam", help_html)
+        self.assertIn("short-lived per-user windows", readme)
+        self.assertIn("grouped incidents per offender and incident window", help_html)
+        self.assertIn("explicit anti-spam thresholds", index_html)
+        self.assertIn("grouped incident dedupe", index_html)
 
-    def test_shield_and_admin_docs_cover_gif_spam_and_emergency_foundation(self):
+    def test_shield_and_admin_docs_cover_gif_spam_and_focused_admin_surfaces(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         index_html = (ROOT / "index.html").read_text(encoding="utf-8")
         help_html = (ROOT / "help.html").read_text(encoding="utf-8")
 
         for text in (
             "GIF Flood / Media Pressure",
-            "/admin emergency",
-            "/admin emergency_trust",
-            "/admin emergency_limits",
-            "protected roles",
-            "trusted granters",
-            "strict reversible containment",
+            "/admin panel",
+            "/admin followup",
+            "/admin verification",
+            "/admin logs",
+            "/admin templates",
         ):
             self.assertIn(text, readme)
             self.assertIn(text, help_html)
         self.assertIn("GIF Flood / Media Pressure", index_html)
-        self.assertIn("strict reversible containment", index_html)
+        self.assertIn("/admin panel", index_html)
 
     def test_shield_docs_cover_no_link_dm_lure_and_truthful_ai_models(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
@@ -261,30 +265,32 @@ class WebsiteDocsTests(unittest.TestCase):
         self.assertNotIn("gpt-4.1-mini", help_html)
         self.assertNotIn("gpt-4.1-mini", index_html)
 
-    def test_permission_orchestration_docs_cover_preview_presets_and_future_rules(self):
+    def test_removed_admin_control_plane_surfaces_are_absent_from_docs(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         index_html = (ROOT / "index.html").read_text(encoding="utf-8")
         help_html = (ROOT / "help.html").read_text(encoding="utf-8")
+        privacy_md = (ROOT / "PRIVACY.md").read_text(encoding="utf-8")
+        privacy_html = (ROOT / "privacy.html").read_text(encoding="utf-8")
 
         for text in (
             "/admin permissions",
-            "preview-first",
-            "future-channel auto-apply rules",
-            "saved future rule",
-            "Quarantine",
-            "Muted",
-            "Not Verified",
-            "Verified",
+            "/admin risk",
+            "/admin emergency",
+            "one-role permission orchestration",
+            "anti-nuke",
+            "anti-raid",
+            "admin_permissions_ui.py",
+            "permission_orchestration.py",
+            "suspicious-member",
+            "member-risk",
+            "member risk",
+            "emergency incidents",
         ):
-            self.assertIn(text, readme)
-            self.assertIn(text, help_html)
-            self.assertIn(text, index_html)
-
-        self.assertIn("one-role permission orchestration", readme)
-        self.assertIn("one-role permission orchestration", help_html)
-        self.assertIn("one-role permission orchestration", index_html)
-        self.assertIn("targeted allow, deny, and clear", help_html)
-        self.assertIn("targeted allow, deny, and clear", index_html)
+            self.assertNotIn(text, readme)
+            self.assertNotIn(text, help_html)
+            self.assertNotIn(text, index_html)
+            self.assertNotIn(text, privacy_md)
+            self.assertNotIn(text, privacy_html)
 
     def test_shield_docs_cover_trusted_link_mode_and_optional_adult_solicitation(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
@@ -346,7 +352,7 @@ class WebsiteDocsTests(unittest.TestCase):
             "recommended non-AI baseline",
         ):
             self.assertIn(text, help_html)
-        for text in ("watch keyword setup stays privacy-only", "privacy, adult, and severe", "Spam / Raid"):
+        for text in ("watch keyword setup stays privacy-only", "privacy, adult, and severe", "Anti-Spam"):
             self.assertIn(text, help_html)
         for text in (
             "feature-surface checks",
