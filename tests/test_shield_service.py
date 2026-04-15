@@ -38,9 +38,22 @@ class FakeRole:
 
 
 class FakeGuildPermissions:
-    def __init__(self, *, administrator: bool = False, manage_guild: bool = False):
+    def __init__(
+        self,
+        *,
+        administrator: bool = False,
+        manage_guild: bool = False,
+        manage_messages: bool = False,
+        moderate_members: bool = False,
+        kick_members: bool = False,
+        ban_members: bool = False,
+    ):
         self.administrator = administrator
         self.manage_guild = manage_guild
+        self.manage_messages = manage_messages
+        self.moderate_members = moderate_members
+        self.kick_members = kick_members
+        self.ban_members = ban_members
 
 
 class FakeAuthor:
@@ -50,6 +63,11 @@ class FakeAuthor:
         *,
         roles=None,
         administrator: bool = False,
+        manage_guild: bool = False,
+        manage_messages: bool = False,
+        moderate_members: bool = False,
+        kick_members: bool = False,
+        ban_members: bool = False,
         bot: bool = False,
         created_at=None,
         joined_at=None,
@@ -61,7 +79,14 @@ class FakeAuthor:
         self.roles = roles or []
         self.mention = f"<@{user_id}>"
         self.display_name = display_name or f"User {user_id}"
-        self.guild_permissions = FakeGuildPermissions(administrator=administrator)
+        self.guild_permissions = FakeGuildPermissions(
+            administrator=administrator,
+            manage_guild=manage_guild,
+            manage_messages=manage_messages,
+            moderate_members=moderate_members,
+            kick_members=kick_members,
+            ban_members=ban_members,
+        )
         self.created_at = created_at or ge.now_utc()
         self.joined_at = joined_at or ge.now_utc()
         self.avatar = avatar
@@ -91,19 +116,48 @@ class FakePermissions:
         self.view_channel = view_channel
 
 
+class FakeSentLogMessage:
+    def __init__(self, *, channel, message_id: int, payload: dict):
+        self.channel = channel
+        self.id = message_id
+        self.content = payload.get("content")
+        self.embed = payload.get("embed")
+        self.allowed_mentions = payload.get("allowed_mentions")
+
+    async def edit(self, **kwargs):
+        if "content" in kwargs:
+            self.content = kwargs["content"]
+        if "embed" in kwargs:
+            self.embed = kwargs["embed"]
+        if "allowed_mentions" in kwargs:
+            self.allowed_mentions = kwargs["allowed_mentions"]
+        self.channel.edits.append(kwargs)
+
+
 class FakeChannel:
     def __init__(self, channel_id: int = 20, *, name: str = "general", permissions: Optional[FakePermissions] = None):
         self.id = channel_id
         self.name = name
         self.mention = f"<#{channel_id}>"
         self.sent = []
+        self.edits = []
         self._permissions = permissions or FakePermissions()
+        self._sent_messages = {}
+        self._next_sent_id = 5000
 
     def permissions_for(self, member):
         return self._permissions
 
     async def send(self, **kwargs):
-        self.sent.append(kwargs)
+        payload = dict(kwargs)
+        self.sent.append(payload)
+        message = FakeSentLogMessage(channel=self, message_id=self._next_sent_id, payload=payload)
+        self._sent_messages[message.id] = message
+        self._next_sent_id += 1
+        return message
+
+    async def fetch_message(self, message_id: int):
+        return self._sent_messages[message_id]
 
 
 class FakeGuild:
@@ -182,6 +236,7 @@ class FakeMessage:
         message_snapshots=None,
         system_content: Optional[str] = None,
         message_id: Optional[int] = None,
+        delete_error: Optional[Exception] = None,
     ):
         self.guild = guild
         self.channel = channel
@@ -197,8 +252,13 @@ class FakeMessage:
             FakeMessage._next_id += 1
         self.jump_url = f"https://discord.com/channels/{guild.id}/{channel.id}/{self.id}"
         self.deleted = False
+        self.delete_error = delete_error
+        self.delete_attempts = 0
 
     async def delete(self):
+        self.delete_attempts += 1
+        if self.delete_error is not None:
+            raise self.delete_error
         self.deleted = True
 
 
@@ -299,6 +359,7 @@ class ShieldPostgresReloadTests(unittest.IsolatedAsyncioTestCase):
                     "allow_domains": json.dumps(["example.com"]),
                     "allow_invite_codes": json.dumps(["abc123"]),
                     "allow_phrases": json.dumps(["friendly server"]),
+                    "pack_exemptions": json.dumps({"spam": {"channel_ids": [777], "role_ids": [42], "user_ids": [30]}}),
                     "privacy_enabled": True,
                     "privacy_action": "log",
                     "privacy_low_action": "log",
@@ -317,6 +378,22 @@ class ShieldPostgresReloadTests(unittest.IsolatedAsyncioTestCase):
                     "scam_medium_action": "delete_log",
                     "scam_high_action": "delete_escalate",
                     "scam_sensitivity": "high",
+                    "spam_message_threshold": 6,
+                    "spam_message_window_seconds": 8,
+                    "spam_burst_threshold": 4,
+                    "spam_burst_window_seconds": 9,
+                    "spam_near_duplicate_threshold": 4,
+                    "spam_near_duplicate_window_seconds": 12,
+                    "spam_emote_enabled": True,
+                    "spam_emote_threshold": 16,
+                    "spam_caps_enabled": True,
+                    "spam_caps_threshold": 24,
+                    "spam_moderator_policy": "delete_only",
+                    "gif_message_threshold": 5,
+                    "gif_window_seconds": 25,
+                    "gif_repeat_threshold": 4,
+                    "gif_same_asset_threshold": 2,
+                    "gif_min_ratio_percent": 80,
                     "adult_enabled": True,
                     "adult_action": "delete_log",
                     "adult_low_action": "log",
@@ -365,7 +442,17 @@ class ShieldPostgresReloadTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(config["allow_domains"], ["example.com"])
         self.assertEqual(config["allow_invite_codes"], ["abc123"])
         self.assertEqual(config["allow_phrases"], ["friendly server"])
+        self.assertEqual(config["pack_exemptions"]["spam"]["channel_ids"], [777])
+        self.assertEqual(config["pack_exemptions"]["spam"]["role_ids"], [42])
+        self.assertEqual(config["pack_exemptions"]["spam"]["user_ids"], [30])
         self.assertTrue(config["adult_solicitation_enabled"])
+        self.assertEqual(config["spam_message_threshold"], 6)
+        self.assertEqual(config["spam_burst_threshold"], 4)
+        self.assertTrue(config["spam_emote_enabled"])
+        self.assertEqual(config["spam_caps_threshold"], 24)
+        self.assertEqual(config["spam_moderator_policy"], "delete_only")
+        self.assertEqual(config["gif_message_threshold"], 5)
+        self.assertEqual(config["gif_same_asset_threshold"], 2)
         self.assertEqual(config["link_policy_mode"], "trusted_only")
         self.assertEqual(config["link_policy_low_action"], "log")
         self.assertEqual(config["link_policy_medium_action"], "delete_log")
@@ -394,6 +481,7 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         low_action: str = "log",
         medium_action: str = "delete_log",
         high_action: str = "delete_escalate",
+        **extra_config,
     ):
         ok, _ = await self.service.set_module_enabled(guild_id, True)
         self.assertTrue(ok)
@@ -405,6 +493,7 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
             medium_action=medium_action,
             high_action=high_action,
             sensitivity=sensitivity,
+            **extra_config,
         )
         self.assertTrue(ok)
 
@@ -416,6 +505,7 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         low_action: str = "log",
         medium_action: str = "delete_log",
         high_action: str = "delete_escalate",
+        **extra_config,
     ):
         ok, _ = await self.service.set_module_enabled(guild_id, True)
         self.assertTrue(ok)
@@ -427,6 +517,7 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
             medium_action=medium_action,
             high_action=high_action,
             sensitivity=sensitivity,
+            **extra_config,
         )
         self.assertTrue(ok)
 
@@ -435,13 +526,26 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         guild: FakeGuild,
         user_id: int,
         *,
+        roles=None,
+        administrator: bool = False,
+        manage_guild: bool = False,
+        manage_messages: bool = False,
+        moderate_members: bool = False,
+        kick_members: bool = False,
+        ban_members: bool = False,
         created_delta: timedelta = timedelta(days=30),
         joined_delta: timedelta = timedelta(days=30),
         bot: bool = False,
     ) -> FakeAuthor:
         member = FakeAuthor(
             user_id,
-            roles=[FakeRole(11, position=1)],
+            roles=roles or [FakeRole(11, position=1)],
+            administrator=administrator,
+            manage_guild=manage_guild,
+            manage_messages=manage_messages,
+            moderate_members=moderate_members,
+            kick_members=kick_members,
+            ban_members=ban_members,
             bot=bot,
             created_at=ge.now_utc() - created_delta,
             joined_at=ge.now_utc() - joined_delta,
@@ -1847,11 +1951,11 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(decisions[:2], [None, None])
         self.assertIsNotNone(decisions[2])
         self.assertEqual(decisions[2].pack, "gif")
-        self.assertEqual(decisions[2].action, "delete_log")
+        self.assertIn(decisions[2].action, {"delete_log", "delete_timeout_log", "delete_escalate"})
         self.assertEqual(decisions[2].reasons[0].match_class, "spam_gif_flood")
         final = decisions[-1]
         self.assertIsNotNone(final)
-        self.assertEqual(final.action, "delete_log")
+        self.assertIn(final.action, {"delete_log", "delete_timeout_log", "delete_escalate"})
         self.assertTrue(final.deleted)
         self.assertEqual(final.pack, "gif")
         self.assertIn("spam_gif_flood", {reason.match_class for reason in final.reasons})
@@ -1918,6 +2022,57 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(final.pack, "gif")
         self.assertEqual(final.reasons[0].match_class, "spam_gif_flood")
         self.assertIn("GIF", final.reasons[0].label)
+
+    async def test_delete_action_removes_full_gif_incident_burst(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        author = self._make_member(guild, 430)
+
+        await self._enable_gif_pack(guild.id, medium_action="delete_log", high_action="delete_log")
+        messages = [
+            FakeMessage(guild=guild, channel=channel, author=author, content="https://tenor.com/view/cat-dance-gif-12345")
+            for _ in range(4)
+        ]
+
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            decisions = [await self.service.handle_message(message) for message in messages]
+
+        final = decisions[-1]
+        self.assertEqual(decisions[:2], [None, None])
+        self.assertIsNotNone(decisions[2])
+        self.assertIsNotNone(final)
+        self.assertEqual(final.pack, "gif")
+        self.assertTrue(final.deleted)
+        self.assertEqual(final.deleted_count, 4)
+        self.assertEqual(final.delete_attempt_count, 4)
+        self.assertTrue(all(message.deleted for message in messages))
+        self.assertIn("spam_gif_flood", {reason.match_class for reason in final.reasons})
+
+    async def test_gif_incident_logging_is_grouped_and_quiet(self):
+        guild = FakeGuild(10)
+        public_channel = FakeChannel(20)
+        log_channel = FakeChannel(99, name="shield-log")
+        self.bot.register_channel(log_channel)
+        author = self._make_member(guild, 431)
+
+        await self._enable_gif_pack(guild.id, medium_action="delete_log", high_action="delete_log")
+        ok, _ = await self.service.set_log_channel(guild.id, log_channel.id)
+        self.assertTrue(ok)
+
+        decisions = []
+        for _ in range(5):
+            decisions.append(
+                await self.service.handle_message(
+                    FakeMessage(guild=guild, channel=public_channel, author=author, content="https://tenor.com/view/cat-dance-gif-12345")
+                )
+            )
+
+        self.assertEqual(len(log_channel.sent), 1)
+        self.assertEqual(len(log_channel.edits), 0)
+        self.assertIsNotNone(decisions[3])
+        self.assertIsNotNone(decisions[4])
+        self.assertEqual(decisions[3].pack, "gif")
+        self.assertEqual(decisions[4].pack, "gif")
 
     async def test_mixed_text_and_occasional_gifs_stay_safe(self):
         guild = FakeGuild(10)
@@ -2317,24 +2472,67 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(decision.action, "delete_log")
         self.assertIn("spam_mention_flood", {reason.match_class for reason in decision.reasons})
 
-    async def test_emoji_flood_detects_but_normal_emoji_use_stays_allowed(self):
+    async def test_emote_spam_toggle_defaults_off_then_detects_when_enabled(self):
         guild = FakeGuild(10)
         channel = FakeChannel(20)
-        author = self._make_member(guild, 92)
+        default_author = self._make_member(guild, 92)
+        enabled_author = self._make_member(guild, 93)
 
         await self._enable_spam_pack(guild.id)
 
         with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            default_flood = await self.service.handle_message(
+                FakeMessage(guild=guild, channel=channel, author=default_author, content="😀" * 20)
+            )
+        self.assertIsNone(default_flood)
+        self.assertFalse(self.service.get_config(guild.id)["spam_emote_enabled"])
+
+        ok, _ = await self.service.set_pack_config(guild.id, "spam", emote_enabled=True, emote_threshold=18)
+        self.assertTrue(ok)
+
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
             flood = await self.service.handle_message(
-                FakeMessage(guild=guild, channel=channel, author=author, content="😀" * 20)
+                FakeMessage(guild=guild, channel=channel, author=enabled_author, content="😀" * 20)
             )
             normal = await self.service.handle_message(
-                FakeMessage(guild=guild, channel=channel, author=author, content="great round 😀😀😀")
+                FakeMessage(guild=guild, channel=channel, author=enabled_author, content="great round 😀😀😀")
             )
 
         self.assertIsNotNone(flood)
         self.assertEqual(flood.pack, "spam")
         self.assertIn("spam_emoji_flood", {reason.match_class for reason in flood.reasons})
+        self.assertIsNone(normal)
+
+    async def test_capitals_spam_toggle_defaults_off_then_detects_when_enabled(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        default_author = self._make_member(guild, 94)
+        enabled_author = self._make_member(guild, 95)
+        flood_text = "THIS CHAT IS ABSOLUTELY UNPLAYABLE RIGHT NOW PLEASE STOP SPAMMING"
+
+        await self._enable_spam_pack(guild.id)
+
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            default_caps = await self.service.handle_message(
+                FakeMessage(guild=guild, channel=channel, author=default_author, content=flood_text)
+            )
+        self.assertIsNone(default_caps)
+        self.assertFalse(self.service.get_config(guild.id)["spam_caps_enabled"])
+
+        ok, _ = await self.service.set_pack_config(guild.id, "spam", caps_enabled=True, caps_threshold=28)
+        self.assertTrue(ok)
+
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            flood = await self.service.handle_message(
+                FakeMessage(guild=guild, channel=channel, author=enabled_author, content=flood_text)
+            )
+            normal = await self.service.handle_message(
+                FakeMessage(guild=guild, channel=channel, author=enabled_author, content="THIS part is fine really.")
+            )
+
+        self.assertIsNotNone(flood)
+        self.assertEqual(flood.pack, "spam")
+        self.assertIn("spam_caps_flood", {reason.match_class for reason in flood.reasons})
         self.assertIsNone(normal)
 
     async def test_burst_posting_detects_low_value_noise_but_not_normal_conversation(self):
@@ -2361,6 +2559,109 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(spam_decisions[-1].pack, "spam")
         self.assertIn("spam_message_rate", {reason.match_class for reason in spam_decisions[-1].reasons})
         self.assertTrue(all(item is None for item in normal_decisions))
+
+    async def test_custom_spam_threshold_profile_triggers_and_explains_itself(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        author = self._make_member(guild, 1040)
+
+        await self._enable_spam_pack(
+            guild.id,
+            medium_action="delete_log",
+            high_action="delete_log",
+            message_threshold=4,
+            window_seconds=8,
+        )
+
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            decisions = [
+                await self.service.handle_message(FakeMessage(guild=guild, channel=channel, author=author, content=text))
+                for text in ("lol", "bruh", "yo", "ok")
+            ]
+
+        final = decisions[-1]
+        self.assertEqual(decisions[:3], [None, None, None])
+        self.assertIsNotNone(final)
+        self.assertEqual(final.pack, "spam")
+        self.assertEqual(final.action, "delete_log")
+        self.assertIn("threshold 4", final.reasons[0].reason.lower())
+        self.assertIn("4 messages landed inside 8 seconds", final.alert_evidence_summary)
+
+    async def test_delete_action_removes_full_spam_burst(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        author = self._make_member(guild, 1041)
+
+        await self._enable_spam_pack(guild.id, medium_action="delete_log", high_action="delete_log")
+        messages = [
+            FakeMessage(guild=guild, channel=channel, author=author, content=text)
+            for text in ("lol", "lmao", "haha", "yo", "ok")
+        ]
+
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            decisions = [await self.service.handle_message(message) for message in messages]
+
+        final = decisions[-1]
+        self.assertEqual(decisions[:4], [None, None, None, None])
+        self.assertIsNotNone(final)
+        self.assertTrue(final.deleted)
+        self.assertEqual(final.deleted_count, 5)
+        self.assertEqual(final.delete_attempt_count, 5)
+        self.assertIn("spam_burst", {reason.match_class for reason in final.reasons})
+        self.assertTrue(all(message.deleted for message in messages))
+        self.assertIn("full 5-message incident burst", final.action_note)
+
+    async def test_duplicate_spam_delete_does_not_overdelete_unrelated_messages(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        author = self._make_member(guild, 1042)
+
+        await self._enable_spam_pack(guild.id, medium_action="delete_log", high_action="delete_log")
+        healthy_messages = [
+            FakeMessage(guild=guild, channel=channel, author=author, content="setting up the queue now"),
+            FakeMessage(guild=guild, channel=channel, author=author, content="drop your map votes in the thread"),
+        ]
+        spam_messages = [
+            FakeMessage(guild=guild, channel=channel, author=author, content="claim your starter pack now")
+            for _ in range(4)
+        ]
+
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            decisions = [await self.service.handle_message(message) for message in [*healthy_messages, *spam_messages]]
+
+        final = decisions[-1]
+        self.assertIsNotNone(final)
+        self.assertEqual(final.pack, "spam")
+        self.assertEqual(final.deleted_count, 4)
+        self.assertEqual(final.delete_attempt_count, 4)
+        self.assertTrue(all(message.deleted for message in spam_messages))
+        self.assertTrue(all(not message.deleted for message in healthy_messages))
+        self.assertIn("spam_duplicate", {reason.match_class for reason in final.reasons})
+
+    async def test_partial_spam_burst_delete_failure_is_reported_clearly(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        author = self._make_member(guild, 1043)
+
+        await self._enable_spam_pack(guild.id, medium_action="delete_log", high_action="delete_log")
+        messages = [
+            FakeMessage(guild=guild, channel=channel, author=author, content="lol"),
+            FakeMessage(guild=guild, channel=channel, author=author, content="lmao", delete_error=RuntimeError("nope")),
+            FakeMessage(guild=guild, channel=channel, author=author, content="haha"),
+            FakeMessage(guild=guild, channel=channel, author=author, content="yo"),
+            FakeMessage(guild=guild, channel=channel, author=author, content="ok"),
+        ]
+
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            decisions = [await self.service.handle_message(message) for message in messages]
+
+        final = decisions[-1]
+        self.assertIsNotNone(final)
+        self.assertTrue(final.deleted)
+        self.assertEqual(final.deleted_count, 4)
+        self.assertEqual(final.delete_attempt_count, 5)
+        self.assertIn("some could not be removed", final.action_note.lower())
+        self.assertEqual(messages[1].delete_attempts, 1)
 
     async def test_bot_turn_taking_game_loop_does_not_trigger_duplicate_spam(self):
         guild = FakeGuild(10)
@@ -2681,6 +2982,20 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(scam_matches)
         self.assertEqual(scam_matches[0].match_class, "scam_dm_lure")
 
+    async def test_no_link_expensive_item_dm_lure_is_caught(self):
+        ok, _ = await self.service.set_pack_config(10, "scam", enabled=True, action="delete_log", sensitivity="normal")
+        self.assertTrue(ok)
+
+        result = self.service.test_message_details(
+            10,
+            "I'm selling a new iPhone 17 Pro Max for a very cheap price, DM me now for more info",
+        )
+
+        scam_matches = [match for match in result.matches if match.pack == "scam"]
+        self.assertTrue(scam_matches)
+        self.assertEqual(scam_matches[0].match_class, "scam_dm_lure")
+        self.assertIn("Too-good-to-be-true", scam_matches[0].label)
+
     async def test_benign_dm_chatter_does_not_false_positive_as_scam_lure(self):
         ok, _ = await self.service.set_pack_config(10, "scam", enabled=True, action="delete_log", sensitivity="high")
         self.assertTrue(ok)
@@ -2688,6 +3003,174 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         result = self.service.test_message_details(10, "DM me later about the build notes from tonight's game.")
 
         self.assertFalse([match for match in result.matches if match.pack == "scam"])
+
+    async def test_benign_marketplace_discussion_does_not_false_positive_as_scam_lure(self):
+        ok, _ = await self.service.set_pack_config(10, "scam", enabled=True, action="delete_log", sensitivity="high")
+        self.assertTrue(ok)
+
+        result = self.service.test_message_details(
+            10,
+            "Price check: what is the resale value on an iPhone 17 Pro Max right now? I saw someone selling one in the marketplace channel.",
+        )
+
+        self.assertFalse([match for match in result.matches if match.pack == "scam"])
+
+    async def test_pack_specific_member_exemption_blocks_scam_only(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        author = self._make_member(guild, 610)
+
+        ok, _ = await self.service.set_module_enabled(guild.id, True)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_pack_config(guild.id, "scam", enabled=True, action="delete_log", sensitivity="normal")
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_pack_exemption(guild.id, "scam", "user", author.id, True)
+        self.assertTrue(ok)
+
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            decision = await self.service.handle_message(
+                FakeMessage(
+                    guild=guild,
+                    channel=channel,
+                    author=author,
+                    content="I'm selling a new iPhone 17 Pro Max for a very cheap price, DM me now for more info",
+                )
+            )
+
+        self.assertIsNone(decision)
+
+    async def test_pack_specific_role_exemption_blocks_spam_only(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        exempt_role = FakeRole(611, position=5)
+        author = self._make_member(guild, 6110, roles=[exempt_role])
+
+        await self._enable_spam_pack(guild.id, medium_action="delete_log", high_action="delete_log")
+        ok, _ = await self.service.set_pack_exemption(guild.id, "spam", "role", exempt_role.id, True)
+        self.assertTrue(ok)
+
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            decisions = [
+                await self.service.handle_message(FakeMessage(guild=guild, channel=channel, author=author, content=text))
+                for text in ("lol", "lmao", "haha", "yo", "ok")
+            ]
+
+        self.assertEqual(decisions, [None, None, None, None, None])
+
+    async def test_pack_specific_channel_exemption_blocks_gif_only(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(620)
+        author = self._make_member(guild, 6200)
+
+        await self._enable_gif_pack(guild.id, medium_action="delete_log", high_action="delete_log")
+        ok, _ = await self.service.set_pack_exemption(guild.id, "gif", "channel", channel.id, True)
+        self.assertTrue(ok)
+
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            decisions = [
+                await self.service.handle_message(
+                    FakeMessage(guild=guild, channel=channel, author=author, content="https://tenor.com/view/cat-dance-gif-12345")
+                )
+                for _ in range(4)
+            ]
+
+        self.assertEqual(decisions, [None, None, None, None])
+
+    async def test_pack_specific_spam_exemption_does_not_disable_scam_pack(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        author = self._make_member(guild, 6300)
+
+        ok, _ = await self.service.set_module_enabled(guild.id, True)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_pack_config(guild.id, "spam", enabled=True, action="delete_log", sensitivity="normal")
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_pack_config(guild.id, "scam", enabled=True, action="delete_log", sensitivity="normal")
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_pack_exemption(guild.id, "spam", "user", author.id, True)
+        self.assertTrue(ok)
+
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            decision = await self.service.handle_message(
+                FakeMessage(
+                    guild=guild,
+                    channel=channel,
+                    author=author,
+                    content="Free nitro, DM me now to claim it",
+                )
+            )
+
+        self.assertIsNotNone(decision)
+        self.assertEqual(decision.pack, "scam")
+
+    async def test_moderators_are_exempt_from_spam_by_default(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        moderator = self._make_member(guild, 6400, manage_messages=True, moderate_members=True)
+
+        await self._enable_spam_pack(guild.id, medium_action="delete_log", high_action="delete_timeout_log")
+
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            decisions = [
+                await self.service.handle_message(
+                    FakeMessage(guild=guild, channel=channel, author=moderator, content="claim your starter pack now")
+                )
+                for _ in range(5)
+            ]
+
+        self.assertEqual(decisions, [None, None, None, None, None])
+
+    async def test_moderator_delete_only_policy_caps_spam_without_timeout(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        moderator = self._make_member(guild, 6401, manage_messages=True, moderate_members=True)
+
+        await self._enable_spam_pack(guild.id, medium_action="delete_log", high_action="delete_timeout_log")
+        ok, _ = await self.service.set_pack_config(guild.id, "spam", moderator_policy="delete_only")
+        self.assertTrue(ok)
+
+        with patch.object(self.service, "_timeout_member", new=AsyncMock(return_value=True)) as timeout_mock, patch.object(
+            self.service,
+            "_send_alert",
+            new=AsyncMock(),
+        ):
+            decisions = [
+                await self.service.handle_message(
+                    FakeMessage(guild=guild, channel=channel, author=moderator, content="claim your starter pack now")
+                )
+                for _ in range(5)
+            ]
+
+        final = decisions[-1]
+        self.assertIsNotNone(final)
+        self.assertEqual(final.pack, "spam")
+        self.assertEqual(final.action, "delete_log")
+        self.assertTrue(final.deleted)
+        self.assertFalse(final.timed_out)
+        timeout_mock.assert_not_awaited()
+
+    async def test_other_packs_still_apply_to_moderators_by_default(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        moderator = self._make_member(guild, 6402, manage_messages=True, moderate_members=True)
+
+        ok, _ = await self.service.set_module_enabled(guild.id, True)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_pack_config(guild.id, "scam", enabled=True, action="delete_log", sensitivity="normal")
+        self.assertTrue(ok)
+
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            decision = await self.service.handle_message(
+                FakeMessage(
+                    guild=guild,
+                    channel=channel,
+                    author=moderator,
+                    content="Free nitro, DM me now to claim it",
+                )
+            )
+
+        self.assertIsNotNone(decision)
+        self.assertEqual(decision.pack, "scam")
 
     async def test_forwarded_snapshot_content_is_scanned(self):
         guild = FakeGuild(10)
@@ -2829,8 +3312,10 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(decision)
         embed = log_channel.sent[0]["embed"]
         evidence_field = next(field for field in embed.fields if field.name == "Evidence Basis")
+        note_field = next(field for field in embed.fields if field.name == "Note")
         self.assertIn("Combined suspicion around an unknown risky link.", evidence_field.value)
         self.assertIn("Primary risky domain: `secure-auth-session.click`", evidence_field.value)
+        self.assertEqual(note_field.value, "Scam detection can still be wrong; recheck the context before taking action.")
 
     async def test_delete_escalate_triggers_timeout_after_threshold(self):
         guild = FakeGuild(10)
@@ -2900,6 +3385,48 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Possible email address", embed.fields[0].value)
         self.assertIn("Class:", embed.fields[0].value)
         self.assertIn("Resolved action:", embed.fields[0].value)
+
+    async def test_alert_embed_uses_polished_confidence_and_action_labels(self):
+        guild = FakeGuild(10)
+        public_channel = FakeChannel(20)
+        log_channel = FakeChannel(99, name="shield-log")
+        self.bot.register_channel(log_channel)
+        author = FakeAuthor(43, roles=[FakeRole(11, position=1)])
+        message = FakeMessage(guild=guild, channel=public_channel, author=author, content="lol")
+
+        ok, _ = await self.service.set_log_channel(guild.id, log_channel.id)
+        self.assertTrue(ok)
+        compiled = self.service._compiled_configs[guild.id]
+        decision = ShieldDecision(
+            matched=True,
+            action="delete_timeout_log",
+            pack="spam",
+            reasons=(
+                ShieldMatch(
+                    pack="spam",
+                    label="Fast burst posting",
+                    reason="5 messages landed inside 10 seconds (threshold 5).",
+                    action="delete_timeout_log",
+                    confidence="high",
+                    heuristic=True,
+                    match_class="spam_burst",
+                ),
+            ),
+            deleted=True,
+            deleted_count=5,
+            delete_attempt_count=5,
+            timed_out=True,
+        )
+        fingerprint = self._content_fingerprint(message.content)
+
+        await self.service._send_alert(message, compiled, decision, content_fingerprint=fingerprint)
+
+        embed = log_channel.sent[0]["embed"]
+        detection_field = next(field for field in embed.fields if field.name == "Detection")
+        action_field = next(field for field in embed.fields if field.name == "Action")
+        self.assertIn("Confidence: High confidence", detection_field.value)
+        self.assertIn("Resolved action: Delete + Timeout + log", detection_field.value)
+        self.assertIn("Deleted 5/5 messages", action_field.value)
 
     async def test_alert_signature_dedupes_near_identical_different_messages(self):
         guild = FakeGuild(10)
