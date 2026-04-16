@@ -68,6 +68,8 @@ from babblebox.shield_store import (
     ShieldStorageUnavailable,
     VALID_SPAM_MODERATOR_POLICIES,
     VALID_SHIELD_AI_ACCESS_MODES,
+    VALID_SHIELD_LOG_PING_MODES,
+    VALID_SHIELD_LOG_STYLES,
     VALID_SHIELD_SEVERE_CATEGORIES,
     VALID_SHIELD_LINK_POLICY_MODES,
     default_guild_shield_config,
@@ -126,15 +128,9 @@ SPAM_MENTION_WINDOW_SECONDS = 20.0
 SPAM_LOW_VALUE_WINDOW_SECONDS = 60.0
 SPAM_GIF_WINDOW_SECONDS = 45.0
 SPAM_GIF_REPEAT_WINDOW_SECONDS = 30.0
-GROUP_GIF_PRESSURE_WINDOW_SECONDS = 20.0
 HEALTHY_CHAT_WINDOW_SECONDS = 20.0
+CHANNEL_ACTIVITY_WINDOW_SECONDS = max(HEALTHY_CHAT_WINDOW_SECONDS, SPAM_GIF_WINDOW_SECONDS)
 HEALTHY_CHAT_AUTHOR_THRESHOLD = 4
-GROUP_GIF_MIN_MESSAGES = 5
-GROUP_GIF_MULTI_AUTHOR_RATIO = 0.72
-GROUP_GIF_TWO_AUTHOR_MIN_MESSAGES = 6
-GROUP_GIF_TWO_AUTHOR_RATIO = 0.80
-GROUP_GIF_REPEAT_SOURCE_THRESHOLD = 4
-GROUP_GIF_REPEAT_SOURCE_RATIO = 0.67
 GIF_EMBED_DOMAINS = frozenset({"tenor.com", "media.tenor.com", "giphy.com", "media.giphy.com"})
 RECENT_ACCOUNT_WINDOW = timedelta(days=7)
 EARLY_MEMBER_WINDOW = timedelta(days=1)
@@ -593,9 +589,22 @@ class SpamRuleSettings:
 class GifRuleSettings:
     message_threshold: int
     window_seconds: int
+    consecutive_threshold: int
     repeat_threshold: int
     same_asset_threshold: int
     min_ratio_percent: int
+
+
+@dataclass(frozen=True)
+class ShieldPackLogOverride:
+    style: str
+    ping_mode: str
+
+
+@dataclass(frozen=True)
+class ShieldResolvedLogDelivery:
+    style: str
+    ping_mode: str
 
 
 @dataclass(frozen=True)
@@ -628,6 +637,8 @@ class CompiledShieldConfig:
     module_enabled: bool
     log_channel_id: int | None
     alert_role_id: int | None
+    log_style: str
+    log_ping_mode: str
     scan_mode: str
     included_channel_ids: frozenset[int]
     excluded_channel_ids: frozenset[int]
@@ -642,6 +653,7 @@ class CompiledShieldConfig:
     trusted_builtin_disabled_families: frozenset[str]
     trusted_builtin_disabled_domains: frozenset[str]
     pack_exemptions: dict[str, PackExemptionScope]
+    pack_log_overrides: dict[str, ShieldPackLogOverride]
     pack_timeout_minutes: dict[str, int | None]
     privacy: PackSettings
     promo: PackSettings
@@ -692,6 +704,18 @@ class CompiledShieldConfig:
             if isinstance(override, int) and override >= 1:
                 return override
         return self.timeout_minutes
+
+    def resolved_log_delivery(self, pack: str | None) -> ShieldResolvedLogDelivery:
+        style = self.log_style if self.log_style in VALID_SHIELD_LOG_STYLES else "adaptive"
+        ping_mode = self.log_ping_mode if self.log_ping_mode in VALID_SHIELD_LOG_PING_MODES else "smart"
+        if pack:
+            override = self.pack_log_overrides.get(pack)
+            if override is not None:
+                if override.style in VALID_SHIELD_LOG_STYLES:
+                    style = override.style
+                if override.ping_mode in VALID_SHIELD_LOG_PING_MODES:
+                    ping_mode = override.ping_mode
+        return ShieldResolvedLogDelivery(style=style, ping_mode=ping_mode)
 
 
 @dataclass(frozen=True)
@@ -848,6 +872,9 @@ class ShieldChannelActivityEvent:
     exact_fingerprint: str | None = None
     near_fingerprint: str | None = None
     is_gif_message: bool = False
+    gif_signature: str | None = None
+    gif_only: bool = False
+    gif_low_text: bool = False
 
 
 @dataclass(frozen=True)
@@ -1816,6 +1843,8 @@ def _build_feature_compiled_config(
         module_enabled=True,
         log_channel_id=None,
         alert_role_id=None,
+        log_style="adaptive",
+        log_ping_mode="smart",
         scan_mode="all",
         included_channel_ids=frozenset(),
         excluded_channel_ids=frozenset(),
@@ -1830,6 +1859,7 @@ def _build_feature_compiled_config(
         trusted_builtin_disabled_families=frozenset(),
         trusted_builtin_disabled_domains=frozenset(),
         pack_exemptions={pack: PackExemptionScope(channel_ids=frozenset(), role_ids=frozenset(), user_ids=frozenset()) for pack in RULE_PACKS},
+        pack_log_overrides={},
         pack_timeout_minutes={},
         privacy=_feature_pack_settings(enabled=privacy_enabled),
         promo=disabled,
@@ -1852,6 +1882,7 @@ def _build_feature_compiled_config(
         gif_rules=GifRuleSettings(
             message_threshold=4,
             window_seconds=20,
+            consecutive_threshold=5,
             repeat_threshold=3,
             same_asset_threshold=3,
             min_ratio_percent=70,
@@ -2530,6 +2561,7 @@ class ShieldService:
         caps_enabled: bool | None = None,
         caps_threshold: int | None = None,
         moderator_policy: str | None = None,
+        consecutive_threshold: int | None = None,
         repeat_threshold: int | None = None,
         same_asset_threshold: int | None = None,
         ratio_percent: int | None = None,
@@ -2552,6 +2584,7 @@ class ShieldService:
                 caps_enabled,
                 caps_threshold,
                 moderator_policy,
+                consecutive_threshold,
                 repeat_threshold,
                 same_asset_threshold,
                 ratio_percent,
@@ -2573,8 +2606,8 @@ class ShieldService:
             )
         ):
             return False, "Burst thresholds, duplicate thresholds, emote or capitals toggles, and moderator policy only apply to the spam pack."
-        if pack != "gif" and any(value is not None for value in (repeat_threshold, same_asset_threshold, ratio_percent)):
-            return False, "GIF repeat and ratio thresholds can only be configured on the GIF pack."
+        if pack != "gif" and any(value is not None for value in (consecutive_threshold, repeat_threshold, same_asset_threshold, ratio_percent)):
+            return False, "GIF streak, repeat, same-asset, and ratio thresholds can only be configured on the GIF pack."
         cleaned_action = action.strip().lower() if isinstance(action, str) else None
         cleaned_low_action = low_action.strip().lower() if isinstance(low_action, str) else None
         cleaned_medium_action = medium_action.strip().lower() if isinstance(medium_action, str) else None
@@ -2613,6 +2646,8 @@ class ShieldService:
             return False, "Capitals threshold must be between 12 and 80."
         if repeat_threshold is not None and not (2 <= repeat_threshold <= 6):
             return False, "GIF repeat threshold must be between 2 and 6."
+        if consecutive_threshold is not None and not (4 <= consecutive_threshold <= 10):
+            return False, "GIF consecutive threshold must be between 4 and 10."
         if same_asset_threshold is not None and not (2 <= same_asset_threshold <= 6):
             return False, "Same-GIF threshold must be between 2 and 6."
         if ratio_percent is not None and not (50 <= ratio_percent <= 95):
@@ -2677,6 +2712,8 @@ class ShieldService:
                     config["gif_message_threshold"] = message_threshold
                 if window_seconds is not None:
                     config["gif_window_seconds"] = window_seconds
+                if consecutive_threshold is not None:
+                    config["gif_consecutive_threshold"] = consecutive_threshold
                 if repeat_threshold is not None:
                     config["gif_repeat_threshold"] = repeat_threshold
                 if same_asset_threshold is not None:
@@ -2716,11 +2753,13 @@ class ShieldService:
         if pack == "gif":
             final_threshold = current["gif_message_threshold"] if message_threshold is None else message_threshold
             final_window = current["gif_window_seconds"] if window_seconds is None else window_seconds
+            final_consecutive = current["gif_consecutive_threshold"] if consecutive_threshold is None else consecutive_threshold
             final_repeat = current["gif_repeat_threshold"] if repeat_threshold is None else repeat_threshold
             final_same_asset = current["gif_same_asset_threshold"] if same_asset_threshold is None else same_asset_threshold
             final_ratio = current["gif_min_ratio_percent"] if ratio_percent is None else ratio_percent
             policy_note = (
                 f" Core rule: {final_threshold} GIF-heavy posts in {final_window}s. "
+                f"Channel streak rule: {final_consecutive}+ GIFs in a row. "
                 f"Repeat rule: {final_repeat}+ repeats with {final_ratio}%+ GIF pressure. "
                 f"Same-GIF rule: {final_same_asset}+ uses of the same asset."
             )
@@ -2877,6 +2916,90 @@ class ShieldService:
             guild_id,
             lambda config: config.__setitem__("alert_role_id", role_id),
             success_message="Shield alert role updated." if role_id else "Shield alert role cleared.",
+        )
+
+    async def set_log_delivery(
+        self,
+        guild_id: int,
+        *,
+        style: str | None = None,
+        ping_mode: str | None = None,
+    ) -> tuple[bool, str]:
+        cleaned_style = str(style).strip().lower() if isinstance(style, str) else None
+        cleaned_ping_mode = str(ping_mode).strip().lower() if isinstance(ping_mode, str) else None
+        if cleaned_style is not None and cleaned_style not in VALID_SHIELD_LOG_STYLES:
+            return False, "Shield log style must be `adaptive` or `compact`."
+        if cleaned_ping_mode is not None and cleaned_ping_mode not in VALID_SHIELD_LOG_PING_MODES:
+            return False, "Shield log ping mode must be `smart` or `never`."
+        if cleaned_style is None and cleaned_ping_mode is None:
+            return False, "Choose a Shield log style and/or ping mode to update."
+
+        current = self.get_config(guild_id)
+        final_style = current.get("log_style", "adaptive") if cleaned_style is None else cleaned_style
+        final_ping_mode = current.get("log_ping_mode", "smart") if cleaned_ping_mode is None else cleaned_ping_mode
+
+        def mutate(config: dict[str, Any]):
+            if cleaned_style is not None:
+                config["log_style"] = cleaned_style
+            if cleaned_ping_mode is not None:
+                config["log_ping_mode"] = cleaned_ping_mode
+
+        return await self._update_config(
+            guild_id,
+            mutate,
+            success_message=(
+                f"Shield log delivery now defaults to `{final_style}` style with `{final_ping_mode}` ping mode."
+            ),
+        )
+
+    async def set_pack_log_override(
+        self,
+        guild_id: int,
+        pack: str,
+        *,
+        style: str | None = None,
+        ping_mode: str | None = None,
+    ) -> tuple[bool, str]:
+        cleaned_pack = normalize_plain_text(pack).casefold()
+        if cleaned_pack not in RULE_PACKS:
+            return False, "Pack log overrides only apply to Shield's core packs."
+        cleaned_style = str(style).strip().lower() if isinstance(style, str) else None
+        cleaned_ping_mode = str(ping_mode).strip().lower() if isinstance(ping_mode, str) else None
+        valid_styles = {"inherit", *VALID_SHIELD_LOG_STYLES}
+        valid_ping_modes = {"inherit", *VALID_SHIELD_LOG_PING_MODES}
+        if cleaned_style is not None and cleaned_style not in valid_styles:
+            return False, "Pack log style must be `inherit`, `adaptive`, or `compact`."
+        if cleaned_ping_mode is not None and cleaned_ping_mode not in valid_ping_modes:
+            return False, "Pack log ping mode must be `inherit`, `smart`, or `never`."
+        if cleaned_style is None and cleaned_ping_mode is None:
+            return False, "Choose a pack log style and/or ping mode to update."
+
+        current = self.get_config(guild_id)
+        raw_overrides = current.get("pack_log_overrides", {})
+        current_override = raw_overrides.get(cleaned_pack, {}) if isinstance(raw_overrides, dict) else {}
+        final_style = current_override.get("style", "inherit") if cleaned_style is None else cleaned_style
+        final_ping_mode = current_override.get("ping_mode", "inherit") if cleaned_ping_mode is None else cleaned_ping_mode
+
+        def mutate(config: dict[str, Any]):
+            overrides = dict(config.get("pack_log_overrides", {}))
+            pack_override = dict(overrides.get(cleaned_pack, {}))
+            if cleaned_style is not None:
+                pack_override["style"] = cleaned_style
+            if cleaned_ping_mode is not None:
+                pack_override["ping_mode"] = cleaned_ping_mode
+            overrides[cleaned_pack] = pack_override
+            config["pack_log_overrides"] = overrides
+
+        resolved_style = current.get("log_style", "adaptive") if final_style == "inherit" else final_style
+        resolved_ping_mode = current.get("log_ping_mode", "smart") if final_ping_mode == "inherit" else final_ping_mode
+        return await self._update_config(
+            guild_id,
+            mutate,
+            success_message=(
+                f"{PACK_LABELS[cleaned_pack]} log delivery override saved. "
+                f"Local style: `{final_style}` | local ping mode: `{final_ping_mode}` | "
+                f"effective style: `{resolved_style}` | effective ping mode: `{resolved_ping_mode}`."
+            ),
         )
 
     async def set_scan_mode(self, guild_id: int, mode: str) -> tuple[bool, str]:
@@ -3319,7 +3442,7 @@ class ShieldService:
         rows = [
             row
             for row in self._recent_channel_activity.get(key, [])
-            if now - row.timestamp <= HEALTHY_CHAT_WINDOW_SECONDS
+            if now - row.timestamp <= CHANNEL_ACTIVITY_WINDOW_SECONDS
         ]
         quality_message = snapshot.plain_word_count >= 3 and not snapshot.low_value_text
         risky = bool(
@@ -3344,6 +3467,9 @@ class ShieldService:
                 exact_fingerprint=snapshot.exact_fingerprint,
                 near_fingerprint=snapshot.near_duplicate_fingerprint,
                 is_gif_message=snapshot.is_gif_message,
+                gif_signature=snapshot.gif_signature,
+                gif_only=snapshot.gif_only,
+                gif_low_text=snapshot.gif_low_text,
             )
         )
         if len(rows) > 100:
@@ -3414,7 +3540,7 @@ class ShieldService:
         rows = [
             row
             for row in self._recent_channel_gif_pressure.get(key, [])
-            if now - row[0] <= GROUP_GIF_PRESSURE_WINDOW_SECONDS
+            if now - row[0] <= SPAM_GIF_WINDOW_SECONDS
         ]
         if snapshot.is_gif_message:
             rows.append((now, user_id, snapshot.gif_signature, snapshot.gif_only, snapshot.gif_low_text))
@@ -3434,70 +3560,94 @@ class ShieldService:
         if channel_id is None or not snapshot.is_gif_message:
             return None
         key = (guild_id, channel_id)
-        gif_rows = [
-            row
-            for row in self._recent_channel_gif_pressure.get(key, [])
-            if now - row[0] <= GROUP_GIF_PRESSURE_WINDOW_SECONDS
-        ]
-        if not gif_rows:
-            return None
-        pressure_rows = [row for row in gif_rows if row[3] or row[4]]
-        if not pressure_rows:
-            return None
+        window_seconds = float(compiled.gif_rules.window_seconds)
         activity_rows = [
             row
             for row in self._recent_channel_activity.get(key, [])
-            if now - row.timestamp <= GROUP_GIF_PRESSURE_WINDOW_SECONDS
+            if now - row.timestamp <= window_seconds
         ]
-        distinct_gif_authors = {author_id for _timestamp, author_id, _signature, _gif_only, _gif_low_text in pressure_rows}
+        if not activity_rows:
+            return None
+        gif_rows = [row for row in activity_rows if row.is_gif_message]
+        if not gif_rows:
+            return None
+        distinct_gif_authors = {row.user_id for row in gif_rows}
+        if len(distinct_gif_authors) < 2:
+            return None
         meaningful_text_rows = [row for row in activity_rows if not row.is_gif_message and row.quality_message]
         meaningful_text_count = len(meaningful_text_rows)
-        gif_ratio = len(pressure_rows) / max(1, len(pressure_rows) + meaningful_text_count)
+        gif_count = len(gif_rows)
+        gif_ratio = gif_count / max(1, gif_count + meaningful_text_count)
         signature_counts: dict[str, int] = {}
-        for _timestamp, _author_id, signature, _gif_only, _gif_low_text in pressure_rows:
-            if signature:
-                signature_counts[signature] = signature_counts.get(signature, 0) + 1
+        for row in gif_rows:
+            if row.gif_signature:
+                signature_counts[row.gif_signature] = signature_counts.get(row.gif_signature, 0) + 1
         repeated_source = max(signature_counts.values(), default=0)
-        multi_author_trigger = (
-            len(distinct_gif_authors) >= 3
-            and len(pressure_rows) >= GROUP_GIF_MIN_MESSAGES
-            and gif_ratio >= GROUP_GIF_MULTI_AUTHOR_RATIO
+
+        consecutive_rows: list[ShieldChannelActivityEvent] = []
+        for row in reversed(activity_rows):
+            if not row.is_gif_message:
+                break
+            consecutive_rows.append(row)
+        consecutive_rows.reverse()
+        consecutive_gif_count = len(consecutive_rows)
+        consecutive_authors = {row.user_id for row in consecutive_rows}
+        balance_minimum = max(5, compiled.gif_rules.message_threshold)
+        streak_trigger = (
+            consecutive_gif_count >= compiled.gif_rules.consecutive_threshold
+            and len(consecutive_authors) >= 2
         )
-        two_author_trigger = (
-            len(distinct_gif_authors) >= 2
-            and len(pressure_rows) >= GROUP_GIF_TWO_AUTHOR_MIN_MESSAGES
-            and gif_ratio >= GROUP_GIF_TWO_AUTHOR_RATIO
+        ratio_trigger = (
+            gif_count >= balance_minimum
+            and int(round(gif_ratio * 100)) >= compiled.gif_rules.min_ratio_percent
         )
-        repeated_source_trigger = (
-            len(distinct_gif_authors) >= 2
-            and len(pressure_rows) >= GROUP_GIF_REPEAT_SOURCE_THRESHOLD
-            and repeated_source >= GROUP_GIF_REPEAT_SOURCE_THRESHOLD
-            and gif_ratio >= GROUP_GIF_REPEAT_SOURCE_RATIO
-        )
-        if not any((multi_author_trigger, two_author_trigger, repeated_source_trigger)):
+        if not streak_trigger and not ratio_trigger:
             return None
+
         ratio_percent = int(round(gif_ratio * 100))
-        summary = (
-            f"{len(pressure_rows)} GIF-heavy posts from {len(distinct_gif_authors)} members overwhelmed only "
-            f"{meaningful_text_count} meaningful text messages inside 20 seconds ({ratio_percent}% GIF pressure)."
-        )
-        if repeated_source_trigger:
-            summary = (
-                f"{len(pressure_rows)} GIF-heavy posts from {len(distinct_gif_authors)} members repeated the same GIF source "
-                f"{repeated_source} times while only {meaningful_text_count} meaningful text messages landed inside 20 seconds "
-                f"({ratio_percent}% GIF pressure)."
+        trigger_bits: list[str] = []
+        if streak_trigger:
+            trigger_bits.append(
+                f"{consecutive_gif_count} GIFs in a row (threshold {compiled.gif_rules.consecutive_threshold})"
             )
+        if ratio_trigger:
+            trigger_bits.append(
+                f"{gif_count} GIFs vs {meaningful_text_count} meaningful text messages in {compiled.gif_rules.window_seconds}s "
+                f"({ratio_percent}% GIF pressure, threshold {compiled.gif_rules.min_ratio_percent}%)"
+            )
+        summary = (
+            f"{gif_count} GIF-heavy posts from {len(distinct_gif_authors)} members crossed "
+            f"{' and '.join(trigger_bits)}."
+        )
+        if repeated_source >= max(2, compiled.gif_rules.same_asset_threshold):
+            summary = f"{summary} The same GIF source repeated {repeated_source} times in the window."
+
+        top_signatures = sorted(signature_counts.items(), key=lambda item: (-item[1], item[0]))[:3]
         signature_seed = "|".join(
-            sorted(signature for signature in signature_counts)[:3]
-            or [str(author_id) for author_id in sorted(distinct_gif_authors)[:4]]
+            [
+                ",".join(sorted(["streak" if streak_trigger else "", "ratio" if ratio_trigger else ""])).strip(","),
+                str(consecutive_gif_count),
+                str(gif_count),
+                str(ratio_percent),
+                ",".join(str(author_id) for author_id in sorted(distinct_gif_authors)[:4]),
+                ",".join(f"{signature}:{count}" for signature, count in top_signatures),
+            ]
         )
         return {
             "reason": summary,
-            "gif_posts": len(pressure_rows),
+            "gif_posts": gif_count,
             "meaningful_text_posts": meaningful_text_count,
             "ratio_percent": ratio_percent,
             "distinct_authors": len(distinct_gif_authors),
+            "consecutive_gif_posts": consecutive_gif_count,
+            "consecutive_authors": len(consecutive_authors),
             "repeated_source": repeated_source,
+            "triggered_by": tuple(
+                trigger
+                for trigger, enabled in (("streak", streak_trigger), ("ratio", ratio_trigger))
+                if enabled
+            ),
+            "window_seconds": int(compiled.gif_rules.window_seconds),
             "signature": hashlib.sha1(f"group_gif|{channel_id}|{signature_seed}".encode("utf-8")).hexdigest(),
         }
 
@@ -3839,6 +3989,11 @@ class ShieldService:
             for event in recent_events
             if event.is_gif_message and now - event.timestamp <= float(gif_rules.window_seconds)
         ]
+        gif_window_events = [
+            event
+            for event in recent_events
+            if now - event.timestamp <= float(gif_rules.window_seconds)
+        ]
         repeated_same_gif = [
             event
             for event in recent_events
@@ -3849,7 +4004,7 @@ class ShieldService:
         gif_low_text_events = [event for event in gif_events if event.gif_low_text]
         gif_only_events = [event for event in gif_events if event.gif_only]
         if gif_settings.enabled and snapshot.is_gif_message:
-            total_recent = max(1, len(message_window) or len(recent_events))
+            total_recent = max(1, len(gif_window_events))
             gif_ratio = int(round((len(gif_events) / total_recent) * 100))
             if (
                 len(gif_events) >= gif_rules.message_threshold
@@ -4058,6 +4213,10 @@ class ShieldService:
                 PACK_STRENGTH.get(item.pack, 0),
             ),
         )
+        if best.match_class == "spam_group_gif_pressure":
+            personal_gif_match = next((item for item in matches if item.match_class == "spam_gif_flood"), None)
+            if personal_gif_match is not None:
+                best = personal_gif_match
         decision = ShieldDecision(
             matched=True,
             action=best.action,
@@ -4723,6 +4882,8 @@ class ShieldService:
         return deleted, len(targets)
 
     def _is_escalation_eligible(self, compiled: CompiledShieldConfig, match: ShieldMatch) -> bool:
+        if match.match_class == "spam_group_gif_pressure":
+            return False
         settings = compiled.pack_settings(match.pack)
         return (
             settings.high_action == "delete_escalate"
@@ -6171,14 +6332,14 @@ class ShieldService:
             if any(now - event.timestamp <= SPAM_EVENT_WINDOW_SECONDS for event in values)
         }
         self._recent_channel_activity = {
-            key: [row for row in values if now - row.timestamp <= HEALTHY_CHAT_WINDOW_SECONDS]
+            key: [row for row in values if now - row.timestamp <= CHANNEL_ACTIVITY_WINDOW_SECONDS]
             for key, values in self._recent_channel_activity.items()
-            if any(now - row.timestamp <= HEALTHY_CHAT_WINDOW_SECONDS for row in values)
+            if any(now - row.timestamp <= CHANNEL_ACTIVITY_WINDOW_SECONDS for row in values)
         }
         self._recent_channel_gif_pressure = {
-            key: [row for row in values if now - row[0] <= GROUP_GIF_PRESSURE_WINDOW_SECONDS]
+            key: [row for row in values if now - row[0] <= SPAM_GIF_WINDOW_SECONDS]
             for key, values in self._recent_channel_gif_pressure.items()
-            if any(now - row[0] <= GROUP_GIF_PRESSURE_WINDOW_SECONDS for row in values)
+            if any(now - row[0] <= SPAM_GIF_WINDOW_SECONDS for row in values)
         }
         self._recent_newcomer_activity = {
             key: value
@@ -6242,7 +6403,19 @@ class ShieldService:
             return True
         return False
 
-    def _should_use_compact_alert(self, decision: ShieldDecision, top_reason: ShieldMatch | None) -> bool:
+    def _primary_alert_reason(self, decision: ShieldDecision) -> ShieldMatch | None:
+        if not decision.reasons:
+            return None
+        return max(
+            decision.reasons,
+            key=lambda item: (
+                1 if item.pack == (decision.pack or item.pack) else 0,
+                ACTION_STRENGTH.get(item.action, 0),
+                CONFIDENCE_STRENGTH.get(item.confidence, 0),
+            ),
+        )
+
+    def _is_adaptive_low_confidence_note(self, decision: ShieldDecision, top_reason: ShieldMatch | None) -> bool:
         return bool(
             top_reason is not None
             and top_reason.heuristic
@@ -6253,14 +6426,60 @@ class ShieldService:
             and not decision.escalated
         )
 
-    def _should_ping_alert_role(self, decision: ShieldDecision, top_reason: ShieldMatch | None) -> bool:
-        if top_reason is None or self._should_use_compact_alert(decision, top_reason):
+    def _should_use_compact_alert(
+        self,
+        compiled: CompiledShieldConfig,
+        decision: ShieldDecision,
+        top_reason: ShieldMatch | None,
+    ) -> bool:
+        delivery = compiled.resolved_log_delivery(decision.pack or (top_reason.pack if top_reason is not None else None))
+        return delivery.style == "compact" or self._is_adaptive_low_confidence_note(decision, top_reason)
+
+    def _should_ping_alert_role(
+        self,
+        compiled: CompiledShieldConfig,
+        decision: ShieldDecision,
+        top_reason: ShieldMatch | None,
+    ) -> bool:
+        if top_reason is None:
+            return False
+        delivery = compiled.resolved_log_delivery(decision.pack or top_reason.pack)
+        if delivery.ping_mode == "never":
             return False
         if top_reason.match_class == "spam_group_gif_pressure":
+            return False
+        if delivery.style != "compact" and self._is_adaptive_low_confidence_note(decision, top_reason):
             return False
         if decision.deleted or decision.timed_out or decision.escalated:
             return True
         return bool(top_reason.pack in {"scam", "adult"} and top_reason.confidence == "high")
+
+    def _alert_location_description(self, message: discord.Message, top_reason: ShieldMatch | None) -> str:
+        if top_reason is not None and top_reason.match_class == "spam_group_gif_pressure":
+            return f"Channel-wide pressure in {message.channel.mention}"
+        return f"{message.author.mention} in {message.channel.mention}"
+
+    def _alert_delivery_note(
+        self,
+        compiled: CompiledShieldConfig,
+        decision: ShieldDecision,
+        top_reason: ShieldMatch | None,
+        *,
+        compact_alert: bool,
+        ping_alert_role: bool,
+    ) -> str | None:
+        flags: list[str] = []
+        delivery = compiled.resolved_log_delivery(decision.pack or (top_reason.pack if top_reason is not None else None))
+        if compact_alert:
+            flags.append("compact log")
+        if compiled.alert_role_id is not None and not ping_alert_role:
+            if delivery.ping_mode == "never":
+                flags.append("no role ping")
+            elif top_reason is not None and top_reason.match_class == "spam_group_gif_pressure":
+                flags.append("collective signal stayed no-ping")
+            elif delivery.style != "compact" and self._is_adaptive_low_confidence_note(decision, top_reason):
+                flags.append("low-confidence note stayed no-ping")
+        return f"Delivery: {', '.join(flags)}." if flags else None
 
     def _compact_alert_cohort_key(
         self,
@@ -6283,25 +6502,37 @@ class ShieldService:
     def _build_compact_alert_embed(
         self,
         message: discord.Message,
+        compiled: CompiledShieldConfig,
         decision: ShieldDecision,
         *,
         preview: str,
         attachment_summary: Sequence[str],
         top_reason: ShieldMatch | None,
     ) -> discord.Embed:
+        ping_alert_role = self._should_ping_alert_role(compiled, decision, top_reason)
+        compact_delivery_note = self._alert_delivery_note(
+            compiled,
+            decision,
+            top_reason,
+            compact_alert=True,
+            ping_alert_role=ping_alert_role,
+        )
         embed = discord.Embed(
             title=f"Shield Note | {PACK_LABELS.get(decision.pack or '', 'Shield')}",
-            description=f"{message.author.mention} in {message.channel.mention}",
+            description=self._alert_location_description(message, top_reason),
             color=ge.EMBED_THEME["info"],
         )
         if top_reason is not None:
+            detection_lines = [
+                f"**{top_reason.label}**",
+                f"Confidence: {CONFIDENCE_LABELS.get(top_reason.confidence, top_reason.confidence.title())}",
+                f"Resolved action: {ACTION_LABELS.get(decision.action, decision.action)}",
+            ]
+            if compact_delivery_note:
+                detection_lines.append(compact_delivery_note)
             embed.add_field(
                 name="Detection",
-                value=(
-                    f"**{top_reason.label}**\n"
-                    f"Confidence: {CONFIDENCE_LABELS.get(top_reason.confidence, top_reason.confidence.title())}\n"
-                    f"Resolved action: {ACTION_LABELS.get(decision.action, decision.action)}"
-                ),
+                value="\n".join(detection_lines),
                 inline=False,
             )
             evidence_summary = decision.alert_evidence_summary or top_reason.reason
@@ -6315,7 +6546,10 @@ class ShieldService:
         if attachment_summary:
             embed.add_field(name="Attachments", value="\n".join(attachment_summary[:2]), inline=False)
         embed.add_field(name="Jump", value=f"[Open message]({message.jump_url})", inline=False)
-        ge.style_embed(embed, footer="Babblebox Shield | Compact low-confidence note")
+        footer = "Babblebox Shield | Compact low-confidence note"
+        if not self._is_adaptive_low_confidence_note(decision, top_reason):
+            footer = "Babblebox Shield | Compact shield log"
+        ge.style_embed(embed, footer=footer)
         return embed
 
     def _gif_incident_key(
@@ -6328,7 +6562,7 @@ class ShieldService:
         channel_id = getattr(getattr(message, "channel", None), "id", None)
         if not isinstance(channel_id, int):
             return None
-        top_reason = decision.reasons[0] if decision.reasons else None
+        top_reason = self._primary_alert_reason(decision)
         if top_reason is not None and top_reason.match_class == "spam_group_gif_pressure":
             return ("channel", message.guild.id, channel_id)
         author_id = getattr(getattr(message, "author", None), "id", None)
@@ -6375,8 +6609,16 @@ class ShieldService:
         last_alert = self._alert_dedup.get(dedupe_key)
         if last_alert is not None and now - last_alert[0] < ALERT_DEDUP_SECONDS and last_alert[1] == content_fingerprint:
             return
-        top_reason = decision.reasons[0] if decision.reasons else None
-        compact_alert = self._should_use_compact_alert(decision, top_reason)
+        top_reason = self._primary_alert_reason(decision)
+        compact_alert = self._should_use_compact_alert(compiled, decision, top_reason)
+        ping_alert_role = self._should_ping_alert_role(compiled, decision, top_reason)
+        delivery_note = self._alert_delivery_note(
+            compiled,
+            decision,
+            top_reason,
+            compact_alert=compact_alert,
+            ping_alert_role=ping_alert_role,
+        )
         if compact_alert:
             cohort_key = self._compact_alert_cohort_key(
                 message,
@@ -6422,6 +6664,7 @@ class ShieldService:
         if compact_alert:
             embed = self._build_compact_alert_embed(
                 message,
+                compiled,
                 decision,
                 preview=preview,
                 attachment_summary=attachment_summary,
@@ -6431,7 +6674,7 @@ class ShieldService:
             alert_title = f"Shield Alert | {PACK_LABELS.get(decision.pack or '', 'Shield')}"
             embed = discord.Embed(
                 title=alert_title,
-                description=f"{message.author.mention} in {message.channel.mention}",
+                description=self._alert_location_description(message, top_reason),
                 color=ge.EMBED_THEME["danger"] if decision.deleted or decision.timed_out else ge.EMBED_THEME["warning"],
             )
             if top_reason is not None:
@@ -6459,6 +6702,8 @@ class ShieldService:
                 source_summary = f"{source_summary} | Surfaces: {', '.join(decision.scan_surface_labels)}"
             embed.add_field(name="Scan Source", value=source_summary, inline=False)
             embed.add_field(name="Action", value=self._format_action_summary(decision), inline=False)
+            if delivery_note:
+                embed.add_field(name="Alert Delivery", value=delivery_note, inline=False)
             embed.add_field(name="Reason", value="\n".join(f"- {item.reason}" for item in decision.reasons[:3]), inline=False)
             embed.add_field(name="Preview", value=preview or "[no text content]", inline=False)
             if attachment_summary:
@@ -6507,9 +6752,13 @@ class ShieldService:
             incident_state = self._gif_incident_alerts.get(gif_incident_key)
             if incident_state is not None and now - float(incident_state.get("last_seen", 0.0)) <= GIF_INCIDENT_WINDOW_SECONDS:
                 hits = int(incident_state.get("hits", 1)) + 1
+                channel_level_incident = bool(gif_incident_key and gif_incident_key[0] == "channel")
                 stronger = (
                     self._gif_incident_rank(decision, top_reason) > int(incident_state.get("severity_rank", -1))
-                    or decision.alert_evidence_signature != incident_state.get("signature")
+                    or (
+                        not channel_level_incident
+                        and decision.alert_evidence_signature != incident_state.get("signature")
+                    )
                     or bool(decision.deleted) != bool(incident_state.get("deleted"))
                     or bool(decision.timed_out) != bool(incident_state.get("timed_out"))
                 )
@@ -6543,7 +6792,7 @@ class ShieldService:
             elif incident_state is not None:
                 self._gif_incident_alerts.pop(gif_incident_key, None)
 
-        content = f"<@&{compiled.alert_role_id}>" if compiled.alert_role_id is not None and self._should_ping_alert_role(decision, top_reason) else None
+        content = f"<@&{compiled.alert_role_id}>" if compiled.alert_role_id is not None and ping_alert_role else None
         allowed_mentions = discord.AllowedMentions(users=False, roles=True, everyone=False)
         sent_message = None
         with contextlib.suppress(discord.Forbidden, discord.HTTPException):
@@ -6635,12 +6884,35 @@ class ShieldService:
             for value in [raw_pack_timeout_minutes.get(pack) if isinstance(raw_pack_timeout_minutes, dict) else None]
             if isinstance(value, int) and 1 <= value <= 60
         }
+        raw_pack_log_overrides = raw.get("pack_log_overrides", {})
+        compiled_pack_log_overrides: dict[str, ShieldPackLogOverride] = {}
+        if isinstance(raw_pack_log_overrides, dict):
+            for pack in RULE_PACKS:
+                raw_override = raw_pack_log_overrides.get(pack)
+                if not isinstance(raw_override, dict):
+                    continue
+                style = str(raw_override.get("style", "inherit")).strip().lower()
+                ping_mode = str(raw_override.get("ping_mode", "inherit")).strip().lower()
+                compiled_pack_log_overrides[pack] = ShieldPackLogOverride(
+                    style=style if style in {"inherit", *VALID_SHIELD_LOG_STYLES} else "inherit",
+                    ping_mode=ping_mode if ping_mode in {"inherit", *VALID_SHIELD_LOG_PING_MODES} else "inherit",
+                )
 
         return CompiledShieldConfig(
             guild_id=guild_id,
             module_enabled=bool(raw.get("module_enabled")),
             log_channel_id=raw.get("log_channel_id") if isinstance(raw.get("log_channel_id"), int) else None,
             alert_role_id=raw.get("alert_role_id") if isinstance(raw.get("alert_role_id"), int) else None,
+            log_style=(
+                str(raw.get("log_style", "adaptive")).strip().lower()
+                if str(raw.get("log_style", "adaptive")).strip().lower() in VALID_SHIELD_LOG_STYLES
+                else "adaptive"
+            ),
+            log_ping_mode=(
+                str(raw.get("log_ping_mode", "smart")).strip().lower()
+                if str(raw.get("log_ping_mode", "smart")).strip().lower() in VALID_SHIELD_LOG_PING_MODES
+                else "smart"
+            ),
             scan_mode=raw.get("scan_mode", "all"),
             included_channel_ids=frozenset(_sorted_unique_ints(raw.get("included_channel_ids", []))),
             excluded_channel_ids=frozenset(_sorted_unique_ints(raw.get("excluded_channel_ids", []))),
@@ -6655,6 +6927,7 @@ class ShieldService:
             trusted_builtin_disabled_families=frozenset(_sorted_unique_text(raw.get("trusted_builtin_disabled_families", []))),
             trusted_builtin_disabled_domains=frozenset(_sorted_unique_text(raw.get("trusted_builtin_disabled_domains", []))),
             pack_exemptions=compiled_pack_exemptions,
+            pack_log_overrides=compiled_pack_log_overrides,
             pack_timeout_minutes=compiled_pack_timeout_minutes,
             privacy=PackSettings(
                 enabled=bool(raw.get("privacy_enabled")),
@@ -6711,6 +6984,7 @@ class ShieldService:
             gif_rules=GifRuleSettings(
                 message_threshold=int(raw.get("gif_message_threshold", 4)),
                 window_seconds=int(raw.get("gif_window_seconds", 20)),
+                consecutive_threshold=int(raw.get("gif_consecutive_threshold", 5)),
                 repeat_threshold=int(raw.get("gif_repeat_threshold", 3)),
                 same_asset_threshold=int(raw.get("gif_same_asset_threshold", 3)),
                 min_ratio_percent=int(raw.get("gif_min_ratio_percent", 70)),

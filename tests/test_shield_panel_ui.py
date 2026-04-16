@@ -8,6 +8,7 @@ import discord
 from babblebox.cogs.shield import (
     ShieldCog,
     ShieldLinkPolicyEditorView,
+    ShieldLogsEditorView,
     ShieldPackActionEditorView,
     ShieldPackExemptionsEditorView,
     ShieldPackOptionsEditorView,
@@ -156,6 +157,7 @@ class ShieldPanelUiTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("Same asset", options.value)
         self.assertIn("GIF-heavy rate", options.value)
+        self.assertIn("Channel streak", options.value)
         self.assertNotIn("Emoji / emote", options.value)
 
     async def test_spam_options_editor_exposes_emoji_and_caps_controls(self):
@@ -209,3 +211,30 @@ class ShieldPanelUiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(embed.title, "Shield Link Policy")
         self.assertIn("Trusted-link timeout profile", placeholders)
         self.assertIn("Trusted-link mode", placeholders)
+
+    async def test_logs_embed_shows_global_delivery_and_pack_overrides(self):
+        await self.cog.service.set_log_delivery(10, style="compact", ping_mode="never")
+        await self.cog.service.set_pack_log_override(10, "gif", style="compact", ping_mode="never")
+
+        embed = self.cog._logs_embed(10)
+
+        self.assertEqual(embed.title, "Shield Logs")
+        self.assertTrue(any(field.name == "Global Delivery" for field in embed.fields))
+        self.assertTrue(any(field.name == "Per-Pack Overrides" for field in embed.fields))
+        delivery = next(field for field in embed.fields if field.name == "Global Delivery")
+        overrides = next(field for field in embed.fields if field.name == "Per-Pack Overrides")
+        self.assertIn("Compact", delivery.value)
+        self.assertIn("Never ping", delivery.value)
+        self.assertIn("GIF Flood / Media Pressure", overrides.value)
+
+    async def test_logs_editor_exposes_global_and_pack_override_controls(self):
+        view = ShieldLogsEditorView(self.cog, guild_id=10, author_id=1)
+        embed = view.current_embed()
+        placeholders = [getattr(child, "placeholder", "") for child in view.children if hasattr(child, "placeholder")]
+
+        self.assertEqual(embed.title, "Shield Log Delivery")
+        self.assertIn("Global log style", placeholders)
+        self.assertIn("Global ping mode", placeholders)
+        self.assertIn("Pack override target", placeholders)
+        self.assertTrue(any("style override" in placeholder for placeholder in placeholders))
+        self.assertTrue(any("ping override" in placeholder for placeholder in placeholders))

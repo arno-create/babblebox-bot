@@ -20,7 +20,7 @@ from babblebox.shield_ai import (
 
 DEFAULT_DATABASE_URL_ENV_ORDER = ("UTILITY_DATABASE_URL", "SUPABASE_DB_URL", "DATABASE_URL")
 DEFAULT_BACKEND = "postgres"
-DEFAULT_VERSION = 9
+DEFAULT_VERSION = 10
 VALID_SCAN_MODES = {"all", "only_included"}
 VALID_SHIELD_ACTIONS = {"disabled", "detect", "log", "delete_log", "delete_escalate", "timeout_log", "delete_timeout_log"}
 VALID_SHIELD_SENSITIVITIES = {"low", "normal", "high"}
@@ -44,6 +44,10 @@ VALID_SHIELD_AI_ACCESS_MODES = {"inherit", "enabled", "disabled"}
 VALID_SPAM_MODERATOR_POLICIES = {"exempt", "delete_only", "full"}
 PACK_EXEMPTION_PACKS = ("privacy", "promo", "scam", "spam", "gif", "adult", "severe")
 PACK_TIMEOUT_PACKS = PACK_EXEMPTION_PACKS + ("link_policy",)
+VALID_SHIELD_LOG_STYLES = {"adaptive", "compact"}
+VALID_SHIELD_LOG_PING_MODES = {"smart", "never"}
+VALID_PACK_LOG_OVERRIDE_STYLES = {"inherit"} | VALID_SHIELD_LOG_STYLES
+VALID_PACK_LOG_OVERRIDE_PING_MODES = {"inherit"} | VALID_SHIELD_LOG_PING_MODES
 
 
 class ShieldStorageUnavailable(RuntimeError):
@@ -72,6 +76,16 @@ def _default_pack_exemptions() -> dict[str, dict[str, list[int]]]:
 
 def _default_pack_timeout_minutes() -> dict[str, int | None]:
     return {pack: None for pack in PACK_TIMEOUT_PACKS}
+
+
+def _default_pack_log_overrides() -> dict[str, dict[str, str]]:
+    return {
+        pack: {
+            "style": "inherit",
+            "ping_mode": "inherit",
+        }
+        for pack in PACK_EXEMPTION_PACKS
+    }
 
 
 def _legacy_action_policy(action: str) -> tuple[str, str, str]:
@@ -103,6 +117,8 @@ def default_guild_shield_config(guild_id: int | None = None) -> dict[str, Any]:
         "baseline_version": 0,
         "log_channel_id": None,
         "alert_role_id": None,
+        "log_style": "adaptive",
+        "log_ping_mode": "smart",
         "scan_mode": "all",
         "included_channel_ids": [],
         "excluded_channel_ids": [],
@@ -116,6 +132,7 @@ def default_guild_shield_config(guild_id: int | None = None) -> dict[str, Any]:
         "allow_phrases": [],
         "trusted_builtin_disabled_families": [],
         "trusted_builtin_disabled_domains": [],
+        "pack_log_overrides": _default_pack_log_overrides(),
         "pack_exemptions": _default_pack_exemptions(),
         "pack_timeout_minutes": _default_pack_timeout_minutes(),
         "privacy_enabled": False,
@@ -161,6 +178,7 @@ def default_guild_shield_config(guild_id: int | None = None) -> dict[str, Any]:
         "gif_sensitivity": "normal",
         "gif_message_threshold": 4,
         "gif_window_seconds": 20,
+        "gif_consecutive_threshold": 5,
         "gif_repeat_threshold": 3,
         "gif_same_asset_threshold": 3,
         "gif_min_ratio_percent": 70,
@@ -256,6 +274,26 @@ def _clean_pack_timeout_minutes(values: Any) -> dict[str, int | None]:
     return cleaned
 
 
+def _clean_pack_log_override_entry(value: Any) -> dict[str, str]:
+    if not isinstance(value, dict):
+        return {"style": "inherit", "ping_mode": "inherit"}
+    style = str(value.get("style", "inherit")).strip().lower()
+    ping_mode = str(value.get("ping_mode", "inherit")).strip().lower()
+    return {
+        "style": style if style in VALID_PACK_LOG_OVERRIDE_STYLES else "inherit",
+        "ping_mode": ping_mode if ping_mode in VALID_PACK_LOG_OVERRIDE_PING_MODES else "inherit",
+    }
+
+
+def _clean_pack_log_overrides(values: Any) -> dict[str, dict[str, str]]:
+    cleaned = _default_pack_log_overrides()
+    if not isinstance(values, dict):
+        return cleaned
+    for pack in PACK_EXEMPTION_PACKS:
+        cleaned[pack] = _clean_pack_log_override_entry(values.get(pack))
+    return cleaned
+
+
 def _legacy_pack_payload(config: dict[str, Any], pack: str) -> dict[str, Any]:
     payload: dict[str, Any] = {}
     sources = []
@@ -291,6 +329,10 @@ def normalize_guild_shield_config(guild_id: int, config: Any) -> dict[str, Any]:
     cleaned["baseline_version"] = baseline_version if isinstance(baseline_version, int) and baseline_version >= 0 else 0
     cleaned["log_channel_id"] = config.get("log_channel_id") if isinstance(config.get("log_channel_id"), int) else None
     cleaned["alert_role_id"] = config.get("alert_role_id") if isinstance(config.get("alert_role_id"), int) else None
+    log_style = str(config.get("log_style", "adaptive")).strip().lower()
+    cleaned["log_style"] = log_style if log_style in VALID_SHIELD_LOG_STYLES else "adaptive"
+    log_ping_mode = str(config.get("log_ping_mode", "smart")).strip().lower()
+    cleaned["log_ping_mode"] = log_ping_mode if log_ping_mode in VALID_SHIELD_LOG_PING_MODES else "smart"
     scan_mode = config.get("scan_mode", "all")
     cleaned["scan_mode"] = scan_mode if scan_mode in VALID_SCAN_MODES else "all"
 
@@ -313,6 +355,7 @@ def normalize_guild_shield_config(guild_id: int, config: Any) -> dict[str, Any]:
         "trusted_builtin_disabled_domains",
     ):
         cleaned[field] = _clean_text_list(config.get(field))
+    cleaned["pack_log_overrides"] = _clean_pack_log_overrides(config.get("pack_log_overrides"))
     cleaned["pack_exemptions"] = _clean_pack_exemptions(config.get("pack_exemptions"))
     cleaned["pack_timeout_minutes"] = _clean_pack_timeout_minutes(config.get("pack_timeout_minutes"))
 
@@ -410,6 +453,7 @@ def normalize_guild_shield_config(guild_id: int, config: Any) -> dict[str, Any]:
         ("spam_caps_threshold", 12, 80, 28),
         ("gif_message_threshold", 3, 8, 4),
         ("gif_window_seconds", 10, 45, 20),
+        ("gif_consecutive_threshold", 4, 10, 5),
         ("gif_repeat_threshold", 2, 6, 3),
         ("gif_same_asset_threshold", 2, 6, 3),
         ("gif_min_ratio_percent", 50, 95, 70),
@@ -624,6 +668,8 @@ class _PostgresShieldStore(_BaseShieldStore):
                 "baseline_version SMALLINT NOT NULL DEFAULT 0, "
                 "log_channel_id BIGINT NULL, "
                 "alert_role_id BIGINT NULL, "
+                "log_style TEXT NOT NULL DEFAULT 'adaptive', "
+                "log_ping_mode TEXT NOT NULL DEFAULT 'smart', "
                 "scan_mode TEXT NOT NULL DEFAULT 'all', "
                 "included_channel_ids JSONB NOT NULL DEFAULT '[]'::jsonb, "
                 "excluded_channel_ids JSONB NOT NULL DEFAULT '[]'::jsonb, "
@@ -637,6 +683,7 @@ class _PostgresShieldStore(_BaseShieldStore):
                 "allow_phrases JSONB NOT NULL DEFAULT '[]'::jsonb, "
                 "trusted_builtin_disabled_families JSONB NOT NULL DEFAULT '[]'::jsonb, "
                 "trusted_builtin_disabled_domains JSONB NOT NULL DEFAULT '[]'::jsonb, "
+                "pack_log_overrides JSONB NOT NULL DEFAULT '{}'::jsonb, "
                 "pack_exemptions JSONB NOT NULL DEFAULT '{}'::jsonb, "
                 "pack_timeout_minutes JSONB NOT NULL DEFAULT '{}'::jsonb, "
                 "privacy_enabled BOOLEAN NOT NULL DEFAULT FALSE, "
@@ -682,6 +729,7 @@ class _PostgresShieldStore(_BaseShieldStore):
                 "gif_sensitivity TEXT NOT NULL DEFAULT 'normal', "
                 "gif_message_threshold SMALLINT NOT NULL DEFAULT 4, "
                 "gif_window_seconds SMALLINT NOT NULL DEFAULT 20, "
+                "gif_consecutive_threshold SMALLINT NOT NULL DEFAULT 5, "
                 "gif_repeat_threshold SMALLINT NOT NULL DEFAULT 3, "
                 "gif_same_asset_threshold SMALLINT NOT NULL DEFAULT 3, "
                 "gif_min_ratio_percent SMALLINT NOT NULL DEFAULT 70, "
@@ -728,6 +776,8 @@ class _PostgresShieldStore(_BaseShieldStore):
                 ")"
             ),
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS baseline_version SMALLINT NOT NULL DEFAULT 0",
+            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS log_style TEXT NOT NULL DEFAULT 'adaptive'",
+            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS log_ping_mode TEXT NOT NULL DEFAULT 'smart'",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS privacy_sensitivity TEXT NOT NULL DEFAULT 'normal'",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS promo_sensitivity TEXT NOT NULL DEFAULT 'normal'",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS scam_sensitivity TEXT NOT NULL DEFAULT 'normal'",
@@ -779,6 +829,7 @@ class _PostgresShieldStore(_BaseShieldStore):
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS link_policy_high_action TEXT NOT NULL DEFAULT 'log'",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS trusted_builtin_disabled_families JSONB NOT NULL DEFAULT '[]'::jsonb",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS trusted_builtin_disabled_domains JSONB NOT NULL DEFAULT '[]'::jsonb",
+            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS pack_log_overrides JSONB NOT NULL DEFAULT '{}'::jsonb",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS pack_exemptions JSONB NOT NULL DEFAULT '{}'::jsonb",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS pack_timeout_minutes JSONB NOT NULL DEFAULT '{}'::jsonb",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS spam_message_threshold SMALLINT NOT NULL DEFAULT 7",
@@ -794,6 +845,7 @@ class _PostgresShieldStore(_BaseShieldStore):
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS spam_moderator_policy TEXT NOT NULL DEFAULT 'exempt'",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS gif_message_threshold SMALLINT NOT NULL DEFAULT 4",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS gif_window_seconds SMALLINT NOT NULL DEFAULT 20",
+            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS gif_consecutive_threshold SMALLINT NOT NULL DEFAULT 5",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS gif_repeat_threshold SMALLINT NOT NULL DEFAULT 3",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS gif_same_asset_threshold SMALLINT NOT NULL DEFAULT 3",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS gif_min_ratio_percent SMALLINT NOT NULL DEFAULT 70",
@@ -836,6 +888,8 @@ class _PostgresShieldStore(_BaseShieldStore):
                 "baseline_version": int(row["baseline_version"]) if "baseline_version" in row else 0,
                 "log_channel_id": row["log_channel_id"],
                 "alert_role_id": row["alert_role_id"],
+                "log_style": row["log_style"] if "log_style" in row else "adaptive",
+                "log_ping_mode": row["log_ping_mode"] if "log_ping_mode" in row else "smart",
                 "scan_mode": row["scan_mode"],
                 "included_channel_ids": decode_postgres_json_array(
                     row["included_channel_ids"],
@@ -889,6 +943,12 @@ class _PostgresShieldStore(_BaseShieldStore):
                 )
                 if "trusted_builtin_disabled_domains" in row
                 else [],
+                "pack_log_overrides": decode_postgres_json_object(
+                    row["pack_log_overrides"],
+                    label="shield_guild_configs.pack_log_overrides",
+                )
+                if "pack_log_overrides" in row
+                else _default_pack_log_overrides(),
                 "pack_exemptions": decode_postgres_json_object(
                     row["pack_exemptions"],
                     label="shield_guild_configs.pack_exemptions",
@@ -944,6 +1004,7 @@ class _PostgresShieldStore(_BaseShieldStore):
                 "gif_sensitivity": row["gif_sensitivity"] if "gif_sensitivity" in row else "normal",
                 "gif_message_threshold": int(row["gif_message_threshold"]) if "gif_message_threshold" in row else 4,
                 "gif_window_seconds": int(row["gif_window_seconds"]) if "gif_window_seconds" in row else 20,
+                "gif_consecutive_threshold": int(row["gif_consecutive_threshold"]) if "gif_consecutive_threshold" in row else 5,
                 "gif_repeat_threshold": int(row["gif_repeat_threshold"]) if "gif_repeat_threshold" in row else 3,
                 "gif_same_asset_threshold": int(row["gif_same_asset_threshold"]) if "gif_same_asset_threshold" in row else 3,
                 "gif_min_ratio_percent": int(row["gif_min_ratio_percent"]) if "gif_min_ratio_percent" in row else 70,
@@ -1094,6 +1155,8 @@ class _PostgresShieldStore(_BaseShieldStore):
             ("baseline_version", config["baseline_version"], ""),
             ("log_channel_id", config["log_channel_id"], ""),
             ("alert_role_id", config["alert_role_id"], ""),
+            ("log_style", config["log_style"], ""),
+            ("log_ping_mode", config["log_ping_mode"], ""),
             ("scan_mode", config["scan_mode"], ""),
             ("included_channel_ids", json.dumps(config["included_channel_ids"]), "::jsonb"),
             ("excluded_channel_ids", json.dumps(config["excluded_channel_ids"]), "::jsonb"),
@@ -1107,6 +1170,7 @@ class _PostgresShieldStore(_BaseShieldStore):
             ("allow_phrases", json.dumps(config["allow_phrases"]), "::jsonb"),
             ("trusted_builtin_disabled_families", json.dumps(config["trusted_builtin_disabled_families"]), "::jsonb"),
             ("trusted_builtin_disabled_domains", json.dumps(config["trusted_builtin_disabled_domains"]), "::jsonb"),
+            ("pack_log_overrides", json.dumps(config["pack_log_overrides"]), "::jsonb"),
             ("pack_exemptions", json.dumps(config["pack_exemptions"]), "::jsonb"),
             ("pack_timeout_minutes", json.dumps(config["pack_timeout_minutes"]), "::jsonb"),
             ("privacy_enabled", config["privacy_enabled"], ""),
@@ -1152,6 +1216,7 @@ class _PostgresShieldStore(_BaseShieldStore):
             ("gif_sensitivity", config["gif_sensitivity"], ""),
             ("gif_message_threshold", config["gif_message_threshold"], ""),
             ("gif_window_seconds", config["gif_window_seconds"], ""),
+            ("gif_consecutive_threshold", config["gif_consecutive_threshold"], ""),
             ("gif_repeat_threshold", config["gif_repeat_threshold"], ""),
             ("gif_same_asset_threshold", config["gif_same_asset_threshold"], ""),
             ("gif_min_ratio_percent", config["gif_min_ratio_percent"], ""),

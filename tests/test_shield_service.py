@@ -2100,6 +2100,31 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(decisions, [None, None, None, None])
 
+    async def test_collective_gif_streak_threshold_is_configurable(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        authors = [self._make_member(guild, 780 + index) for index in range(4)]
+
+        await self._enable_gif_pack(guild.id)
+        ok, _ = await self.service.set_pack_config(guild.id, "gif", consecutive_threshold=4)
+        self.assertTrue(ok)
+
+        final = None
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            for author, content in (
+                (authors[0], "https://tenor.com/view/g1"),
+                (authors[1], "https://tenor.com/view/g2"),
+                (authors[2], "https://tenor.com/view/g3"),
+                (authors[3], "https://tenor.com/view/g4"),
+            ):
+                final = await self.service.handle_message(
+                    FakeMessage(guild=guild, channel=channel, author=author, content=content)
+                )
+
+        self.assertIsNotNone(final)
+        self.assertIn("spam_group_gif_pressure", {reason.match_class for reason in final.reasons})
+        self.assertIn("4 gifs in a row", (final.alert_evidence_summary or "").lower())
+
     async def test_multi_user_gif_pressure_is_detected_without_needing_one_spammer(self):
         guild = FakeGuild(10)
         channel = FakeChannel(20)
@@ -2134,6 +2159,31 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("gif-heavy posts from 3 members", final.alert_evidence_summary.lower())
         self.assertIn("meaningful text messages", final.alert_evidence_summary.lower())
         self.assertIn("soft suppression only", (final.action_note or "").lower())
+
+    async def test_captioned_collective_gif_pressure_is_detected_by_ratio(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        authors = [self._make_member(guild, 810 + index) for index in range(3)]
+
+        await self._enable_gif_pack(guild.id)
+
+        final = None
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            for author, content in (
+                (authors[0], "https://tenor.com/view/g1 that deploy landed clean"),
+                (authors[1], "https://tenor.com/view/g2 logs finally look normal"),
+                (authors[2], "https://tenor.com/view/g3 this release feels good"),
+                (authors[0], "https://tenor.com/view/g4 shipping party time"),
+                (authors[1], "https://tenor.com/view/g5 we can close the incident"),
+            ):
+                final = await self.service.handle_message(
+                    FakeMessage(guild=guild, channel=channel, author=author, content=content)
+                )
+
+        self.assertIsNotNone(final)
+        self.assertIn("spam_group_gif_pressure", {reason.match_class for reason in final.reasons})
+        self.assertIn("gif pressure", (final.alert_evidence_summary or "").lower())
+        self.assertIn("meaningful text messages", (final.alert_evidence_summary or "").lower())
 
     async def test_collective_gif_pressure_only_deletes_current_excess_posts(self):
         guild = FakeGuild(10)
@@ -2259,11 +2309,40 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(log_channel.edits), 0)
         self.assertIsNone(log_channel.sent[0]["content"])
         embed = log_channel.sent[0]["embed"]
+        self.assertIn("channel-wide pressure", (embed.description or "").lower())
         note_field = next(field for field in embed.fields if field.name == "Operational Note")
         self.assertIn("soft suppression only", note_field.value.lower())
         reason_field = next(field for field in embed.fields if field.name == "Reason")
         self.assertIn("meaningful text messages", reason_field.value.lower())
         self.assertTrue(any(decision is not None for decision in decisions[-2:]))
+
+    async def test_collective_gif_pressure_never_records_strikes_under_delete_escalate(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        authors = [self._make_member(guild, 870 + index) for index in range(3)]
+
+        await self._enable_gif_pack(guild.id, medium_action="delete_log", high_action="delete_escalate")
+
+        final = None
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            for author, content in (
+                (authors[0], "https://tenor.com/view/g1"),
+                (authors[1], "https://tenor.com/view/g2"),
+                (authors[2], "https://tenor.com/view/g3"),
+                (authors[0], "https://tenor.com/view/g4"),
+                (authors[1], "https://tenor.com/view/g5"),
+                (authors[2], "https://tenor.com/view/g6"),
+            ):
+                final = await self.service.handle_message(
+                    FakeMessage(guild=guild, channel=channel, author=author, content=content)
+                )
+
+        self.assertIsNotNone(final)
+        self.assertIn("spam_group_gif_pressure", {reason.match_class for reason in final.reasons})
+        self.assertFalse(final.timed_out)
+        self.assertFalse(final.escalated)
+        self.assertEqual(self.service._strike_windows, {})
+        self.assertIn("soft suppression only", (final.action_note or "").lower())
 
     async def test_individual_gif_abuse_can_still_win_inside_collective_pressure(self):
         guild = FakeGuild(10)
@@ -2314,6 +2393,30 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(final)
         self.assertEqual(final.pack, "gif")
         self.assertEqual(final.reasons[0].match_class, "spam_gif_flood")
+
+    async def test_personal_gif_pressure_never_exceeds_one_hundred_percent(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        author = self._make_member(guild, 903)
+
+        await self._enable_gif_pack(guild.id)
+
+        final = None
+        with patch("babblebox.shield_service.time.monotonic", side_effect=(100.0, 104.0, 108.0, 112.0)):
+            with patch.object(self.service, "_send_alert", new=AsyncMock()):
+                for content in (
+                    "https://tenor.com/view/cat-dance-gif-12345",
+                    "https://tenor.com/view/cat-jump-gif-22345",
+                    "https://tenor.com/view/cat-spin-gif-32345",
+                    "https://tenor.com/view/cat-wave-gif-42345",
+                ):
+                    final = await self.service.handle_message(
+                        FakeMessage(guild=guild, channel=channel, author=author, content=content)
+                    )
+
+        self.assertIsNotNone(final)
+        self.assertIn("100% gif pressure", (final.alert_evidence_summary or "").lower())
+        self.assertNotIn("400% gif pressure", (final.alert_evidence_summary or "").lower())
 
     async def test_gif_flood_stays_off_when_gif_pack_is_disabled_even_if_spam_is_on(self):
         guild = FakeGuild(10)
@@ -3832,6 +3935,93 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(log_channel.sent), 1)
         self.assertEqual(log_channel.sent[0]["content"], "<@&777>")
+
+    async def test_global_compact_logging_applies_across_shield_packs(self):
+        guild = FakeGuild(10)
+        public_channel = FakeChannel(20)
+        log_channel = FakeChannel(99, name="shield-log")
+        self.bot.register_channel(log_channel)
+        author = FakeAuthor(42, roles=[FakeRole(11, position=1)])
+
+        ok, _ = await self.service.set_log_channel(guild.id, log_channel.id)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_log_delivery(guild.id, style="compact")
+        self.assertTrue(ok)
+        compiled = self.service._compiled_configs[guild.id]
+        decision = ShieldDecision(
+            matched=True,
+            action="log",
+            pack="privacy",
+            reasons=(
+                ShieldMatch(
+                    pack="privacy",
+                    label="Possible email address",
+                    reason="Looks like an email address was posted in chat.",
+                    action="log",
+                    confidence="high",
+                    heuristic=False,
+                    match_class="privacy_email",
+                ),
+            ),
+        )
+        message = FakeMessage(guild=guild, channel=public_channel, author=author, content="Email me at friend@example.com")
+
+        await self.service._send_alert(message, compiled, decision, content_fingerprint="privacy")
+
+        self.assertEqual(len(log_channel.sent), 1)
+        embed = log_channel.sent[0]["embed"]
+        self.assertEqual(embed.title, "Shield Note | Privacy Leak")
+        self.assertEqual([field.name for field in embed.fields], ["Detection", "Why it was noted", "Scan Source", "Preview", "Jump"])
+
+    async def test_global_no_ping_mode_applies_across_shield_packs(self):
+        guild = FakeGuild(10)
+        public_channel = FakeChannel(20)
+        log_channel = FakeChannel(99, name="shield-log")
+        self.bot.register_channel(log_channel)
+        author = FakeAuthor(42, roles=[FakeRole(11, position=1)])
+
+        ok, _ = await self.service.set_log_channel(guild.id, log_channel.id)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_alert_role(guild.id, 777)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_log_delivery(guild.id, ping_mode="never")
+        self.assertTrue(ok)
+        compiled = self.service._compiled_configs[guild.id]
+        decision = ShieldDecision(
+            matched=True,
+            action="log",
+            pack="scam",
+            reasons=(
+                ShieldMatch(
+                    pack="scam",
+                    label="Known malicious domain",
+                    reason="A linked domain matched Shield's local malicious-domain intelligence.",
+                    action="log",
+                    confidence="high",
+                    heuristic=False,
+                    match_class="known_malicious_domain",
+                ),
+            ),
+        )
+        message = FakeMessage(guild=guild, channel=public_channel, author=author, content="https://dlscord-gift.com/claim")
+
+        await self.service._send_alert(message, compiled, decision, content_fingerprint="danger-no-ping")
+
+        self.assertEqual(len(log_channel.sent), 1)
+        self.assertIsNone(log_channel.sent[0]["content"])
+
+    async def test_pack_log_override_inherits_and_isolates_correctly(self):
+        ok, _ = await self.service.set_log_delivery(10, style="adaptive", ping_mode="smart")
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_pack_log_override(10, "gif", style="compact", ping_mode="never")
+        self.assertTrue(ok)
+
+        compiled = self.service._compiled_configs[10]
+        gif_delivery = compiled.resolved_log_delivery("gif")
+        privacy_delivery = compiled.resolved_log_delivery("privacy")
+
+        self.assertEqual((gif_delivery.style, gif_delivery.ping_mode), ("compact", "never"))
+        self.assertEqual((privacy_delivery.style, privacy_delivery.ping_mode), ("adaptive", "smart"))
 
     async def test_support_guild_ai_policy_defaults_to_enabled_with_full_models(self):
         status = self.service.get_ai_status(SHIELD_AI_ALLOWED_GUILD_ID)

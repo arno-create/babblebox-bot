@@ -233,6 +233,20 @@ class WebsiteDocsTests(unittest.TestCase):
         self.assertIn("explicit anti-spam thresholds", index_html)
         self.assertIn("grouped incident dedupe", index_html)
 
+    def test_shield_docs_cover_hybrid_gif_fairness_and_compact_logging(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        index_html = (ROOT / "index.html").read_text(encoding="utf-8")
+        help_html = (ROOT / "help.html").read_text(encoding="utf-8")
+
+        self.assertIn("consecutive-streak and GIF-to-text balance", help_html)
+        self.assertIn("consecutive-streak plus GIF-to-text pressure", index_html)
+        self.assertIn("consecutive GIF streaks or GIF-to-text imbalance", readme)
+        self.assertIn("collective pressure never adds strikes or timeouts on its own", readme)
+        self.assertIn("Adaptive", help_html)
+        self.assertIn("Compact", help_html)
+        self.assertIn("smart or never-ping alerts", index_html)
+        self.assertIn("compact/no-ping defaults", readme)
+
     def test_shield_and_admin_docs_cover_gif_spam_and_focused_admin_surfaces(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         index_html = (ROOT / "index.html").read_text(encoding="utf-8")
