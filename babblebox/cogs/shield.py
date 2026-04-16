@@ -101,6 +101,24 @@ LINK_POLICY_MODE_CHOICES = [
     app_commands.Choice(name="Default", value="default"),
     app_commands.Choice(name="Trusted Links Only", value="trusted_only"),
 ]
+LOG_STYLE_CHOICES = [
+    app_commands.Choice(name="Adaptive", value="adaptive"),
+    app_commands.Choice(name="Compact", value="compact"),
+]
+LOG_PING_MODE_CHOICES = [
+    app_commands.Choice(name="Smart", value="smart"),
+    app_commands.Choice(name="Never Ping", value="never"),
+]
+PACK_LOG_STYLE_CHOICES = [
+    app_commands.Choice(name="Inherit", value="inherit"),
+    app_commands.Choice(name="Adaptive", value="adaptive"),
+    app_commands.Choice(name="Compact", value="compact"),
+]
+PACK_LOG_PING_CHOICES = [
+    app_commands.Choice(name="Inherit", value="inherit"),
+    app_commands.Choice(name="Smart", value="smart"),
+    app_commands.Choice(name="Never Ping", value="never"),
+]
 SEVERE_CATEGORY_CHOICES = [
     app_commands.Choice(name="Sexual Exploitation", value="sexual_exploitation"),
     app_commands.Choice(name="Self-Harm Encouragement", value="self_harm_encouragement"),
@@ -122,7 +140,7 @@ PACK_PANEL_DESCRIPTIONS = {
     "promo": "Handles invite spam, promo blasts, and repetitive self-promotion without overfiring on normal info links.",
     "scam": "Catches malicious domains, impersonation hosts, and suspicious lure patterns with stronger action lanes.",
     "spam": "Handles rate spam, duplicate floods, emoji clutter, capitals spam, and moderator handling for live-message raids.",
-    "gif": "Controls one-user GIF floods, channel GIF pressure, repeat loops, and same-asset bursts without polluting unrelated packs.",
+    "gif": "Controls one-user GIF floods, channel-wide streak or ratio pressure, repeat loops, and same-asset bursts without polluting unrelated packs.",
     "adult": "Blocks adult domains and can optionally catch DM-gated adult solicitation text with a bounded carve-out lane.",
     "severe": "Targets explicit severe harm, self-harm encouragement, eliminationist or dehumanizing hate, and server-specific severe phrase tuning with reference-aware suppressors.",
     "link_policy": "Controls the separate trusted-link policy lane for broad link posting without weakening hard malicious intel.",
@@ -160,6 +178,7 @@ SPAM_CAPS_THRESHOLDS = (20, 28, 40, 60)
 GIF_REPEAT_THRESHOLDS = (2, 3, 4, 5)
 GIF_SAME_ASSET_THRESHOLDS = (2, 3, 4, 5)
 GIF_RATIO_THRESHOLDS = (60, 70, 80, 90)
+GIF_CONSECUTIVE_THRESHOLDS = (4, 5, 6, 7, 8, 9, 10)
 
 
 class ShieldManagedView(discord.ui.View):
@@ -369,6 +388,25 @@ class ShieldPanelView(ShieldManagedView):
             action=action,
         )
 
+    async def _open_logs_editor(self, interaction: discord.Interaction):
+        async def action():
+            view = ShieldLogsEditorView(
+                self.cog,
+                guild_id=self.guild_id,
+                author_id=self.author_id,
+                panel_view=self,
+            )
+            sent = await self.cog._send_private_interaction(interaction, embed=view.current_embed(), view=view)
+            if sent is not None:
+                view.message = sent
+
+        await self._safe_action(
+            interaction,
+            stage="shield_panel_open_logs",
+            failure_message="Babblebox could not open the Shield log-delivery editor right now.",
+            action=action,
+        )
+
     def _refresh_items(self):
         self.clear_items()
 
@@ -462,6 +500,12 @@ class ShieldPanelView(ShieldManagedView):
                 await self._open_link_policy_editor(interaction)
 
             add_button(label="Edit Link Policy", style=discord.ButtonStyle.secondary, row=2, callback=link_editor_callback)
+
+        if self.section == "logs":
+            async def logs_editor_callback(interaction: discord.Interaction):
+                await self._open_logs_editor(interaction)
+
+            add_button(label="Edit Log Delivery", style=discord.ButtonStyle.secondary, row=2, callback=logs_editor_callback)
 
 
 class ShieldPackActionEditorView(ShieldManagedView):
@@ -788,9 +832,10 @@ class ShieldPackOptionsEditorView(ShieldManagedView):
             self.add_item(rate_select)
 
             for row, field, values, placeholder in (
-                (1, "repeat_threshold", GIF_REPEAT_THRESHOLDS, "Repeat threshold"),
-                (2, "same_asset_threshold", GIF_SAME_ASSET_THRESHOLDS, "Same-asset threshold"),
-                (3, "ratio_percent", GIF_RATIO_THRESHOLDS, "Minimum GIF ratio"),
+                (1, "consecutive_threshold", GIF_CONSECUTIVE_THRESHOLDS, "Channel streak threshold"),
+                (2, "repeat_threshold", GIF_REPEAT_THRESHOLDS, "Repeat threshold"),
+                (3, "same_asset_threshold", GIF_SAME_ASSET_THRESHOLDS, "Same-asset threshold"),
+                (4, "ratio_percent", GIF_RATIO_THRESHOLDS, "Minimum GIF ratio"),
             ):
                 current = int(config.get(f"gif_{'min_' if field == 'ratio_percent' else ''}{field}", 70 if field == "ratio_percent" else values[0]))
                 select = discord.ui.Select(
@@ -1132,6 +1177,190 @@ class ShieldLinkPolicyEditorView(ShieldManagedView):
         self.add_item(timeout_select)
 
 
+class ShieldLogsEditorView(ShieldManagedView):
+    panel_title = "Shield Log Delivery"
+    stale_message = "That log-delivery editor expired. Open it again from `/shield panel`."
+
+    def __init__(
+        self,
+        cog: "ShieldCog",
+        *,
+        guild_id: int,
+        author_id: int,
+        panel_view: ShieldPanelView | None = None,
+        selected_pack: str = "gif",
+    ):
+        super().__init__(cog, guild_id=guild_id, author_id=author_id)
+        self.panel_view = panel_view
+        self.selected_pack = selected_pack if selected_pack in RULE_PANEL_PACKS else "gif"
+        self._refresh_items()
+
+    def current_embed(self) -> discord.Embed:
+        return self.cog._logs_editor_embed(self.guild_id, selected_pack=self.selected_pack)
+
+    async def _sync_parent_panel(self):
+        if self.panel_view is not None:
+            await self.panel_view.refresh_message()
+
+    async def _rerender(self, interaction: discord.Interaction, *, note: str | None = None, note_ok: bool = True):
+        self._refresh_items()
+        updated = await self.cog._edit_interaction_message(interaction, embed=self.current_embed(), view=self)
+        await self._sync_parent_panel()
+        if not updated:
+            await self.cog._send_private_interaction(
+                interaction,
+                embed=self.cog._shield_status_embed(self.panel_title, self.stale_message, ok=False),
+            )
+            return
+        if note:
+            await self.cog._send_private_interaction(
+                interaction,
+                embed=self.cog._shield_status_embed(self.panel_title, note, ok=note_ok),
+            )
+
+    def _refresh_items(self):
+        self.clear_items()
+        config = self.cog.service.get_config(self.guild_id)
+        pack_overrides = config.get("pack_log_overrides", {})
+        selected_override = pack_overrides.get(self.selected_pack, {}) if isinstance(pack_overrides, dict) else {}
+        current_style = str(config.get("log_style", "adaptive"))
+        current_ping_mode = str(config.get("log_ping_mode", "smart"))
+        override_style = str(selected_override.get("style", "inherit"))
+        override_ping_mode = str(selected_override.get("ping_mode", "inherit"))
+
+        global_style_select = discord.ui.Select(
+            placeholder="Global log style",
+            row=0,
+            options=[
+                discord.SelectOption(label=choice.name, value=str(choice.value), default=str(choice.value) == current_style)
+                for choice in LOG_STYLE_CHOICES
+            ],
+        )
+
+        async def global_style_callback(interaction: discord.Interaction):
+            async def action():
+                ok, message = await self.cog.service.set_log_delivery(self.guild_id, style=global_style_select.values[0])
+                await self._rerender(interaction, note=message, note_ok=ok)
+
+            await self._safe_action(
+                interaction,
+                stage="shield_log_style",
+                failure_message="Babblebox could not update the global Shield log style right now.",
+                action=action,
+            )
+
+        global_style_select.callback = global_style_callback
+        self.add_item(global_style_select)
+
+        global_ping_select = discord.ui.Select(
+            placeholder="Global ping mode",
+            row=1,
+            options=[
+                discord.SelectOption(label=choice.name, value=str(choice.value), default=str(choice.value) == current_ping_mode)
+                for choice in LOG_PING_MODE_CHOICES
+            ],
+        )
+
+        async def global_ping_callback(interaction: discord.Interaction):
+            async def action():
+                ok, message = await self.cog.service.set_log_delivery(self.guild_id, ping_mode=global_ping_select.values[0])
+                await self._rerender(interaction, note=message, note_ok=ok)
+
+            await self._safe_action(
+                interaction,
+                stage="shield_log_ping_mode",
+                failure_message="Babblebox could not update the global Shield log ping mode right now.",
+                action=action,
+            )
+
+        global_ping_select.callback = global_ping_callback
+        self.add_item(global_ping_select)
+
+        pack_select = discord.ui.Select(
+            placeholder="Pack override target",
+            row=2,
+            options=[
+                discord.SelectOption(
+                    label=PACK_LABELS[pack],
+                    value=pack,
+                    default=pack == self.selected_pack,
+                )
+                for pack in RULE_PANEL_PACKS
+            ],
+        )
+
+        async def pack_callback(interaction: discord.Interaction):
+            async def action():
+                self.selected_pack = pack_select.values[0]
+                await self._rerender(interaction)
+
+            await self._safe_action(
+                interaction,
+                stage="shield_log_override_pack",
+                failure_message="Babblebox could not switch the pack log override target right now.",
+                action=action,
+            )
+
+        pack_select.callback = pack_callback
+        self.add_item(pack_select)
+
+        override_style_select = discord.ui.Select(
+            placeholder=f"{PACK_LABELS[self.selected_pack]} style override",
+            row=3,
+            options=[
+                discord.SelectOption(label=choice.name, value=str(choice.value), default=str(choice.value) == override_style)
+                for choice in PACK_LOG_STYLE_CHOICES
+            ],
+        )
+
+        async def override_style_callback(interaction: discord.Interaction):
+            async def action():
+                ok, message = await self.cog.service.set_pack_log_override(
+                    self.guild_id,
+                    self.selected_pack,
+                    style=override_style_select.values[0],
+                )
+                await self._rerender(interaction, note=message, note_ok=ok)
+
+            await self._safe_action(
+                interaction,
+                stage=f"shield_log_override_style_{self.selected_pack}",
+                failure_message="Babblebox could not update that pack log style override right now.",
+                action=action,
+            )
+
+        override_style_select.callback = override_style_callback
+        self.add_item(override_style_select)
+
+        override_ping_select = discord.ui.Select(
+            placeholder=f"{PACK_LABELS[self.selected_pack]} ping override",
+            row=4,
+            options=[
+                discord.SelectOption(label=choice.name, value=str(choice.value), default=str(choice.value) == override_ping_mode)
+                for choice in PACK_LOG_PING_CHOICES
+            ],
+        )
+
+        async def override_ping_callback(interaction: discord.Interaction):
+            async def action():
+                ok, message = await self.cog.service.set_pack_log_override(
+                    self.guild_id,
+                    self.selected_pack,
+                    ping_mode=override_ping_select.values[0],
+                )
+                await self._rerender(interaction, note=message, note_ok=ok)
+
+            await self._safe_action(
+                interaction,
+                stage=f"shield_log_override_ping_{self.selected_pack}",
+                failure_message="Babblebox could not update that pack log ping override right now.",
+                action=action,
+            )
+
+        override_ping_select.callback = override_ping_callback
+        self.add_item(override_ping_select)
+
+
 class ShieldCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
@@ -1298,6 +1527,41 @@ class ShieldCog(commands.Cog):
         }
         return labels.get(str(policy), str(policy).replace("_", " ").title())
 
+    def _log_style_label(self, style: str) -> str:
+        labels = {
+            "adaptive": "Adaptive",
+            "compact": "Compact",
+            "inherit": "Inherit",
+        }
+        return labels.get(str(style), str(style).replace("_", " ").title())
+
+    def _log_ping_mode_label(self, mode: str) -> str:
+        labels = {
+            "smart": "Smart",
+            "never": "Never ping",
+            "inherit": "Inherit",
+        }
+        return labels.get(str(mode), str(mode).replace("_", " ").title())
+
+    def _resolved_pack_log_delivery(self, config: dict[str, object], pack: str) -> tuple[str, str, str, str]:
+        pack_overrides = config.get("pack_log_overrides", {})
+        entry = pack_overrides.get(pack, {}) if isinstance(pack_overrides, dict) else {}
+        local_style = str(entry.get("style", "inherit"))
+        local_ping_mode = str(entry.get("ping_mode", "inherit"))
+        global_style = str(config.get("log_style", "adaptive"))
+        global_ping_mode = str(config.get("log_ping_mode", "smart"))
+        effective_style = global_style if local_style == "inherit" else local_style
+        effective_ping_mode = global_ping_mode if local_ping_mode == "inherit" else local_ping_mode
+        return (local_style, local_ping_mode, effective_style, effective_ping_mode)
+
+    def _pack_log_override_summary(self, config: dict[str, object], pack: str) -> str:
+        local_style, local_ping_mode, effective_style, effective_ping_mode = self._resolved_pack_log_delivery(config, pack)
+        return (
+            f"Local style: {self._log_style_label(local_style)} | "
+            f"Local ping: {self._log_ping_mode_label(local_ping_mode)} | "
+            f"Effective: {self._log_style_label(effective_style)} + {self._log_ping_mode_label(effective_ping_mode)}"
+        )
+
     def _pack_exemption_summary(self, config: dict[str, object], pack: str) -> str:
         pack_exemptions = config.get("pack_exemptions", {})
         if not isinstance(pack_exemptions, dict):
@@ -1335,9 +1599,10 @@ class ShieldCog(commands.Cog):
         if pack == "gif":
             return (
                 f"Rule: {config.get('gif_message_threshold', 4)} GIF-heavy posts in {config.get('gif_window_seconds', 20)}s\n"
+                f"Channel streak: {config.get('gif_consecutive_threshold', 5)} GIFs in a row across members\n"
                 f"Repeat pressure: {config.get('gif_repeat_threshold', 3)}+ with {config.get('gif_min_ratio_percent', 70)}% GIF ratio\n"
                 f"Same asset: {config.get('gif_same_asset_threshold', 3)}+ repeats\n"
-                "Delete actions remove the matched GIF burst, not just the last message"
+                "Delete actions remove the matched GIF burst, not just the last message. Collective pressure stays channel-soft: delete the current excess GIF, then log calmly"
             )
         return ""
 
@@ -1514,6 +1779,7 @@ class ShieldCog(commands.Cog):
         if pack == "gif":
             return [
                 f"GIF-heavy rate: {config.get('gif_message_threshold', 4)} posts in {config.get('gif_window_seconds', 20)}s",
+                f"Channel streak: {config.get('gif_consecutive_threshold', 5)} GIFs in a row",
                 f"Repeat pressure: {config.get('gif_repeat_threshold', 3)}+ repeats at {config.get('gif_min_ratio_percent', 70)}% GIF ratio",
                 f"Same asset: {config.get('gif_same_asset_threshold', 3)}+ repeats",
             ]
@@ -2104,35 +2370,89 @@ class ShieldCog(commands.Cog):
         alert_role = f"<@&{config['alert_role_id']}>" if config.get("alert_role_id") else "None"
         embed = discord.Embed(
             title="Shield Logs",
-            description="Moderator delivery stays compact and channel-based.",
+            description="Calm, pack-aware delivery controls keep Shield readable without hiding serious incidents.",
             color=ge.EMBED_THEME["info"],
         )
         embed.add_field(
-            name="Delivery",
+            name="Global Delivery",
             value=(
                 f"Log channel: {log_channel}\n"
                 f"Alert role: {alert_role}\n"
-                "Alerts are deduped so one message does not spam repeated mod notices.\n"
-                "Low-confidence repeated-link notes stay compact and do not ping the alert role.\n"
-                "One-user GIF floods are grouped per offender and incident window, while collective GIF pressure is grouped per channel so one takeover does not create its own log flood."
+                f"Log style: {self._log_style_label(str(config.get('log_style', 'adaptive')))}\n"
+                f"Ping mode: {self._log_ping_mode_label(str(config.get('log_ping_mode', 'smart')))}\n"
+                "Alerts are deduped so one message does not spray repeated moderator notices.\n"
+                "Low-confidence repeated-link notes still stay compact and no-ping in adaptive mode.\n"
+                "Collective GIF pressure always stays channel-level and no-ping, even when GIF high action is stronger."
             ),
             inline=False,
         )
         embed.add_field(
-            name="What Alerts Include",
+            name="Per-Pack Overrides",
             value=(
-                "Full alerts cover meaningful actions or clearly dangerous matches. Low-confidence heuristics are downgraded to compact notes with precise evidence wording.\n"
-                "Moderator notes include the resolved action, compact preview, optional attachment summary, compact evidence, and optional AI second-pass note.\n"
-                "Babblebox does not keep a heavy deleted-message archive in Shield storage."
+                "\n".join(
+                    f"**{PACK_LABELS[pack]}** | {self._pack_log_override_summary(config, pack)}"
+                    for pack in RULE_PANEL_PACKS
+                )
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Behavior Notes",
+            value=(
+                "Compact mode keeps the calmer note layout across Shield packs while preserving detection, reason, preview, and jump context.\n"
+                "Smart ping mode keeps current high-signal ping behavior for serious or actioned incidents.\n"
+                "Never ping mode still logs everything to the configured channel but suppresses alert-role mentions."
             ),
             inline=False,
         )
         embed.add_field(
             name="Quick Use",
-            value="`/shield logs channel:#shield-log role:@Mods`\n`/shield logs clear_channel:true clear_role:true`",
+            value=(
+                "`/shield logs channel:#shield-log role:@Mods style:compact ping_mode:never`\n"
+                "`/shield logs override_pack:gif override_style:compact override_ping_mode:never`\n"
+                "`/shield logs clear_channel:true clear_role:true`"
+            ),
             inline=False,
         )
-        return self._finalize_shield_embed(embed, footer="Babblebox Shield | Log-first and compact by design")
+        return self._finalize_shield_embed(embed, footer="Babblebox Shield | Calm delivery, compact by policy when you want it")
+
+    def _logs_editor_embed(self, guild_id: int, *, selected_pack: str) -> discord.Embed:
+        config = self.service.get_config(guild_id)
+        local_style, local_ping_mode, effective_style, effective_ping_mode = self._resolved_pack_log_delivery(config, selected_pack)
+        embed = discord.Embed(
+            title="Shield Log Delivery",
+            description="Global defaults live at the top. One selected-pack override lives underneath so the editor stays compact.",
+            color=ge.EMBED_THEME["info"],
+        )
+        embed.add_field(
+            name="Global Defaults",
+            value=(
+                f"Style: {self._log_style_label(str(config.get('log_style', 'adaptive')))}\n"
+                f"Ping mode: {self._log_ping_mode_label(str(config.get('log_ping_mode', 'smart')))}\n"
+                "Adaptive keeps today's smart behavior. Compact forces the calmer note layout.\n"
+                "Smart ping preserves current high-signal mentions; Never ping suppresses all alert-role pings."
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name=f"{PACK_LABELS[selected_pack]} Override",
+            value=(
+                f"Local style: {self._log_style_label(local_style)}\n"
+                f"Local ping mode: {self._log_ping_mode_label(local_ping_mode)}\n"
+                f"Effective style: {self._log_style_label(effective_style)}\n"
+                f"Effective ping mode: {self._log_ping_mode_label(effective_ping_mode)}"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Reminder",
+            value=(
+                "Collective GIF pressure still stays channel-level and no-ping even if GIF override ping mode is smart.\n"
+                "Log channel and alert role remain under `/shield logs` so selector-based delivery tuning stays uncluttered here."
+            ),
+            inline=False,
+        )
+        return self._finalize_shield_embed(embed, footer="Babblebox Shield | Pack-aware log delivery editor")
 
     def build_panel_embed(
         self,
@@ -2239,6 +2559,7 @@ class ShieldCog(commands.Cog):
         caps_enabled="Enable or disable the spam pack's optional excessive-capitals lane",
         caps_threshold="Uppercase-letter threshold for the spam pack",
         moderator_policy="How the spam pack should treat moderators by default",
+        consecutive_threshold="Channel-level consecutive GIF threshold for the GIF pack",
         repeat_threshold="Low-text GIF repeat threshold for the GIF pack",
         same_asset_threshold="Same-GIF asset repeat threshold for the GIF pack",
         ratio_percent="Minimum GIF-share ratio for the GIF pack",
@@ -2278,6 +2599,7 @@ class ShieldCog(commands.Cog):
         caps_enabled: Optional[bool] = None,
         caps_threshold: Optional[int] = None,
         moderator_policy: Optional[str] = None,
+        consecutive_threshold: Optional[int] = None,
         repeat_threshold: Optional[int] = None,
         same_asset_threshold: Optional[int] = None,
         ratio_percent: Optional[int] = None,
@@ -2314,6 +2636,7 @@ class ShieldCog(commands.Cog):
                 caps_enabled,
                 caps_threshold,
                 moderator_policy,
+                consecutive_threshold,
                 repeat_threshold,
                 same_asset_threshold,
                 ratio_percent,
@@ -2344,6 +2667,7 @@ class ShieldCog(commands.Cog):
                 caps_enabled=caps_enabled,
                 caps_threshold=caps_threshold,
                 moderator_policy=moderator_policy,
+                consecutive_threshold=consecutive_threshold,
                 repeat_threshold=repeat_threshold,
                 same_asset_threshold=same_asset_threshold,
                 ratio_percent=ratio_percent,
@@ -2480,12 +2804,34 @@ class ShieldCog(commands.Cog):
         await self._send_result(ctx, "Shield Severe Terms", message, ok=ok)
 
     @shield_group.command(name="logs", with_app_command=True, description="Configure Shield log delivery")
-    @app_commands.describe(channel="Channel for Shield alerts", role="Optional role to ping for alerts", clear_channel="Clear the current log channel", clear_role="Clear the current alert role")
+    @app_commands.describe(
+        channel="Channel for Shield alerts",
+        role="Optional role to ping for alerts",
+        style="Global default log layout",
+        ping_mode="Global default alert-role ping behavior",
+        override_pack="Optional per-pack override target",
+        override_style="Override log style for the selected pack",
+        override_ping_mode="Override ping behavior for the selected pack",
+        clear_channel="Clear the current log channel",
+        clear_role="Clear the current alert role",
+    )
+    @app_commands.choices(
+        style=LOG_STYLE_CHOICES,
+        ping_mode=LOG_PING_MODE_CHOICES,
+        override_pack=PACK_CHOICES,
+        override_style=PACK_LOG_STYLE_CHOICES,
+        override_ping_mode=PACK_LOG_PING_CHOICES,
+    )
     async def shield_logs_command(
         self,
         ctx: commands.Context,
         channel: Optional[discord.TextChannel] = None,
         role: Optional[discord.Role] = None,
+        style: Optional[str] = None,
+        ping_mode: Optional[str] = None,
+        override_pack: Optional[str] = None,
+        override_style: Optional[str] = None,
+        override_ping_mode: Optional[str] = None,
         clear_channel: bool = False,
         clear_role: bool = False,
     ):
@@ -2501,6 +2847,23 @@ class ShieldCog(commands.Cog):
             role_ok, role_message = await self.service.set_alert_role(ctx.guild.id, None if clear_role else role.id)
             ok = ok and role_ok
             messages.append(role_message)
+        if style is not None or ping_mode is not None:
+            delivery_ok, delivery_message = await self.service.set_log_delivery(ctx.guild.id, style=style, ping_mode=ping_mode)
+            ok = ok and delivery_ok
+            messages.append(delivery_message)
+        if override_pack is not None or override_style is not None or override_ping_mode is not None:
+            if override_pack is None:
+                ok = False
+                messages.append("Choose `override_pack` when saving a per-pack Shield log override.")
+            else:
+                override_ok, override_message = await self.service.set_pack_log_override(
+                    ctx.guild.id,
+                    override_pack,
+                    style=override_style,
+                    ping_mode=override_ping_mode,
+                )
+                ok = ok and override_ok
+                messages.append(override_message)
         if not messages:
             await send_hybrid_response(ctx, embed=self._logs_embed(ctx.guild.id), ephemeral=True)
             return
