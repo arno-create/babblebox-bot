@@ -7,10 +7,9 @@ from discord import app_commands
 ADMIN_ROOT_CONTEXTS = app_commands.AppCommandContext(guild=True, dm_channel=False, private_channel=False)
 ADMIN_ROOT_INSTALLS = app_commands.AppInstallationType(guild=True, user=False)
 ADMIN_ROOT_PERMISSIONS = discord.Permissions(manage_guild=True)
-LOCK_ROOT_PERMISSIONS = discord.Permissions(manage_channels=True)
 
 
-def _harden_root_group(command: object, *, default_permissions: discord.Permissions) -> None:
+def _harden_root_group(command: object, *, default_permissions: discord.Permissions | None) -> None:
     app_command = getattr(command, "app_command", command)
     if not isinstance(app_command, app_commands.Group):
         return
@@ -26,4 +25,6 @@ def harden_admin_root_group(command: object) -> None:
 
 
 def harden_lock_root_group(command: object) -> None:
-    _harden_root_group(command, default_permissions=LOCK_ROOT_PERMISSIONS)
+    # Discord treats default_member_permissions as a required bitset, so `/lock`
+    # cannot publish Babblebox's intended moderator-or-admin runtime rule there.
+    _harden_root_group(command, default_permissions=None)

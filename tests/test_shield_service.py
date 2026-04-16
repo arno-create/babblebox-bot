@@ -1621,9 +1621,13 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
 
         expectations = {
             "kill yourself": "self_harm_encouragement",
+            "go jump off a bridge": "self_harm_encouragement",
             "DM me for CSAM prices": "sexual_exploitation_solicitation",
             "exterminate jews": "eliminationist_hate",
+            "all muslims are animals": "eliminationist_hate",
+            "all trans people should be wiped out": "eliminationist_hate",
             "you retard": "severe_slur_abuse",
+            "you are human garbage": "targeted_extreme_degradation",
         }
         for text, expected_class in expectations.items():
             with self.subTest(text=text):
@@ -1642,6 +1646,12 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
             'moderation note: user said "kill yourself"',
             "mods deleted you retard spam",
             "report this ad: DM me for CSAM prices",
+            "the phrase kill yourself is bannable here",
+            "saying kill yourself gets you banned",
+            "quote: retard",
+            "user said go die in DMs",
+            "mods said you retard is banned",
+            "example: you filthy kike",
             "please do not tell people to kill yourself",
             "please do not call people retard",
             "shut up",
@@ -1654,12 +1664,12 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_severe_pack_high_sensitivity_adds_extreme_degradation_layer(self):
         ok, _ = await self.service.set_pack_config(10, "severe", enabled=True, action="delete_log", sensitivity="normal")
         self.assertTrue(ok)
-        normal_result = self.service.test_message_details(10, "those immigrants are vermin")
+        normal_result = self.service.test_message_details(10, "those immigrants, absolute vermin")
         self.assertFalse([match for match in normal_result.matches if match.pack == "severe"])
 
         ok, _ = await self.service.set_pack_config(10, "severe", enabled=True, action="delete_log", sensitivity="high")
         self.assertTrue(ok)
-        high_result = self.service.test_message_details(10, "those immigrants are vermin")
+        high_result = self.service.test_message_details(10, "those immigrants, absolute vermin")
         severe_matches = [match for match in high_result.matches if match.pack == "severe"]
         self.assertTrue(severe_matches)
         self.assertEqual(severe_matches[0].match_class, "eliminationist_hate")
@@ -2116,8 +2126,174 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIsNotNone(final)
         self.assertEqual(final.pack, "gif")
+        self.assertEqual(final.action, "delete_log")
+        self.assertTrue(final.deleted)
+        self.assertEqual(final.deleted_count, 1)
+        self.assertFalse(final.timed_out)
         self.assertIn("spam_group_gif_pressure", {reason.match_class for reason in final.reasons})
         self.assertIn("gif-heavy posts from 3 members", final.alert_evidence_summary.lower())
+        self.assertIn("meaningful text messages", final.alert_evidence_summary.lower())
+        self.assertIn("soft suppression only", (final.action_note or "").lower())
+
+    async def test_collective_gif_pressure_only_deletes_current_excess_posts(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        authors = [self._make_member(guild, 820 + index) for index in range(3)]
+        messages = [
+            FakeMessage(guild=guild, channel=channel, author=authors[0], content="https://tenor.com/view/cat-dance-gif-1000"),
+            FakeMessage(guild=guild, channel=channel, author=authors[1], content="https://tenor.com/view/cat-dance-gif-1000"),
+            FakeMessage(guild=guild, channel=channel, author=authors[2], content="https://tenor.com/view/cat-dance-gif-1000"),
+            FakeMessage(guild=guild, channel=channel, author=authors[0], content="https://tenor.com/view/hype-gif-2000"),
+            FakeMessage(guild=guild, channel=channel, author=authors[1], content="https://tenor.com/view/hype-gif-2000"),
+            FakeMessage(guild=guild, channel=channel, author=authors[2], content="https://tenor.com/view/hype-gif-2000"),
+        ]
+
+        await self._enable_gif_pack(guild.id, medium_action="delete_log", high_action="delete_timeout_log")
+
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            decisions = [await self.service.handle_message(message) for message in messages]
+
+        self.assertEqual(decisions[:4], [None, None, None, None])
+        self.assertTrue(messages[4].deleted)
+        self.assertTrue(messages[5].deleted)
+        self.assertFalse(any(message.deleted for message in messages[:4]))
+        self.assertEqual(decisions[4].deleted_count, 1)
+        self.assertEqual(decisions[5].deleted_count, 1)
+        self.assertFalse(decisions[4].timed_out)
+        self.assertFalse(decisions[5].timed_out)
+
+    async def test_collective_gif_pressure_low_value_replies_do_not_hide_channel_takeover(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+
+        await self._enable_gif_pack(guild.id)
+
+        final = None
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            for user_id, content in (
+                (840, "https://tenor.com/view/g1"),
+                (841, "lol"),
+                (842, "https://tenor.com/view/g2"),
+                (843, "nice"),
+                (840, "https://tenor.com/view/g3"),
+                (841, "haha"),
+                (842, "https://tenor.com/view/g4"),
+                (843, "yep"),
+                (840, "https://tenor.com/view/g5"),
+                (842, "https://tenor.com/view/g6"),
+            ):
+                final = await self.service.handle_message(
+                    FakeMessage(
+                        guild=guild,
+                        channel=channel,
+                        author=FakeAuthor(user_id, roles=[FakeRole(11, position=1)]),
+                        content=content,
+                    )
+                )
+
+        self.assertIsNotNone(final)
+        self.assertEqual(final.reasons[0].match_class, "spam_group_gif_pressure")
+
+    async def test_meaningful_text_balances_group_gif_pressure_and_keeps_fun_chat_safe(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+
+        await self._enable_gif_pack(guild.id)
+
+        decisions = []
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            for user_id, content in (
+                (850, "https://tenor.com/view/g1"),
+                (851, "that deploy finally landed"),
+                (852, "https://tenor.com/view/g2"),
+                (853, "nice work team"),
+                (850, "https://tenor.com/view/g3"),
+                (851, "the rollback stayed clean"),
+                (852, "https://tenor.com/view/g4"),
+                (853, "great catch on the logs"),
+                (850, "https://tenor.com/view/g5"),
+                (852, "https://tenor.com/view/g6"),
+            ):
+                decisions.append(
+                    await self.service.handle_message(
+                        FakeMessage(
+                            guild=guild,
+                            channel=channel,
+                            author=FakeAuthor(user_id, roles=[FakeRole(11, position=1)]),
+                            content=content,
+                        )
+                    )
+                )
+
+        self.assertEqual([decision for decision in decisions if decision is not None], [])
+
+    async def test_collective_gif_pressure_logs_group_once_per_channel(self):
+        guild = FakeGuild(10)
+        public_channel = FakeChannel(20)
+        log_channel = FakeChannel(99, name="shield-log")
+        self.bot.register_channel(log_channel)
+        authors = [self._make_member(guild, 860 + index) for index in range(3)]
+
+        await self._enable_gif_pack(guild.id, medium_action="delete_log", high_action="delete_timeout_log")
+        ok, _ = await self.service.set_log_channel(guild.id, log_channel.id)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_alert_role(guild.id, 777)
+        self.assertTrue(ok)
+
+        decisions = []
+        for author, content in (
+            (authors[0], "https://tenor.com/view/cat-dance-gif-1000"),
+            (authors[1], "https://tenor.com/view/cat-dance-gif-1000"),
+            (authors[2], "https://tenor.com/view/cat-dance-gif-1000"),
+            (authors[0], "https://tenor.com/view/hype-gif-2000"),
+            (authors[1], "https://tenor.com/view/hype-gif-2000"),
+            (authors[2], "https://tenor.com/view/hype-gif-2000"),
+        ):
+            decisions.append(
+                await self.service.handle_message(
+                    FakeMessage(guild=guild, channel=public_channel, author=author, content=content)
+                )
+            )
+
+        self.assertEqual(len(log_channel.sent), 1)
+        self.assertEqual(len(log_channel.edits), 0)
+        self.assertIsNone(log_channel.sent[0]["content"])
+        embed = log_channel.sent[0]["embed"]
+        note_field = next(field for field in embed.fields if field.name == "Operational Note")
+        self.assertIn("soft suppression only", note_field.value.lower())
+        reason_field = next(field for field in embed.fields if field.name == "Reason")
+        self.assertIn("meaningful text messages", reason_field.value.lower())
+        self.assertTrue(any(decision is not None for decision in decisions[-2:]))
+
+    async def test_individual_gif_abuse_can_still_win_inside_collective_pressure(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        authors = {
+            "heavy": self._make_member(guild, 880),
+            "light_a": self._make_member(guild, 881),
+            "light_b": self._make_member(guild, 882),
+        }
+
+        await self._enable_gif_pack(guild.id, medium_action="delete_log", high_action="delete_timeout_log")
+
+        final = None
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            for author, content in (
+                (authors["heavy"], "https://tenor.com/view/g1"),
+                (authors["light_a"], "https://tenor.com/view/g2"),
+                (authors["heavy"], "https://tenor.com/view/g3"),
+                (authors["light_b"], "https://tenor.com/view/g4"),
+                (authors["heavy"], "https://tenor.com/view/g5"),
+                (authors["heavy"], "https://tenor.com/view/g6"),
+            ):
+                final = await self.service.handle_message(
+                    FakeMessage(guild=guild, channel=channel, author=author, content=content)
+                )
+
+        self.assertIsNotNone(final)
+        self.assertEqual(final.reasons[0].match_class, "spam_gif_flood")
+        self.assertIn("spam_group_gif_pressure", {reason.match_class for reason in final.reasons})
+        self.assertIn("personal gif-abuse threshold", (final.action_note or "").lower())
 
     async def test_gif_pack_runs_even_when_spam_pack_is_disabled(self):
         guild = FakeGuild(10)

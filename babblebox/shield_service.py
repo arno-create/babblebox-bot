@@ -84,6 +84,7 @@ from babblebox.text_safety import (
     find_safety_term_hits,
     fold_confusable_text,
     is_harmful_context_suppressed,
+    is_severe_reference_context,
     normalize_plain_text,
     sanitize_short_plain_text,
     squash_for_evasion_checks,
@@ -128,6 +129,12 @@ SPAM_GIF_REPEAT_WINDOW_SECONDS = 30.0
 GROUP_GIF_PRESSURE_WINDOW_SECONDS = 20.0
 HEALTHY_CHAT_WINDOW_SECONDS = 20.0
 HEALTHY_CHAT_AUTHOR_THRESHOLD = 4
+GROUP_GIF_MIN_MESSAGES = 5
+GROUP_GIF_MULTI_AUTHOR_RATIO = 0.72
+GROUP_GIF_TWO_AUTHOR_MIN_MESSAGES = 6
+GROUP_GIF_TWO_AUTHOR_RATIO = 0.80
+GROUP_GIF_REPEAT_SOURCE_THRESHOLD = 4
+GROUP_GIF_REPEAT_SOURCE_RATIO = 0.67
 GIF_EMBED_DOMAINS = frozenset({"tenor.com", "media.tenor.com", "giphy.com", "media.giphy.com"})
 RECENT_ACCOUNT_WINDOW = timedelta(days=7)
 EARLY_MEMBER_WINDOW = timedelta(days=1)
@@ -347,7 +354,17 @@ SEVERE_CHILD_ABUSE_ROUTING_RE = re.compile(
     r"(?i)\b(?:dm(?:s)?(?: me)?|message me|msg me|pm me|inbox me|telegram|trade|trading|sell(?:ing)?|buy|prices?|menu|collection|folder|drop|dropbox|send)\b"
 )
 SEVERE_SELF_HARM_LOW_TERMS = frozenset({"end your life", "kill yourself", "kys", "off yourself"})
-SEVERE_SELF_HARM_NORMAL_TERMS = frozenset({"drink bleach", "go die", "hang yourself", "slit your wrists", "you should die"})
+SEVERE_SELF_HARM_NORMAL_TERMS = frozenset(
+    {
+        "drink bleach",
+        "go die",
+        "go jump off a bridge",
+        "go jump off a cliff",
+        "hang yourself",
+        "slit your wrists",
+        "you should die",
+    }
+)
 SEVERE_SELF_HARM_HIGH_TERMS = frozenset({"nobody would miss you if you died", "the world would be better if you were dead"})
 SEVERE_SELF_HARM_NEGATION_RE = re.compile(
     r"(?i)\b(?:do not|don't|dont|never|please don't|please do not)\b.{0,10}\b(?:kill yourself|kys|off yourself|end your life|go die|you should die)\b"
@@ -357,15 +374,39 @@ SEVERE_PROTECTED_GROUP_RE = re.compile(
     r"(?i)\b(?:asians?|black people|blacks|disabled people|gays?|immigrants?|jews?|latinos?|lesbians?|mexicans?|muslims?|queers?|trans(?: people)?|transgender(?: people)?)\b"
 )
 SEVERE_ELIMINATION_RE = re.compile(
-    r"(?i)\b(?:eradicate|exterminate|gas|kill all|lynch|purge|should die|should not exist|wipe out|wipe them out)\b"
+    r"(?i)\b(?:eradicate|eradicated|exterminate|exterminated|gas|kill all|lynch|purge|should die|should not exist|wipe out|wipe them out|wiped out|wiping out|wiping them out|should be wiped out|should be exterminated)\b"
 )
 SEVERE_DEHUMANIZING_RE = re.compile(r"(?i)\b(?:animals|cockroaches|filth|parasites|subhuman|vermin)\b")
+SEVERE_GROUP_DEHUMANIZING_RE = re.compile(
+    r"(?i)\b(?:are|r|be|being)\s+(?:just\s+|literal(?:ly)?\s+|filthy\s+)?(?:animals|cockroaches|filth|parasites|subhuman|vermin)\b"
+)
 SEVERE_TARGETING_RE = re.compile(
     r"(?i)\b(?:you|your|you['’]re|you are|u|ur|he|she|they|them|that person|this person|mods?|admins?|member|user)\b"
 )
-SEVERE_SLUR_LOW_TERMS = frozenset({"chink", "faggot", "gook", "kike", "n1gg3r", "n1gg@", "n1gga", "n1gger", "nigga", "nigger", "spic", "wetback"})
+SEVERE_SLUR_LOW_TERMS = frozenset(
+    {
+        "beaner",
+        "chink",
+        "faggot",
+        "gook",
+        "kike",
+        "n1gg3r",
+        "n1gg@",
+        "n1gga",
+        "n1gger",
+        "nigga",
+        "nigger",
+        "raghead",
+        "spic",
+        "towelhead",
+        "wetback",
+    }
+)
 SEVERE_SLUR_NORMAL_TERMS = frozenset({"coon", "cripple", "dyke", "mongoloid", "paki", "retard", "tranny"})
 SEVERE_DEGRADING_TERMS = frozenset({"human garbage", "subhuman", "vermin", "worthless trash"})
+SEVERE_TARGETED_DEGRADING_RE = re.compile(
+    r"(?i)\b(?:you|you['ƒ?T]re|you are|u|ur|he|she|they|that person|this person)\b.{0,20}\b(?:human garbage|subhuman|vermin|worthless trash)\b"
+)
 SEVERE_REMOVABLE_DEFAULT_TERMS = frozenset(
     set(SEVERE_CHILD_ABUSE_TERMS)
     | set(SEVERE_SELF_HARM_LOW_TERMS)
@@ -3400,35 +3441,51 @@ class ShieldService:
         ]
         if not gif_rows:
             return None
+        pressure_rows = [row for row in gif_rows if row[3] or row[4]]
+        if not pressure_rows:
+            return None
         activity_rows = [
             row
             for row in self._recent_channel_activity.get(key, [])
             if now - row.timestamp <= GROUP_GIF_PRESSURE_WINDOW_SECONDS
         ]
-        distinct_gif_authors = {author_id for _timestamp, author_id, _signature, _gif_only, _gif_low_text in gif_rows}
-        low_text_gifs = sum(1 for _timestamp, _author_id, _signature, gif_only, gif_low_text in gif_rows if gif_only or gif_low_text)
-        total_messages = len(activity_rows)
-        gif_ratio = len(gif_rows) / max(1, total_messages)
+        distinct_gif_authors = {author_id for _timestamp, author_id, _signature, _gif_only, _gif_low_text in pressure_rows}
+        meaningful_text_rows = [row for row in activity_rows if not row.is_gif_message and row.quality_message]
+        meaningful_text_count = len(meaningful_text_rows)
+        gif_ratio = len(pressure_rows) / max(1, len(pressure_rows) + meaningful_text_count)
         signature_counts: dict[str, int] = {}
-        for _timestamp, _author_id, signature, _gif_only, _gif_low_text in gif_rows:
+        for _timestamp, _author_id, signature, _gif_only, _gif_low_text in pressure_rows:
             if signature:
                 signature_counts[signature] = signature_counts.get(signature, 0) + 1
         repeated_source = max(signature_counts.values(), default=0)
-        minimum_authors = 2
-        minimum_messages = max(5, compiled.gif_rules.message_threshold + 1)
-        minimum_ratio = max(0.65, compiled.gif_rules.min_ratio_percent / 100.0)
-        if (
-            len(distinct_gif_authors) < minimum_authors
-            or len(gif_rows) < minimum_messages
-            or low_text_gifs < max(4, minimum_messages - 1)
-            or gif_ratio < minimum_ratio
-        ):
+        multi_author_trigger = (
+            len(distinct_gif_authors) >= 3
+            and len(pressure_rows) >= GROUP_GIF_MIN_MESSAGES
+            and gif_ratio >= GROUP_GIF_MULTI_AUTHOR_RATIO
+        )
+        two_author_trigger = (
+            len(distinct_gif_authors) >= 2
+            and len(pressure_rows) >= GROUP_GIF_TWO_AUTHOR_MIN_MESSAGES
+            and gif_ratio >= GROUP_GIF_TWO_AUTHOR_RATIO
+        )
+        repeated_source_trigger = (
+            len(distinct_gif_authors) >= 2
+            and len(pressure_rows) >= GROUP_GIF_REPEAT_SOURCE_THRESHOLD
+            and repeated_source >= GROUP_GIF_REPEAT_SOURCE_THRESHOLD
+            and gif_ratio >= GROUP_GIF_REPEAT_SOURCE_RATIO
+        )
+        if not any((multi_author_trigger, two_author_trigger, repeated_source_trigger)):
             return None
-        summary = f"{len(gif_rows)} GIF-heavy posts from {len(distinct_gif_authors)} members drowned the channel inside 20 seconds."
-        if repeated_source >= 3:
+        ratio_percent = int(round(gif_ratio * 100))
+        summary = (
+            f"{len(pressure_rows)} GIF-heavy posts from {len(distinct_gif_authors)} members overwhelmed only "
+            f"{meaningful_text_count} meaningful text messages inside 20 seconds ({ratio_percent}% GIF pressure)."
+        )
+        if repeated_source_trigger:
             summary = (
-                f"{len(gif_rows)} GIF-heavy posts from {len(distinct_gif_authors)} members repeated the same GIF source "
-                f"{repeated_source} times inside 20 seconds."
+                f"{len(pressure_rows)} GIF-heavy posts from {len(distinct_gif_authors)} members repeated the same GIF source "
+                f"{repeated_source} times while only {meaningful_text_count} meaningful text messages landed inside 20 seconds "
+                f"({ratio_percent}% GIF pressure)."
             )
         signature_seed = "|".join(
             sorted(signature for signature in signature_counts)[:3]
@@ -3436,6 +3493,11 @@ class ShieldService:
         )
         return {
             "reason": summary,
+            "gif_posts": len(pressure_rows),
+            "meaningful_text_posts": meaningful_text_count,
+            "ratio_percent": ratio_percent,
+            "distinct_authors": len(distinct_gif_authors),
+            "repeated_source": repeated_source,
             "signature": hashlib.sha1(f"group_gif|{channel_id}|{signature_seed}".encode("utf-8")).hexdigest(),
         }
 
@@ -3898,6 +3960,8 @@ class ShieldService:
                 heuristic=True,
                 match_class=fact["match_class"],
             )
+            if match.match_class == "spam_group_gif_pressure":
+                match = self._cap_group_gif_action(match)
             matches.append(match)
         return self._dedupe_matches(matches)
 
@@ -4032,6 +4096,16 @@ class ShieldService:
         if best.pack == "spam" and self._member_is_moderator(getattr(message, "author", None)):
             if compiled.spam_rules.moderator_policy == "delete_only" and best.action == "delete_log":
                 moderator_spam_policy_note = "Moderator anti-spam policy capped this incident at delete + log."
+        gif_group_note = None
+        if any(item.match_class == "spam_group_gif_pressure" for item in decision.reasons):
+            if best.match_class == "spam_group_gif_pressure":
+                gif_group_note = (
+                    "Collective channel GIF pressure triggered soft suppression only; Babblebox did not add strikes or time out members on the group signal alone."
+                )
+            elif best.pack == "gif":
+                gif_group_note = (
+                    "Channel-wide GIF pressure was also active, but the resolved action followed this member's personal GIF-abuse threshold."
+                )
 
         if best.action.startswith("delete"):
             delete_targets = self._collect_incident_messages(
@@ -4087,6 +4161,11 @@ class ShieldService:
             decision.action_note = "Repeated-hit escalation is reserved for actionable medium/high-confidence spam, GIF, and scam patterns."
         if moderator_spam_policy_note is not None and decision.action_note is None:
             decision.action_note = moderator_spam_policy_note
+        if gif_group_note is not None:
+            if decision.action_note:
+                decision.action_note = f"{decision.action_note} {gif_group_note}"
+            else:
+                decision.action_note = gif_group_note
 
         if self._should_request_ai_review(compiled, decision):
             request = self._build_ai_review_request(
@@ -4459,6 +4538,18 @@ class ShieldService:
             match_class=match.match_class,
         )
 
+    def _cap_group_gif_action(self, match: ShieldMatch) -> ShieldMatch:
+        capped_action = "delete_log" if match.action.startswith("delete") or match.action in {"timeout_log", "delete_timeout_log", "delete_escalate"} else "log"
+        return ShieldMatch(
+            pack=match.pack,
+            label=match.label,
+            reason=match.reason,
+            action=capped_action,
+            confidence=match.confidence,
+            heuristic=match.heuristic,
+            match_class=match.match_class,
+        )
+
     def _apply_spam_moderator_policy(
         self,
         compiled: CompiledShieldConfig,
@@ -4531,6 +4622,8 @@ class ShieldService:
             return [message]
 
         selected_events: list[ShieldSpamEvent]
+        if match.match_class == "spam_group_gif_pressure":
+            return [message]
         if match.pack == "gif":
             selected_events = [
                 event
@@ -4867,7 +4960,7 @@ class ShieldService:
             return []
         text = fold_confusable_text(snapshot.context_text)
         squashed = squash_for_evasion_checks(text)
-        if not text or is_harmful_context_suppressed(text, include_disapproval=True):
+        if not text:
             return []
         matches: list[ShieldMatch] = []
         matches.extend(self._detect_severe_sexual_exploitation(compiled, text, squashed))
@@ -4886,6 +4979,8 @@ class ShieldService:
             return []
         hits = find_safety_term_hits(self._active_severe_terms(compiled, SEVERE_CHILD_ABUSE_TERMS), text, squashed)
         if not hits or not SEVERE_CHILD_ABUSE_ROUTING_RE.search(text):
+            return []
+        if is_severe_reference_context(text, matched_terms=hits):
             return []
         confidence = "high" if any(hit in {"cp", "csam", "csem", "child porn", "child pornography"} for hit in hits) else "medium"
         return [
@@ -4908,7 +5003,7 @@ class ShieldService:
     ) -> list[ShieldMatch]:
         if "self_harm_encouragement" not in compiled.severe_enabled_categories:
             return []
-        if SEVERE_SELF_HARM_NEGATION_RE.search(text) or SEVERE_SUPPORT_CONTEXT_RE.search(text):
+        if SEVERE_SELF_HARM_NEGATION_RE.search(text):
             return []
         low_terms = self._active_severe_terms(compiled, SEVERE_SELF_HARM_LOW_TERMS)
         normal_terms = self._active_severe_terms(compiled, SEVERE_SELF_HARM_NORMAL_TERMS)
@@ -4920,6 +5015,10 @@ class ShieldService:
             active_terms.update(high_terms)
         hits = find_safety_term_hits(frozenset(active_terms), text, squashed)
         if not hits:
+            return []
+        if is_severe_reference_context(text, matched_terms=hits):
+            return []
+        if SEVERE_SUPPORT_CONTEXT_RE.search(text) and is_harmful_context_suppressed(text, include_disapproval=True):
             return []
         confidence = "high" if any(hit in low_terms for hit in hits) else "medium" if any(hit in normal_terms for hit in hits) else "low"
         return [
@@ -4939,8 +5038,12 @@ class ShieldService:
             return []
         if not SEVERE_PROTECTED_GROUP_RE.search(text):
             return []
+        if is_severe_reference_context(text):
+            return []
         if SEVERE_ELIMINATION_RE.search(text):
             confidence = "high"
+        elif SEVERE_GROUP_DEHUMANIZING_RE.search(text):
+            confidence = "medium"
         elif compiled.severe.sensitivity == "high" and SEVERE_DEHUMANIZING_RE.search(text):
             confidence = "low"
         else:
@@ -4972,6 +5075,8 @@ class ShieldService:
             active_terms.update(normal_terms)
         active_terms.update(compiled.severe_custom_terms)
         hits = find_safety_term_hits(frozenset(active_terms), text, squashed)
+        if hits and is_severe_reference_context(text, matched_terms=hits):
+            return []
         targeted = bool(SEVERE_TARGETING_RE.search(text))
         standalone = len([part for part in text.split(" ") if part]) <= 4
         if hits and (targeted or standalone):
@@ -4987,20 +5092,22 @@ class ShieldService:
                     match_class="severe_slur_abuse",
                 )
             ]
-        if compiled.severe.sensitivity == "high":
-            degrading_hits = find_safety_term_hits(SEVERE_DEGRADING_TERMS, text, squashed)
-            if degrading_hits and targeted:
-                return [
-                    self._make_pack_match(
-                        pack="severe",
-                        settings=compiled.severe,
-                        label="Extreme degrading abuse",
-                        reason="Targeted dehumanizing abuse crossed the severe-harm threshold.",
-                        confidence="low",
-                        heuristic=True,
-                        match_class="targeted_extreme_degradation",
-                    )
-                ]
+        degrading_hits = find_safety_term_hits(SEVERE_DEGRADING_TERMS, text, squashed)
+        if degrading_hits and is_severe_reference_context(text, matched_terms=degrading_hits):
+            return []
+        explicit_targeted_degradation = bool(SEVERE_TARGETED_DEGRADING_RE.search(text))
+        if explicit_targeted_degradation or (compiled.severe.sensitivity == "high" and degrading_hits and targeted):
+            return [
+                self._make_pack_match(
+                    pack="severe",
+                    settings=compiled.severe,
+                    label="Extreme degrading abuse",
+                    reason="Targeted dehumanizing abuse crossed the severe-harm threshold.",
+                    confidence="medium" if explicit_targeted_degradation else "low",
+                    heuristic=True,
+                    match_class="targeted_extreme_degradation",
+                )
+            ]
         return []
 
     def _link_is_trusted_under_policy(
@@ -6149,6 +6256,8 @@ class ShieldService:
     def _should_ping_alert_role(self, decision: ShieldDecision, top_reason: ShieldMatch | None) -> bool:
         if top_reason is None or self._should_use_compact_alert(decision, top_reason):
             return False
+        if top_reason.match_class == "spam_group_gif_pressure":
+            return False
         if decision.deleted or decision.timed_out or decision.escalated:
             return True
         return bool(top_reason.pack in {"scam", "adult"} and top_reason.confidence == "high")
@@ -6213,14 +6322,31 @@ class ShieldService:
         self,
         message: discord.Message,
         decision: ShieldDecision,
-    ) -> tuple[int, int, int] | None:
+    ) -> tuple[Any, ...] | None:
         if decision.pack != "gif" or getattr(message, "guild", None) is None:
             return None
         channel_id = getattr(getattr(message, "channel", None), "id", None)
-        author_id = getattr(getattr(message, "author", None), "id", None)
-        if not isinstance(channel_id, int) or not isinstance(author_id, int) or author_id <= 0:
+        if not isinstance(channel_id, int):
             return None
-        return (message.guild.id, channel_id, author_id)
+        top_reason = decision.reasons[0] if decision.reasons else None
+        if top_reason is not None and top_reason.match_class == "spam_group_gif_pressure":
+            return ("channel", message.guild.id, channel_id)
+        author_id = getattr(getattr(message, "author", None), "id", None)
+        if not isinstance(author_id, int) or author_id <= 0:
+            return None
+        return ("member", message.guild.id, channel_id, author_id)
+
+    def _gif_incident_note(self, incident_key: tuple[Any, ...], hits: int) -> str:
+        if incident_key and incident_key[0] == "channel":
+            return (
+                f"Grouped with **{hits}** channel-level GIF-pressure matches inside the current "
+                f"{int(GIF_INCIDENT_WINDOW_SECONDS)}s incident window. Babblebox kept this collective and only suppressed "
+                "the excess GIF posts instead of punishing members on the group signal alone."
+            )
+        return (
+            f"Grouped with **{hits}** GIF-heavy posts from this member inside the current "
+            f"{int(GIF_INCIDENT_WINDOW_SECONDS)}s incident window. Severity was raised as the incident continued."
+        )
 
     def _gif_incident_rank(self, decision: ShieldDecision, top_reason: ShieldMatch | None) -> int:
         if decision.timed_out:
@@ -6399,10 +6525,7 @@ class ShieldService:
                     return
                 embed.add_field(
                     name="Incident",
-                    value=(
-                        f"Grouped with **{hits}** GIF-heavy posts from this member inside the current "
-                        f"{int(GIF_INCIDENT_WINDOW_SECONDS)}s incident window. Severity was raised as the incident continued."
-                    ),
+                    value=self._gif_incident_note(gif_incident_key, hits),
                     inline=False,
                 )
                 existing_message_id = incident_state.get("log_message_id")

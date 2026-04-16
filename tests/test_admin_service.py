@@ -771,6 +771,43 @@ class AdminServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(channel.overwrites_for(self.guild.default_role).send_messages)
         self.assertEqual(self._last_log_embed().title, "Channel Unlocked")
 
+    async def test_due_channel_locks_clear_missing_guild_rows_and_reach_later_live_lock_same_sweep(self):
+        actor = self._admin_actor()
+        live_channel = FakeChannel(500)
+        self.guild.channels[live_channel.id] = live_channel
+
+        locked, _ = await self.service.lock_channel(self.guild, live_channel, actor=actor, duration_text="30m", post_notice=False)
+        self.assertTrue(locked)
+        live_record = await self.store.fetch_channel_lock(self.guild.id, live_channel.id)
+        self.assertIsNotNone(live_record)
+
+        due_at = ge.now_utc() - timedelta(minutes=1)
+        live_record["due_at"] = serialize_datetime(due_at)
+        await self.store.upsert_channel_lock(live_record)
+
+        for channel_id in range(1, 61):
+            await self.store.upsert_channel_lock(
+                {
+                    "guild_id": 9999,
+                    "channel_id": channel_id,
+                    "actor_id": None,
+                    "created_at": serialize_datetime(due_at - timedelta(minutes=5)),
+                    "due_at": serialize_datetime(due_at),
+                    "category_id": None,
+                    "permissions_synced": False,
+                    "locked_permissions": ["send_messages"],
+                    "original_permissions": {"send_messages": True},
+                }
+            )
+
+        processed = await self.service._process_due_channel_locks(ge.now_utc())
+
+        self.assertTrue(processed)
+        for channel_id in range(1, 61):
+            self.assertIsNone(await self.store.fetch_channel_lock(9999, channel_id))
+        self.assertIsNone(await self.store.fetch_channel_lock(self.guild.id, live_channel.id))
+        self.assertIsNone(live_channel.overwrites_for(self.guild.default_role).send_messages)
+
     async def test_remove_channel_lock_refuses_when_category_changes(self):
         actor = self._admin_actor()
         category_before = types.SimpleNamespace(id=201)

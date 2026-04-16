@@ -100,6 +100,15 @@ LOCK_NOTICE_FALLBACK = (
     "It will be unlocked as soon as we resolve the issue. "
     "Thank you for your patience and understanding."
 )
+LOCK_MODERATOR_PERMISSION_NAMES = (
+    "manage_channels",
+    "manage_messages",
+    "moderate_members",
+    "kick_members",
+    "ban_members",
+)
+LOCK_ADMIN_ONLY_ACCESS_SUMMARY = "Admins only"
+LOCK_MODERATOR_ACCESS_SUMMARY = "Moderators who can manage channels or messages, timeout, kick, or ban members, plus admins"
 FOLLOWUP_DURATION_RE = re.compile(r"(?ix)^\s*(\d+)\s*(d|day|days|w|week|weeks|mo|mon|month|months|y|yr|year|years)\s*$")
 VERIFICATION_REVIEW_DELAY_SECONDS = 24 * 3600
 
@@ -765,8 +774,8 @@ class AdminService:
     def lock_access_summary(self, guild_id: int) -> str:
         compiled = self.get_compiled_config(guild_id)
         if compiled.lock_admin_only:
-            return "Admins only"
-        return "Moderators with Manage Channels, plus admins"
+            return LOCK_ADMIN_ONLY_ACCESS_SUMMARY
+        return LOCK_MODERATOR_ACCESS_SUMMARY
 
     async def set_lock_config(
         self,
@@ -793,7 +802,7 @@ class AdminService:
         final_notice = preview["lock_notice_template"] if notice_value is ... else notice_value
         final_admin_only = preview["lock_admin_only"] if admin_only is None else bool(admin_only)
         notice_label = "Custom" if final_notice else "Babblebox default"
-        access_label = "Admins only" if final_admin_only else "Moderators with Manage Channels, plus admins"
+        access_label = LOCK_ADMIN_ONLY_ACCESS_SUMMARY if final_admin_only else LOCK_MODERATOR_ACCESS_SUMMARY
         return await self._update_config(
             guild_id,
             mutate,
@@ -3376,46 +3385,54 @@ class AdminService:
 
     async def _process_due_channel_locks(self, now: datetime) -> bool:
         processed = False
-        for record in await self.store.list_due_channel_locks(now, limit=50):
-            guild = self.bot.get_guild(int(record["guild_id"]))
-            if guild is None:
-                continue
-            channel = self._guild_channel(guild, int(record["channel_id"]))
-            compiled = self.get_compiled_config(guild.id)
-            if channel is None:
-                await self.store.delete_channel_lock(guild.id, int(record["channel_id"]))
-                await self.send_log(
+        while True:
+            due_records = await self.store.list_due_channel_locks(now, limit=50)
+            if not due_records:
+                break
+            for record in due_records:
+                guild_id = int(record["guild_id"])
+                channel_id = int(record["channel_id"])
+                guild = self.bot.get_guild(guild_id)
+                if guild is None:
+                    await self.store.delete_channel_lock(guild_id, channel_id)
+                    processed = True
+                    continue
+                channel = self._guild_channel(guild, channel_id)
+                compiled = self.get_compiled_config(guild.id)
+                if channel is None:
+                    await self.store.delete_channel_lock(guild.id, channel_id)
+                    await self.send_log(
+                        guild,
+                        compiled,
+                        embed=ge.make_status_embed(
+                            "Channel Lock Record Cleared",
+                            f"Babblebox removed a timed lock record for <#{record['channel_id']}> because the channel is gone or inaccessible.",
+                            tone="info",
+                            footer="Babblebox Lock",
+                        ),
+                        alert=False,
+                    )
+                    processed = True
+                    continue
+
+                ok, message = await self.remove_channel_lock(guild, channel, actor=None, automatic=True)
+                if ok:
+                    processed = True
+                    continue
+
+                updated = dict(record)
+                updated["due_at"] = serialize_datetime(now + timedelta(seconds=OPERATION_BACKOFF_SECONDS))
+                await self.store.upsert_channel_lock(updated)
+                await self.log_operability_warning_once(
                     guild,
                     compiled,
-                    embed=ge.make_status_embed(
-                        "Channel Lock Record Cleared",
-                        f"Babblebox removed a timed lock record for <#{record['channel_id']}> because the channel is gone or inaccessible.",
-                        tone="info",
-                        footer="Babblebox Lock",
-                    ),
+                    key=f"channel-lock-unlock:{channel.id}",
+                    title="Channel Unlock Needs Review",
+                    message=f"{channel.mention} is still carrying a Babblebox lock because the timed unlock could not complete safely. {message}",
+                    footer="Babblebox Lock",
                     alert=False,
                 )
                 processed = True
-                continue
-
-            ok, message = await self.remove_channel_lock(guild, channel, actor=None, automatic=True)
-            if ok:
-                processed = True
-                continue
-
-            updated = dict(record)
-            updated["due_at"] = serialize_datetime(now + timedelta(seconds=OPERATION_BACKOFF_SECONDS))
-            await self.store.upsert_channel_lock(updated)
-            await self.log_operability_warning_once(
-                guild,
-                compiled,
-                key=f"channel-lock-unlock:{channel.id}",
-                title="Channel Unlock Needs Review",
-                message=f"{channel.mention} is still carrying a Babblebox lock because the timed unlock could not complete safely. {message}",
-                footer="Babblebox Lock",
-                alert=False,
-            )
-            processed = True
         return processed
 
 
