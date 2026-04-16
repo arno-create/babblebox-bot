@@ -743,7 +743,8 @@ OPENAI_API_KEY=sk-...
 Environment variable notes:
 
 - `DISCORD_TOKEN` is required
-- `DEV_GUILD_ID` is optional and helps faster dev sync
+- `DEV_GUILD_ID` is optional, helps faster dev sync, and is the quickest way to verify required slash surfaces such as `/lock` before waiting on global propagation
+- Babblebox now fails startup if a required slash sync target comes back stale or missing the shipped `/lock` slash surface
 - `UTILITY_DATABASE_URL` is the preferred Postgres connection string
 - `SUPABASE_DB_URL` and `DATABASE_URL` are also accepted
 - `CONFESSIONS_CONTENT_KEY` and `CONFESSIONS_IDENTITY_KEY` are required for Postgres-backed Confessions and should be separate random secrets of at least 32 characters each

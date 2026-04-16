@@ -1423,7 +1423,8 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_manual_moderation_by_confession_id_creates_anonymous_case(self):
         await self._configure()
-        result = await self.service.submit_confession(self.guild, author_id=808, content="published note", attachments=[])
+        author_id = 808080808080808
+        result = await self.service.submit_confession(self.guild, author_id=author_id, content="published note", attachments=[])
         self.assertEqual(result.state, "published")
 
         ok, message = await self.service.handle_staff_action(self.guild, target_id=result.confession_id, action="clear")
@@ -1435,7 +1436,7 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(case["resolution_action"], "clear")
         detail = await self.service.build_target_status_embed(self.guild, result.confession_id)
         rendered = json.dumps(detail.to_dict())
-        self.assertNotIn("808", rendered)
+        self.assertNotIn(str(author_id), rendered)
         self.assertIn("Manual staff action", rendered)
 
     async def test_multi_link_and_attachment_leak_surfaces_are_blocked_or_sanitized(self):
