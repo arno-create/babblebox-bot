@@ -276,6 +276,19 @@ class WebsiteDocsTests(unittest.TestCase):
             self.assertIn(text, help_html)
             self.assertIn(text, index_html)
 
+    def test_admin_panel_docs_reflect_interactive_control_surface_story(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        help_html = (ROOT / "help.html").read_text(encoding="utf-8")
+        index_html = (ROOT / "index.html").read_text(encoding="utf-8")
+
+        self.assertIn("interactive admin control surface", readme)
+        self.assertIn("commands remain precise fallbacks", readme)
+        self.assertIn("interactive admin lifecycle surface", help_html)
+        self.assertIn("sectioned control surface", help_html)
+        self.assertIn("precise fallback path", help_html)
+        self.assertIn("sectioned interactive control surface", index_html)
+        self.assertIn("illustrative rather than exhaustive", index_html)
+
     def test_shield_docs_cover_no_link_dm_lure_and_truthful_ai_models(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         help_html = (ROOT / "help.html").read_text(encoding="utf-8")

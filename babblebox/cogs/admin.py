@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from datetime import timedelta
-from typing import Optional
+from typing import Awaitable, Callable, Optional
 
 import discord
 from discord import app_commands
@@ -13,6 +13,7 @@ from babblebox.app_command_hardening import harden_admin_root_group, harden_lock
 from babblebox import game_engine as ge
 from babblebox.admin_service import (
     FOLLOWUP_MODE_LABELS,
+    CONFIG_UNCHANGED,
     LOCK_MODERATOR_PERMISSION_NAMES,
     REVIEW_ACTION_LABELS,
     VERIFICATION_DEADLINE_ACTION_LABELS,
@@ -30,7 +31,8 @@ from babblebox.command_utils import (
     defer_hybrid_response,
     send_hybrid_panel_response,
 )
-from babblebox.utility_helpers import deserialize_datetime, format_duration_brief
+from babblebox.admin_panel_views import AdminPanelView, VerificationSyncView
+from babblebox.utility_helpers import deserialize_datetime, format_duration_brief, parse_duration_string
 
 
 FOLLOWUP_MODE_CHOICES = [
@@ -101,6 +103,65 @@ PERMISSION_DIAGNOSTIC_RULES: tuple[tuple[str, str, str], ...] = (
         "Rich help, support, Shield, and admin embeds may fail or fall back.",
     ),
 )
+FOLLOWUP_DURATION_PRESETS: tuple[tuple[str, str], ...] = (
+    ("14d", "2 weeks"),
+    ("30d", "30 days"),
+    ("6w", "6 weeks"),
+    ("3mo", "3 months"),
+    ("6mo", "6 months"),
+)
+VERIFICATION_KICK_AFTER_PRESETS: tuple[tuple[str, str], ...] = (
+    ("3d", "3 days"),
+    ("7d", "1 week"),
+    ("14d", "2 weeks"),
+    ("30d", "30 days"),
+)
+VERIFICATION_WARNING_LEAD_PRESETS: tuple[tuple[str, str], ...] = (
+    ("12h", "12 hours"),
+    ("1d", "1 day"),
+    ("2d", "2 days"),
+    ("3d", "3 days"),
+    ("7d", "1 week"),
+)
+VERIFICATION_HELP_EXTENSION_PRESETS: tuple[tuple[str, str], ...] = (
+    ("12h", "12 hours"),
+    ("1d", "1 day"),
+    ("2d", "2 days"),
+    ("3d", "3 days"),
+    ("7d", "1 week"),
+)
+
+
+def _preset_select_options(
+    presets: tuple[tuple[str, str], ...],
+    *,
+    current_label: str,
+    current_value: str,
+) -> list[discord.SelectOption]:
+    options = [discord.SelectOption(label=label, value=value, default=value == current_value) for value, label in presets]
+    if any(option.default for option in options):
+        return options
+    return [discord.SelectOption(label=f"Current: {current_label}", value="__current__", default=True)] + options
+
+
+def _match_duration_preset_value(seconds: int, presets: tuple[tuple[str, str], ...]) -> str:
+    for value, _label in presets:
+        if parse_duration_string(value) == seconds:
+            return value
+    return "__current__"
+
+
+def _best_duration_input(seconds: int) -> str:
+    if seconds % (24 * 3600) == 0:
+        return f"{seconds // (24 * 3600)}d"
+    if seconds % 3600 == 0:
+        return f"{seconds // 3600}h"
+    return f"{max(seconds // 60, 1)}m"
+
+
+def _followup_duration_input(value: int, unit: str) -> str:
+    suffix = {"days": "d", "weeks": "w", "months": "mo"}.get(unit, "d")
+    return f"{value}{suffix}"
 
 
 class FollowupReviewView(discord.ui.View):
@@ -266,7 +327,7 @@ class VerificationDeadlineReviewView(discord.ui.View):
         await self._refresh_queue_message(interaction, service, note=message)
 
 
-class AdminPanelView(discord.ui.View):
+class LegacyAdminPanelView(discord.ui.View):
     def __init__(self, cog: "AdminCog", *, guild_id: int, author_id: int, section: str = "overview"):
         super().__init__(timeout=180)
         self.cog = cog
@@ -364,7 +425,7 @@ class AdminPanelView(discord.ui.View):
         await self._render(interaction, note="Admin panel refreshed.")
 
 
-class VerificationSyncView(discord.ui.View):
+class LegacyVerificationSyncView(discord.ui.View):
     def __init__(self, cog: "AdminCog", *, guild_id: int, author_id: int):
         super().__init__(timeout=None)
         self.cog = cog
@@ -1070,7 +1131,7 @@ class AdminCog(commands.Cog):
         verification_rule = self._verification_rule_details(guild_id)
         embed = discord.Embed(
             title="Admin Systems Overview",
-            description="Compact server-lifecycle helpers for returned-after-ban follow-up and verification cleanup.",
+            description="Interactive control surface for follow-up, verification cleanup, exclusions, logs, and templates.",
             color=ge.EMBED_THEME["accent"],
         )
         embed.add_field(
@@ -1115,13 +1176,17 @@ class AdminCog(commands.Cog):
             inline=False,
         )
         embed.add_field(
-            name="Emergency Locks",
+            name="Direct Panel Controls",
             value=(
-                f"Access: **{self.service.lock_access_summary(guild_id)}**\n"
-                f"Default notice: **{'Custom' if config['lock_notice_template'] else 'Babblebox default'}**\n"
-                f"Tracked locks: **{counts.get('active_channel_locks', 0)}**\n"
-                "Direct locks only target normal text channels and intentionally refuse category-synced channels."
+                "Open focused editors from each section instead of memorizing command flags.\n"
+                "Use **Open Sync Review** for the one-time verification catch-up flow.\n"
+                "Use **Run Permission Check** when admin automations feel blocked or incomplete."
             ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Command Fallback",
+            value="`/admin followup`, `/admin verification`, `/admin logs`, `/admin exclusions`, `/admin templates`, `/admin permissions`, `/admin sync`",
             inline=False,
         )
         return embed
@@ -1130,7 +1195,7 @@ class AdminCog(commands.Cog):
         config = self.service.get_config(guild_id)
         embed = discord.Embed(
             title="Punishment Follow-up",
-            description="When someone returns within 30 days of a ban event, Babblebox can apply one configured follow-up role.",
+            description="Returned-after-ban role handling with direct panel editing and command parity.",
             color=ge.EMBED_THEME["warning"],
         )
         embed.add_field(
@@ -1145,7 +1210,7 @@ class AdminCog(commands.Cog):
             inline=False,
         )
         embed.add_field(
-            name="Behavior",
+            name="What This Controls",
             value=(
                 "Babblebox does not know the original ban length.\n"
                 "It only reacts when a member returns within 30 days of a ban event.\n"
@@ -1155,7 +1220,12 @@ class AdminCog(commands.Cog):
             inline=False,
         )
         embed.add_field(
-            name="Quick Use",
+            name="Panel Actions",
+            value="Use **Edit Follow-up** to change enabled state, follow-up role, mode, and duration directly from the panel.",
+            inline=False,
+        )
+        embed.add_field(
+            name="Command Fallback",
             value="`/admin followup enabled:true role:@Probation mode:review duration:30d`",
             inline=False,
         )
@@ -1166,7 +1236,7 @@ class AdminCog(commands.Cog):
         rule = self._verification_rule_details(guild_id)
         embed = discord.Embed(
             title="Verification Cleanup",
-            description="Warn members who stay unverified too long, then either kick automatically or place them into one persistent moderator review queue with a verification-help extension path.",
+            description="Verification policy, timing, help-path, previews, and sync tools in one compact admin surface.",
             color=ge.EMBED_THEME["danger"],
         )
         embed.add_field(
@@ -1199,7 +1269,7 @@ class AdminCog(commands.Cog):
             inline=False,
         )
         embed.add_field(
-            name="Behavior",
+            name="What This Controls",
             value=(
                 "Babblebox tracks compact pending member state only.\n"
                 "Any non-trivial message in the verification-help channel can extend the deadline.\n"
@@ -1211,6 +1281,15 @@ class AdminCog(commands.Cog):
         )
         if rule["review_lines"]:
             embed.add_field(name="Please Review Carefully", value="\n".join(rule["review_lines"]), inline=False)
+        embed.add_field(
+            name="Panel Actions",
+            value=(
+                "Use **Edit Policy**, **Edit Timing**, and **Edit Help Path** for direct configuration.\n"
+                "Use **Preview Warning** or **Preview Final Kick** to render the current DM copy against your own member profile.\n"
+                "Use **Open Sync Review** for the one-time catch-up scan."
+            ),
+            inline=False,
+        )
         embed.add_field(
             name="Examples",
             value=(
@@ -1225,7 +1304,7 @@ class AdminCog(commands.Cog):
         config = self.service.get_config(guild_id)
         embed = discord.Embed(
             title="Exclusions And Trusted Roles",
-            description="Shared exclusions keep these automations compact and predictable instead of layering many per-feature lists.",
+            description="Shared exclusions keep follow-up and verification compact, explicit, and easy to audit.",
             color=ge.EMBED_THEME["info"],
         )
         embed.add_field(
@@ -1247,7 +1326,12 @@ class AdminCog(commands.Cog):
             inline=False,
         )
         embed.add_field(
-            name="Quick Use",
+            name="Panel Actions",
+            value="Use **Edit Exclusions** to replace the shared lists directly from the panel and toggle staff or bot exemptions without leaving the UI.",
+            inline=False,
+        )
+        embed.add_field(
+            name="Command Fallback",
             value="`/admin exclusions target:trusted_role_ids state:on role:@Mods`\n`/admin exclusions verification_exempt_bots:false`",
             inline=False,
         )
@@ -1257,7 +1341,7 @@ class AdminCog(commands.Cog):
         config = self.service.get_config(guild_id)
         embed = discord.Embed(
             title="Logs And Alerts",
-            description="Both admin systems share one compact mod-facing log path instead of keeping a big internal archive.",
+            description="One calm moderator-facing delivery lane for admin automation output and operability warnings.",
             color=ge.EMBED_THEME["info"],
         )
         embed.add_field(
@@ -1270,7 +1354,12 @@ class AdminCog(commands.Cog):
             inline=False,
         )
         embed.add_field(
-            name="Quick Use",
+            name="Panel Actions",
+            value="Use **Edit Logs** to change the admin log channel or alert role directly from the panel.",
+            inline=False,
+        )
+        embed.add_field(
+            name="Command Fallback",
             value="`/admin logs channel:#admin-log role:@Mods`",
             inline=False,
         )
@@ -1280,7 +1369,7 @@ class AdminCog(commands.Cog):
         config = self.service.get_config(guild_id)
         embed = discord.Embed(
             title="Templates And Messages",
-            description="Verification DMs stay configurable, but Babblebox only supports a small safe placeholder set.",
+            description="Edit verification DM copy and the optional invite link directly from the panel, then preview the result safely.",
             color=ge.EMBED_THEME["info"],
         )
         embed.add_field(
@@ -1298,7 +1387,12 @@ class AdminCog(commands.Cog):
             inline=False,
         )
         embed.add_field(
-            name="Quick Use",
+            name="Panel Actions",
+            value="Use **Edit Templates** to update warning copy, final kick copy, and the invite link. Preview buttons render the current templates without sending DMs.",
+            inline=False,
+        )
+        embed.add_field(
+            name="Command Fallback",
             value="`/admin templates invite_link:https://discord.gg/example`",
             inline=False,
         )
@@ -1457,6 +1551,126 @@ class AdminCog(commands.Cog):
             limit=1024,
             empty="No placeholders were rendered.",
         )
+
+    def _admin_status_embed(self, title: str, message: str, *, ok: bool) -> discord.Embed:
+        return ge.make_status_embed(title, message, tone="success" if ok else "warning", footer="Babblebox Admin")
+
+    async def _resolve_interaction_message(self, interaction: discord.Interaction, response=None) -> discord.Message | None:
+        resource = getattr(response, "resource", None)
+        if resource is not None and hasattr(resource, "edit"):
+            return resource
+        message_id = getattr(response, "message_id", None)
+        channel = getattr(interaction, "channel", None)
+        if isinstance(message_id, int) and channel is not None and hasattr(channel, "get_partial_message"):
+            with contextlib.suppress(Exception):
+                return channel.get_partial_message(message_id)
+        original_response = getattr(interaction, "original_response", None)
+        if callable(original_response):
+            with contextlib.suppress(discord.NotFound, discord.HTTPException, discord.ClientException):
+                return await original_response()
+        return None
+
+    async def _send_private_interaction(self, interaction: discord.Interaction, **kwargs):
+        if interaction.guild is not None:
+            kwargs["ephemeral"] = True
+        else:
+            kwargs.pop("ephemeral", None)
+        try:
+            if interaction.response.is_done():
+                kwargs.setdefault("wait", True)
+                return await interaction.followup.send(**kwargs)
+            response = await interaction.response.send_message(**kwargs)
+            return await self._resolve_interaction_message(interaction, response=response)
+        except discord.InteractionResponded:
+            with contextlib.suppress(discord.NotFound, discord.HTTPException):
+                kwargs.setdefault("wait", True)
+                return await interaction.followup.send(**kwargs)
+            return None
+        except (discord.NotFound, discord.HTTPException):
+            return None
+
+    async def _edit_interaction_message(self, interaction: discord.Interaction, **kwargs) -> bool:
+        if not interaction.response.is_done():
+            await interaction.response.edit_message(**kwargs)
+            return True
+        edit_original_response = getattr(interaction, "edit_original_response", None)
+        if callable(edit_original_response):
+            with contextlib.suppress(discord.NotFound, discord.HTTPException, discord.ClientException):
+                await edit_original_response(**kwargs)
+                return True
+        message = getattr(interaction, "message", None)
+        edit_message = getattr(message, "edit", None)
+        if callable(edit_message):
+            with contextlib.suppress(discord.NotFound, discord.HTTPException, AttributeError):
+                await edit_message(**kwargs)
+                return True
+        return False
+
+    async def _defer_component_interaction(
+        self,
+        interaction: discord.Interaction,
+        *,
+        stage: str,
+        failure_title: str,
+        failure_message: str,
+        guild_id: int | None = None,
+    ) -> bool:
+        if interaction.response.is_done():
+            return True
+        defer = getattr(interaction.response, "defer", None)
+        if not callable(defer):
+            return True
+        try:
+            await defer(ephemeral=interaction.guild is not None, thinking=False)
+            return True
+        except Exception:
+            await self._send_private_interaction(
+                interaction,
+                embed=self._admin_status_embed(failure_title, failure_message, ok=False),
+            )
+            return False
+
+    def build_verification_preview_embed(self, guild: discord.Guild | None, target: object, *, final: bool) -> discord.Embed:
+        if guild is None:
+            return ge.make_status_embed(
+                "Verification Preview Unavailable",
+                "This verification preview only works inside a server.",
+                tone="warning",
+                footer="Babblebox Admin",
+            )
+        compiled = self.service.get_compiled_config(guild.id)
+        help_channel = self.service._guild_channel(guild, compiled.verification_help_channel_id)
+        preview_deadline = ge.now_utc() + timedelta(seconds=max(compiled.verification_warning_lead_seconds, 3600))
+        embed = (
+            self.service.build_kick_embed(target, guild=guild, deadline=preview_deadline, compiled=compiled)
+            if final
+            else self.service.build_warning_embed(target, guild=guild, deadline=preview_deadline, compiled=compiled)
+        )
+        placeholders = self.service.verification_template_placeholders(
+            target,
+            guild=guild,
+            deadline=preview_deadline,
+            help_channel=help_channel,
+            invite_link=compiled.invite_link,
+            preview=True,
+        )
+        preview = self._copy_embed(embed)
+        preview.add_field(
+            name="Preview Mode",
+            value=(
+                f"Template: **{'Final kick DM' if final else 'Warning DM'}**\n"
+                f"Rendered member: {getattr(target, 'mention', ge.display_name_of(target))}\n"
+                "Member side effects: **None**"
+            ),
+            inline=False,
+        )
+        preview.add_field(name="Resolved Placeholders", value=self._placeholder_lines(placeholders), inline=False)
+        preview.add_field(
+            name="Command Fallback",
+            value=f"`/admin test kind:{'kick_dm' if final else 'warning_dm'}`",
+            inline=False,
+        )
+        return preview
 
     @app_commands.allowed_installs(guilds=True, users=False)
     @app_commands.guild_only()

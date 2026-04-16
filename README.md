@@ -358,12 +358,12 @@ The default lock notice is configurable, one-off notice overrides stay optional 
 
 ### Admin Lifecycle
 
-Admin lifecycle commands stay private/admin-facing. The streamlined admin surface is centered on `/admin panel`, while `/admin permissions` gives one truthful place to inspect Babblebox's missing permissions and the feature lanes they degrade.
+Admin lifecycle commands stay private/admin-facing. `/admin panel` is now the interactive admin control surface: section buttons open focused editors for follow-up, verification policy/timing/help path, exclusions, logs, and templates directly from the UI, while `/admin permissions` stays the truthful diagnostics lane and `/admin sync` stays the one-time catch-up tool.
 Slash is recommended for the heavier config flows here. Prefix stays positional, so the examples below show the safest compact forms.
 
 | Slash | Prefix | Purpose |
 | --- | --- | --- |
-| `/admin panel` | `bb!admin panel` | Open the admin lifecycle control panel |
+| `/admin panel` | `bb!admin panel` | Open the interactive admin lifecycle control surface |
 | `/admin status` | `bb!admin status` | View overview counts or inspect one member |
 | `/admin followup` | `bb!admin followup true @Probation review 30d` | Configure returned-after-ban follow-up roles |
 | `/admin verification` | `bb!admin verification true @Verified must_have_role review 7d 2d` | Configure warning-before-kick verification cleanup and the shared review queue |
@@ -373,7 +373,7 @@ Slash is recommended for the heavier config flows here. Prefix stays positional,
 | `/admin permissions` | `bb!admin permissions` | Diagnose missing bot permissions and the affected feature lanes |
 | `/admin sync` | `bb!admin sync` | One-time catch-up scan for current unverified members |
 
-Follow-up and verification stay batch-first and review-lane focused: routine sweeps emit grouped summaries, review mode uses one persistent queue message per lane, startup reconciliation resumes quietly, and Babblebox does not post public channel reactions or reply callouts for weak evidence. The admin surface is intentionally narrower now: follow-up, verification, exclusions, logs, templates, permission diagnostics, and sync only.
+Follow-up and verification stay batch-first and review-lane focused: routine sweeps emit grouped summaries, review mode uses one persistent queue message per lane, startup reconciliation resumes quietly, and Babblebox does not post public channel reactions or reply callouts for weak evidence. The admin surface is intentionally narrower now: the panel is the premium interactive path for common changes, commands remain precise fallbacks, and the whole lane stays limited to follow-up, verification, exclusions, logs, templates, permission diagnostics, and sync.
 
 ### Daily Arcade
 

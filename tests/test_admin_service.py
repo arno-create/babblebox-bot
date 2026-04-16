@@ -600,6 +600,62 @@ class AdminServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(queue)
         return record
 
+    async def test_set_followup_config_can_clear_role_without_touching_other_fields(self):
+        await self._configure_followup()
+
+        ok, message = await self.service.set_followup_config(self.guild.id, role_id=None)
+
+        self.assertTrue(ok)
+        self.assertIn("enabled", message)
+        config = self.service.get_config(self.guild.id)
+        self.assertTrue(config["followup_enabled"])
+        self.assertIsNone(config["followup_role_id"])
+        self.assertEqual(config["followup_mode"], "auto_remove")
+        self.assertEqual((config["followup_duration_value"], config["followup_duration_unit"]), (30, "days"))
+
+    async def test_set_verification_config_can_clear_role_and_help_channel_without_touching_other_fields(self):
+        await self._configure_verification()
+
+        ok, message = await self.service.set_verification_config(self.guild.id, role_id=None, help_channel_id=None)
+
+        self.assertTrue(ok)
+        self.assertIn("enabled", message)
+        config = self.service.get_config(self.guild.id)
+        self.assertTrue(config["verification_enabled"])
+        self.assertIsNone(config["verification_role_id"])
+        self.assertEqual(config["verification_logic"], "must_have_role")
+        self.assertEqual(config["verification_deadline_action"], "auto_kick")
+        self.assertIsNone(config["verification_help_channel_id"])
+        self.assertEqual(config["verification_help_extension_seconds"], 24 * 3600)
+
+    async def test_replace_exclusion_targets_replaces_bucket_atomically(self):
+        ok, _ = await self.service.set_exclusion_target(self.guild.id, "excluded_role_ids", self.followup_role.id, True)
+        self.assertTrue(ok)
+
+        ok, message = await self.service.replace_exclusion_targets(
+            self.guild.id,
+            "excluded_role_ids",
+            [self.verified_role.id, self.verified_role.id],
+        )
+
+        self.assertTrue(ok)
+        self.assertIn("list updated", message)
+        self.assertEqual(self.service.get_config(self.guild.id)["excluded_role_ids"], [self.verified_role.id])
+
+    async def test_replace_exclusion_targets_reconciles_review_backlog_for_newly_exempt_member(self):
+        member = FakeMember(701, self.guild, roles=[], top_role=FakeRole(5, position=5))
+        await self._create_verification_review(member)
+        queue = await self.store.fetch_verification_review_queue(self.guild.id)
+        queue_message = await self.log_channel.fetch_message(queue["message_id"])
+
+        ok, _ = await self.service.replace_exclusion_targets(self.guild.id, "excluded_user_ids", [member.id])
+
+        self.assertTrue(ok)
+        updated = await self.store.fetch_verification_state(self.guild.id, member.id)
+        self.assertIsNone(updated)
+        self.assertIsNone(await self.store.fetch_verification_review_queue(self.guild.id))
+        self.assertEqual(queue_message.view, None)
+
     async def test_lock_channel_applies_expected_overwrite_notice_and_log(self):
         ok, _ = await self.service.set_logs_config(self.guild.id, channel_id=self.log_channel.id, alert_role_id=None)
         self.assertTrue(ok)

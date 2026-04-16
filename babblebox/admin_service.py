@@ -49,6 +49,7 @@ GROUPED_MEMBER_PREVIEW_LIMIT = 3
 VERIFICATION_NOTIFICATION_SUPPRESSION_SECONDS = 24 * 3600
 VERIFICATION_QUEUE_PREVIEW_LIMIT = 5
 VERIFICATION_SUMMARY_LINE_LIMIT = 8
+CONFIG_UNCHANGED = object()
 VERIFICATION_QUEUE_RELEVANT_CONFIG_FIELDS = frozenset(
     {
         "admin_log_channel_id",
@@ -535,7 +536,7 @@ class AdminService:
         guild_id: int,
         *,
         enabled: bool | None = None,
-        role_id: int | None = None,
+        role_id: int | None | object = CONFIG_UNCHANGED,
         mode: str | None = None,
         duration_text: str | None = None,
     ) -> tuple[bool, str]:
@@ -552,7 +553,7 @@ class AdminService:
         def mutate(config: dict[str, Any]):
             if enabled is not None:
                 config["followup_enabled"] = bool(enabled)
-            if role_id is not None:
+            if role_id is not CONFIG_UNCHANGED:
                 config["followup_role_id"] = role_id
             if cleaned_mode is not None:
                 config["followup_mode"] = cleaned_mode
@@ -562,7 +563,7 @@ class AdminService:
 
         preview = self.get_config(guild_id)
         final_enabled = preview["followup_enabled"] if enabled is None else bool(enabled)
-        final_role = preview["followup_role_id"] if role_id is None else role_id
+        final_role = preview["followup_role_id"] if role_id is CONFIG_UNCHANGED else role_id
         final_mode = preview["followup_mode"] if cleaned_mode is None else cleaned_mode
         final_value = preview["followup_duration_value"] if parsed_duration is None else parsed_duration[0]
         final_unit = preview["followup_duration_unit"] if parsed_duration is None else parsed_duration[1]
@@ -582,12 +583,12 @@ class AdminService:
         guild_id: int,
         *,
         enabled: bool | None = None,
-        role_id: int | None = None,
+        role_id: int | None | object = CONFIG_UNCHANGED,
         logic: str | None = None,
         deadline_action: str | None = None,
         kick_after_text: str | None = None,
         warning_lead_text: str | None = None,
-        help_channel_id: int | None = None,
+        help_channel_id: int | None | object = CONFIG_UNCHANGED,
         help_extension_text: str | None = None,
         max_extensions: int | None = None,
     ) -> tuple[bool, str]:
@@ -617,7 +618,7 @@ class AdminService:
         def mutate(config: dict[str, Any]):
             if enabled is not None:
                 config["verification_enabled"] = bool(enabled)
-            if role_id is not None:
+            if role_id is not CONFIG_UNCHANGED:
                 config["verification_role_id"] = role_id
             if cleaned_logic is not None:
                 config["verification_logic"] = cleaned_logic
@@ -627,7 +628,7 @@ class AdminService:
                 config["verification_kick_after_seconds"] = parsed_kick_after
             if parsed_warning_lead is not None:
                 config["verification_warning_lead_seconds"] = parsed_warning_lead
-            if help_channel_id is not None:
+            if help_channel_id is not CONFIG_UNCHANGED:
                 config["verification_help_channel_id"] = help_channel_id
             if parsed_help_extension is not None:
                 config["verification_help_extension_seconds"] = parsed_help_extension
@@ -636,7 +637,7 @@ class AdminService:
 
         preview = self.get_config(guild_id)
         final_enabled = preview["verification_enabled"] if enabled is None else bool(enabled)
-        final_role = preview["verification_role_id"] if role_id is None else role_id
+        final_role = preview["verification_role_id"] if role_id is CONFIG_UNCHANGED else role_id
         final_logic = preview["verification_logic"] if cleaned_logic is None else cleaned_logic
         final_deadline_action = preview["verification_deadline_action"] if cleaned_deadline_action is None else cleaned_deadline_action
         final_kick_after = preview["verification_kick_after_seconds"] if parsed_kick_after is None else parsed_kick_after
@@ -645,7 +646,7 @@ class AdminService:
             field
             for field, supplied in (
                 ("verification_enabled", enabled is not None),
-                ("verification_role_id", role_id is not None),
+                ("verification_role_id", role_id is not CONFIG_UNCHANGED),
                 ("verification_logic", cleaned_logic is not None),
                 ("verification_deadline_action", cleaned_deadline_action is not None),
             )
@@ -705,6 +706,24 @@ class AdminService:
             guild_id,
             mutate,
             success_message=f"Admin {label} was {'updated' if enabled else 'trimmed'}.",
+            post_update_hook=self._reconcile_verification_review_backlog_after_config_change,
+            requested_fields={field},
+            force_post_update=field in VERIFICATION_QUEUE_RELEVANT_CONFIG_FIELDS,
+        )
+
+    async def replace_exclusion_targets(self, guild_id: int, field: str, target_ids: list[int]) -> tuple[bool, str]:
+        if field not in {"excluded_user_ids", "excluded_role_ids", "trusted_role_ids"}:
+            return False, "Unknown exclusion bucket."
+
+        cleaned = sorted({int(value) for value in target_ids if isinstance(value, int) and value > 0})
+        if len(cleaned) > EXCLUSION_LIMIT:
+            return False, f"You can keep up to {EXCLUSION_LIMIT} entries in `{field}`."
+
+        label = field.replace("_ids", "").replace("_", " ")
+        return await self._update_config(
+            guild_id,
+            lambda config: config.__setitem__(field, cleaned),
+            success_message=f"Admin {label} list updated.",
             post_update_hook=self._reconcile_verification_review_backlog_after_config_change,
             requested_fields={field},
             force_post_update=field in VERIFICATION_QUEUE_RELEVANT_CONFIG_FIELDS,

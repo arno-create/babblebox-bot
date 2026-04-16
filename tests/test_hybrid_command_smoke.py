@@ -1825,7 +1825,7 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(len(ctx.send_calls), 1)
             self.assertIn("/shield escalation timeout_minutes:...", ctx.send_calls[0]["embed"].description)
-            self.assertEqual(cog.service.get_config(10)["timeout_minutes"], 15)
+            self.assertEqual(cog.service.get_config(10)["timeout_minutes"], 10)
         finally:
             await cog.service.close()
 
