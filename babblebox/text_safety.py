@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import re
 import unicodedata
+from collections.abc import Sequence
 
 
 URL_RE = re.compile(
@@ -166,6 +167,22 @@ MODERATION_ACTION_CONTEXT_RE = re.compile(
     r"(?i)\b(?:mods?|moderators?|staff|admins?|filter|shield|automod)\s+(?:removed|deleted|flagged|warned|muted|timed out|banned)\b|\b(?:removed|deleted|flagged|warned)\s+(?:for|because)\b"
 )
 EXAMPLE_CONTEXT_RE = re.compile(r"(?i)\b(?:sample|example)\b")
+SEVERE_REFERENCE_PREFIX_RE = re.compile(
+    r"(?i)^(?:quote|quoted|quoting|example|sample|history|report(?:ed)?(?: this)?(?: ad| message| post| screenshot)?|moderation(?: note| log)?|mod note|admin note|warning example)\b.{0,12}(?:[:\-]|$)"
+)
+SEVERE_HARD_REFERENCE_CONTEXT_RE = re.compile(
+    r"(?i)\b(?:for review|for moderation|moderation(?: note| log)?|mod note|admin note|incident review|review queue|news|headline|history|historical|documentary)\b"
+)
+SEVERE_REFERENCE_OBJECT_RE = re.compile(r"(?i)\b(?:phrase|term|slur|word|wording|language|quote)\b")
+SEVERE_DISCUSSION_VERB_RE = re.compile(
+    r"(?i)\b(?:said|saying|says|posted|posting|wrote|writing|sent|sending|called|calling|used|using|uses|discussed|discussing|mention(?:ed|ing)?|quoted|quoting)\b"
+)
+SEVERE_STAFF_ATTRIBUTION_RE = re.compile(
+    r"(?i)\b(?:mods?|moderators?|staff|admins?)\s+(?:said|posted|wrote|sent|called|used|quoted|warned)\b"
+)
+SEVERE_RULES_CONTEXT_RE = re.compile(
+    r"(?i)\b(?:bann(?:ed|able)|not allowed|against (?:the )?(?:rules|policy)|rule violation|policy violation|keep that out)\b"
+)
 
 
 def normalize_plain_text(text: str | None) -> str:
@@ -245,6 +262,35 @@ def is_harmful_context_suppressed(text: str, *, include_disapproval: bool = Fals
     if EXAMPLE_CONTEXT_RE.search(text):
         return bool(QUOTE_ATTRIBUTION_RE.search(text))
     return bool(QUOTE_ATTRIBUTION_RE.search(text))
+
+
+def is_severe_reference_context(text: str, *, matched_terms: Sequence[str] = ()) -> bool:
+    cleaned = normalize_plain_text(text)
+    if not cleaned:
+        return False
+    if MODERATION_ACTION_CONTEXT_RE.search(cleaned):
+        return True
+    squashed = squash_for_evasion_checks(cleaned)
+    normalized_hits = tuple(term for term in matched_terms if contains_safety_term(term, cleaned, squashed))
+    has_reporting = bool(REPORTING_CONTEXT_RE.search(cleaned))
+    has_hard_reference = bool(SEVERE_HARD_REFERENCE_CONTEXT_RE.search(cleaned))
+    has_reference_prefix = bool(SEVERE_REFERENCE_PREFIX_RE.search(cleaned))
+    has_meta_object = bool(SEVERE_REFERENCE_OBJECT_RE.search(cleaned))
+    has_discussion_verb = bool(SEVERE_DISCUSSION_VERB_RE.search(cleaned))
+    has_attribution = bool(QUOTE_ATTRIBUTION_RE.search(cleaned) or SEVERE_STAFF_ATTRIBUTION_RE.search(cleaned))
+    has_educational = bool(EDUCATIONAL_CONTEXT_RE.search(cleaned))
+    has_rules_context = bool(DISAPPROVAL_CONTEXT_RE.search(cleaned) or SEVERE_RULES_CONTEXT_RE.search(cleaned))
+    if has_hard_reference or has_reference_prefix:
+        return True
+    if has_rules_context and (has_meta_object or has_attribution or has_discussion_verb or bool(normalized_hits)):
+        return True
+    if has_attribution and (has_reporting or has_discussion_verb or has_meta_object or bool(normalized_hits)):
+        return True
+    if has_reporting and (has_meta_object or has_discussion_verb or bool(normalized_hits)):
+        return True
+    if has_educational and (has_meta_object or has_discussion_verb or has_attribution):
+        return True
+    return False
 
 
 def sanitize_short_plain_text(

@@ -122,9 +122,9 @@ PACK_PANEL_DESCRIPTIONS = {
     "promo": "Handles invite spam, promo blasts, and repetitive self-promotion without overfiring on normal info links.",
     "scam": "Catches malicious domains, impersonation hosts, and suspicious lure patterns with stronger action lanes.",
     "spam": "Handles rate spam, duplicate floods, emoji clutter, capitals spam, and moderator handling for live-message raids.",
-    "gif": "Controls GIF-heavy flood pressure, repeat loops, and same-asset bursts without polluting unrelated packs.",
+    "gif": "Controls one-user GIF floods, channel GIF pressure, repeat loops, and same-asset bursts without polluting unrelated packs.",
     "adult": "Blocks adult domains and can optionally catch DM-gated adult solicitation text with a bounded carve-out lane.",
-    "severe": "Targets severe harm, self-harm encouragement, eliminationist hate, and server-specific severe phrase tuning.",
+    "severe": "Targets explicit severe harm, self-harm encouragement, eliminationist or dehumanizing hate, and server-specific severe phrase tuning with reference-aware suppressors.",
     "link_policy": "Controls the separate trusted-link policy lane for broad link posting without weakening hard malicious intel.",
 }
 TIMEOUT_PRESET_CHOICES = (
@@ -1837,7 +1837,7 @@ class ShieldCog(commands.Cog):
                 f"Alert role: {alert_role}\n"
                 "First enable: Babblebox applies its recommended non-AI baseline once, then leaves your edits alone.\n"
                 "Feature checks: AFK + reminders use privacy/adult/severe, Watch stays privacy-only, Confessions shares link checks, and spam plus GIF moderation stay live-message only.\n"
-                "Delete actions on spam and GIF incidents remove the matched burst, not only the last post."
+                "Delete actions remove the matched burst for one-user spam or GIF floods, while collective GIF pressure trims only the excess posts that keep the channel GIF-heavy."
             ),
             inline=False,
         )
@@ -2114,7 +2114,7 @@ class ShieldCog(commands.Cog):
                 f"Alert role: {alert_role}\n"
                 "Alerts are deduped so one message does not spam repeated mod notices.\n"
                 "Low-confidence repeated-link notes stay compact and do not ping the alert role.\n"
-                "GIF incidents are grouped per offender and incident window so one GIF flood does not flood the logs channel."
+                "One-user GIF floods are grouped per offender and incident window, while collective GIF pressure is grouped per channel so one takeover does not create its own log flood."
             ),
             inline=False,
         )
