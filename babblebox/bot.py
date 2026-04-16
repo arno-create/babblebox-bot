@@ -33,6 +33,10 @@ REQUIRED_SLASH_CONTRACT: dict[str, dict[str, object]] = {
         "children": frozenset({"channel", "remove", "settings"}),
         "default_member_permissions": None,
     },
+    "timeout": {
+        "children": frozenset({"remove"}),
+        "default_member_permissions": None,
+    },
 }
 
 DISCORD_MAX_COMMAND_OPTIONS = 25

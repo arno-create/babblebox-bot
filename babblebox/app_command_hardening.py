@@ -28,3 +28,9 @@ def harden_lock_root_group(command: object) -> None:
     # Discord treats default_member_permissions as a required bitset, so `/lock`
     # cannot publish Babblebox's intended moderator-or-admin runtime rule there.
     _harden_root_group(command, default_permissions=None)
+
+
+def harden_timeout_root_group(command: object) -> None:
+    # `/timeout` also relies on a runtime moderation rule instead of one fixed
+    # default-member-permissions bitset.
+    _harden_root_group(command, default_permissions=None)

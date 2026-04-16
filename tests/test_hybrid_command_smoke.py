@@ -9,7 +9,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from babblebox.app_command_hardening import harden_admin_root_group, harden_lock_root_group
+from babblebox.app_command_hardening import harden_admin_root_group, harden_lock_root_group, harden_timeout_root_group
 from babblebox import game_engine as ge
 from babblebox.admin_service import AdminService
 from babblebox.admin_store import AdminStore
@@ -525,6 +525,7 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/lock channel", shield_page["body"])
         self.assertIn("/lock remove", shield_page["body"])
         self.assertIn("/lock settings", shield_page["body"])
+        self.assertIn("/timeout remove", shield_page["body"])
         self.assertIn("/admin permissions", shield_page["body"])
         self.assertNotIn("/admin risk", shield_page["body"])
         self.assertNotIn("/admin emergency", shield_page["body"])
@@ -536,6 +537,7 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/shield severe category", shield_field.value)
         self.assertIn("/lock channel", shield_field.value)
         self.assertIn("/lock remove", shield_field.value)
+        self.assertIn("/timeout remove", shield_field.value)
         self.assertIn("/admin followup", shield_field.value)
         self.assertIn("/admin verification", shield_field.value)
         self.assertIn("/admin permissions", shield_field.value)
@@ -598,6 +600,7 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         expected = {
             "admin": (AdminCog, int(discord.Permissions(manage_guild=True).value)),
             "lock": (AdminCog, None),
+            "timeout": (AdminCog, None),
             "shield": (ShieldCog, int(discord.Permissions(manage_guild=True).value)),
             "confessions": (ConfessionsCog, int(discord.Permissions(manage_guild=True).value)),
             "dropsadmin": (QuestionDropsCog, int(discord.Permissions(manage_guild=True).value)),
@@ -628,15 +631,21 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
                         int(settings_app_command.default_permissions.value),
                         int(discord.Permissions(manage_guild=True).value),
                     )
+                if name == "timeout":
+                    self.assertEqual({option["name"] for option in payload["options"]}, {"remove"})
 
     async def test_lock_root_keeps_expected_prefix_and_slash_children(self):
         cog = AdminCog(types.SimpleNamespace(loop=None))
         try:
             prefix_names = {command.name for command in cog.lock_group.commands}
             slash_names = {command.name for command in cog.lock_group.app_command.commands}
+            timeout_prefix_names = {command.name for command in cog.timeout_group.commands}
+            timeout_slash_names = {command.name for command in cog.timeout_group.app_command.commands}
 
             self.assertEqual(prefix_names, {"channel", "remove", "settings"})
             self.assertEqual(slash_names, {"channel", "remove", "settings"})
+            self.assertEqual(timeout_prefix_names, {"remove"})
+            self.assertEqual(timeout_slash_names, {"remove"})
         finally:
             await cog.service.close()
 

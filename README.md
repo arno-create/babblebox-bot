@@ -346,15 +346,16 @@ Shield also now governs eligible non-chat surfaces in a bounded way. Confessions
 ### Emergency Locks
 
 `/lock` is Babblebox's direct moderator/admin command lane. Moderators who can manage channels or messages, timeout, kick, or ban members, plus admins can use it by default, and admins can switch the lane to admins-only when they want tighter control.
-Direct locks only target normal text channels. Babblebox intentionally refuses category-synced channels, only changes the bounded `@everyone` send/thread/reaction flags it owns, and only restores those same flags later. Timed locks persist through restart reconciliation.
+Direct locks only target normal text channels. Babblebox intentionally refuses category-synced channels, only changes the bounded `@everyone` send/thread/reaction flags it owns, and only restores those same flags later. If a channel already fully denies those flags, Babblebox can track the existing lock without changing the overwrite and later clears only its own timer or marker. Timed locks persist through restart reconciliation.
 
 | Slash | Prefix | Purpose |
 | --- | --- | --- |
 | `/lock channel` | `bb!lock channel #ops 30m` | Safely lock one normal text channel, optionally with a timer |
 | `/lock remove` | `bb!lock remove #ops` | Safely remove one Babblebox-tracked emergency lock |
 | `/lock settings` | `bb!lock settings` | Review or configure the default lock notice and access model |
+| `/timeout remove` | `bb!timeout remove @member Appeal accepted` | Safely remove one active member timeout |
 
-The default lock notice is configurable, one-off notice overrides stay optional per lock, notice posting can be suppressed per run, and every lock or unlock is logged cleanly to the shared admin log lane when one is configured.
+The default lock notice is configurable, one-off notice overrides stay optional per lock, notice posting can be suppressed per run, and every lock or unlock is logged cleanly to the shared admin log lane when one is configured. `/timeout remove` uses the same compact admin log lane when one is configured and checks moderator access, hierarchy, bot timeout permission, bot hierarchy, and whether the member is actually timed out before clearing anything.
 
 ### Admin Lifecycle
 

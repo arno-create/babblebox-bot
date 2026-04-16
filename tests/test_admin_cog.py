@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import timedelta
 import types
 import unittest
 from unittest import mock
@@ -268,16 +269,40 @@ class FakeMember(FakeAuthor):
         roles=None,
         manage_guild: bool = False,
         manage_channels: bool = False,
+        moderate_members: bool = False,
         administrator: bool = False,
         joined_at=None,
     ):
-        super().__init__(user_id=user_id, manage_guild=manage_guild, manage_channels=manage_channels, administrator=administrator)
+        super().__init__(
+            user_id=user_id,
+            manage_guild=manage_guild,
+            manage_channels=manage_channels,
+            moderate_members=moderate_members,
+            administrator=administrator,
+        )
         self.guild = guild
         self.roles = list(roles or [])
         self.top_role = self.roles[0] if self.roles else FakeRole(0, position=1)
-        self.guild_permissions = FakePermissionSnapshot(manage_guild=manage_guild, manage_channels=manage_channels, administrator=administrator)
+        self.guild_permissions = FakePermissionSnapshot(
+            manage_guild=manage_guild,
+            manage_channels=manage_channels,
+            moderate_members=moderate_members,
+            administrator=administrator,
+        )
         self.joined_at = joined_at or ge.now_utc()
         self.bot = False
+        self.timed_out_until = None
+        self.communication_disabled_until = None
+        self.timeout_calls = []
+        self.raise_forbidden_on_timeout = False
+
+    async def timeout(self, until, reason=None):
+        if self.raise_forbidden_on_timeout:
+            response = types.SimpleNamespace(status=403, reason="Forbidden", headers={})
+            raise discord.Forbidden(response=response, message="missing permissions")
+        self.timed_out_until = until
+        self.communication_disabled_until = until
+        self.timeout_calls.append({"until": until, "reason": reason})
 
 
 class FakeChannel:
@@ -711,6 +736,71 @@ class AdminCogSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(ctx.send_calls[0]["ephemeral"])
         self.assertIn("Locked", ctx.send_calls[0]["embed"].description)
 
+    async def test_timeout_remove_allows_timeout_moderator(self):
+        actor_role = FakeRole(500, position=40, name="Moderator")
+        actor = FakeMember(50, self.guild, roles=[actor_role], moderate_members=True)
+        target_role = FakeRole(501, position=10, name="Member")
+        member = FakeMember(51, self.guild, roles=[target_role])
+        member.timed_out_until = ge.now_utc() + timedelta(minutes=15)
+        member.communication_disabled_until = member.timed_out_until
+        self.guild.members[actor.id] = actor
+        self.guild.members[member.id] = member
+        ctx = FakeContext(
+            interaction=FakeInteraction(),
+            guild=self.guild,
+            channel=FakeChannel(220),
+            author=actor,
+        )
+
+        await AdminCog.timeout_remove_command.callback(self.cog, ctx, member=member, reason="Appeal accepted")
+
+        self.assertEqual(len(ctx.send_calls), 1)
+        self.assertTrue(ctx.send_calls[0]["ephemeral"])
+        self.assertIn("Removed the timeout", ctx.send_calls[0]["embed"].description)
+        self.assertEqual(len(member.timeout_calls), 1)
+        self.assertIsNone(member.timed_out_until)
+
+    async def test_timeout_remove_denies_member_without_timeout_access(self):
+        actor_role = FakeRole(510, position=40, name="Helper")
+        actor = FakeMember(52, self.guild, roles=[actor_role])
+        target_role = FakeRole(511, position=10, name="Member")
+        member = FakeMember(53, self.guild, roles=[target_role])
+        member.timed_out_until = ge.now_utc() + timedelta(minutes=15)
+        member.communication_disabled_until = member.timed_out_until
+        self.guild.members[actor.id] = actor
+        self.guild.members[member.id] = member
+        ctx = FakeContext(
+            interaction=FakeInteraction(),
+            guild=self.guild,
+            channel=FakeChannel(221),
+            author=actor,
+        )
+
+        await AdminCog.timeout_remove_command.callback(self.cog, ctx, member=member, reason=None)
+
+        self.assertEqual(len(ctx.send_calls), 1)
+        self.assertTrue(ctx.send_calls[0]["ephemeral"])
+        self.assertIn("Timeout Members", ctx.send_calls[0]["embed"].description)
+
+    async def test_timeout_remove_handles_member_without_active_timeout(self):
+        actor_role = FakeRole(520, position=40, name="Moderator")
+        actor = FakeMember(54, self.guild, roles=[actor_role], moderate_members=True)
+        member = FakeMember(55, self.guild, roles=[FakeRole(521, position=10, name="Member")])
+        self.guild.members[actor.id] = actor
+        self.guild.members[member.id] = member
+        ctx = FakeContext(
+            interaction=FakeInteraction(),
+            guild=self.guild,
+            channel=FakeChannel(222),
+            author=actor,
+        )
+
+        await AdminCog.timeout_remove_command.callback(self.cog, ctx, member=member, reason=None)
+
+        self.assertEqual(len(ctx.send_calls), 1)
+        self.assertTrue(ctx.send_calls[0]["ephemeral"])
+        self.assertIn("not currently timed out", ctx.send_calls[0]["embed"].description)
+
     async def test_admin_permissions_surfaces_missing_manage_channels(self):
         self.guild.me.guild_permissions = FakePermissionSnapshot(
             manage_roles=True,
@@ -734,6 +824,29 @@ class AdminCogSmokeTests(unittest.IsolatedAsyncioTestCase):
         missing = next(field for field in embed.fields if field.name == "Missing Server Permissions")
         self.assertIn("Manage Channels", missing.value)
         self.assertIn("/lock channel", missing.value)
+
+    async def test_admin_permissions_surfaces_missing_timeout_members_for_timeout_remove(self):
+        self.guild.me.guild_permissions = FakePermissionSnapshot(
+            manage_roles=True,
+            manage_channels=True,
+            manage_messages=True,
+            moderate_members=False,
+            kick_members=True,
+            mention_everyone=True,
+        )
+        ctx = FakeContext(
+            interaction=FakeInteraction(),
+            guild=self.guild,
+            channel=FakeChannel(223),
+            author=FakeAuthor(manage_guild=True),
+        )
+
+        await AdminCog.admin_permissions_command.callback(self.cog, ctx)
+
+        embed = ctx.send_calls[0]["embed"]
+        missing = next(field for field in embed.fields if field.name == "Missing Server Permissions")
+        self.assertIn("Timeout Members", missing.value)
+        self.assertIn("/timeout remove", missing.value)
 
     async def test_verification_panel_spells_out_verified_and_unverified_members(self):
         ok, _ = await self.cog.service.set_verification_config(

@@ -9,7 +9,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
-from babblebox.app_command_hardening import harden_admin_root_group, harden_lock_root_group
+from babblebox.app_command_hardening import harden_admin_root_group, harden_lock_root_group, harden_timeout_root_group
 from babblebox import game_engine as ge
 from babblebox.admin_service import (
     FOLLOWUP_MODE_LABELS,
@@ -80,7 +80,7 @@ PERMISSION_DIAGNOSTIC_RULES: tuple[tuple[str, str, str], ...] = (
     (
         "moderate_members",
         "Moderate Members / Timeout Members",
-        "Shield timeout actions cannot run.",
+        "Shield timeout actions and `/timeout remove` cannot run.",
     ),
     (
         "manage_messages",
@@ -569,6 +569,7 @@ class AdminCog(commands.Cog):
         self.service = AdminService(bot)
         harden_admin_root_group(self.admin_group)
         harden_lock_root_group(self.lock_group)
+        harden_timeout_root_group(self.timeout_group)
 
     async def cog_load(self):
         await self.service.start()
@@ -622,6 +623,12 @@ class AdminCog(commands.Cog):
         if self.service.get_compiled_config(guild_id).lock_admin_only:
             return False
         return self._user_has_lock_moderator_permission(actor)
+
+    def user_can_manage_timeout(self, actor: object) -> bool:
+        if self.user_can_manage_admin(actor):
+            return True
+        perms = getattr(actor, "guild_permissions", None)
+        return bool(getattr(perms, "moderate_members", False))
 
     async def _guard(self, ctx: commands.Context) -> bool:
         await defer_hybrid_response(ctx, ephemeral=True)
@@ -708,6 +715,38 @@ class AdminCog(commands.Cog):
             recovery_title="Emergency Lock Access Check Unavailable",
             recovery_description="Babblebox could not finish the emergency lock access check just now. Please try again in a moment.",
             recovery_footer="Babblebox Lock",
+        )
+        return False
+
+    async def _timeout_guard(self, ctx: commands.Context) -> bool:
+        await defer_hybrid_response(ctx, ephemeral=True)
+        if ctx.guild is None:
+            await self._send_admin_response(
+                ctx,
+                embed=ge.make_status_embed(
+                    "Server Only",
+                    "Timeout removal tools only work inside a server.",
+                    tone="warning",
+                    footer="Babblebox Timeout",
+                ),
+                recovery_title="Timeout Removal Unavailable",
+                recovery_description="Babblebox could not complete the timeout removal permission check just now. Please try again inside a server.",
+                recovery_footer="Babblebox Timeout",
+            )
+            return False
+        if self.user_can_manage_timeout(ctx.author):
+            return True
+        await self._send_admin_response(
+            ctx,
+            embed=ge.make_status_embed(
+                "Timeout Access Denied",
+                "You need **Timeout Members**, **Manage Server**, or administrator access to remove timeouts in this server.",
+                tone="warning",
+                footer="Babblebox Timeout",
+            ),
+            recovery_title="Timeout Access Check Unavailable",
+            recovery_description="Babblebox could not finish the timeout access check just now. Please try again in a moment.",
+            recovery_footer="Babblebox Timeout",
         )
         return False
 
@@ -866,6 +905,8 @@ class AdminCog(commands.Cog):
         perms = getattr(me, "guild_permissions", None)
         if perms is None or not getattr(perms, "manage_channels", False):
             add("Warning: Emergency locks cannot run because Babblebox is missing Manage Channels.")
+        if perms is None or not getattr(perms, "moderate_members", False):
+            add("Warning: Timeout removals and Shield timeout actions cannot run because Babblebox is missing Timeout Members.")
         return lines
 
     def _permission_diagnostic_rows(self, guild_id: int) -> list[tuple[str, str]]:
@@ -917,6 +958,7 @@ class AdminCog(commands.Cog):
             value=(
                 "Babblebox only locks normal text channels.\n"
                 "Category-synced channels are intentionally rejected so Babblebox does not break sync.\n"
+                "If the channel is already fully denied, Babblebox can track the lock without changing the overwrite and later clears only its own marker.\n"
                 "Only the `@everyone` flags Babblebox changed are restored later, and manual mid-lock edits are preserved when possible.\n"
                 "Timed locks survive restarts and are reconciled by the background sweep."
             ),
@@ -933,6 +975,43 @@ class AdminCog(commands.Cog):
             inline=False,
         )
         return ge.style_embed(embed, footer="Babblebox Lock | /lock channel, remove, or settings")
+
+    async def _timeout_embed(self, guild_id: int) -> discord.Embed:
+        compiled = self.service.get_compiled_config(guild_id)
+        log_status = "Shared admin log enabled" if compiled.admin_log_channel_id is not None else "Shared admin log optional"
+        embed = discord.Embed(
+            title="Timeout Removal",
+            description="Direct moderator/admin lane for safely clearing active member timeouts.",
+            color=ge.EMBED_THEME["warning"],
+        )
+        embed.add_field(
+            name="Current Policy",
+            value=(
+                "Access: **Moderators with Timeout Members, plus Manage Server/admin users**\n"
+                f"Logging: **{log_status}**\n"
+                "Targeting: **Only members Babblebox and the moderator can safely affect**"
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Safety Model",
+            value=(
+                "Babblebox checks the moderator's access, moderator hierarchy, Babblebox's Timeout Members permission, Babblebox's hierarchy, "
+                "and whether the member is actually timed out before clearing anything.\n"
+                "If an admin log channel is configured, timeout removals are logged there."
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Quick Use",
+            value=(
+                "`/timeout remove member:@User reason:Appeal accepted`\n"
+                "`/admin permissions`\n"
+                "`/admin logs channel:#admin-log`"
+            ),
+            inline=False,
+        )
+        return ge.style_embed(embed, footer="Babblebox Timeout | /timeout remove")
 
     async def _permission_diagnostics_embed(self, guild_id: int) -> discord.Embed:
         guild = self._guild(guild_id)
@@ -1809,6 +1888,53 @@ class AdminCog(commands.Cog):
             ok=ok,
             footer="Babblebox Lock",
             recovery_footer="Babblebox Lock",
+        )
+
+    @app_commands.allowed_installs(guilds=True, users=False)
+    @app_commands.guild_only()
+    @commands.hybrid_group(
+        name="timeout",
+        with_app_command=True,
+        description="Moderator timeout removal tools",
+        invoke_without_command=True,
+    )
+    async def timeout_group(self, ctx: commands.Context):
+        if not await self._timeout_guard(ctx):
+            return
+        await self._send_admin_response(
+            ctx,
+            embed=await self._timeout_embed(ctx.guild.id),
+            recovery_title="Timeout Removal Panel Unavailable",
+            recovery_description="Babblebox could not open the timeout removal panel just now. Please try `/timeout` again in a moment.",
+            recovery_footer="Babblebox Timeout",
+        )
+
+    @timeout_group.command(name="remove", with_app_command=True, description="Remove one active member timeout safely")
+    @app_commands.describe(
+        member="Which member's timeout to remove",
+        reason="Optional moderation note for the audit log",
+    )
+    async def timeout_remove_command(
+        self,
+        ctx: commands.Context,
+        member: discord.Member,
+        reason: Optional[str] = None,
+    ):
+        if not await self._timeout_guard(ctx):
+            return
+        ok, message = await self.service.remove_timeout(
+            ctx.guild,
+            member,
+            actor=ctx.author,
+            reason_text=reason,
+        )
+        await self._send_result(
+            ctx,
+            "Timeout Removal",
+            message,
+            ok=ok,
+            footer="Babblebox Timeout",
+            recovery_footer="Babblebox Timeout",
         )
 
     @app_commands.allowed_installs(guilds=True, users=False)

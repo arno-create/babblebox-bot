@@ -166,6 +166,8 @@ HELP_PAGES: list[dict[str, str]] = [
             "`/shield panel`, `/shield rules`, `/shield links`, `/shield trusted`, `/shield filters`, `/shield exemptions`, `/shield allowlist`, `/shield logs`, `/shield severe category`, `/shield severe term`, `/shield ai`, and `/shield test` cover the shipped admin flow.\n"
             "`/shield panel` is the panel-first editor: pick one pack, then use Actions, Options, or Exemptions so Babblebox only shows relevant controls and keeps global scope separate from pack-local exemptions.\n"
             "`/lock channel` and `/lock remove` are Babblebox's direct emergency moderator/admin lane for calm channel lockdowns. `/lock settings` lets admins tune the default notice and optionally limit the lane to admins only.\n"
+            "If a channel is already fully denied, Babblebox can track that lock without reopening it later and only clears its own timer or marker on unlock.\n"
+            "`/timeout remove` is the direct moderator/admin lane for safely clearing active member timeouts.\n"
             "`/admin panel`, `/admin followup`, `/admin verification`, `/admin logs`, `/admin exclusions`, `/admin templates`, `/admin permissions`, and `/admin sync` cover returned-after-ban follow-up roles, verification cleanup, permission diagnostics, and compact admin operations.\n"
             "`/admin panel` is now the interactive control surface: use its section buttons to open focused editors for follow-up, verification policy/timing/help path, exclusions, logs, and templates, then keep the slash commands as the precise fallback path.\n"
             "Live moderation stays off until an admin enables it, and the first enable applies a recommended non-AI baseline while Shield AI access stays owner-managed.\n"
@@ -315,7 +317,7 @@ def build_help_embed() -> discord.Embed:
         name="Shield / Admin",
         value=(
             "`/shield panel`, `/shield rules`, `/shield exemptions`, `/shield links`, `/shield filters`, `/shield severe category`, "
-            "`/shield severe term`, `/shield ai`, `/lock channel`, `/lock remove`, `/admin panel`, `/admin followup`, `/admin verification`, "
+            "`/shield severe term`, `/shield ai`, `/lock channel`, `/lock remove`, `/timeout remove`, `/admin panel`, `/admin followup`, `/admin verification`, "
             "`/admin permissions`, and `/admin sync` "
             "cover focused safety setup and compact admin automation, with `/admin panel` now acting as the interactive control surface for the common admin settings."
         ),

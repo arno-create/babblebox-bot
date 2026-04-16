@@ -61,9 +61,12 @@ class BabbleBotSetupHookTests(unittest.IsolatedAsyncioTestCase):
                     await bot.setup_hook()
 
                 lock_root = next(command for command in bot.tree.get_commands() if command.name == "lock")
+                timeout_root = next(command for command in bot.tree.get_commands() if command.name == "timeout")
                 self.assertEqual(sync_targets, [None])
                 self.assertEqual({command.name for command in lock_root.commands}, {"channel", "remove", "settings"})
+                self.assertEqual({command.name for command in timeout_root.commands}, {"remove"})
                 self.assertIsNone(lock_root.default_permissions)
+                self.assertIsNone(timeout_root.default_permissions)
             finally:
                 await self._close_bot(bot)
 
@@ -100,7 +103,7 @@ class BabbleBotSetupHookTests(unittest.IsolatedAsyncioTestCase):
             bot = BabbleBot()
 
             async def fake_sync(*, guild=None):
-                return [command for command in bot.tree.get_commands(guild=guild) if command.name != "lock"]
+                return [command for command in bot.tree.get_commands(guild=guild) if command.name not in {"lock", "timeout"}]
 
             try:
                 with patch.object(BabbleBot, "_load_dictionary", new=_fake_load_dictionary), patch.object(
@@ -112,7 +115,49 @@ class BabbleBotSetupHookTests(unittest.IsolatedAsyncioTestCase):
                         await bot.setup_hook()
 
                 self.assertIn("missing `/lock`", str(error_context.exception))
+                self.assertIn("missing `/timeout`", str(error_context.exception))
                 self.assertIn("global commands sync result", str(error_context.exception))
+            finally:
+                await self._close_bot(bot)
+
+    async def test_setup_hook_raises_when_synced_timeout_root_keeps_old_visibility_bitset(self):
+        with self._env():
+            bot = BabbleBot()
+
+            synced_lock_root = type(
+                "FakeSyncedLockCommand",
+                (),
+                {
+                    "name": "lock",
+                    "options": [type("FakeOption", (), {"name": name})() for name in ("channel", "remove", "settings")],
+                    "default_member_permissions": None,
+                },
+            )()
+            stale_timeout_root = type(
+                "FakeSyncedTimeoutCommand",
+                (),
+                {
+                    "name": "timeout",
+                    "options": [type("FakeOption", (), {"name": "remove"})()],
+                    "default_member_permissions": discord.Permissions(moderate_members=True),
+                },
+            )()
+
+            async def fake_sync(*, guild=None):
+                return [synced_lock_root, stale_timeout_root]
+
+            try:
+                with patch.object(BabbleBot, "_load_dictionary", new=_fake_load_dictionary), patch.object(
+                    bot.tree,
+                    "sync",
+                    new=AsyncMock(side_effect=fake_sync),
+                ):
+                    with self.assertRaises(RuntimeError) as error_context:
+                        await bot.setup_hook()
+
+                message = str(error_context.exception)
+                self.assertIn("default_member_permissions", message)
+                self.assertIn("`/timeout`", message)
             finally:
                 await self._close_bot(bot)
 

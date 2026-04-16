@@ -328,13 +328,14 @@ def normalize_channel_lock(payload: Any) -> dict[str, Any] | None:
     created_at = _serialize_datetime(_parse_datetime(payload.get("created_at")))
     due_at = _serialize_datetime(_parse_datetime(payload.get("due_at")))
     category_id = payload.get("category_id")
+    marker_only = bool(payload.get("marker_only"))
     locked_permissions = _clean_permission_name_list(payload.get("locked_permissions"))
     original_permissions = _clean_permission_state_map(payload.get("original_permissions"))
     if not isinstance(guild_id, int) or guild_id <= 0:
         return None
     if not isinstance(channel_id, int) or channel_id <= 0:
         return None
-    if created_at is None or not locked_permissions:
+    if created_at is None or (not locked_permissions and not marker_only):
         return None
     return {
         "guild_id": guild_id,
@@ -344,6 +345,7 @@ def normalize_channel_lock(payload: Any) -> dict[str, Any] | None:
         "due_at": due_at,
         "category_id": category_id if isinstance(category_id, int) and category_id > 0 else None,
         "permissions_synced": bool(payload.get("permissions_synced")),
+        "marker_only": marker_only,
         "locked_permissions": locked_permissions,
         "original_permissions": {name: original_permissions.get(name) for name in locked_permissions},
     }
@@ -777,6 +779,7 @@ def _channel_lock_from_row(row) -> dict[str, Any] | None:
             "due_at": row.get("due_at"),
             "category_id": row.get("category_id"),
             "permissions_synced": row.get("permissions_synced", False),
+            "marker_only": row.get("marker_only", False),
             "locked_permissions": locked_permissions,
             "original_permissions": original_permissions,
         }
@@ -832,7 +835,7 @@ class _PostgresAdminStore(_BaseAdminStore):
             "CREATE TABLE IF NOT EXISTS admin_verification_states (guild_id BIGINT NOT NULL, user_id BIGINT NOT NULL, joined_at TIMESTAMPTZ NOT NULL, warning_at TIMESTAMPTZ NOT NULL, kick_at TIMESTAMPTZ NOT NULL, warning_sent_at TIMESTAMPTZ NULL, extension_count SMALLINT NOT NULL DEFAULT 0, review_pending BOOLEAN NOT NULL DEFAULT FALSE, review_version INTEGER NOT NULL DEFAULT 0, review_message_channel_id BIGINT NULL, review_message_id BIGINT NULL, last_result_code TEXT NULL, last_result_at TIMESTAMPTZ NULL, last_notified_code TEXT NULL, last_notified_at TIMESTAMPTZ NULL, PRIMARY KEY (guild_id, user_id))",
             "CREATE TABLE IF NOT EXISTS admin_verification_review_queues (guild_id BIGINT PRIMARY KEY, channel_id BIGINT NULL, message_id BIGINT NULL, updated_at TIMESTAMPTZ NULL)",
             "CREATE TABLE IF NOT EXISTS admin_verification_notification_snapshots (guild_id BIGINT NOT NULL, run_context TEXT NOT NULL, operation TEXT NOT NULL, outcome TEXT NOT NULL, reason_code TEXT NOT NULL, signature TEXT NULL, notified_at TIMESTAMPTZ NULL, PRIMARY KEY (guild_id, run_context, operation, outcome, reason_code))",
-            "CREATE TABLE IF NOT EXISTS admin_channel_locks (guild_id BIGINT NOT NULL, channel_id BIGINT NOT NULL, actor_id BIGINT NULL, created_at TIMESTAMPTZ NOT NULL, due_at TIMESTAMPTZ NULL, category_id BIGINT NULL, permissions_synced BOOLEAN NOT NULL DEFAULT FALSE, locked_permissions JSONB NOT NULL DEFAULT '[]'::jsonb, original_permissions JSONB NOT NULL DEFAULT '{}'::jsonb, PRIMARY KEY (guild_id, channel_id))",
+            "CREATE TABLE IF NOT EXISTS admin_channel_locks (guild_id BIGINT NOT NULL, channel_id BIGINT NOT NULL, actor_id BIGINT NULL, created_at TIMESTAMPTZ NOT NULL, due_at TIMESTAMPTZ NULL, category_id BIGINT NULL, permissions_synced BOOLEAN NOT NULL DEFAULT FALSE, marker_only BOOLEAN NOT NULL DEFAULT FALSE, locked_permissions JSONB NOT NULL DEFAULT '[]'::jsonb, original_permissions JSONB NOT NULL DEFAULT '{}'::jsonb, PRIMARY KEY (guild_id, channel_id))",
         ]
         alter_statements = [
             "ALTER TABLE admin_guild_configs ADD COLUMN IF NOT EXISTS followup_enabled BOOLEAN NOT NULL DEFAULT FALSE",
@@ -879,6 +882,7 @@ class _PostgresAdminStore(_BaseAdminStore):
             "ALTER TABLE admin_channel_locks ADD COLUMN IF NOT EXISTS due_at TIMESTAMPTZ NULL",
             "ALTER TABLE admin_channel_locks ADD COLUMN IF NOT EXISTS category_id BIGINT NULL",
             "ALTER TABLE admin_channel_locks ADD COLUMN IF NOT EXISTS permissions_synced BOOLEAN NOT NULL DEFAULT FALSE",
+            "ALTER TABLE admin_channel_locks ADD COLUMN IF NOT EXISTS marker_only BOOLEAN NOT NULL DEFAULT FALSE",
             "ALTER TABLE admin_channel_locks ADD COLUMN IF NOT EXISTS locked_permissions JSONB NOT NULL DEFAULT '[]'::jsonb",
             "ALTER TABLE admin_channel_locks ADD COLUMN IF NOT EXISTS original_permissions JSONB NOT NULL DEFAULT '{}'::jsonb",
             "DROP TABLE IF EXISTS admin_member_risk_states",
@@ -1048,7 +1052,7 @@ class _PostgresAdminStore(_BaseAdminStore):
             return
         async with self.pool.acquire() as conn:
             await conn.execute(
-                "INSERT INTO admin_channel_locks (guild_id, channel_id, actor_id, created_at, due_at, category_id, permissions_synced, locked_permissions, original_permissions) VALUES ($1, $2, $3, $4, $5, $6, $7, $8::jsonb, $9::jsonb) ON CONFLICT (guild_id, channel_id) DO UPDATE SET actor_id = EXCLUDED.actor_id, created_at = EXCLUDED.created_at, due_at = EXCLUDED.due_at, category_id = EXCLUDED.category_id, permissions_synced = EXCLUDED.permissions_synced, locked_permissions = EXCLUDED.locked_permissions, original_permissions = EXCLUDED.original_permissions",
+                "INSERT INTO admin_channel_locks (guild_id, channel_id, actor_id, created_at, due_at, category_id, permissions_synced, marker_only, locked_permissions, original_permissions) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb) ON CONFLICT (guild_id, channel_id) DO UPDATE SET actor_id = EXCLUDED.actor_id, created_at = EXCLUDED.created_at, due_at = EXCLUDED.due_at, category_id = EXCLUDED.category_id, permissions_synced = EXCLUDED.permissions_synced, marker_only = EXCLUDED.marker_only, locked_permissions = EXCLUDED.locked_permissions, original_permissions = EXCLUDED.original_permissions",
                 normalized["guild_id"],
                 normalized["channel_id"],
                 normalized["actor_id"],
@@ -1056,6 +1060,7 @@ class _PostgresAdminStore(_BaseAdminStore):
                 normalized["due_at"],
                 normalized["category_id"],
                 normalized["permissions_synced"],
+                normalized["marker_only"],
                 json.dumps(normalized["locked_permissions"]),
                 json.dumps(normalized["original_permissions"]),
             )
