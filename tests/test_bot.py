@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, patch
 
 import discord
 
-from babblebox.bot import BabbleBot
+from babblebox.bot import BabbleBot, DISCORD_MAX_COMMAND_CHOICES, DISCORD_MAX_COMMAND_OPTIONS
 
 
 MEMORY_STORAGE_ENV = {
@@ -22,6 +22,15 @@ async def _fake_load_dictionary(self):
 
 
 class BabbleBotSetupHookTests(unittest.IsolatedAsyncioTestCase):
+    def _iter_command_schema_paths(self, payload: dict, *, path: str):
+        yield path, payload
+        for option in payload.get("options", []):
+            if not isinstance(option, dict):
+                continue
+            option_name = option.get("name")
+            next_path = f"{path} {option_name}" if option_name else path
+            yield from self._iter_command_schema_paths(option, path=next_path)
+
     async def _close_bot(self, bot: BabbleBot) -> None:
         for loaded in list(bot.cogs.values()):
             service = getattr(loaded, "service", None)
@@ -159,6 +168,117 @@ class BabbleBotSetupHookTests(unittest.IsolatedAsyncioTestCase):
                         await bot.setup_hook()
 
                 self.assertIn("`/lock missing`", str(error_context.exception))
+                sync_mock.assert_not_awaited()
+            finally:
+                await self._close_bot(bot)
+
+    async def test_setup_hook_keeps_loaded_tree_within_discord_schema_limits(self):
+        with self._env():
+            bot = BabbleBot()
+
+            async def fake_sync(*, guild=None):
+                return bot.tree.get_commands(guild=guild)
+
+            try:
+                with patch.object(BabbleBot, "_load_dictionary", new=_fake_load_dictionary), patch.object(
+                    bot.tree,
+                    "sync",
+                    new=AsyncMock(side_effect=fake_sync),
+                ):
+                    await bot.setup_hook()
+
+                for command in bot.tree.get_commands():
+                    payload = bot._command_schema_payload(command)
+                    for path, node in self._iter_command_schema_paths(payload, path=f"/{command.name}"):
+                        self.assertLessEqual(
+                            len(node.get("options", [])),
+                            DISCORD_MAX_COMMAND_OPTIONS,
+                            msg=f"{path} exceeded the Discord option cap",
+                        )
+                        self.assertLessEqual(
+                            len(node.get("choices", [])),
+                            DISCORD_MAX_COMMAND_CHOICES,
+                            msg=f"{path} exceeded the Discord choice cap",
+                        )
+            finally:
+                await self._close_bot(bot)
+
+    async def test_setup_hook_raises_before_sync_when_local_tree_exposes_too_many_options(self):
+        with self._env():
+            bot = BabbleBot()
+            sync_mock = AsyncMock()
+            original_payload = bot._command_schema_payload
+
+            def overflow_payload(command):
+                payload = original_payload(command)
+                if getattr(command, "name", None) != "shield":
+                    return payload
+                mutated = dict(payload)
+                mutated["options"] = [
+                    dict(option)
+                    if not (isinstance(option, dict) and option.get("name") == "rules")
+                    else {
+                        **option,
+                        "options": [{"name": f"overflow_{index}"} for index in range(DISCORD_MAX_COMMAND_OPTIONS + 2)],
+                    }
+                    for option in payload.get("options", [])
+                ]
+                return mutated
+
+            try:
+                with patch.object(BabbleBot, "_load_dictionary", new=_fake_load_dictionary), patch.object(
+                    bot,
+                    "_command_schema_payload",
+                    side_effect=overflow_payload,
+                ), patch.object(bot.tree, "sync", new=sync_mock):
+                    with self.assertRaises(RuntimeError) as error_context:
+                        await bot.setup_hook()
+
+                self.assertIn("loaded global tree exposes 27 options on `/shield rules`", str(error_context.exception))
+                sync_mock.assert_not_awaited()
+            finally:
+                await self._close_bot(bot)
+
+    async def test_setup_hook_raises_before_sync_when_local_tree_exposes_too_many_choices(self):
+        with self._env():
+            bot = BabbleBot()
+            sync_mock = AsyncMock()
+            original_payload = bot._command_schema_payload
+
+            def overflow_payload(command):
+                payload = original_payload(command)
+                if getattr(command, "name", None) != "shield":
+                    return payload
+                mutated = dict(payload)
+                mutated["options"] = [
+                    dict(option)
+                    if not (isinstance(option, dict) and option.get("name") == "rules")
+                    else {
+                        **option,
+                        "options": [
+                            {
+                                **dict(parameter),
+                                "choices": [{"name": f"choice_{index}", "value": f"choice_{index}"} for index in range(DISCORD_MAX_COMMAND_CHOICES + 1)],
+                            }
+                            if isinstance(parameter, dict) and parameter.get("name") == "pack"
+                            else parameter
+                            for parameter in option.get("options", [])
+                        ],
+                    }
+                    for option in payload.get("options", [])
+                ]
+                return mutated
+
+            try:
+                with patch.object(BabbleBot, "_load_dictionary", new=_fake_load_dictionary), patch.object(
+                    bot,
+                    "_command_schema_payload",
+                    side_effect=overflow_payload,
+                ), patch.object(bot.tree, "sync", new=sync_mock):
+                    with self.assertRaises(RuntimeError) as error_context:
+                        await bot.setup_hook()
+
+                self.assertIn(f"loaded global tree exposes {DISCORD_MAX_COMMAND_CHOICES + 1} choices on `/shield rules pack`", str(error_context.exception))
                 sync_mock.assert_not_awaited()
             finally:
                 await self._close_bot(bot)

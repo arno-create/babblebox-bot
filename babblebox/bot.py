@@ -35,6 +35,9 @@ REQUIRED_SLASH_CONTRACT: dict[str, dict[str, object]] = {
     },
 }
 
+DISCORD_MAX_COMMAND_OPTIONS = 25
+DISCORD_MAX_COMMAND_CHOICES = 25
+
 
 class BabbleBot(commands.Bot):
     def __init__(self):
@@ -108,6 +111,72 @@ class BabbleBot(commands.Bot):
         if failures:
             raise RuntimeError("Required slash-command contract failed: " + " ".join(failures))
 
+    def _command_schema_payload(self, command: object) -> dict[str, Any]:
+        to_dict = getattr(command, "to_dict", None)
+        if not callable(to_dict):
+            return {}
+        try:
+            payload = to_dict(self.tree)
+        except TypeError:
+            payload = to_dict()
+        return payload if isinstance(payload, dict) else {}
+
+    def _collect_slash_schema_failures(
+        self,
+        payload: dict[str, Any],
+        *,
+        path: str,
+        target_label: str,
+        failures: list[str],
+    ) -> None:
+        options = payload.get("options", [])
+        if isinstance(options, list):
+            if len(options) > DISCORD_MAX_COMMAND_OPTIONS:
+                failures.append(
+                    f"{target_label} exposes {len(options)} options on `{path}` "
+                    f"(Discord max {DISCORD_MAX_COMMAND_OPTIONS})."
+                )
+            for option in options:
+                if not isinstance(option, dict):
+                    continue
+                option_name = option.get("name")
+                next_path = f"{path} {option_name}" if option_name else path
+                self._collect_slash_schema_failures(
+                    option,
+                    path=next_path,
+                    target_label=target_label,
+                    failures=failures,
+                )
+
+        choices = payload.get("choices", [])
+        if isinstance(choices, list) and len(choices) > DISCORD_MAX_COMMAND_CHOICES:
+            failures.append(
+                f"{target_label} exposes {len(choices)} choices on `{path}` "
+                f"(Discord max {DISCORD_MAX_COMMAND_CHOICES})."
+            )
+
+    def _verify_slash_schema_limits(self, commands_to_check: list[object], *, target_label: str) -> None:
+        failures: list[str] = []
+        for command in commands_to_check:
+            name = getattr(command, "name", None)
+            if not name:
+                continue
+            payload = self._command_schema_payload(command)
+            if not payload:
+                continue
+            self._collect_slash_schema_failures(
+                payload,
+                path=f"/{name}",
+                target_label=target_label,
+                failures=failures,
+            )
+        if failures:
+            raise RuntimeError("Slash-command schema failed: " + " ".join(failures))
+
+    def _verify_loaded_tree(self, commands_to_check: list[object], *, target_label: str) -> None:
+        self._verify_required_slash_contract(commands_to_check, target_label=target_label)
+        self._verify_slash_schema_limits(commands_to_check, target_label=target_label)
+
     async def _sync_commands_for_target(
         self,
         *,
@@ -132,12 +201,12 @@ class BabbleBot(commands.Bot):
         for extension in COGS:
             await self.load_extension(extension)
 
-        self._verify_required_slash_contract(self.tree.get_commands(), target_label="loaded global tree")
+        self._verify_loaded_tree(self.tree.get_commands(), target_label="loaded global tree")
 
         if self.dev_guild_id:
             dev_guild = discord.Object(id=self.dev_guild_id)
             self.tree.copy_global_to(guild=dev_guild)
-            self._verify_required_slash_contract(
+            self._verify_loaded_tree(
                 self.tree.get_commands(guild=dev_guild),
                 target_label=f"loaded dev guild tree {self.dev_guild_id}",
             )

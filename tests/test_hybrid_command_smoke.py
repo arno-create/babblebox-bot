@@ -1706,7 +1706,6 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             await ShieldCog.shield_rules_command.callback(
                 cog,
                 ctx,
-                module=None,
                 pack="adult",
                 enabled=True,
                 action="delete_log",
@@ -1714,8 +1713,6 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
                 medium_action=None,
                 high_action=None,
                 sensitivity="normal",
-                escalation_threshold=None,
-                escalation_window_minutes=None,
                 timeout_minutes=None,
             )
 
@@ -1739,7 +1736,6 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             await ShieldCog.shield_rules_command.callback(
                 cog,
                 ctx,
-                module=None,
                 pack="adult",
                 enabled=True,
                 action=None,
@@ -1748,14 +1744,88 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
                 high_action="delete_log",
                 sensitivity="normal",
                 adult_solicitation=True,
-                escalation_threshold=None,
-                escalation_window_minutes=None,
                 timeout_minutes=None,
             )
 
             self.assertEqual(len(ctx.send_calls), 1)
             self.assertIn("Optional solicitation text detection is on", ctx.send_calls[0]["embed"].description)
             self.assertTrue(cog.service.get_config(10)["adult_solicitation_enabled"])
+        finally:
+            await cog.service.close()
+
+    async def test_shield_module_command_updates_live_moderation_toggle(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
+        cog = ShieldCog(bot)
+        try:
+            cog.service.storage_ready = True
+            ctx = FakeContext(
+                interaction=FakeInteraction(),
+                guild=FakeGuild(10),
+                channel=FakeChannel(),
+                author=FakeAuthor(manage_guild=True),
+            )
+
+            await ShieldCog.shield_module_command.callback(cog, ctx, enabled=True)
+
+            self.assertEqual(len(ctx.send_calls), 1)
+            self.assertIn("Shield live-message moderation is now enabled", ctx.send_calls[0]["embed"].description)
+            self.assertTrue(cog.service.get_config(10)["module_enabled"])
+        finally:
+            await cog.service.close()
+
+    async def test_shield_escalation_command_updates_global_escalation_settings(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
+        cog = ShieldCog(bot)
+        try:
+            cog.service.storage_ready = True
+            ctx = FakeContext(
+                interaction=FakeInteraction(),
+                guild=FakeGuild(10),
+                channel=FakeChannel(),
+                author=FakeAuthor(manage_guild=True),
+            )
+
+            await ShieldCog.shield_escalation_command.callback(
+                cog,
+                ctx,
+                threshold=4,
+                window_minutes=12,
+                timeout_minutes=9,
+            )
+
+            self.assertEqual(len(ctx.send_calls), 1)
+            description = ctx.send_calls[0]["embed"].description
+            self.assertIn("Escalation now uses `4` hits in `12` minutes", description)
+            self.assertIn("`9` minute timeout", description)
+            config = cog.service.get_config(10)
+            self.assertEqual(config["escalation_threshold"], 4)
+            self.assertEqual(config["escalation_window_minutes"], 12)
+            self.assertEqual(config["timeout_minutes"], 9)
+        finally:
+            await cog.service.close()
+
+    async def test_shield_rules_command_redirects_global_timeout_updates_to_escalation(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
+        cog = ShieldCog(bot)
+        try:
+            cog.service.storage_ready = True
+            ctx = FakeContext(
+                interaction=FakeInteraction(),
+                guild=FakeGuild(10),
+                channel=FakeChannel(),
+                author=FakeAuthor(manage_guild=True),
+            )
+
+            await ShieldCog.shield_rules_command.callback(
+                cog,
+                ctx,
+                pack=None,
+                timeout_minutes=9,
+            )
+
+            self.assertEqual(len(ctx.send_calls), 1)
+            self.assertIn("/shield escalation timeout_minutes:...", ctx.send_calls[0]["embed"].description)
+            self.assertEqual(cog.service.get_config(10)["timeout_minutes"], 15)
         finally:
             await cog.service.close()
 
