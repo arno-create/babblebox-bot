@@ -356,6 +356,8 @@ class WebsiteDocsTests(unittest.TestCase):
             "/shield links",
             "/shield trusted",
             "/shield logs",
+            "/shield module",
+            "/shield escalation",
             "/shield filters",
             "separate from Confessions link mode",
             "DM-ad",
@@ -547,7 +549,9 @@ class WebsiteDocsTests(unittest.TestCase):
             "Slash is recommended for the heavier config flows here.",
             "bb!hunt guess contains_digits",
             "bb!drops config true 4",
-            "bb!shield rules true promo true log",
+            "bb!shield module true",
+            "bb!shield escalation 3 10 15",
+            "bb!shield rules promo true log",
             "bb!admin followup true @Probation review 30d",
         ):
             self.assertIn(expected_text, readme)

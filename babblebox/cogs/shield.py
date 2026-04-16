@@ -2152,7 +2152,7 @@ class ShieldCog(commands.Cog):
         )
         return self._finalize_shield_embed(
             embed,
-            footer="Babblebox Shield | Use /shield panel, rules, exemptions, links, trusted, filters, logs, allowlist, ai, or test",
+            footer="Babblebox Shield | Use /shield panel, module, escalation, rules, exemptions, links, trusted, filters, logs, allowlist, ai, or test",
         )
 
     def _rules_embed(self, guild_id: int, *, selected_pack: str | None = None) -> discord.Embed:
@@ -2160,7 +2160,7 @@ class ShieldCog(commands.Cog):
         active_pack = selected_pack if selected_pack in RULE_PANEL_PACKS else self._default_rule_pack(guild_id)
         embed = discord.Embed(
             title="Shield Rules",
-            description="Select a pack below in `/shield panel` and Babblebox only shows the controls relevant to that pack. Slash commands stay available as exact fallbacks, not the primary editing surface.",
+            description="Select a pack below in `/shield panel` and Babblebox only shows the controls relevant to that pack. `/shield module` owns the live toggle, `/shield escalation` owns repeated-hit fallbacks, and `/shield rules` stays pack-local.",
             color=ge.EMBED_THEME["info"],
         )
         embed.add_field(
@@ -2537,9 +2537,46 @@ class ShieldCog(commands.Cog):
             return
         await self._send_panel(ctx, section="overview")
 
-    @shield_group.command(name="rules", with_app_command=True, description="Configure core Shield rules, actions, and thresholds")
+    @shield_group.command(name="module", with_app_command=True, description="Turn Shield live moderation on or off")
+    @app_commands.describe(enabled="Turn the live Shield moderation module on or off")
+    async def shield_module_command(self, ctx: commands.Context, enabled: bool):
+        if not await self._guard(ctx):
+            return
+        ok, message = await self.service.set_module_enabled(ctx.guild.id, enabled)
+        await self._send_result(ctx, "Shield Module", message, ok=ok)
+
+    @shield_group.command(
+        name="escalation",
+        with_app_command=True,
+        description="Configure repeated-hit escalation and the global Shield timeout fallback",
+    )
     @app_commands.describe(
-        module="Turn the Shield module on or off",
+        threshold="Repeated-hit threshold used by delete_escalate",
+        window_minutes="Strike window used by delete_escalate",
+        timeout_minutes="Global timeout length used when escalation or timeout actions fire",
+    )
+    async def shield_escalation_command(
+        self,
+        ctx: commands.Context,
+        threshold: Optional[int] = None,
+        window_minutes: Optional[int] = None,
+        timeout_minutes: Optional[int] = None,
+    ):
+        if not await self._guard(ctx):
+            return
+        if all(value is None for value in (threshold, window_minutes, timeout_minutes)):
+            await send_hybrid_response(ctx, embed=self._rules_embed(ctx.guild.id), ephemeral=True)
+            return
+        ok, message = await self.service.set_escalation(
+            ctx.guild.id,
+            threshold=threshold,
+            window_minutes=window_minutes,
+            timeout_minutes=timeout_minutes,
+        )
+        await self._send_result(ctx, "Shield Escalation", message, ok=ok)
+
+    @shield_group.command(name="rules", with_app_command=True, description="Configure one Shield pack's actions and thresholds")
+    @app_commands.describe(
         pack="Which protection pack to adjust",
         enabled="Turn that pack on or off",
         action="Shorthand to use one graduated policy derived from a single action",
@@ -2563,9 +2600,7 @@ class ShieldCog(commands.Cog):
         repeat_threshold="Low-text GIF repeat threshold for the GIF pack",
         same_asset_threshold="Same-GIF asset repeat threshold for the GIF pack",
         ratio_percent="Minimum GIF-share ratio for the GIF pack",
-        escalation_threshold="Repeated-hit threshold for delete_escalate",
-        escalation_window_minutes="Strike window used for delete_escalate",
-        timeout_minutes="Timeout length used when escalation or timeout actions fire. With a pack selected, this becomes that pack's dedicated timeout override.",
+        timeout_minutes="Pack-specific timeout override. Use `/shield escalation timeout_minutes:...` for the global Shield timeout fallback.",
     )
     @app_commands.choices(
         pack=PACK_CHOICES,
@@ -2579,7 +2614,6 @@ class ShieldCog(commands.Cog):
     async def shield_rules_command(
         self,
         ctx: commands.Context,
-        module: Optional[bool] = None,
         pack: Optional[str] = None,
         enabled: Optional[bool] = None,
         action: Optional[str] = None,
@@ -2603,18 +2637,12 @@ class ShieldCog(commands.Cog):
         repeat_threshold: Optional[int] = None,
         same_asset_threshold: Optional[int] = None,
         ratio_percent: Optional[int] = None,
-        escalation_threshold: Optional[int] = None,
-        escalation_window_minutes: Optional[int] = None,
         timeout_minutes: Optional[int] = None,
     ):
         if not await self._guard(ctx):
             return
         messages: list[str] = []
         ok = True
-        if module is not None:
-            module_ok, module_message = await self.service.set_module_enabled(ctx.guild.id, module)
-            ok = ok and module_ok
-            messages.append(module_message)
         pack_fields_used = any(
             value is not None
             for value in (
@@ -2674,19 +2702,16 @@ class ShieldCog(commands.Cog):
             )
             ok = ok and pack_ok
             messages.append(pack_message)
+        if timeout_minutes is not None and pack is None:
+            ok = False
+            messages.append(
+                "Use `/shield escalation timeout_minutes:...` to change the global Shield timeout fallback. "
+                "`/shield rules timeout_minutes` only applies when `pack` is selected."
+            )
         if pack is not None and timeout_minutes is not None:
             timeout_ok, timeout_message = await self.service.set_pack_timeout_override(ctx.guild.id, pack, timeout_minutes)
             ok = ok and timeout_ok
             messages.append(timeout_message)
-        if any(value is not None for value in (escalation_threshold, escalation_window_minutes)) or (timeout_minutes is not None and pack is None):
-            escalation_ok, escalation_message = await self.service.set_escalation(
-                ctx.guild.id,
-                threshold=escalation_threshold,
-                window_minutes=escalation_window_minutes,
-                timeout_minutes=timeout_minutes if pack is None else None,
-            )
-            ok = ok and escalation_ok
-            messages.append(escalation_message)
         if not messages:
             await send_hybrid_response(ctx, embed=self._rules_embed(ctx.guild.id, selected_pack=pack), ephemeral=True)
             return
