@@ -13,6 +13,7 @@ from babblebox.app_command_hardening import harden_admin_root_group, harden_lock
 from babblebox import game_engine as ge
 from babblebox.admin_service import (
     FOLLOWUP_MODE_LABELS,
+    LOCK_MODERATOR_PERMISSION_NAMES,
     REVIEW_ACTION_LABELS,
     VERIFICATION_DEADLINE_ACTION_LABELS,
     VERIFICATION_REVIEW_ACTION_LABELS,
@@ -550,13 +551,16 @@ class AdminCog(commands.Cog):
         perms = getattr(actor, "guild_permissions", None)
         return bool(getattr(perms, "administrator", False) or getattr(perms, "manage_guild", False))
 
-    def user_can_manage_lock(self, actor: object, guild_id: int) -> bool:
+    def _user_has_lock_moderator_permission(self, actor: object) -> bool:
         perms = getattr(actor, "guild_permissions", None)
-        if bool(getattr(perms, "administrator", False) or getattr(perms, "manage_guild", False)):
+        return any(bool(getattr(perms, permission_name, False)) for permission_name in LOCK_MODERATOR_PERMISSION_NAMES)
+
+    def user_can_manage_lock(self, actor: object, guild_id: int) -> bool:
+        if self.user_can_manage_admin(actor):
             return True
         if self.service.get_compiled_config(guild_id).lock_admin_only:
             return False
-        return bool(getattr(perms, "manage_channels", False))
+        return self._user_has_lock_moderator_permission(actor)
 
     async def _guard(self, ctx: commands.Context) -> bool:
         await defer_hybrid_response(ctx, ephemeral=True)
@@ -632,7 +636,10 @@ class AdminCog(commands.Cog):
             if self.service.get_compiled_config(ctx.guild.id).lock_admin_only:
                 description = "This server has limited emergency locks to **Manage Server** or administrator users."
             else:
-                description = "You need **Manage Channels** to use emergency locks in this server."
+                description = (
+                    "You need a moderator permission such as **Manage Channels**, **Manage Messages**, "
+                    "**Timeout Members**, **Kick Members**, or **Ban Members** to use emergency locks in this server."
+                )
             title = "Lock Access Denied"
         await self._send_admin_response(
             ctx,
@@ -1546,7 +1553,7 @@ class AdminCog(commands.Cog):
     @app_commands.describe(
         default_notice="Default lock notice to post when a moderator does not supply a one-off notice",
         clear_notice="Clear the custom default notice and return to Babblebox's built-in notice",
-        admin_only="Limit `/lock` use to Manage Server/admin users instead of moderators with Manage Channels",
+        admin_only="Limit `/lock` use to Manage Server/admin users instead of moderators who can manage channels or messages, timeout, kick, or ban members",
     )
     async def lock_settings_command(
         self,

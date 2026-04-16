@@ -254,6 +254,13 @@ class WebsiteDocsTests(unittest.TestCase):
             self.assertIn(text, help_html)
         for text in ("GIF Flood / Media Pressure", "/admin panel", "/lock channel", "/admin permissions"):
             self.assertIn(text, index_html)
+        for text in (
+            "manage channels or messages, timeout, kick, or ban members",
+            "admins-only",
+        ):
+            self.assertIn(text, readme)
+            self.assertIn(text, help_html)
+            self.assertIn(text, index_html)
 
     def test_shield_docs_cover_no_link_dm_lure_and_truthful_ai_models(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")

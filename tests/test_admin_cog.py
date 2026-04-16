@@ -69,6 +69,11 @@ class FakeInteraction:
 class FakeGuildPermissions:
     administrator = False
     manage_guild = False
+    manage_channels = False
+    manage_messages = False
+    moderate_members = False
+    kick_members = False
+    ban_members = False
 
 
 class FakePermissionSnapshot:
@@ -79,6 +84,7 @@ class FakePermissionSnapshot:
             "manage_webhooks": False,
             "manage_messages": False,
             "kick_members": False,
+            "ban_members": False,
             "moderate_members": False,
             "view_audit_log": True,
             "view_channel": True,
@@ -103,13 +109,28 @@ class FakeRole:
 
 
 class FakeAuthor:
-    def __init__(self, user_id: int = 1, *, manage_guild: bool = False, manage_channels: bool = False, administrator: bool = False):
+    def __init__(
+        self,
+        user_id: int = 1,
+        *,
+        manage_guild: bool = False,
+        manage_channels: bool = False,
+        manage_messages: bool = False,
+        moderate_members: bool = False,
+        kick_members: bool = False,
+        ban_members: bool = False,
+        administrator: bool = False,
+    ):
         self.id = user_id
         self.display_name = f"User {user_id}"
         self.mention = f"<@{user_id}>"
         self.guild_permissions = FakeGuildPermissions()
         self.guild_permissions.manage_guild = manage_guild
         self.guild_permissions.manage_channels = manage_channels
+        self.guild_permissions.manage_messages = manage_messages
+        self.guild_permissions.moderate_members = moderate_members
+        self.guild_permissions.kick_members = kick_members
+        self.guild_permissions.ban_members = ban_members
         self.guild_permissions.administrator = administrator
         self.sent = []
 
@@ -384,6 +405,31 @@ class AdminCogSmokeTests(unittest.IsolatedAsyncioTestCase):
         everyone_overwrite = channel.overwrites_for(self.guild.default_role)
         self.assertFalse(everyone_overwrite.send_messages)
 
+    async def test_lock_channel_allows_manage_messages_moderator_by_default(self):
+        channel = FakeChannel(23)
+        self.guild.channels[channel.id] = channel
+        ctx = FakeContext(
+            interaction=FakeInteraction(),
+            guild=self.guild,
+            channel=channel,
+            author=FakeAuthor(manage_messages=True),
+        )
+
+        await AdminCog.lock_channel_command.callback(
+            self.cog,
+            ctx,
+            channel=channel,
+            duration="30m",
+            notice_message=None,
+            post_notice=False,
+        )
+
+        self.assertEqual(len(ctx.send_calls), 1)
+        self.assertTrue(ctx.send_calls[0]["ephemeral"])
+        self.assertIn("Locked", ctx.send_calls[0]["embed"].description)
+        everyone_overwrite = channel.overwrites_for(self.guild.default_role)
+        self.assertFalse(everyone_overwrite.send_messages)
+
     async def test_lock_settings_is_admin_only(self):
         ctx = FakeContext(
             interaction=FakeInteraction(),
@@ -434,7 +480,7 @@ class AdminCogSmokeTests(unittest.IsolatedAsyncioTestCase):
             interaction=FakeInteraction(),
             guild=self.guild,
             channel=channel,
-            author=FakeAuthor(manage_channels=True),
+            author=FakeAuthor(manage_messages=True),
         )
 
         await AdminCog.lock_channel_command.callback(
@@ -449,6 +495,29 @@ class AdminCogSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(ctx.send_calls), 1)
         self.assertTrue(ctx.send_calls[0]["ephemeral"])
         self.assertIn("limited emergency locks", ctx.send_calls[0]["embed"].description)
+
+    async def test_lock_channel_denies_member_without_moderator_permissions_by_default(self):
+        channel = FakeChannel(24)
+        self.guild.channels[channel.id] = channel
+        ctx = FakeContext(
+            interaction=FakeInteraction(),
+            guild=self.guild,
+            channel=channel,
+            author=FakeAuthor(),
+        )
+
+        await AdminCog.lock_channel_command.callback(
+            self.cog,
+            ctx,
+            channel=channel,
+            duration="30m",
+            notice_message=None,
+            post_notice=False,
+        )
+
+        self.assertEqual(len(ctx.send_calls), 1)
+        self.assertTrue(ctx.send_calls[0]["ephemeral"])
+        self.assertIn("Manage Messages", ctx.send_calls[0]["embed"].description)
 
     async def test_lock_channel_still_allows_manage_guild_admin_when_admin_only_is_enabled(self):
         ok, _ = await self.cog.service.set_lock_config(self.guild.id, admin_only=True)

@@ -594,10 +594,10 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(prefix_mastery_names, {"category", "recalc", "scholar"})
         self.assertEqual(admin_slash_mastery_names, {"category", "recalc", "scholar"})
 
-    async def test_admin_only_roots_emit_hidden_guild_only_metadata(self):
+    async def test_admin_roots_and_lock_root_emit_expected_hidden_guild_only_metadata(self):
         expected = {
             "admin": (AdminCog, int(discord.Permissions(manage_guild=True).value)),
-            "lock": (AdminCog, int(discord.Permissions(manage_channels=True, manage_guild=True).value)),
+            "lock": (AdminCog, None),
             "shield": (ShieldCog, int(discord.Permissions(manage_guild=True).value)),
             "confessions": (ConfessionsCog, int(discord.Permissions(manage_guild=True).value)),
             "dropsadmin": (QuestionDropsCog, int(discord.Permissions(manage_guild=True).value)),
@@ -607,7 +607,10 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             with self.subTest(command=name):
                 command, payload = await self._registered_root(cog_cls, root_name=name)
 
-                self.assertEqual(payload["default_member_permissions"], default_permissions)
+                if default_permissions is None:
+                    self.assertIsNone(payload["default_member_permissions"])
+                else:
+                    self.assertEqual(payload["default_member_permissions"], default_permissions)
                 self.assertEqual(payload["contexts"], [0])
                 self.assertEqual(payload["integration_types"], [0])
                 self.assertFalse(payload["dm_permission"])
@@ -619,6 +622,12 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(command.allowed_installs.user)
                 if name == "lock":
                     self.assertEqual({option["name"] for option in payload["options"]}, {"channel", "remove", "settings"})
+                    settings_command = next(subcommand for subcommand in command.commands if subcommand.name == "settings")
+                    settings_app_command = getattr(settings_command, "app_command", settings_command)
+                    self.assertEqual(
+                        int(settings_app_command.default_permissions.value),
+                        int(discord.Permissions(manage_guild=True).value),
+                    )
 
     async def test_lock_root_keeps_expected_prefix_and_slash_children(self):
         cog = AdminCog(types.SimpleNamespace(loop=None))
