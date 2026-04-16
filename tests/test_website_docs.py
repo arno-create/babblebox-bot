@@ -36,7 +36,7 @@ class WebsiteDocsTests(unittest.TestCase):
             'id="faq"',
         ):
             self.assertIn(anchor, help_html)
-        for command in ("/support", "/daily", "/buddy", "/profile", "/vault", "/watch", "/later", "/capture", "/remind", "/afk", "/shield panel", "/shield links", "/shield trusted", "/lock channel", "/lock remove", "/lock settings", "/admin panel", "/admin followup", "/admin verification", "/admin permissions", "/confess", "/confessions moderate"):
+        for command in ("/support", "/daily", "/buddy", "/profile", "/vault", "/watch", "/later", "/capture", "/remind", "/afk", "/shield panel", "/shield links", "/shield trusted", "/lock channel", "/lock remove", "/lock settings", "/timeout remove", "/admin panel", "/admin followup", "/admin verification", "/admin permissions", "/confess", "/confessions moderate"):
             self.assertIn(command, help_html)
         self.assertIn("Broken Telephone, Exquisite Corpse, Spyfall, Word Bomb, and Pattern Hunt", help_html)
         self.assertIn("1-10 drops per day", help_html)
@@ -142,6 +142,7 @@ class WebsiteDocsTests(unittest.TestCase):
             "/lock channel",
             "/lock remove",
             "/lock settings",
+            "/timeout remove",
             "/admin permissions",
             "PYTHONPATH=. pytest -q",
             "optional feature that only works after admins enable and configure it",
@@ -183,6 +184,7 @@ class WebsiteDocsTests(unittest.TestCase):
             "/dropsadmin config",
             "/dropsadmin mastery category",
             "/lock channel",
+            "/timeout remove",
             "/admin permissions",
             "{user.mention}",
             "{category.name}",
@@ -257,6 +259,7 @@ class WebsiteDocsTests(unittest.TestCase):
             "/lock channel",
             "/lock remove",
             "/lock settings",
+            "/timeout remove",
             "/admin panel",
             "/admin followup",
             "/admin verification",
@@ -275,6 +278,19 @@ class WebsiteDocsTests(unittest.TestCase):
             self.assertIn(text, readme)
             self.assertIn(text, help_html)
             self.assertIn(text, index_html)
+
+    def test_admin_panel_docs_reflect_interactive_control_surface_story(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        help_html = (ROOT / "help.html").read_text(encoding="utf-8")
+        index_html = (ROOT / "index.html").read_text(encoding="utf-8")
+
+        self.assertIn("interactive admin control surface", readme)
+        self.assertIn("commands remain precise fallbacks", readme)
+        self.assertIn("interactive admin lifecycle surface", help_html)
+        self.assertIn("sectioned control surface", help_html)
+        self.assertIn("precise fallback path", help_html)
+        self.assertIn("sectioned interactive control surface", index_html)
+        self.assertIn("illustrative rather than exhaustive", index_html)
 
     def test_shield_docs_cover_no_link_dm_lure_and_truthful_ai_models(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")

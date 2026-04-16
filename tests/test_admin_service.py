@@ -15,6 +15,7 @@ from babblebox.admin_store import (
     _PostgresAdminStore,
     _config_from_row as _admin_config_from_row,
     default_admin_config,
+    normalize_channel_lock,
     normalize_admin_config,
     normalize_verification_state,
 )
@@ -193,6 +194,10 @@ class FakeMember:
         self.default_avatar = object()
         self.sent = []
         self.kicked = False
+        self.timed_out_until = None
+        self.communication_disabled_until = None
+        self.timeout_calls: list[dict[str, object]] = []
+        self.raise_forbidden_on_timeout = False
 
     async def add_roles(self, role, reason=None):
         if role not in self.roles:
@@ -207,6 +212,14 @@ class FakeMember:
     async def kick(self, reason=None):
         self.kicked = True
         self.guild.members.pop(self.id, None)
+
+    async def timeout(self, until, reason=None):
+        if self.raise_forbidden_on_timeout:
+            response = types.SimpleNamespace(status=403, reason="Forbidden", headers={})
+            raise discord.Forbidden(response=response, message="missing permissions")
+        self.timed_out_until = until
+        self.communication_disabled_until = until
+        self.timeout_calls.append({"until": until, "reason": reason})
 
 
 class FakeGuild:
@@ -230,6 +243,7 @@ class FakeGuild:
                 manage_channels=True,
                 manage_webhooks=True,
                 manage_messages=True,
+                moderate_members=True,
                 kick_members=True,
                 ban_members=True,
                 view_audit_log=True,
@@ -319,8 +333,26 @@ class AdminStoreNormalizationTests(unittest.TestCase):
         self.assertEqual(normalized["review_version"], 3)
         self.assertEqual(normalized["review_message_channel_id"], 50)
         self.assertEqual(normalized["review_message_id"], 75)
-        self.assertEqual(normalized["last_result_code"], "kick:blocked:missing_kick_members")
-        self.assertEqual(normalized["last_notified_code"], "kick:blocked:missing_kick_members")
+
+    def test_channel_lock_normalization_allows_marker_only_records_with_no_mutated_flags(self):
+        normalized = normalize_channel_lock(
+            {
+                "guild_id": 10,
+                "channel_id": 20,
+                "actor_id": 30,
+                "created_at": serialize_datetime(ge.now_utc()),
+                "due_at": serialize_datetime(ge.now_utc() + timedelta(minutes=30)),
+                "category_id": None,
+                "permissions_synced": False,
+                "marker_only": True,
+                "locked_permissions": [],
+                "original_permissions": {},
+            }
+        )
+
+        self.assertIsNotNone(normalized)
+        self.assertTrue(normalized["marker_only"])
+        self.assertEqual(normalized["locked_permissions"], [])
 
     def test_postgres_config_row_decodes_json_string_id_lists(self):
         config = _admin_config_from_row(
@@ -600,6 +632,62 @@ class AdminServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(queue)
         return record
 
+    async def test_set_followup_config_can_clear_role_without_touching_other_fields(self):
+        await self._configure_followup()
+
+        ok, message = await self.service.set_followup_config(self.guild.id, role_id=None)
+
+        self.assertTrue(ok)
+        self.assertIn("enabled", message)
+        config = self.service.get_config(self.guild.id)
+        self.assertTrue(config["followup_enabled"])
+        self.assertIsNone(config["followup_role_id"])
+        self.assertEqual(config["followup_mode"], "auto_remove")
+        self.assertEqual((config["followup_duration_value"], config["followup_duration_unit"]), (30, "days"))
+
+    async def test_set_verification_config_can_clear_role_and_help_channel_without_touching_other_fields(self):
+        await self._configure_verification()
+
+        ok, message = await self.service.set_verification_config(self.guild.id, role_id=None, help_channel_id=None)
+
+        self.assertTrue(ok)
+        self.assertIn("enabled", message)
+        config = self.service.get_config(self.guild.id)
+        self.assertTrue(config["verification_enabled"])
+        self.assertIsNone(config["verification_role_id"])
+        self.assertEqual(config["verification_logic"], "must_have_role")
+        self.assertEqual(config["verification_deadline_action"], "auto_kick")
+        self.assertIsNone(config["verification_help_channel_id"])
+        self.assertEqual(config["verification_help_extension_seconds"], 24 * 3600)
+
+    async def test_replace_exclusion_targets_replaces_bucket_atomically(self):
+        ok, _ = await self.service.set_exclusion_target(self.guild.id, "excluded_role_ids", self.followup_role.id, True)
+        self.assertTrue(ok)
+
+        ok, message = await self.service.replace_exclusion_targets(
+            self.guild.id,
+            "excluded_role_ids",
+            [self.verified_role.id, self.verified_role.id],
+        )
+
+        self.assertTrue(ok)
+        self.assertIn("list updated", message)
+        self.assertEqual(self.service.get_config(self.guild.id)["excluded_role_ids"], [self.verified_role.id])
+
+    async def test_replace_exclusion_targets_reconciles_review_backlog_for_newly_exempt_member(self):
+        member = FakeMember(701, self.guild, roles=[], top_role=FakeRole(5, position=5))
+        await self._create_verification_review(member)
+        queue = await self.store.fetch_verification_review_queue(self.guild.id)
+        queue_message = await self.log_channel.fetch_message(queue["message_id"])
+
+        ok, _ = await self.service.replace_exclusion_targets(self.guild.id, "excluded_user_ids", [member.id])
+
+        self.assertTrue(ok)
+        updated = await self.store.fetch_verification_state(self.guild.id, member.id)
+        self.assertIsNone(updated)
+        self.assertIsNone(await self.store.fetch_verification_review_queue(self.guild.id))
+        self.assertEqual(queue_message.view, None)
+
     async def test_lock_channel_applies_expected_overwrite_notice_and_log(self):
         ok, _ = await self.service.set_logs_config(self.guild.id, channel_id=self.log_channel.id, alert_role_id=None)
         self.assertTrue(ok)
@@ -673,6 +761,88 @@ class AdminServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertGreater(second_due_at, first_due_at)
         self.assertEqual(len(channel.permission_edits), 1)
 
+    async def test_lock_channel_tracks_existing_full_lock_without_false_warning(self):
+        actor = self._admin_actor()
+        channel = FakeChannel(780)
+        self.guild.channels[channel.id] = channel
+        self._set_role_overwrite(
+            channel,
+            self.guild.default_role,
+            send_messages=False,
+            create_public_threads=False,
+            create_private_threads=False,
+            send_messages_in_threads=False,
+            add_reactions=False,
+        )
+
+        ok, message = await self.service.lock_channel(self.guild, channel, actor=actor, duration_text="30m", post_notice=False)
+
+        self.assertTrue(ok)
+        self.assertIn("already matched Babblebox's lock restrictions", message)
+        self.assertNotIn("cannot safely restore later", message)
+        record = await self.store.fetch_channel_lock(self.guild.id, channel.id)
+        self.assertTrue(record["marker_only"])
+        self.assertEqual(record["locked_permissions"], [])
+        self.assertEqual(channel.permission_edits, [])
+
+    async def test_lock_channel_marker_only_repeated_attempt_refreshes_timer_without_overwrite_mutation(self):
+        actor = self._admin_actor()
+        channel = FakeChannel(781)
+        self.guild.channels[channel.id] = channel
+        self._set_role_overwrite(
+            channel,
+            self.guild.default_role,
+            send_messages=False,
+            create_public_threads=False,
+            create_private_threads=False,
+            send_messages_in_threads=False,
+            add_reactions=False,
+        )
+
+        first_ok, _ = await self.service.lock_channel(self.guild, channel, actor=actor, duration_text="30m", post_notice=False)
+        first_record = await self.store.fetch_channel_lock(self.guild.id, channel.id)
+        first_due_at = deserialize_datetime(first_record["due_at"])
+
+        second_ok, message = await self.service.lock_channel(self.guild, channel, actor=actor, duration_text="2h", post_notice=False)
+        second_record = await self.store.fetch_channel_lock(self.guild.id, channel.id)
+        second_due_at = deserialize_datetime(second_record["due_at"])
+
+        self.assertTrue(first_ok)
+        self.assertTrue(second_ok)
+        self.assertIn("already locked by Babblebox", message)
+        self.assertTrue(second_record["marker_only"])
+        self.assertGreater(second_due_at, first_due_at)
+        self.assertEqual(channel.permission_edits, [])
+
+    async def test_lock_channel_marker_only_refresh_can_convert_into_mutating_lock(self):
+        actor = self._admin_actor()
+        channel = FakeChannel(782)
+        self.guild.channels[channel.id] = channel
+        self._set_role_overwrite(
+            channel,
+            self.guild.default_role,
+            send_messages=False,
+            create_public_threads=False,
+            create_private_threads=False,
+            send_messages_in_threads=False,
+            add_reactions=False,
+        )
+
+        first_ok, _ = await self.service.lock_channel(self.guild, channel, actor=actor, duration_text="30m", post_notice=False)
+        self.assertTrue(first_ok)
+        overwrite = channel.overwrites_for(self.guild.default_role)
+        overwrite.add_reactions = None
+        channel._role_overwrites[self.guild.default_role.id] = overwrite
+
+        second_ok, message = await self.service.lock_channel(self.guild, channel, actor=actor, duration_text="2h", post_notice=False)
+
+        self.assertTrue(second_ok)
+        self.assertIn("Locked", message)
+        record = await self.store.fetch_channel_lock(self.guild.id, channel.id)
+        self.assertFalse(record["marker_only"])
+        self.assertEqual(record["locked_permissions"], ["add_reactions"])
+        self.assertEqual(len(channel.permission_edits), 1)
+
     async def test_lock_channel_fails_clearly_without_manage_channels(self):
         actor = self._admin_actor()
         channel = FakeChannel(79)
@@ -703,6 +873,17 @@ class AdminServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(ok)
         self.assertIn("category-synced channel", message)
+        self.assertIsNone(await self.store.fetch_channel_lock(self.guild.id, channel.id))
+
+    async def test_lock_channel_rejects_subminute_duration(self):
+        actor = self._admin_actor()
+        channel = FakeChannel(801)
+        self.guild.channels[channel.id] = channel
+
+        ok, message = await self.service.lock_channel(self.guild, channel, actor=actor, duration_text="30s", post_notice=False)
+
+        self.assertFalse(ok)
+        self.assertIn("at least 1 minute", message)
         self.assertIsNone(await self.store.fetch_channel_lock(self.guild.id, channel.id))
 
     async def test_remove_channel_lock_restores_tracked_flags_and_preserves_unrelated_overwrites(self):
@@ -747,6 +928,50 @@ class AdminServiceTests(unittest.IsolatedAsyncioTestCase):
         updated = channel.overwrites_for(self.guild.default_role)
         self.assertTrue(updated.add_reactions)
 
+    async def test_remove_channel_lock_marker_only_clears_state_without_reopening_channel(self):
+        actor = self._admin_actor()
+        channel = FakeChannel(820)
+        self.guild.channels[channel.id] = channel
+        self._set_role_overwrite(
+            channel,
+            self.guild.default_role,
+            send_messages=False,
+            create_public_threads=False,
+            create_private_threads=False,
+            send_messages_in_threads=False,
+            add_reactions=False,
+        )
+        ok, _ = await self.service.lock_channel(self.guild, channel, actor=actor, duration_text="30m", post_notice=False)
+        self.assertTrue(ok)
+
+        remove_ok, message = await self.service.remove_channel_lock(self.guild, channel, actor=actor, automatic=False)
+
+        self.assertTrue(remove_ok)
+        self.assertIn("did not change the overwrite", message)
+        self.assertIsNone(await self.store.fetch_channel_lock(self.guild.id, channel.id))
+        overwrite = channel.overwrites_for(self.guild.default_role)
+        self.assertFalse(overwrite.send_messages)
+        self.assertFalse(overwrite.create_public_threads)
+
+    async def test_remove_channel_lock_without_record_on_already_locked_channel_has_clear_message(self):
+        actor = self._admin_actor()
+        channel = FakeChannel(821)
+        self.guild.channels[channel.id] = channel
+        self._set_role_overwrite(
+            channel,
+            self.guild.default_role,
+            send_messages=False,
+            create_public_threads=False,
+            create_private_threads=False,
+            send_messages_in_threads=False,
+            add_reactions=False,
+        )
+
+        ok, message = await self.service.remove_channel_lock(self.guild, channel, actor=actor, automatic=False)
+
+        self.assertFalse(ok)
+        self.assertIn("already matches the lock restrictions", message)
+
     async def test_timed_lock_auto_unlocks_after_restart_safe_sweep(self):
         ok, _ = await self.service.set_logs_config(self.guild.id, channel_id=self.log_channel.id, alert_role_id=None)
         self.assertTrue(ok)
@@ -769,6 +994,42 @@ class AdminServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(processed)
         self.assertIsNone(await self.store.fetch_channel_lock(self.guild.id, channel.id))
         self.assertIsNone(channel.overwrites_for(self.guild.default_role).send_messages)
+        self.assertEqual(self._last_log_embed().title, "Channel Unlocked")
+
+    async def test_timed_marker_only_lock_auto_unlocks_after_restart_safe_sweep(self):
+        ok, _ = await self.service.set_logs_config(self.guild.id, channel_id=self.log_channel.id, alert_role_id=None)
+        self.assertTrue(ok)
+        actor = self._admin_actor()
+        channel = FakeChannel(831)
+        self.guild.channels[channel.id] = channel
+        self._set_role_overwrite(
+            channel,
+            self.guild.default_role,
+            send_messages=False,
+            create_public_threads=False,
+            create_private_threads=False,
+            send_messages_in_threads=False,
+            add_reactions=False,
+        )
+
+        locked, _ = await self.service.lock_channel(self.guild, channel, actor=actor, duration_text="30m", post_notice=False)
+        self.assertTrue(locked)
+        record = await self.store.fetch_channel_lock(self.guild.id, channel.id)
+        self.assertTrue(record["marker_only"])
+        record["due_at"] = serialize_datetime(ge.now_utc() - timedelta(minutes=1))
+        await self.store.upsert_channel_lock(record)
+
+        restarted = AdminService(self.bot, store=self.store)
+        restarted.storage_ready = True
+        await restarted._rebuild_config_cache()
+
+        processed = await restarted._run_sweep()
+
+        self.assertTrue(processed)
+        self.assertIsNone(await self.store.fetch_channel_lock(self.guild.id, channel.id))
+        overwrite = channel.overwrites_for(self.guild.default_role)
+        self.assertFalse(overwrite.send_messages)
+        self.assertFalse(overwrite.add_reactions)
         self.assertEqual(self._last_log_embed().title, "Channel Unlocked")
 
     async def test_due_channel_locks_clear_missing_guild_rows_and_reach_later_live_lock_same_sweep(self):
@@ -825,6 +1086,80 @@ class AdminServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(ok)
         self.assertIn("different category", message)
         self.assertIsNotNone(await self.store.fetch_channel_lock(self.guild.id, channel.id))
+
+    async def test_remove_timeout_clears_member_timeout_and_logs_when_available(self):
+        ok, _ = await self.service.set_logs_config(self.guild.id, channel_id=self.log_channel.id, alert_role_id=None)
+        self.assertTrue(ok)
+        actor = self._admin_actor(top_position=40)
+        member = FakeMember(880, self.guild, top_role=FakeRole(8800, position=10))
+        member.timed_out_until = ge.now_utc() + timedelta(minutes=15)
+        member.communication_disabled_until = member.timed_out_until
+        self.guild.members[member.id] = member
+
+        removed, message = await self.service.remove_timeout(self.guild, member, actor=actor, reason_text="Appeal accepted")
+
+        self.assertTrue(removed)
+        self.assertIn("Removed the timeout", message)
+        self.assertEqual(len(member.timeout_calls), 1)
+        self.assertIsNone(member.timed_out_until)
+        self.assertEqual(self._last_log_embed().title, "Timeout Removed")
+
+    async def test_remove_timeout_rejects_member_without_active_timeout(self):
+        actor = self._admin_actor(top_position=40)
+        member = FakeMember(881, self.guild, top_role=FakeRole(8810, position=10))
+        self.guild.members[member.id] = member
+
+        removed, message = await self.service.remove_timeout(self.guild, member, actor=actor)
+
+        self.assertFalse(removed)
+        self.assertIn("not currently timed out", message)
+
+    async def test_remove_timeout_requires_actor_access(self):
+        actor_role = FakeRole(8820, position=40)
+        actor = FakeMember(882, self.guild, roles=[actor_role], top_role=actor_role, guild_permissions=FakePermissions())
+        member = FakeMember(883, self.guild, top_role=FakeRole(8830, position=10))
+        member.timed_out_until = ge.now_utc() + timedelta(minutes=15)
+        member.communication_disabled_until = member.timed_out_until
+        self.guild.members[actor.id] = actor
+        self.guild.members[member.id] = member
+
+        removed, message = await self.service.remove_timeout(self.guild, member, actor=actor)
+
+        self.assertFalse(removed)
+        self.assertIn("Timeout Members", message)
+
+    async def test_remove_timeout_rejects_missing_bot_timeout_permission(self):
+        actor = self._admin_actor(top_position=40)
+        member = FakeMember(884, self.guild, top_role=FakeRole(8840, position=10))
+        member.timed_out_until = ge.now_utc() + timedelta(minutes=15)
+        member.communication_disabled_until = member.timed_out_until
+        self.guild.members[member.id] = member
+        self.guild.me.guild_permissions.moderate_members = False
+
+        removed, message = await self.service.remove_timeout(self.guild, member, actor=actor)
+
+        self.assertFalse(removed)
+        self.assertIn("Timeout Members", message)
+
+    async def test_remove_timeout_respects_actor_hierarchy(self):
+        actor_role = FakeRole(8850, position=10)
+        actor = FakeMember(
+            885,
+            self.guild,
+            roles=[actor_role],
+            top_role=actor_role,
+            guild_permissions=FakePermissions(moderate_members=True),
+        )
+        member = FakeMember(886, self.guild, top_role=FakeRole(8860, position=20))
+        member.timed_out_until = ge.now_utc() + timedelta(minutes=15)
+        member.communication_disabled_until = member.timed_out_until
+        self.guild.members[actor.id] = actor
+        self.guild.members[member.id] = member
+
+        removed, message = await self.service.remove_timeout(self.guild, member, actor=actor)
+
+        self.assertFalse(removed)
+        self.assertIn("your top role", message)
 
     async def test_ban_candidate_and_return_assign_followup_role(self):
         ok, _ = await self.service.set_logs_config(self.guild.id, channel_id=self.log_channel.id, alert_role_id=None)

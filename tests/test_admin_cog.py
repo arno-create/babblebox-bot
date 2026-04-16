@@ -1,69 +1,191 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import timedelta
 import types
 import unittest
+from unittest import mock
 from unittest.mock import AsyncMock
 
 import discord
 
 from babblebox import game_engine as ge
+from babblebox.admin_panel_views import (
+    ExclusionsEditorView,
+    FollowupEditorView,
+    LogsEditorView,
+    TemplatesEditorView,
+    VerificationHelpEditorView,
+    VerificationPolicyEditorView,
+    VerificationSyncView,
+    VerificationTimingEditorView,
+)
 from babblebox.cogs.admin import AdminCog, AdminPanelView, FollowupReviewView, VerificationDeadlineReviewView
 from babblebox.admin_service import AdminService
 from babblebox.admin_store import AdminStore
 
 
 class FakeMessage:
-    def __init__(self, **kwargs):
+    _next_id = 1000
+
+    def __init__(self, *, channel=None, message_id=None, **kwargs):
+        if message_id is None:
+            message_id = FakeMessage._next_id
+            FakeMessage._next_id += 1
+        self.id = message_id
+        self.channel = channel
         self.embed = kwargs.get("embed")
         self.view = kwargs.get("view")
         self.ephemeral = kwargs.get("ephemeral")
-        self.edits = []
+        self.content = kwargs.get("content")
+        self.edit_calls = []
+        self.edits = self.edit_calls
+        self.delete_calls = []
 
     async def edit(self, **kwargs):
-        self.edits.append(kwargs)
+        self.edit_calls.append(kwargs)
+        if "content" in kwargs:
+            self.content = kwargs["content"]
         if "embed" in kwargs:
             self.embed = kwargs["embed"]
         if "view" in kwargs:
             self.view = kwargs["view"]
         return self
 
+    async def delete(self, *, delay=None):
+        self.delete_calls.append(delay)
+
+
+class FakeInteractionCallbackResponse:
+    def __init__(self, *, resource=None, message_id=None):
+        self.resource = resource
+        self.message_id = message_id
+
 
 class FakeResponse:
     def __init__(self, interaction=None):
         self._interaction = interaction
         self._done = False
+        self.send_calls = []
         self.edits = []
         self.sent_messages = []
+        self.defer_calls = []
+        self.modal_calls = []
 
     def is_done(self):
         return self._done
 
     async def edit_message(self, **kwargs):
+        if self._interaction is not None and getattr(self._interaction, "edit_exception", None) is not None:
+            raise self._interaction.edit_exception
         self._done = True
         self.edits.append(kwargs)
-        if self._interaction is not None and self._interaction.message is not None:
-            await self._interaction.message.edit(**kwargs)
+        target = None
+        if self._interaction is not None:
+            target = self._interaction.message or self._interaction._original_response_message
+        if target is not None:
+            await target.edit(**kwargs)
+        return FakeInteractionCallbackResponse(resource=target, message_id=getattr(target, "id", None))
 
     async def send_message(self, *args, **kwargs):
+        self.send_calls.append((args, kwargs))
         self._done = True
         self.sent_messages.append({"args": args, "kwargs": kwargs})
+        if self._interaction is not None and getattr(self._interaction, "initial_send_exception", None) is not None:
+            raise self._interaction.initial_send_exception
+        if self._interaction is None:
+            return FakeInteractionCallbackResponse()
+        return self._interaction.build_initial_response(kwargs)
+
+    async def defer(self, *args, **kwargs):
+        self.defer_calls.append((args, kwargs))
+        if self._interaction is not None and getattr(self._interaction, "defer_exception", None) is not None:
+            raise self._interaction.defer_exception
+        self._done = True
+        return FakeInteractionCallbackResponse(resource=getattr(self._interaction, "message", None))
+
+    async def send_modal(self, modal):
+        self.modal_calls.append(modal)
+        self._done = True
+        return None
 
 
 class FakeInteraction:
-    def __init__(self, *, user=None, guild=None, message=None):
+    def __init__(
+        self,
+        *,
+        user=None,
+        guild=None,
+        message=None,
+        channel=None,
+        expired: bool = False,
+        initial_send_exception: Exception | None = None,
+        followup_exception: Exception | None = None,
+        original_response_exception: Exception | None = None,
+        edit_original_response_exception: Exception | None = None,
+        defer_exception: Exception | None = None,
+        edit_exception: Exception | None = None,
+    ):
         self.user = user
         self.guild = guild
         self.message = message
+        self.channel = channel or getattr(message, "channel", None)
         self.response = FakeResponse(self)
         self.followup = types.SimpleNamespace(send=self._followup_send)
+        self._expired = expired
+        self.initial_send_exception = initial_send_exception
+        self.followup_exception = followup_exception
+        self.original_response_exception = original_response_exception
+        self.edit_original_response_exception = edit_original_response_exception
+        self.defer_exception = defer_exception
+        self.edit_exception = edit_exception
+        self.original_response_calls = []
+        self.edit_original_response_calls = []
+        self._original_response_message = None
+        self._last_followup_message = None
         self.followup_calls = []
 
     def is_expired(self):
-        return False
+        return self._expired
+
+    def _register_message(self, message: FakeMessage):
+        if self.channel is not None and hasattr(self.channel, "register_message"):
+            self.channel.register_message(message)
+        return message
+
+    def create_message(self, payload: dict) -> FakeMessage:
+        return self._register_message(FakeMessage(channel=self.channel, **payload))
+
+    def build_initial_response(self, payload: dict):
+        message = self.create_message(payload)
+        self._original_response_message = message
+        return FakeInteractionCallbackResponse(resource=message, message_id=message.id)
 
     async def _followup_send(self, *args, **kwargs):
+        if self.followup_exception is not None:
+            raise self.followup_exception
         self.followup_calls.append({"args": args, "kwargs": kwargs})
+        message = self.create_message(kwargs)
+        self._last_followup_message = message
+        return message if kwargs.get("wait") else None
+
+    async def original_response(self):
+        self.original_response_calls.append(None)
+        if self.original_response_exception is not None:
+            raise self.original_response_exception
+        if self._original_response_message is None:
+            raise discord.ClientException("Original response unavailable")
+        return self._original_response_message
+
+    async def edit_original_response(self, **kwargs):
+        self.edit_original_response_calls.append(kwargs)
+        if self.edit_original_response_exception is not None:
+            raise self.edit_original_response_exception
+        target = self._original_response_message or self.message
+        if target is None:
+            raise discord.ClientException("Original response unavailable")
+        await target.edit(**kwargs)
+        return target
 
 
 class FakeGuildPermissions:
@@ -147,16 +269,40 @@ class FakeMember(FakeAuthor):
         roles=None,
         manage_guild: bool = False,
         manage_channels: bool = False,
+        moderate_members: bool = False,
         administrator: bool = False,
         joined_at=None,
     ):
-        super().__init__(user_id=user_id, manage_guild=manage_guild, manage_channels=manage_channels, administrator=administrator)
+        super().__init__(
+            user_id=user_id,
+            manage_guild=manage_guild,
+            manage_channels=manage_channels,
+            moderate_members=moderate_members,
+            administrator=administrator,
+        )
         self.guild = guild
         self.roles = list(roles or [])
         self.top_role = self.roles[0] if self.roles else FakeRole(0, position=1)
-        self.guild_permissions = FakePermissionSnapshot(manage_guild=manage_guild, manage_channels=manage_channels, administrator=administrator)
+        self.guild_permissions = FakePermissionSnapshot(
+            manage_guild=manage_guild,
+            manage_channels=manage_channels,
+            moderate_members=moderate_members,
+            administrator=administrator,
+        )
         self.joined_at = joined_at or ge.now_utc()
         self.bot = False
+        self.timed_out_until = None
+        self.communication_disabled_until = None
+        self.timeout_calls = []
+        self.raise_forbidden_on_timeout = False
+
+    async def timeout(self, until, reason=None):
+        if self.raise_forbidden_on_timeout:
+            response = types.SimpleNamespace(status=403, reason="Forbidden", headers={})
+            raise discord.Forbidden(response=response, message="missing permissions")
+        self.timed_out_until = until
+        self.communication_disabled_until = until
+        self.timeout_calls.append({"until": until, "reason": reason})
 
 
 class FakeChannel:
@@ -222,6 +368,16 @@ class FakeChannel:
         message = self._messages.get(message_id)
         if message is None:
             raise Exception("missing")
+        return message
+
+    def register_message(self, message: FakeMessage):
+        self._messages[message.id] = message
+
+    def get_partial_message(self, message_id: int):
+        message = self._messages.get(message_id)
+        if message is None:
+            message = FakeMessage(channel=self, message_id=message_id)
+            self._messages[message.id] = message
         return message
 
 
@@ -298,7 +454,7 @@ class FakeContext:
 
     async def send(self, **kwargs):
         self.send_calls.append(kwargs)
-        return FakeMessage(**kwargs)
+        return FakeMessage(channel=self.channel, **kwargs)
 
     async def defer(self, **kwargs):
         self.defer_calls.append(kwargs)
@@ -327,6 +483,42 @@ class AdminCogSmokeTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         await self.cog.service.close()
         await self.original_service.close()
+
+    async def _panel_message(self, view) -> FakeMessage:
+        channel = FakeChannel(900, name="panel-ui")
+        message = FakeMessage(channel=channel, embed=await view.current_embed(), view=view)
+        channel.register_message(message)
+        view.message = message
+        return message
+
+    def _view_interaction(self, *, message: FakeMessage | None = None, user: object | None = None, **kwargs) -> FakeInteraction:
+        target_message = message or FakeMessage(channel=FakeChannel(901))
+        return FakeInteraction(
+            user=user or FakeAuthor(manage_guild=True),
+            guild=self.guild,
+            message=target_message,
+            channel=target_message.channel,
+            **kwargs,
+        )
+
+    def _button(self, view, label: str):
+        return next(child for child in view.children if getattr(child, "label", None) == label)
+
+    def _select(self, view, cls, *, placeholder_contains: str | None = None):
+        for child in view.children:
+            if isinstance(child, cls) and (placeholder_contains is None or placeholder_contains in getattr(child, "placeholder", "")):
+                return child
+        raise AssertionError(f"missing {cls.__name__} with placeholder {placeholder_contains!r}")
+
+    def _assert_embed_valid(self, embed: discord.Embed):
+        total = len(embed.title or "") + len(embed.description or "") + len(getattr(embed.footer, "text", "") or "")
+        for field in embed.fields:
+            total += len(field.name or "") + len(field.value or "")
+            self.assertLessEqual(len(field.name or ""), 256)
+            self.assertLessEqual(len(field.value or ""), 1024)
+        self.assertLessEqual(len(embed.title or ""), 256)
+        self.assertLessEqual(len(embed.description or ""), 4096)
+        self.assertLessEqual(total, 6000)
 
     async def test_admin_status_is_private_for_admins(self):
         ctx = FakeContext(
@@ -544,6 +736,71 @@ class AdminCogSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(ctx.send_calls[0]["ephemeral"])
         self.assertIn("Locked", ctx.send_calls[0]["embed"].description)
 
+    async def test_timeout_remove_allows_timeout_moderator(self):
+        actor_role = FakeRole(500, position=40, name="Moderator")
+        actor = FakeMember(50, self.guild, roles=[actor_role], moderate_members=True)
+        target_role = FakeRole(501, position=10, name="Member")
+        member = FakeMember(51, self.guild, roles=[target_role])
+        member.timed_out_until = ge.now_utc() + timedelta(minutes=15)
+        member.communication_disabled_until = member.timed_out_until
+        self.guild.members[actor.id] = actor
+        self.guild.members[member.id] = member
+        ctx = FakeContext(
+            interaction=FakeInteraction(),
+            guild=self.guild,
+            channel=FakeChannel(220),
+            author=actor,
+        )
+
+        await AdminCog.timeout_remove_command.callback(self.cog, ctx, member=member, reason="Appeal accepted")
+
+        self.assertEqual(len(ctx.send_calls), 1)
+        self.assertTrue(ctx.send_calls[0]["ephemeral"])
+        self.assertIn("Removed the timeout", ctx.send_calls[0]["embed"].description)
+        self.assertEqual(len(member.timeout_calls), 1)
+        self.assertIsNone(member.timed_out_until)
+
+    async def test_timeout_remove_denies_member_without_timeout_access(self):
+        actor_role = FakeRole(510, position=40, name="Helper")
+        actor = FakeMember(52, self.guild, roles=[actor_role])
+        target_role = FakeRole(511, position=10, name="Member")
+        member = FakeMember(53, self.guild, roles=[target_role])
+        member.timed_out_until = ge.now_utc() + timedelta(minutes=15)
+        member.communication_disabled_until = member.timed_out_until
+        self.guild.members[actor.id] = actor
+        self.guild.members[member.id] = member
+        ctx = FakeContext(
+            interaction=FakeInteraction(),
+            guild=self.guild,
+            channel=FakeChannel(221),
+            author=actor,
+        )
+
+        await AdminCog.timeout_remove_command.callback(self.cog, ctx, member=member, reason=None)
+
+        self.assertEqual(len(ctx.send_calls), 1)
+        self.assertTrue(ctx.send_calls[0]["ephemeral"])
+        self.assertIn("Timeout Members", ctx.send_calls[0]["embed"].description)
+
+    async def test_timeout_remove_handles_member_without_active_timeout(self):
+        actor_role = FakeRole(520, position=40, name="Moderator")
+        actor = FakeMember(54, self.guild, roles=[actor_role], moderate_members=True)
+        member = FakeMember(55, self.guild, roles=[FakeRole(521, position=10, name="Member")])
+        self.guild.members[actor.id] = actor
+        self.guild.members[member.id] = member
+        ctx = FakeContext(
+            interaction=FakeInteraction(),
+            guild=self.guild,
+            channel=FakeChannel(222),
+            author=actor,
+        )
+
+        await AdminCog.timeout_remove_command.callback(self.cog, ctx, member=member, reason=None)
+
+        self.assertEqual(len(ctx.send_calls), 1)
+        self.assertTrue(ctx.send_calls[0]["ephemeral"])
+        self.assertIn("not currently timed out", ctx.send_calls[0]["embed"].description)
+
     async def test_admin_permissions_surfaces_missing_manage_channels(self):
         self.guild.me.guild_permissions = FakePermissionSnapshot(
             manage_roles=True,
@@ -567,6 +824,29 @@ class AdminCogSmokeTests(unittest.IsolatedAsyncioTestCase):
         missing = next(field for field in embed.fields if field.name == "Missing Server Permissions")
         self.assertIn("Manage Channels", missing.value)
         self.assertIn("/lock channel", missing.value)
+
+    async def test_admin_permissions_surfaces_missing_timeout_members_for_timeout_remove(self):
+        self.guild.me.guild_permissions = FakePermissionSnapshot(
+            manage_roles=True,
+            manage_channels=True,
+            manage_messages=True,
+            moderate_members=False,
+            kick_members=True,
+            mention_everyone=True,
+        )
+        ctx = FakeContext(
+            interaction=FakeInteraction(),
+            guild=self.guild,
+            channel=FakeChannel(223),
+            author=FakeAuthor(manage_guild=True),
+        )
+
+        await AdminCog.admin_permissions_command.callback(self.cog, ctx)
+
+        embed = ctx.send_calls[0]["embed"]
+        missing = next(field for field in embed.fields if field.name == "Missing Server Permissions")
+        self.assertIn("Timeout Members", missing.value)
+        self.assertIn("/timeout remove", missing.value)
 
     async def test_verification_panel_spells_out_verified_and_unverified_members(self):
         ok, _ = await self.cog.service.set_verification_config(
@@ -772,10 +1052,415 @@ class AdminCogSmokeTests(unittest.IsolatedAsyncioTestCase):
 
         labels = [child.label for child in view.children]
 
-        self.assertEqual(labels, ["Overview", "Follow-up", "Verification", "Exclusions", "Logs", "Templates", "Refresh"])
+        self.assertEqual(
+            labels,
+            [
+                "Overview",
+                "Follow-up",
+                "Verification",
+                "Exclusions",
+                "Logs",
+                "Templates",
+                "Refresh",
+                "Open Sync Review",
+                "Run Permission Check",
+            ],
+        )
         self.assertNotIn("Risk", labels)
         self.assertNotIn("Emergency", labels)
         self.assertNotIn("Permissions", labels)
+
+    async def test_admin_panel_section_switching_updates_contextual_actions(self):
+        view = AdminPanelView(self.cog, guild_id=self.guild.id, author_id=1)
+        message = await self._panel_message(view)
+        interaction = self._view_interaction(message=message)
+
+        await self._button(view, "Verification").callback(interaction)
+
+        labels = [child.label for child in view.children if hasattr(child, "label")]
+        self.assertEqual(view.section, "verification")
+        self.assertEqual(message.embed.title, "Verification Cleanup")
+        self.assertIn("Edit Policy", labels)
+        self.assertIn("Edit Timing", labels)
+        self.assertIn("Edit Help Path", labels)
+        self.assertIn("Preview Warning", labels)
+        self.assertIn("Preview Final Kick", labels)
+        self.assertIn("Open Sync Review", labels)
+        self.assertNotIn("Run Permission Check", labels)
+        self.assertEqual(len(interaction.response.defer_calls), 1)
+        self.assertEqual(interaction.response.defer_calls[0][1]["thinking"], False)
+
+    async def test_admin_panel_wrong_user_is_locked_out_privately(self):
+        view = AdminPanelView(self.cog, guild_id=self.guild.id, author_id=1)
+        interaction = self._view_interaction(user=FakeAuthor(user_id=2, manage_guild=True))
+
+        allowed = await view.interaction_check(interaction)
+
+        self.assertFalse(allowed)
+        self.assertTrue(interaction.response.sent_messages)
+        payload = interaction.response.sent_messages[-1]["kwargs"]
+        self.assertTrue(payload["ephemeral"])
+        self.assertEqual(payload["embed"].title, "This Panel Is Locked")
+
+    async def test_admin_panel_expired_interaction_fails_gracefully(self):
+        view = AdminPanelView(self.cog, guild_id=self.guild.id, author_id=1)
+        view._expired = True
+        interaction = self._view_interaction()
+
+        allowed = await view.interaction_check(interaction)
+
+        self.assertFalse(allowed)
+        self.assertTrue(interaction.response.sent_messages)
+        self.assertIn("expired", interaction.response.sent_messages[-1]["kwargs"]["embed"].description.lower())
+
+    async def test_admin_panel_timeout_disables_controls(self):
+        view = AdminPanelView(self.cog, guild_id=self.guild.id, author_id=1, section="verification")
+        message = await self._panel_message(view)
+
+        await view.on_timeout()
+
+        self.assertTrue(view._expired)
+        self.assertTrue(all(child.disabled for child in view.children))
+        self.assertIs(message.view, view)
+
+    async def test_admin_panel_stale_edit_falls_back_to_private_warning(self):
+        view = AdminPanelView(self.cog, guild_id=self.guild.id, author_id=1)
+        interaction = FakeInteraction(
+            user=FakeAuthor(manage_guild=True),
+            guild=self.guild,
+            message=None,
+            channel=FakeChannel(920),
+            edit_original_response_exception=discord.ClientException("edit failed"),
+        )
+
+        await self._button(view, "Verification").callback(interaction)
+
+        self.assertTrue(interaction.followup_calls)
+        embed = interaction.followup_calls[-1]["kwargs"]["embed"]
+        self.assertIn("expired", embed.description.lower())
+
+    async def test_admin_panel_overview_tools_open_permission_diagnostics_and_sync_view(self):
+        view = AdminPanelView(self.cog, guild_id=self.guild.id, author_id=1)
+        message = await self._panel_message(view)
+
+        permission_interaction = self._view_interaction(message=message)
+        await self._button(view, "Run Permission Check").callback(permission_interaction)
+        self.assertTrue(permission_interaction.followup_calls)
+        self.assertEqual(permission_interaction.followup_calls[-1]["kwargs"]["embed"].title, "Babblebox Permission Health")
+
+        sync_interaction = self._view_interaction(message=message)
+        await self._button(view, "Open Sync Review").callback(sync_interaction)
+        self.assertTrue(sync_interaction.followup_calls)
+        self.assertIsInstance(sync_interaction._last_followup_message.view, VerificationSyncView)
+        self.assertEqual(sync_interaction._last_followup_message.embed.title, "Verification Sync Review")
+
+    async def test_followup_panel_editor_updates_role_and_parent_panel(self):
+        panel = AdminPanelView(self.cog, guild_id=self.guild.id, author_id=1, section="followup")
+        panel_message = await self._panel_message(panel)
+        open_interaction = self._view_interaction(message=panel_message)
+
+        await self._button(panel, "Edit Follow-up").callback(open_interaction)
+
+        child_message = open_interaction._last_followup_message
+        child_view = child_message.view
+        self.assertIsInstance(child_view, FollowupEditorView)
+
+        role_select = self._select(child_view, discord.ui.RoleSelect, placeholder_contains="Follow-up role")
+        role_select._values = [types.SimpleNamespace(id=self.followup_role.id)]
+        update_interaction = self._view_interaction(message=child_message)
+
+        await role_select.callback(update_interaction)
+
+        config = self.cog.service.get_config(self.guild.id)
+        self.assertEqual(config["followup_role_id"], self.followup_role.id)
+        self.assertIn(self.followup_role.mention, panel_message.embed.fields[0].value)
+        self.assertTrue(update_interaction.followup_calls)
+        self.assertIn(self.followup_role.mention, update_interaction.followup_calls[-1]["kwargs"]["embed"].description)
+
+    async def test_followup_editor_custom_duration_modal_updates_state_and_parent_panel(self):
+        panel = AdminPanelView(self.cog, guild_id=self.guild.id, author_id=1, section="followup")
+        panel_message = await self._panel_message(panel)
+        view = FollowupEditorView(self.cog, guild_id=self.guild.id, author_id=1, panel_view=panel)
+        child_message = await self._panel_message(view)
+        interaction = self._view_interaction(message=child_message)
+
+        await self._button(view, "Custom Duration").callback(interaction)
+
+        modal = interaction.response.modal_calls[-1]
+        modal.value_input._value = "6w"
+        submit_interaction = self._view_interaction(message=child_message)
+
+        await modal.on_submit(submit_interaction)
+
+        config = self.cog.service.get_config(self.guild.id)
+        self.assertEqual(config["followup_duration_value"], 6)
+        self.assertEqual(config["followup_duration_unit"], "weeks")
+        self.assertIn("6 weeks", panel_message.embed.fields[0].value)
+        self.assertTrue(submit_interaction.response.sent_messages)
+
+    async def test_followup_editor_modal_open_failure_returns_private_feedback(self):
+        view = FollowupEditorView(self.cog, guild_id=self.guild.id, author_id=1)
+        child_message = await self._panel_message(view)
+        interaction = self._view_interaction(message=child_message)
+        interaction.response.send_modal = mock.AsyncMock(side_effect=RuntimeError("modal boom"))
+
+        await self._button(view, "Custom Duration").callback(interaction)
+
+        self.assertTrue(interaction.response.sent_messages)
+        self.assertIn("could not open", interaction.response.sent_messages[-1]["kwargs"]["embed"].description.lower())
+
+    async def test_verification_policy_editor_updates_role_logic_action_and_toggle(self):
+        ok, _ = await self.cog.service.set_verification_config(
+            self.guild.id,
+            enabled=True,
+            role_id=self.verified_role.id,
+            logic="must_have_role",
+            deadline_action="auto_kick",
+            kick_after_text="7d",
+            warning_lead_text="2d",
+            help_channel_id=None,
+            help_extension_text="1d",
+            max_extensions=1,
+        )
+        self.assertTrue(ok)
+        view = VerificationPolicyEditorView(self.cog, guild_id=self.guild.id, author_id=1)
+        child_message = await self._panel_message(view)
+
+        toggle_interaction = self._view_interaction(message=child_message)
+        await self._button(view, "Disable Cleanup").callback(toggle_interaction)
+
+        role_select = self._select(view, discord.ui.RoleSelect, placeholder_contains="Verification role")
+        role_select._values = [types.SimpleNamespace(id=self.verified_role.id)]
+        await role_select.callback(self._view_interaction(message=child_message))
+
+        logic_select = self._select(view, discord.ui.Select, placeholder_contains="Who counts as unverified")
+        logic_select._values = ["must_not_have_role"]
+        await logic_select.callback(self._view_interaction(message=child_message))
+
+        action_select = self._select(view, discord.ui.Select, placeholder_contains="Deadline action")
+        action_select._values = ["review"]
+        await action_select.callback(self._view_interaction(message=child_message))
+
+        await self._button(view, "Clear Role").callback(self._view_interaction(message=child_message))
+
+        config = self.cog.service.get_config(self.guild.id)
+        self.assertFalse(config["verification_enabled"])
+        self.assertIsNone(config["verification_role_id"])
+        self.assertEqual(config["verification_logic"], "must_not_have_role")
+        self.assertEqual(config["verification_deadline_action"], "review")
+
+    async def test_verification_timing_editor_updates_presets_and_custom_modal(self):
+        ok, _ = await self.cog.service.set_verification_config(
+            self.guild.id,
+            enabled=True,
+            role_id=self.verified_role.id,
+            logic="must_have_role",
+            deadline_action="auto_kick",
+            kick_after_text="7d",
+            warning_lead_text="2d",
+            help_channel_id=None,
+            help_extension_text="1d",
+            max_extensions=1,
+        )
+        self.assertTrue(ok)
+        view = VerificationTimingEditorView(self.cog, guild_id=self.guild.id, author_id=1)
+        child_message = await self._panel_message(view)
+
+        kick_select = self._select(view, discord.ui.Select, placeholder_contains="Kick-after presets")
+        kick_select._values = ["14d"]
+        await kick_select.callback(self._view_interaction(message=child_message))
+
+        open_modal_interaction = self._view_interaction(message=child_message)
+        await self._button(view, "Custom Warning Lead").callback(open_modal_interaction)
+        warning_modal = open_modal_interaction.response.modal_calls[-1]
+        warning_modal.value_input._value = "12h"
+        await warning_modal.on_submit(self._view_interaction(message=child_message))
+
+        config = self.cog.service.get_config(self.guild.id)
+        self.assertEqual(config["verification_kick_after_seconds"], 14 * 24 * 3600)
+        self.assertEqual(config["verification_warning_lead_seconds"], 12 * 3600)
+
+    async def test_verification_help_editor_updates_channel_extension_cap_and_clear(self):
+        help_channel = FakeChannel(31, name="verify-help")
+        second_help_channel = FakeChannel(32, name="verify-help-2")
+        self.guild.channels[help_channel.id] = help_channel
+        self.guild.channels[second_help_channel.id] = second_help_channel
+        ok, _ = await self.cog.service.set_verification_config(
+            self.guild.id,
+            enabled=True,
+            role_id=self.verified_role.id,
+            logic="must_have_role",
+            deadline_action="review",
+            kick_after_text="7d",
+            warning_lead_text="2d",
+            help_channel_id=help_channel.id,
+            help_extension_text="1d",
+            max_extensions=1,
+        )
+        self.assertTrue(ok)
+        view = VerificationHelpEditorView(self.cog, guild_id=self.guild.id, author_id=1)
+        child_message = await self._panel_message(view)
+
+        channel_select = self._select(view, discord.ui.ChannelSelect, placeholder_contains="Verification-help channel")
+        channel_select._values = [types.SimpleNamespace(id=second_help_channel.id)]
+        await channel_select.callback(self._view_interaction(message=child_message))
+
+        extension_select = self._select(view, discord.ui.Select, placeholder_contains="Help-extension presets")
+        extension_select._values = ["2d"]
+        await extension_select.callback(self._view_interaction(message=child_message))
+
+        max_extensions_select = self._select(view, discord.ui.Select, placeholder_contains="Max extensions per member")
+        max_extensions_select._values = ["4"]
+        await max_extensions_select.callback(self._view_interaction(message=child_message))
+
+        await self._button(view, "Clear Channel").callback(self._view_interaction(message=child_message))
+
+        config = self.cog.service.get_config(self.guild.id)
+        self.assertIsNone(config["verification_help_channel_id"])
+        self.assertEqual(config["verification_help_extension_seconds"], 2 * 24 * 3600)
+        self.assertEqual(config["verification_max_extensions"], 4)
+
+    async def test_logs_editor_updates_and_clears_delivery_targets(self):
+        alert_role = FakeRole(91, position=11, name="Moderators")
+        second_channel = FakeChannel(33, name="staff-log")
+        self.guild.roles[alert_role.id] = alert_role
+        self.guild.channels[second_channel.id] = second_channel
+        view = LogsEditorView(self.cog, guild_id=self.guild.id, author_id=1)
+        child_message = await self._panel_message(view)
+
+        channel_select = self._select(view, discord.ui.ChannelSelect, placeholder_contains="Admin log channel")
+        channel_select._values = [types.SimpleNamespace(id=second_channel.id)]
+        await channel_select.callback(self._view_interaction(message=child_message))
+
+        role_select = self._select(view, discord.ui.RoleSelect, placeholder_contains="Admin alert role")
+        role_select._values = [types.SimpleNamespace(id=alert_role.id)]
+        await role_select.callback(self._view_interaction(message=child_message))
+
+        await self._button(view, "Clear Channel").callback(self._view_interaction(message=child_message))
+        await self._button(view, "Clear Alert Role").callback(self._view_interaction(message=child_message))
+
+        config = self.cog.service.get_config(self.guild.id)
+        self.assertIsNone(config["admin_log_channel_id"])
+        self.assertIsNone(config["admin_alert_role_id"])
+
+    async def test_exclusions_editor_replaces_lists_clears_and_toggles(self):
+        member = FakeMember(55, self.guild, roles=[])
+        self.guild.members[member.id] = member
+        trusted_role = FakeRole(92, position=9, name="Trusted")
+        self.guild.roles[trusted_role.id] = trusted_role
+        view = ExclusionsEditorView(self.cog, guild_id=self.guild.id, author_id=1)
+        child_message = await self._panel_message(view)
+        starting = self.cog.service.get_config(self.guild.id)["verification_exempt_bots"]
+
+        user_select = self._select(view, discord.ui.UserSelect, placeholder_contains="Excluded members")
+        user_select._values = [types.SimpleNamespace(id=member.id)]
+        await user_select.callback(self._view_interaction(message=child_message))
+
+        excluded_role_select = self._select(view, discord.ui.RoleSelect, placeholder_contains="Excluded roles")
+        excluded_role_select._values = [types.SimpleNamespace(id=self.followup_role.id)]
+        await excluded_role_select.callback(self._view_interaction(message=child_message))
+
+        trusted_role_select = self._select(view, discord.ui.RoleSelect, placeholder_contains="Trusted roles")
+        trusted_role_select._values = [types.SimpleNamespace(id=trusted_role.id)]
+        await trusted_role_select.callback(self._view_interaction(message=child_message))
+
+        await self._button(view, "Clear Members").callback(self._view_interaction(message=child_message))
+        toggle = next(child for child in view.children if getattr(child, "label", "").startswith("Verification Bots:"))
+        await toggle.callback(self._view_interaction(message=child_message))
+
+        config = self.cog.service.get_config(self.guild.id)
+        self.assertEqual(config["excluded_user_ids"], [])
+        self.assertEqual(config["excluded_role_ids"], [self.followup_role.id])
+        self.assertEqual(config["trusted_role_ids"], [trusted_role.id])
+        self.assertEqual(config["verification_exempt_bots"], (not starting))
+
+    async def test_templates_editor_updates_modal_fields_clears_and_previews(self):
+        ok, _ = await self.cog.service.set_verification_config(
+            self.guild.id,
+            enabled=True,
+            role_id=self.verified_role.id,
+            logic="must_have_role",
+            deadline_action="review",
+            kick_after_text="7d",
+            warning_lead_text="2d",
+            help_channel_id=self.log_channel.id,
+            help_extension_text="1d",
+            max_extensions=1,
+        )
+        self.assertTrue(ok)
+        view = TemplatesEditorView(self.cog, guild_id=self.guild.id, author_id=1)
+        child_message = await self._panel_message(view)
+
+        edit_warning_interaction = self._view_interaction(message=child_message)
+        await self._button(view, "Edit Warning").callback(edit_warning_interaction)
+        warning_modal = edit_warning_interaction.response.modal_calls[-1]
+        warning_modal.value_input._value = "Hi {member}, verify in {guild}."
+        await warning_modal.on_submit(self._view_interaction(message=child_message))
+
+        edit_kick_interaction = self._view_interaction(message=child_message)
+        await self._button(view, "Edit Final Kick").callback(edit_kick_interaction)
+        kick_modal = edit_kick_interaction.response.modal_calls[-1]
+        kick_modal.value_input._value = "Final notice for {guild}."
+        await kick_modal.on_submit(self._view_interaction(message=child_message))
+
+        edit_invite_interaction = self._view_interaction(message=child_message)
+        await self._button(view, "Edit Invite Link").callback(edit_invite_interaction)
+        invite_modal = edit_invite_interaction.response.modal_calls[-1]
+        invite_modal.value_input._value = "https://discord.gg/example"
+        await invite_modal.on_submit(self._view_interaction(message=child_message))
+
+        preview_interaction = self._view_interaction(message=child_message, user=FakeMember(1, self.guild, roles=[]))
+        await self._button(view, "Preview Warning").callback(preview_interaction)
+
+        await self._button(view, "Clear Invite").callback(self._view_interaction(message=child_message))
+
+        config = self.cog.service.get_config(self.guild.id)
+        self.assertEqual(config["warning_template"], "Hi {member}, verify in {guild}.")
+        self.assertEqual(config["kick_template"], "Final notice for {guild}.")
+        self.assertIsNone(config["invite_link"])
+        preview_embed = preview_interaction.followup_calls[-1]["kwargs"]["embed"]
+        self.assertTrue(any(field.name == "Preview Mode" for field in preview_embed.fields))
+        self.assertTrue(any(field.name == "Resolved Placeholders" for field in preview_embed.fields))
+
+    async def test_verification_panel_preview_button_renders_private_preview(self):
+        ok, _ = await self.cog.service.set_verification_config(
+            self.guild.id,
+            enabled=True,
+            role_id=self.verified_role.id,
+            logic="must_have_role",
+            deadline_action="review",
+            kick_after_text="7d",
+            warning_lead_text="2d",
+            help_channel_id=self.log_channel.id,
+            help_extension_text="1d",
+            max_extensions=1,
+        )
+        self.assertTrue(ok)
+        panel = AdminPanelView(self.cog, guild_id=self.guild.id, author_id=1, section="verification")
+        message = await self._panel_message(panel)
+        interaction = self._view_interaction(message=message, user=FakeMember(1, self.guild, roles=[]))
+
+        await self._button(panel, "Preview Warning").callback(interaction)
+
+        embed = interaction.followup_calls[-1]["kwargs"]["embed"]
+        self.assertTrue(any(field.name == "Preview Mode" for field in embed.fields))
+        self.assertTrue(any(field.name == "Resolved Placeholders" for field in embed.fields))
+
+    async def test_admin_panel_embeds_stay_compact_for_dense_config(self):
+        dense = self.cog.service.get_config(self.guild.id)
+        dense["excluded_user_ids"] = list(range(100, 120))
+        dense["excluded_role_ids"] = list(range(200, 220))
+        dense["trusted_role_ids"] = list(range(300, 320))
+        dense["warning_template"] = "Warn " + ("x" * 200)
+        dense["kick_template"] = "Kick " + ("y" * 200)
+        dense["invite_link"] = "https://discord.gg/example"
+        await self.cog.service.store.upsert_config(dense)
+        self.cog.service._compiled_configs.pop(self.guild.id, None)
+
+        for section in ("overview", "followup", "verification", "exclusions", "logs", "templates"):
+            with self.subTest(section=section):
+                embed = await self.cog.build_panel_embed(self.guild.id, section)
+                self._assert_embed_valid(embed)
 
     async def test_admin_sync_command_opens_confirmation_panel_with_preview_count(self):
         ok, _ = await self.cog.service.set_verification_config(

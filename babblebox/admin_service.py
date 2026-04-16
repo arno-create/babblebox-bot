@@ -49,6 +49,7 @@ GROUPED_MEMBER_PREVIEW_LIMIT = 3
 VERIFICATION_NOTIFICATION_SUPPRESSION_SECONDS = 24 * 3600
 VERIFICATION_QUEUE_PREVIEW_LIMIT = 5
 VERIFICATION_SUMMARY_LINE_LIMIT = 8
+CONFIG_UNCHANGED = object()
 VERIFICATION_QUEUE_RELEVANT_CONFIG_FIELDS = frozenset(
     {
         "admin_log_channel_id",
@@ -351,6 +352,8 @@ def _parse_lock_duration(raw: str | None) -> tuple[bool, int | None | str]:
         return False, "Lock duration must use a value like `30m`, `2h`, or `1d`."
     if parsed <= 0:
         return False, "Lock duration must be greater than zero."
+    if parsed < 60:
+        return False, "Lock duration must be at least 1 minute."
     if parsed > LOCK_MAX_DURATION_SECONDS:
         return False, f"Lock duration can be at most {format_duration_brief(LOCK_MAX_DURATION_SECONDS)}."
     return True, parsed
@@ -535,7 +538,7 @@ class AdminService:
         guild_id: int,
         *,
         enabled: bool | None = None,
-        role_id: int | None = None,
+        role_id: int | None | object = CONFIG_UNCHANGED,
         mode: str | None = None,
         duration_text: str | None = None,
     ) -> tuple[bool, str]:
@@ -552,7 +555,7 @@ class AdminService:
         def mutate(config: dict[str, Any]):
             if enabled is not None:
                 config["followup_enabled"] = bool(enabled)
-            if role_id is not None:
+            if role_id is not CONFIG_UNCHANGED:
                 config["followup_role_id"] = role_id
             if cleaned_mode is not None:
                 config["followup_mode"] = cleaned_mode
@@ -562,7 +565,7 @@ class AdminService:
 
         preview = self.get_config(guild_id)
         final_enabled = preview["followup_enabled"] if enabled is None else bool(enabled)
-        final_role = preview["followup_role_id"] if role_id is None else role_id
+        final_role = preview["followup_role_id"] if role_id is CONFIG_UNCHANGED else role_id
         final_mode = preview["followup_mode"] if cleaned_mode is None else cleaned_mode
         final_value = preview["followup_duration_value"] if parsed_duration is None else parsed_duration[0]
         final_unit = preview["followup_duration_unit"] if parsed_duration is None else parsed_duration[1]
@@ -582,12 +585,12 @@ class AdminService:
         guild_id: int,
         *,
         enabled: bool | None = None,
-        role_id: int | None = None,
+        role_id: int | None | object = CONFIG_UNCHANGED,
         logic: str | None = None,
         deadline_action: str | None = None,
         kick_after_text: str | None = None,
         warning_lead_text: str | None = None,
-        help_channel_id: int | None = None,
+        help_channel_id: int | None | object = CONFIG_UNCHANGED,
         help_extension_text: str | None = None,
         max_extensions: int | None = None,
     ) -> tuple[bool, str]:
@@ -617,7 +620,7 @@ class AdminService:
         def mutate(config: dict[str, Any]):
             if enabled is not None:
                 config["verification_enabled"] = bool(enabled)
-            if role_id is not None:
+            if role_id is not CONFIG_UNCHANGED:
                 config["verification_role_id"] = role_id
             if cleaned_logic is not None:
                 config["verification_logic"] = cleaned_logic
@@ -627,7 +630,7 @@ class AdminService:
                 config["verification_kick_after_seconds"] = parsed_kick_after
             if parsed_warning_lead is not None:
                 config["verification_warning_lead_seconds"] = parsed_warning_lead
-            if help_channel_id is not None:
+            if help_channel_id is not CONFIG_UNCHANGED:
                 config["verification_help_channel_id"] = help_channel_id
             if parsed_help_extension is not None:
                 config["verification_help_extension_seconds"] = parsed_help_extension
@@ -636,7 +639,7 @@ class AdminService:
 
         preview = self.get_config(guild_id)
         final_enabled = preview["verification_enabled"] if enabled is None else bool(enabled)
-        final_role = preview["verification_role_id"] if role_id is None else role_id
+        final_role = preview["verification_role_id"] if role_id is CONFIG_UNCHANGED else role_id
         final_logic = preview["verification_logic"] if cleaned_logic is None else cleaned_logic
         final_deadline_action = preview["verification_deadline_action"] if cleaned_deadline_action is None else cleaned_deadline_action
         final_kick_after = preview["verification_kick_after_seconds"] if parsed_kick_after is None else parsed_kick_after
@@ -645,7 +648,7 @@ class AdminService:
             field
             for field, supplied in (
                 ("verification_enabled", enabled is not None),
-                ("verification_role_id", role_id is not None),
+                ("verification_role_id", role_id is not CONFIG_UNCHANGED),
                 ("verification_logic", cleaned_logic is not None),
                 ("verification_deadline_action", cleaned_deadline_action is not None),
             )
@@ -705,6 +708,24 @@ class AdminService:
             guild_id,
             mutate,
             success_message=f"Admin {label} was {'updated' if enabled else 'trimmed'}.",
+            post_update_hook=self._reconcile_verification_review_backlog_after_config_change,
+            requested_fields={field},
+            force_post_update=field in VERIFICATION_QUEUE_RELEVANT_CONFIG_FIELDS,
+        )
+
+    async def replace_exclusion_targets(self, guild_id: int, field: str, target_ids: list[int]) -> tuple[bool, str]:
+        if field not in {"excluded_user_ids", "excluded_role_ids", "trusted_role_ids"}:
+            return False, "Unknown exclusion bucket."
+
+        cleaned = sorted({int(value) for value in target_ids if isinstance(value, int) and value > 0})
+        if len(cleaned) > EXCLUSION_LIMIT:
+            return False, f"You can keep up to {EXCLUSION_LIMIT} entries in `{field}`."
+
+        label = field.replace("_ids", "").replace("_", " ")
+        return await self._update_config(
+            guild_id,
+            lambda config: config.__setitem__(field, cleaned),
+            success_message=f"Admin {label} list updated.",
             post_update_hook=self._reconcile_verification_review_backlog_after_config_change,
             requested_fields={field},
             force_post_update=field in VERIFICATION_QUEUE_RELEVANT_CONFIG_FIELDS,
@@ -883,6 +904,111 @@ class AdminService:
             return f"Babblebox timed emergency channel {action}"
         return f"Babblebox emergency channel {action} by {ge.display_name_of(actor)}"
 
+    def _lock_record_is_marker_only(self, record: dict[str, Any] | None) -> bool:
+        return bool(record and record.get("marker_only"))
+
+    def _overwrite_matches_lock_restrictions(self, overwrite: discord.PermissionOverwrite) -> bool:
+        return all(getattr(overwrite, name, None) is False for name in LOCK_PERMISSION_NAMES)
+
+    def _build_channel_lock_record(
+        self,
+        *,
+        guild_id: int,
+        channel,
+        actor_id: int | None,
+        created_at: datetime,
+        due_at: datetime | None,
+        marker_only: bool,
+        locked_permissions: list[str],
+        original_permissions: dict[str, Any],
+    ) -> dict[str, Any]:
+        return {
+            "guild_id": guild_id,
+            "channel_id": channel.id,
+            "actor_id": actor_id,
+            "created_at": serialize_datetime(created_at),
+            "due_at": serialize_datetime(due_at),
+            "category_id": getattr(channel, "category_id", None),
+            "permissions_synced": bool(getattr(channel, "permissions_synced", False)),
+            "marker_only": marker_only,
+            "locked_permissions": locked_permissions,
+            "original_permissions": {name: original_permissions.get(name) for name in locked_permissions},
+        }
+
+    def _timeout_actor_issue(self, guild: discord.Guild, actor: discord.Member, member: discord.Member) -> AdminActionIssue | None:
+        perms = getattr(actor, "guild_permissions", None)
+        if perms is None or not (
+            getattr(perms, "administrator", False)
+            or getattr(perms, "manage_guild", False)
+            or getattr(perms, "moderate_members", False)
+        ):
+            return AdminActionIssue(
+                code="missing_timeout_access",
+                detail="You need Timeout Members, Manage Server, or administrator access to remove timeouts.",
+                because_text="you are missing Timeout Members, Manage Server, or administrator access",
+            )
+        if getattr(member.guild_permissions, "administrator", False):
+            return AdminActionIssue(
+                code="target_is_administrator",
+                detail="They are administrators.",
+                because_text="they are administrators",
+            )
+        if getattr(guild, "owner_id", None) == member.id:
+            return AdminActionIssue(
+                code="target_is_owner",
+                detail="They are the server owner.",
+                because_text="they are the server owner",
+            )
+        if actor.id != getattr(guild, "owner_id", None):
+            if getattr(getattr(member, "top_role", None), "position", 0) >= getattr(getattr(actor, "top_role", None), "position", 0):
+                return AdminActionIssue(
+                    code="target_above_actor_role",
+                    detail="They are at or above your top role.",
+                    because_text="they are at or above your top role",
+                )
+        return None
+
+    def _timeout_issue(self, guild: discord.Guild, member: discord.Member) -> AdminActionIssue | None:
+        me = self._bot_member(guild)
+        if me is None:
+            return AdminActionIssue(
+                code="bot_member_unavailable",
+                detail="Babblebox could not resolve its server member for timeout removal.",
+                because_text="Babblebox could not resolve its server member for timeout removal",
+            )
+        perms = getattr(me, "guild_permissions", None)
+        if perms is None or not getattr(perms, "moderate_members", False):
+            return AdminActionIssue(
+                code="missing_moderate_members",
+                detail="Babblebox is missing Timeout Members.",
+                because_text="Babblebox is missing Timeout Members",
+            )
+        if getattr(member.guild_permissions, "administrator", False):
+            return AdminActionIssue(
+                code="target_is_administrator",
+                detail="They are administrators.",
+                because_text="they are administrators",
+            )
+        if getattr(guild, "owner_id", None) == member.id:
+            return AdminActionIssue(
+                code="target_is_owner",
+                detail="They are the server owner.",
+                because_text="they are the server owner",
+            )
+        if getattr(getattr(member, "top_role", None), "position", 0) >= getattr(getattr(me, "top_role", None), "position", 0):
+            return AdminActionIssue(
+                code="target_above_bot_role",
+                detail="They are at or above Babblebox's top role.",
+                because_text="they are at or above Babblebox's top role",
+            )
+        return None
+
+    def _member_timeout_until(self, member: discord.Member) -> datetime | None:
+        timed_out_until = getattr(member, "timed_out_until", None)
+        if timed_out_until is None:
+            timed_out_until = getattr(member, "communication_disabled_until", None)
+        return timed_out_until if isinstance(timed_out_until, datetime) else None
+
     async def _post_lock_notice(self, channel, text: str) -> tuple[bool, str]:
         try:
             await channel.send(
@@ -953,52 +1079,146 @@ class AdminService:
         now = ge.now_utc()
 
         if current_record is not None:
-            tracked_flags = tuple(current_record.get("locked_permissions", ()))
-            if any(getattr(current_overwrite, name, None) is not False for name in tracked_flags):
-                return False, "Babblebox already tracks a lock here, but the overwrite changed while it was active. Review the channel and use `/lock remove` before locking it again."
-            due_at = deserialize_datetime(current_record.get("due_at"))
-            updated_due_at = now + timedelta(seconds=duration_seconds) if duration_seconds is not None else due_at
-            if duration_seconds is not None:
-                current_record["due_at"] = serialize_datetime(updated_due_at)
-                current_record["actor_id"] = actor.id
-                await self.store.upsert_channel_lock(current_record)
-                self._wake_event.set()
-            notice_status = "Suppressed for this run."
-            if post_notice:
-                final_notice = notice_or_message or self.lock_notice_text(guild.id)
-                posted, notice_status = await self._post_lock_notice(channel, final_notice)
-                if not posted:
-                    notice_status = "Timer updated, but the notice could not be posted."
-            timer_label = format_duration_brief(duration_seconds) if duration_seconds is not None else (f"Until {ge.format_timestamp(updated_due_at, 'R')}" if updated_due_at is not None else "Manual unlock required")
-            log_sent = await self.send_log(
-                guild,
-                compiled,
-                embed=self._build_lock_log_embed(
-                    title="Channel Lock Updated",
-                    description=f"{actor.mention} refreshed the emergency lock for {channel.mention}.",
-                    tone="info",
-                    channel=channel,
-                    timer_label=timer_label,
-                    notice_status=notice_status,
-                ),
-                alert=False,
-            )
-            status_lines = [f"{channel.mention} is already locked by Babblebox."]
-            if duration_seconds is not None:
-                status_lines.append(f"Timer updated to **{format_duration_brief(duration_seconds)}** from now.")
-            elif due_at is not None:
-                status_lines.append(f"Current timer ends {ge.format_timestamp(due_at, 'R')}.")
+            if self._lock_record_is_marker_only(current_record):
+                if self._overwrite_matches_lock_restrictions(current_overwrite):
+                    due_at = deserialize_datetime(current_record.get("due_at"))
+                    updated_due_at = now + timedelta(seconds=duration_seconds) if duration_seconds is not None else due_at
+                    if duration_seconds is not None:
+                        current_record["due_at"] = serialize_datetime(updated_due_at)
+                        current_record["actor_id"] = actor.id
+                        await self.store.upsert_channel_lock(current_record)
+                        self._wake_event.set()
+                    notice_status = "Suppressed for this run."
+                    if post_notice:
+                        final_notice = notice_or_message or self.lock_notice_text(guild.id)
+                        posted, notice_status = await self._post_lock_notice(channel, final_notice)
+                        if not posted:
+                            notice_status = "Timer updated, but the notice could not be posted."
+                    timer_label = (
+                        format_duration_brief(duration_seconds)
+                        if duration_seconds is not None
+                        else (f"Until {ge.format_timestamp(updated_due_at, 'R')}" if updated_due_at is not None else "Manual unlock required")
+                    )
+                    log_sent = await self.send_log(
+                        guild,
+                        compiled,
+                        embed=self._build_lock_log_embed(
+                            title="Channel Lock Updated",
+                            description=f"{actor.mention} refreshed the tracked emergency lock for {channel.mention}.",
+                            tone="info",
+                            channel=channel,
+                            timer_label=timer_label,
+                            notice_status=notice_status,
+                            restore_status="Babblebox is only tracking this lock state. Later unlocks will clear Babblebox's marker and timer without reopening the overwrite.",
+                        ),
+                        alert=False,
+                    )
+                    status_lines = [f"{channel.mention} is already locked by Babblebox."]
+                    if duration_seconds is not None:
+                        status_lines.append(f"Timer updated to **{format_duration_brief(duration_seconds)}** from now.")
+                    elif due_at is not None:
+                        status_lines.append(f"Current timer ends {ge.format_timestamp(due_at, 'R')}.")
+                    else:
+                        status_lines.append("This tracked lock stays in place until someone removes it.")
+                    status_lines.append("Babblebox is tracking the existing overwrite and will only clear its own lock state later.")
+                    if post_notice:
+                        status_lines.append(notice_status)
+                    status_lines.append("Admin log updated." if log_sent else "Admin log delivery was unavailable.")
+                    return True, " ".join(status_lines)
             else:
-                status_lines.append("This lock stays in place until someone removes it.")
-            if post_notice:
-                status_lines.append(notice_status)
-            status_lines.append("Admin log updated." if log_sent else "Admin log delivery was unavailable.")
-            return True, " ".join(status_lines)
+                tracked_flags = tuple(current_record.get("locked_permissions", ()))
+                if any(getattr(current_overwrite, name, None) is not False for name in tracked_flags):
+                    return False, "Babblebox already tracks a lock here, but the overwrite changed while it was active. Review the channel and use `/lock remove` before locking it again."
+                due_at = deserialize_datetime(current_record.get("due_at"))
+                updated_due_at = now + timedelta(seconds=duration_seconds) if duration_seconds is not None else due_at
+                if duration_seconds is not None:
+                    current_record["due_at"] = serialize_datetime(updated_due_at)
+                    current_record["actor_id"] = actor.id
+                    await self.store.upsert_channel_lock(current_record)
+                    self._wake_event.set()
+                notice_status = "Suppressed for this run."
+                if post_notice:
+                    final_notice = notice_or_message or self.lock_notice_text(guild.id)
+                    posted, notice_status = await self._post_lock_notice(channel, final_notice)
+                    if not posted:
+                        notice_status = "Timer updated, but the notice could not be posted."
+                timer_label = (
+                    format_duration_brief(duration_seconds)
+                    if duration_seconds is not None
+                    else (f"Until {ge.format_timestamp(updated_due_at, 'R')}" if updated_due_at is not None else "Manual unlock required")
+                )
+                log_sent = await self.send_log(
+                    guild,
+                    compiled,
+                    embed=self._build_lock_log_embed(
+                        title="Channel Lock Updated",
+                        description=f"{actor.mention} refreshed the emergency lock for {channel.mention}.",
+                        tone="info",
+                        channel=channel,
+                        timer_label=timer_label,
+                        notice_status=notice_status,
+                    ),
+                    alert=False,
+                )
+                status_lines = [f"{channel.mention} is already locked by Babblebox."]
+                if duration_seconds is not None:
+                    status_lines.append(f"Timer updated to **{format_duration_brief(duration_seconds)}** from now.")
+                elif due_at is not None:
+                    status_lines.append(f"Current timer ends {ge.format_timestamp(due_at, 'R')}.")
+                else:
+                    status_lines.append("This lock stays in place until someone removes it.")
+                if post_notice:
+                    status_lines.append(notice_status)
+                status_lines.append("Admin log updated." if log_sent else "Admin log delivery was unavailable.")
+                return True, " ".join(status_lines)
 
         previous_values = {name: getattr(current_overwrite, name, None) for name in LOCK_PERMISSION_NAMES}
         locked_permissions = [name for name, value in previous_values.items() if value is not False]
         if not locked_permissions:
-            return False, "That channel already denies Babblebox's emergency-lock permissions. Babblebox will not create a timed lock it cannot safely restore later."
+            due_at = now + timedelta(seconds=duration_seconds) if duration_seconds is not None else None
+            await self.store.upsert_channel_lock(
+                self._build_channel_lock_record(
+                    guild_id=guild.id,
+                    channel=channel,
+                    actor_id=actor.id,
+                    created_at=now,
+                    due_at=due_at,
+                    marker_only=True,
+                    locked_permissions=[],
+                    original_permissions={},
+                )
+            )
+            self._wake_event.set()
+            notice_status = "Notice suppressed for this run."
+            if post_notice:
+                final_notice = notice_or_message or self.lock_notice_text(guild.id)
+                posted, notice_status = await self._post_lock_notice(channel, final_notice)
+                if not posted:
+                    notice_status = "Tracked lock started, but the notice could not be posted."
+            timer_label = format_duration_brief(duration_seconds) if duration_seconds is not None else "Manual unlock required"
+            log_sent = await self.send_log(
+                guild,
+                compiled,
+                embed=self._build_lock_log_embed(
+                    title="Channel Lock Tracked",
+                    description=f"{actor.mention} started tracking the existing emergency lock state on {channel.mention}.",
+                    tone="warning",
+                    channel=channel,
+                    timer_label=timer_label,
+                    notice_status=notice_status,
+                    restore_status="Babblebox did not change the @everyone overwrite here. Later unlocks will only clear Babblebox's lock marker and timer.",
+                ),
+                alert=False,
+            )
+            message_parts = [f"{channel.mention} already matched Babblebox's lock restrictions, so Babblebox started tracking it without changing the overwrite."]
+            if due_at is not None:
+                message_parts.append(f"Timer: **{format_duration_brief(duration_seconds)}**.")
+            else:
+                message_parts.append("Timer: **manual unlock required**.")
+            message_parts.append("Babblebox will only clear its own tracked lock state later.")
+            message_parts.append(notice_status)
+            message_parts.append("Admin log updated." if log_sent else "Admin log delivery was unavailable.")
+            return True, " ".join(message_parts)
         updated_overwrite = self._copy_overwrite(current_overwrite)
         for name in locked_permissions:
             setattr(updated_overwrite, name, False)
@@ -1010,17 +1230,16 @@ class AdminService:
 
         due_at = now + timedelta(seconds=duration_seconds) if duration_seconds is not None else None
         await self.store.upsert_channel_lock(
-            {
-                "guild_id": guild.id,
-                "channel_id": channel.id,
-                "actor_id": actor.id,
-                "created_at": serialize_datetime(now),
-                "due_at": serialize_datetime(due_at),
-                "category_id": getattr(channel, "category_id", None),
-                "permissions_synced": bool(getattr(channel, "permissions_synced", False)),
-                "locked_permissions": locked_permissions,
-                "original_permissions": {name: previous_values.get(name) for name in locked_permissions},
-            }
+            self._build_channel_lock_record(
+                guild_id=guild.id,
+                channel=channel,
+                actor_id=actor.id,
+                created_at=now,
+                due_at=due_at,
+                marker_only=False,
+                locked_permissions=locked_permissions,
+                original_permissions=previous_values,
+            )
         )
         self._wake_event.set()
 
@@ -1074,13 +1293,44 @@ class AdminService:
         if record is None:
             current_overwrite = channel.overwrites_for(everyone_role)
             if any(getattr(current_overwrite, name, None) is False for name in LOCK_PERMISSION_NAMES):
-                return False, "Babblebox is not tracking this lock record and will not guess at restoring the overwrite."
+                return False, "That channel already matches the lock restrictions, but Babblebox is not tracking an active emergency lock there."
             return False, "Babblebox is not tracking an active emergency lock for that channel."
-        lock_issue = self._lock_manage_issue(guild, channel)
-        if lock_issue is not None:
-            return False, lock_issue.detail
+        marker_only = self._lock_record_is_marker_only(record)
+        if not marker_only:
+            lock_issue = self._lock_manage_issue(guild, channel)
+            if lock_issue is not None:
+                return False, lock_issue.detail
 
         current_overwrite = channel.overwrites_for(everyone_role)
+        if marker_only:
+            await self.store.delete_channel_lock(guild.id, channel.id)
+            restore_notes = "Cleared Babblebox's tracked lock state only. Babblebox did not reopen the @everyone overwrite because it had not changed it."
+            timer_label = "Automatic unlock" if automatic else "Manual unlock"
+            log_description = (
+                f"Babblebox automatically cleared the tracked emergency lock state from {channel.mention}."
+                if automatic or actor is None
+                else f"{actor.mention} cleared the tracked emergency lock state from {channel.mention}."
+            )
+            log_sent = await self.send_log(
+                guild,
+                compiled,
+                embed=self._build_lock_log_embed(
+                    title="Channel Unlocked",
+                    description=log_description,
+                    tone="success",
+                    channel=channel,
+                    timer_label=timer_label,
+                    restore_status=restore_notes,
+                ),
+                alert=False,
+            )
+            summary = f"Cleared Babblebox's tracked lock state for {channel.mention}. Babblebox did not change the overwrite because it had not locked any @everyone flags here."
+            if not self._overwrite_matches_lock_restrictions(current_overwrite):
+                summary += " The channel no longer matched the lock restrictions, so no overwrite restore was needed."
+            if not log_sent:
+                summary += " Admin log delivery was unavailable."
+            return True, summary
+
         tracked_permissions = tuple(record.get("locked_permissions", ()))
         still_locked = [name for name in tracked_permissions if getattr(current_overwrite, name, None) is False]
         if not still_locked:
@@ -1137,6 +1387,52 @@ class AdminService:
         if not log_sent:
             summary += " Admin log delivery was unavailable."
         return True, summary
+
+    async def remove_timeout(
+        self,
+        guild: discord.Guild,
+        member: discord.Member,
+        *,
+        actor: discord.Member,
+        reason_text: str | None = None,
+    ) -> tuple[bool, str]:
+        if guild is None or member is None or actor is None:
+            return False, "Timeout removal only works inside a server."
+        actor_issue = self._timeout_actor_issue(guild, actor, member)
+        if actor_issue is not None:
+            return False, actor_issue.detail
+        timeout_issue = self._timeout_issue(guild, member)
+        if timeout_issue is not None:
+            return False, timeout_issue.detail
+        timed_out_until = self._member_timeout_until(member)
+        now = ge.now_utc()
+        if timed_out_until is None or timed_out_until <= now:
+            return False, f"{member.mention} is not currently timed out."
+
+        compiled = self.get_compiled_config(guild.id)
+        cleaned_reason = normalize_plain_text(reason_text) if reason_text is not None else None
+        cleaned_reason = cleaned_reason or None
+        audit_reason = "Babblebox timeout removed"
+        if cleaned_reason:
+            audit_reason = f"{audit_reason}: {cleaned_reason}"
+        with contextlib.suppress(discord.Forbidden, discord.HTTPException):
+            await member.timeout(None, reason=audit_reason)
+            embed = ge.make_status_embed(
+                "Timeout Removed",
+                f"{actor.mention} removed the timeout from {member.mention}.",
+                tone="success",
+                footer="Babblebox Timeout",
+            )
+            embed.add_field(
+                name="Reason",
+                value=cleaned_reason or "No reason provided.",
+                inline=False,
+            )
+            await self.send_log(guild, compiled, embed=embed, alert=False)
+            if cleaned_reason:
+                return True, f"Removed the timeout from {member.mention}. Reason recorded: {cleaned_reason}"
+            return True, f"Removed the timeout from {member.mention}."
+        return False, f"Babblebox could not remove the timeout from {member.mention}."
 
     async def list_review_views(self) -> list[dict[str, Any]]:
         if not self.storage_ready:
