@@ -7,7 +7,7 @@ from discord import app_commands
 ADMIN_ROOT_CONTEXTS = app_commands.AppCommandContext(guild=True, dm_channel=False, private_channel=False)
 ADMIN_ROOT_INSTALLS = app_commands.AppInstallationType(guild=True, user=False)
 ADMIN_ROOT_PERMISSIONS = discord.Permissions(manage_guild=True)
-LOCK_ROOT_PERMISSIONS = discord.Permissions(manage_channels=True)
+LOCK_ROOT_PERMISSIONS = discord.Permissions(manage_channels=True, manage_guild=True)
 
 
 def _harden_root_group(command: object, *, default_permissions: discord.Permissions) -> None:

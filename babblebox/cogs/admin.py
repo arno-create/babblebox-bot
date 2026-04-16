@@ -830,7 +830,7 @@ class AdminCog(commands.Cog):
         notice_label = "Custom" if config["lock_notice_template"] else "Babblebox default"
         embed = discord.Embed(
             title="Emergency Channel Locks",
-            description="Direct moderator lane for calm, reversible emergency channel locking.",
+            description="Direct moderator/admin lane for calm, reversible emergency channel locking.",
             color=ge.EMBED_THEME["warning"],
         )
         embed.add_field(
@@ -1456,7 +1456,7 @@ class AdminCog(commands.Cog):
     @commands.hybrid_group(
         name="lock",
         with_app_command=True,
-        description="Emergency channel lock tools for moderators",
+        description="Emergency channel lock tools for moderators and admins",
         invoke_without_command=True,
     )
     async def lock_group(self, ctx: commands.Context):

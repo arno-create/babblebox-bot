@@ -450,6 +450,31 @@ class AdminCogSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(ctx.send_calls[0]["ephemeral"])
         self.assertIn("limited emergency locks", ctx.send_calls[0]["embed"].description)
 
+    async def test_lock_channel_still_allows_manage_guild_admin_when_admin_only_is_enabled(self):
+        ok, _ = await self.cog.service.set_lock_config(self.guild.id, admin_only=True)
+        self.assertTrue(ok)
+        channel = FakeChannel(22)
+        self.guild.channels[channel.id] = channel
+        ctx = FakeContext(
+            interaction=FakeInteraction(),
+            guild=self.guild,
+            channel=channel,
+            author=FakeAuthor(manage_guild=True),
+        )
+
+        await AdminCog.lock_channel_command.callback(
+            self.cog,
+            ctx,
+            channel=channel,
+            duration="30m",
+            notice_message=None,
+            post_notice=False,
+        )
+
+        self.assertEqual(len(ctx.send_calls), 1)
+        self.assertTrue(ctx.send_calls[0]["ephemeral"])
+        self.assertIn("Locked", ctx.send_calls[0]["embed"].description)
+
     async def test_admin_permissions_surfaces_missing_manage_channels(self):
         self.guild.me.guild_permissions = FakePermissionSnapshot(
             manage_roles=True,

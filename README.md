@@ -343,7 +343,7 @@ Shield also now governs eligible non-chat surfaces in a bounded way. Confessions
 
 ### Emergency Locks
 
-`/lock` is Babblebox's only direct moderator command lane. Moderators with `Manage Channels` can use it by default, and admins can switch the lane to admins-only when they want tighter control.
+`/lock` is Babblebox's direct moderator/admin command lane. Moderators with `Manage Channels` and admins can use it by default, and admins can switch the lane to admins-only when they want tighter control.
 Direct locks only target normal text channels. Babblebox intentionally refuses category-synced channels, only changes the bounded `@everyone` send/thread/reaction flags it owns, and only restores those same flags later. Timed locks persist through restart reconciliation.
 
 | Slash | Prefix | Purpose |

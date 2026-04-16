@@ -597,7 +597,7 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
     async def test_admin_only_roots_emit_hidden_guild_only_metadata(self):
         expected = {
             "admin": (AdminCog, int(discord.Permissions(manage_guild=True).value)),
-            "lock": (AdminCog, int(discord.Permissions(manage_channels=True).value)),
+            "lock": (AdminCog, int(discord.Permissions(manage_channels=True, manage_guild=True).value)),
             "shield": (ShieldCog, int(discord.Permissions(manage_guild=True).value)),
             "confessions": (ConfessionsCog, int(discord.Permissions(manage_guild=True).value)),
             "dropsadmin": (QuestionDropsCog, int(discord.Permissions(manage_guild=True).value)),
@@ -617,6 +617,19 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertFalse(command.allowed_contexts.private_channel)
                 self.assertTrue(command.allowed_installs.guild)
                 self.assertFalse(command.allowed_installs.user)
+                if name == "lock":
+                    self.assertEqual({option["name"] for option in payload["options"]}, {"channel", "remove", "settings"})
+
+    async def test_lock_root_keeps_expected_prefix_and_slash_children(self):
+        cog = AdminCog(types.SimpleNamespace(loop=None))
+        try:
+            prefix_names = {command.name for command in cog.lock_group.commands}
+            slash_names = {command.name for command in cog.lock_group.app_command.commands}
+
+            self.assertEqual(prefix_names, {"channel", "remove", "settings"})
+            self.assertEqual(slash_names, {"channel", "remove", "settings"})
+        finally:
+            await cog.service.close()
 
     async def test_public_member_roots_remain_visible(self):
         _, drops_payload = await self._registered_root(QuestionDropsCog, root_name="drops")
