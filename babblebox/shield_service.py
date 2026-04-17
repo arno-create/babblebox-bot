@@ -132,7 +132,16 @@ SPAM_LOW_VALUE_WINDOW_SECONDS = 60.0
 SPAM_GIF_WINDOW_SECONDS = 45.0
 SPAM_GIF_REPEAT_WINDOW_SECONDS = 30.0
 HEALTHY_CHAT_WINDOW_SECONDS = 20.0
-CHANNEL_ACTIVITY_WINDOW_SECONDS = max(HEALTHY_CHAT_WINDOW_SECONDS, SPAM_GIF_WINDOW_SECONDS)
+GIF_PRESSURE_WINDOW_MULTIPLIER = 4
+GIF_PRESSURE_MIN_WINDOW_SECONDS = 60.0
+GIF_PRESSURE_SLICE_LIMIT = 12
+GIF_FILLER_RELIEF_WEIGHT = 0.25
+MAX_GIF_PRESSURE_WINDOW_SECONDS = max(
+    GIF_PRESSURE_MIN_WINDOW_SECONDS,
+    float(SHIELD_NUMERIC_CONFIG_SPECS["gif_window_seconds"][1] * GIF_PRESSURE_WINDOW_MULTIPLIER),
+)
+CHANNEL_ACTIVITY_CONTEXT_WINDOW_SECONDS = max(HEALTHY_CHAT_WINDOW_SECONDS, SPAM_GIF_WINDOW_SECONDS)
+CHANNEL_ACTIVITY_WINDOW_SECONDS = max(CHANNEL_ACTIVITY_CONTEXT_WINDOW_SECONDS, MAX_GIF_PRESSURE_WINDOW_SECONDS)
 HEALTHY_CHAT_AUTHOR_THRESHOLD = 4
 GIF_EMBED_DOMAINS = frozenset({"tenor.com", "media.tenor.com", "giphy.com", "media.giphy.com"})
 GIF_STREAK_TRACK_LIMIT = 50
@@ -544,6 +553,42 @@ CAMPAIGN_HOST_FAMILY_MAP = {
     "support": frozenset({"case", "help", "helpdesk", "support", "ticket"}),
     "setup": frozenset({"captcha", "device", "download", "installer", "qr", "setup", "update"}),
 }
+GIF_FILLER_TEXT_PHRASES = frozenset(
+    {
+        "agreed",
+        "aha",
+        "cool",
+        "haha",
+        "hello",
+        "hello all",
+        "hello everyone",
+        "hello there",
+        "hey",
+        "hey all",
+        "hey everyone",
+        "hi",
+        "hi all",
+        "hi everyone",
+        "hi guys",
+        "hi jim",
+        "hi team",
+        "hi there",
+        "lol",
+        "lmao",
+        "nice",
+        "ok",
+        "okay",
+        "same",
+        "sounds good",
+        "sup",
+        "thanks",
+        "thank you",
+        "what's up",
+        "what's up guys",
+        "yep",
+        "yup",
+    }
+)
 @dataclass(frozen=True)
 class PackSettings:
     enabled: bool
@@ -867,6 +912,8 @@ class ShieldSpamEvent:
     alpha_count: int
     low_value_text: bool
     repeated_char_run: int
+    text_substance: str = "ignored"
+    text_relief_weight: float = 0.0
     is_gif_message: bool = False
     gif_signature: str | None = None
     gif_only: bool = False
@@ -883,6 +930,8 @@ class ShieldChannelActivityEvent:
     plain_word_count: int
     low_value_text: bool
     quality_message: bool
+    text_substance: str
+    text_relief_weight: float
     risky: bool
     token_signature: str
     exact_fingerprint: str | None = None
@@ -1131,6 +1180,25 @@ def _is_low_value_text(text: str, *, plain_word_count: int) -> bool:
         and len(joined) <= 18
         and (unique_tokens <= 2 or unique_chars <= 4)
     )
+
+
+def _classify_gif_text_substance(
+    text: str,
+    *,
+    plain_word_count: int,
+    low_value_text: bool,
+    risky: bool,
+) -> tuple[str, float]:
+    cleaned = normalize_plain_text(text).casefold()
+    if not cleaned or risky or plain_word_count <= 0:
+        return ("ignored", 0.0)
+    if low_value_text:
+        return ("filler", GIF_FILLER_RELIEF_WEIGHT)
+    if plain_word_count <= 5 and cleaned in GIF_FILLER_TEXT_PHRASES:
+        return ("filler", GIF_FILLER_RELIEF_WEIGHT)
+    if plain_word_count >= 3:
+        return ("substantive", 1.0)
+    return ("ignored", 0.0)
 
 
 def _short_token_signature(text: str, *, limit: int = 3) -> str:
@@ -3453,6 +3521,20 @@ class ShieldService:
         ]
         media_only_links = bool(snapshot.links) and all(link.category == "media_embed" for link in snapshot.links)
         link_signature = "|".join(sorted(snapshot.canonical_links)[:3]) if snapshot.canonical_links else None
+        text_substance, text_relief_weight = _classify_gif_text_substance(
+            snapshot.context_text,
+            plain_word_count=snapshot.plain_word_count,
+            low_value_text=snapshot.low_value_text,
+            risky=bool(
+                snapshot.has_links
+                or snapshot.has_suspicious_attachment
+                or snapshot.invite_codes
+                or snapshot.mention_count > 0
+                or snapshot.everyone_here_count > 0
+                or snapshot.repeated_char_run >= 12
+                or snapshot.emoji_count >= 25
+            ),
+        )
         current = ShieldSpamEvent(
             timestamp=now,
             channel_id=channel_id,
@@ -3470,6 +3552,8 @@ class ShieldService:
             uppercase_count=snapshot.uppercase_count,
             alpha_count=snapshot.alpha_count,
             low_value_text=snapshot.low_value_text,
+            text_substance=text_substance,
+            text_relief_weight=text_relief_weight,
             repeated_char_run=snapshot.repeated_char_run,
             is_gif_message=snapshot.is_gif_message,
             gif_signature=snapshot.gif_signature,
@@ -3505,7 +3589,6 @@ class ShieldService:
             if now - row.timestamp <= CHANNEL_ACTIVITY_WINDOW_SECONDS
             and not self._message_is_deleted(row.message)
         ]
-        quality_message = snapshot.plain_word_count >= 3 and not snapshot.low_value_text
         risky = bool(
             snapshot.has_links
             or snapshot.has_suspicious_attachment
@@ -3515,6 +3598,13 @@ class ShieldService:
             or snapshot.repeated_char_run >= 12
             or snapshot.emoji_count >= 25
         )
+        text_substance, text_relief_weight = _classify_gif_text_substance(
+            snapshot.context_text,
+            plain_word_count=snapshot.plain_word_count,
+            low_value_text=snapshot.low_value_text,
+            risky=risky,
+        )
+        quality_message = snapshot.plain_word_count >= 3 and not snapshot.low_value_text
         activity_event = ShieldChannelActivityEvent(
             timestamp=now,
             user_id=user_id,
@@ -3522,6 +3612,8 @@ class ShieldService:
             plain_word_count=snapshot.plain_word_count,
             low_value_text=snapshot.low_value_text,
             quality_message=quality_message,
+            text_substance=text_substance,
+            text_relief_weight=text_relief_weight,
             risky=risky,
             token_signature=_short_token_signature(snapshot.context_text),
             exact_fingerprint=snapshot.exact_fingerprint,
@@ -3538,8 +3630,14 @@ class ShieldService:
             rows = rows[-CHANNEL_ACTIVITY_LIMIT:]
         self._recent_channel_activity[key] = rows
         self._update_channel_gif_streak_state(key, activity_event)
-        distinct_authors = {row.user_id for row in rows}
-        quality_authors = {row.user_id for row in rows if row.quality_message}
+        recent_context_rows = [
+            row
+            for row in rows
+            if now - row.timestamp <= CHANNEL_ACTIVITY_CONTEXT_WINDOW_SECONDS
+            and not self._message_is_deleted(row.message)
+        ]
+        distinct_authors = {row.user_id for row in recent_context_rows}
+        quality_authors = {row.user_id for row in recent_context_rows if row.quality_message}
         return len(distinct_authors), len(quality_authors), tuple(rows)
 
     def _update_channel_gif_streak_state(
@@ -3564,6 +3662,144 @@ class ShieldService:
         state = ShieldChannelGifStreakState(rows=tuple(rows), capped=capped)
         self._channel_gif_streaks[key] = state
         return state
+
+    def _gif_pressure_window_seconds(self, compiled: CompiledShieldConfig) -> float:
+        return float(max(GIF_PRESSURE_MIN_WINDOW_SECONDS, compiled.gif_rules.window_seconds * GIF_PRESSURE_WINDOW_MULTIPLIER))
+
+    def _channel_activity_context_rows(
+        self,
+        channel_activity: Sequence[ShieldChannelActivityEvent],
+        *,
+        now: float,
+    ) -> list[ShieldChannelActivityEvent]:
+        return [
+            row
+            for row in channel_activity
+            if now - row.timestamp <= CHANNEL_ACTIVITY_CONTEXT_WINDOW_SECONDS
+            and not self._message_is_deleted(row.message)
+        ]
+
+    def _select_gif_pressure_rows(
+        self,
+        channel_activity: Sequence[ShieldChannelActivityEvent],
+        compiled: CompiledShieldConfig,
+        *,
+        now: float,
+        user_id: int | None = None,
+    ) -> list[ShieldChannelActivityEvent]:
+        rows = [
+            row
+            for row in channel_activity
+            if now - row.timestamp <= self._gif_pressure_window_seconds(compiled)
+            and not self._message_is_deleted(row.message)
+            and (user_id is None or row.user_id == user_id)
+        ]
+        if len(rows) > GIF_PRESSURE_SLICE_LIMIT:
+            rows = rows[-GIF_PRESSURE_SLICE_LIMIT:]
+        return rows
+
+    def _effective_gif_text_relief(
+        self,
+        row: ShieldChannelActivityEvent,
+        *,
+        repeated_short_signatures: frozenset[str],
+    ) -> tuple[str, float]:
+        if row.is_gif_message:
+            return ("ignored", 0.0)
+        if (
+            row.text_substance == "substantive"
+            and row.plain_word_count <= 4
+            and row.token_signature
+            and row.token_signature in repeated_short_signatures
+        ):
+            return ("filler", GIF_FILLER_RELIEF_WEIGHT)
+        return (row.text_substance, float(row.text_relief_weight))
+
+    def _gif_pressure_metrics(self, rows: Sequence[ShieldChannelActivityEvent]) -> dict[str, Any]:
+        repeated_short_signature_counts: dict[str, int] = {}
+        for row in rows:
+            if row.is_gif_message or not row.token_signature or row.plain_word_count > 4:
+                continue
+            repeated_short_signature_counts[row.token_signature] = repeated_short_signature_counts.get(row.token_signature, 0) + 1
+        repeated_short_signatures = frozenset(
+            signature
+            for signature, count in repeated_short_signature_counts.items()
+            if count >= 2
+        )
+
+        gif_rows = [row for row in rows if row.is_gif_message and not row.gif_pack_exempt]
+        substantive_text_count = 0
+        filler_text_count = 0
+        text_relief_units = 0.0
+        for row in rows:
+            substance, weight = self._effective_gif_text_relief(
+                row,
+                repeated_short_signatures=repeated_short_signatures,
+            )
+            if substance == "substantive":
+                substantive_text_count += 1
+            elif substance == "filler":
+                filler_text_count += 1
+            text_relief_units += weight
+
+        signature_counts: dict[str, int] = {}
+        for row in gif_rows:
+            if row.gif_signature:
+                signature_counts[row.gif_signature] = signature_counts.get(row.gif_signature, 0) + 1
+        gif_count = len(gif_rows)
+        ratio_percent = (
+            int(round((gif_count / max(1.0, gif_count + text_relief_units)) * 100))
+            if gif_count > 0
+            else 0
+        )
+        return {
+            "rows": tuple(rows),
+            "gif_rows": tuple(gif_rows),
+            "gif_count": gif_count,
+            "low_text_gif_count": sum(1 for row in gif_rows if row.gif_low_text),
+            "distinct_gif_authors": frozenset(row.user_id for row in gif_rows),
+            "substantive_text_count": substantive_text_count,
+            "filler_text_count": filler_text_count,
+            "text_relief_units": text_relief_units,
+            "ratio_percent": ratio_percent,
+            "signature_counts": signature_counts,
+            "repeated_source": max(signature_counts.values(), default=0),
+        }
+
+    def _gif_pressure_triggered(
+        self,
+        metrics: dict[str, Any],
+        compiled: CompiledShieldConfig,
+        *,
+        minimum_authors: int,
+    ) -> bool:
+        gif_count = int(metrics.get("gif_count", 0))
+        if gif_count < max(1, compiled.gif_rules.message_threshold):
+            return False
+        if len(metrics.get("distinct_gif_authors", ())) < minimum_authors:
+            return False
+        if int(metrics.get("ratio_percent", 0)) < compiled.gif_rules.min_ratio_percent:
+            return False
+        return (
+            int(metrics.get("low_text_gif_count", 0)) >= compiled.gif_rules.repeat_threshold
+            or gif_count >= compiled.gif_rules.message_threshold + 1
+        )
+
+    def _collect_personal_gif_streak_rows(
+        self,
+        channel_activity: Sequence[ShieldChannelActivityEvent],
+        *,
+        user_id: int,
+    ) -> list[ShieldChannelActivityEvent]:
+        streak_rows: list[ShieldChannelActivityEvent] = []
+        for row in reversed(channel_activity):
+            if self._message_is_deleted(row.message):
+                continue
+            if row.user_id != user_id or not row.is_gif_message or row.gif_pack_exempt:
+                break
+            streak_rows.append(row)
+        streak_rows.reverse()
+        return streak_rows
 
     def _is_benign_turn_taking_context(
         self,
@@ -3611,6 +3847,116 @@ class ShieldService:
             return False
         return True
 
+    def _build_personal_gif_pressure(
+        self,
+        snapshot: ShieldSnapshot,
+        recent_events: Sequence[ShieldSpamEvent],
+        channel_activity: Sequence[ShieldChannelActivityEvent],
+        compiled: CompiledShieldConfig,
+        *,
+        now: float,
+        author_id: int,
+        channel_id: int | None,
+        gif_pack_exempt: bool = False,
+    ) -> dict[str, Any] | None:
+        if channel_id is None or author_id <= 0 or not snapshot.is_gif_message or gif_pack_exempt:
+            return None
+
+        same_channel_gif_events = [
+            event
+            for event in recent_events
+            if event.message is not None
+            and event.channel_id == channel_id
+            and event.is_gif_message
+            and not event.gif_pack_exempt
+            and now - event.timestamp <= float(compiled.gif_rules.window_seconds)
+            and not self._message_is_deleted(event.message)
+        ]
+        same_asset_messages: tuple[discord.Message, ...] = ()
+        same_asset_count = 0
+        if snapshot.gif_signature is not None:
+            same_asset_events = [event for event in same_channel_gif_events if event.gif_signature == snapshot.gif_signature]
+            same_asset_count = len(same_asset_events)
+            if same_asset_count >= compiled.gif_rules.same_asset_threshold:
+                same_asset_messages = tuple(
+                    self._dedupe_message_targets(
+                        [
+                            event.message
+                            for event in same_asset_events[-compiled.gif_rules.same_asset_threshold:]
+                            if event.message is not None
+                        ]
+                    )
+                )
+
+        streak_rows = self._collect_personal_gif_streak_rows(channel_activity, user_id=author_id)
+        pressure_rows = self._select_gif_pressure_rows(
+            channel_activity,
+            compiled,
+            now=now,
+            user_id=author_id,
+        )
+        metrics = self._gif_pressure_metrics(pressure_rows)
+        streak_trigger = len(streak_rows) >= compiled.gif_rules.consecutive_threshold
+        pressure_trigger = self._gif_pressure_triggered(metrics, compiled, minimum_authors=1)
+        if not same_asset_messages and not streak_trigger and not pressure_trigger:
+            return None
+
+        if same_asset_messages:
+            trigger_mode = "same asset"
+            triggered_by = ("same_asset",)
+            summary = (
+                f"Trigger mode: {trigger_mode}. The same GIF asset was repeated {same_asset_count} times inside "
+                f"{compiled.gif_rules.window_seconds} seconds (threshold {compiled.gif_rules.same_asset_threshold})."
+            )
+        else:
+            trigger_labels = [
+                label
+                for label, enabled in (("personal streak", streak_trigger), ("personal pressure", pressure_trigger))
+                if enabled
+            ]
+            trigger_mode = " + ".join(trigger_labels)
+            triggered_by = tuple("streak" if label == "personal streak" else "pressure" for label in trigger_labels)
+            trigger_bits: list[str] = []
+            if streak_trigger:
+                trigger_bits.append(
+                    f"{len(streak_rows)} consecutive GIF-heavy messages crossed the {compiled.gif_rules.consecutive_threshold}-message personal streak threshold"
+                )
+            if pressure_trigger:
+                trigger_bits.append(
+                    f"{metrics['gif_count']} GIFs vs {metrics['substantive_text_count']} substantive and "
+                    f"{metrics['filler_text_count']} filler text messages in the active personal pressure slice "
+                    f"({metrics['ratio_percent']}% effective GIF pressure, threshold {compiled.gif_rules.min_ratio_percent}%)"
+                )
+            summary = f"Trigger mode: {trigger_mode}. {' and '.join(trigger_bits)}."
+
+        top_signatures = sorted(metrics["signature_counts"].items(), key=lambda item: (-item[1], item[0]))[:3]
+        signature_seed = "|".join(
+            [
+                trigger_mode,
+                str(author_id),
+                str(metrics["gif_count"]),
+                str(metrics["ratio_percent"]),
+                str(len(streak_rows)),
+                str(same_asset_count),
+                ",".join(f"{signature}:{count}" for signature, count in top_signatures),
+            ]
+        )
+        return {
+            "reason": summary,
+            "trigger_mode": trigger_mode,
+            "triggered_by": triggered_by,
+            "gif_posts": int(metrics["gif_count"]),
+            "substantive_text_posts": int(metrics["substantive_text_count"]),
+            "filler_text_posts": int(metrics["filler_text_count"]),
+            "text_relief_units": float(metrics["text_relief_units"]),
+            "ratio_percent": int(metrics["ratio_percent"]),
+            "streak_rows": tuple(streak_rows),
+            "pressure_rows": tuple(pressure_rows),
+            "same_asset_messages": same_asset_messages,
+            "same_asset_count": same_asset_count,
+            "signature": hashlib.sha1(f"personal_gif|{channel_id}|{signature_seed}".encode("utf-8")).hexdigest(),
+        }
+
     def _build_group_gif_pressure(
         self,
         guild_id: int,
@@ -3632,105 +3978,92 @@ class ShieldService:
         ]
         consecutive_gif_count = len(consecutive_rows)
         consecutive_authors = {row.user_id for row in consecutive_rows}
-        window_seconds = float(compiled.gif_rules.window_seconds)
-        activity_rows = [
-            row
-            for row in self._recent_channel_activity.get(key, [])
-            if now - row.timestamp <= window_seconds
-            and not self._message_is_deleted(row.message)
-        ]
-        if not activity_rows:
-            return None
-        gif_rows = [row for row in activity_rows if row.is_gif_message and not row.gif_pack_exempt]
-        if not gif_rows:
-            return None
-        distinct_gif_authors = {row.user_id for row in gif_rows}
-        meaningful_text_rows = [row for row in activity_rows if not row.is_gif_message and row.quality_message]
-        meaningful_text_count = len(meaningful_text_rows)
-        gif_count = len(gif_rows)
-        gif_ratio = gif_count / max(1, gif_count + meaningful_text_count)
-        signature_counts: dict[str, int] = {}
-        for row in gif_rows:
-            if row.gif_signature:
-                signature_counts[row.gif_signature] = signature_counts.get(row.gif_signature, 0) + 1
-        repeated_source = max(signature_counts.values(), default=0)
-        balance_minimum = max(1, compiled.gif_rules.message_threshold)
-        pure_low_text_gif_run = (
-            meaningful_text_count == 0
-            and bool(activity_rows)
-            and all(row.is_gif_message and not row.gif_pack_exempt for row in activity_rows)
-            and all(row.gif_low_text for row in gif_rows)
+        pressure_rows = self._select_gif_pressure_rows(
+            self._recent_channel_activity.get(key, []),
+            compiled,
+            now=now,
         )
+        if not pressure_rows:
+            return None
+        metrics = self._gif_pressure_metrics(pressure_rows)
+        if not metrics["gif_rows"]:
+            return None
         streak_trigger = (
             consecutive_gif_count >= compiled.gif_rules.consecutive_threshold
             and len(consecutive_authors) >= 2
         )
-        ratio_trigger = (
-            len(distinct_gif_authors) >= 2
-            and not pure_low_text_gif_run
-            and gif_count >= balance_minimum
-            and int(round(gif_ratio * 100)) >= compiled.gif_rules.min_ratio_percent
+        pressure_trigger = self._gif_pressure_triggered(metrics, compiled, minimum_authors=2)
+        pure_collective_gif_run = bool(pressure_rows) and all(
+            row.is_gif_message and not row.gif_pack_exempt
+            for row in pressure_rows
         )
-        if not streak_trigger and not ratio_trigger:
+        # Let the exact live-streak lane own uninterrupted multi-member GIF runs.
+        # Pressure is for GIF-dominated conversation slices that still contain some text.
+        if pure_collective_gif_run:
+            pressure_trigger = False
+        if not streak_trigger and not pressure_trigger:
             return None
 
-        ratio_percent = int(round(gif_ratio * 100))
-        collective_author_count = max(len(distinct_gif_authors), len(consecutive_authors))
+        collective_author_count = max(len(metrics["distinct_gif_authors"]), len(consecutive_authors))
         trigger_bits: list[str] = []
         if streak_trigger:
             trigger_bits.append(
-                f"{consecutive_gif_count} consecutive GIF-heavy messages (threshold {compiled.gif_rules.consecutive_threshold})"
+                f"{consecutive_gif_count} consecutive GIF-heavy messages from {len(consecutive_authors)} members crossed "
+                f"the {compiled.gif_rules.consecutive_threshold}-message live streak threshold"
             )
-        if ratio_trigger:
+        if pressure_trigger:
             trigger_bits.append(
-                f"{gif_count} GIFs vs {meaningful_text_count} meaningful text messages in the recent {compiled.gif_rules.window_seconds}s pressure window "
-                f"({ratio_percent}% GIF pressure, threshold {compiled.gif_rules.min_ratio_percent}%)"
+                f"{metrics['gif_count']} GIFs from {collective_author_count} members vs {metrics['substantive_text_count']} substantive and "
+                f"{metrics['filler_text_count']} filler text messages in the active channel pressure slice "
+                f"({metrics['ratio_percent']}% effective GIF pressure, threshold {compiled.gif_rules.min_ratio_percent}%)"
             )
         trigger_label = " + ".join(
             trigger
-            for trigger, enabled in (("streak", streak_trigger), ("ratio", ratio_trigger))
+            for trigger, enabled in (("collective streak", streak_trigger), ("collective pressure", pressure_trigger))
             if enabled
         )
-        summary = (
-            f"Trigger mode: {trigger_label}. {gif_count} GIF-heavy posts from {collective_author_count} members crossed "
-            f"{' and '.join(trigger_bits)}."
-        )
-        if repeated_source >= max(2, compiled.gif_rules.same_asset_threshold):
-            summary = f"{summary} The same GIF source repeated {repeated_source} times in the recent pressure window."
+        summary = f"Trigger mode: {trigger_label}. {' and '.join(trigger_bits)}."
+        if metrics["repeated_source"] >= max(2, compiled.gif_rules.same_asset_threshold):
+            summary = (
+                f"{summary} The same GIF source repeated {metrics['repeated_source']} times in the active pressure slice."
+            )
         if streak_trigger and streak_state.capped:
             summary = (
                 f"{summary} The live streak tracker hit its {GIF_STREAK_TRACK_LIMIT}-message cap, so collective streak cleanup stays capped to the newest tracked GIFs."
             )
 
-        top_signatures = sorted(signature_counts.items(), key=lambda item: (-item[1], item[0]))[:3]
+        top_signatures = sorted(metrics["signature_counts"].items(), key=lambda item: (-item[1], item[0]))[:3]
         signature_seed = "|".join(
             [
                 trigger_label,
                 str(consecutive_gif_count),
-                str(gif_count),
-                str(ratio_percent),
-                ",".join(str(author_id) for author_id in sorted(distinct_gif_authors)[:4]),
+                str(metrics["gif_count"]),
+                str(metrics["ratio_percent"]),
+                ",".join(str(author_id) for author_id in sorted(metrics["distinct_gif_authors"])[:4]),
                 ",".join(f"{signature}:{count}" for signature, count in top_signatures),
             ]
         )
         return {
             "reason": summary,
-            "gif_posts": gif_count,
-            "meaningful_text_posts": meaningful_text_count,
-            "ratio_percent": ratio_percent,
+            "gif_posts": int(metrics["gif_count"]),
+            "substantive_text_posts": int(metrics["substantive_text_count"]),
+            "filler_text_posts": int(metrics["filler_text_count"]),
+            "text_relief_units": float(metrics["text_relief_units"]),
+            "ratio_percent": int(metrics["ratio_percent"]),
             "distinct_authors": collective_author_count,
             "consecutive_gif_posts": consecutive_gif_count,
             "consecutive_authors": len(consecutive_authors),
-            "repeated_source": repeated_source,
+            "repeated_source": int(metrics["repeated_source"]),
             "triggered_by": tuple(
                 trigger
-                for trigger, enabled in (("streak", streak_trigger), ("ratio", ratio_trigger))
+                for trigger, enabled in (("streak", streak_trigger), ("pressure", pressure_trigger))
                 if enabled
             ),
             "trigger_label": trigger_label,
             "streak_rows": tuple(consecutive_rows),
             "streak_capped": bool(streak_state.capped),
-            "window_seconds": int(compiled.gif_rules.window_seconds),
+            "pressure_rows": tuple(pressure_rows),
+            "window_seconds": int(self._gif_pressure_window_seconds(compiled)),
             "signature": hashlib.sha1(f"group_gif|{channel_id}|{signature_seed}".encode("utf-8")).hexdigest(),
         }
 
@@ -3747,6 +4080,7 @@ class ShieldService:
         distinct_channel_authors: int = 0,
         quality_channel_authors: int = 0,
         channel_activity: Sequence[ShieldChannelActivityEvent] = (),
+        personal_gif_pressure: dict[str, Any] | None = None,
         group_gif_pressure: dict[str, Any] | None = None,
     ) -> list[ShieldMatch]:
         spam_settings = compiled.spam
@@ -3771,17 +4105,18 @@ class ShieldService:
         facts: list[dict[str, Any]] = []
         spam_rules = compiled.spam_rules
         gif_rules = compiled.gif_rules
+        channel_context_rows = self._channel_activity_context_rows(channel_activity, now=now)
         benign_turn_taking = self._is_benign_turn_taking_context(
             snapshot,
-            channel_activity,
+            channel_context_rows,
             author_id=author_id,
         )
-        channel_low_value_events = [row for row in channel_activity if row.low_value_text]
-        current_author_message_count = sum(1 for row in channel_activity if row.user_id == author_id)
+        channel_low_value_events = [row for row in channel_context_rows if row.low_value_text]
+        current_author_message_count = sum(1 for row in channel_context_rows if row.user_id == author_id)
         current_author_low_value_count = sum(1 for row in channel_low_value_events if row.user_id == author_id)
         dominant_channel_presence = (
             distinct_channel_authors <= 2
-            or current_author_message_count >= max(4, (len(channel_activity) // 2) + 1)
+            or current_author_message_count >= max(4, (len(channel_context_rows) // 2) + 1)
             or current_author_low_value_count >= max(4, len(channel_low_value_events) - 1)
         )
         burst_window = [
@@ -4067,56 +4402,19 @@ class ShieldService:
                 }
             )
 
-        gif_events = [
-            event
-            for event in recent_events
-            if event.is_gif_message
-            and not event.gif_pack_exempt
-            and now - event.timestamp <= float(gif_rules.window_seconds)
-            and not self._message_is_deleted(event.message)
-        ]
-        gif_window_events = [
-            event
-            for event in recent_events
-            if now - event.timestamp <= float(gif_rules.window_seconds)
-            and not self._message_is_deleted(event.message)
-        ]
-        repeated_same_gif = [
-            event
-            for event in recent_events
-            if snapshot.gif_signature is not None
-            and not event.gif_pack_exempt
-            and event.gif_signature == snapshot.gif_signature
-            and now - event.timestamp <= float(gif_rules.window_seconds)
-            and not self._message_is_deleted(event.message)
-        ]
-        gif_low_text_events = [event for event in gif_events if event.gif_low_text]
-        gif_only_events = [event for event in gif_events if event.gif_only]
-        if gif_settings.enabled and snapshot.is_gif_message:
-            total_recent = max(1, len(gif_window_events))
-            gif_ratio = int(round((len(gif_events) / total_recent) * 100))
-            if (
-                len(gif_events) >= gif_rules.message_threshold
-                and (len(gif_low_text_events) >= gif_rules.repeat_threshold or len(gif_only_events) >= 2)
-                and gif_ratio >= gif_rules.min_ratio_percent
-            ) or len(repeated_same_gif) >= gif_rules.same_asset_threshold:
-                facts.append(
-                    {
-                        "match_class": "spam_gif_flood",
-                        "label": "GIF flood",
-                        "reason": (
-                            f"{len(gif_events)} GIF-heavy posts landed inside {gif_rules.window_seconds} seconds "
-                            f"(threshold {gif_rules.message_threshold}) with {gif_ratio}% GIF pressure."
-                            if len(repeated_same_gif) < gif_rules.same_asset_threshold
-                            else f"The same GIF asset was repeated {len(repeated_same_gif)} times inside {gif_rules.window_seconds} seconds (threshold {gif_rules.same_asset_threshold})."
-                        ),
-                        "base_confidence": "medium",
-                        "strong": True,
-                        "signature": snapshot.gif_signature or snapshot.near_duplicate_fingerprint,
-                        "pack": "gif",
-                        "settings": compiled.gif,
-                    }
-                )
+        if gif_settings.enabled and personal_gif_pressure is not None:
+            facts.append(
+                {
+                    "match_class": "spam_gif_flood",
+                    "label": "GIF flood",
+                    "reason": str(personal_gif_pressure["reason"]),
+                    "base_confidence": "medium",
+                    "strong": True,
+                    "signature": personal_gif_pressure.get("signature") or snapshot.gif_signature or snapshot.near_duplicate_fingerprint,
+                    "pack": "gif",
+                    "settings": compiled.gif,
+                }
+            )
         if gif_settings.enabled and group_gif_pressure is not None:
             facts.append(
                 {
@@ -4261,6 +4559,16 @@ class ShieldService:
             now=now,
             scan_source=scan_source,
         )
+        personal_gif_pressure = self._build_personal_gif_pressure(
+            snapshot,
+            recent_spam_events,
+            channel_activity,
+            compiled,
+            now=now,
+            author_id=int(getattr(message.author, "id", 0) or 0),
+            channel_id=channel_id,
+            gif_pack_exempt=gif_pack_exempt,
+        )
         group_gif_pressure = self._build_group_gif_pressure(
             message.guild.id,
             channel_id,
@@ -4284,6 +4592,7 @@ class ShieldService:
             distinct_channel_authors=distinct_channel_authors,
             quality_channel_authors=quality_channel_authors,
             channel_activity=channel_activity,
+            personal_gif_pressure=personal_gif_pressure,
             group_gif_pressure=group_gif_pressure,
         )
         matches, _ = self._apply_allow_phrase_suppression(matches, allow_phrase=self._matching_allow_phrase(compiled, snapshot))
@@ -4306,11 +4615,10 @@ class ShieldService:
                 matches,
                 best,
                 message,
-                snapshot,
-                recent_spam_events,
                 compiled,
                 now=now,
                 channel_activity=channel_activity,
+                personal_gif_pressure=personal_gif_pressure,
                 group_gif_pressure=group_gif_pressure,
             )
             if gif_plan is not None:
@@ -4897,32 +5205,70 @@ class ShieldService:
 
     def _select_minimal_personal_gif_tail(
         self,
-        gif_events: Sequence[ShieldSpamEvent],
-        channel_window_events: Sequence[ShieldSpamEvent],
+        rows: Sequence[ShieldChannelActivityEvent],
         compiled: CompiledShieldConfig,
-    ) -> list[ShieldSpamEvent]:
-        threshold = compiled.gif_rules.message_threshold
-        if len(gif_events) < threshold:
+        *,
+        minimum_authors: int,
+    ) -> list[ShieldChannelActivityEvent]:
+        working_rows = [
+            row
+            for row in rows
+            if row.message is not None
+            and not self._message_is_deleted(row.message)
+        ]
+        if not working_rows:
             return []
-        for start_index in range(len(gif_events) - 1, -1, -1):
-            tail = list(gif_events[start_index:])
-            if len(tail) < threshold:
+        if sum(1 for row in working_rows if row.is_gif_message and not row.gif_pack_exempt) < compiled.gif_rules.message_threshold:
+            return []
+        for start_index in range(len(working_rows) - 1, -1, -1):
+            tail_rows = working_rows[start_index:]
+            metrics = self._gif_pressure_metrics(tail_rows)
+            if not self._gif_pressure_triggered(metrics, compiled, minimum_authors=minimum_authors):
                 continue
-            low_text_count = sum(1 for event in tail if event.gif_low_text)
-            gif_only_count = sum(1 for event in tail if event.gif_only)
-            tail_start = tail[0].timestamp
-            tail_window_events = [
-                event
-                for event in channel_window_events
-                if event.timestamp >= tail_start
-            ]
-            ratio_percent = int(round((len(tail) / max(1, len(tail_window_events))) * 100))
-            if (
-                (low_text_count >= compiled.gif_rules.repeat_threshold or gif_only_count >= 2)
-                and ratio_percent >= compiled.gif_rules.min_ratio_percent
-            ):
-                return tail
-        return list(gif_events[-threshold:])
+            selected_rows = [row for row in tail_rows if row.is_gif_message and not row.gif_pack_exempt]
+            if selected_rows:
+                return selected_rows
+        return []
+
+    def _select_newest_contributing_gif_rows(
+        self,
+        rows: Sequence[ShieldChannelActivityEvent],
+        compiled: CompiledShieldConfig,
+        *,
+        minimum_authors: int,
+    ) -> list[ShieldChannelActivityEvent]:
+        working_rows = [
+            row
+            for row in rows
+            if row.message is not None
+            and not self._message_is_deleted(row.message)
+        ]
+        if not working_rows:
+            return []
+        removable_rows = [row for row in working_rows if row.is_gif_message and not row.gif_pack_exempt]
+        if len(removable_rows) < compiled.gif_rules.message_threshold:
+            return []
+        selected_rows: list[ShieldChannelActivityEvent] = []
+        remaining_rows = list(working_rows)
+        for row in reversed(removable_rows):
+            metrics = self._gif_pressure_metrics(remaining_rows)
+            if not self._gif_pressure_triggered(metrics, compiled, minimum_authors=minimum_authors):
+                break
+            selected_rows.append(row)
+            message_id = self._message_id(row.message)
+            remove_index = next(
+                (
+                    index
+                    for index, candidate in enumerate(remaining_rows)
+                    if self._message_id(candidate.message) == message_id
+                ),
+                None,
+            )
+            if remove_index is None:
+                continue
+            remaining_rows.pop(remove_index)
+        selected_rows.reverse()
+        return selected_rows
 
     def _collect_group_gif_incident_messages(
         self,
@@ -4934,7 +5280,6 @@ class ShieldService:
     ) -> list[discord.Message]:
         if not channel_activity or group_gif_pressure is None:
             return []
-        window_seconds = float(compiled.gif_rules.window_seconds)
         triggered_by = tuple(group_gif_pressure.get("triggered_by", ()))
         if "streak" in triggered_by:
             streak_rows = [
@@ -4949,35 +5294,22 @@ class ShieldService:
                 return self._dedupe_message_targets(
                     [row.message for row in streak_rows if row.message is not None]
                 )
-        if "ratio" not in triggered_by:
+        if "pressure" not in triggered_by:
             return []
-        live_rows = [
+        pressure_rows = [
             row
-            for row in channel_activity
-            if now - row.timestamp <= window_seconds
-            and row.message is not None
+            for row in group_gif_pressure.get("pressure_rows", ())
+            if row.message is not None
+            and now - row.timestamp <= self._gif_pressure_window_seconds(compiled)
             and not self._message_is_deleted(row.message)
         ]
-        if not live_rows:
+        if not pressure_rows:
             return []
-        meaningful_text_count = sum(
-            1 for row in live_rows if not row.is_gif_message and row.quality_message
+        selected_rows = self._select_newest_contributing_gif_rows(
+            pressure_rows,
+            compiled,
+            minimum_authors=2,
         )
-        gif_rows = [row for row in live_rows if row.is_gif_message and not row.gif_pack_exempt]
-        if len(gif_rows) < 2 or len({row.user_id for row in gif_rows}) < 2:
-            return []
-        minimum_count = max(1, compiled.gif_rules.message_threshold)
-        remaining_gif_count = len(gif_rows)
-        selected_rows: list[ShieldChannelActivityEvent] = []
-        for row in reversed(gif_rows):
-            ratio_percent = int(
-                round((remaining_gif_count / max(1, remaining_gif_count + meaningful_text_count)) * 100)
-            )
-            if remaining_gif_count < minimum_count or ratio_percent < compiled.gif_rules.min_ratio_percent:
-                break
-            selected_rows.append(row)
-            remaining_gif_count -= 1
-        selected_rows.reverse()
         return self._dedupe_message_targets(
             [row.message for row in selected_rows if row.message is not None]
         )
@@ -4985,44 +5317,45 @@ class ShieldService:
     def _collect_personal_gif_incident_messages(
         self,
         message: discord.Message,
-        snapshot: ShieldSnapshot,
-        recent_events: Sequence[ShieldSpamEvent],
         compiled: CompiledShieldConfig,
         *,
         now: float,
+        personal_gif_pressure: dict[str, Any] | None,
     ) -> list[discord.Message]:
-        channel_id = getattr(getattr(message, "channel", None), "id", None)
-        same_channel_window_events = [
-            event
-            for event in recent_events
-            if event.message is not None
-            and event.channel_id == channel_id
-            and now - event.timestamp <= float(compiled.gif_rules.window_seconds)
-            and not self._message_is_deleted(event.message)
-        ]
-        if not same_channel_window_events:
+        if personal_gif_pressure is None:
             return [message]
-        same_channel_gif_events = [
-            event
-            for event in same_channel_window_events
-            if event.is_gif_message and not event.gif_pack_exempt
+        triggered_by = tuple(personal_gif_pressure.get("triggered_by", ()))
+        if "same_asset" in triggered_by:
+            same_asset_messages = list(personal_gif_pressure.get("same_asset_messages", ()))
+            if same_asset_messages:
+                return self._dedupe_message_targets(same_asset_messages) or [message]
+        if "streak" in triggered_by:
+            streak_rows = [
+                row
+                for row in personal_gif_pressure.get("streak_rows", ())
+                if row.message is not None and not self._message_is_deleted(row.message)
+            ]
+            if len(streak_rows) >= compiled.gif_rules.consecutive_threshold:
+                return self._dedupe_message_targets([row.message for row in streak_rows if row.message is not None]) or [message]
+        pressure_rows = [
+            row
+            for row in personal_gif_pressure.get("pressure_rows", ())
+            if row.message is not None
+            and now - row.timestamp <= self._gif_pressure_window_seconds(compiled)
+            and not self._message_is_deleted(row.message)
         ]
-        if not same_channel_gif_events:
-            return [message]
-        selected_events = same_channel_gif_events
-        if snapshot.gif_signature is not None:
-            same_asset_events = [event for event in same_channel_gif_events if event.gif_signature == snapshot.gif_signature]
-            if len(same_asset_events) >= compiled.gif_rules.same_asset_threshold:
-                selected_events = same_asset_events[-compiled.gif_rules.same_asset_threshold:]
-                return self._dedupe_message_targets([event.message for event in selected_events if event.message is not None]) or [message]
-        selected_events = self._select_minimal_personal_gif_tail(
-            same_channel_gif_events,
-            same_channel_window_events,
+        selected_rows = self._select_minimal_personal_gif_tail(
+            pressure_rows,
             compiled,
+            minimum_authors=1,
         )
-        if not selected_events:
-            selected_events = same_channel_gif_events[-max(1, compiled.gif_rules.message_threshold):]
-        return self._dedupe_message_targets([event.message for event in selected_events if event.message is not None]) or [message]
+        if not selected_rows:
+            selected_rows = [
+                row
+                for row in pressure_rows
+                if row.is_gif_message and not row.gif_pack_exempt
+            ][-max(1, compiled.gif_rules.message_threshold):]
+        return self._dedupe_message_targets([row.message for row in selected_rows if row.message is not None]) or [message]
 
     def _primary_gif_match(
         self,
@@ -5057,7 +5390,8 @@ class ShieldService:
         group_delete_count: int = 0,
     ) -> str:
         triggers = tuple(group_gif_pressure.get("triggered_by", ())) if group_gif_pressure is not None else ()
-        meaningful_text_posts = int(group_gif_pressure.get("meaningful_text_posts", 0)) if group_gif_pressure is not None else 0
+        substantive_text_posts = int(group_gif_pressure.get("substantive_text_posts", 0)) if group_gif_pressure is not None else 0
+        filler_text_posts = int(group_gif_pressure.get("filler_text_posts", 0)) if group_gif_pressure is not None else 0
         cleanup_phrase = "kept the collective signal channel-level only"
         delete_enabled = group_match.action.startswith("delete")
         if delete_enabled and "streak" in triggers:
@@ -5066,19 +5400,20 @@ class ShieldService:
                 if group_delete_count > 0 or group_gif_pressure is not None
                 else "removed the exact live GIF streak"
             )
-        elif delete_enabled and "ratio" in triggers:
+        elif delete_enabled and "pressure" in triggers:
             cleanup_phrase = (
-                f"trimmed the {group_delete_count} newest excess GIF posts from the recent pressure window"
+                f"trimmed the {group_delete_count} newest contributing GIF posts from the active pressure slice"
                 if group_delete_count > 0
-                else "trimmed only the newest excess GIF posts from the recent pressure window"
+                else "trimmed only the newest contributing GIF posts from the active pressure slice"
             )
         elif delete_enabled:
             cleanup_phrase = "used channel-safe GIF cleanup"
-        preserved_text_phrase = (
-            f" It preserved {meaningful_text_posts} recent meaningful text messages."
-            if delete_enabled and meaningful_text_posts > 0
-            else ""
-        )
+        preserved_text_bits: list[str] = []
+        if delete_enabled and substantive_text_posts > 0:
+            preserved_text_bits.append(f"{substantive_text_posts} substantive text messages")
+        if delete_enabled and filler_text_posts > 0:
+            preserved_text_bits.append(f"{filler_text_posts} filler text messages")
+        preserved_text_phrase = f" It preserved {', '.join(preserved_text_bits)}." if preserved_text_bits else ""
         if group_gif_pressure is not None and group_gif_pressure.get("streak_capped"):
             preserved_text_phrase += f" The live streak tracker was capped at {GIF_STREAK_TRACK_LIMIT} messages."
 
@@ -5119,12 +5454,11 @@ class ShieldService:
         matches: Sequence[ShieldMatch],
         preferred_match: ShieldMatch,
         message: discord.Message,
-        snapshot: ShieldSnapshot,
-        recent_events: Sequence[ShieldSpamEvent],
         compiled: CompiledShieldConfig,
         *,
         now: float,
         channel_activity: Sequence[ShieldChannelActivityEvent] = (),
+        personal_gif_pressure: dict[str, Any] | None = None,
         group_gif_pressure: dict[str, Any] | None = None,
     ) -> ShieldGifIncidentPlan | None:
         personal_match = next((item for item in matches if item.match_class == "spam_gif_flood"), None)
@@ -5152,16 +5486,15 @@ class ShieldService:
             personal_delete_targets.extend(
                 self._collect_personal_gif_incident_messages(
                     message,
-                    snapshot,
-                    recent_events,
                     compiled,
                     now=now,
+                    personal_gif_pressure=personal_gif_pressure,
                 )
             )
         deduped_targets = tuple(self._dedupe_message_targets([*group_delete_targets, *personal_delete_targets]))
 
         if personal_match is not None and group_match is not None:
-            personal_signature = snapshot.gif_signature or snapshot.near_duplicate_fingerprint or snapshot.exact_fingerprint
+            personal_signature = personal_gif_pressure.get("signature") if personal_gif_pressure is not None else None
             group_signature = group_gif_pressure.get("signature") if group_gif_pressure is not None else None
             signature_seed = "|".join(part for part in (personal_signature, group_signature) if part)
             alert_signature = (
@@ -5188,7 +5521,7 @@ class ShieldService:
                 group_delete_count=len(self._dedupe_message_targets(group_delete_targets)),
             )
         else:
-            alert_signature = snapshot.gif_signature or snapshot.near_duplicate_fingerprint or snapshot.exact_fingerprint
+            alert_signature = personal_gif_pressure.get("signature") if personal_gif_pressure is not None else None
             evidence_summary = personal_match.reason if personal_match is not None else preferred_match.reason
             action_note = None
 
@@ -5369,6 +5702,7 @@ class ShieldService:
         distinct_channel_authors: int = 0,
         quality_channel_authors: int = 0,
         channel_activity: Sequence[ShieldChannelActivityEvent] = (),
+        personal_gif_pressure: dict[str, Any] | None = None,
         group_gif_pressure: dict[str, Any] | None = None,
     ) -> list[ShieldMatch]:
         active_link_assessments = tuple(link_assessments or ())
@@ -5388,6 +5722,7 @@ class ShieldService:
                 distinct_channel_authors=distinct_channel_authors,
                 quality_channel_authors=quality_channel_authors,
                 channel_activity=channel_activity,
+                personal_gif_pressure=personal_gif_pressure,
                 group_gif_pressure=group_gif_pressure,
             )
         )

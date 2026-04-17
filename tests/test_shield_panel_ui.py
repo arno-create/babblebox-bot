@@ -62,7 +62,7 @@ class ShieldPanelUiTests(unittest.IsolatedAsyncioTestCase):
 
         self._assert_embed_valid(embed)
         self.assertIn(
-            "Delete lane removes bounded GIF bursts; collective cleanup uses the exact streak or trims the newest excess GIFs inside the pressure window while personal abuse still targets one member.",
+            "Delete lane removes bounded GIF bursts; collective cleanup uses the exact streak or trims the newest contributing GIFs inside the active pressure slice while personal abuse still targets one member.",
             protection.value,
         )
         self.assertFalse(protection.value.endswith("..."))
