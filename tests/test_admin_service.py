@@ -5,7 +5,7 @@ import json
 import discord
 import types
 import unittest
-from datetime import timedelta
+from datetime import datetime, timedelta
 from unittest.mock import patch
 
 from babblebox import game_engine as ge
@@ -461,6 +461,21 @@ class _FakeSchemaPool:
         return _FakeAcquireContext(self.connection)
 
 
+class _RecordingConnection:
+    def __init__(self):
+        self.calls: list[tuple[str, tuple[object, ...]]] = []
+
+    async def execute(self, statement: str, *args):
+        self.calls.append((statement, args))
+        return "OK"
+
+    async def fetch(self, *args, **kwargs):
+        return []
+
+    async def fetchrow(self, *args, **kwargs):
+        return None
+
+
 class PostgresAdminStoreSchemaTests(unittest.IsolatedAsyncioTestCase):
     async def test_ensure_schema_backfills_columns_before_creating_indexes(self):
         store = _PostgresAdminStore("postgresql://admin-user:secret@db.example.com:5432/app")
@@ -507,6 +522,140 @@ class PostgresAdminStoreSchemaTests(unittest.IsolatedAsyncioTestCase):
         self.assertLess(verification_last_result_code_alter, verification_last_notified_index)
         self.assertLess(verification_last_notified_at_alter, verification_last_notified_index)
         self.assertGreater(first_index, last_alter)
+
+
+class PostgresAdminStoreTimestampCoercionTests(unittest.IsolatedAsyncioTestCase):
+    def _store_with_connection(self):
+        store = _PostgresAdminStore("postgresql://admin-user:secret@db.example.com:5432/app")
+        connection = _RecordingConnection()
+        store.pool = _FakeSchemaPool(connection)
+        return store, connection
+
+    async def test_upsert_ban_candidate_coerces_datetime_args(self):
+        store, connection = self._store_with_connection()
+        now = ge.now_utc()
+
+        await store.upsert_ban_candidate(
+            {
+                "guild_id": 10,
+                "user_id": 20,
+                "banned_at": serialize_datetime(now),
+                "expires_at": serialize_datetime(now + timedelta(days=30)),
+            }
+        )
+
+        _, args = connection.calls[-1]
+        self.assertIsInstance(args[2], datetime)
+        self.assertIsInstance(args[3], datetime)
+
+    async def test_upsert_followup_coerces_datetime_args(self):
+        store, connection = self._store_with_connection()
+        now = ge.now_utc()
+
+        await store.upsert_followup(
+            {
+                "guild_id": 10,
+                "user_id": 20,
+                "role_id": 70,
+                "assigned_at": serialize_datetime(now),
+                "due_at": serialize_datetime(now + timedelta(days=30)),
+                "mode": "review",
+                "review_pending": False,
+                "review_version": 0,
+                "review_message_channel_id": None,
+                "review_message_id": None,
+            }
+        )
+
+        _, args = connection.calls[-1]
+        self.assertIsInstance(args[3], datetime)
+        self.assertIsInstance(args[4], datetime)
+
+    async def test_upsert_channel_lock_coerces_datetime_args(self):
+        store, connection = self._store_with_connection()
+        now = ge.now_utc()
+
+        await store.upsert_channel_lock(
+            {
+                "guild_id": 10,
+                "channel_id": 75,
+                "actor_id": 9001,
+                "created_at": serialize_datetime(now),
+                "due_at": serialize_datetime(now + timedelta(minutes=30)),
+                "category_id": None,
+                "permissions_synced": False,
+                "marker_only": False,
+                "locked_permissions": ["send_messages"],
+                "original_permissions": {"send_messages": None},
+            }
+        )
+
+        _, args = connection.calls[-1]
+        self.assertIsInstance(args[3], datetime)
+        self.assertIsInstance(args[4], datetime)
+
+    async def test_upsert_verification_state_coerces_sync_and_result_timestamps(self):
+        store, connection = self._store_with_connection()
+        now = ge.now_utc()
+
+        await store.upsert_verification_state(
+            {
+                "guild_id": 10,
+                "user_id": 20,
+                "joined_at": serialize_datetime(now - timedelta(days=7)),
+                "warning_at": serialize_datetime(now - timedelta(days=2)),
+                "kick_at": serialize_datetime(now - timedelta(minutes=1)),
+                "warning_sent_at": serialize_datetime(now - timedelta(days=1)),
+                "extension_count": 1,
+                "review_pending": True,
+                "review_version": 3,
+                "review_message_channel_id": 50,
+                "review_message_id": 75,
+                "last_result_code": "warning:sent",
+                "last_result_at": serialize_datetime(now - timedelta(minutes=2)),
+                "last_notified_code": "warning:sent",
+                "last_notified_at": serialize_datetime(now - timedelta(minutes=1)),
+            }
+        )
+
+        _, args = connection.calls[-1]
+        for index in (2, 3, 4, 5, 12, 14):
+            self.assertIsInstance(args[index], datetime)
+
+    async def test_upsert_verification_review_queue_coerces_datetime_args(self):
+        store, connection = self._store_with_connection()
+        now = ge.now_utc()
+
+        await store.upsert_verification_review_queue(
+            {
+                "guild_id": 10,
+                "channel_id": 50,
+                "message_id": 1234,
+                "updated_at": serialize_datetime(now),
+            }
+        )
+
+        _, args = connection.calls[-1]
+        self.assertIsInstance(args[3], datetime)
+
+    async def test_upsert_verification_notification_snapshot_coerces_datetime_args(self):
+        store, connection = self._store_with_connection()
+        now = ge.now_utc()
+
+        await store.upsert_verification_notification_snapshot(
+            {
+                "guild_id": 10,
+                "run_context": "manual_sync",
+                "operation": "warning",
+                "outcome": "blocked",
+                "reason_code": "missing-template",
+                "signature": "abc123",
+                "notified_at": serialize_datetime(now),
+            }
+        )
+
+        _, args = connection.calls[-1]
+        self.assertIsInstance(args[6], datetime)
 
 
 class AdminServiceTests(unittest.IsolatedAsyncioTestCase):
@@ -886,6 +1035,31 @@ class AdminServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("at least 1 minute", message)
         self.assertIsNone(await self.store.fetch_channel_lock(self.guild.id, channel.id))
 
+    async def test_lock_channel_rolls_back_when_tracking_write_fails(self):
+        actor = self._admin_actor()
+        channel = FakeChannel(802)
+        self.guild.channels[channel.id] = channel
+        original_upsert_channel_lock = self.store.upsert_channel_lock
+
+        async def failing_upsert_channel_lock(record):
+            raise RuntimeError("lock write failed")
+
+        self.store.upsert_channel_lock = failing_upsert_channel_lock
+
+        ok, message = await self.service.lock_channel(self.guild, channel, actor=actor, duration_text="30m", post_notice=True)
+
+        self.assertFalse(ok)
+        self.assertIn("rolled the channel overwrite back", message)
+        self.assertEqual(len(channel.permission_edits), 2)
+        overwrite = channel.overwrites_for(self.guild.default_role)
+        self.assertIsNone(overwrite.send_messages)
+        self.assertEqual(channel.sent, [])
+        remove_ok, remove_message = await self.service.remove_channel_lock(self.guild, channel, actor=actor, automatic=False)
+        self.assertFalse(remove_ok)
+        self.assertEqual(remove_message, "Babblebox is not tracking an active emergency lock for that channel.")
+
+        self.store.upsert_channel_lock = original_upsert_channel_lock
+
     async def test_remove_channel_lock_restores_tracked_flags_and_preserves_unrelated_overwrites(self):
         actor = self._admin_actor()
         channel = FakeChannel(81)
@@ -1185,6 +1359,135 @@ class AdminServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(followup["role_id"], self.followup_role.id)
         self.assertEqual(len(self.log_channel.sent), 1)
 
+    async def test_returned_member_with_trusted_role_is_exempt_from_followup(self):
+        ok, _ = await self.service.set_logs_config(self.guild.id, channel_id=self.log_channel.id, alert_role_id=None)
+        self.assertTrue(ok)
+        trusted_role = FakeRole(71, position=8, name="Trusted")
+        self.guild.roles[trusted_role.id] = trusted_role
+        ok, _ = await self.service.set_followup_config(
+            self.guild.id,
+            enabled=True,
+            role_id=self.followup_role.id,
+            mode="review",
+            duration_text="30d",
+        )
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_exclusion_target(self.guild.id, "trusted_role_ids", trusted_role.id, True)
+        self.assertTrue(ok)
+        member = FakeMember(420, self.guild, roles=[trusted_role], top_role=FakeRole(5, position=5))
+        self.guild.members[member.id] = member
+
+        await self.service.handle_member_ban(self.guild, types.SimpleNamespace(id=member.id))
+        await self.service.handle_member_join(member)
+
+        self.assertNotIn(self.followup_role, member.roles)
+        self.assertIsNone(await self.store.fetch_followup(self.guild.id, member.id))
+        self.assertIsNone(await self.store.fetch_ban_candidate(self.guild.id, member.id))
+        self.assertEqual(self._last_log_embed().title, "Returned Member Exempt")
+        self.assertIn("trusted role", self._last_log_embed().description.lower())
+
+    async def test_return_followup_manage_roles_failure_is_logged_and_clears_candidate(self):
+        ok, _ = await self.service.set_logs_config(self.guild.id, channel_id=self.log_channel.id, alert_role_id=None)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_followup_config(
+            self.guild.id,
+            enabled=True,
+            role_id=self.followup_role.id,
+            mode="review",
+            duration_text="30d",
+        )
+        self.assertTrue(ok)
+        self.guild.me.guild_permissions = FakePermissions(
+            manage_roles=False,
+            manage_channels=True,
+            manage_messages=True,
+            moderate_members=True,
+            kick_members=True,
+            ban_members=True,
+            view_channel=True,
+            send_messages=True,
+            embed_links=True,
+            mention_everyone=True,
+        )
+        member = FakeMember(421, self.guild, roles=[], top_role=FakeRole(5, position=5))
+        self.guild.members[member.id] = member
+
+        await self.service.handle_member_ban(self.guild, types.SimpleNamespace(id=member.id))
+        await self.service.handle_member_join(member)
+
+        self.assertNotIn(self.followup_role, member.roles)
+        self.assertIsNone(await self.store.fetch_followup(self.guild.id, member.id))
+        self.assertIsNone(await self.store.fetch_ban_candidate(self.guild.id, member.id))
+        self.assertEqual(self._last_log_embed().title, "Follow-up Assignment Blocked")
+        self.assertIn("Manage Roles", self._last_log_embed().description)
+
+    async def test_followup_persistence_failure_keeps_candidate_and_logs_reason(self):
+        ok, _ = await self.service.set_logs_config(self.guild.id, channel_id=self.log_channel.id, alert_role_id=None)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_followup_config(
+            self.guild.id,
+            enabled=True,
+            role_id=self.followup_role.id,
+            mode="review",
+            duration_text="30d",
+        )
+        self.assertTrue(ok)
+        member = FakeMember(422, self.guild, roles=[], top_role=FakeRole(5, position=5))
+        self.guild.members[member.id] = member
+        original_upsert_followup = self.store.upsert_followup
+
+        async def failing_upsert_followup(record):
+            raise RuntimeError("followup write failed")
+
+        self.store.upsert_followup = failing_upsert_followup
+
+        await self.service.handle_member_ban(self.guild, types.SimpleNamespace(id=member.id))
+        await self.service.handle_member_join(member)
+
+        self.assertIn(self.followup_role, member.roles)
+        self.assertIsNotNone(await self.store.fetch_ban_candidate(self.guild.id, member.id))
+        self.assertIsNone(await self.store.fetch_followup(self.guild.id, member.id))
+        self.assertEqual(self._last_log_embed().title, "Follow-up Persistence Failed")
+        self.assertIn("later retry", self._last_log_embed().description.lower())
+
+        self.store.upsert_followup = original_upsert_followup
+
+    async def test_followup_resume_rebuilds_tracking_after_persistence_retry(self):
+        ok, _ = await self.service.set_logs_config(self.guild.id, channel_id=self.log_channel.id, alert_role_id=None)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_followup_config(
+            self.guild.id,
+            enabled=True,
+            role_id=self.followup_role.id,
+            mode="review",
+            duration_text="30d",
+        )
+        self.assertTrue(ok)
+        member = FakeMember(423, self.guild, roles=[], top_role=FakeRole(5, position=5))
+        self.guild.members[member.id] = member
+        original_upsert_followup = self.store.upsert_followup
+        failures = {"count": 0}
+
+        async def flaky_upsert_followup(record):
+            if failures["count"] == 0:
+                failures["count"] += 1
+                raise RuntimeError("followup write failed once")
+            return await original_upsert_followup(record)
+
+        self.store.upsert_followup = flaky_upsert_followup
+
+        await self.service.handle_member_ban(self.guild, types.SimpleNamespace(id=member.id))
+        await self.service.handle_member_join(member)
+        self.assertIsNotNone(await self.store.fetch_ban_candidate(self.guild.id, member.id))
+        self.assertIn(self.followup_role, member.roles)
+
+        await self.service.handle_member_join(member)
+
+        followup = await self.store.fetch_followup(self.guild.id, member.id)
+        self.assertIsNotNone(followup)
+        self.assertIsNone(await self.store.fetch_ban_candidate(self.guild.id, member.id))
+        self.assertEqual(self._last_log_embed().title, "Follow-up Tracking Resumed")
+
     async def test_duplicate_followup_role_is_not_reassigned(self):
         ok, _ = await self.service.set_followup_config(
             self.guild.id,
@@ -1207,7 +1510,11 @@ class AdminServiceTests(unittest.IsolatedAsyncioTestCase):
 
         await self.service.handle_member_join(member)
 
-        self.assertIsNone(await self.store.fetch_followup(self.guild.id, member.id))
+        followup = await self.store.fetch_followup(self.guild.id, member.id)
+        self.assertIsNotNone(followup)
+        self.assertEqual(followup["role_id"], self.followup_role.id)
+        self.assertEqual(sum(1 for role in member.roles if role.id == self.followup_role.id), 1)
+        self.assertIsNone(await self.store.fetch_ban_candidate(self.guild.id, member.id))
 
     async def test_due_followup_review_records_message_without_ping(self):
         ok, _ = await self.service.set_logs_config(self.guild.id, channel_id=self.log_channel.id, alert_role_id=None)

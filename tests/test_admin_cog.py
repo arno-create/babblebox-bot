@@ -622,6 +622,35 @@ class AdminCogSmokeTests(unittest.IsolatedAsyncioTestCase):
         everyone_overwrite = channel.overwrites_for(self.guild.default_role)
         self.assertFalse(everyone_overwrite.send_messages)
 
+    async def test_lock_channel_reports_private_failure_when_service_raises_after_defer(self):
+        channel = FakeChannel(230)
+        self.guild.channels[channel.id] = channel
+
+        async def failing_lock_channel(*args, **kwargs):
+            raise RuntimeError("write failed")
+
+        self.cog.service.lock_channel = failing_lock_channel
+        ctx = FakeContext(
+            interaction=FakeInteraction(),
+            guild=self.guild,
+            channel=channel,
+            author=FakeAuthor(manage_channels=True),
+        )
+
+        await AdminCog.lock_channel_command.callback(
+            self.cog,
+            ctx,
+            channel=channel,
+            duration="30m",
+            notice_message=None,
+            post_notice=True,
+        )
+
+        self.assertEqual(len(ctx.defer_calls), 1)
+        self.assertEqual(len(ctx.send_calls), 1)
+        self.assertTrue(ctx.send_calls[0]["ephemeral"])
+        self.assertIn("could not finish the emergency lock action", ctx.send_calls[0]["embed"].description.lower())
+
     async def test_lock_settings_is_admin_only(self):
         ctx = FakeContext(
             interaction=FakeInteraction(),
@@ -800,6 +829,31 @@ class AdminCogSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(ctx.send_calls), 1)
         self.assertTrue(ctx.send_calls[0]["ephemeral"])
         self.assertIn("not currently timed out", ctx.send_calls[0]["embed"].description)
+
+    async def test_timeout_remove_reports_private_failure_when_service_raises_after_defer(self):
+        actor_role = FakeRole(522, position=40, name="Moderator")
+        actor = FakeMember(56, self.guild, roles=[actor_role], moderate_members=True)
+        member = FakeMember(57, self.guild, roles=[FakeRole(523, position=10, name="Member")])
+        self.guild.members[actor.id] = actor
+        self.guild.members[member.id] = member
+
+        async def failing_remove_timeout(*args, **kwargs):
+            raise RuntimeError("timeout write failed")
+
+        self.cog.service.remove_timeout = failing_remove_timeout
+        ctx = FakeContext(
+            interaction=FakeInteraction(),
+            guild=self.guild,
+            channel=FakeChannel(224),
+            author=actor,
+        )
+
+        await AdminCog.timeout_remove_command.callback(self.cog, ctx, member=member, reason="Appeal accepted")
+
+        self.assertEqual(len(ctx.defer_calls), 1)
+        self.assertEqual(len(ctx.send_calls), 1)
+        self.assertTrue(ctx.send_calls[0]["ephemeral"])
+        self.assertIn("could not finish the timeout removal", ctx.send_calls[0]["embed"].description.lower())
 
     async def test_admin_permissions_surfaces_missing_manage_channels(self):
         self.guild.me.guild_permissions = FakePermissionSnapshot(

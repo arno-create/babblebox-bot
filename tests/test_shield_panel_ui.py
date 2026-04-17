@@ -61,7 +61,7 @@ class ShieldPanelUiTests(unittest.IsolatedAsyncioTestCase):
         protection = next(field for field in embed.fields if field.name == "Protection Packs")
 
         self._assert_embed_valid(embed)
-        self.assertIn("Delete lane removes the matched GIF burst; collective pressure trims GIFs only.", protection.value)
+        self.assertIn("Delete lane removes bounded GIF bursts; collective cleanup can trim shared floods while personal abuse still targets one member.", protection.value)
         self.assertFalse(protection.value.endswith("..."))
 
     async def test_rules_and_scope_embeds_stay_within_limits_for_dense_config(self):
@@ -168,12 +168,42 @@ class ShieldPanelUiTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Channel streak", options.value)
         self.assertNotIn("Emoji / emote", options.value)
 
+    async def test_gif_options_editor_surfaces_tighter_low_end_values(self):
+        view = ShieldPackOptionsEditorView(self.cog, guild_id=10, author_id=1, pack="gif")
+        streak_select = next(child for child in view.children if getattr(child, "placeholder", "") == "Channel streak threshold")
+        ratio_select = next(child for child in view.children if getattr(child, "placeholder", "") == "Minimum GIF ratio")
+
+        self.assertIn("3", [option.value for option in streak_select.options])
+        self.assertIn("50", [option.value for option in ratio_select.options])
+
+    async def test_gif_tight_rate_preset_applies_successfully(self):
+        view = ShieldPackOptionsEditorView(self.cog, guild_id=10, author_id=1, pack="gif")
+        rate_select = next(child for child in view.children if getattr(child, "placeholder", "") == "GIF pressure preset")
+        rate_select._values = ["tight"]
+        interaction = self._interaction(message=FakeMessage(channel=FakeChannel()))
+
+        await rate_select.callback(interaction)
+
+        config = self.cog.service.get_config(10)
+        self.assertEqual(config["gif_message_threshold"], 3)
+        self.assertEqual(config["gif_window_seconds"], 15)
+
     async def test_spam_options_editor_exposes_emoji_and_caps_controls(self):
         view = ShieldPackOptionsEditorView(self.cog, guild_id=10, author_id=1, pack="spam")
         placeholders = [getattr(child, "placeholder", "") for child in view.children if hasattr(child, "placeholder")]
 
         self.assertIn("Emoji / emote lane + threshold", placeholders)
         self.assertIn("Capitals lane + threshold", placeholders)
+
+    async def test_spam_options_editor_surfaces_tighter_duplicate_emote_and_caps_values(self):
+        view = ShieldPackOptionsEditorView(self.cog, guild_id=10, author_id=1, pack="spam")
+        duplicate_select = next(child for child in view.children if getattr(child, "placeholder", "") == "Anti-Spam duplicate preset")
+        emote_select = next(child for child in view.children if getattr(child, "placeholder", "") == "Emoji / emote lane + threshold")
+        caps_select = next(child for child in view.children if getattr(child, "placeholder", "") == "Capitals lane + threshold")
+
+        self.assertIn("Extra-tight: 3 near-duplicates in 8s", [option.label for option in duplicate_select.options])
+        self.assertIn("8", [option.value for option in emote_select.options])
+        self.assertIn("12", [option.value for option in caps_select.options])
 
     async def test_action_editor_shows_dedicated_pack_timeout(self):
         current = deepcopy(self.cog.service.get_config(10))

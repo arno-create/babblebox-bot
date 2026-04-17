@@ -151,6 +151,17 @@ def _serialize_datetime(value: Any) -> str | None:
     return parsed.isoformat() if parsed is not None else None
 
 
+def _coerce_storage_datetime(value: Any) -> datetime | None:
+    return _parse_datetime(value)
+
+
+def _coerce_storage_datetimes(record: dict[str, Any], *fields: str) -> dict[str, Any]:
+    coerced = dict(record)
+    for field in fields:
+        coerced[field] = _coerce_storage_datetime(coerced.get(field))
+    return coerced
+
+
 def normalize_admin_config(guild_id: int, payload: Any) -> dict[str, Any]:
     cleaned = default_admin_config(guild_id)
     if not isinstance(payload, dict):
@@ -965,8 +976,9 @@ class _PostgresAdminStore(_BaseAdminStore):
         normalized = normalize_ban_candidate(record)
         if normalized is None:
             return
+        coerced = _coerce_storage_datetimes(normalized, "banned_at", "expires_at")
         async with self.pool.acquire() as conn:
-            await conn.execute("INSERT INTO admin_ban_return_candidates (guild_id, user_id, banned_at, expires_at) VALUES ($1, $2, $3, $4) ON CONFLICT (guild_id, user_id) DO UPDATE SET banned_at = EXCLUDED.banned_at, expires_at = EXCLUDED.expires_at", normalized["guild_id"], normalized["user_id"], normalized["banned_at"], normalized["expires_at"])
+            await conn.execute("INSERT INTO admin_ban_return_candidates (guild_id, user_id, banned_at, expires_at) VALUES ($1, $2, $3, $4) ON CONFLICT (guild_id, user_id) DO UPDATE SET banned_at = EXCLUDED.banned_at, expires_at = EXCLUDED.expires_at", coerced["guild_id"], coerced["user_id"], coerced["banned_at"], coerced["expires_at"])
 
     async def fetch_ban_candidate(self, guild_id: int, user_id: int) -> dict[str, Any] | None:
         async with self.pool.acquire() as conn:
@@ -986,8 +998,9 @@ class _PostgresAdminStore(_BaseAdminStore):
         normalized = normalize_followup_record(record)
         if normalized is None:
             return
+        coerced = _coerce_storage_datetimes(normalized, "assigned_at", "due_at")
         async with self.pool.acquire() as conn:
-            await conn.execute("INSERT INTO admin_followup_roles (guild_id, user_id, role_id, assigned_at, due_at, mode, review_pending, review_version, review_message_channel_id, review_message_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT (guild_id, user_id) DO UPDATE SET role_id = EXCLUDED.role_id, assigned_at = EXCLUDED.assigned_at, due_at = EXCLUDED.due_at, mode = EXCLUDED.mode, review_pending = EXCLUDED.review_pending, review_version = EXCLUDED.review_version, review_message_channel_id = EXCLUDED.review_message_channel_id, review_message_id = EXCLUDED.review_message_id", normalized["guild_id"], normalized["user_id"], normalized["role_id"], normalized["assigned_at"], normalized["due_at"], normalized["mode"], normalized["review_pending"], normalized["review_version"], normalized["review_message_channel_id"], normalized["review_message_id"])
+            await conn.execute("INSERT INTO admin_followup_roles (guild_id, user_id, role_id, assigned_at, due_at, mode, review_pending, review_version, review_message_channel_id, review_message_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) ON CONFLICT (guild_id, user_id) DO UPDATE SET role_id = EXCLUDED.role_id, assigned_at = EXCLUDED.assigned_at, due_at = EXCLUDED.due_at, mode = EXCLUDED.mode, review_pending = EXCLUDED.review_pending, review_version = EXCLUDED.review_version, review_message_channel_id = EXCLUDED.review_message_channel_id, review_message_id = EXCLUDED.review_message_id", coerced["guild_id"], coerced["user_id"], coerced["role_id"], coerced["assigned_at"], coerced["due_at"], coerced["mode"], coerced["review_pending"], coerced["review_version"], coerced["review_message_channel_id"], coerced["review_message_id"])
 
     async def fetch_followup(self, guild_id: int, user_id: int) -> dict[str, Any] | None:
         async with self.pool.acquire() as conn:
@@ -1027,8 +1040,9 @@ class _PostgresAdminStore(_BaseAdminStore):
         normalized = normalize_verification_review_queue(record)
         if normalized is None:
             return
+        coerced = _coerce_storage_datetimes(normalized, "updated_at")
         async with self.pool.acquire() as conn:
-            await conn.execute("INSERT INTO admin_verification_review_queues (guild_id, channel_id, message_id, updated_at) VALUES ($1, $2, $3, $4) ON CONFLICT (guild_id) DO UPDATE SET channel_id = EXCLUDED.channel_id, message_id = EXCLUDED.message_id, updated_at = EXCLUDED.updated_at", normalized["guild_id"], normalized["channel_id"], normalized["message_id"], normalized["updated_at"])
+            await conn.execute("INSERT INTO admin_verification_review_queues (guild_id, channel_id, message_id, updated_at) VALUES ($1, $2, $3, $4) ON CONFLICT (guild_id) DO UPDATE SET channel_id = EXCLUDED.channel_id, message_id = EXCLUDED.message_id, updated_at = EXCLUDED.updated_at", coerced["guild_id"], coerced["channel_id"], coerced["message_id"], coerced["updated_at"])
 
     async def delete_verification_review_queue(self, guild_id: int):
         async with self.pool.acquire() as conn:
@@ -1043,26 +1057,28 @@ class _PostgresAdminStore(_BaseAdminStore):
         normalized = normalize_verification_notification_snapshot(record)
         if normalized is None:
             return
+        coerced = _coerce_storage_datetimes(normalized, "notified_at")
         async with self.pool.acquire() as conn:
-            await conn.execute("INSERT INTO admin_verification_notification_snapshots (guild_id, run_context, operation, outcome, reason_code, signature, notified_at) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (guild_id, run_context, operation, outcome, reason_code) DO UPDATE SET signature = EXCLUDED.signature, notified_at = EXCLUDED.notified_at", normalized["guild_id"], normalized["run_context"], normalized["operation"], normalized["outcome"], normalized["reason_code"], normalized["signature"], normalized["notified_at"])
+            await conn.execute("INSERT INTO admin_verification_notification_snapshots (guild_id, run_context, operation, outcome, reason_code, signature, notified_at) VALUES ($1, $2, $3, $4, $5, $6, $7) ON CONFLICT (guild_id, run_context, operation, outcome, reason_code) DO UPDATE SET signature = EXCLUDED.signature, notified_at = EXCLUDED.notified_at", coerced["guild_id"], coerced["run_context"], coerced["operation"], coerced["outcome"], coerced["reason_code"], coerced["signature"], coerced["notified_at"])
 
     async def upsert_channel_lock(self, record: dict[str, Any]):
         normalized = normalize_channel_lock(record)
         if normalized is None:
             return
+        coerced = _coerce_storage_datetimes(normalized, "created_at", "due_at")
         async with self.pool.acquire() as conn:
             await conn.execute(
                 "INSERT INTO admin_channel_locks (guild_id, channel_id, actor_id, created_at, due_at, category_id, permissions_synced, marker_only, locked_permissions, original_permissions) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::jsonb, $10::jsonb) ON CONFLICT (guild_id, channel_id) DO UPDATE SET actor_id = EXCLUDED.actor_id, created_at = EXCLUDED.created_at, due_at = EXCLUDED.due_at, category_id = EXCLUDED.category_id, permissions_synced = EXCLUDED.permissions_synced, marker_only = EXCLUDED.marker_only, locked_permissions = EXCLUDED.locked_permissions, original_permissions = EXCLUDED.original_permissions",
-                normalized["guild_id"],
-                normalized["channel_id"],
-                normalized["actor_id"],
-                normalized["created_at"],
-                normalized["due_at"],
-                normalized["category_id"],
-                normalized["permissions_synced"],
-                normalized["marker_only"],
-                json.dumps(normalized["locked_permissions"]),
-                json.dumps(normalized["original_permissions"]),
+                coerced["guild_id"],
+                coerced["channel_id"],
+                coerced["actor_id"],
+                coerced["created_at"],
+                coerced["due_at"],
+                coerced["category_id"],
+                coerced["permissions_synced"],
+                coerced["marker_only"],
+                json.dumps(coerced["locked_permissions"]),
+                json.dumps(coerced["original_permissions"]),
             )
 
     async def fetch_channel_lock(self, guild_id: int, channel_id: int) -> dict[str, Any] | None:
@@ -1088,8 +1104,17 @@ class _PostgresAdminStore(_BaseAdminStore):
         normalized = normalize_verification_state(record)
         if normalized is None:
             return
+        coerced = _coerce_storage_datetimes(
+            normalized,
+            "joined_at",
+            "warning_at",
+            "kick_at",
+            "warning_sent_at",
+            "last_result_at",
+            "last_notified_at",
+        )
         async with self.pool.acquire() as conn:
-            await conn.execute("INSERT INTO admin_verification_states (guild_id, user_id, joined_at, warning_at, kick_at, warning_sent_at, extension_count, review_pending, review_version, review_message_channel_id, review_message_id, last_result_code, last_result_at, last_notified_code, last_notified_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) ON CONFLICT (guild_id, user_id) DO UPDATE SET joined_at = EXCLUDED.joined_at, warning_at = EXCLUDED.warning_at, kick_at = EXCLUDED.kick_at, warning_sent_at = EXCLUDED.warning_sent_at, extension_count = EXCLUDED.extension_count, review_pending = EXCLUDED.review_pending, review_version = EXCLUDED.review_version, review_message_channel_id = EXCLUDED.review_message_channel_id, review_message_id = EXCLUDED.review_message_id, last_result_code = EXCLUDED.last_result_code, last_result_at = EXCLUDED.last_result_at, last_notified_code = EXCLUDED.last_notified_code, last_notified_at = EXCLUDED.last_notified_at", normalized["guild_id"], normalized["user_id"], normalized["joined_at"], normalized["warning_at"], normalized["kick_at"], normalized["warning_sent_at"], normalized["extension_count"], normalized["review_pending"], normalized["review_version"], normalized["review_message_channel_id"], normalized["review_message_id"], normalized["last_result_code"], normalized["last_result_at"], normalized["last_notified_code"], normalized["last_notified_at"])
+            await conn.execute("INSERT INTO admin_verification_states (guild_id, user_id, joined_at, warning_at, kick_at, warning_sent_at, extension_count, review_pending, review_version, review_message_channel_id, review_message_id, last_result_code, last_result_at, last_notified_code, last_notified_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) ON CONFLICT (guild_id, user_id) DO UPDATE SET joined_at = EXCLUDED.joined_at, warning_at = EXCLUDED.warning_at, kick_at = EXCLUDED.kick_at, warning_sent_at = EXCLUDED.warning_sent_at, extension_count = EXCLUDED.extension_count, review_pending = EXCLUDED.review_pending, review_version = EXCLUDED.review_version, review_message_channel_id = EXCLUDED.review_message_channel_id, review_message_id = EXCLUDED.review_message_id, last_result_code = EXCLUDED.last_result_code, last_result_at = EXCLUDED.last_result_at, last_notified_code = EXCLUDED.last_notified_code, last_notified_at = EXCLUDED.last_notified_at", coerced["guild_id"], coerced["user_id"], coerced["joined_at"], coerced["warning_at"], coerced["kick_at"], coerced["warning_sent_at"], coerced["extension_count"], coerced["review_pending"], coerced["review_version"], coerced["review_message_channel_id"], coerced["review_message_id"], coerced["last_result_code"], coerced["last_result_at"], coerced["last_notified_code"], coerced["last_notified_at"])
 
     async def fetch_verification_state(self, guild_id: int, user_id: int) -> dict[str, Any] | None:
         async with self.pool.acquire() as conn:

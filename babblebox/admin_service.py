@@ -850,6 +850,29 @@ class AdminService:
         allow, deny = overwrite.pair()
         return int(getattr(allow, "value", 0) or 0) == 0 and int(getattr(deny, "value", 0) or 0) == 0
 
+    def _exception_detail(self, exc: Exception) -> str:
+        detail = str(exc).strip()
+        return detail or type(exc).__name__
+
+    async def _rollback_lock_overwrite(
+        self,
+        channel,
+        everyone_role: discord.Role,
+        original_overwrite: discord.PermissionOverwrite,
+        *,
+        actor: discord.Member,
+    ) -> bool:
+        overwrite_to_apply = None if self._overwrite_is_empty(original_overwrite) else original_overwrite
+        try:
+            await channel.set_permissions(
+                everyone_role,
+                overwrite=overwrite_to_apply,
+                reason=self._lock_reason_text(actor=actor, automatic=False, action="lock rollback"),
+            )
+        except (discord.Forbidden, discord.HTTPException):
+            return False
+        return True
+
     def _lock_manage_issue(self, guild: discord.Guild, channel) -> AdminActionIssue | None:
         me = self._bot_member(guild)
         if me is None:
@@ -1086,7 +1109,10 @@ class AdminService:
                     if duration_seconds is not None:
                         current_record["due_at"] = serialize_datetime(updated_due_at)
                         current_record["actor_id"] = actor.id
-                        await self.store.upsert_channel_lock(current_record)
+                        try:
+                            await self.store.upsert_channel_lock(current_record)
+                        except Exception as exc:
+                            return False, f"{channel.mention} stayed locked, but Babblebox could not refresh the tracked timer/state. {self._exception_detail(exc)}"
                         self._wake_event.set()
                     notice_status = "Suppressed for this run."
                     if post_notice:
@@ -1134,7 +1160,10 @@ class AdminService:
                 if duration_seconds is not None:
                     current_record["due_at"] = serialize_datetime(updated_due_at)
                     current_record["actor_id"] = actor.id
-                    await self.store.upsert_channel_lock(current_record)
+                    try:
+                        await self.store.upsert_channel_lock(current_record)
+                    except Exception as exc:
+                        return False, f"{channel.mention} stayed locked, but Babblebox could not refresh the emergency lock timer/state. {self._exception_detail(exc)}"
                     self._wake_event.set()
                 notice_status = "Suppressed for this run."
                 if post_notice:
@@ -1176,18 +1205,21 @@ class AdminService:
         locked_permissions = [name for name, value in previous_values.items() if value is not False]
         if not locked_permissions:
             due_at = now + timedelta(seconds=duration_seconds) if duration_seconds is not None else None
-            await self.store.upsert_channel_lock(
-                self._build_channel_lock_record(
-                    guild_id=guild.id,
-                    channel=channel,
-                    actor_id=actor.id,
-                    created_at=now,
-                    due_at=due_at,
-                    marker_only=True,
-                    locked_permissions=[],
-                    original_permissions={},
+            try:
+                await self.store.upsert_channel_lock(
+                    self._build_channel_lock_record(
+                        guild_id=guild.id,
+                        channel=channel,
+                        actor_id=actor.id,
+                        created_at=now,
+                        due_at=due_at,
+                        marker_only=True,
+                        locked_permissions=[],
+                        original_permissions={},
+                    )
                 )
-            )
+            except Exception as exc:
+                return False, f"{channel.mention} already matched Babblebox's lock restrictions, but Babblebox could not start tracking that state. {self._exception_detail(exc)}"
             self._wake_event.set()
             notice_status = "Notice suppressed for this run."
             if post_notice:
@@ -1229,18 +1261,24 @@ class AdminService:
             return False, "Babblebox could not apply the channel overwrite. No emergency lock was recorded."
 
         due_at = now + timedelta(seconds=duration_seconds) if duration_seconds is not None else None
-        await self.store.upsert_channel_lock(
-            self._build_channel_lock_record(
-                guild_id=guild.id,
-                channel=channel,
-                actor_id=actor.id,
-                created_at=now,
-                due_at=due_at,
-                marker_only=False,
-                locked_permissions=locked_permissions,
-                original_permissions=previous_values,
+        try:
+            await self.store.upsert_channel_lock(
+                self._build_channel_lock_record(
+                    guild_id=guild.id,
+                    channel=channel,
+                    actor_id=actor.id,
+                    created_at=now,
+                    due_at=due_at,
+                    marker_only=False,
+                    locked_permissions=locked_permissions,
+                    original_permissions=previous_values,
+                )
             )
-        )
+        except Exception as exc:
+            rolled_back = await self._rollback_lock_overwrite(channel, everyone_role, current_overwrite, actor=actor)
+            if rolled_back:
+                return False, f"Babblebox rolled the channel overwrite back because it could not record the emergency lock. {self._exception_detail(exc)}"
+            return False, f"Babblebox locked {channel.mention}, but could not record the emergency lock or restore the overwrite automatically. Review the @everyone overwrite manually. {self._exception_detail(exc)}"
         self._wake_event.set()
 
         notice_status = "Notice suppressed for this run."
@@ -3074,15 +3112,40 @@ class AdminService:
         candidate = await self.store.fetch_ban_candidate(member.guild.id, member.id)
         if candidate is None:
             return
-        await self.store.delete_ban_candidate(member.guild.id, member.id)
+        now = ge.now_utc()
         expires_at = deserialize_datetime(candidate.get("expires_at"))
-        if expires_at is None or expires_at <= ge.now_utc():
-            return
         compiled = self.get_compiled_config(member.guild.id)
-        if not compiled.followup_enabled or compiled.followup_role_id is None:
+        if expires_at is None or expires_at <= now:
+            await self.store.delete_ban_candidate(member.guild.id, member.id)
+            await self.send_log(
+                member.guild,
+                compiled,
+                embed=ge.make_status_embed(
+                    "Return Follow-up Window Expired",
+                    f"{member.mention} returned after the 30-day ban-return follow-up window, so Babblebox cleared the stale candidate.",
+                    tone="info",
+                    footer="Babblebox Admin | Returned-after-ban follow-up",
+                ),
+                alert=False,
+            )
+            return
+        if not compiled.followup_enabled:
+            await self.store.delete_ban_candidate(member.guild.id, member.id)
+            return
+        if compiled.followup_role_id is None:
+            await self.store.delete_ban_candidate(member.guild.id, member.id)
+            await self.log_operability_warning_once(
+                member.guild,
+                compiled,
+                key="followup-role-not-configured",
+                title="Follow-up Role Missing",
+                message=f"{member.mention} returned within 30 days of a ban event, but Babblebox skipped the follow-up because no role is configured.",
+                footer="Babblebox Admin | Returned-after-ban follow-up",
+            )
             return
         exempt_reason = self._followup_exempt_reason(member, compiled)
         if exempt_reason is not None:
+            await self.store.delete_ban_candidate(member.guild.id, member.id)
             await self.send_log(
                 member.guild,
                 compiled,
@@ -3097,14 +3160,74 @@ class AdminService:
             return
         role = self._guild_role(member.guild, compiled.followup_role_id)
         if role is None:
+            await self.store.delete_ban_candidate(member.guild.id, member.id)
             await self.log_operability_warning_once(
                 member.guild,
                 compiled,
                 key="followup-missing-role",
+                title="Follow-up Role Missing",
                 message="Babblebox cannot assign the follow-up role because the configured role no longer exists.",
+                footer="Babblebox Admin | Returned-after-ban follow-up",
             )
             return
+        existing_followup = await self.store.fetch_followup(member.guild.id, member.id)
         if role in getattr(member, "roles", []):
+            if existing_followup is None:
+                assigned_at = ge.now_utc()
+                due_at = add_followup_duration(
+                    assigned_at,
+                    value=compiled.followup_duration_value,
+                    unit=compiled.followup_duration_unit,
+                )
+                try:
+                    await self.store.upsert_followup(
+                        {
+                            "guild_id": member.guild.id,
+                            "user_id": member.id,
+                            "role_id": role.id,
+                            "assigned_at": serialize_datetime(assigned_at),
+                            "due_at": serialize_datetime(due_at),
+                            "mode": compiled.followup_mode,
+                            "review_pending": False,
+                            "review_version": 0,
+                            "review_message_channel_id": None,
+                            "review_message_id": None,
+                        }
+                    )
+                except Exception as exc:
+                    await self.log_operability_warning_once(
+                        member.guild,
+                        compiled,
+                        key=f"followup-persist-resume-{member.id}",
+                        title="Follow-up Persistence Failed",
+                        message=(
+                            f"{member.mention} returned within 30 days of a ban event and already had {role.mention}, "
+                            f"but Babblebox could not rebuild the follow-up timer/review state. {self._exception_detail(exc)} "
+                            "Babblebox kept the return candidate so a later retry is still possible."
+                        ),
+                        footer="Babblebox Admin | Returned-after-ban follow-up",
+                    )
+                    return
+                await self.store.delete_ban_candidate(member.guild.id, member.id)
+                self._wake_event.set()
+                await self.send_log(
+                    member.guild,
+                    compiled,
+                    embed=ge.make_status_embed(
+                        "Follow-up Tracking Resumed",
+                        (
+                            f"{member.mention} returned within 30 days of a ban event and already had {role.mention}, "
+                            "so Babblebox rebuilt the follow-up timer/review state.\n"
+                            f"Next action: {FOLLOWUP_MODE_LABELS[compiled.followup_mode]} after "
+                            f"{_followup_duration_label(compiled.followup_duration_value, compiled.followup_duration_unit)}."
+                        ),
+                        tone="warning",
+                        footer="Babblebox Admin | Returned-after-ban follow-up",
+                    ),
+                    alert=False,
+                )
+                return
+            await self.store.delete_ban_candidate(member.guild.id, member.id)
             await self.send_log(
                 member.guild,
                 compiled,
@@ -3119,25 +3242,42 @@ class AdminService:
             return
         issue = self._followup_role_issue(member.guild, member, role)
         if issue is not None:
+            await self.store.delete_ban_candidate(member.guild.id, member.id)
             await self.log_operability_warning_once(
                 member.guild,
                 compiled,
                 key=f"followup-assign-{member.id}",
+                title="Follow-up Assignment Blocked",
                 message=f"Babblebox could not assign {role.mention} to {member.mention}. {issue.detail}",
+                footer="Babblebox Admin | Returned-after-ban follow-up",
             )
             return
-        assigned = False
         try:
             await member.add_roles(role, reason="Babblebox follow-up after return within 30 days of a ban event.")
-            assigned = True
-        except (discord.Forbidden, discord.HTTPException):
-            assigned = False
-        if not assigned:
+        except (discord.Forbidden, discord.HTTPException) as exc:
             await self.log_operability_warning_once(
                 member.guild,
                 compiled,
                 key=f"followup-assign-http-{member.id}",
-                message=f"Babblebox tried to assign {role.mention} to {member.mention}, but Discord did not confirm the role change.",
+                title="Follow-up Assignment Failed",
+                message=(
+                    f"Babblebox tried to assign {role.mention} to {member.mention}, but Discord did not confirm the role change. "
+                    f"{self._exception_detail(exc)} Babblebox kept the return candidate so a later retry is still possible."
+                ),
+                footer="Babblebox Admin | Returned-after-ban follow-up",
+            )
+            return
+        except Exception as exc:
+            await self.log_operability_warning_once(
+                member.guild,
+                compiled,
+                key=f"followup-assign-unexpected-{member.id}",
+                title="Follow-up Assignment Failed",
+                message=(
+                    f"Babblebox hit an unexpected error while assigning {role.mention} to {member.mention}. "
+                    f"{self._exception_detail(exc)} Babblebox kept the return candidate so a later retry is still possible."
+                ),
+                footer="Babblebox Admin | Returned-after-ban follow-up",
             )
             return
         assigned_at = ge.now_utc()
@@ -3146,20 +3286,35 @@ class AdminService:
             value=compiled.followup_duration_value,
             unit=compiled.followup_duration_unit,
         )
-        await self.store.upsert_followup(
-            {
-                "guild_id": member.guild.id,
-                "user_id": member.id,
-                "role_id": role.id,
-                "assigned_at": serialize_datetime(assigned_at),
-                "due_at": serialize_datetime(due_at),
-                "mode": compiled.followup_mode,
-                "review_pending": False,
-                "review_version": 0,
-                "review_message_channel_id": None,
-                "review_message_id": None,
-            }
-        )
+        try:
+            await self.store.upsert_followup(
+                {
+                    "guild_id": member.guild.id,
+                    "user_id": member.id,
+                    "role_id": role.id,
+                    "assigned_at": serialize_datetime(assigned_at),
+                    "due_at": serialize_datetime(due_at),
+                    "mode": compiled.followup_mode,
+                    "review_pending": False,
+                    "review_version": 0,
+                    "review_message_channel_id": None,
+                    "review_message_id": None,
+                }
+            )
+        except Exception as exc:
+            await self.log_operability_warning_once(
+                member.guild,
+                compiled,
+                key=f"followup-persist-{member.id}",
+                title="Follow-up Persistence Failed",
+                message=(
+                    f"Babblebox assigned {role.mention} to {member.mention}, but could not persist the follow-up timer/review state. "
+                    f"{self._exception_detail(exc)} Babblebox kept the return candidate so a later retry is still possible."
+                ),
+                footer="Babblebox Admin | Returned-after-ban follow-up",
+            )
+            return
+        await self.store.delete_ban_candidate(member.guild.id, member.id)
         self._wake_event.set()
         await self.send_log(
             member.guild,

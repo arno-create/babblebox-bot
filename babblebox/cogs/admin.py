@@ -1547,6 +1547,30 @@ class AdminCog(commands.Cog):
             recovery_footer=recovery_footer,
         )
 
+    async def _run_result_action(
+        self,
+        ctx: commands.Context,
+        *,
+        title: str,
+        footer: str,
+        recovery_footer: str,
+        unexpected_message: str,
+        action,
+    ):
+        try:
+            ok, message = await action()
+        except Exception as exc:
+            print(f"{title} action failed: {exc}")
+            ok, message = False, unexpected_message
+        await self._send_result(
+            ctx,
+            title,
+            message,
+            ok=ok,
+            footer=footer,
+            recovery_footer=recovery_footer,
+        )
+
     async def _send_panel(self, ctx: commands.Context, *, section: str = "overview"):
         view = AdminPanelView(self, guild_id=ctx.guild.id, author_id=ctx.author.id, section=section)
         result = await self._send_admin_response(
@@ -1798,21 +1822,20 @@ class AdminCog(commands.Cog):
                 recovery_footer="Babblebox Lock",
             )
             return
-        ok, message = await self.service.lock_channel(
-            ctx.guild,
-            target_channel,
-            actor=ctx.author,
-            duration_text=duration,
-            notice_message=notice_message,
-            post_notice=post_notice,
-        )
-        await self._send_result(
+        await self._run_result_action(
             ctx,
-            "Channel Lock",
-            message,
-            ok=ok,
+            title="Channel Lock",
             footer="Babblebox Lock",
             recovery_footer="Babblebox Lock",
+            unexpected_message="Babblebox could not finish the emergency lock action right now. Review the channel before retrying.",
+            action=lambda: self.service.lock_channel(
+                ctx.guild,
+                target_channel,
+                actor=ctx.author,
+                duration_text=duration,
+                notice_message=notice_message,
+                post_notice=post_notice,
+            ),
         )
 
     @lock_group.command(name="remove", with_app_command=True, description="Remove a Babblebox emergency lock safely")
@@ -1831,14 +1854,13 @@ class AdminCog(commands.Cog):
                 recovery_footer="Babblebox Lock",
             )
             return
-        ok, message = await self.service.remove_channel_lock(ctx.guild, target_channel, actor=ctx.author, automatic=False)
-        await self._send_result(
+        await self._run_result_action(
             ctx,
-            "Channel Unlock",
-            message,
-            ok=ok,
+            title="Channel Unlock",
             footer="Babblebox Lock",
             recovery_footer="Babblebox Lock",
+            unexpected_message="Babblebox could not finish the emergency unlock action right now. Review the channel before retrying.",
+            action=lambda: self.service.remove_channel_lock(ctx.guild, target_channel, actor=ctx.author, automatic=False),
         )
 
     @lock_group.command(name="settings", with_app_command=True, description="Review or change emergency lock defaults")
@@ -1876,18 +1898,17 @@ class AdminCog(commands.Cog):
                 recovery_footer="Babblebox Lock",
             )
             return
-        ok, message = await self.service.set_lock_config(
-            ctx.guild.id,
-            notice_template=None if clear_notice else (default_notice if default_notice is not None else ...),
-            admin_only=admin_only,
-        )
-        await self._send_result(
+        await self._run_result_action(
             ctx,
-            "Emergency Lock Settings",
-            message,
-            ok=ok,
+            title="Emergency Lock Settings",
             footer="Babblebox Lock",
             recovery_footer="Babblebox Lock",
+            unexpected_message="Babblebox could not update the emergency lock settings right now. No settings changed after the failure point.",
+            action=lambda: self.service.set_lock_config(
+                ctx.guild.id,
+                notice_template=None if clear_notice else (default_notice if default_notice is not None else ...),
+                admin_only=admin_only,
+            ),
         )
 
     @app_commands.allowed_installs(guilds=True, users=False)
@@ -1922,19 +1943,18 @@ class AdminCog(commands.Cog):
     ):
         if not await self._timeout_guard(ctx):
             return
-        ok, message = await self.service.remove_timeout(
-            ctx.guild,
-            member,
-            actor=ctx.author,
-            reason_text=reason,
-        )
-        await self._send_result(
+        await self._run_result_action(
             ctx,
-            "Timeout Removal",
-            message,
-            ok=ok,
+            title="Timeout Removal",
             footer="Babblebox Timeout",
             recovery_footer="Babblebox Timeout",
+            unexpected_message="Babblebox could not finish the timeout removal right now. Check whether the member is still timed out before retrying.",
+            action=lambda: self.service.remove_timeout(
+                ctx.guild,
+                member,
+                actor=ctx.author,
+                reason_text=reason,
+            ),
         )
 
     @app_commands.allowed_installs(guilds=True, users=False)

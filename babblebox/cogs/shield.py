@@ -164,6 +164,7 @@ SPAM_BURST_PRESETS = {
     "wide": (6, 12, "Wide: 6 messages in 12s"),
 }
 SPAM_DUPLICATE_PRESETS = {
+    "extra_tight": (3, 8, "Extra-tight: 3 near-duplicates in 8s"),
     "tight": (4, 8, "Tight: 4 near-duplicates in 8s"),
     "balanced": (5, 10, "Balanced: 5 near-duplicates in 10s"),
     "wide": (6, 12, "Wide: 6 near-duplicates in 12s"),
@@ -173,12 +174,12 @@ GIF_RATE_PRESETS = {
     "balanced": (4, 20, "Balanced: 4 GIF-heavy posts in 20s"),
     "wide": (5, 25, "Wide: 5 GIF-heavy posts in 25s"),
 }
-SPAM_EMOTE_THRESHOLDS = (12, 18, 24, 30)
-SPAM_CAPS_THRESHOLDS = (20, 28, 40, 60)
+SPAM_EMOTE_THRESHOLDS = (8, 12, 18, 24, 30)
+SPAM_CAPS_THRESHOLDS = (12, 20, 28, 40, 60)
 GIF_REPEAT_THRESHOLDS = (2, 3, 4, 5)
 GIF_SAME_ASSET_THRESHOLDS = (2, 3, 4, 5)
-GIF_RATIO_THRESHOLDS = (60, 70, 80, 90)
-GIF_CONSECUTIVE_THRESHOLDS = (4, 5, 6, 7, 8, 9, 10)
+GIF_RATIO_THRESHOLDS = (50, 60, 70, 80, 90)
+GIF_CONSECUTIVE_THRESHOLDS = (3, 4, 5, 6, 7, 8, 9, 10)
 
 
 class ShieldManagedView(discord.ui.View):
@@ -1602,7 +1603,7 @@ class ShieldCog(commands.Cog):
                 f"Channel streak: {config.get('gif_consecutive_threshold', 5)} GIFs in a row across members\n"
                 f"Low-text repeat gate: {config.get('gif_repeat_threshold', 3)}+ repeats at {config.get('gif_min_ratio_percent', 70)}% GIF pressure\n"
                 f"Same asset: {config.get('gif_same_asset_threshold', 3)}+ repeats\n"
-                "Delete actions remove the matched GIF burst, not just the last message. Collective pressure stays channel-soft: remove the full live GIF streak for streak floods or only the newest excess GIF posts for ratio pressure, never text."
+                "Delete actions remove bounded GIF bursts, not just the last message. Collective cleanup removes the shared flood, personal abuse can still enforce one member, and healthy text stays untouched. Tight low-end settings are stricter and can be noisy in meme-heavy rooms."
             )
         return ""
 
@@ -1631,7 +1632,7 @@ class ShieldCog(commands.Cog):
                 f"Repeat {config.get('gif_repeat_threshold', 3)} at {config.get('gif_min_ratio_percent', 70)}% | "
                 f"Same asset {config.get('gif_same_asset_threshold', 3)}"
             )
-            lines.append("Delete lane removes the matched GIF burst; collective pressure trims GIFs only.")
+            lines.append("Delete lane removes bounded GIF bursts; collective cleanup can trim shared floods while personal abuse still targets one member.")
         return "\n".join(lines)
 
     def _pack_policy_compact(self, config: dict[str, object], pack: str) -> str:
@@ -1821,6 +1822,7 @@ class ShieldCog(commands.Cog):
                 f"Channel streak: {config.get('gif_consecutive_threshold', 5)} GIFs in a row",
                 f"Low-text repeat gate: {config.get('gif_repeat_threshold', 3)}+ repeats at {config.get('gif_min_ratio_percent', 70)}% GIF pressure",
                 f"Same asset: {config.get('gif_same_asset_threshold', 3)}+ repeats",
+                "Tighter low-end values are stricter and best for rooms that want faster GIF cleanup.",
             ]
         if pack == "adult":
             return [
@@ -2144,7 +2146,7 @@ class ShieldCog(commands.Cog):
                 f"Alert role: {alert_role}\n"
                 "First enable: Babblebox applies its recommended non-AI baseline once, then leaves your edits alone.\n"
                 "Feature checks: AFK + reminders use privacy/adult/severe, Watch stays privacy-only, Confessions shares link checks, and spam plus GIF moderation stay live-message only.\n"
-                "Delete actions remove the matched burst for one-user spam or GIF floods, while collective GIF pressure only removes the full live GIF streak or the newest excess GIF posts that crossed the rule and never touches healthy text."
+                "Delete actions remove bounded bursts for one-user spam or GIF floods, while collective GIF pressure only removes the full live GIF streak or the newest excess GIF posts that crossed the rule. Mixed incidents can combine shared cleanup with one member's personal enforcement, and healthy text stays untouched."
             ),
             inline=False,
         )
