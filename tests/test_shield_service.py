@@ -24,7 +24,13 @@ from babblebox.shield_service import (
     _build_snapshot,
     _campaign_kind_label,
 )
-from babblebox.shield_store import SHIELD_META_GLOBAL_AI_OVERRIDE_KEY, ShieldStateStore, _MemoryShieldStore, _PostgresShieldStore
+from babblebox.shield_store import (
+    SHIELD_META_GLOBAL_AI_OVERRIDE_KEY,
+    ShieldStateStore,
+    _MemoryShieldStore,
+    _PostgresShieldStore,
+    normalize_guild_shield_config,
+)
 
 
 class FakeRole:
@@ -717,6 +723,28 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(config["severe_high_action"], "delete_log")
         self.assertEqual(config["severe_sensitivity"], "high")
         self.assertEqual(config["scam_high_action"], "delete_escalate")
+
+    async def test_gif_pack_config_persists_three_without_store_reread_drift(self):
+        ok, message = await self.service.set_pack_config(
+            10,
+            "gif",
+            enabled=True,
+            consecutive_threshold=3,
+            message_threshold=3,
+            window_seconds=3,
+        )
+
+        self.assertTrue(ok)
+        self.assertIn("True channel streak rule: 3+ consecutive GIF-heavy messages.", message)
+        self.assertEqual(self.service.store.state["guilds"]["10"]["gif_consecutive_threshold"], 3)
+        self.assertEqual(self.service.store.state["guilds"]["10"]["gif_message_threshold"], 3)
+        self.assertEqual(self.service.store.state["guilds"]["10"]["gif_window_seconds"], 3)
+
+        config = self.service.get_config(10)
+        self.assertEqual(config["gif_consecutive_threshold"], 3)
+        self.assertEqual(config["gif_message_threshold"], 3)
+        self.assertEqual(config["gif_window_seconds"], 3)
+        self.assertEqual(self.service._compiled_configs[10].gif_rules.consecutive_threshold, 3)
 
     async def test_allowlisted_invite_does_not_bypass_promo_match(self):
         ok, _ = await self.service.set_pack_config(10, "promo", enabled=True, action="log", sensitivity="normal")
@@ -2129,7 +2157,8 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         final = decisions[-1]
         self.assertIsNotNone(final)
         self.assertIn("spam_group_gif_pressure", {reason.match_class for reason in final.reasons})
-        self.assertIn("4 gifs in a row", (final.alert_evidence_summary or "").lower())
+        self.assertIn("trigger mode: streak", (final.alert_evidence_summary or "").lower())
+        self.assertIn("4 consecutive gif-heavy messages", (final.alert_evidence_summary or "").lower())
         self.assertTrue(final.deleted)
         self.assertEqual(final.deleted_count, 4)
         self.assertTrue(all(message.deleted for message in messages))
@@ -2158,10 +2187,75 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         final = decisions[-1]
         self.assertIsNotNone(final)
         self.assertIn("spam_group_gif_pressure", {reason.match_class for reason in final.reasons})
-        self.assertIn("3 gifs in a row", (final.alert_evidence_summary or "").lower())
+        self.assertIn("trigger mode: streak", (final.alert_evidence_summary or "").lower())
+        self.assertIn("3 consecutive gif-heavy messages", (final.alert_evidence_summary or "").lower())
         self.assertTrue(final.deleted)
         self.assertEqual(final.deleted_count, 3)
         self.assertTrue(all(message.deleted for message in messages))
+
+    async def test_collective_gif_streak_can_span_large_time_gaps(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        authors = [self._make_member(guild, 795 + index) for index in range(3)]
+
+        await self._enable_gif_pack(guild.id, medium_action="delete_log", high_action="delete_log")
+        ok, _ = await self.service.set_pack_config(guild.id, "gif", consecutive_threshold=3, window_seconds=3, message_threshold=6)
+        self.assertTrue(ok)
+
+        messages = []
+        with patch("babblebox.shield_service.time.monotonic", side_effect=(100.0, 124.0, 148.0)):
+            with patch.object(self.service, "_send_alert", new=AsyncMock()):
+                decisions = []
+                for author, content in (
+                    (authors[0], "https://tenor.com/view/g1"),
+                    (authors[1], "https://tenor.com/view/g2"),
+                    (authors[2], "https://tenor.com/view/g3"),
+                ):
+                    message = FakeMessage(guild=guild, channel=channel, author=author, content=content)
+                    messages.append(message)
+                    decisions.append(await self.service.handle_message(message))
+
+        final = decisions[-1]
+        self.assertIsNotNone(final)
+        self.assertIn("spam_group_gif_pressure", {reason.match_class for reason in final.reasons})
+        self.assertIn("trigger mode: streak", (final.alert_evidence_summary or "").lower())
+        self.assertIn("3 consecutive gif-heavy messages", (final.alert_evidence_summary or "").lower())
+
+    async def test_collective_gif_streak_deletes_exact_suffix_and_preserves_unrelated_text(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        authors = [self._make_member(guild, 798 + index) for index in range(4)]
+
+        await self._enable_gif_pack(guild.id, medium_action="delete_log", high_action="delete_log")
+        ok, _ = await self.service.set_pack_config(
+            guild.id,
+            "gif",
+            consecutive_threshold=3,
+            message_threshold=10,
+            ratio_percent=95,
+        )
+        self.assertTrue(ok)
+
+        messages = [
+            FakeMessage(guild=guild, channel=channel, author=authors[0], content="https://tenor.com/view/early-g1"),
+            FakeMessage(guild=guild, channel=channel, author=authors[1], content="https://tenor.com/view/early-g2"),
+            FakeMessage(guild=guild, channel=channel, author=authors[2], content="actual release update with enough words"),
+            FakeMessage(guild=guild, channel=channel, author=authors[0], content="https://tenor.com/view/streak-g1"),
+            FakeMessage(guild=guild, channel=channel, author=authors[1], content="https://tenor.com/view/streak-g2"),
+            FakeMessage(guild=guild, channel=channel, author=authors[3], content="https://tenor.com/view/streak-g3"),
+        ]
+
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            decisions = [await self.service.handle_message(message) for message in messages]
+
+        final = decisions[-1]
+        self.assertIsNotNone(final)
+        self.assertIn("trigger mode: streak", (final.alert_evidence_summary or "").lower())
+        self.assertEqual(final.deleted_count, 3)
+        self.assertFalse(messages[0].deleted)
+        self.assertFalse(messages[1].deleted)
+        self.assertFalse(messages[2].deleted)
+        self.assertTrue(all(message.deleted for message in messages[3:]))
 
     async def test_personal_gif_rate_threshold_can_be_three(self):
         guild = FakeGuild(10)
@@ -2223,7 +2317,7 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(final.timed_out)
         self.assertIn("spam_group_gif_pressure", {reason.match_class for reason in final.reasons})
         self.assertIn("gif-heavy posts from 3 members", final.alert_evidence_summary.lower())
-        self.assertIn("meaningful text messages", final.alert_evidence_summary.lower())
+        self.assertIn("trigger mode: streak", final.alert_evidence_summary.lower())
         self.assertIn("channel-safe cleanup only", (final.action_note or "").lower())
         self.assertTrue(all(message.deleted for message in messages[:5]))
         self.assertFalse(messages[5].deleted)
@@ -2286,7 +2380,8 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(decision.deleted_count, 1)
             self.assertEqual(decision.delete_attempt_count, 1)
             self.assertFalse(decision.timed_out)
-            self.assertIn("trimmed only the newest excess gif posts", (decision.action_note or "").lower())
+            self.assertIn("trigger mode: ratio", (decision.alert_evidence_summary or "").lower())
+            self.assertIn("newest excess gif posts", (decision.action_note or "").lower())
 
     async def test_collective_gif_pressure_low_value_replies_do_not_hide_channel_takeover(self):
         guild = FakeGuild(10)
@@ -2388,9 +2483,9 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("channel-wide pressure", (embed.description or "").lower())
         note_field = next(field for field in embed.fields if field.name == "Operational Note")
         self.assertIn("channel-safe cleanup only", note_field.value.lower())
-        self.assertIn("full live gif streak", note_field.value.lower())
+        self.assertIn("exact 5-message live gif streak", note_field.value.lower())
         reason_field = next(field for field in embed.fields if field.name == "Reason")
-        self.assertIn("meaningful text messages", reason_field.value.lower())
+        self.assertIn("trigger mode: streak", reason_field.value.lower())
         actionable = [decision for decision in decisions if decision is not None]
         self.assertEqual(len(actionable), 1)
 
@@ -4683,3 +4778,19 @@ class ShieldStoreNormalizationTests(unittest.TestCase):
         self.assertEqual(config["gif_medium_action"], "delete_log")
         self.assertEqual(config["gif_high_action"], "delete_escalate")
         self.assertEqual(config["gif_sensitivity"], "high")
+
+    def test_normalize_guild_shield_config_preserves_low_end_gif_and_spam_bounds(self):
+        normalized = normalize_guild_shield_config(
+            10,
+            {
+                "gif_consecutive_threshold": 3,
+                "gif_message_threshold": 12,
+                "gif_window_seconds": 3,
+                "spam_message_window_seconds": 3,
+            },
+        )
+
+        self.assertEqual(normalized["gif_consecutive_threshold"], 3)
+        self.assertEqual(normalized["gif_message_threshold"], 12)
+        self.assertEqual(normalized["gif_window_seconds"], 3)
+        self.assertEqual(normalized["spam_message_window_seconds"], 3)

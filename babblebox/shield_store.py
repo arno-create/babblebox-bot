@@ -48,6 +48,29 @@ VALID_SHIELD_LOG_STYLES = {"adaptive", "compact"}
 VALID_SHIELD_LOG_PING_MODES = {"smart", "never"}
 VALID_PACK_LOG_OVERRIDE_STYLES = {"inherit"} | VALID_SHIELD_LOG_STYLES
 VALID_PACK_LOG_OVERRIDE_PING_MODES = {"inherit"} | VALID_SHIELD_LOG_PING_MODES
+SHIELD_NUMERIC_CONFIG_SPECS: dict[str, tuple[int, int, int]] = {
+    "escalation_threshold": (2, 6, 3),
+    "escalation_window_minutes": (5, 120, 15),
+    "timeout_minutes": (1, 60, 10),
+    "spam_message_threshold": (4, 12, 7),
+    "spam_message_window_seconds": (3, 30, 5),
+    "spam_burst_threshold": (4, 10, 5),
+    "spam_burst_window_seconds": (5, 30, 10),
+    "spam_near_duplicate_threshold": (3, 10, 5),
+    "spam_near_duplicate_window_seconds": (5, 45, 10),
+    "spam_emote_threshold": (8, 40, 18),
+    "spam_caps_threshold": (12, 80, 28),
+    "gif_message_threshold": (3, 12, 4),
+    "gif_window_seconds": (3, 45, 20),
+    "gif_consecutive_threshold": (3, 10, 5),
+    "gif_repeat_threshold": (2, 6, 3),
+    "gif_same_asset_threshold": (2, 6, 3),
+    "gif_min_ratio_percent": (50, 95, 70),
+}
+
+
+def shield_numeric_config_default(field: str) -> int:
+    return SHIELD_NUMERIC_CONFIG_SPECS[field][2]
 
 
 class ShieldStorageUnavailable(RuntimeError):
@@ -159,16 +182,16 @@ def default_guild_shield_config(guild_id: int | None = None) -> dict[str, Any]:
         "spam_medium_action": "log",
         "spam_high_action": "log",
         "spam_sensitivity": "normal",
-        "spam_message_threshold": 7,
-        "spam_message_window_seconds": 5,
-        "spam_burst_threshold": 5,
-        "spam_burst_window_seconds": 10,
-        "spam_near_duplicate_threshold": 5,
-        "spam_near_duplicate_window_seconds": 10,
+        "spam_message_threshold": shield_numeric_config_default("spam_message_threshold"),
+        "spam_message_window_seconds": shield_numeric_config_default("spam_message_window_seconds"),
+        "spam_burst_threshold": shield_numeric_config_default("spam_burst_threshold"),
+        "spam_burst_window_seconds": shield_numeric_config_default("spam_burst_window_seconds"),
+        "spam_near_duplicate_threshold": shield_numeric_config_default("spam_near_duplicate_threshold"),
+        "spam_near_duplicate_window_seconds": shield_numeric_config_default("spam_near_duplicate_window_seconds"),
         "spam_emote_enabled": False,
-        "spam_emote_threshold": 18,
+        "spam_emote_threshold": shield_numeric_config_default("spam_emote_threshold"),
         "spam_caps_enabled": False,
-        "spam_caps_threshold": 28,
+        "spam_caps_threshold": shield_numeric_config_default("spam_caps_threshold"),
         "spam_moderator_policy": "exempt",
         "gif_enabled": False,
         "gif_action": "log",
@@ -176,12 +199,12 @@ def default_guild_shield_config(guild_id: int | None = None) -> dict[str, Any]:
         "gif_medium_action": "log",
         "gif_high_action": "log",
         "gif_sensitivity": "normal",
-        "gif_message_threshold": 4,
-        "gif_window_seconds": 20,
-        "gif_consecutive_threshold": 5,
-        "gif_repeat_threshold": 3,
-        "gif_same_asset_threshold": 3,
-        "gif_min_ratio_percent": 70,
+        "gif_message_threshold": shield_numeric_config_default("gif_message_threshold"),
+        "gif_window_seconds": shield_numeric_config_default("gif_window_seconds"),
+        "gif_consecutive_threshold": shield_numeric_config_default("gif_consecutive_threshold"),
+        "gif_repeat_threshold": shield_numeric_config_default("gif_repeat_threshold"),
+        "gif_same_asset_threshold": shield_numeric_config_default("gif_same_asset_threshold"),
+        "gif_min_ratio_percent": shield_numeric_config_default("gif_min_ratio_percent"),
         "adult_enabled": False,
         "adult_action": "log",
         "adult_low_action": "log",
@@ -211,9 +234,9 @@ def default_guild_shield_config(guild_id: int | None = None) -> dict[str, Any]:
         "ai_access_updated_at": None,
         "ai_min_confidence": "high",
         "ai_enabled_packs": list(SHIELD_AI_REVIEW_PACKS),
-        "escalation_threshold": 3,
-        "escalation_window_minutes": 15,
-        "timeout_minutes": 10,
+        "escalation_threshold": shield_numeric_config_default("escalation_threshold"),
+        "escalation_window_minutes": shield_numeric_config_default("escalation_window_minutes"),
+        "timeout_minutes": shield_numeric_config_default("timeout_minutes"),
         "custom_patterns": [],
     }
 
@@ -439,25 +462,7 @@ def normalize_guild_shield_config(guild_id: int, config: Any) -> dict[str, Any]:
     else:
         cleaned["ai_enabled_packs"] = list(SHIELD_AI_REVIEW_PACKS)
 
-    for field, minimum, maximum, default in (
-        ("escalation_threshold", 2, 6, 3),
-        ("escalation_window_minutes", 5, 120, 15),
-        ("timeout_minutes", 1, 60, 10),
-        ("spam_message_threshold", 4, 12, 7),
-        ("spam_message_window_seconds", 3, 30, 5),
-        ("spam_burst_threshold", 4, 10, 5),
-        ("spam_burst_window_seconds", 5, 30, 10),
-        ("spam_near_duplicate_threshold", 3, 10, 5),
-        ("spam_near_duplicate_window_seconds", 5, 45, 10),
-        ("spam_emote_threshold", 8, 40, 18),
-        ("spam_caps_threshold", 12, 80, 28),
-        ("gif_message_threshold", 3, 8, 4),
-        ("gif_window_seconds", 10, 45, 20),
-        ("gif_consecutive_threshold", 4, 10, 5),
-        ("gif_repeat_threshold", 2, 6, 3),
-        ("gif_same_asset_threshold", 2, 6, 3),
-        ("gif_min_ratio_percent", 50, 95, 70),
-    ):
+    for field, (minimum, maximum, default) in SHIELD_NUMERIC_CONFIG_SPECS.items():
         value = config.get(field)
         cleaned[field] = value if isinstance(value, int) and minimum <= value <= maximum else default
     cleaned["spam_emote_enabled"] = bool(config.get("spam_emote_enabled"))
@@ -710,16 +715,16 @@ class _PostgresShieldStore(_BaseShieldStore):
                 "spam_medium_action TEXT NOT NULL DEFAULT 'log', "
                 "spam_high_action TEXT NOT NULL DEFAULT 'log', "
                 "spam_sensitivity TEXT NOT NULL DEFAULT 'normal', "
-                "spam_message_threshold SMALLINT NOT NULL DEFAULT 7, "
-                "spam_message_window_seconds SMALLINT NOT NULL DEFAULT 5, "
-                "spam_burst_threshold SMALLINT NOT NULL DEFAULT 5, "
-                "spam_burst_window_seconds SMALLINT NOT NULL DEFAULT 10, "
-                "spam_near_duplicate_threshold SMALLINT NOT NULL DEFAULT 5, "
-                "spam_near_duplicate_window_seconds SMALLINT NOT NULL DEFAULT 10, "
+                f"spam_message_threshold SMALLINT NOT NULL DEFAULT {shield_numeric_config_default('spam_message_threshold')}, "
+                f"spam_message_window_seconds SMALLINT NOT NULL DEFAULT {shield_numeric_config_default('spam_message_window_seconds')}, "
+                f"spam_burst_threshold SMALLINT NOT NULL DEFAULT {shield_numeric_config_default('spam_burst_threshold')}, "
+                f"spam_burst_window_seconds SMALLINT NOT NULL DEFAULT {shield_numeric_config_default('spam_burst_window_seconds')}, "
+                f"spam_near_duplicate_threshold SMALLINT NOT NULL DEFAULT {shield_numeric_config_default('spam_near_duplicate_threshold')}, "
+                f"spam_near_duplicate_window_seconds SMALLINT NOT NULL DEFAULT {shield_numeric_config_default('spam_near_duplicate_window_seconds')}, "
                 "spam_emote_enabled BOOLEAN NOT NULL DEFAULT FALSE, "
-                "spam_emote_threshold SMALLINT NOT NULL DEFAULT 18, "
+                f"spam_emote_threshold SMALLINT NOT NULL DEFAULT {shield_numeric_config_default('spam_emote_threshold')}, "
                 "spam_caps_enabled BOOLEAN NOT NULL DEFAULT FALSE, "
-                "spam_caps_threshold SMALLINT NOT NULL DEFAULT 28, "
+                f"spam_caps_threshold SMALLINT NOT NULL DEFAULT {shield_numeric_config_default('spam_caps_threshold')}, "
                 "spam_moderator_policy TEXT NOT NULL DEFAULT 'exempt', "
                 "gif_enabled BOOLEAN NOT NULL DEFAULT FALSE, "
                 "gif_action TEXT NOT NULL DEFAULT 'log', "
@@ -727,12 +732,12 @@ class _PostgresShieldStore(_BaseShieldStore):
                 "gif_medium_action TEXT NOT NULL DEFAULT 'log', "
                 "gif_high_action TEXT NOT NULL DEFAULT 'log', "
                 "gif_sensitivity TEXT NOT NULL DEFAULT 'normal', "
-                "gif_message_threshold SMALLINT NOT NULL DEFAULT 4, "
-                "gif_window_seconds SMALLINT NOT NULL DEFAULT 20, "
-                "gif_consecutive_threshold SMALLINT NOT NULL DEFAULT 5, "
-                "gif_repeat_threshold SMALLINT NOT NULL DEFAULT 3, "
-                "gif_same_asset_threshold SMALLINT NOT NULL DEFAULT 3, "
-                "gif_min_ratio_percent SMALLINT NOT NULL DEFAULT 70, "
+                f"gif_message_threshold SMALLINT NOT NULL DEFAULT {shield_numeric_config_default('gif_message_threshold')}, "
+                f"gif_window_seconds SMALLINT NOT NULL DEFAULT {shield_numeric_config_default('gif_window_seconds')}, "
+                f"gif_consecutive_threshold SMALLINT NOT NULL DEFAULT {shield_numeric_config_default('gif_consecutive_threshold')}, "
+                f"gif_repeat_threshold SMALLINT NOT NULL DEFAULT {shield_numeric_config_default('gif_repeat_threshold')}, "
+                f"gif_same_asset_threshold SMALLINT NOT NULL DEFAULT {shield_numeric_config_default('gif_same_asset_threshold')}, "
+                f"gif_min_ratio_percent SMALLINT NOT NULL DEFAULT {shield_numeric_config_default('gif_min_ratio_percent')}, "
                 "adult_enabled BOOLEAN NOT NULL DEFAULT FALSE, "
                 "adult_action TEXT NOT NULL DEFAULT 'log', "
                 "adult_low_action TEXT NOT NULL DEFAULT 'log', "
@@ -832,23 +837,23 @@ class _PostgresShieldStore(_BaseShieldStore):
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS pack_log_overrides JSONB NOT NULL DEFAULT '{}'::jsonb",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS pack_exemptions JSONB NOT NULL DEFAULT '{}'::jsonb",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS pack_timeout_minutes JSONB NOT NULL DEFAULT '{}'::jsonb",
-            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS spam_message_threshold SMALLINT NOT NULL DEFAULT 7",
-            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS spam_message_window_seconds SMALLINT NOT NULL DEFAULT 5",
-            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS spam_burst_threshold SMALLINT NOT NULL DEFAULT 5",
-            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS spam_burst_window_seconds SMALLINT NOT NULL DEFAULT 10",
-            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS spam_near_duplicate_threshold SMALLINT NOT NULL DEFAULT 5",
-            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS spam_near_duplicate_window_seconds SMALLINT NOT NULL DEFAULT 10",
+            f"ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS spam_message_threshold SMALLINT NOT NULL DEFAULT {shield_numeric_config_default('spam_message_threshold')}",
+            f"ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS spam_message_window_seconds SMALLINT NOT NULL DEFAULT {shield_numeric_config_default('spam_message_window_seconds')}",
+            f"ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS spam_burst_threshold SMALLINT NOT NULL DEFAULT {shield_numeric_config_default('spam_burst_threshold')}",
+            f"ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS spam_burst_window_seconds SMALLINT NOT NULL DEFAULT {shield_numeric_config_default('spam_burst_window_seconds')}",
+            f"ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS spam_near_duplicate_threshold SMALLINT NOT NULL DEFAULT {shield_numeric_config_default('spam_near_duplicate_threshold')}",
+            f"ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS spam_near_duplicate_window_seconds SMALLINT NOT NULL DEFAULT {shield_numeric_config_default('spam_near_duplicate_window_seconds')}",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS spam_emote_enabled BOOLEAN NOT NULL DEFAULT FALSE",
-            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS spam_emote_threshold SMALLINT NOT NULL DEFAULT 18",
+            f"ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS spam_emote_threshold SMALLINT NOT NULL DEFAULT {shield_numeric_config_default('spam_emote_threshold')}",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS spam_caps_enabled BOOLEAN NOT NULL DEFAULT FALSE",
-            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS spam_caps_threshold SMALLINT NOT NULL DEFAULT 28",
+            f"ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS spam_caps_threshold SMALLINT NOT NULL DEFAULT {shield_numeric_config_default('spam_caps_threshold')}",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS spam_moderator_policy TEXT NOT NULL DEFAULT 'exempt'",
-            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS gif_message_threshold SMALLINT NOT NULL DEFAULT 4",
-            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS gif_window_seconds SMALLINT NOT NULL DEFAULT 20",
-            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS gif_consecutive_threshold SMALLINT NOT NULL DEFAULT 5",
-            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS gif_repeat_threshold SMALLINT NOT NULL DEFAULT 3",
-            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS gif_same_asset_threshold SMALLINT NOT NULL DEFAULT 3",
-            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS gif_min_ratio_percent SMALLINT NOT NULL DEFAULT 70",
+            f"ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS gif_message_threshold SMALLINT NOT NULL DEFAULT {shield_numeric_config_default('gif_message_threshold')}",
+            f"ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS gif_window_seconds SMALLINT NOT NULL DEFAULT {shield_numeric_config_default('gif_window_seconds')}",
+            f"ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS gif_consecutive_threshold SMALLINT NOT NULL DEFAULT {shield_numeric_config_default('gif_consecutive_threshold')}",
+            f"ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS gif_repeat_threshold SMALLINT NOT NULL DEFAULT {shield_numeric_config_default('gif_repeat_threshold')}",
+            f"ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS gif_same_asset_threshold SMALLINT NOT NULL DEFAULT {shield_numeric_config_default('gif_same_asset_threshold')}",
+            f"ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS gif_min_ratio_percent SMALLINT NOT NULL DEFAULT {shield_numeric_config_default('gif_min_ratio_percent')}",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS ai_enabled BOOLEAN NOT NULL DEFAULT FALSE",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS ai_access_mode TEXT NOT NULL DEFAULT 'inherit'",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS ai_allowed_models_override JSONB NOT NULL DEFAULT '[]'::jsonb",
@@ -985,16 +990,32 @@ class _PostgresShieldStore(_BaseShieldStore):
                 "spam_medium_action": row["spam_medium_action"] if "spam_medium_action" in row else "log",
                 "spam_high_action": row["spam_high_action"] if "spam_high_action" in row else "log",
                 "spam_sensitivity": row["spam_sensitivity"] if "spam_sensitivity" in row else "normal",
-                "spam_message_threshold": int(row["spam_message_threshold"]) if "spam_message_threshold" in row else 7,
-                "spam_message_window_seconds": int(row["spam_message_window_seconds"]) if "spam_message_window_seconds" in row else 5,
-                "spam_burst_threshold": int(row["spam_burst_threshold"]) if "spam_burst_threshold" in row else 5,
-                "spam_burst_window_seconds": int(row["spam_burst_window_seconds"]) if "spam_burst_window_seconds" in row else 10,
-                "spam_near_duplicate_threshold": int(row["spam_near_duplicate_threshold"]) if "spam_near_duplicate_threshold" in row else 5,
-                "spam_near_duplicate_window_seconds": int(row["spam_near_duplicate_window_seconds"]) if "spam_near_duplicate_window_seconds" in row else 10,
+                "spam_message_threshold": int(row["spam_message_threshold"])
+                if "spam_message_threshold" in row
+                else shield_numeric_config_default("spam_message_threshold"),
+                "spam_message_window_seconds": int(row["spam_message_window_seconds"])
+                if "spam_message_window_seconds" in row
+                else shield_numeric_config_default("spam_message_window_seconds"),
+                "spam_burst_threshold": int(row["spam_burst_threshold"])
+                if "spam_burst_threshold" in row
+                else shield_numeric_config_default("spam_burst_threshold"),
+                "spam_burst_window_seconds": int(row["spam_burst_window_seconds"])
+                if "spam_burst_window_seconds" in row
+                else shield_numeric_config_default("spam_burst_window_seconds"),
+                "spam_near_duplicate_threshold": int(row["spam_near_duplicate_threshold"])
+                if "spam_near_duplicate_threshold" in row
+                else shield_numeric_config_default("spam_near_duplicate_threshold"),
+                "spam_near_duplicate_window_seconds": int(row["spam_near_duplicate_window_seconds"])
+                if "spam_near_duplicate_window_seconds" in row
+                else shield_numeric_config_default("spam_near_duplicate_window_seconds"),
                 "spam_emote_enabled": bool(row["spam_emote_enabled"]) if "spam_emote_enabled" in row else False,
-                "spam_emote_threshold": int(row["spam_emote_threshold"]) if "spam_emote_threshold" in row else 18,
+                "spam_emote_threshold": int(row["spam_emote_threshold"])
+                if "spam_emote_threshold" in row
+                else shield_numeric_config_default("spam_emote_threshold"),
                 "spam_caps_enabled": bool(row["spam_caps_enabled"]) if "spam_caps_enabled" in row else False,
-                "spam_caps_threshold": int(row["spam_caps_threshold"]) if "spam_caps_threshold" in row else 28,
+                "spam_caps_threshold": int(row["spam_caps_threshold"])
+                if "spam_caps_threshold" in row
+                else shield_numeric_config_default("spam_caps_threshold"),
                 "spam_moderator_policy": row["spam_moderator_policy"] if "spam_moderator_policy" in row else "exempt",
                 "gif_enabled": bool(row["gif_enabled"]) if "gif_enabled" in row else False,
                 "gif_action": row["gif_action"] if "gif_action" in row else "log",
@@ -1002,12 +1023,24 @@ class _PostgresShieldStore(_BaseShieldStore):
                 "gif_medium_action": row["gif_medium_action"] if "gif_medium_action" in row else "log",
                 "gif_high_action": row["gif_high_action"] if "gif_high_action" in row else "log",
                 "gif_sensitivity": row["gif_sensitivity"] if "gif_sensitivity" in row else "normal",
-                "gif_message_threshold": int(row["gif_message_threshold"]) if "gif_message_threshold" in row else 4,
-                "gif_window_seconds": int(row["gif_window_seconds"]) if "gif_window_seconds" in row else 20,
-                "gif_consecutive_threshold": int(row["gif_consecutive_threshold"]) if "gif_consecutive_threshold" in row else 5,
-                "gif_repeat_threshold": int(row["gif_repeat_threshold"]) if "gif_repeat_threshold" in row else 3,
-                "gif_same_asset_threshold": int(row["gif_same_asset_threshold"]) if "gif_same_asset_threshold" in row else 3,
-                "gif_min_ratio_percent": int(row["gif_min_ratio_percent"]) if "gif_min_ratio_percent" in row else 70,
+                "gif_message_threshold": int(row["gif_message_threshold"])
+                if "gif_message_threshold" in row
+                else shield_numeric_config_default("gif_message_threshold"),
+                "gif_window_seconds": int(row["gif_window_seconds"])
+                if "gif_window_seconds" in row
+                else shield_numeric_config_default("gif_window_seconds"),
+                "gif_consecutive_threshold": int(row["gif_consecutive_threshold"])
+                if "gif_consecutive_threshold" in row
+                else shield_numeric_config_default("gif_consecutive_threshold"),
+                "gif_repeat_threshold": int(row["gif_repeat_threshold"])
+                if "gif_repeat_threshold" in row
+                else shield_numeric_config_default("gif_repeat_threshold"),
+                "gif_same_asset_threshold": int(row["gif_same_asset_threshold"])
+                if "gif_same_asset_threshold" in row
+                else shield_numeric_config_default("gif_same_asset_threshold"),
+                "gif_min_ratio_percent": int(row["gif_min_ratio_percent"])
+                if "gif_min_ratio_percent" in row
+                else shield_numeric_config_default("gif_min_ratio_percent"),
                 "adult_enabled": bool(row["adult_enabled"]) if "adult_enabled" in row else False,
                 "adult_action": row["adult_action"] if "adult_action" in row else "log",
                 "adult_low_action": row["adult_low_action"] if "adult_low_action" in row else "log",
