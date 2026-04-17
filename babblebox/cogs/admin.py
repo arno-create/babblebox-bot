@@ -1209,12 +1209,12 @@ class AdminCog(commands.Cog):
         counts = await self.service.get_counts(guild_id)
         verification_rule = self._verification_rule_details(guild_id)
         embed = discord.Embed(
-            title="Admin Systems Overview",
-            description="Interactive control surface for follow-up, verification cleanup, exclusions, logs, and templates.",
+            title="Admin Control Panel",
+            description="Operator-first control surface for follow-up, verification cleanup, exclusions, logs, and verification messaging.",
             color=ge.EMBED_THEME["accent"],
         )
         embed.add_field(
-            name="Punishment Follow-up",
+            name="Follow-up Lane",
             value=(
                 f"Enabled: **{'Yes' if config['followup_enabled'] else 'No'}**\n"
                 f"Role: {self._role_mention(config['followup_role_id'])}\n"
@@ -1224,10 +1224,10 @@ class AdminCog(commands.Cog):
             inline=False,
         )
         embed.add_field(
-            name="Verification Cleanup",
+            name="Verification Lane",
             value=(
                 f"Enabled: **{'Yes' if config['verification_enabled'] else 'No'}**\n"
-                f"Rule: {VERIFICATION_LOGIC_LABELS[config['verification_logic']]}\n"
+                f"Verification rule: {VERIFICATION_LOGIC_LABELS[config['verification_logic']]}\n"
                 f"Deadline action: **{verification_rule['deadline_action_label']}**\n"
                 f"{verification_rule['unverified_sentence']}\n"
                 f"Deadline timer: {format_duration_brief(config['verification_kick_after_seconds'])}\n"
@@ -1236,7 +1236,7 @@ class AdminCog(commands.Cog):
             inline=False,
         )
         embed.add_field(
-            name="Live Counts",
+            name="Current Backlog",
             value=(
                 f"Pending ban-return candidates: **{counts['ban_candidates']}**\n"
                 f"Active follow-up roles: **{counts['active_followups']}**\n"
@@ -1247,7 +1247,7 @@ class AdminCog(commands.Cog):
             inline=False,
         )
         embed.add_field(
-            name="Logs",
+            name="Admin Delivery",
             value=(
                 f"Channel: {self._channel_mention(config['admin_log_channel_id'])}\n"
                 f"Alert role: {self._role_mention(config['admin_alert_role_id'])}"
@@ -1255,11 +1255,11 @@ class AdminCog(commands.Cog):
             inline=False,
         )
         embed.add_field(
-            name="Direct Panel Controls",
+            name="Quick Configure",
             value=(
-                "Open focused editors from each section instead of memorizing command flags.\n"
-                "Use **Open Sync Review** for the one-time verification catch-up flow.\n"
-                "Use **Run Permission Check** when admin automations feel blocked or incomplete."
+                "Use **Edit Follow-up**, **Edit Verification Policy**, and **Edit Logs** for the most common changes.\n"
+                "Keep **Open Sync Review** for one-time verification catch-up work.\n"
+                "Use **Run Permission Check** when automations feel blocked or incomplete."
             ),
             inline=False,
         )
@@ -1274,11 +1274,11 @@ class AdminCog(commands.Cog):
         config = self.service.get_config(guild_id)
         embed = discord.Embed(
             title="Punishment Follow-up",
-            description="Returned-after-ban role handling with direct panel editing and command parity.",
+            description="Manage the returned-after-ban follow-up lane directly from the panel, with commands still available for exact overrides.",
             color=ge.EMBED_THEME["warning"],
         )
         embed.add_field(
-            name="Policy",
+            name="Current Policy",
             value=(
                 f"Enabled: **{'Yes' if config['followup_enabled'] else 'No'}**\n"
                 f"Role: {self._role_mention(config['followup_role_id'])}\n"
@@ -1315,15 +1315,15 @@ class AdminCog(commands.Cog):
         rule = self._verification_rule_details(guild_id)
         embed = discord.Embed(
             title="Verification Cleanup",
-            description="Verification policy, timing, help-path, previews, and sync tools in one compact admin surface.",
+            description="Set who counts as unverified, tune the warning timeline, and manage the help path from one focused admin surface.",
             color=ge.EMBED_THEME["danger"],
         )
         embed.add_field(
-            name="Current Rule",
+            name="Current Policy",
             value=(
                 f"Enabled: **{'Yes' if config['verification_enabled'] else 'No'}**\n"
                 f"Role: {self._role_mention(config['verification_role_id'])}\n"
-                f"Logic label: {VERIFICATION_LOGIC_LABELS[config['verification_logic']]}\n"
+                f"Verification rule: {VERIFICATION_LOGIC_LABELS[config['verification_logic']]}\n"
                 f"Deadline action: **{rule['deadline_action_label']}**\n"
                 f"{rule['verified_sentence']}\n"
                 f"{rule['unverified_sentence']}"
@@ -1331,7 +1331,7 @@ class AdminCog(commands.Cog):
             inline=False,
         )
         embed.add_field(
-            name="Deadline Path",
+            name="Deadline Experience",
             value=(
                 f"{rule['preview_sentence']}\n"
                 f"{rule['exempt_sentence']}"
@@ -1339,7 +1339,7 @@ class AdminCog(commands.Cog):
             inline=False,
         )
         embed.add_field(
-            name="Help Channel Path",
+            name="Help Path",
             value=(
                 f"Help channel: {self._channel_mention(config['verification_help_channel_id'])}\n"
                 f"Extension: {format_duration_brief(config['verification_help_extension_seconds'])}\n"
@@ -1383,7 +1383,7 @@ class AdminCog(commands.Cog):
         config = self.service.get_config(guild_id)
         embed = discord.Embed(
             title="Exclusions And Trusted Roles",
-            description="Shared exclusions keep follow-up and verification compact, explicit, and easy to audit.",
+            description="Shared exclusions keep follow-up and verification predictable, explicit, and easy to audit.",
             color=ge.EMBED_THEME["info"],
         )
         embed.add_field(
@@ -1420,7 +1420,7 @@ class AdminCog(commands.Cog):
         config = self.service.get_config(guild_id)
         embed = discord.Embed(
             title="Logs And Alerts",
-            description="One calm moderator-facing delivery lane for admin automation output and operability warnings.",
+            description="Choose one calm staff-facing delivery lane for admin automation output and operability warnings.",
             color=ge.EMBED_THEME["info"],
         )
         embed.add_field(

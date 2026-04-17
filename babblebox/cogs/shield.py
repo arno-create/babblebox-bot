@@ -1606,6 +1606,34 @@ class ShieldCog(commands.Cog):
             )
         return ""
 
+    def _pack_policy_overview(self, config: dict[str, object], pack: str) -> str:
+        low_action, medium_action, high_action = self._pack_policy_actions(config, pack)
+        lines = [
+            f"Enabled: {'Yes' if config.get(f'{pack}_enabled') else 'No'} | Sensitivity: {SENSITIVITY_LABELS[config.get(f'{pack}_sensitivity', 'normal')]} | Timeout: {self._pack_timeout_badge(config, pack)}",
+            f"Actions: {self._action_label(low_action)} / {self._action_label(medium_action)} / {self._action_label(high_action)}",
+        ]
+        if pack == "spam":
+            lines.append(
+                f"Rate {config.get('spam_message_threshold', 7)} in {config.get('spam_message_window_seconds', 5)}s | "
+                f"Burst {config.get('spam_burst_threshold', 5)} in {config.get('spam_burst_window_seconds', 10)}s | "
+                f"Duplicates {config.get('spam_near_duplicate_threshold', 5)} in {config.get('spam_near_duplicate_window_seconds', 10)}s"
+            )
+            lines.append(
+                "Emotes: "
+                + (f"On at {config.get('spam_emote_threshold', 18)}+" if config.get("spam_emote_enabled") else "Off")
+                + " | Caps: "
+                + (f"On at {config.get('spam_caps_threshold', 28)}+" if config.get("spam_caps_enabled") else "Off")
+            )
+        elif pack == "gif":
+            lines.append(
+                f"Rate {config.get('gif_message_threshold', 4)} in {config.get('gif_window_seconds', 20)}s | "
+                f"Streak {config.get('gif_consecutive_threshold', 5)} | "
+                f"Repeat {config.get('gif_repeat_threshold', 3)} at {config.get('gif_min_ratio_percent', 70)}% | "
+                f"Same asset {config.get('gif_same_asset_threshold', 3)}"
+            )
+            lines.append("Delete lane removes the matched GIF burst; collective pressure trims GIFs only.")
+        return "\n".join(lines)
+
     def _pack_policy_compact(self, config: dict[str, object], pack: str) -> str:
         low_action, medium_action, high_action = self._pack_policy_actions(config, pack)
         rule_summary = self._pack_rule_summary(config, pack)
@@ -1750,6 +1778,17 @@ class ShieldCog(commands.Cog):
         if isinstance(override, int) and override >= 1:
             return f"{override}m dedicated"
         return f"{int(config.get('timeout_minutes', 10))}m global"
+
+    def _ai_routing_label(self, value: object) -> str:
+        labels = {
+            "single_model_override": "Single model override",
+            "routed_fast_complex": "Fast + complex routing",
+            "routed_fast_complex_frontier": "Fast + complex + frontier routing",
+        }
+        return labels.get(str(value or ""), str(value or "disabled"))
+
+    def _ai_setup_blocker_summary(self, blockers: list[str]) -> str:
+        return "; ".join(blockers) if blockers else "None"
 
     def _pack_exemption_counts(self, config: dict[str, object], pack: str) -> tuple[int, int, int]:
         pack_exemptions = config.get("pack_exemptions", {})
@@ -1984,8 +2023,10 @@ class ShieldCog(commands.Cog):
                 value=(
                     f"Minimum local confidence: `{ai_status['min_confidence']}`\n"
                     f"Eligible packs: {self._format_ai_pack_summary(ai_status['enabled_packs'])}\n"
-                    f"Routing: `{ai_status['routing_strategy'] or 'disabled'}`\n"
-                    f"Provider ready: {'Yes' if ai_status['provider_available'] else 'No'}"
+                    f"Routing: {self._ai_routing_label(ai_status['routing_strategy'])}\n"
+                    f"Provider ready: {'Yes' if ai_status['provider_available'] else 'No'}\n"
+                    f"Provider diagnostics: {ai_status['provider_status']}\n"
+                    f"Local blockers: {self._ai_setup_blocker_summary(ai_status['setup_blockers'])}"
                 ),
                 inline=False,
             )
@@ -2111,16 +2152,14 @@ class ShieldCog(commands.Cog):
         for pack in ("privacy", "promo", "spam", "gif"):
             protection_lines.append(
                 f"**{PACK_LABELS[pack]}**\n"
-                f"Enabled: {'Yes' if config[f'{pack}_enabled'] else 'No'} | Sensitivity: {SENSITIVITY_LABELS[config[f'{pack}_sensitivity']]}\n"
-                f"{self._pack_policy_compact(config, pack)}"
+                f"{self._pack_policy_overview(config, pack)}"
             )
         embed.add_field(name="Protection Packs", value="\n\n".join(protection_lines), inline=False)
         high_risk_lines = []
         for pack in ("scam", "adult", "severe"):
             high_risk_lines.append(
                 f"**{PACK_LABELS[pack]}**\n"
-                f"Enabled: {'Yes' if config[f'{pack}_enabled'] else 'No'} | Sensitivity: {SENSITIVITY_LABELS[config[f'{pack}_sensitivity']]}\n"
-                f"{self._pack_policy_compact(config, pack)}"
+                f"{self._pack_policy_overview(config, pack)}"
             )
         embed.add_field(name="High-Risk Packs", value="\n\n".join(high_risk_lines), inline=False)
         embed.add_field(
@@ -2131,12 +2170,13 @@ class ShieldCog(commands.Cog):
         embed.add_field(
             name="AI Assist",
             value=(
-                f"Status: {ai_status['status']}\n"
-                f"Enabled by owner policy: **{'Yes' if ai_status['enabled'] else 'No'}**\n"
+                f"Readiness: {ai_status['status']}\n"
                 f"Policy source: {self._ai_policy_source_label(ai_status['policy_source'])}\n"
                 f"Allowed models: {self._format_ai_models(ai_status['allowed_models'])}\n"
+                f"Routing: {self._ai_routing_label(ai_status['routing_strategy'])}\n"
                 f"Local-confidence threshold: `{ai_status['min_confidence']}`\n"
                 f"Packs: {self._format_ai_pack_summary(ai_status['enabled_packs'])}\n"
+                f"Local blockers: {self._ai_setup_blocker_summary(ai_status['setup_blockers'])}\n"
                 "Scope: Live-message moderation only\n"
                 "AI stays second-pass only and only enriches moderator context."
             ),
@@ -2305,6 +2345,7 @@ class ShieldCog(commands.Cog):
     def _ai_embed(self, guild_id: int) -> discord.Embed:
         config = self.service.get_config(guild_id)
         ai_status = self.service.get_ai_status(guild_id)
+        log_channel = self._format_mentions([int(config["log_channel_id"])], kind="channel") if config.get("log_channel_id") else "Not set"
         embed = discord.Embed(
             title="Shield AI Assist",
             description="Second-pass review for already-flagged live messages only. Access is owner-managed; this page shows the resolved policy plus this guild's local review scope.",
@@ -2314,12 +2355,13 @@ class ShieldCog(commands.Cog):
             name="Access Policy",
             value=(
                 f"Enabled: **{'Yes' if ai_status['enabled'] else 'No'}**\n"
+                f"Readiness: {ai_status['status']}\n"
                 f"Policy source: {self._ai_policy_source_label(ai_status['policy_source'])}\n"
                 f"Support default: {'Yes' if ai_status['support_server_default'] else 'No'}\n"
                 f"Ordinary-guild default: {'Enabled' if ai_status['ordinary_global_enabled'] else 'Disabled'}\n"
                 f"Allowed models: {self._format_ai_models(ai_status['allowed_models'])}\n"
                 f"Guild model override: {self._format_ai_models(ai_status['guild_allowed_models_override'])}\n"
-                f"Status: {ai_status['status']}"
+                f"Provider diagnostics: {ai_status['provider_status']}"
             ),
             inline=False,
         )
@@ -2328,19 +2370,23 @@ class ShieldCog(commands.Cog):
             value=(
                 f"Provider: {ai_status['provider'] or 'Not configured'}\n"
                 f"Provider ready: {'Yes' if ai_status['provider_available'] else 'No'}\n"
-                f"Routing: `{ai_status['routing_strategy'] or 'disabled'}`\n"
+                f"Routing mode: {self._ai_routing_label(ai_status['routing_strategy'])}\n"
                 f"Fast tier: `{ai_status['fast_model'] or 'Not configured'}`\n"
                 f"Complex tier: `{ai_status['complex_model'] or 'Not configured'}`\n"
                 f"Frontier tier: `{ai_status['top_model'] or 'Not configured'}`\n"
-                f"Frontier enabled: {'Yes' if ai_status['top_tier_enabled'] else 'No'}"
+                f"Frontier enabled: {'Yes' if ai_status['top_tier_enabled'] else 'No'}\n"
+                f"Ignored invalid model settings: {self._format_text_list(ai_status['ignored_model_settings'], limit=4)}"
             ),
             inline=False,
         )
         embed.add_field(
             name="Runtime Policy",
             value=(
+                f"Live moderation: {'On' if config['module_enabled'] else 'Off'}\n"
+                f"Shield log channel: {log_channel}\n"
                 f"Local-confidence threshold: `{config['ai_min_confidence']}`\n"
                 f"Eligible packs: {self._format_ai_pack_summary(ai_status['enabled_packs'])}\n"
+                f"Local blockers: {self._ai_setup_blocker_summary(ai_status['setup_blockers'])}\n"
                 "Live-message only: Yes\n"
                 "Punishment engine: Never\n"
                 "Spam and GIF moderation stay local and non-AI"

@@ -183,6 +183,13 @@ def _read_bool_env(name: str, default: bool) -> bool:
     return default
 
 
+def _read_model_env(name: str, default: str) -> tuple[str, str, bool]:
+    raw = os.getenv(name, "").strip()
+    normalized = normalize_shield_ai_model_name(raw)
+    invalid = bool(raw and normalized is None)
+    return (normalized or default, raw, invalid)
+
+
 def _truncate_text(text: str, limit: int) -> tuple[str, bool]:
     if len(text) <= limit:
         return text, False
@@ -336,9 +343,9 @@ class OpenAIShieldAIProvider(ShieldAIProvider):
         self.api_key = os.getenv("OPENAI_API_KEY", "").strip()
         self.single_model_override_raw = os.getenv("SHIELD_AI_MODEL", "").strip()
         self.single_model_override = normalize_shield_ai_model_name(self.single_model_override_raw)
-        self.fast_model = normalize_shield_ai_model_name(os.getenv("SHIELD_AI_FAST_MODEL")) or DEFAULT_SHIELD_AI_FAST_MODEL
-        self.complex_model = normalize_shield_ai_model_name(os.getenv("SHIELD_AI_COMPLEX_MODEL")) or DEFAULT_SHIELD_AI_COMPLEX_MODEL
-        self.top_model = normalize_shield_ai_model_name(os.getenv("SHIELD_AI_TOP_MODEL")) or DEFAULT_SHIELD_AI_TOP_MODEL
+        self.fast_model, _fast_model_raw, invalid_fast_model = _read_model_env("SHIELD_AI_FAST_MODEL", DEFAULT_SHIELD_AI_FAST_MODEL)
+        self.complex_model, _complex_model_raw, invalid_complex_model = _read_model_env("SHIELD_AI_COMPLEX_MODEL", DEFAULT_SHIELD_AI_COMPLEX_MODEL)
+        self.top_model, _top_model_raw, invalid_top_model = _read_model_env("SHIELD_AI_TOP_MODEL", DEFAULT_SHIELD_AI_TOP_MODEL)
         self.top_tier_enabled = _read_bool_env("SHIELD_AI_ENABLE_TOP_TIER", DEFAULT_SHIELD_AI_ENABLE_TOP_TIER)
         self.timeout_seconds = _read_float_env(
             "SHIELD_AI_TIMEOUT_SECONDS",
@@ -354,9 +361,19 @@ class OpenAIShieldAIProvider(ShieldAIProvider):
         )
         self._session: aiohttp.ClientSession | None = None
         self._semaphore = asyncio.Semaphore(DEFAULT_SHIELD_AI_CONCURRENCY)
-        invalid_override_note = ""
-        if self.single_model_override_raw and self.single_model_override is None:
-            invalid_override_note = f", ignored_single_model_override={self.single_model_override_raw}"
+        self.ignored_model_settings = tuple(
+            name
+            for name, invalid in (
+                ("SHIELD_AI_MODEL", bool(self.single_model_override_raw and self.single_model_override is None)),
+                ("SHIELD_AI_FAST_MODEL", invalid_fast_model),
+                ("SHIELD_AI_COMPLEX_MODEL", invalid_complex_model),
+                ("SHIELD_AI_TOP_MODEL", invalid_top_model),
+            )
+            if invalid
+        )
+        invalid_settings_note = ""
+        if self.ignored_model_settings:
+            invalid_settings_note = f", ignored_invalid_model_settings={','.join(self.ignored_model_settings)}"
         print(
             "Shield AI init: "
             f"provider={OPENAI_PROVIDER_NAME.lower()}, "
@@ -366,7 +383,7 @@ class OpenAIShieldAIProvider(ShieldAIProvider):
             f"top_model={self.top_model}, "
             f"top_tier_enabled={'yes' if self.top_tier_enabled else 'no'}, "
             f"single_model_override={self.single_model_override or 'none'}"
-            f"{invalid_override_note}, "
+            f"{invalid_settings_note}, "
             f"timeout_seconds={self.timeout_seconds}, "
             f"max_chars={self.max_chars}, "
             f"support_default_guild_id={SHIELD_AI_SUPPORT_GUILD_ID}"
@@ -375,9 +392,9 @@ class OpenAIShieldAIProvider(ShieldAIProvider):
     def diagnostics(self) -> dict[str, Any]:
         available = bool(self.api_key)
         status = "Ready." if available else "OpenAI API key is not configured."
-        if self.single_model_override_raw and self.single_model_override is None:
-            status += " Invalid SHIELD_AI_MODEL override was ignored."
-        routing_strategy = "single_model_override" if self.single_model_override else "two_tier_with_dormant_top"
+        if self.ignored_model_settings:
+            status += f" Ignored invalid model settings: {', '.join(self.ignored_model_settings)}."
+        routing_strategy = "single_model_override" if self.single_model_override else ("routed_fast_complex_frontier" if self.top_tier_enabled else "routed_fast_complex")
         return {
             "provider": OPENAI_PROVIDER_NAME,
             "available": available,
@@ -385,6 +402,7 @@ class OpenAIShieldAIProvider(ShieldAIProvider):
             "model": self.single_model_override or self.fast_model,
             "routing_strategy": routing_strategy,
             "single_model_override": bool(self.single_model_override),
+            "ignored_model_settings": list(self.ignored_model_settings),
             "fast_model": self.fast_model,
             "complex_model": self.complex_model,
             "top_model": self.top_model,

@@ -864,8 +864,8 @@ class AdminCogSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(ok)
 
         embed = await self.cog.build_panel_embed(self.guild.id, "verification")
-        current_rule = next(field for field in embed.fields if field.name == "Current Rule")
-        target = next(field for field in embed.fields if field.name == "Deadline Path")
+        current_rule = next(field for field in embed.fields if field.name == "Current Policy")
+        target = next(field for field in embed.fields if field.name == "Deadline Experience")
 
         self.assertIn("Members are considered verified only if they HAVE <@&80>.", current_rule.value)
         self.assertIn("Users WITHOUT <@&80> are treated as unverified.", current_rule.value)
@@ -892,7 +892,7 @@ class AdminCogSmokeTests(unittest.IsolatedAsyncioTestCase):
 
         embed = await self.cog.build_panel_embed(self.guild.id, "verification")
         review = next(field for field in embed.fields if field.name == "Please Review Carefully")
-        target = next(field for field in embed.fields if field.name == "Deadline Path")
+        target = next(field for field in embed.fields if field.name == "Deadline Experience")
 
         self.assertIn("sounds like an unverified-state role", review.value)
         self.assertIn("users WITH <@&81> should be warned and kicked", review.value)
@@ -914,8 +914,8 @@ class AdminCogSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(ok)
 
         embed = await self.cog.build_panel_embed(self.guild.id, "verification")
-        current_rule = next(field for field in embed.fields if field.name == "Current Rule")
-        target = next(field for field in embed.fields if field.name == "Deadline Path")
+        current_rule = next(field for field in embed.fields if field.name == "Current Policy")
+        target = next(field for field in embed.fields if field.name == "Deadline Experience")
 
         self.assertIn("Deadline action: **Moderator review**", current_rule.value)
         self.assertIn("sent for moderator review after 1 week", target.value)
@@ -1062,6 +1062,9 @@ class AdminCogSmokeTests(unittest.IsolatedAsyncioTestCase):
                 "Logs",
                 "Templates",
                 "Refresh",
+                "Edit Follow-up",
+                "Edit Verification Policy",
+                "Edit Logs",
                 "Open Sync Review",
                 "Run Permission Check",
             ],
@@ -1153,6 +1156,22 @@ class AdminCogSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(sync_interaction.followup_calls)
         self.assertIsInstance(sync_interaction._last_followup_message.view, VerificationSyncView)
         self.assertEqual(sync_interaction._last_followup_message.embed.title, "Verification Sync Review")
+
+    async def test_admin_panel_overview_quick_config_buttons_open_direct_editors(self):
+        view = AdminPanelView(self.cog, guild_id=self.guild.id, author_id=1)
+        message = await self._panel_message(view)
+
+        followup_interaction = self._view_interaction(message=message)
+        await self._button(view, "Edit Follow-up").callback(followup_interaction)
+        self.assertIsInstance(followup_interaction._last_followup_message.view, FollowupEditorView)
+
+        verification_interaction = self._view_interaction(message=message)
+        await self._button(view, "Edit Verification Policy").callback(verification_interaction)
+        self.assertIsInstance(verification_interaction._last_followup_message.view, VerificationPolicyEditorView)
+
+        logs_interaction = self._view_interaction(message=message)
+        await self._button(view, "Edit Logs").callback(logs_interaction)
+        self.assertIsInstance(logs_interaction._last_followup_message.view, LogsEditorView)
 
     async def test_followup_panel_editor_updates_role_and_parent_panel(self):
         panel = AdminPanelView(self.cog, guild_id=self.guild.id, author_id=1, section="followup")

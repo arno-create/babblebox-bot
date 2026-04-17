@@ -289,8 +289,9 @@ class FakeAIProvider:
             "available": self._available,
             "configured": self._available,
             "model": "gpt-5.4-nano" if self._available else None,
-            "routing_strategy": "two_tier_with_dormant_top",
+            "routing_strategy": "routed_fast_complex",
             "single_model_override": False,
+            "ignored_model_settings": [],
             "fast_model": "gpt-5.4-nano" if self._available else None,
             "complex_model": "gpt-5.4-mini" if self._available else None,
             "top_model": "gpt-5.4" if self._available else None,
@@ -4095,6 +4096,33 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(status["enabled"])
         self.assertEqual(status["policy_source"], "ordinary_global")
         self.assertEqual(status["allowed_models"], ["gpt-5.4-nano"])
+
+    async def test_ai_status_reports_log_channel_blocker_when_policy_and_provider_are_ready(self):
+        self.service.ai_provider = FakeAIProvider(available=True)
+        ok, _ = await self.service.set_module_enabled(SHIELD_AI_ALLOWED_GUILD_ID, True)
+        self.assertTrue(ok)
+
+        status = self.service.get_ai_status(SHIELD_AI_ALLOWED_GUILD_ID)
+
+        self.assertFalse(status["ready_for_review"])
+        self.assertIn("log channel", status["status"].lower())
+        self.assertIn("delivery lane", status["setup_blockers"][0].lower())
+
+    async def test_ai_status_reports_ready_once_local_delivery_lane_is_configured(self):
+        self.service.ai_provider = FakeAIProvider(available=True)
+        log_channel = FakeChannel(99, name="shield-log")
+        self.bot.register_channel(log_channel)
+        ok, _ = await self.service.set_module_enabled(SHIELD_AI_ALLOWED_GUILD_ID, True)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_log_channel(SHIELD_AI_ALLOWED_GUILD_ID, log_channel.id)
+        self.assertTrue(ok)
+
+        status = self.service.get_ai_status(SHIELD_AI_ALLOWED_GUILD_ID)
+
+        self.assertTrue(status["ready_for_review"])
+        self.assertEqual(status["status"], "Ready for second-pass review.")
+        self.assertEqual(status["setup_blockers"], [])
+        self.assertEqual(status["routing_strategy"], "routed_fast_complex")
 
     async def test_public_ai_config_only_changes_scope(self):
         ok, message = await self.service.set_ai_config(10, enabled=True)

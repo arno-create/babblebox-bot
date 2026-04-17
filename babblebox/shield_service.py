@@ -2126,7 +2126,16 @@ class ShieldService:
         policy = self.resolve_ai_access_policy(guild_id)
         diagnostics = self.ai_provider.diagnostics()
         enabled_packs = [pack for pack in config.get("ai_enabled_packs", []) if pack in AI_REVIEW_PACK_SET]
-        status_message = diagnostics["status"]
+        provider_status = str(diagnostics.get("status") or "Unavailable.")
+        setup_blockers: list[str] = []
+        if policy.enabled and diagnostics["available"]:
+            if not bool(config.get("module_enabled")):
+                setup_blockers.append("Shield live moderation is off.")
+            if config.get("log_channel_id") is None:
+                setup_blockers.append("Set a Shield log channel so AI-enriched alerts have a delivery lane.")
+            if not enabled_packs:
+                setup_blockers.append("Select at least one Shield pack for AI review.")
+        status_message = provider_status
         if not policy.enabled:
             if policy.support_default:
                 status_message = "AI review is disabled for the support server by owner override."
@@ -2136,6 +2145,8 @@ class ShieldService:
                 status_message = "AI review is off for ordinary guilds until the owner enables it."
         elif not diagnostics["available"]:
             status_message = "AI review is enabled by policy but the provider is not configured."
+        elif setup_blockers:
+            status_message = setup_blockers[0] if len(setup_blockers) == 1 else "AI review is enabled by policy, but local Shield setup is incomplete."
         else:
             status_message = "Ready for second-pass review."
         return {
@@ -2152,9 +2163,11 @@ class ShieldService:
             "min_confidence": config.get("ai_min_confidence", "high"),
             "provider": diagnostics.get("provider"),
             "provider_available": bool(diagnostics.get("available")),
+            "provider_status": provider_status,
             "model": diagnostics.get("model"),
             "routing_strategy": diagnostics.get("routing_strategy"),
             "single_model_override": bool(diagnostics.get("single_model_override")),
+            "ignored_model_settings": list(diagnostics.get("ignored_model_settings") or []),
             "fast_model": diagnostics.get("fast_model"),
             "complex_model": diagnostics.get("complex_model"),
             "top_model": diagnostics.get("top_model"),
@@ -2162,6 +2175,8 @@ class ShieldService:
             "timeout_seconds": diagnostics.get("timeout_seconds"),
             "max_chars": diagnostics.get("max_chars"),
             "status": status_message,
+            "setup_blockers": setup_blockers,
+            "ready_for_review": policy.enabled and bool(diagnostics.get("available")) and not setup_blockers,
             "updated_by": policy.updated_by,
             "updated_at": policy.updated_at,
         }

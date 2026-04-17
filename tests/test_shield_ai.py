@@ -136,6 +136,15 @@ class ShieldAITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(route.target_tier, "frontier")
         self.assertEqual(route.selected_model, "gpt-5.4")
 
+    def test_diagnostics_report_frontier_capable_routing_when_top_tier_is_enabled(self):
+        with patch.dict(os.environ, {"SHIELD_AI_ENABLE_TOP_TIER": "true"}, clear=False):
+            provider = shield_ai.OpenAIShieldAIProvider()
+
+        diagnostics = provider.diagnostics()
+
+        self.assertEqual(diagnostics["routing_strategy"], "routed_fast_complex_frontier")
+        self.assertTrue(diagnostics["top_tier_enabled"])
+
     def test_policy_cap_uses_best_allowed_lower_model(self):
         provider = shield_ai.OpenAIShieldAIProvider()
 
@@ -172,6 +181,30 @@ class ShieldAITests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(diagnostics["single_model_override"])
         self.assertEqual(diagnostics["model"], "gpt-5.4-nano")
         self.assertIn("ignored", diagnostics["status"].lower())
+        self.assertEqual(diagnostics["ignored_model_settings"], ["SHIELD_AI_MODEL"])
+
+    def test_invalid_tier_model_settings_are_ignored_and_reported_truthfully(self):
+        with patch.dict(
+            os.environ,
+            {
+                "SHIELD_AI_FAST_MODEL": "gpt-4.1-mini",
+                "SHIELD_AI_COMPLEX_MODEL": "bad-model",
+                "SHIELD_AI_TOP_MODEL": "legacy-full",
+            },
+            clear=False,
+        ):
+            provider = shield_ai.OpenAIShieldAIProvider()
+
+        diagnostics = provider.diagnostics()
+
+        self.assertEqual(diagnostics["fast_model"], "gpt-5.4-nano")
+        self.assertEqual(diagnostics["complex_model"], "gpt-5.4-mini")
+        self.assertEqual(diagnostics["top_model"], "gpt-5.4")
+        self.assertEqual(
+            diagnostics["ignored_model_settings"],
+            ["SHIELD_AI_FAST_MODEL", "SHIELD_AI_COMPLEX_MODEL", "SHIELD_AI_TOP_MODEL"],
+        )
+        self.assertIn("SHIELD_AI_FAST_MODEL", diagnostics["status"])
 
     async def test_retryable_failure_falls_back_once(self):
         with patch.dict(os.environ, {"OPENAI_API_KEY": "test"}, clear=False):

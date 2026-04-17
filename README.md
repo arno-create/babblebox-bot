@@ -145,7 +145,7 @@ Babblebox is intentionally compact:
 - bot and webhook scam handling stays conservative by default unless the evidence is clearly dangerous
 - optional AI-assisted second-pass review for moderator context only
 - Shield AI stays live-message-only; AFK, reminders, watch keywords, and Confessions feature checks remain local-first and AI-free
-- support server AI is on by default with routed `gpt-5.4-nano`, `gpt-5.4-mini`, and `gpt-5.4`, and Shield diagnostics report the actual model tier used
+- support server AI is on by default with routed `gpt-5.4-nano`, `gpt-5.4-mini`, and `gpt-5.4`, and Shield diagnostics report the resolved routing lane plus local readiness
 - ordinary guild AI stays off by default until the owner enables it globally or per guild
 - `/shield ai` only configures review scope; owner-only private policy controls real AI access and allowed models
 - log-first defaults with global `adaptive` vs `compact` delivery, `smart` vs `never` ping policy, and bounded per-pack delivery overrides
@@ -359,7 +359,7 @@ The default lock notice is configurable, one-off notice overrides stay optional 
 
 ### Admin Lifecycle
 
-Admin lifecycle commands stay private/admin-facing. `/admin panel` is now the interactive admin control surface: section buttons open focused editors for follow-up, verification policy/timing/help path, exclusions, logs, and templates directly from the UI, while `/admin permissions` stays the truthful diagnostics lane and `/admin sync` stays the one-time catch-up tool.
+Admin lifecycle commands stay private/admin-facing. `/admin panel` is now the interactive admin control surface: its overview quick-config row jumps straight into follow-up, verification policy, and logs, section buttons still open focused editors for follow-up, verification policy/timing/help path, exclusions, logs, and templates directly from the UI, `/admin permissions` stays the truthful diagnostics lane, and `/admin sync` stays the one-time catch-up tool.
 Slash is recommended for the heavier config flows here. Prefix stays positional, so the examples below show the safest compact forms.
 
 | Slash | Prefix | Purpose |

@@ -56,6 +56,14 @@ class ShieldPanelUiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(embed.title, "Shield Rules")
         self.assertTrue(any(field.name == "Anti-Spam Details" for field in embed.fields))
 
+    async def test_overview_protection_packs_keep_full_gif_summary_without_truncation(self):
+        embed = self.cog._overview_embed(10)
+        protection = next(field for field in embed.fields if field.name == "Protection Packs")
+
+        self._assert_embed_valid(embed)
+        self.assertIn("Delete lane removes the matched GIF burst; collective pressure trims GIFs only.", protection.value)
+        self.assertFalse(protection.value.endswith("..."))
+
     async def test_rules_and_scope_embeds_stay_within_limits_for_dense_config(self):
         dense = deepcopy(self.cog.service.get_config(10))
         dense["allow_domains"] = [f"example{i}.com" for i in range(25)]
