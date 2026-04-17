@@ -374,7 +374,7 @@ Slash is recommended for the heavier config flows here. Prefix stays positional,
 | `/admin permissions` | `bb!admin permissions` | Diagnose missing bot permissions and the affected feature lanes |
 | `/admin sync` | `bb!admin sync` | One-time catch-up scan for current unverified members |
 
-Follow-up and verification stay batch-first and review-lane focused: routine sweeps emit grouped summaries, review mode uses one persistent queue message per lane, startup reconciliation resumes quietly, and Babblebox does not post public channel reactions or reply callouts for weak evidence. The admin surface is intentionally narrower now: the panel is the premium interactive path for common changes, commands remain precise fallbacks, and the whole lane stays limited to follow-up, verification, exclusions, logs, templates, permission diagnostics, and sync.
+Follow-up and verification stay batch-first and review-lane focused: routine sweeps emit grouped summaries, review mode uses one persistent shared queue message per lane, startup reconciliation resumes quietly, and Babblebox does not post public channel reactions or reply callouts for weak evidence. Verification review now uses `Kick All Pending`, `Delay All 24h`, `Ignore All`, plus a member picker for one-off actions. `Ignore Forever` keeps that member out of verification cleanup until they verify, become exempt, or leave, and auto-kick attempts the final removal DM before kicking while logging whether delivery actually succeeded. The admin surface is intentionally narrower now: the panel is the premium interactive path for common changes, commands remain precise fallbacks, and the whole lane stays limited to follow-up, verification, exclusions, logs, templates, permission diagnostics, and sync.
 
 ### Daily Arcade
 
@@ -603,8 +603,8 @@ Stored data is intentionally small:
 - one shared config row per guild
 - short-lived ban-return candidates with a 30-day purge window
 - active follow-up role rows only while Babblebox still manages that follow-up
-- pending verification rows only while someone is still unverified
-- one shared verification review queue row only while overdue review backlog exists
+- active or ignored verification rows only while someone is still under the current verification rule
+- one shared verification review queue row only while overdue active review backlog exists
 - short-lived grouped verification notification snapshots only while restart-safe suppression state matters
 
 Not stored:

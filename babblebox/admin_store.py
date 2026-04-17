@@ -265,6 +265,8 @@ def normalize_verification_state(payload: Any) -> dict[str, Any] | None:
     last_result_at = _serialize_datetime(_parse_datetime(payload.get("last_result_at")))
     last_notified_code = _clean_optional_text(payload.get("last_notified_code"))
     last_notified_at = _serialize_datetime(_parse_datetime(payload.get("last_notified_at")))
+    ignored_at = _serialize_datetime(_parse_datetime(payload.get("ignored_at")))
+    ignored_by_user_id = payload.get("ignored_by_user_id")
     if not all(isinstance(value, int) and value > 0 for value in (guild_id, user_id)):
         return None
     if joined_at is None or warning_at is None or kick_at is None:
@@ -285,6 +287,8 @@ def normalize_verification_state(payload: Any) -> dict[str, Any] | None:
         "last_result_at": last_result_at,
         "last_notified_code": last_notified_code,
         "last_notified_at": last_notified_at,
+        "ignored_at": ignored_at,
+        "ignored_by_user_id": ignored_by_user_id if isinstance(ignored_by_user_id, int) and ignored_by_user_id > 0 else None,
     }
 
 
@@ -551,7 +555,11 @@ class _MemoryAdminStore(_BaseAdminStore):
         return rows
 
     async def list_verification_review_views(self) -> list[dict[str, Any]]:
-        rows = [deepcopy(record) for record in self.verification_states.values() if record.get("review_pending") and record.get("review_message_id") is not None]
+        rows = [
+            deepcopy(record)
+            for record in self.verification_states.values()
+            if record.get("ignored_at") is None and record.get("review_pending") and record.get("review_message_id") is not None
+        ]
         rows.sort(key=lambda record: (int(record.get("guild_id", 0) or 0), record.get("joined_at") or "", int(record.get("user_id", 0) or 0)))
         return rows
 
@@ -633,6 +641,8 @@ class _MemoryAdminStore(_BaseAdminStore):
     async def list_due_verification_warnings(self, now: datetime, *, limit: int = 100) -> list[dict[str, Any]]:
         rows = []
         for record in self.verification_states.values():
+            if record.get("ignored_at") is not None:
+                continue
             if record.get("warning_sent_at") is not None:
                 continue
             warning_at = _parse_datetime(record.get("warning_at"))
@@ -645,6 +655,8 @@ class _MemoryAdminStore(_BaseAdminStore):
     async def list_due_verification_kicks(self, now: datetime, *, limit: int = 100) -> list[dict[str, Any]]:
         rows = []
         for record in self.verification_states.values():
+            if record.get("ignored_at") is not None:
+                continue
             kick_at = _parse_datetime(record.get("kick_at"))
             if kick_at is None or kick_at > now:
                 continue
@@ -659,7 +671,11 @@ class _MemoryAdminStore(_BaseAdminStore):
 
     async def fetch_guild_counts(self, guild_id: int) -> dict[str, int]:
         followup_rows = [record for record in self.followups.values() if record.get("guild_id") == guild_id]
-        verification_rows = [record for record in self.verification_states.values() if record.get("guild_id") == guild_id]
+        verification_rows = [
+            record
+            for record in self.verification_states.values()
+            if record.get("guild_id") == guild_id and record.get("ignored_at") is None
+        ]
         return {
             "ban_candidates": sum(1 for record in self.ban_candidates.values() if record.get("guild_id") == guild_id),
             "active_followups": len(followup_rows),
@@ -739,6 +755,8 @@ def _verification_from_row(row) -> dict[str, Any] | None:
             "last_result_at": row.get("last_result_at"),
             "last_notified_code": row.get("last_notified_code"),
             "last_notified_at": row.get("last_notified_at"),
+            "ignored_at": row.get("ignored_at"),
+            "ignored_by_user_id": row.get("ignored_by_user_id"),
         }
     )
 
@@ -843,7 +861,7 @@ class _PostgresAdminStore(_BaseAdminStore):
             "updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc', now()))",
             "CREATE TABLE IF NOT EXISTS admin_ban_return_candidates (guild_id BIGINT NOT NULL, user_id BIGINT NOT NULL, banned_at TIMESTAMPTZ NOT NULL, expires_at TIMESTAMPTZ NOT NULL, PRIMARY KEY (guild_id, user_id))",
             "CREATE TABLE IF NOT EXISTS admin_followup_roles (guild_id BIGINT NOT NULL, user_id BIGINT NOT NULL, role_id BIGINT NOT NULL, assigned_at TIMESTAMPTZ NOT NULL, due_at TIMESTAMPTZ NULL, mode TEXT NOT NULL, review_pending BOOLEAN NOT NULL DEFAULT FALSE, review_version INTEGER NOT NULL DEFAULT 0, review_message_channel_id BIGINT NULL, review_message_id BIGINT NULL, PRIMARY KEY (guild_id, user_id))",
-            "CREATE TABLE IF NOT EXISTS admin_verification_states (guild_id BIGINT NOT NULL, user_id BIGINT NOT NULL, joined_at TIMESTAMPTZ NOT NULL, warning_at TIMESTAMPTZ NOT NULL, kick_at TIMESTAMPTZ NOT NULL, warning_sent_at TIMESTAMPTZ NULL, extension_count SMALLINT NOT NULL DEFAULT 0, review_pending BOOLEAN NOT NULL DEFAULT FALSE, review_version INTEGER NOT NULL DEFAULT 0, review_message_channel_id BIGINT NULL, review_message_id BIGINT NULL, last_result_code TEXT NULL, last_result_at TIMESTAMPTZ NULL, last_notified_code TEXT NULL, last_notified_at TIMESTAMPTZ NULL, PRIMARY KEY (guild_id, user_id))",
+            "CREATE TABLE IF NOT EXISTS admin_verification_states (guild_id BIGINT NOT NULL, user_id BIGINT NOT NULL, joined_at TIMESTAMPTZ NOT NULL, warning_at TIMESTAMPTZ NOT NULL, kick_at TIMESTAMPTZ NOT NULL, warning_sent_at TIMESTAMPTZ NULL, extension_count SMALLINT NOT NULL DEFAULT 0, review_pending BOOLEAN NOT NULL DEFAULT FALSE, review_version INTEGER NOT NULL DEFAULT 0, review_message_channel_id BIGINT NULL, review_message_id BIGINT NULL, last_result_code TEXT NULL, last_result_at TIMESTAMPTZ NULL, last_notified_code TEXT NULL, last_notified_at TIMESTAMPTZ NULL, ignored_at TIMESTAMPTZ NULL, ignored_by_user_id BIGINT NULL, PRIMARY KEY (guild_id, user_id))",
             "CREATE TABLE IF NOT EXISTS admin_verification_review_queues (guild_id BIGINT PRIMARY KEY, channel_id BIGINT NULL, message_id BIGINT NULL, updated_at TIMESTAMPTZ NULL)",
             "CREATE TABLE IF NOT EXISTS admin_verification_notification_snapshots (guild_id BIGINT NOT NULL, run_context TEXT NOT NULL, operation TEXT NOT NULL, outcome TEXT NOT NULL, reason_code TEXT NOT NULL, signature TEXT NULL, notified_at TIMESTAMPTZ NULL, PRIMARY KEY (guild_id, run_context, operation, outcome, reason_code))",
             "CREATE TABLE IF NOT EXISTS admin_channel_locks (guild_id BIGINT NOT NULL, channel_id BIGINT NOT NULL, actor_id BIGINT NULL, created_at TIMESTAMPTZ NOT NULL, due_at TIMESTAMPTZ NULL, category_id BIGINT NULL, permissions_synced BOOLEAN NOT NULL DEFAULT FALSE, marker_only BOOLEAN NOT NULL DEFAULT FALSE, locked_permissions JSONB NOT NULL DEFAULT '[]'::jsonb, original_permissions JSONB NOT NULL DEFAULT '{}'::jsonb, PRIMARY KEY (guild_id, channel_id))",
@@ -888,6 +906,8 @@ class _PostgresAdminStore(_BaseAdminStore):
             "ALTER TABLE admin_verification_states ADD COLUMN IF NOT EXISTS last_result_at TIMESTAMPTZ NULL",
             "ALTER TABLE admin_verification_states ADD COLUMN IF NOT EXISTS last_notified_code TEXT NULL",
             "ALTER TABLE admin_verification_states ADD COLUMN IF NOT EXISTS last_notified_at TIMESTAMPTZ NULL",
+            "ALTER TABLE admin_verification_states ADD COLUMN IF NOT EXISTS ignored_at TIMESTAMPTZ NULL",
+            "ALTER TABLE admin_verification_states ADD COLUMN IF NOT EXISTS ignored_by_user_id BIGINT NULL",
             "ALTER TABLE admin_channel_locks ADD COLUMN IF NOT EXISTS actor_id BIGINT NULL",
             "ALTER TABLE admin_channel_locks ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc', now())",
             "ALTER TABLE admin_channel_locks ADD COLUMN IF NOT EXISTS due_at TIMESTAMPTZ NULL",
@@ -943,6 +963,7 @@ class _PostgresAdminStore(_BaseAdminStore):
             "CREATE INDEX IF NOT EXISTS ix_admin_verification_guild ON admin_verification_states (guild_id)",
             "CREATE INDEX IF NOT EXISTS ix_admin_verification_review_pending ON admin_verification_states (review_pending, review_message_id)",
             "CREATE INDEX IF NOT EXISTS ix_admin_verification_last_notified ON admin_verification_states (guild_id, last_notified_at)",
+            "CREATE INDEX IF NOT EXISTS ix_admin_verification_ignored ON admin_verification_states (guild_id, ignored_at)",
             "CREATE INDEX IF NOT EXISTS ix_admin_verification_snapshot_notified ON admin_verification_notification_snapshots (guild_id, notified_at)",
             "CREATE INDEX IF NOT EXISTS ix_admin_channel_locks_due ON admin_channel_locks (due_at)",
         ]
@@ -1112,9 +1133,10 @@ class _PostgresAdminStore(_BaseAdminStore):
             "warning_sent_at",
             "last_result_at",
             "last_notified_at",
+            "ignored_at",
         )
         async with self.pool.acquire() as conn:
-            await conn.execute("INSERT INTO admin_verification_states (guild_id, user_id, joined_at, warning_at, kick_at, warning_sent_at, extension_count, review_pending, review_version, review_message_channel_id, review_message_id, last_result_code, last_result_at, last_notified_code, last_notified_at) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15) ON CONFLICT (guild_id, user_id) DO UPDATE SET joined_at = EXCLUDED.joined_at, warning_at = EXCLUDED.warning_at, kick_at = EXCLUDED.kick_at, warning_sent_at = EXCLUDED.warning_sent_at, extension_count = EXCLUDED.extension_count, review_pending = EXCLUDED.review_pending, review_version = EXCLUDED.review_version, review_message_channel_id = EXCLUDED.review_message_channel_id, review_message_id = EXCLUDED.review_message_id, last_result_code = EXCLUDED.last_result_code, last_result_at = EXCLUDED.last_result_at, last_notified_code = EXCLUDED.last_notified_code, last_notified_at = EXCLUDED.last_notified_at", coerced["guild_id"], coerced["user_id"], coerced["joined_at"], coerced["warning_at"], coerced["kick_at"], coerced["warning_sent_at"], coerced["extension_count"], coerced["review_pending"], coerced["review_version"], coerced["review_message_channel_id"], coerced["review_message_id"], coerced["last_result_code"], coerced["last_result_at"], coerced["last_notified_code"], coerced["last_notified_at"])
+            await conn.execute("INSERT INTO admin_verification_states (guild_id, user_id, joined_at, warning_at, kick_at, warning_sent_at, extension_count, review_pending, review_version, review_message_channel_id, review_message_id, last_result_code, last_result_at, last_notified_code, last_notified_at, ignored_at, ignored_by_user_id) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17) ON CONFLICT (guild_id, user_id) DO UPDATE SET joined_at = EXCLUDED.joined_at, warning_at = EXCLUDED.warning_at, kick_at = EXCLUDED.kick_at, warning_sent_at = EXCLUDED.warning_sent_at, extension_count = EXCLUDED.extension_count, review_pending = EXCLUDED.review_pending, review_version = EXCLUDED.review_version, review_message_channel_id = EXCLUDED.review_message_channel_id, review_message_id = EXCLUDED.review_message_id, last_result_code = EXCLUDED.last_result_code, last_result_at = EXCLUDED.last_result_at, last_notified_code = EXCLUDED.last_notified_code, last_notified_at = EXCLUDED.last_notified_at, ignored_at = EXCLUDED.ignored_at, ignored_by_user_id = EXCLUDED.ignored_by_user_id", coerced["guild_id"], coerced["user_id"], coerced["joined_at"], coerced["warning_at"], coerced["kick_at"], coerced["warning_sent_at"], coerced["extension_count"], coerced["review_pending"], coerced["review_version"], coerced["review_message_channel_id"], coerced["review_message_id"], coerced["last_result_code"], coerced["last_result_at"], coerced["last_notified_code"], coerced["last_notified_at"], coerced["ignored_at"], coerced["ignored_by_user_id"])
 
     async def fetch_verification_state(self, guild_id: int, user_id: int) -> dict[str, Any] | None:
         async with self.pool.acquire() as conn:
@@ -1127,12 +1149,12 @@ class _PostgresAdminStore(_BaseAdminStore):
 
     async def list_due_verification_warnings(self, now: datetime, *, limit: int = 100) -> list[dict[str, Any]]:
         async with self.pool.acquire() as conn:
-            rows = await conn.fetch("SELECT * FROM admin_verification_states WHERE warning_sent_at IS NULL AND warning_at <= $1 ORDER BY warning_at ASC, user_id ASC LIMIT $2", now, limit)
+            rows = await conn.fetch("SELECT * FROM admin_verification_states WHERE ignored_at IS NULL AND warning_sent_at IS NULL AND warning_at <= $1 ORDER BY warning_at ASC, user_id ASC LIMIT $2", now, limit)
         return [record for row in rows if (record := _verification_from_row(row)) is not None]
 
     async def list_due_verification_kicks(self, now: datetime, *, limit: int = 100) -> list[dict[str, Any]]:
         async with self.pool.acquire() as conn:
-            rows = await conn.fetch("SELECT * FROM admin_verification_states WHERE kick_at <= $1 ORDER BY kick_at ASC, user_id ASC LIMIT $2", now, limit)
+            rows = await conn.fetch("SELECT * FROM admin_verification_states WHERE ignored_at IS NULL AND kick_at <= $1 ORDER BY kick_at ASC, user_id ASC LIMIT $2", now, limit)
         return [record for row in rows if (record := _verification_from_row(row)) is not None]
 
     async def list_verification_states_for_guild(self, guild_id: int) -> list[dict[str, Any]]:
@@ -1142,7 +1164,7 @@ class _PostgresAdminStore(_BaseAdminStore):
 
     async def fetch_guild_counts(self, guild_id: int) -> dict[str, int]:
         async with self.pool.acquire() as conn:
-            row = await conn.fetchrow("SELECT (SELECT COUNT(*) FROM admin_ban_return_candidates WHERE guild_id = $1) AS ban_candidates, (SELECT COUNT(*) FROM admin_followup_roles WHERE guild_id = $1) AS active_followups, (SELECT COUNT(*) FROM admin_followup_roles WHERE guild_id = $1 AND review_pending = TRUE) AS pending_reviews, (SELECT COUNT(*) FROM admin_verification_states WHERE guild_id = $1) AS verification_pending, (SELECT COUNT(*) FROM admin_verification_states WHERE guild_id = $1 AND warning_sent_at IS NOT NULL) AS verification_warned, (SELECT COUNT(*) FROM admin_channel_locks WHERE guild_id = $1) AS active_channel_locks", guild_id)
+            row = await conn.fetchrow("SELECT (SELECT COUNT(*) FROM admin_ban_return_candidates WHERE guild_id = $1) AS ban_candidates, (SELECT COUNT(*) FROM admin_followup_roles WHERE guild_id = $1) AS active_followups, (SELECT COUNT(*) FROM admin_followup_roles WHERE guild_id = $1 AND review_pending = TRUE) AS pending_reviews, (SELECT COUNT(*) FROM admin_verification_states WHERE guild_id = $1 AND ignored_at IS NULL) AS verification_pending, (SELECT COUNT(*) FROM admin_verification_states WHERE guild_id = $1 AND ignored_at IS NULL AND warning_sent_at IS NOT NULL) AS verification_warned, (SELECT COUNT(*) FROM admin_channel_locks WHERE guild_id = $1) AS active_channel_locks", guild_id)
         return {"ban_candidates": int(row["ban_candidates"] or 0), "active_followups": int(row["active_followups"] or 0), "pending_reviews": int(row["pending_reviews"] or 0), "verification_pending": int(row["verification_pending"] or 0), "verification_warned": int(row["verification_warned"] or 0), "active_channel_locks": int(row["active_channel_locks"] or 0)}
 
 

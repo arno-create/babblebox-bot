@@ -48,6 +48,7 @@ VERIFICATION_SYNC_RUNTIME_ISSUE_LIMIT = 5
 GROUPED_MEMBER_PREVIEW_LIMIT = 3
 VERIFICATION_NOTIFICATION_SUPPRESSION_SECONDS = 24 * 3600
 VERIFICATION_QUEUE_PREVIEW_LIMIT = 5
+VERIFICATION_QUEUE_SELECT_LIMIT = 25
 VERIFICATION_SUMMARY_LINE_LIMIT = 8
 CONFIG_UNCHANGED = object()
 VERIFICATION_QUEUE_RELEVANT_CONFIG_FIELDS = frozenset(
@@ -248,6 +249,22 @@ class VerificationSweepBatch:
     grouped_by_guild: dict[int, dict[VerificationBatchKey, VerificationBatchGroup]] = field(default_factory=dict)
     counts_by_guild: dict[int, dict[str, int]] = field(default_factory=dict)
     queue_refresh_guild_ids: set[int] = field(default_factory=set)
+
+
+@dataclass(frozen=True)
+class VerificationMemberResolution:
+    state: str
+    member: discord.Member | None = None
+    detail: str | None = None
+
+
+@dataclass(frozen=True)
+class VerificationReviewActionResult:
+    status: str
+    user_id: int
+    mention: str
+    message: str
+    dm_sent: bool | None = None
 
 
 def _compile_config(raw: dict[str, Any]) -> CompiledAdminConfig:
@@ -1552,6 +1569,63 @@ class AdminService:
                 continue
             yield member
 
+    def _verification_member_mention(self, user_id: int) -> str:
+        return f"<@{user_id}>"
+
+    def _is_ignored_verification_record(self, record: dict[str, Any] | None) -> bool:
+        return bool(record and record.get("ignored_at"))
+
+    def _clear_verification_ignore(self, record: dict[str, Any]) -> dict[str, Any]:
+        updated = dict(record)
+        updated["ignored_at"] = None
+        updated["ignored_by_user_id"] = None
+        return updated
+
+    def _ignore_verification_record(self, record: dict[str, Any], *, actor_id: int, now: datetime) -> dict[str, Any]:
+        updated = dict(record)
+        updated["ignored_at"] = serialize_datetime(now)
+        updated["ignored_by_user_id"] = actor_id
+        return updated
+
+    def verification_review_snapshot_signature(self, pending_rows: list[dict[str, Any]]) -> str:
+        joined = "|".join(
+            f"{int(row.get('user_id', 0) or 0)}:{int(row.get('review_version', 0) or 0)}"
+            for row in pending_rows
+        )
+        return hashlib.sha1(joined.encode("ascii"), usedforsecurity=False).hexdigest()[:16] if joined else "empty"
+
+    async def _resolve_verification_member(self, guild: discord.Guild, user_id: int) -> VerificationMemberResolution:
+        member = guild.get_member(user_id)
+        if member is not None:
+            return VerificationMemberResolution("resolved", member=member)
+        fetch_member = getattr(guild, "fetch_member", None)
+        if not callable(fetch_member):
+            return VerificationMemberResolution("missing")
+        try:
+            fetched = await fetch_member(user_id)
+        except discord.NotFound:
+            return VerificationMemberResolution("missing")
+        except discord.Forbidden:
+            return VerificationMemberResolution(
+                "unavailable",
+                detail="Babblebox could not fetch that member from Discord right now because member lookup is forbidden.",
+            )
+        except discord.HTTPException as exc:
+            detail = str(exc).strip() or "Discord rejected the member lookup."
+            return VerificationMemberResolution(
+                "unavailable",
+                detail=f"Babblebox could not fetch that member from Discord right now. {detail}",
+            )
+        except Exception as exc:
+            detail = str(exc).strip() or type(exc).__name__
+            return VerificationMemberResolution(
+                "unavailable",
+                detail=f"Babblebox could not fetch that member from Discord right now. {detail}",
+            )
+        if fetched is None:
+            return VerificationMemberResolution("missing")
+        return VerificationMemberResolution("resolved", member=fetched)
+
     def _collect_grouped_member_log(
         self,
         grouped: dict[GroupedAdminLogKey, list[str]],
@@ -1746,6 +1820,7 @@ class AdminService:
             "target_is_owner": "they are the server owner",
             "discord_rejected_kick": "Discord rejected the kick",
             "bot_member_unavailable": "Babblebox could not resolve its own server member for kicks",
+            "member_lookup_failed": detail or "Babblebox could not refresh the member from Discord right now",
             "verification_rule_ambiguous": detail or "the verification rule could not be evaluated",
             "review_queued": "they were added to the verification review queue",
             "missing_prior_warning": "no prior warning had been recorded",
@@ -2060,6 +2135,8 @@ class AdminService:
             status, _ = self._verification_status(member, compiled)
             existing = existing_rows.get(int(member.id))
             if status == "unverified":
+                if self._is_ignored_verification_record(existing):
+                    continue
                 matched_unverified += 1
                 preview_record = existing
                 if preview_record is None:
@@ -2385,17 +2462,22 @@ class AdminService:
             title="Verification Deadline Review",
             description=(
                 f"{member.mention} reached the verification deadline and still matches the configured unverified rule.\n"
-                "Kick now, delay the deadline by 24 hours, or ignore this deadline for now."
+                "Use the selected-member buttons for this member only. Shared queue buttons still act on the full current queue snapshot."
             ),
             color=ge.EMBED_THEME["warning"],
         )
-        embed.add_field(name="Member", value=f"{ge.display_name_of(member)} (`{member.id}`)", inline=True)
+        embed.add_field(name="Member", value=f"{ge.display_name_of(member)} (`{member.id}`)", inline=False)
         embed.add_field(name="Rule", value=VERIFICATION_LOGIC_LABELS.get(compiled.verification_logic, "Verification rule"), inline=False)
         if kick_at is not None:
             embed.add_field(name="Deadline Reached", value=f"{ge.format_timestamp(kick_at, 'R')} ({ge.format_timestamp(kick_at, 'f')})", inline=False)
         issue = self._kick_issue(guild, member)
         kick_status = issue.detail if issue is not None else "Kick is currently available if permissions and hierarchy stay the same."
         embed.add_field(name="Kick Check", value=kick_status, inline=False)
+        embed.add_field(
+            name="Ignore Forever",
+            value="Ignore keeps this member out of verification cleanup until they verify, become exempt, or leave the server.",
+            inline=False,
+        )
         return ge.style_embed(embed, footer="Babblebox Admin | Verification cleanup")
 
     def build_verification_review_resolution_embed(self, record: dict[str, Any], *, message: str, success: bool) -> discord.Embed:
@@ -2423,31 +2505,51 @@ class AdminService:
     ) -> list[dict[str, Any]]:
         pending: list[dict[str, Any]] = []
         for record in await self.store.list_verification_states_for_guild(guild.id):
-            if not record.get("review_pending"):
+            if self._is_ignored_verification_record(record):
+                if record.get("review_pending"):
+                    await self.store.upsert_verification_state(self._close_verification_review_record(record))
                 continue
-            member = guild.get_member(int(record["user_id"]))
-            if member is None:
-                await self.store.delete_verification_state(guild.id, int(record["user_id"]))
+            if not record.get("review_pending"):
                 continue
             if not compiled.verification_enabled:
                 continue
             if compiled.verification_deadline_action != "review":
                 await self.store.upsert_verification_state(self._close_verification_review_record(record))
                 continue
+            resolution = await self._resolve_verification_member(guild, int(record["user_id"]))
+            if resolution.state == "missing":
+                await self.store.delete_verification_state(guild.id, int(record["user_id"]))
+                continue
+            cleaned = dict(record)
+            if cleaned.get("review_message_channel_id") is not None or cleaned.get("review_message_id") is not None:
+                cleaned["review_message_channel_id"] = None
+                cleaned["review_message_id"] = None
+                await self.store.upsert_verification_state(cleaned)
+            if resolution.state != "resolved" or resolution.member is None:
+                cleaned["_resolved_member"] = None
+                cleaned["_member_mention"] = self._verification_member_mention(int(cleaned["user_id"]))
+                cleaned["_member_label"] = f"<@{cleaned['user_id']}> (`{cleaned['user_id']}`)"
+                cleaned["_kick_issue_detail"] = resolution.detail or "Babblebox could not refresh this member from Discord right now."
+                cleaned["_kick_ready"] = False
+                cleaned["_resolution_state"] = resolution.state
+                pending.append(cleaned)
+                continue
+            member = resolution.member
             status, _ = self._verification_status(member, compiled)
             if status in {"verified", "exempt"}:
                 await self.store.delete_verification_state(guild.id, int(record["user_id"]))
                 continue
             if status != "unverified":
-                await self.store.upsert_verification_state(self._close_verification_review_record(record))
+                await self.store.upsert_verification_state(self._close_verification_review_record(cleaned))
                 continue
-            if record.get("review_message_channel_id") is not None or record.get("review_message_id") is not None:
-                cleaned = dict(record)
-                cleaned["review_message_channel_id"] = None
-                cleaned["review_message_id"] = None
-                await self.store.upsert_verification_state(cleaned)
-                record = cleaned
-            pending.append(record)
+            issue = self._kick_issue(guild, member)
+            cleaned["_resolved_member"] = member
+            cleaned["_member_mention"] = member.mention
+            cleaned["_member_label"] = f"{ge.display_name_of(member)} (`{member.id}`)"
+            cleaned["_kick_issue_detail"] = issue.detail if issue is not None else None
+            cleaned["_kick_ready"] = issue is None
+            cleaned["_resolution_state"] = resolution.state
+            pending.append(cleaned)
         pending.sort(key=self._verification_review_sort_key)
         return pending
 
@@ -2458,66 +2560,100 @@ class AdminService:
         *,
         compiled: CompiledAdminConfig,
         note: str | None = None,
+        focused_row: dict[str, Any] | None = None,
     ) -> discord.Embed:
         embed = discord.Embed(
-            title="Verification Review Queue",
+            title="Verification Cleanup Queue",
             description=(
-                "Overdue verification cases are queued here. The oldest actionable case is shown first."
+                "Top-row buttons apply to every pending member in this current queue snapshot. Use the member picker for a one-off action."
                 if pending_rows
                 else "No pending verification reviews remain."
             ),
             color=ge.EMBED_THEME["warning"],
         )
         embed.add_field(
-            name="Queue",
-            value=f"Pending reviews: **{len(pending_rows)}**",
+            name="Queue Snapshot",
+            value=f"Pending members: **{len(pending_rows)}**",
             inline=False,
         )
         if not pending_rows:
             if note:
                 embed.add_field(name="Last Update", value=note, inline=False)
             return ge.style_embed(embed, footer="Babblebox Admin | Verification cleanup")
-        current = pending_rows[0]
-        member = guild.get_member(int(current["user_id"]))
-        kick_at = deserialize_datetime(current.get("kick_at"))
-        member_label = (
-            f"{ge.display_name_of(member)} (`{member.id}`)"
-            if member is not None
-            else f"<@{current['user_id']}> (`{current['user_id']}`)"
+        ready_count = sum(1 for row in pending_rows if bool(row.get("_kick_ready")))
+        blocked_count = len(pending_rows) - ready_count
+        embed.add_field(
+            name="Batch Actions",
+            value=(
+                "Kick All Pending removes every currently queued member Babblebox can safely kick and leaves blocked cases in the queue.\n"
+                "Delay All 24h pushes every currently queued member back by 24 hours.\n"
+                "Ignore All removes every currently queued member from verification cleanup until they verify, become exempt, or leave.\n"
+                "Refresh re-checks the backlog before you act again."
+            ),
+            inline=False,
         )
-        embed.add_field(name="Current Case", value=member_label, inline=False)
+        embed.add_field(
+            name="Kick Readiness",
+            value=(
+                f"Ready now: **{ready_count}**\n"
+                f"Needs review or lookup retry: **{blocked_count}**"
+            ),
+            inline=False,
+        )
         embed.add_field(
             name="Rule",
             value=VERIFICATION_LOGIC_LABELS.get(compiled.verification_logic, "Verification rule"),
             inline=False,
         )
-        if kick_at is not None:
-            embed.add_field(
-                name="Deadline Reached",
-                value=f"{ge.format_timestamp(kick_at, 'R')} ({ge.format_timestamp(kick_at, 'f')})",
-                inline=False,
-            )
-        if member is not None:
-            issue = self._kick_issue(guild, member)
-            kick_status = issue.detail if issue is not None else "Kick is currently available if permissions and hierarchy stay the same."
-        else:
-            kick_status = "Kick cannot be checked because the member is no longer cached."
-        embed.add_field(name="Kick Check", value=kick_status, inline=False)
         preview_lines: list[str] = []
         for row in pending_rows[:VERIFICATION_QUEUE_PREVIEW_LIMIT]:
             user_id = int(row["user_id"])
-            queued_member = guild.get_member(user_id)
-            mention = queued_member.mention if queued_member is not None else f"<@{user_id}>"
+            mention = str(row.get("_member_mention") or self._verification_member_mention(user_id))
             deadline = deserialize_datetime(row.get("kick_at"))
+            status_label = "ready to kick" if row.get("_kick_ready") else "needs review"
             if deadline is not None:
-                preview_lines.append(f"{mention} - due {ge.format_timestamp(deadline, 'R')}")
+                preview_lines.append(f"{mention} - due {ge.format_timestamp(deadline, 'R')} - {status_label}")
             else:
-                preview_lines.append(mention)
+                preview_lines.append(f"{mention} - {status_label}")
         if len(pending_rows) > VERIFICATION_QUEUE_PREVIEW_LIMIT:
             remaining = len(pending_rows) - VERIFICATION_QUEUE_PREVIEW_LIMIT
             suffix = "" if remaining == 1 else "s"
             preview_lines.append(f"... and {remaining} more queued case{suffix}.")
         embed.add_field(name="Backlog Preview", value="\n".join(preview_lines), inline=False)
+        picker_limit = min(len(pending_rows), VERIFICATION_QUEUE_SELECT_LIMIT)
+        embed.add_field(
+            name="One-Off Actions",
+            value=(
+                f"Use the member picker below to focus one queued member for individual Kick, Delay 24h, or Ignore Forever buttons. "
+                f"The picker currently shows the oldest **{picker_limit}** queued member{'s' if picker_limit != 1 else ''}."
+            ),
+            inline=False,
+        )
+        if focused_row is not None:
+            focused_member = focused_row.get("_resolved_member")
+            if focused_member is not None:
+                focus_embed = self.build_verification_review_embed(guild, focused_member, focused_row, compiled=compiled)
+                for field in focus_embed.fields:
+                    embed.add_field(name=f"Selected {field.name}", value=field.value, inline=False)
+            else:
+                deadline = deserialize_datetime(focused_row.get("kick_at"))
+                deadline_text = (
+                    f"{ge.format_timestamp(deadline, 'R')} ({ge.format_timestamp(deadline, 'f')})"
+                    if deadline is not None
+                    else "No stored deadline."
+                )
+                embed.add_field(name="Selected Member", value=str(focused_row.get("_member_label")), inline=False)
+                embed.add_field(name="Selected Deadline", value=deadline_text, inline=False)
+                embed.add_field(
+                    name="Selected Kick Check",
+                    value=str(focused_row.get("_kick_issue_detail") or "Kick is currently available if permissions and hierarchy stay the same."),
+                    inline=False,
+                )
+                embed.add_field(
+                    name="Selected Ignore Forever",
+                    value="Ignore keeps this member out of verification cleanup until they verify, become exempt, or leave the server.",
+                    inline=False,
+                )
         if note:
             embed.add_field(name="Last Update", value=note, inline=False)
         return ge.style_embed(embed, footer="Babblebox Admin | Verification cleanup")
@@ -2588,7 +2724,7 @@ class AdminService:
         note: str | None = None,
         inactive_reason: str | None = None,
     ):
-        from babblebox.cogs.admin import VerificationDeadlineReviewView
+        from babblebox.cogs.admin import VerificationReviewQueueView
 
         pending_rows = await self._active_verification_review_rows(guild, compiled)
         queue_record = await self.store.fetch_verification_review_queue(guild.id)
@@ -2657,11 +2793,10 @@ class AdminService:
                 message=f"The shared verification review queue moved to {channel.mention}.",
             )
             queue_record = None
-        current = pending_rows[0]
-        view = VerificationDeadlineReviewView(
+        view = VerificationReviewQueueView(
             guild_id=guild.id,
-            user_id=int(current["user_id"]),
-            version=int(current.get("review_version", 0) or 0),
+            snapshot_signature=self.verification_review_snapshot_signature(pending_rows),
+            pending_rows=pending_rows,
         )
         embed = self.build_verification_review_queue_embed(guild, pending_rows, compiled=compiled, note=note)
         message = await self._verification_queue_message(channel, message_id=queue_record.get("message_id") if queue_record else None)
@@ -2718,14 +2853,17 @@ class AdminService:
         if compiled_after.verification_enabled and compiled_after.verification_deadline_action == "review":
             batch = VerificationSweepBatch(run_context="config_change")
             for record in await self.store.list_verification_states_for_guild(guild_id):
+                if self._is_ignored_verification_record(record):
+                    continue
                 if record.get("review_pending"):
                     continue
                 kick_at = deserialize_datetime(record.get("kick_at"))
                 if kick_at is None or kick_at > now:
                     continue
-                member = guild.get_member(int(record["user_id"]))
-                if member is None:
+                resolution = await self._resolve_verification_member(guild, int(record["user_id"]))
+                if resolution.state != "resolved" or resolution.member is None:
                     continue
+                member = resolution.member
                 status, _ = self._verification_status(member, compiled_after)
                 if status in {"verified", "exempt"}:
                     await self.store.delete_verification_state(guild_id, member.id)
@@ -3004,6 +3142,8 @@ class AdminService:
             "last_result_at": None,
             "last_notified_code": None,
             "last_notified_at": None,
+            "ignored_at": None,
+            "ignored_by_user_id": None,
         }
 
     async def handle_member_ban(self, guild: discord.Guild, user: discord.abc.User):
@@ -3066,6 +3206,10 @@ class AdminService:
         if verification_state is None:
             return
         status, _ = self._verification_status(message.author, compiled)
+        if self._is_ignored_verification_record(verification_state):
+            if status != "unverified":
+                await self.store.delete_verification_state(message.guild.id, message.author.id)
+            return
         if status != "unverified":
             review_pending = bool(verification_state.get("review_pending"))
             await self.store.delete_verification_state(message.guild.id, message.author.id)
@@ -3336,8 +3480,10 @@ class AdminService:
         if not compiled.verification_enabled:
             return
         status, status_reason = self._verification_status(member, compiled)
+        existing = await self.store.fetch_verification_state(member.guild.id, member.id)
         if status in {"verified", "exempt"}:
-            await self.store.delete_verification_state(member.guild.id, member.id)
+            if existing is not None:
+                await self.store.delete_verification_state(member.guild.id, member.id)
             return
         if status != "unverified":
             if status == "ambiguous":
@@ -3348,11 +3494,49 @@ class AdminService:
                     message=f"Babblebox cannot evaluate verification cleanup. {status_reason}",
                 )
             return
-        existing = await self.store.fetch_verification_state(member.guild.id, member.id)
         if existing is not None:
             return
         await self.store.upsert_verification_state(self._build_verification_state(member, compiled, now=ge.now_utc()))
         self._wake_event.set()
+
+    async def handle_member_update(self, before: discord.Member, after: discord.Member):
+        if not self.storage_ready or before.guild.id != after.guild.id:
+            return
+        if self._role_ids_for(before) == self._role_ids_for(after):
+            return
+        existing = await self.store.fetch_verification_state(after.guild.id, after.id)
+        compiled = self.get_compiled_config(after.guild.id)
+        if not compiled.verification_enabled:
+            if existing is not None:
+                review_pending = bool(existing.get("review_pending"))
+                await self.store.delete_verification_state(after.guild.id, after.id)
+                if review_pending:
+                    await self._sync_verification_review_queue(
+                        after.guild,
+                        compiled,
+                        now=ge.now_utc(),
+                        note=f"{after.mention} no longer needs verification cleanup, so the queue was refreshed.",
+                    )
+            return
+        status, _ = self._verification_status(after, compiled)
+        if status in {"verified", "exempt"}:
+            if existing is None:
+                return
+            review_pending = bool(existing.get("review_pending"))
+            await self.store.delete_verification_state(after.guild.id, after.id)
+            if review_pending:
+                await self._sync_verification_review_queue(
+                    after.guild,
+                    compiled,
+                    now=ge.now_utc(),
+                    note=f"{after.mention} no longer needs verification cleanup, so the queue was refreshed.",
+                )
+            return
+        if status != "unverified":
+            return
+        if existing is None:
+            await self.store.upsert_verification_state(self._build_verification_state(after, compiled, now=ge.now_utc()))
+            self._wake_event.set()
 
     def build_verification_sync_summary_embed(self, summary: VerificationSyncSummary) -> discord.Embed:
         stopped = summary.manually_stopped
@@ -3433,6 +3617,9 @@ class AdminService:
                     status, status_reason = self._verification_status(member, compiled)
                     existing = existing_rows.get(member_id)
                     if status == "unverified":
+                        if self._is_ignored_verification_record(existing):
+                            session.skipped_count += 1
+                            continue
                         session.matched_unverified += 1
                         record = existing
                         if record is None:
@@ -3554,14 +3741,15 @@ class AdminService:
         tracked = 0
         cleared = 0
         for member in self._iter_guild_members(guild):
+            existing = existing_rows.get(member.id)
             status, _ = self._verification_status(member, compiled)
             if status == "unverified":
-                if member.id not in existing_rows:
+                if existing is None:
                     await self.store.upsert_verification_state(self._build_verification_state(member, compiled, now=ge.now_utc()))
                     tracked += 1
                     self._wake_event.set()
                 continue
-            if member.id in existing_rows:
+            if existing is not None:
                 await self.store.delete_verification_state(guild.id, member.id)
                 cleared += 1
                 self._wake_event.set()
@@ -3685,48 +3873,21 @@ class AdminService:
         if guild is None or guild.id != guild_id:
             return False, "This verification review action must be used inside the correct server.", record
         compiled = self.get_compiled_config(guild_id)
-        member = guild.get_member(user_id)
-        if member is None:
-            await self.store.delete_verification_state(guild_id, user_id)
-            await self._sync_verification_review_queue(
-                guild,
-                compiled,
-                now=ge.now_utc(),
-                note=f"<@{user_id}> already left the server, so the queue was refreshed.",
-            )
-            return True, "That member already left the server, so Babblebox cleared the pending review.", record
-        status, status_reason = self._verification_status(member, compiled)
-        if status in {"verified", "exempt"}:
-            await self.store.delete_verification_state(guild_id, user_id)
-            await self._sync_verification_review_queue(
-                guild,
-                compiled,
-                now=ge.now_utc(),
-                note=f"{member.mention} no longer needs verification cleanup, so the queue was refreshed.",
-            )
-            return True, "That member no longer needs verification cleanup, so Babblebox cleared the pending review.", record
+        now = ge.now_utc()
+        result = await self._apply_verification_review_action(
+            guild=guild,
+            compiled=compiled,
+            record=record,
+            action=action,
+            actor=actor,
+            now=now,
+        )
+        if result.status == "blocked":
+            return False, result.message, record
+        if result.status == "cleared":
+            await self._sync_verification_review_queue(guild, compiled, now=now, note=result.message)
+            return True, result.message, record
         if action == "kick":
-            if status != "unverified":
-                return False, status_reason, record
-            issue = self._kick_issue(guild, member)
-            if issue is not None:
-                return False, issue.detail, record
-            dm_sent = False
-            with contextlib.suppress(discord.Forbidden, discord.HTTPException):
-                await member.send(
-                    embed=self.build_kick_embed(
-                        member,
-                        guild=guild,
-                        deadline=deserialize_datetime(record.get("kick_at")) or ge.now_utc(),
-                        compiled=compiled,
-                    )
-                )
-                dm_sent = True
-            try:
-                await member.kick(reason=f"Babblebox verification cleanup review action by {ge.display_name_of(actor)}.")
-            except (discord.Forbidden, discord.HTTPException):
-                return False, "Babblebox could not kick that member right now.", record
-            await self.store.delete_verification_state(guild_id, user_id)
             await self.send_log(
                 guild,
                 compiled,
@@ -3734,7 +3895,7 @@ class AdminService:
                     "Verification Review Kick",
                     (
                         f"{actor.mention} kicked <@{user_id}> from verification cleanup review."
-                        if dm_sent
+                        if result.dm_sent
                         else f"{actor.mention} kicked <@{user_id}> from verification cleanup review after the final DM could not be delivered."
                     ),
                     tone="success",
@@ -3745,16 +3906,11 @@ class AdminService:
             await self._sync_verification_review_queue(
                 guild,
                 compiled,
-                now=ge.now_utc(),
+                now=now,
                 note=f"{actor.mention} kicked <@{user_id}> from the verification review queue.",
             )
             return True, "The member was kicked.", record
-
-        updated = self._close_verification_review_record(record)
-        now = ge.now_utc()
         if action == "delay":
-            updated["kick_at"] = serialize_datetime(now + timedelta(seconds=VERIFICATION_REVIEW_DELAY_SECONDS))
-            await self.store.upsert_verification_state(updated)
             await self.send_log(
                 guild,
                 compiled,
@@ -3772,15 +3928,13 @@ class AdminService:
                 now=now,
                 note=f"{actor.mention} delayed verification cleanup for <@{user_id}> by 24 hours.",
             )
-            return True, "The verification review was delayed by 24 hours.", updated
-
-        await self.store.delete_verification_state(guild_id, user_id)
+            return True, "The verification review was delayed by 24 hours.", record
         await self.send_log(
             guild,
             compiled,
             embed=ge.make_status_embed(
                 "Verification Review Ignored",
-                f"{actor.mention} dismissed verification deadline enforcement for <@{user_id}>.",
+                f"{actor.mention} ignored verification cleanup for <@{user_id}> until they verify, become exempt, or leave.",
                 tone="info",
                 footer="Babblebox Admin | Verification cleanup",
             ),
@@ -3790,9 +3944,183 @@ class AdminService:
             guild,
             compiled,
             now=now,
-            note=f"{actor.mention} ignored verification deadline enforcement for <@{user_id}>.",
+            note=f"{actor.mention} ignored verification cleanup for <@{user_id}> until they verify, become exempt, or leave.",
         )
-        return True, "The verification deadline was ignored for now.", record
+        return True, "This member was ignored until they verify, become exempt, or leave the server.", record
+
+    async def _apply_verification_review_action(
+        self,
+        *,
+        guild: discord.Guild,
+        compiled: CompiledAdminConfig,
+        record: dict[str, Any],
+        action: str,
+        actor: discord.Member,
+        now: datetime,
+    ) -> VerificationReviewActionResult:
+        user_id = int(record["user_id"])
+        mention = self._verification_member_mention(user_id)
+        resolution = await self._resolve_verification_member(guild, user_id)
+        if resolution.state == "missing":
+            await self.store.delete_verification_state(guild.id, user_id)
+            return VerificationReviewActionResult(
+                "cleared",
+                user_id,
+                mention,
+                f"{mention} already left the server, so Babblebox cleared the pending review.",
+            )
+        if resolution.state == "resolved" and resolution.member is not None:
+            mention = resolution.member.mention
+            status, status_reason = self._verification_status(resolution.member, compiled)
+            if status in {"verified", "exempt"}:
+                await self.store.delete_verification_state(guild.id, user_id)
+                return VerificationReviewActionResult(
+                    "cleared",
+                    user_id,
+                    mention,
+                    f"{mention} no longer needs verification cleanup, so Babblebox cleared the pending review.",
+                )
+            if action == "kick":
+                if status != "unverified":
+                    return VerificationReviewActionResult("blocked", user_id, mention, status_reason)
+                issue = self._kick_issue(guild, resolution.member)
+                if issue is not None:
+                    return VerificationReviewActionResult("blocked", user_id, mention, issue.detail)
+                dm_sent = False
+                with contextlib.suppress(discord.Forbidden, discord.HTTPException):
+                    await resolution.member.send(
+                        embed=self.build_kick_embed(
+                            resolution.member,
+                            guild=guild,
+                            deadline=deserialize_datetime(record.get("kick_at")) or now,
+                            compiled=compiled,
+                        )
+                    )
+                    dm_sent = True
+                try:
+                    await resolution.member.kick(
+                        reason=f"Babblebox verification cleanup review action by {ge.display_name_of(actor)}."
+                    )
+                except (discord.Forbidden, discord.HTTPException):
+                    return VerificationReviewActionResult(
+                        "blocked",
+                        user_id,
+                        mention,
+                        "Babblebox could not kick that member right now.",
+                    )
+                await self.store.delete_verification_state(guild.id, user_id)
+                return VerificationReviewActionResult(
+                    "kicked",
+                    user_id,
+                    mention,
+                    f"Kicked {mention} from verification cleanup review.",
+                    dm_sent=dm_sent,
+                )
+        elif action == "kick":
+            return VerificationReviewActionResult(
+                "blocked",
+                user_id,
+                mention,
+                resolution.detail or "Babblebox could not refresh that member from Discord right now.",
+            )
+
+        updated = self._close_verification_review_record(record)
+        if action == "delay":
+            updated["kick_at"] = serialize_datetime(now + timedelta(seconds=VERIFICATION_REVIEW_DELAY_SECONDS))
+            await self.store.upsert_verification_state(updated)
+            return VerificationReviewActionResult(
+                "delayed",
+                user_id,
+                mention,
+                f"Delayed verification cleanup for {mention} by 24 hours.",
+            )
+        updated = self._ignore_verification_record(updated, actor_id=actor.id, now=now)
+        await self.store.upsert_verification_state(updated)
+        return VerificationReviewActionResult(
+            "ignored",
+            user_id,
+            mention,
+            f"Ignored verification cleanup for {mention} until they verify, become exempt, or leave.",
+        )
+
+    async def handle_verification_review_batch_action(
+        self,
+        *,
+        guild_id: int,
+        snapshot_signature: str,
+        action: str,
+        actor: discord.Member,
+    ) -> tuple[bool, str]:
+        if action not in VERIFICATION_REVIEW_ACTION_LABELS:
+            return False, "That verification review action is no longer supported."
+        guild = getattr(actor, "guild", None)
+        if guild is None or guild.id != guild_id:
+            return False, "This verification review action must be used inside the correct server."
+        compiled = self.get_compiled_config(guild_id)
+        pending_rows = await self._active_verification_review_rows(guild, compiled)
+        if not pending_rows:
+            return False, "No pending verification reviews remain. Refresh the shared queue message instead."
+        current_signature = self.verification_review_snapshot_signature(pending_rows)
+        if current_signature != snapshot_signature:
+            return False, "The verification review queue changed. Refresh the shared queue message before taking a batch action."
+        now = ge.now_utc()
+        results: list[VerificationReviewActionResult] = []
+        for row in pending_rows:
+            results.append(
+                await self._apply_verification_review_action(
+                    guild=guild,
+                    compiled=compiled,
+                    record=row,
+                    action=action,
+                    actor=actor,
+                    now=now,
+                )
+            )
+        counts = {
+            status: sum(1 for result in results if result.status == status)
+            for status in ("kicked", "delayed", "ignored", "cleared", "blocked")
+        }
+        title = {
+            "kick": "Verification Queue Batch Kick",
+            "delay": "Verification Queue Batch Delay",
+            "ignore": "Verification Queue Batch Ignore",
+        }[action]
+        action_phrase = {
+            "kick": "ran **Kick All Pending**",
+            "delay": "ran **Delay All 24h**",
+            "ignore": "ran **Ignore All**",
+        }[action]
+        summary_lines: list[str] = []
+        if action == "kick":
+            summary_lines.append(f"Members kicked: **{counts['kicked']}**")
+            summary_lines.append(f"Still blocked: **{counts['blocked']}**")
+            summary_lines.append(f"Cleared without action: **{counts['cleared']}**")
+        elif action == "delay":
+            summary_lines.append(f"Delayed by 24 hours: **{counts['delayed']}**")
+            summary_lines.append(f"Cleared without delay: **{counts['cleared']}**")
+        else:
+            summary_lines.append(f"Ignored until verified or gone: **{counts['ignored']}**")
+            summary_lines.append(f"Cleared without ignore: **{counts['cleared']}**")
+        detail_lines = [result.message for result in results if result.status in {"blocked", "cleared"}]
+        if len(detail_lines) > VERIFICATION_SUMMARY_LINE_LIMIT:
+            remaining = len(detail_lines) - VERIFICATION_SUMMARY_LINE_LIMIT
+            suffix = "" if remaining == 1 else "s"
+            detail_lines = [*detail_lines[:VERIFICATION_SUMMARY_LINE_LIMIT], f"... and {remaining} more queue outcome{suffix}."]
+        embed = ge.make_status_embed(
+            title,
+            f"{actor.mention} {action_phrase} on the shared verification cleanup queue.",
+            tone="warning" if counts["blocked"] else "info",
+            footer="Babblebox Admin | Verification cleanup",
+        )
+        embed.add_field(name="Run Summary", value="\n".join(summary_lines), inline=False)
+        if detail_lines:
+            embed.add_field(name="Details", value=ge.join_limited_lines(detail_lines, limit=1024), inline=False)
+        await self.send_log(guild, compiled, embed=embed, alert=False)
+        if action == "kick":
+            return True, f"Kick All Pending finished: {counts['kicked']} kicked, {counts['blocked']} still blocked, and {counts['cleared']} cleared from the queue."
+        if action == "delay":
+            return True, f"Delay All 24h finished: {counts['delayed']} delayed and {counts['cleared']} cleared from the queue."
+        return True, f"Ignore All finished: {counts['ignored']} ignored until they verify, become exempt, or leave, and {counts['cleared']} cleared from the queue."
 
 
 
@@ -4061,6 +4389,7 @@ class AdminService:
         *,
         now: datetime,
         batch: VerificationSweepBatch,
+        member: discord.Member | discord.abc.User | str | None = None,
     ):
         updated = dict(record)
         updated["review_pending"] = True
@@ -4076,8 +4405,8 @@ class AdminService:
         )
         updated = self._set_verification_result(updated, key, now=now)
         await self.store.upsert_verification_state(updated)
-        member = guild.get_member(int(updated["user_id"])) or f"<@{updated['user_id']}>"
-        self._collect_verification_batch_outcome(batch, guild.id, key, member, record=updated)
+        queue_member = member or guild.get_member(int(updated["user_id"])) or f"<@{updated['user_id']}>"
+        self._collect_verification_batch_outcome(batch, guild.id, key, queue_member, record=updated)
         batch.queue_refresh_guild_ids.add(guild.id)
 
     async def _process_due_verification_warnings(
@@ -4097,16 +4426,38 @@ class AdminService:
                 continue
             if self.get_verification_sync_session(guild.id) is not None:
                 continue
-            member = guild.get_member(int(record["user_id"]))
-            if member is None:
+            compiled = self.get_compiled_config(guild.id)
+            if not compiled.verification_enabled:
                 await self.store.delete_verification_state(guild.id, int(record["user_id"]))
                 processed = True
                 continue
-            compiled = self.get_compiled_config(guild.id)
-            if not compiled.verification_enabled:
-                await self.store.delete_verification_state(guild.id, member.id)
+            resolution = await self._resolve_verification_member(guild, int(record["user_id"]))
+            if resolution.state == "missing":
+                await self.store.delete_verification_state(guild.id, int(record["user_id"]))
                 processed = True
                 continue
+            if resolution.state != "resolved" or resolution.member is None:
+                updated = dict(record)
+                updated["warning_at"] = serialize_datetime(now + timedelta(seconds=OPERATION_BACKOFF_SECONDS))
+                key = VerificationBatchKey(
+                    run_context=batch.run_context,
+                    operation="warning",
+                    outcome="skipped",
+                    reason_code="member_lookup_failed",
+                    reason_text=resolution.detail,
+                )
+                updated = self._set_verification_result(updated, key, now=now)
+                await self.store.upsert_verification_state(updated)
+                self._collect_verification_batch_outcome(
+                    batch,
+                    guild.id,
+                    key,
+                    self._verification_member_mention(int(record["user_id"])),
+                    record=updated,
+                )
+                processed = True
+                continue
+            member = resolution.member
             status, status_reason = self._verification_status(member, compiled)
             if status in {"verified", "exempt"}:
                 await self.store.delete_verification_state(guild.id, member.id)
@@ -4173,16 +4524,48 @@ class AdminService:
                 continue
             if self.get_verification_sync_session(guild.id) is not None:
                 continue
-            member = guild.get_member(int(record["user_id"]))
-            if member is None:
+            compiled = self.get_compiled_config(guild.id)
+            if not compiled.verification_enabled:
                 await self.store.delete_verification_state(guild.id, int(record["user_id"]))
                 processed = True
                 continue
-            compiled = self.get_compiled_config(guild.id)
-            if not compiled.verification_enabled:
-                await self.store.delete_verification_state(guild.id, member.id)
+            resolution = await self._resolve_verification_member(guild, int(record["user_id"]))
+            if resolution.state == "missing":
+                await self.store.delete_verification_state(guild.id, int(record["user_id"]))
                 processed = True
                 continue
+            if resolution.state != "resolved" or resolution.member is None:
+                if compiled.verification_deadline_action == "review":
+                    await self._queue_verification_review(
+                        guild,
+                        compiled,
+                        record,
+                        now=now,
+                        batch=batch,
+                        member=self._verification_member_mention(int(record["user_id"])),
+                    )
+                else:
+                    updated = dict(record)
+                    updated["kick_at"] = serialize_datetime(now + timedelta(seconds=OPERATION_BACKOFF_SECONDS))
+                    key = VerificationBatchKey(
+                        run_context=batch.run_context,
+                        operation="kick",
+                        outcome="blocked",
+                        reason_code="member_lookup_failed",
+                        reason_text=resolution.detail,
+                    )
+                    updated = self._set_verification_result(updated, key, now=now)
+                    await self.store.upsert_verification_state(updated)
+                    self._collect_verification_batch_outcome(
+                        batch,
+                        guild.id,
+                        key,
+                        self._verification_member_mention(int(record["user_id"])),
+                        record=updated,
+                    )
+                processed = True
+                continue
+            member = resolution.member
             status, status_reason = self._verification_status(member, compiled)
             if status in {"verified", "exempt"}:
                 await self.store.delete_verification_state(guild.id, member.id)
@@ -4230,7 +4613,7 @@ class AdminService:
                 processed = True
                 continue
             if compiled.verification_deadline_action == "review":
-                await self._queue_verification_review(guild, compiled, record, now=now, batch=batch)
+                await self._queue_verification_review(guild, compiled, record, now=now, batch=batch, member=member)
                 processed = True
                 continue
             issue = self._kick_issue(guild, member)
