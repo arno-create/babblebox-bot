@@ -2134,6 +2134,61 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(final.deleted_count, 4)
         self.assertTrue(all(message.deleted for message in messages))
 
+    async def test_collective_gif_streak_threshold_can_be_three(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        authors = [self._make_member(guild, 790 + index) for index in range(3)]
+
+        await self._enable_gif_pack(guild.id, medium_action="delete_log", high_action="delete_log")
+        ok, _ = await self.service.set_pack_config(guild.id, "gif", consecutive_threshold=3)
+        self.assertTrue(ok)
+
+        messages = []
+        decisions = []
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            for author, content in (
+                (authors[0], "https://tenor.com/view/g1"),
+                (authors[1], "https://tenor.com/view/g2"),
+                (authors[2], "https://tenor.com/view/g3"),
+            ):
+                message = FakeMessage(guild=guild, channel=channel, author=author, content=content)
+                messages.append(message)
+                decisions.append(await self.service.handle_message(message))
+
+        final = decisions[-1]
+        self.assertIsNotNone(final)
+        self.assertIn("spam_group_gif_pressure", {reason.match_class for reason in final.reasons})
+        self.assertIn("3 gifs in a row", (final.alert_evidence_summary or "").lower())
+        self.assertTrue(final.deleted)
+        self.assertEqual(final.deleted_count, 3)
+        self.assertTrue(all(message.deleted for message in messages))
+
+    async def test_personal_gif_rate_threshold_can_be_three(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        author = self._make_member(guild, 799)
+
+        await self._enable_gif_pack(guild.id, medium_action="delete_log", high_action="delete_log")
+        ok, _ = await self.service.set_pack_config(guild.id, "gif", message_threshold=3)
+        self.assertTrue(ok)
+
+        final = None
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            for content in (
+                "https://tenor.com/view/g1",
+                "https://tenor.com/view/g2",
+                "https://tenor.com/view/g3",
+            ):
+                final = await self.service.handle_message(
+                    FakeMessage(guild=guild, channel=channel, author=author, content=content)
+                )
+
+        self.assertIsNotNone(final)
+        self.assertEqual(final.pack, "gif")
+        self.assertIn("spam_gif_flood", {reason.match_class for reason in final.reasons})
+        self.assertTrue(final.deleted)
+        self.assertEqual(final.deleted_count, 3)
+
     async def test_multi_user_gif_pressure_is_detected_without_needing_one_spammer(self):
         guild = FakeGuild(10)
         channel = FakeChannel(20)
@@ -2219,15 +2274,19 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.service, "_send_alert", new=AsyncMock()):
             decisions = [await self.service.handle_message(message) for message in messages]
 
-        self.assertEqual(decisions[:5], [None, None, None, None, None])
-        final = decisions[5]
-        self.assertIsNotNone(final)
+        self.assertEqual(decisions[:4], [None, None, None, None])
+        first_excess = decisions[4]
+        second_excess = decisions[5]
+        self.assertIsNotNone(first_excess)
+        self.assertIsNotNone(second_excess)
+        self.assertTrue(messages[4].deleted)
         self.assertTrue(messages[5].deleted)
-        self.assertFalse(any(message.deleted for message in messages[:5]))
-        self.assertEqual(final.deleted_count, 1)
-        self.assertEqual(final.delete_attempt_count, 1)
-        self.assertFalse(final.timed_out)
-        self.assertIn("trimmed only the newest excess gif posts", (final.action_note or "").lower())
+        self.assertFalse(any(message.deleted for message in messages[:4]))
+        for decision in (first_excess, second_excess):
+            self.assertEqual(decision.deleted_count, 1)
+            self.assertEqual(decision.delete_attempt_count, 1)
+            self.assertFalse(decision.timed_out)
+            self.assertIn("trimmed only the newest excess gif posts", (decision.action_note or "").lower())
 
     async def test_collective_gif_pressure_low_value_replies_do_not_hide_channel_takeover(self):
         guild = FakeGuild(10)
@@ -2397,11 +2456,7 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(final.reasons[0].match_class, "spam_gif_flood")
         self.assertIn("spam_group_gif_pressure", {reason.match_class for reason in final.reasons})
         self.assertIn("personal gif-abuse threshold", (final.action_note or "").lower())
-        self.assertTrue(messages[0].deleted)
-        self.assertFalse(messages[1].deleted)
-        self.assertTrue(messages[2].deleted)
-        self.assertFalse(messages[3].deleted)
-        self.assertTrue(messages[4].deleted)
+        self.assertTrue(all(message.deleted for message in messages))
 
     async def test_gif_pack_exempt_messages_do_not_count_toward_collective_pressure(self):
         guild = FakeGuild(10)

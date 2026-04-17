@@ -1552,7 +1552,10 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("**GIF Flood / Media Pressure**", protection_field.value)
             self.assertIn("Enabled: Yes | Sensitivity: Normal", protection_field.value)
             self.assertIn("Emotes: Off | Caps: Off", protection_field.value)
-            self.assertIn("Delete lane removes the matched GIF burst; collective pressure trims GIFs only.", protection_field.value)
+            self.assertIn(
+                "Delete lane removes bounded GIF bursts; collective cleanup can trim shared floods while personal abuse still targets one member.",
+                protection_field.value,
+            )
             self.assertIn("**Scam / Malicious Links**", link_safety_field.value)
             self.assertIn("**Adult Links + Solicitation**", link_safety_field.value)
             self.assertIn("**Severe Harm / Hate**", link_safety_field.value)

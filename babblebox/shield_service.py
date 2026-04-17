@@ -810,6 +810,17 @@ class ShieldDecision:
     alert_evidence_summary: str | None = None
 
 
+@dataclass(frozen=True)
+class ShieldGifIncidentPlan:
+    primary_match: ShieldMatch
+    personal_match: ShieldMatch | None = None
+    group_match: ShieldMatch | None = None
+    delete_targets: tuple[discord.Message, ...] = ()
+    alert_evidence_signature: str | None = None
+    alert_evidence_summary: str | None = None
+    action_note: str | None = None
+
+
 @dataclass
 class ShieldNewcomerActivityState:
     first_seen_at: float
@@ -2646,8 +2657,11 @@ class ShieldService:
             return False, "Sensitivity must be low, normal, or high."
         if cleaned_moderator_policy is not None and cleaned_moderator_policy not in VALID_SPAM_MODERATOR_POLICIES:
             return False, "Moderator anti-spam policy must be exempt, delete_only, or full."
-        if message_threshold is not None and not (4 <= message_threshold <= 12):
-            return False, "Message threshold must be between 4 and 12."
+        if message_threshold is not None:
+            if pack == "gif" and not (3 <= message_threshold <= 12):
+                return False, "GIF message threshold must be between 3 and 12."
+            if pack != "gif" and not (4 <= message_threshold <= 12):
+                return False, "Message threshold must be between 4 and 12."
         if window_seconds is not None and not (3 <= window_seconds <= 45):
             return False, "Window length must be between 3 and 45 seconds."
         if burst_threshold is not None and not (4 <= burst_threshold <= 10):
@@ -2664,8 +2678,8 @@ class ShieldService:
             return False, "Capitals threshold must be between 12 and 80."
         if repeat_threshold is not None and not (2 <= repeat_threshold <= 6):
             return False, "GIF repeat threshold must be between 2 and 6."
-        if consecutive_threshold is not None and not (4 <= consecutive_threshold <= 10):
-            return False, "GIF consecutive threshold must be between 4 and 10."
+        if consecutive_threshold is not None and not (3 <= consecutive_threshold <= 10):
+            return False, "GIF consecutive threshold must be between 3 and 10."
         if same_asset_threshold is not None and not (2 <= same_asset_threshold <= 6):
             return False, "Same-GIF threshold must be between 2 and 6."
         if ratio_percent is not None and not (50 <= ratio_percent <= 95):
@@ -3596,13 +3610,20 @@ class ShieldService:
         consecutive_rows.reverse()
         consecutive_gif_count = len(consecutive_rows)
         consecutive_authors = {row.user_id for row in consecutive_rows}
-        balance_minimum = max(5, compiled.gif_rules.message_threshold)
+        balance_minimum = max(1, compiled.gif_rules.message_threshold)
+        pure_low_text_gif_run = (
+            meaningful_text_count == 0
+            and bool(activity_rows)
+            and all(row.is_gif_message and not row.gif_pack_exempt for row in activity_rows)
+            and all(row.gif_low_text for row in gif_rows)
+        )
         streak_trigger = (
             consecutive_gif_count >= compiled.gif_rules.consecutive_threshold
             and len(consecutive_authors) >= 2
         )
         ratio_trigger = (
-            gif_count >= balance_minimum
+            not pure_low_text_gif_run
+            and gif_count >= balance_minimum
             and int(round(gif_ratio * 100)) >= compiled.gif_rules.min_ratio_percent
         )
         if not streak_trigger and not ratio_trigger:
@@ -3621,7 +3642,7 @@ class ShieldService:
             )
         summary = (
             f"{gif_count} GIF-heavy posts from {len(distinct_gif_authors)} members crossed "
-            f"{' and '.join(trigger_bits)}."
+            f"{' and '.join(trigger_bits)} with {meaningful_text_count} meaningful text messages in the window."
         )
         if repeated_source >= max(2, compiled.gif_rules.same_asset_threshold):
             summary = f"{summary} The same GIF source repeated {repeated_source} times in the window."
@@ -4221,10 +4242,21 @@ class ShieldService:
                 PACK_STRENGTH.get(item.pack, 0),
             ),
         )
-        if best.match_class == "spam_group_gif_pressure":
-            personal_gif_match = next((item for item in matches if item.match_class == "spam_gif_flood"), None)
-            if personal_gif_match is not None:
-                best = personal_gif_match
+        gif_plan = None
+        if best.pack == "gif":
+            gif_plan = self._build_gif_incident_plan(
+                matches,
+                best,
+                message,
+                snapshot,
+                recent_spam_events,
+                compiled,
+                now=now,
+                channel_activity=channel_activity,
+                group_gif_pressure=group_gif_pressure,
+            )
+            if gif_plan is not None:
+                best = gif_plan.primary_match
         decision = ShieldDecision(
             matched=True,
             action=best.action,
@@ -4238,53 +4270,39 @@ class ShieldService:
             decision.alert_evidence_signature = repetition.fingerprint
             decision.alert_evidence_summary = self._repetition_reason(repetition)
         elif best.pack in {"spam", "gif"}:
-            decision.alert_evidence_signature = (
-                group_gif_pressure.get("signature")
-                if best.match_class == "spam_group_gif_pressure" and group_gif_pressure is not None
-                else snapshot.gif_signature or snapshot.near_duplicate_fingerprint or snapshot.exact_fingerprint
-            )
-            if best.match_class == "spam_duplicate":
-                decision.alert_evidence_summary = f"Repeated duplicate spam in a short window ({best.reason.lower()})"
-            elif best.match_class == "spam_near_duplicate":
-                decision.alert_evidence_summary = best.reason
-            elif best.match_class in {
-                "spam_message_rate",
-                "spam_burst",
-                "spam_low_value_noise",
-                "spam_padding_noise",
-                "spam_gif_flood",
-                "spam_group_gif_pressure",
-                "spam_emoji_flood",
-                "spam_caps_flood",
-            }:
-                decision.alert_evidence_summary = best.reason
+            if gif_plan is not None:
+                decision.alert_evidence_signature = gif_plan.alert_evidence_signature
+                decision.alert_evidence_summary = gif_plan.alert_evidence_summary
+            else:
+                decision.alert_evidence_signature = (
+                    snapshot.gif_signature or snapshot.near_duplicate_fingerprint or snapshot.exact_fingerprint
+                )
+                if best.match_class == "spam_duplicate":
+                    decision.alert_evidence_summary = f"Repeated duplicate spam in a short window ({best.reason.lower()})"
+                elif best.match_class == "spam_near_duplicate":
+                    decision.alert_evidence_summary = best.reason
+                elif best.match_class in {
+                    "spam_message_rate",
+                    "spam_burst",
+                    "spam_low_value_noise",
+                    "spam_padding_noise",
+                    "spam_gif_flood",
+                    "spam_group_gif_pressure",
+                    "spam_emoji_flood",
+                    "spam_caps_flood",
+                }:
+                    decision.alert_evidence_summary = best.reason
 
         moderator_spam_policy_note = None
         if best.pack == "spam" and self._member_is_moderator(getattr(message, "author", None)):
             if compiled.spam_rules.moderator_policy == "delete_only" and best.action == "delete_log":
                 moderator_spam_policy_note = "Moderator anti-spam policy capped this incident at delete + log."
-        gif_group_note = None
-        if any(item.match_class == "spam_group_gif_pressure" for item in decision.reasons):
-            if best.match_class == "spam_group_gif_pressure":
-                group_triggers = tuple(group_gif_pressure.get("triggered_by", ())) if group_gif_pressure is not None else ()
-                if "streak" in group_triggers:
-                    gif_group_note = (
-                        "Collective channel GIF pressure triggered channel-safe cleanup only; Babblebox removed the full live GIF streak and did not add strikes or time out members on the group signal alone."
-                    )
-                elif "ratio" in group_triggers:
-                    gif_group_note = (
-                        "Collective channel GIF pressure triggered channel-safe cleanup only; Babblebox trimmed only the newest excess GIF posts needed to calm the channel and did not add strikes or time out members on the group signal alone."
-                    )
-                else:
-                    gif_group_note = (
-                        "Collective channel GIF pressure triggered channel-safe cleanup only; Babblebox did not add strikes or time out members on the group signal alone."
-                    )
-            elif best.pack == "gif":
-                gif_group_note = (
-                    "Channel-wide GIF pressure was also active, but the resolved action followed this member's personal GIF-abuse threshold."
-                )
+        gif_group_note = gif_plan.action_note if gif_plan is not None else None
 
-        if best.action.startswith("delete"):
+        delete_targets: Sequence[discord.Message] = ()
+        if gif_plan is not None:
+            delete_targets = gif_plan.delete_targets
+        elif best.action.startswith("delete"):
             delete_targets = self._collect_incident_messages(
                 best,
                 message,
@@ -4295,7 +4313,8 @@ class ShieldService:
                 channel_activity=channel_activity,
                 group_gif_pressure=group_gif_pressure,
             )
-            deleted_count, attempt_count = await self._delete_messages(delete_targets) if delete_targets else (0, 0)
+        if delete_targets:
+            deleted_count, attempt_count = await self._delete_messages(delete_targets)
             decision.deleted = deleted_count > 0
             decision.deleted_count = deleted_count
             decision.delete_attempt_count = attempt_count
@@ -4313,24 +4332,26 @@ class ShieldService:
             elif attempt_count > 1:
                 decision.action_note = f"Deleted the full {attempt_count}-message incident burst."
 
-        if best.action in {"timeout_log", "delete_timeout_log"}:
+        timeout_match = gif_plan.personal_match if gif_plan is not None and gif_plan.personal_match is not None else best
+        if timeout_match.action in {"timeout_log", "delete_timeout_log"}:
             decision.timed_out = await self._timeout_member(
                 message,
                 compiled,
-                pack=best.pack,
-                reason=f"Babblebox Shield matched {PACK_LABELS.get(best.pack, 'Shield')}.",
+                pack=timeout_match.pack,
+                reason=f"Babblebox Shield matched {PACK_LABELS.get(timeout_match.pack, 'Shield')}.",
             )
             if not decision.timed_out:
                 decision.action_note = "Timeout was configured, but Babblebox could not time out that member."
 
-        if self._is_escalation_eligible(compiled, best):
-            strike_count = self._record_strike(message.guild.id, message.author.id, best.pack, compiled, now)
+        escalation_match = gif_plan.personal_match if gif_plan is not None and gif_plan.personal_match is not None else best
+        if self._is_escalation_eligible(compiled, escalation_match):
+            strike_count = self._record_strike(message.guild.id, message.author.id, escalation_match.pack, compiled, now)
             if strike_count >= compiled.escalation_threshold:
                 decision.timed_out = await self._timeout_member(
                     message,
                     compiled,
-                    pack=best.pack,
-                    reason=f"Babblebox Shield escalation after repeated {PACK_LABELS.get(best.pack, 'Shield').lower()} hits.",
+                    pack=escalation_match.pack,
+                    reason=f"Babblebox Shield escalation after repeated {PACK_LABELS.get(escalation_match.pack, 'Shield').lower()} hits.",
                 )
                 decision.escalated = decision.timed_out
                 if decision.timed_out:
@@ -4859,7 +4880,7 @@ class ShieldService:
         gif_rows = [row for row in live_rows if row.is_gif_message and not row.gif_pack_exempt]
         if len(gif_rows) < 2 or len({row.user_id for row in gif_rows}) < 2:
             return []
-        minimum_count = max(5, compiled.gif_rules.message_threshold)
+        minimum_count = max(1, compiled.gif_rules.message_threshold)
         remaining_gif_count = len(gif_rows)
         selected_rows: list[ShieldChannelActivityEvent] = []
         for row in reversed(gif_rows):
@@ -4873,6 +4894,194 @@ class ShieldService:
         selected_rows.reverse()
         return self._dedupe_message_targets(
             [row.message for row in selected_rows if row.message is not None]
+        )
+
+    def _collect_personal_gif_incident_messages(
+        self,
+        message: discord.Message,
+        snapshot: ShieldSnapshot,
+        recent_events: Sequence[ShieldSpamEvent],
+        compiled: CompiledShieldConfig,
+        *,
+        now: float,
+    ) -> list[discord.Message]:
+        channel_id = getattr(getattr(message, "channel", None), "id", None)
+        same_channel_events = [
+            event
+            for event in recent_events
+            if event.message is not None
+            and event.channel_id == channel_id
+            and event.is_gif_message
+            and not event.gif_pack_exempt
+            and now - event.timestamp <= float(compiled.gif_rules.window_seconds)
+            and not self._message_is_deleted(event.message)
+        ]
+        if not same_channel_events:
+            return [message]
+        selected_events = same_channel_events
+        if snapshot.gif_signature is not None:
+            same_asset_events = [event for event in selected_events if event.gif_signature == snapshot.gif_signature]
+            if len(same_asset_events) >= compiled.gif_rules.same_asset_threshold:
+                selected_events = same_asset_events
+        return self._dedupe_message_targets([event.message for event in selected_events if event.message is not None]) or [message]
+
+    def _primary_gif_match(
+        self,
+        *,
+        personal_match: ShieldMatch | None,
+        group_match: ShieldMatch | None,
+        fallback: ShieldMatch,
+    ) -> ShieldMatch:
+        candidates: list[tuple[int, ShieldMatch]] = []
+        if group_match is not None:
+            candidates.append((0, group_match))
+        if personal_match is not None:
+            candidates.append((1, personal_match))
+        if not candidates:
+            return fallback
+        _tie_rank, match = max(
+            candidates,
+            key=lambda item: (
+                ACTION_STRENGTH.get(item[1].action, 0),
+                CONFIDENCE_STRENGTH.get(item[1].confidence, 0),
+                item[0],
+            ),
+        )
+        return match
+
+    def _gif_group_action_note(
+        self,
+        group_match: ShieldMatch,
+        *,
+        group_gif_pressure: dict[str, Any] | None,
+        personal_match: ShieldMatch | None = None,
+    ) -> str:
+        triggers = tuple(group_gif_pressure.get("triggered_by", ())) if group_gif_pressure is not None else ()
+        delete_enabled = group_match.action.startswith("delete")
+        if delete_enabled and "streak" in triggers:
+            cleanup_phrase = "removed the full live GIF streak"
+        elif delete_enabled and "ratio" in triggers:
+            cleanup_phrase = "trimmed only the newest excess GIF posts needed to calm the channel"
+        elif delete_enabled:
+            cleanup_phrase = "used channel-safe GIF cleanup"
+        else:
+            cleanup_phrase = "kept the collective signal channel-level only"
+
+        if personal_match is None:
+            if delete_enabled:
+                return (
+                    f"Collective channel GIF pressure triggered channel-safe cleanup only; Babblebox {cleanup_phrase} "
+                    "and did not add strikes or time out members on the group signal alone."
+                )
+            return (
+                "Collective channel GIF pressure stayed channel-level only; Babblebox did not add strikes or time out "
+                "members on the group signal alone."
+            )
+
+        personal_enforcement = personal_match.action not in {"detect", "log"}
+        if personal_enforcement:
+            if delete_enabled:
+                return (
+                    f"Channel-wide GIF pressure was also active, so Babblebox {cleanup_phrase} and followed this "
+                    "member's personal GIF-abuse threshold for individual enforcement."
+                )
+            return (
+                "Channel-wide GIF pressure was also active, but Babblebox kept the collective signal channel-level "
+                "only and followed this member's personal GIF-abuse threshold for individual enforcement."
+            )
+        if delete_enabled:
+            return (
+                f"Channel-wide GIF pressure was also active, so Babblebox {cleanup_phrase} while keeping any "
+                "member-specific action bounded to the channel-safe collective cleanup."
+            )
+        return (
+            "Channel-wide GIF pressure was also active, and Babblebox kept the collective signal channel-level only "
+            "without strikes or timeouts."
+        )
+
+    def _build_gif_incident_plan(
+        self,
+        matches: Sequence[ShieldMatch],
+        preferred_match: ShieldMatch,
+        message: discord.Message,
+        snapshot: ShieldSnapshot,
+        recent_events: Sequence[ShieldSpamEvent],
+        compiled: CompiledShieldConfig,
+        *,
+        now: float,
+        channel_activity: Sequence[ShieldChannelActivityEvent] = (),
+        group_gif_pressure: dict[str, Any] | None = None,
+    ) -> ShieldGifIncidentPlan | None:
+        personal_match = next((item for item in matches if item.match_class == "spam_gif_flood"), None)
+        group_match = next((item for item in matches if item.match_class == "spam_group_gif_pressure"), None)
+        if personal_match is None and group_match is None:
+            return None
+
+        primary_match = self._primary_gif_match(
+            personal_match=personal_match,
+            group_match=group_match,
+            fallback=preferred_match,
+        )
+        delete_targets: list[discord.Message] = []
+        if group_match is not None and group_match.action.startswith("delete"):
+            delete_targets.extend(
+                self._collect_group_gif_incident_messages(
+                    channel_activity,
+                    compiled,
+                    group_gif_pressure=group_gif_pressure,
+                    now=now,
+                )
+            )
+        if personal_match is not None and personal_match.action.startswith("delete"):
+            delete_targets.extend(
+                self._collect_personal_gif_incident_messages(
+                    message,
+                    snapshot,
+                    recent_events,
+                    compiled,
+                    now=now,
+                )
+            )
+        deduped_targets = tuple(self._dedupe_message_targets(delete_targets))
+
+        if personal_match is not None and group_match is not None:
+            personal_signature = snapshot.gif_signature or snapshot.near_duplicate_fingerprint or snapshot.exact_fingerprint
+            group_signature = group_gif_pressure.get("signature") if group_gif_pressure is not None else None
+            signature_seed = "|".join(part for part in (personal_signature, group_signature) if part)
+            alert_signature = (
+                hashlib.sha1(f"gif_mix|{signature_seed}".encode("utf-8")).hexdigest()
+                if signature_seed
+                else personal_signature or group_signature
+            )
+            evidence_summary = (
+                "Personal GIF abuse and collective channel GIF pressure were both active. "
+                f"Personal signal: {personal_match.reason} Collective signal: {group_match.reason}"
+            )
+            action_note = self._gif_group_action_note(
+                group_match,
+                group_gif_pressure=group_gif_pressure,
+                personal_match=personal_match,
+            )
+        elif group_match is not None:
+            alert_signature = group_gif_pressure.get("signature") if group_gif_pressure is not None else None
+            evidence_summary = group_match.reason
+            action_note = self._gif_group_action_note(
+                group_match,
+                group_gif_pressure=group_gif_pressure,
+            )
+        else:
+            alert_signature = snapshot.gif_signature or snapshot.near_duplicate_fingerprint or snapshot.exact_fingerprint
+            evidence_summary = personal_match.reason if personal_match is not None else preferred_match.reason
+            action_note = None
+
+        return ShieldGifIncidentPlan(
+            primary_match=primary_match,
+            personal_match=personal_match,
+            group_match=group_match,
+            delete_targets=deduped_targets,
+            alert_evidence_signature=alert_signature,
+            alert_evidence_summary=evidence_summary,
+            action_note=action_note,
         )
 
     def _collect_incident_messages(
