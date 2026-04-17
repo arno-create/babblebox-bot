@@ -240,9 +240,11 @@ class WebsiteDocsTests(unittest.TestCase):
         index_html = (ROOT / "index.html").read_text(encoding="utf-8")
         help_html = (ROOT / "help.html").read_text(encoding="utf-8")
 
-        self.assertIn("consecutive-streak and GIF-to-text balance", help_html)
-        self.assertIn("consecutive-streak plus GIF-to-text pressure", index_html)
+        self.assertIn("one-member rate, low-text repeat gate, same-asset repeat, channel streak, and GIF-to-text balance", help_html)
+        self.assertIn("configurable one-member rate, low-text repeat, same-asset, channel-streak, and GIF-to-text pressure controls", index_html)
         self.assertIn("consecutive GIF streaks or GIF-to-text imbalance", readme)
+        self.assertIn("full live GIF streak", readme)
+        self.assertIn("newest excess GIF posts", readme)
         self.assertIn("collective pressure never adds strikes or timeouts on its own", readme)
         self.assertIn("Adaptive", help_html)
         self.assertIn("Compact", help_html)
@@ -286,11 +288,14 @@ class WebsiteDocsTests(unittest.TestCase):
 
         self.assertIn("interactive admin control surface", readme)
         self.assertIn("commands remain precise fallbacks", readme)
+        self.assertIn("overview quick-config row", readme)
         self.assertIn("interactive admin lifecycle surface", help_html)
         self.assertIn("sectioned control surface", help_html)
         self.assertIn("precise fallback path", help_html)
+        self.assertIn("overview quick-config row", help_html)
         self.assertIn("sectioned interactive control surface", index_html)
         self.assertIn("illustrative rather than exhaustive", index_html)
+        self.assertIn("overview quick-config row", index_html)
 
     def test_shield_docs_cover_no_link_dm_lure_and_truthful_ai_models(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
@@ -302,11 +307,13 @@ class WebsiteDocsTests(unittest.TestCase):
             "gpt-5.4-nano",
             "gpt-5.4-mini",
             "gpt-5.4",
+            "resolved routing lane plus local readiness",
         ):
             self.assertIn(text, readme)
-        for text in ("no-link DM-lure", "gpt-5.4-nano", "gpt-5.4-mini", "gpt-5.4"):
+        for text in ("no-link DM-lure", "gpt-5.4-nano", "gpt-5.4-mini", "gpt-5.4", "resolved routing lane plus local readiness"):
             self.assertIn(text, help_html)
         self.assertIn("no-link DM-lure", index_html)
+        self.assertIn("resolved routing lane plus local readiness", index_html)
         self.assertNotIn("gpt-4.1-mini", readme)
         self.assertNotIn("gpt-4.1-mini", help_html)
         self.assertNotIn("gpt-4.1-mini", index_html)

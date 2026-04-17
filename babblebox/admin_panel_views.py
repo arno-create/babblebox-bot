@@ -390,6 +390,30 @@ class AdminPanelView(AdminManagedView):
             action=action,
         )
 
+    async def _open_followup_editor(self, interaction: discord.Interaction):
+        await self._open_child_view(
+            interaction,
+            stage="admin_panel_followup_editor",
+            failure_message="Babblebox could not open the follow-up editor right now.",
+            view_factory=lambda: FollowupEditorView(self.cog, guild_id=self.guild_id, author_id=self.author_id, panel_view=self),
+        )
+
+    async def _open_verification_policy_editor(self, interaction: discord.Interaction):
+        await self._open_child_view(
+            interaction,
+            stage="admin_panel_verification_policy",
+            failure_message="Babblebox could not open the verification policy editor right now.",
+            view_factory=lambda: VerificationPolicyEditorView(self.cog, guild_id=self.guild_id, author_id=self.author_id, panel_view=self),
+        )
+
+    async def _open_logs_editor(self, interaction: discord.Interaction):
+        await self._open_child_view(
+            interaction,
+            stage="admin_panel_logs_editor",
+            failure_message="Babblebox could not open the logs editor right now.",
+            view_factory=lambda: LogsEditorView(self.cog, guild_id=self.guild_id, author_id=self.author_id, panel_view=self),
+        )
+
     def _refresh_items(self):
         self.clear_items()
 
@@ -422,31 +446,24 @@ class AdminPanelView(AdminManagedView):
         add_button(label="Refresh", style=discord.ButtonStyle.secondary, row=2, callback=refresh_callback)
 
         if self.section == "overview":
-            add_button(label="Open Sync Review", style=discord.ButtonStyle.secondary, row=3, callback=self._open_sync_review)
-            add_button(label="Run Permission Check", style=discord.ButtonStyle.secondary, row=3, callback=self._open_permission_diagnostics)
+            add_button(label="Edit Follow-up", style=discord.ButtonStyle.secondary, row=3, callback=self._open_followup_editor)
+            add_button(label="Edit Verification Policy", style=discord.ButtonStyle.secondary, row=3, callback=self._open_verification_policy_editor)
+            add_button(label="Edit Logs", style=discord.ButtonStyle.secondary, row=3, callback=self._open_logs_editor)
+            add_button(label="Open Sync Review", style=discord.ButtonStyle.secondary, row=4, callback=self._open_sync_review)
+            add_button(label="Run Permission Check", style=discord.ButtonStyle.secondary, row=4, callback=self._open_permission_diagnostics)
         elif self.section == "followup":
             add_button(
                 label="Edit Follow-up",
                 style=discord.ButtonStyle.secondary,
                 row=3,
-                callback=lambda interaction: self._open_child_view(
-                    interaction,
-                    stage="admin_panel_followup_editor",
-                    failure_message="Babblebox could not open the follow-up editor right now.",
-                    view_factory=lambda: FollowupEditorView(self.cog, guild_id=self.guild_id, author_id=self.author_id, panel_view=self),
-                ),
+                callback=self._open_followup_editor,
             )
         elif self.section == "verification":
             add_button(
                 label="Edit Policy",
                 style=discord.ButtonStyle.secondary,
                 row=3,
-                callback=lambda interaction: self._open_child_view(
-                    interaction,
-                    stage="admin_panel_verification_policy",
-                    failure_message="Babblebox could not open the verification policy editor right now.",
-                    view_factory=lambda: VerificationPolicyEditorView(self.cog, guild_id=self.guild_id, author_id=self.author_id, panel_view=self),
-                ),
+                callback=self._open_verification_policy_editor,
             )
             add_button(
                 label="Edit Timing",
@@ -490,12 +507,7 @@ class AdminPanelView(AdminManagedView):
                 label="Edit Logs",
                 style=discord.ButtonStyle.secondary,
                 row=3,
-                callback=lambda interaction: self._open_child_view(
-                    interaction,
-                    stage="admin_panel_logs_editor",
-                    failure_message="Babblebox could not open the logs editor right now.",
-                    view_factory=lambda: LogsEditorView(self.cog, guild_id=self.guild_id, author_id=self.author_id, panel_view=self),
-                ),
+                callback=self._open_logs_editor,
             )
             add_button(label="Run Permission Check", style=discord.ButtonStyle.secondary, row=3, callback=self._open_permission_diagnostics)
         elif self.section == "templates":

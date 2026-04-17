@@ -289,8 +289,9 @@ class FakeAIProvider:
             "available": self._available,
             "configured": self._available,
             "model": "gpt-5.4-nano" if self._available else None,
-            "routing_strategy": "two_tier_with_dormant_top",
+            "routing_strategy": "routed_fast_complex",
             "single_model_override": False,
+            "ignored_model_settings": [],
             "fast_model": "gpt-5.4-nano" if self._available else None,
             "complex_model": "gpt-5.4-mini" if self._available else None,
             "top_model": "gpt-5.4" if self._available else None,
@@ -1959,16 +1960,16 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
                 )
 
         self.assertEqual(decisions[:2], [None, None])
-        self.assertIsNotNone(decisions[2])
-        self.assertEqual(decisions[2].pack, "gif")
-        self.assertIn(decisions[2].action, {"delete_log", "delete_timeout_log", "delete_escalate"})
-        self.assertEqual(decisions[2].reasons[0].match_class, "spam_gif_flood")
-        final = decisions[-1]
+        gif_decisions = [decision for decision in decisions if decision is not None and decision.pack == "gif"]
+        self.assertEqual(len(gif_decisions), 1)
+        final = gif_decisions[0]
         self.assertIsNotNone(final)
+        self.assertEqual(final.pack, "gif")
         self.assertIn(final.action, {"delete_log", "delete_timeout_log", "delete_escalate"})
         self.assertTrue(final.deleted)
-        self.assertEqual(final.pack, "gif")
+        self.assertEqual(final.deleted_count, 3)
         self.assertIn("spam_gif_flood", {reason.match_class for reason in final.reasons})
+        self.assertEqual(decisions[3], None)
 
     async def test_repeated_generic_link_stays_log_only_noise(self):
         guild = FakeGuild(10)
@@ -2047,16 +2048,19 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         with patch.object(self.service, "_send_alert", new=AsyncMock()):
             decisions = [await self.service.handle_message(message) for message in messages]
 
-        final = decisions[-1]
         self.assertEqual(decisions[:2], [None, None])
-        self.assertIsNotNone(decisions[2])
+        actionable = [decision for decision in decisions if decision is not None]
+        self.assertEqual(len(actionable), 1)
+        final = actionable[0]
         self.assertIsNotNone(final)
         self.assertEqual(final.pack, "gif")
         self.assertTrue(final.deleted)
-        self.assertEqual(final.deleted_count, 4)
-        self.assertEqual(final.delete_attempt_count, 4)
-        self.assertTrue(all(message.deleted for message in messages))
+        self.assertEqual(final.deleted_count, 3)
+        self.assertEqual(final.delete_attempt_count, 3)
+        self.assertTrue(all(message.deleted for message in messages[:3]))
+        self.assertFalse(messages[3].deleted)
         self.assertIn("spam_gif_flood", {reason.match_class for reason in final.reasons})
+        self.assertEqual(decisions[3], None)
 
     async def test_gif_incident_logging_is_grouped_and_quiet(self):
         guild = FakeGuild(10)
@@ -2079,10 +2083,10 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(log_channel.sent), 1)
         self.assertEqual(len(log_channel.edits), 0)
-        self.assertIsNotNone(decisions[3])
-        self.assertIsNotNone(decisions[4])
-        self.assertEqual(decisions[3].pack, "gif")
-        self.assertEqual(decisions[4].pack, "gif")
+        actionable = [decision for decision in decisions if decision is not None]
+        self.assertEqual(len(actionable), 1)
+        self.assertEqual(actionable[0].pack, "gif")
+        self.assertEqual(decisions[3:], [None, None])
 
     async def test_mixed_text_and_occasional_gifs_stay_safe(self):
         guild = FakeGuild(10)
@@ -2105,11 +2109,12 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         channel = FakeChannel(20)
         authors = [self._make_member(guild, 780 + index) for index in range(4)]
 
-        await self._enable_gif_pack(guild.id)
+        await self._enable_gif_pack(guild.id, medium_action="delete_log", high_action="delete_log")
         ok, _ = await self.service.set_pack_config(guild.id, "gif", consecutive_threshold=4)
         self.assertTrue(ok)
 
-        final = None
+        messages = []
+        decisions = []
         with patch.object(self.service, "_send_alert", new=AsyncMock()):
             for author, content in (
                 (authors[0], "https://tenor.com/view/g1"),
@@ -2117,13 +2122,17 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
                 (authors[2], "https://tenor.com/view/g3"),
                 (authors[3], "https://tenor.com/view/g4"),
             ):
-                final = await self.service.handle_message(
-                    FakeMessage(guild=guild, channel=channel, author=author, content=content)
-                )
+                message = FakeMessage(guild=guild, channel=channel, author=author, content=content)
+                messages.append(message)
+                decisions.append(await self.service.handle_message(message))
 
+        final = decisions[-1]
         self.assertIsNotNone(final)
         self.assertIn("spam_group_gif_pressure", {reason.match_class for reason in final.reasons})
         self.assertIn("4 gifs in a row", (final.alert_evidence_summary or "").lower())
+        self.assertTrue(final.deleted)
+        self.assertEqual(final.deleted_count, 4)
+        self.assertTrue(all(message.deleted for message in messages))
 
     async def test_multi_user_gif_pressure_is_detected_without_needing_one_spammer(self):
         guild = FakeGuild(10)
@@ -2135,7 +2144,8 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
 
         await self._enable_gif_pack(guild.id)
 
-        final = None
+        messages = []
+        decisions = []
         with patch.object(self.service, "_send_alert", new=AsyncMock()):
             for author, content in (
                 (authors[0], "https://tenor.com/view/cat-dance-gif-1000"),
@@ -2145,20 +2155,24 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
                 (authors[1], "https://tenor.com/view/hype-gif-2000"),
                 (authors[2], "https://tenor.com/view/hype-gif-2000"),
             ):
-                final = await self.service.handle_message(
-                    FakeMessage(guild=guild, channel=channel, author=author, content=content)
-                )
+                message = FakeMessage(guild=guild, channel=channel, author=author, content=content)
+                messages.append(message)
+                decisions.append(await self.service.handle_message(message))
 
+        final = decisions[4]
         self.assertIsNotNone(final)
         self.assertEqual(final.pack, "gif")
         self.assertEqual(final.action, "delete_log")
         self.assertTrue(final.deleted)
-        self.assertEqual(final.deleted_count, 1)
+        self.assertEqual(final.deleted_count, 5)
         self.assertFalse(final.timed_out)
         self.assertIn("spam_group_gif_pressure", {reason.match_class for reason in final.reasons})
         self.assertIn("gif-heavy posts from 3 members", final.alert_evidence_summary.lower())
         self.assertIn("meaningful text messages", final.alert_evidence_summary.lower())
-        self.assertIn("soft suppression only", (final.action_note or "").lower())
+        self.assertIn("channel-safe cleanup only", (final.action_note or "").lower())
+        self.assertTrue(all(message.deleted for message in messages[:5]))
+        self.assertFalse(messages[5].deleted)
+        self.assertIsNone(decisions[5])
 
     async def test_captioned_collective_gif_pressure_is_detected_by_ratio(self):
         guild = FakeGuild(10)
@@ -2190,27 +2204,30 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         channel = FakeChannel(20)
         authors = [self._make_member(guild, 820 + index) for index in range(3)]
         messages = [
-            FakeMessage(guild=guild, channel=channel, author=authors[0], content="https://tenor.com/view/cat-dance-gif-1000"),
-            FakeMessage(guild=guild, channel=channel, author=authors[1], content="https://tenor.com/view/cat-dance-gif-1000"),
-            FakeMessage(guild=guild, channel=channel, author=authors[2], content="https://tenor.com/view/cat-dance-gif-1000"),
-            FakeMessage(guild=guild, channel=channel, author=authors[0], content="https://tenor.com/view/hype-gif-2000"),
-            FakeMessage(guild=guild, channel=channel, author=authors[1], content="https://tenor.com/view/hype-gif-2000"),
-            FakeMessage(guild=guild, channel=channel, author=authors[2], content="https://tenor.com/view/hype-gif-2000"),
+            FakeMessage(guild=guild, channel=channel, author=authors[0], content="https://tenor.com/view/g1"),
+            FakeMessage(guild=guild, channel=channel, author=authors[1], content="solid deploy notes here"),
+            FakeMessage(guild=guild, channel=channel, author=authors[2], content="https://tenor.com/view/g2"),
+            FakeMessage(guild=guild, channel=channel, author=authors[0], content="https://tenor.com/view/g3"),
+            FakeMessage(guild=guild, channel=channel, author=authors[1], content="https://tenor.com/view/g4"),
+            FakeMessage(guild=guild, channel=channel, author=authors[2], content="https://tenor.com/view/g5"),
         ]
 
         await self._enable_gif_pack(guild.id, medium_action="delete_log", high_action="delete_timeout_log")
+        ok, _ = await self.service.set_pack_config(guild.id, "gif", consecutive_threshold=6)
+        self.assertTrue(ok)
 
         with patch.object(self.service, "_send_alert", new=AsyncMock()):
             decisions = [await self.service.handle_message(message) for message in messages]
 
-        self.assertEqual(decisions[:4], [None, None, None, None])
-        self.assertTrue(messages[4].deleted)
+        self.assertEqual(decisions[:5], [None, None, None, None, None])
+        final = decisions[5]
+        self.assertIsNotNone(final)
         self.assertTrue(messages[5].deleted)
-        self.assertFalse(any(message.deleted for message in messages[:4]))
-        self.assertEqual(decisions[4].deleted_count, 1)
-        self.assertEqual(decisions[5].deleted_count, 1)
-        self.assertFalse(decisions[4].timed_out)
-        self.assertFalse(decisions[5].timed_out)
+        self.assertFalse(any(message.deleted for message in messages[:5]))
+        self.assertEqual(final.deleted_count, 1)
+        self.assertEqual(final.delete_attempt_count, 1)
+        self.assertFalse(final.timed_out)
+        self.assertIn("trimmed only the newest excess gif posts", (final.action_note or "").lower())
 
     async def test_collective_gif_pressure_low_value_replies_do_not_hide_channel_takeover(self):
         guild = FakeGuild(10)
@@ -2311,10 +2328,12 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         embed = log_channel.sent[0]["embed"]
         self.assertIn("channel-wide pressure", (embed.description or "").lower())
         note_field = next(field for field in embed.fields if field.name == "Operational Note")
-        self.assertIn("soft suppression only", note_field.value.lower())
+        self.assertIn("channel-safe cleanup only", note_field.value.lower())
+        self.assertIn("full live gif streak", note_field.value.lower())
         reason_field = next(field for field in embed.fields if field.name == "Reason")
         self.assertIn("meaningful text messages", reason_field.value.lower())
-        self.assertTrue(any(decision is not None for decision in decisions[-2:]))
+        actionable = [decision for decision in decisions if decision is not None]
+        self.assertEqual(len(actionable), 1)
 
     async def test_collective_gif_pressure_never_records_strikes_under_delete_escalate(self):
         guild = FakeGuild(10)
@@ -2323,7 +2342,7 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
 
         await self._enable_gif_pack(guild.id, medium_action="delete_log", high_action="delete_escalate")
 
-        final = None
+        decisions = []
         with patch.object(self.service, "_send_alert", new=AsyncMock()):
             for author, content in (
                 (authors[0], "https://tenor.com/view/g1"),
@@ -2333,16 +2352,21 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
                 (authors[1], "https://tenor.com/view/g5"),
                 (authors[2], "https://tenor.com/view/g6"),
             ):
-                final = await self.service.handle_message(
-                    FakeMessage(guild=guild, channel=channel, author=author, content=content)
+                decisions.append(
+                    await self.service.handle_message(
+                        FakeMessage(guild=guild, channel=channel, author=author, content=content)
+                    )
                 )
 
+        actionable = [decision for decision in decisions if decision is not None]
+        self.assertEqual(len(actionable), 1)
+        final = actionable[0]
         self.assertIsNotNone(final)
         self.assertIn("spam_group_gif_pressure", {reason.match_class for reason in final.reasons})
         self.assertFalse(final.timed_out)
         self.assertFalse(final.escalated)
         self.assertEqual(self.service._strike_windows, {})
-        self.assertIn("soft suppression only", (final.action_note or "").lower())
+        self.assertIn("channel-safe cleanup only", (final.action_note or "").lower())
 
     async def test_individual_gif_abuse_can_still_win_inside_collective_pressure(self):
         guild = FakeGuild(10)
@@ -2356,23 +2380,59 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         await self._enable_gif_pack(guild.id, medium_action="delete_log", high_action="delete_timeout_log")
 
         final = None
+        messages = []
         with patch.object(self.service, "_send_alert", new=AsyncMock()):
             for author, content in (
                 (authors["heavy"], "https://tenor.com/view/g1"),
                 (authors["light_a"], "https://tenor.com/view/g2"),
-                (authors["heavy"], "https://tenor.com/view/g3"),
+                (authors["heavy"], "https://tenor.com/view/g1"),
                 (authors["light_b"], "https://tenor.com/view/g4"),
-                (authors["heavy"], "https://tenor.com/view/g5"),
-                (authors["heavy"], "https://tenor.com/view/g6"),
+                (authors["heavy"], "https://tenor.com/view/g1"),
             ):
-                final = await self.service.handle_message(
-                    FakeMessage(guild=guild, channel=channel, author=author, content=content)
-                )
+                message = FakeMessage(guild=guild, channel=channel, author=author, content=content)
+                messages.append(message)
+                final = await self.service.handle_message(message)
 
         self.assertIsNotNone(final)
         self.assertEqual(final.reasons[0].match_class, "spam_gif_flood")
         self.assertIn("spam_group_gif_pressure", {reason.match_class for reason in final.reasons})
         self.assertIn("personal gif-abuse threshold", (final.action_note or "").lower())
+        self.assertTrue(messages[0].deleted)
+        self.assertFalse(messages[1].deleted)
+        self.assertTrue(messages[2].deleted)
+        self.assertFalse(messages[3].deleted)
+        self.assertTrue(messages[4].deleted)
+
+    async def test_gif_pack_exempt_messages_do_not_count_toward_collective_pressure(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        exempt_role = FakeRole(77, position=5)
+        exempt_author = FakeAuthor(890, roles=[exempt_role])
+        authors = [self._make_member(guild, 891 + index) for index in range(4)]
+
+        await self._enable_gif_pack(guild.id, medium_action="delete_log", high_action="delete_log")
+        ok, _ = await self.service.set_pack_exemption(guild.id, "gif", "role", exempt_role.id, True)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_pack_config(guild.id, "gif", consecutive_threshold=4)
+        self.assertTrue(ok)
+
+        messages = [
+            FakeMessage(guild=guild, channel=channel, author=exempt_author, content="https://tenor.com/view/exempt"),
+            FakeMessage(guild=guild, channel=channel, author=authors[0], content="https://tenor.com/view/g1"),
+            FakeMessage(guild=guild, channel=channel, author=authors[1], content="https://tenor.com/view/g2"),
+            FakeMessage(guild=guild, channel=channel, author=authors[2], content="https://tenor.com/view/g3"),
+            FakeMessage(guild=guild, channel=channel, author=authors[3], content="https://tenor.com/view/g4"),
+        ]
+
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            decisions = [await self.service.handle_message(message) for message in messages]
+
+        self.assertEqual(decisions[:4], [None, None, None, None])
+        final = decisions[4]
+        self.assertIsNotNone(final)
+        self.assertEqual(final.deleted_count, 4)
+        self.assertFalse(messages[0].deleted)
+        self.assertTrue(all(message.deleted for message in messages[1:]))
 
     async def test_gif_pack_runs_even_when_spam_pack_is_disabled(self):
         guild = FakeGuild(10)
@@ -4036,6 +4096,33 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(status["enabled"])
         self.assertEqual(status["policy_source"], "ordinary_global")
         self.assertEqual(status["allowed_models"], ["gpt-5.4-nano"])
+
+    async def test_ai_status_reports_log_channel_blocker_when_policy_and_provider_are_ready(self):
+        self.service.ai_provider = FakeAIProvider(available=True)
+        ok, _ = await self.service.set_module_enabled(SHIELD_AI_ALLOWED_GUILD_ID, True)
+        self.assertTrue(ok)
+
+        status = self.service.get_ai_status(SHIELD_AI_ALLOWED_GUILD_ID)
+
+        self.assertFalse(status["ready_for_review"])
+        self.assertIn("log channel", status["status"].lower())
+        self.assertIn("delivery lane", status["setup_blockers"][0].lower())
+
+    async def test_ai_status_reports_ready_once_local_delivery_lane_is_configured(self):
+        self.service.ai_provider = FakeAIProvider(available=True)
+        log_channel = FakeChannel(99, name="shield-log")
+        self.bot.register_channel(log_channel)
+        ok, _ = await self.service.set_module_enabled(SHIELD_AI_ALLOWED_GUILD_ID, True)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_log_channel(SHIELD_AI_ALLOWED_GUILD_ID, log_channel.id)
+        self.assertTrue(ok)
+
+        status = self.service.get_ai_status(SHIELD_AI_ALLOWED_GUILD_ID)
+
+        self.assertTrue(status["ready_for_review"])
+        self.assertEqual(status["status"], "Ready for second-pass review.")
+        self.assertEqual(status["setup_blockers"], [])
+        self.assertEqual(status["routing_strategy"], "routed_fast_complex")
 
     async def test_public_ai_config_only_changes_scope(self):
         ok, message = await self.service.set_ai_config(10, enabled=True)
