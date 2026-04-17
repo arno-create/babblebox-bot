@@ -240,9 +240,11 @@ class WebsiteDocsTests(unittest.TestCase):
         index_html = (ROOT / "index.html").read_text(encoding="utf-8")
         help_html = (ROOT / "help.html").read_text(encoding="utf-8")
 
-        self.assertIn("consecutive-streak and GIF-to-text balance", help_html)
-        self.assertIn("consecutive-streak plus GIF-to-text pressure", index_html)
+        self.assertIn("one-member rate, low-text repeat gate, same-asset repeat, channel streak, and GIF-to-text balance", help_html)
+        self.assertIn("configurable one-member rate, low-text repeat, same-asset, channel-streak, and GIF-to-text pressure controls", index_html)
         self.assertIn("consecutive GIF streaks or GIF-to-text imbalance", readme)
+        self.assertIn("full live GIF streak", readme)
+        self.assertIn("newest excess GIF posts", readme)
         self.assertIn("collective pressure never adds strikes or timeouts on its own", readme)
         self.assertIn("Adaptive", help_html)
         self.assertIn("Compact", help_html)

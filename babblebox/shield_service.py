@@ -856,6 +856,7 @@ class ShieldSpamEvent:
     gif_signature: str | None = None
     gif_only: bool = False
     gif_low_text: bool = False
+    gif_pack_exempt: bool = False
     message: Any | None = None
 
 
@@ -875,6 +876,8 @@ class ShieldChannelActivityEvent:
     gif_signature: str | None = None
     gif_only: bool = False
     gif_low_text: bool = False
+    gif_pack_exempt: bool = False
+    message: Any | None = None
 
 
 @dataclass(frozen=True)
@@ -1984,11 +1987,11 @@ class ShieldService:
         self._alert_signature_dedup: dict[tuple[Any, ...], float] = {}
         self._compact_alert_cohorts: dict[tuple[Any, ...], float] = {}
         self._strike_windows: dict[tuple[int, int, str], list[float]] = {}
+        self._deleted_message_ids: dict[int, float] = {}
         self._recent_promos: dict[tuple[int, int, str], list[float]] = {}
         self._recent_scam_campaigns: dict[tuple[int, str, str], list[tuple[float, int]]] = {}
         self._recent_spam_events: dict[tuple[int, int], list[ShieldSpamEvent]] = {}
         self._recent_channel_activity: dict[tuple[int, int], list[ShieldChannelActivityEvent]] = {}
-        self._recent_channel_gif_pressure: dict[tuple[int, int], list[tuple[float, int, str | None, bool, bool]]] = {}
         self._gif_incident_alerts: dict[tuple[int, int, int], dict[str, Any]] = {}
         self._recent_newcomer_activity: dict[tuple[int, int], ShieldNewcomerActivityState] = {}
         self._last_runtime_prune = 0.0
@@ -2758,9 +2761,9 @@ class ShieldService:
             final_same_asset = current["gif_same_asset_threshold"] if same_asset_threshold is None else same_asset_threshold
             final_ratio = current["gif_min_ratio_percent"] if ratio_percent is None else ratio_percent
             policy_note = (
-                f" Core rule: {final_threshold} GIF-heavy posts in {final_window}s. "
+                f" One-member GIF-heavy rate: {final_threshold} posts in {final_window}s. "
                 f"Channel streak rule: {final_consecutive}+ GIFs in a row. "
-                f"Repeat rule: {final_repeat}+ repeats with {final_ratio}%+ GIF pressure. "
+                f"Low-text repeat gate: {final_repeat}+ repeats with {final_ratio}%+ GIF pressure. "
                 f"Same-GIF rule: {final_same_asset}+ uses of the same asset."
             )
         return await self._update_config(
@@ -3387,6 +3390,7 @@ class ShieldService:
         snapshot: ShieldSnapshot,
         *,
         now: float,
+        gif_pack_exempt: bool = False,
     ) -> tuple[ShieldSpamEvent, tuple[ShieldSpamEvent, ...]]:
         key = (guild_id, user_id)
         rows = [
@@ -3418,6 +3422,7 @@ class ShieldService:
             gif_signature=snapshot.gif_signature,
             gif_only=snapshot.gif_only,
             gif_low_text=snapshot.gif_low_text,
+            gif_pack_exempt=gif_pack_exempt,
             message=message,
         )
         rows.append(current)
@@ -3431,10 +3436,12 @@ class ShieldService:
         guild_id: int,
         channel_id: int | None,
         user_id: int,
+        message: discord.Message,
         snapshot: ShieldSnapshot,
         *,
         now: float,
         author_kind: str,
+        gif_pack_exempt: bool = False,
     ) -> tuple[int, int, tuple[ShieldChannelActivityEvent, ...]]:
         if channel_id is None:
             return 0, 0, ()
@@ -3443,6 +3450,7 @@ class ShieldService:
             row
             for row in self._recent_channel_activity.get(key, [])
             if now - row.timestamp <= CHANNEL_ACTIVITY_WINDOW_SECONDS
+            and not self._message_is_deleted(row.message)
         ]
         quality_message = snapshot.plain_word_count >= 3 and not snapshot.low_value_text
         risky = bool(
@@ -3470,6 +3478,8 @@ class ShieldService:
                 gif_signature=snapshot.gif_signature,
                 gif_only=snapshot.gif_only,
                 gif_low_text=snapshot.gif_low_text,
+                gif_pack_exempt=gif_pack_exempt,
+                message=message,
             )
         )
         if len(rows) > 100:
@@ -3525,29 +3535,6 @@ class ShieldService:
             return False
         return True
 
-    def _track_channel_gif_pressure(
-        self,
-        guild_id: int,
-        channel_id: int | None,
-        user_id: int,
-        snapshot: ShieldSnapshot,
-        *,
-        now: float,
-    ):
-        if channel_id is None:
-            return
-        key = (guild_id, channel_id)
-        rows = [
-            row
-            for row in self._recent_channel_gif_pressure.get(key, [])
-            if now - row[0] <= SPAM_GIF_WINDOW_SECONDS
-        ]
-        if snapshot.is_gif_message:
-            rows.append((now, user_id, snapshot.gif_signature, snapshot.gif_only, snapshot.gif_low_text))
-        if len(rows) > 100:
-            rows = rows[-100:]
-        self._recent_channel_gif_pressure[key] = rows
-
     def _build_group_gif_pressure(
         self,
         guild_id: int,
@@ -3556,8 +3543,9 @@ class ShieldService:
         *,
         compiled: CompiledShieldConfig,
         now: float,
+        gif_pack_exempt: bool = False,
     ) -> dict[str, Any] | None:
-        if channel_id is None or not snapshot.is_gif_message:
+        if channel_id is None or not snapshot.is_gif_message or gif_pack_exempt:
             return None
         key = (guild_id, channel_id)
         window_seconds = float(compiled.gif_rules.window_seconds)
@@ -3565,10 +3553,11 @@ class ShieldService:
             row
             for row in self._recent_channel_activity.get(key, [])
             if now - row.timestamp <= window_seconds
+            and not self._message_is_deleted(row.message)
         ]
         if not activity_rows:
             return None
-        gif_rows = [row for row in activity_rows if row.is_gif_message]
+        gif_rows = [row for row in activity_rows if row.is_gif_message and not row.gif_pack_exempt]
         if not gif_rows:
             return None
         distinct_gif_authors = {row.user_id for row in gif_rows}
@@ -3586,7 +3575,7 @@ class ShieldService:
 
         consecutive_rows: list[ShieldChannelActivityEvent] = []
         for row in reversed(activity_rows):
-            if not row.is_gif_message:
+            if not row.is_gif_message or row.gif_pack_exempt:
                 break
             consecutive_rows.append(row)
         consecutive_rows.reverse()
@@ -3987,19 +3976,25 @@ class ShieldService:
         gif_events = [
             event
             for event in recent_events
-            if event.is_gif_message and now - event.timestamp <= float(gif_rules.window_seconds)
+            if event.is_gif_message
+            and not event.gif_pack_exempt
+            and now - event.timestamp <= float(gif_rules.window_seconds)
+            and not self._message_is_deleted(event.message)
         ]
         gif_window_events = [
             event
             for event in recent_events
             if now - event.timestamp <= float(gif_rules.window_seconds)
+            and not self._message_is_deleted(event.message)
         ]
         repeated_same_gif = [
             event
             for event in recent_events
             if snapshot.gif_signature is not None
+            and not event.gif_pack_exempt
             and event.gif_signature == snapshot.gif_signature
             and now - event.timestamp <= float(gif_rules.window_seconds)
+            and not self._message_is_deleted(event.message)
         ]
         gif_low_text_events = [event for event in gif_events if event.gif_low_text]
         gif_only_events = [event for event in gif_events if event.gif_only]
@@ -4142,14 +4137,17 @@ class ShieldService:
         distinct_channel_authors = 0
         quality_channel_authors = 0
         channel_activity: tuple[ShieldChannelActivityEvent, ...] = ()
+        gif_pack_exempt = self._message_pack_exempt(compiled, message, "gif")
         if scan_source == "new_message":
             distinct_channel_authors, quality_channel_authors, channel_activity = self._track_channel_activity(
                 message.guild.id,
                 channel_id,
                 int(getattr(message.author, "id", 0) or 0),
+                message,
                 snapshot,
                 now=now,
                 author_kind=author_kind,
+                gif_pack_exempt=gif_pack_exempt,
             )
         if author_kind == "human" and scan_source == "new_message":
             _spam_event, recent_spam_events = self._track_spam_event(
@@ -4159,13 +4157,7 @@ class ShieldService:
                 message,
                 snapshot,
                 now=now,
-            )
-            self._track_channel_gif_pressure(
-                message.guild.id,
-                channel_id,
-                int(getattr(message.author, "id", 0) or 0),
-                snapshot,
-                now=now,
+                gif_pack_exempt=gif_pack_exempt,
             )
         link_assessments = self._collect_link_assessments(compiled, snapshot, now=now)
         scam_context = self._build_scam_context(
@@ -4181,6 +4173,7 @@ class ShieldService:
             snapshot,
             compiled=compiled,
             now=now,
+            gif_pack_exempt=gif_pack_exempt,
         )
         matches = self._collect_matches(
             compiled,
@@ -4258,9 +4251,19 @@ class ShieldService:
         gif_group_note = None
         if any(item.match_class == "spam_group_gif_pressure" for item in decision.reasons):
             if best.match_class == "spam_group_gif_pressure":
-                gif_group_note = (
-                    "Collective channel GIF pressure triggered soft suppression only; Babblebox did not add strikes or time out members on the group signal alone."
-                )
+                group_triggers = tuple(group_gif_pressure.get("triggered_by", ())) if group_gif_pressure is not None else ()
+                if "streak" in group_triggers:
+                    gif_group_note = (
+                        "Collective channel GIF pressure triggered channel-safe cleanup only; Babblebox removed the full live GIF streak and did not add strikes or time out members on the group signal alone."
+                    )
+                elif "ratio" in group_triggers:
+                    gif_group_note = (
+                        "Collective channel GIF pressure triggered channel-safe cleanup only; Babblebox trimmed only the newest excess GIF posts needed to calm the channel and did not add strikes or time out members on the group signal alone."
+                    )
+                else:
+                    gif_group_note = (
+                        "Collective channel GIF pressure triggered channel-safe cleanup only; Babblebox did not add strikes or time out members on the group signal alone."
+                    )
             elif best.pack == "gif":
                 gif_group_note = (
                     "Channel-wide GIF pressure was also active, but the resolved action followed this member's personal GIF-abuse threshold."
@@ -4274,17 +4277,22 @@ class ShieldService:
                 recent_spam_events,
                 compiled,
                 now=now,
+                channel_activity=channel_activity,
+                group_gif_pressure=group_gif_pressure,
             )
-            deleted_count, attempt_count = await self._delete_messages(delete_targets)
+            deleted_count, attempt_count = await self._delete_messages(delete_targets) if delete_targets else (0, 0)
             decision.deleted = deleted_count > 0
             decision.deleted_count = deleted_count
             decision.delete_attempt_count = attempt_count
             if deleted_count <= 0:
-                decision.action_note = (
-                    "Delete was configured, but Babblebox could not delete the message."
-                    if attempt_count <= 1
-                    else f"Delete was configured, but Babblebox could not delete the {attempt_count}-message incident burst."
-                )
+                if attempt_count <= 0:
+                    decision.action_note = "Delete was configured, but no live messages remained inside the matched incident."
+                else:
+                    decision.action_note = (
+                        "Delete was configured, but Babblebox could not delete the message."
+                        if attempt_count <= 1
+                        else f"Delete was configured, but Babblebox could not delete the {attempt_count}-message incident burst."
+                    )
             elif deleted_count < attempt_count:
                 decision.action_note = f"Deleted {deleted_count} of {attempt_count} incident messages; some could not be removed."
             elif attempt_count > 1:
@@ -4742,6 +4750,38 @@ class ShieldService:
             unique.append(message)
         return unique
 
+    def _message_id(self, message: Any) -> int | None:
+        message_id = getattr(message, "id", None)
+        return message_id if isinstance(message_id, int) and message_id > 0 else None
+
+    def _message_is_deleted(self, message: Any) -> bool:
+        if message is None:
+            return False
+        if bool(getattr(message, "deleted", False)):
+            return True
+        message_id = self._message_id(message)
+        return message_id is not None and message_id in self._deleted_message_ids
+
+    def _record_deleted_message(self, message: Any, *, now: float | None = None) -> None:
+        message_id = self._message_id(message)
+        if message_id is None:
+            return
+        self._deleted_message_ids[message_id] = time.monotonic() if now is None else now
+
+    def _message_pack_exempt(self, compiled: CompiledShieldConfig, message: discord.Message, pack: str) -> bool:
+        scope = compiled.pack_exemptions.get(pack)
+        if scope is None:
+            return False
+        user_id = int(getattr(getattr(message, "author", None), "id", 0) or 0)
+        if user_id <= 0:
+            return False
+        channel_id = getattr(getattr(message, "channel", None), "id", None)
+        return scope.matches(
+            channel_id=channel_id,
+            user_id=user_id,
+            role_ids=self._member_role_ids(getattr(message, "author", None)),
+        )
+
     def _select_incident_tail(
         self,
         events: Sequence[ShieldSpamEvent],
@@ -4761,6 +4801,65 @@ class ShieldService:
             last_timestamp = event.timestamp
         return list(reversed(selected))
 
+    def _collect_group_gif_incident_messages(
+        self,
+        channel_activity: Sequence[ShieldChannelActivityEvent],
+        compiled: CompiledShieldConfig,
+        *,
+        group_gif_pressure: dict[str, Any] | None,
+        now: float,
+    ) -> list[discord.Message]:
+        if not channel_activity or group_gif_pressure is None:
+            return []
+        window_seconds = float(compiled.gif_rules.window_seconds)
+        live_rows = [
+            row
+            for row in channel_activity
+            if now - row.timestamp <= window_seconds
+            and row.message is not None
+            and not self._message_is_deleted(row.message)
+        ]
+        if not live_rows:
+            return []
+        triggered_by = tuple(group_gif_pressure.get("triggered_by", ()))
+        if "streak" in triggered_by:
+            streak_rows: list[ShieldChannelActivityEvent] = []
+            for row in reversed(live_rows):
+                if not row.is_gif_message or row.gif_pack_exempt:
+                    break
+                streak_rows.append(row)
+            streak_rows.reverse()
+            if (
+                len(streak_rows) >= compiled.gif_rules.consecutive_threshold
+                and len({row.user_id for row in streak_rows}) >= 2
+            ):
+                return self._dedupe_message_targets(
+                    [row.message for row in streak_rows if row.message is not None]
+                )
+        if "ratio" not in triggered_by:
+            return []
+        meaningful_text_count = sum(
+            1 for row in live_rows if not row.is_gif_message and row.quality_message
+        )
+        gif_rows = [row for row in live_rows if row.is_gif_message and not row.gif_pack_exempt]
+        if len(gif_rows) < 2 or len({row.user_id for row in gif_rows}) < 2:
+            return []
+        minimum_count = max(5, compiled.gif_rules.message_threshold)
+        remaining_gif_count = len(gif_rows)
+        selected_rows: list[ShieldChannelActivityEvent] = []
+        for row in reversed(gif_rows):
+            ratio_percent = int(
+                round((remaining_gif_count / max(1, remaining_gif_count + meaningful_text_count)) * 100)
+            )
+            if remaining_gif_count < minimum_count or ratio_percent < compiled.gif_rules.min_ratio_percent:
+                break
+            selected_rows.append(row)
+            remaining_gif_count -= 1
+        selected_rows.reverse()
+        return self._dedupe_message_targets(
+            [row.message for row in selected_rows if row.message is not None]
+        )
+
     def _collect_incident_messages(
         self,
         match: ShieldMatch,
@@ -4770,24 +4869,42 @@ class ShieldService:
         compiled: CompiledShieldConfig,
         *,
         now: float,
+        channel_activity: Sequence[ShieldChannelActivityEvent] = (),
+        group_gif_pressure: dict[str, Any] | None = None,
     ) -> list[discord.Message]:
         channel_id = getattr(getattr(message, "channel", None), "id", None)
         same_channel_events = [
             event
             for event in recent_events
-            if event.message is not None and event.channel_id == channel_id
+            if event.message is not None
+            and event.channel_id == channel_id
+            and not self._message_is_deleted(event.message)
         ]
         if not same_channel_events:
+            if match.match_class == "spam_group_gif_pressure":
+                return self._collect_group_gif_incident_messages(
+                    channel_activity,
+                    compiled,
+                    group_gif_pressure=group_gif_pressure,
+                    now=now,
+                )
             return [message]
 
         selected_events: list[ShieldSpamEvent]
         if match.match_class == "spam_group_gif_pressure":
-            return [message]
+            return self._collect_group_gif_incident_messages(
+                channel_activity,
+                compiled,
+                group_gif_pressure=group_gif_pressure,
+                now=now,
+            )
         if match.pack == "gif":
             selected_events = [
                 event
                 for event in same_channel_events
-                if event.is_gif_message and now - event.timestamp <= float(compiled.gif_rules.window_seconds)
+                if event.is_gif_message
+                and not event.gif_pack_exempt
+                and now - event.timestamp <= float(compiled.gif_rules.window_seconds)
             ]
             if match.match_class == "spam_gif_flood" and snapshot.gif_signature is not None:
                 same_asset_events = [event for event in selected_events if event.gif_signature == snapshot.gif_signature]
@@ -6332,14 +6449,23 @@ class ShieldService:
             if any(now - event.timestamp <= SPAM_EVENT_WINDOW_SECONDS for event in values)
         }
         self._recent_channel_activity = {
-            key: [row for row in values if now - row.timestamp <= CHANNEL_ACTIVITY_WINDOW_SECONDS]
+            key: [
+                row
+                for row in values
+                if now - row.timestamp <= CHANNEL_ACTIVITY_WINDOW_SECONDS
+                and not self._message_is_deleted(row.message)
+            ]
             for key, values in self._recent_channel_activity.items()
-            if any(now - row.timestamp <= CHANNEL_ACTIVITY_WINDOW_SECONDS for row in values)
+            if any(
+                now - row.timestamp <= CHANNEL_ACTIVITY_WINDOW_SECONDS and not self._message_is_deleted(row.message)
+                for row in values
+            )
         }
-        self._recent_channel_gif_pressure = {
-            key: [row for row in values if now - row[0] <= SPAM_GIF_WINDOW_SECONDS]
-            for key, values in self._recent_channel_gif_pressure.items()
-            if any(now - row[0] <= SPAM_GIF_WINDOW_SECONDS for row in values)
+        deleted_window_seconds = max(SPAM_EVENT_WINDOW_SECONDS, CHANNEL_ACTIVITY_WINDOW_SECONDS, GIF_INCIDENT_WINDOW_SECONDS)
+        self._deleted_message_ids = {
+            message_id: deleted_at
+            for message_id, deleted_at in self._deleted_message_ids.items()
+            if now - deleted_at <= deleted_window_seconds
         }
         self._recent_newcomer_activity = {
             key: value
@@ -6370,6 +6496,7 @@ class ShieldService:
             return False
         try:
             await message.delete()
+            self._record_deleted_message(message)
             return True
         except (discord.Forbidden, discord.NotFound, discord.HTTPException):
             return False
@@ -6574,8 +6701,8 @@ class ShieldService:
         if incident_key and incident_key[0] == "channel":
             return (
                 f"Grouped with **{hits}** channel-level GIF-pressure matches inside the current "
-                f"{int(GIF_INCIDENT_WINDOW_SECONDS)}s incident window. Babblebox kept this collective and only suppressed "
-                "the excess GIF posts instead of punishing members on the group signal alone."
+                f"{int(GIF_INCIDENT_WINDOW_SECONDS)}s incident window. Babblebox kept this collective and only used "
+                "channel-safe GIF cleanup instead of punishing members on the group signal alone."
             )
         return (
             f"Grouped with **{hits}** GIF-heavy posts from this member inside the current "

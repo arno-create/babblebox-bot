@@ -1598,11 +1598,11 @@ class ShieldCog(commands.Cog):
             )
         if pack == "gif":
             return (
-                f"Rule: {config.get('gif_message_threshold', 4)} GIF-heavy posts in {config.get('gif_window_seconds', 20)}s\n"
+                f"One-member GIF-heavy rate: {config.get('gif_message_threshold', 4)} posts in {config.get('gif_window_seconds', 20)}s\n"
                 f"Channel streak: {config.get('gif_consecutive_threshold', 5)} GIFs in a row across members\n"
-                f"Repeat pressure: {config.get('gif_repeat_threshold', 3)}+ with {config.get('gif_min_ratio_percent', 70)}% GIF ratio\n"
+                f"Low-text repeat gate: {config.get('gif_repeat_threshold', 3)}+ repeats at {config.get('gif_min_ratio_percent', 70)}% GIF pressure\n"
                 f"Same asset: {config.get('gif_same_asset_threshold', 3)}+ repeats\n"
-                "Delete actions remove the matched GIF burst, not just the last message. Collective pressure stays channel-soft: delete the current excess GIF, then log calmly"
+                "Delete actions remove the matched GIF burst, not just the last message. Collective pressure stays channel-soft: remove the full live GIF streak for streak floods or only the newest excess GIF posts for ratio pressure, never text."
             )
         return ""
 
@@ -1778,9 +1778,9 @@ class ShieldCog(commands.Cog):
             ]
         if pack == "gif":
             return [
-                f"GIF-heavy rate: {config.get('gif_message_threshold', 4)} posts in {config.get('gif_window_seconds', 20)}s",
+                f"One-member GIF-heavy rate: {config.get('gif_message_threshold', 4)} posts in {config.get('gif_window_seconds', 20)}s",
                 f"Channel streak: {config.get('gif_consecutive_threshold', 5)} GIFs in a row",
-                f"Repeat pressure: {config.get('gif_repeat_threshold', 3)}+ repeats at {config.get('gif_min_ratio_percent', 70)}% GIF ratio",
+                f"Low-text repeat gate: {config.get('gif_repeat_threshold', 3)}+ repeats at {config.get('gif_min_ratio_percent', 70)}% GIF pressure",
                 f"Same asset: {config.get('gif_same_asset_threshold', 3)}+ repeats",
             ]
         if pack == "adult":
@@ -2103,7 +2103,7 @@ class ShieldCog(commands.Cog):
                 f"Alert role: {alert_role}\n"
                 "First enable: Babblebox applies its recommended non-AI baseline once, then leaves your edits alone.\n"
                 "Feature checks: AFK + reminders use privacy/adult/severe, Watch stays privacy-only, Confessions shares link checks, and spam plus GIF moderation stay live-message only.\n"
-                "Delete actions remove the matched burst for one-user spam or GIF floods, while collective GIF pressure trims only the excess posts that keep the channel GIF-heavy."
+                "Delete actions remove the matched burst for one-user spam or GIF floods, while collective GIF pressure only removes the full live GIF streak or the newest excess GIF posts that crossed the rule and never touches healthy text."
             ),
             inline=False,
         )
