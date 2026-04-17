@@ -61,7 +61,10 @@ class ShieldPanelUiTests(unittest.IsolatedAsyncioTestCase):
         protection = next(field for field in embed.fields if field.name == "Protection Packs")
 
         self._assert_embed_valid(embed)
-        self.assertIn("Delete lane removes bounded GIF bursts; collective cleanup can trim shared floods while personal abuse still targets one member.", protection.value)
+        self.assertIn(
+            "Delete lane removes bounded GIF bursts; collective cleanup uses the exact streak or trims the newest excess GIFs inside the pressure window while personal abuse still targets one member.",
+            protection.value,
+        )
         self.assertFalse(protection.value.endswith("..."))
 
     async def test_rules_and_scope_embeds_stay_within_limits_for_dense_config(self):
@@ -165,16 +168,34 @@ class ShieldPanelUiTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("Same asset", options.value)
         self.assertIn("GIF-heavy rate", options.value)
-        self.assertIn("Channel streak", options.value)
+        self.assertIn("True channel streak", options.value)
         self.assertNotIn("Emoji / emote", options.value)
 
     async def test_gif_options_editor_surfaces_tighter_low_end_values(self):
         view = ShieldPackOptionsEditorView(self.cog, guild_id=10, author_id=1, pack="gif")
-        streak_select = next(child for child in view.children if getattr(child, "placeholder", "") == "Channel streak threshold")
+        streak_select = next(child for child in view.children if getattr(child, "placeholder", "") == "Consecutive GIF streak threshold")
         ratio_select = next(child for child in view.children if getattr(child, "placeholder", "") == "Minimum GIF ratio")
 
         self.assertIn("3", [option.value for option in streak_select.options])
         self.assertIn("50", [option.value for option in ratio_select.options])
+
+    async def test_gif_streak_threshold_selection_persists_three_and_rerenders_cleanly(self):
+        view = ShieldPackOptionsEditorView(self.cog, guild_id=10, author_id=1, pack="gif")
+        streak_select = next(child for child in view.children if getattr(child, "placeholder", "") == "Consecutive GIF streak threshold")
+        streak_select._values = ["3"]
+        interaction = self._interaction(message=FakeMessage(channel=FakeChannel()))
+
+        await streak_select.callback(interaction)
+
+        config = self.cog.service.get_config(10)
+        self.assertEqual(config["gif_consecutive_threshold"], 3)
+
+        refreshed = ShieldPackOptionsEditorView(self.cog, guild_id=10, author_id=1, pack="gif")
+        refreshed_select = next(
+            child for child in refreshed.children if getattr(child, "placeholder", "") == "Consecutive GIF streak threshold"
+        )
+        default_option = next(option for option in refreshed_select.options if option.default)
+        self.assertEqual(default_option.value, "3")
 
     async def test_gif_tight_rate_preset_applies_successfully(self):
         view = ShieldPackOptionsEditorView(self.cog, guild_id=10, author_id=1, pack="gif")

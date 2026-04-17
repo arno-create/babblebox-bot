@@ -21,6 +21,7 @@ from babblebox.shield_service import (
     SENSITIVITY_LABELS,
     ShieldService,
 )
+from babblebox.shield_store import SHIELD_NUMERIC_CONFIG_SPECS
 
 
 PACK_CHOICES = [
@@ -174,12 +175,20 @@ GIF_RATE_PRESETS = {
     "balanced": (4, 20, "Balanced: 4 GIF-heavy posts in 20s"),
     "wide": (5, 25, "Wide: 5 GIF-heavy posts in 25s"),
 }
+
+
+def _threshold_values(field: str, *, include_max: bool = False) -> tuple[int, ...]:
+    minimum, maximum, _default = SHIELD_NUMERIC_CONFIG_SPECS[field]
+    stop = maximum + 1 if include_max else maximum
+    return tuple(range(minimum, stop))
+
+
 SPAM_EMOTE_THRESHOLDS = (8, 12, 18, 24, 30)
 SPAM_CAPS_THRESHOLDS = (12, 20, 28, 40, 60)
-GIF_REPEAT_THRESHOLDS = (2, 3, 4, 5)
-GIF_SAME_ASSET_THRESHOLDS = (2, 3, 4, 5)
+GIF_REPEAT_THRESHOLDS = _threshold_values("gif_repeat_threshold")
+GIF_SAME_ASSET_THRESHOLDS = _threshold_values("gif_same_asset_threshold")
 GIF_RATIO_THRESHOLDS = (50, 60, 70, 80, 90)
-GIF_CONSECUTIVE_THRESHOLDS = (3, 4, 5, 6, 7, 8, 9, 10)
+GIF_CONSECUTIVE_THRESHOLDS = _threshold_values("gif_consecutive_threshold", include_max=True)
 
 
 class ShieldManagedView(discord.ui.View):
@@ -833,8 +842,8 @@ class ShieldPackOptionsEditorView(ShieldManagedView):
             self.add_item(rate_select)
 
             for row, field, values, placeholder in (
-                (1, "consecutive_threshold", GIF_CONSECUTIVE_THRESHOLDS, "Channel streak threshold"),
-                (2, "repeat_threshold", GIF_REPEAT_THRESHOLDS, "Repeat threshold"),
+                (1, "consecutive_threshold", GIF_CONSECUTIVE_THRESHOLDS, "Consecutive GIF streak threshold"),
+                (2, "repeat_threshold", GIF_REPEAT_THRESHOLDS, "Low-text repeat threshold"),
                 (3, "same_asset_threshold", GIF_SAME_ASSET_THRESHOLDS, "Same-asset threshold"),
                 (4, "ratio_percent", GIF_RATIO_THRESHOLDS, "Minimum GIF ratio"),
             ):
@@ -1600,10 +1609,10 @@ class ShieldCog(commands.Cog):
         if pack == "gif":
             return (
                 f"One-member GIF-heavy rate: {config.get('gif_message_threshold', 4)} posts in {config.get('gif_window_seconds', 20)}s\n"
-                f"Channel streak: {config.get('gif_consecutive_threshold', 5)} GIFs in a row across members\n"
+                f"True channel streak: {config.get('gif_consecutive_threshold', 5)} consecutive GIF-heavy messages across members\n"
                 f"Low-text repeat gate: {config.get('gif_repeat_threshold', 3)}+ repeats at {config.get('gif_min_ratio_percent', 70)}% GIF pressure\n"
                 f"Same asset: {config.get('gif_same_asset_threshold', 3)}+ repeats\n"
-                "Delete actions remove bounded GIF bursts, not just the last message. Collective cleanup removes the shared flood, personal abuse can still enforce one member, and healthy text stays untouched. Tight low-end settings are stricter and can be noisy in meme-heavy rooms."
+                "Delete actions remove bounded GIF bursts, not just the last message. Collective cleanup removes the exact streak or trims only the newest excess GIFs from the recent pressure window, personal abuse can still enforce one member, and healthy text stays untouched. Tight low-end settings are stricter and can be noisy in meme-heavy rooms."
             )
         return ""
 
@@ -1627,12 +1636,14 @@ class ShieldCog(commands.Cog):
             )
         elif pack == "gif":
             lines.append(
-                f"Rate {config.get('gif_message_threshold', 4)} in {config.get('gif_window_seconds', 20)}s | "
-                f"Streak {config.get('gif_consecutive_threshold', 5)} | "
-                f"Repeat {config.get('gif_repeat_threshold', 3)} at {config.get('gif_min_ratio_percent', 70)}% | "
+                f"One-member rate {config.get('gif_message_threshold', 4)} in {config.get('gif_window_seconds', 20)}s | "
+                f"True streak {config.get('gif_consecutive_threshold', 5)} | "
+                f"Low-text repeat {config.get('gif_repeat_threshold', 3)} at {config.get('gif_min_ratio_percent', 70)}% | "
                 f"Same asset {config.get('gif_same_asset_threshold', 3)}"
             )
-            lines.append("Delete lane removes bounded GIF bursts; collective cleanup can trim shared floods while personal abuse still targets one member.")
+            lines.append(
+                "Delete lane removes bounded GIF bursts; collective cleanup uses the exact streak or trims the newest excess GIFs inside the pressure window while personal abuse still targets one member."
+            )
         return "\n".join(lines)
 
     def _pack_policy_compact(self, config: dict[str, object], pack: str) -> str:
@@ -1819,7 +1830,7 @@ class ShieldCog(commands.Cog):
         if pack == "gif":
             return [
                 f"One-member GIF-heavy rate: {config.get('gif_message_threshold', 4)} posts in {config.get('gif_window_seconds', 20)}s",
-                f"Channel streak: {config.get('gif_consecutive_threshold', 5)} GIFs in a row",
+                f"True channel streak: {config.get('gif_consecutive_threshold', 5)} consecutive GIF-heavy messages",
                 f"Low-text repeat gate: {config.get('gif_repeat_threshold', 3)}+ repeats at {config.get('gif_min_ratio_percent', 70)}% GIF pressure",
                 f"Same asset: {config.get('gif_same_asset_threshold', 3)}+ repeats",
                 "Tighter low-end values are stricter and best for rooms that want faster GIF cleanup.",
@@ -2146,7 +2157,7 @@ class ShieldCog(commands.Cog):
                 f"Alert role: {alert_role}\n"
                 "First enable: Babblebox applies its recommended non-AI baseline once, then leaves your edits alone.\n"
                 "Feature checks: AFK + reminders use privacy/adult/severe, Watch stays privacy-only, Confessions shares link checks, and spam plus GIF moderation stay live-message only.\n"
-                "Delete actions remove bounded bursts for one-user spam or GIF floods, while collective GIF pressure only removes the full live GIF streak or the newest excess GIF posts that crossed the rule. Mixed incidents can combine shared cleanup with one member's personal enforcement, and healthy text stays untouched."
+                "Delete actions remove bounded bursts for one-user spam or GIF floods, while collective GIF pressure only removes the exact live GIF streak or the newest excess GIF posts from the recent pressure window. Mixed incidents can combine shared cleanup with one member's personal enforcement, and healthy text stays untouched."
             ),
             inline=False,
         )
