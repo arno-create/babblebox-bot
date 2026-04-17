@@ -3,7 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 from datetime import timedelta
-from typing import Awaitable, Callable, Optional
+from typing import Any, Awaitable, Callable, Optional
 
 import discord
 from discord import app_commands
@@ -16,8 +16,8 @@ from babblebox.admin_service import (
     CONFIG_UNCHANGED,
     LOCK_MODERATOR_PERMISSION_NAMES,
     REVIEW_ACTION_LABELS,
+    VERIFICATION_QUEUE_SELECT_LIMIT,
     VERIFICATION_DEADLINE_ACTION_LABELS,
-    VERIFICATION_REVIEW_ACTION_LABELS,
     VERIFICATION_LOGIC_LABELS,
     AdminService,
     VerificationPrecheck,
@@ -233,19 +233,74 @@ class FollowupReviewView(discord.ui.View):
         await interaction.response.edit_message(embed=embed, view=self)
 
 
-class VerificationDeadlineReviewView(discord.ui.View):
-    def __init__(self, *, guild_id: int, user_id: int, version: int):
+class VerificationReviewMemberSelect(discord.ui.Select):
+    def __init__(
+        self,
+        owner: "VerificationReviewQueueView",
+        *,
+        guild_id: int,
+        snapshot_signature: str,
+        pending_rows: list[dict[str, Any]],
+        focused_user_id: int | None,
+        focused_version: int | None,
+    ):
+        options: list[discord.SelectOption] = []
+        for row in pending_rows[:VERIFICATION_QUEUE_SELECT_LIMIT]:
+            user_id = int(row.get("user_id", 0) or 0)
+            version = int(row.get("review_version", 0) or 0)
+            member = row.get("_resolved_member")
+            label = (ge.display_name_of(member) if member is not None else f"User {user_id}")[:100]
+            description = (
+                "Ready to kick"
+                if bool(row.get("_kick_ready"))
+                else str(row.get("_kick_issue_detail") or "Needs review")
+            )[:100]
+            options.append(
+                discord.SelectOption(
+                    label=label,
+                    value=f"{user_id}:{version}",
+                    description=description,
+                    default=user_id == focused_user_id and version == focused_version,
+                )
+            )
+        super().__init__(
+            placeholder="Focus one queued member",
+            min_values=1,
+            max_values=1,
+            options=options,
+            custom_id=f"bb-admin-verification-review:focus:{guild_id}:{snapshot_signature}",
+            row=1,
+        )
+        self._owner = owner
+
+    async def callback(self, interaction: discord.Interaction):
+        await self._owner._handle_focus_selection(interaction, self.values[0])
+
+
+class VerificationReviewQueueView(discord.ui.View):
+    def __init__(
+        self,
+        *,
+        guild_id: int,
+        snapshot_signature: str,
+        pending_rows: list[dict[str, Any]],
+        focused_user_id: int | None = None,
+        focused_version: int | None = None,
+    ):
         super().__init__(timeout=None)
         self.guild_id = guild_id
-        self.user_id = user_id
-        self.version = version
-        self.add_item(self._make_button("kick", discord.ButtonStyle.danger))
-        self.add_item(self._make_button("delay", discord.ButtonStyle.secondary))
-        self.add_item(self._make_button("ignore", discord.ButtonStyle.success))
+        self.snapshot_signature = snapshot_signature
+        self.pending_rows = [dict(row) for row in pending_rows]
+        self.focused_user_id = focused_user_id
+        self.focused_version = focused_version
+        self.add_item(self._make_batch_button("kick", "Kick All Pending", discord.ButtonStyle.danger))
+        self.add_item(self._make_batch_button("delay", "Delay All 24h", discord.ButtonStyle.secondary))
+        self.add_item(self._make_batch_button("ignore", "Ignore All", discord.ButtonStyle.secondary))
         refresh = discord.ui.Button(
             label="Refresh",
             style=discord.ButtonStyle.secondary,
-            custom_id=f"bb-admin-verification-review:refresh:{self.guild_id}:{self.user_id}:{self.version}",
+            custom_id=f"bb-admin-verification-review:refresh:{self.guild_id}:{self.snapshot_signature}",
+            row=0,
         )
 
         async def _refresh_callback(interaction: discord.Interaction):
@@ -257,16 +312,150 @@ class VerificationDeadlineReviewView(discord.ui.View):
 
         refresh.callback = _refresh_callback
         self.add_item(refresh)
+        if self.pending_rows:
+            self.add_item(
+                VerificationReviewMemberSelect(
+                    self,
+                    guild_id=self.guild_id,
+                    snapshot_signature=self.snapshot_signature,
+                    pending_rows=self.pending_rows,
+                    focused_user_id=self.focused_user_id,
+                    focused_version=self.focused_version,
+                )
+            )
+        focused_row = self._find_focused_row(self.pending_rows, self.focused_user_id, self.focused_version)
+        if focused_row is not None:
+            self.add_item(self._make_selected_button("kick", "Kick Selected", discord.ButtonStyle.danger, focused_row))
+            self.add_item(self._make_selected_button("delay", "Delay Selected 24h", discord.ButtonStyle.secondary, focused_row))
+            self.add_item(self._make_selected_button("ignore", "Ignore Forever", discord.ButtonStyle.secondary, focused_row))
+            self.add_item(self._make_clear_focus_button())
 
-    def _make_button(self, action: str, style: discord.ButtonStyle) -> discord.ui.Button:
+    def _find_focused_row(
+        self,
+        pending_rows: list[dict[str, Any]],
+        focused_user_id: int | None,
+        focused_version: int | None,
+    ) -> dict[str, Any] | None:
+        if focused_user_id is None or focused_version is None:
+            return None
+        for row in pending_rows:
+            if int(row.get("user_id", 0) or 0) != focused_user_id:
+                continue
+            if int(row.get("review_version", 0) or 0) != focused_version:
+                continue
+            return row
+        return None
+
+    async def _send_private_message(
+        self,
+        interaction: discord.Interaction,
+        *,
+        content: str | None = None,
+        embed: discord.Embed | None = None,
+    ):
+        kwargs: dict[str, Any] = {"ephemeral": interaction.guild is not None}
+        if content is not None:
+            kwargs["content"] = content
+        if embed is not None:
+            kwargs["embed"] = embed
+        if interaction.response.is_done():
+            await interaction.followup.send(**kwargs)
+            return
+        await interaction.response.send_message(**kwargs)
+
+    async def _edit_queue_message(
+        self,
+        interaction: discord.Interaction,
+        *,
+        embed: discord.Embed,
+        view: discord.ui.View | None,
+    ):
+        if not interaction.response.is_done():
+            await interaction.response.edit_message(embed=embed, view=view)
+            return
+        message = getattr(interaction, "message", None)
+        if message is not None and hasattr(message, "edit"):
+            await message.edit(embed=embed, view=view)
+
+    async def _resolve_service(self, interaction: discord.Interaction) -> AdminService | None:
+        if interaction.guild is None or interaction.user is None:
+            await self._send_private_message(
+                interaction,
+                content="This verification review action only works inside a server.",
+            )
+            return None
+        perms = getattr(interaction.user, "guild_permissions", None)
+        if not (getattr(perms, "administrator", False) or getattr(perms, "manage_guild", False)):
+            await self._send_private_message(
+                interaction,
+                embed=ge.make_status_embed(
+                    "Admin Only",
+                    "You need **Manage Server** or administrator access to use verification review actions.",
+                    tone="warning",
+                    footer="Babblebox Admin",
+                ),
+            )
+            return None
+        service = getattr(interaction.client, "admin_service", None)
+        if service is None:
+            await self._send_private_message(
+                interaction,
+                content="Babblebox admin systems are unavailable right now.",
+            )
+            return None
+        return service
+
+    def _make_batch_button(self, action: str, label: str, style: discord.ButtonStyle) -> discord.ui.Button:
         button = discord.ui.Button(
-            label=VERIFICATION_REVIEW_ACTION_LABELS[action],
+            label=label,
             style=style,
-            custom_id=f"bb-admin-verification-review:{action}:{self.guild_id}:{self.user_id}:{self.version}",
+            custom_id=f"bb-admin-verification-review:batch:{action}:{self.guild_id}:{self.snapshot_signature}",
+            row=0,
         )
 
         async def _callback(interaction: discord.Interaction):
-            await self._handle_action(interaction, action)
+            await self._handle_batch_action(interaction, action)
+
+        button.callback = _callback
+        return button
+
+    def _make_selected_button(
+        self,
+        action: str,
+        label: str,
+        style: discord.ButtonStyle,
+        focused_row: dict[str, Any],
+    ) -> discord.ui.Button:
+        user_id = int(focused_row.get("user_id", 0) or 0)
+        version = int(focused_row.get("review_version", 0) or 0)
+        button = discord.ui.Button(
+            label=label,
+            style=style,
+            custom_id=f"bb-admin-verification-review:selected:{action}:{self.guild_id}:{user_id}:{version}:{self.snapshot_signature}",
+            row=2,
+        )
+
+        async def _callback(interaction: discord.Interaction):
+            await self._handle_selected_action(interaction, action, user_id=user_id, version=version)
+
+        button.callback = _callback
+        return button
+
+    def _make_clear_focus_button(self) -> discord.ui.Button:
+        button = discord.ui.Button(
+            label="Clear Focus",
+            style=discord.ButtonStyle.secondary,
+            custom_id=f"bb-admin-verification-review:clear-focus:{self.guild_id}:{self.snapshot_signature}",
+            row=2,
+        )
+
+        async def _callback(interaction: discord.Interaction):
+            service = await self._resolve_service(interaction)
+            if service is None:
+                return
+            self.focused_user_id = None
+            self.focused_version = None
+            await self._refresh_queue_message(interaction, service, note="Cleared member focus.")
 
         button.callback = _callback
         return button
@@ -274,57 +463,97 @@ class VerificationDeadlineReviewView(discord.ui.View):
     async def _refresh_queue_message(self, interaction: discord.Interaction, service: AdminService, *, note: str | None = None):
         guild = interaction.guild
         if guild is None:
-            await interaction.response.send_message("This verification review action only works inside a server.", ephemeral=True)
-            return
-        current = await service.current_verification_review_target(self.guild_id)
-        compiled = service.get_compiled_config(self.guild_id)
-        if current is None:
-            embed = service.build_verification_review_queue_embed(guild, [], compiled=compiled, note=note)
-            await interaction.response.edit_message(embed=embed, view=None)
-            return
-        pending_rows = await service._active_verification_review_rows(guild, compiled)
-        embed = service.build_verification_review_queue_embed(guild, pending_rows, compiled=compiled, note=note)
-        next_view = VerificationDeadlineReviewView(
-            guild_id=self.guild_id,
-            user_id=int(current["user_id"]),
-            version=int(current.get("review_version", 0) or 0),
-        )
-        await interaction.response.edit_message(embed=embed, view=next_view)
-
-    async def _handle_action(self, interaction: discord.Interaction, action: str):
-        if interaction.guild is None or interaction.user is None:
-            await interaction.response.send_message("This verification review action only works inside a server.", ephemeral=True)
-            return
-        perms = getattr(interaction.user, "guild_permissions", None)
-        if not (getattr(perms, "administrator", False) or getattr(perms, "manage_guild", False)):
-            await interaction.response.send_message(
-                embed=ge.make_status_embed(
-                    "Admin Only",
-                    "You need **Manage Server** or administrator access to use verification review actions.",
-                    tone="warning",
-                    footer="Babblebox Admin",
-                ),
-                ephemeral=True,
+            await self._send_private_message(
+                interaction,
+                content="This verification review action only works inside a server.",
             )
             return
-        service = getattr(interaction.client, "admin_service", None)
-        if service is None:
-            await interaction.response.send_message("Babblebox admin systems are unavailable right now.", ephemeral=True)
+        compiled = service.get_compiled_config(self.guild_id)
+        pending_rows = await service._active_verification_review_rows(guild, compiled)
+        focused_row = self._find_focused_row(pending_rows, self.focused_user_id, self.focused_version)
+        embed = service.build_verification_review_queue_embed(
+            guild,
+            pending_rows,
+            compiled=compiled,
+            note=note,
+            focused_row=focused_row,
+        )
+        if not pending_rows:
+            await self._edit_queue_message(interaction, embed=embed, view=None)
             return
-        ok, message, record = await service.handle_verification_review_action(
+        next_view = VerificationReviewQueueView(
             guild_id=self.guild_id,
-            user_id=self.user_id,
-            version=self.version,
+            snapshot_signature=service.verification_review_snapshot_signature(pending_rows),
+            pending_rows=pending_rows,
+            focused_user_id=int(focused_row["user_id"]) if focused_row is not None else None,
+            focused_version=int(focused_row.get("review_version", 0) or 0) if focused_row is not None else None,
+        )
+        await self._edit_queue_message(interaction, embed=embed, view=next_view)
+
+    async def _handle_focus_selection(self, interaction: discord.Interaction, value: str):
+        service = await self._resolve_service(interaction)
+        if service is None:
+            return
+        try:
+            raw_user_id, raw_version = value.split(":", 1)
+            self.focused_user_id = int(raw_user_id)
+            self.focused_version = int(raw_version)
+        except (TypeError, ValueError):
+            await self._refresh_queue_message(
+                interaction,
+                service,
+                note="Babblebox could not resolve that queued member. Refresh the queue and try again.",
+            )
+            return
+        await self._refresh_queue_message(
+            interaction,
+            service,
+            note="Focused one queued member for individual verification cleanup actions.",
+        )
+
+    async def _handle_batch_action(self, interaction: discord.Interaction, action: str):
+        service = await self._resolve_service(interaction)
+        if service is None:
+            return
+        ok, message = await service.handle_verification_review_batch_action(
+            guild_id=self.guild_id,
+            snapshot_signature=self.snapshot_signature,
             action=action,
             actor=interaction.user,
         )
-        if not ok:
-            if "stale" in message.lower() or "closed" in message.lower():
-                await self._refresh_queue_message(interaction, service, note=message)
-                return
-            await interaction.response.send_message(message, ephemeral=True)
+        lowered = message.lower()
+        if ok or "refresh" in lowered or "no pending verification reviews remain" in lowered:
+            self.focused_user_id = None
+            self.focused_version = None
+            await self._refresh_queue_message(interaction, service, note=message)
             return
-        await self._refresh_queue_message(interaction, service, note=message)
+        await self._send_private_message(interaction, content=message)
+
+    async def _handle_selected_action(
+        self,
+        interaction: discord.Interaction,
+        action: str,
+        *,
+        user_id: int,
+        version: int,
+    ):
+        service = await self._resolve_service(interaction)
+        if service is None:
+            return
+        ok, message, _record = await service.handle_verification_review_action(
+            guild_id=self.guild_id,
+            user_id=user_id,
+            version=version,
+            action=action,
+            actor=interaction.user,
+        )
+        lowered = message.lower()
+        if ok or "stale" in lowered or "closed" in lowered:
+            self.focused_user_id = None
+            self.focused_version = None
+            await self._refresh_queue_message(interaction, service, note=message)
+            return
+        await self._send_private_message(interaction, content=message)
 
 
 class LegacyAdminPanelView(discord.ui.View):
@@ -591,15 +820,19 @@ class AdminCog(commands.Cog):
             message_id = record.get("message_id")
             if not isinstance(message_id, int):
                 continue
-            target = await self.service.current_verification_review_target(int(record["guild_id"]))
-            if target is None:
+            guild = self.bot.get_guild(int(record["guild_id"]))
+            if guild is None:
+                continue
+            compiled = self.service.get_compiled_config(guild.id)
+            pending_rows = await self.service._active_verification_review_rows(guild, compiled)
+            if not pending_rows:
                 continue
             with contextlib.suppress(Exception):
                 self.bot.add_view(
-                    VerificationDeadlineReviewView(
+                    VerificationReviewQueueView(
                         guild_id=int(record["guild_id"]),
-                        user_id=int(target["user_id"]),
-                        version=int(target.get("review_version", 0) or 0),
+                        snapshot_signature=self.service.verification_review_snapshot_signature(pending_rows),
+                        pending_rows=pending_rows,
                     ),
                     message_id=message_id,
                 )
@@ -881,11 +1114,11 @@ class AdminCog(commands.Cog):
             perms = getattr(me, "guild_permissions", None)
             if perms is None or not getattr(perms, "kick_members", False):
                 if compiled.verification_deadline_action == "review":
-                    add("Warning: Verification review mode can still warn members, but Kick Members is required for the Kick button.")
+                    add("Warning: Verification review mode can still warn members, but Kick Members is required for batch kicks and selected kick actions.")
                 else:
                     add("Warning: Verification cleanup cannot kick members because Babblebox is missing Kick Members.")
             if compiled.verification_deadline_action == "review" and compiled.admin_log_channel_id is None:
-                add("Warning: Review-mode verification cleanup needs an admin log channel so Babblebox can send Kick, Delay, and Ignore buttons.")
+                add("Warning: Review-mode verification cleanup needs an admin log channel so Babblebox can publish the shared verification queue.")
             add("Note: Verification cleanup still cannot kick administrators or members whose top role is at or above Babblebox.")
 
         if compiled.admin_log_channel_id is not None:
@@ -1353,7 +1586,8 @@ class AdminCog(commands.Cog):
                 "Babblebox tracks compact pending member state only.\n"
                 "Any non-trivial message in the verification-help channel can extend the deadline.\n"
                 "If someone is already deep into the timer when tracking starts, Babblebox gives them a fresh warning window instead of enforcing the deadline instantly.\n"
-                "Review mode maintains one persistent verification review queue with Kick, Delay, Ignore, and Refresh actions.\n"
+                "Review mode keeps one persistent shared queue with Kick All Pending, Delay All 24h, Ignore All, Refresh, and a per-member drill-down.\n"
+                "Ignore Forever removes a member from verification cleanup until they verify, become exempt, or leave.\n"
                 "Restart reconciliation stays grouped and quiet instead of replaying one message per overdue member."
             ),
             inline=False,
@@ -1634,6 +1868,8 @@ class AdminCog(commands.Cog):
                     f"Extensions used: {verification_state.get('extension_count', 0)}",
                 ]
             )
+            if verification_state.get("ignored_at"):
+                verification_lines.append("Ignored: Yes, until they verify, become exempt, or leave.")
         embed.add_field(name="Verification", value="\n".join(verification_lines), inline=False)
         return ge.style_embed(embed, footer="Babblebox Admin | Member automation status")
 
@@ -2395,6 +2631,10 @@ class AdminCog(commands.Cog):
     @commands.Cog.listener()
     async def on_member_remove(self, member: discord.Member):
         await self.service.handle_member_remove(member)
+
+    @commands.Cog.listener()
+    async def on_member_update(self, before: discord.Member, after: discord.Member):
+        await self.service.handle_member_update(before, after)
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):

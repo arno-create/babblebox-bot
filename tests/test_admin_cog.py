@@ -20,7 +20,7 @@ from babblebox.admin_panel_views import (
     VerificationSyncView,
     VerificationTimingEditorView,
 )
-from babblebox.cogs.admin import AdminCog, AdminPanelView, FollowupReviewView, VerificationDeadlineReviewView
+from babblebox.cogs.admin import AdminCog, AdminPanelView, FollowupReviewView, VerificationReviewQueueView
 from babblebox.admin_service import AdminService
 from babblebox.admin_store import AdminStore
 
@@ -1004,7 +1004,17 @@ class AdminCogSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(ctx.send_calls[0]["ephemeral"])
 
     async def test_verification_review_view_denies_non_admins_privately(self):
-        view = VerificationDeadlineReviewView(guild_id=self.guild.id, user_id=123, version=1)
+        pending_rows = [
+            {
+                "guild_id": self.guild.id,
+                "user_id": 123,
+                "review_version": 1,
+                "kick_at": ge.now_utc().isoformat(),
+                "_kick_ready": True,
+                "_kick_issue_detail": None,
+            }
+        ]
+        view = VerificationReviewQueueView(guild_id=self.guild.id, snapshot_signature="sig-current", pending_rows=pending_rows)
         message = FakeMessage(embed=None, view=view)
         interaction = FakeInteraction(
             user=FakeAuthor(manage_guild=False),
@@ -1012,13 +1022,130 @@ class AdminCogSmokeTests(unittest.IsolatedAsyncioTestCase):
             message=message,
         )
         interaction.client = types.SimpleNamespace(admin_service=self.cog.service)
-        kick_button = next(child for child in view.children if child.label == "Kick")
+        kick_button = next(child for child in view.children if child.label == "Kick All Pending")
 
         await kick_button.callback(interaction)
 
         self.assertEqual(len(interaction.response.sent_messages), 1)
         self.assertTrue(interaction.response.sent_messages[0]["kwargs"]["ephemeral"])
         self.assertIn("Manage Server", interaction.response.sent_messages[0]["kwargs"]["embed"].description)
+
+    async def test_verification_review_queue_batch_button_calls_batch_handler(self):
+        pending_rows = [
+            {
+                "guild_id": self.guild.id,
+                "user_id": 123,
+                "review_version": 1,
+                "kick_at": ge.now_utc().isoformat(),
+                "_kick_ready": True,
+                "_kick_issue_detail": None,
+            },
+            {
+                "guild_id": self.guild.id,
+                "user_id": 124,
+                "review_version": 2,
+                "kick_at": ge.now_utc().isoformat(),
+                "_kick_ready": False,
+                "_kick_issue_detail": "Needs review",
+            },
+        ]
+        view = VerificationReviewQueueView(guild_id=self.guild.id, snapshot_signature="sig-current", pending_rows=pending_rows)
+        message = FakeMessage(embed=discord.Embed(title="Verification Cleanup Queue"), view=view)
+        interaction = self._view_interaction(message=message)
+        interaction.client = types.SimpleNamespace(admin_service=self.cog.service)
+        self.cog.service.handle_verification_review_batch_action = AsyncMock(return_value=(True, "Kick All Pending finished."))
+        self.cog.service._active_verification_review_rows = AsyncMock(return_value=pending_rows)
+        self.cog.service.verification_review_snapshot_signature = mock.Mock(return_value="sig-next")
+        self.cog.service.build_verification_review_queue_embed = mock.Mock(return_value=discord.Embed(title="Verification Cleanup Queue"))
+        kick_button = next(child for child in view.children if child.label == "Kick All Pending")
+
+        await kick_button.callback(interaction)
+
+        self.cog.service.handle_verification_review_batch_action.assert_awaited_once_with(
+            guild_id=self.guild.id,
+            snapshot_signature="sig-current",
+            action="kick",
+            actor=interaction.user,
+        )
+        self.assertEqual(len(interaction.response.edits), 1)
+        self.assertIsInstance(interaction.response.edits[0]["view"], VerificationReviewQueueView)
+
+    async def test_verification_review_queue_member_picker_focuses_selected_member(self):
+        pending_rows = [
+            {
+                "guild_id": self.guild.id,
+                "user_id": 123,
+                "review_version": 1,
+                "kick_at": ge.now_utc().isoformat(),
+                "_kick_ready": True,
+                "_kick_issue_detail": None,
+            },
+            {
+                "guild_id": self.guild.id,
+                "user_id": 124,
+                "review_version": 2,
+                "kick_at": ge.now_utc().isoformat(),
+                "_kick_ready": False,
+                "_kick_issue_detail": "Needs review",
+            },
+        ]
+        view = VerificationReviewQueueView(guild_id=self.guild.id, snapshot_signature="sig-current", pending_rows=pending_rows)
+        message = FakeMessage(embed=discord.Embed(title="Verification Cleanup Queue"), view=view)
+        interaction = self._view_interaction(message=message)
+        interaction.client = types.SimpleNamespace(admin_service=self.cog.service)
+        self.cog.service._active_verification_review_rows = AsyncMock(return_value=pending_rows)
+        self.cog.service.verification_review_snapshot_signature = mock.Mock(return_value="sig-focused")
+        self.cog.service.build_verification_review_queue_embed = mock.Mock(return_value=discord.Embed(title="Verification Cleanup Queue"))
+        select = self._select(view, discord.ui.Select, placeholder_contains="Focus one queued member")
+        select._values = ["124:2"]
+
+        await select.callback(interaction)
+
+        self.assertEqual(len(interaction.response.edits), 1)
+        next_view = interaction.response.edits[0]["view"]
+        self.assertIsInstance(next_view, VerificationReviewQueueView)
+        self.assertEqual(next_view.focused_user_id, 124)
+        self.assertEqual(next_view.focused_version, 2)
+        self.assertIn("Kick Selected", [child.label for child in next_view.children if getattr(child, "label", None)])
+
+    async def test_verification_review_queue_selected_button_calls_single_action_handler(self):
+        pending_rows = [
+            {
+                "guild_id": self.guild.id,
+                "user_id": 123,
+                "review_version": 1,
+                "kick_at": ge.now_utc().isoformat(),
+                "_kick_ready": True,
+                "_kick_issue_detail": None,
+            }
+        ]
+        view = VerificationReviewQueueView(
+            guild_id=self.guild.id,
+            snapshot_signature="sig-current",
+            pending_rows=pending_rows,
+            focused_user_id=123,
+            focused_version=1,
+        )
+        message = FakeMessage(embed=discord.Embed(title="Verification Cleanup Queue"), view=view)
+        interaction = self._view_interaction(message=message)
+        interaction.client = types.SimpleNamespace(admin_service=self.cog.service)
+        self.cog.service.handle_verification_review_action = AsyncMock(return_value=(True, "Delayed by 24 hours.", pending_rows[0]))
+        self.cog.service._active_verification_review_rows = AsyncMock(return_value=pending_rows)
+        self.cog.service.verification_review_snapshot_signature = mock.Mock(return_value="sig-next")
+        self.cog.service.build_verification_review_queue_embed = mock.Mock(return_value=discord.Embed(title="Verification Cleanup Queue"))
+        delay_button = next(child for child in view.children if getattr(child, "label", None) == "Delay Selected 24h")
+
+        await delay_button.callback(interaction)
+
+        self.cog.service.handle_verification_review_action.assert_awaited_once_with(
+            guild_id=self.guild.id,
+            user_id=123,
+            version=1,
+            action="delay",
+            actor=interaction.user,
+        )
+        self.assertEqual(len(interaction.response.edits), 1)
+        self.assertIsInstance(interaction.response.edits[0]["view"], VerificationReviewQueueView)
 
     async def test_cog_load_registers_followup_and_verification_review_views(self):
         record_followup = {
@@ -1033,22 +1160,19 @@ class AdminCogSmokeTests(unittest.IsolatedAsyncioTestCase):
             "message_id": 1502,
             "updated_at": ge.now_utc().isoformat(),
         }
-        record_verification = {
-            "guild_id": self.guild.id,
-            "user_id": 502,
-            "review_version": 3,
-        }
+        pending_rows = [{"guild_id": self.guild.id, "user_id": 502, "review_version": 3, "_kick_ready": True}]
         self.cog.service.start = AsyncMock(return_value=True)
         self.cog.service.list_review_views = AsyncMock(return_value=[record_followup])
         self.cog.service.list_verification_review_queues = AsyncMock(return_value=[record_queue])
-        self.cog.service.current_verification_review_target = AsyncMock(return_value=record_verification)
+        self.cog.service._active_verification_review_rows = AsyncMock(return_value=pending_rows)
+        self.cog.service.verification_review_snapshot_signature = mock.Mock(return_value="sig-load")
 
         await self.cog.cog_load()
 
         self.assertEqual(len(self.bot.views), 2)
         self.assertIsInstance(self.bot.views[0][0], FollowupReviewView)
         self.assertEqual(self.bot.views[0][1], 1501)
-        self.assertIsInstance(self.bot.views[1][0], VerificationDeadlineReviewView)
+        self.assertIsInstance(self.bot.views[1][0], VerificationReviewQueueView)
         self.assertEqual(self.bot.views[1][1], 1502)
 
     async def test_admin_panel_warns_when_operability_is_missing(self):

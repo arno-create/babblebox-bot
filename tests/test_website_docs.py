@@ -300,6 +300,21 @@ class WebsiteDocsTests(unittest.TestCase):
         self.assertIn("illustrative rather than exhaustive", index_html)
         self.assertIn("overview quick-config row", index_html)
 
+    def test_admin_docs_cover_verification_queue_batch_and_durable_ignore(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        help_html = (ROOT / "help.html").read_text(encoding="utf-8")
+
+        for text in (
+            "Kick All Pending",
+            "Delay All 24h",
+            "Ignore All",
+            "Ignore Forever",
+            "until they verify, become exempt, or leave",
+            "final removal DM",
+        ):
+            self.assertIn(text, readme)
+            self.assertIn(text, help_html)
+
     def test_shield_docs_cover_no_link_dm_lure_and_truthful_ai_models(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         help_html = (ROOT / "help.html").read_text(encoding="utf-8")
