@@ -605,6 +605,7 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             "shield": (ShieldCog, int(discord.Permissions(manage_guild=True).value)),
             "confessions": (ConfessionsCog, int(discord.Permissions(manage_guild=True).value)),
             "dropsadmin": (QuestionDropsCog, int(discord.Permissions(manage_guild=True).value)),
+            "bremind": (UtilityCog, int(discord.Permissions(manage_guild=True).value)),
         }
 
         for name, (cog_cls, default_permissions) in expected.items():

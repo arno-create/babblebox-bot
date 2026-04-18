@@ -214,9 +214,11 @@ class WebsiteDocsTests(unittest.TestCase):
         self.assertIn("Disboard-only V1", readme)
         self.assertIn("verified provider output", readme)
         self.assertIn("quiet, public, or off thank-you behavior", readme)
+        self.assertIn("separate admin utility lane", readme)
         self.assertIn("verified provider output", help_html)
         self.assertIn("quiet, public, or off thank-you behavior", help_html)
         self.assertIn("without fake manual timers", help_html)
+        self.assertIn("admin-only", help_html)
         self.assertIn("blind two-hour guesses", index_html)
         self.assertIn("/bremind", index_html)
 
