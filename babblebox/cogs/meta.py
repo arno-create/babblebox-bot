@@ -168,8 +168,8 @@ HELP_PAGES: list[dict[str, str]] = [
             "`/lock channel` and `/lock remove` are Babblebox's direct emergency moderator/admin lane for calm channel lockdowns. `/lock settings` lets admins tune the default notice and optionally limit the lane to admins only.\n"
             "If a channel is already fully denied, Babblebox can track that lock without reopening it later and only clears its own timer or marker on unlock.\n"
             "`/timeout remove` is the direct moderator/admin lane for safely clearing active member timeouts.\n"
-            "`/admin panel`, `/admin followup`, `/admin verification`, `/admin logs`, `/admin exclusions`, `/admin templates`, `/admin permissions`, and `/admin sync` cover returned-after-ban follow-up roles, verification cleanup, permission diagnostics, and compact admin operations.\n"
-            "`/admin panel` is now the interactive control surface: use its overview quick-config row or section buttons to open focused editors for follow-up, verification policy/timing/help path, exclusions, logs, and templates, then keep the slash commands as the precise fallback path.\n"
+            "`/admin panel`, `/admin followup`, `/admin logs`, `/admin exclusions`, and `/admin permissions` cover returned-after-ban follow-up roles, permission diagnostics, and compact admin operations.\n"
+            "`/admin panel` is now the interactive control surface: use its overview quick-config row or section buttons to open focused editors for follow-up, exclusions, and logs, then keep the slash commands as the precise fallback path.\n"
             "Live moderation stays off until an admin enables it, and the first enable applies a recommended non-AI baseline while Shield AI access stays owner-managed.\n"
             "Each live pack can inherit the global timeout or keep a dedicated timeout profile, and the trusted-link lane can do the same without turning the UI into a giant matrix.\n"
             "Trusted Links Only now exposes its built-in trusted families and domains under `/shield trusted`, keeps Confessions link mode separate, and still lets malicious, impersonation, adult, or suspicious-link intel override local trust exceptions.\n"
@@ -317,8 +317,8 @@ def build_help_embed() -> discord.Embed:
         name="Shield / Admin",
         value=(
             "`/shield panel`, `/shield rules`, `/shield exemptions`, `/shield links`, `/shield filters`, `/shield severe category`, "
-            "`/shield severe term`, `/shield ai`, `/lock channel`, `/lock remove`, `/timeout remove`, `/admin panel`, `/admin followup`, `/admin verification`, "
-            "`/admin permissions`, and `/admin sync` "
+            "`/shield severe term`, `/shield ai`, `/lock channel`, `/lock remove`, `/timeout remove`, `/admin panel`, `/admin followup`, `/admin logs`, "
+            "`/admin exclusions`, and `/admin permissions` "
             "cover focused safety setup and compact admin automation, with `/admin panel` now acting as the interactive control surface for the common admin settings."
         ),
         inline=False,

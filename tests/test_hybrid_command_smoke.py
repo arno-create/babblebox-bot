@@ -539,7 +539,8 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/lock remove", shield_field.value)
         self.assertIn("/timeout remove", shield_field.value)
         self.assertIn("/admin followup", shield_field.value)
-        self.assertIn("/admin verification", shield_field.value)
+        self.assertIn("/admin logs", shield_field.value)
+        self.assertIn("/admin exclusions", shield_field.value)
         self.assertIn("/admin permissions", shield_field.value)
 
     def test_help_embeds_stay_within_discord_limits(self):

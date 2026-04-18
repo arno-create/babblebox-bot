@@ -161,9 +161,7 @@ Babblebox is intentionally compact:
   - returned-after-ban follow-up role assignment within a clear 30-day return window
   - auto-remove or moderator-review follow-up role expiry
 - review alerts with compact action buttons instead of a case system
-- verification retention with warning-before-kick cleanup
-- verification-help channel deadline extensions with a small extension cap
-- shared exclusions, trusted-role bypasses, templates, permission diagnostics, and compact admin logs
+- shared exclusions, trusted-role bypasses, permission diagnostics, and compact admin logs
 
 ### Daily Arcade
 
@@ -359,7 +357,7 @@ The default lock notice is configurable, one-off notice overrides stay optional 
 
 ### Admin Lifecycle
 
-Admin lifecycle commands stay private/admin-facing. `/admin panel` is now the interactive admin control surface: its overview quick-config row jumps straight into follow-up, verification policy, and logs, section buttons still open focused editors for follow-up, verification policy/timing/help path, exclusions, logs, and templates directly from the UI, `/admin permissions` stays the truthful diagnostics lane, and `/admin sync` stays the one-time catch-up tool.
+Admin lifecycle commands stay private/admin-facing. `/admin panel` is now the interactive admin control surface: its overview quick-config row jumps straight into follow-up, exclusions, and logs, section buttons open focused editors for follow-up, exclusions, and logs directly from the UI, and `/admin permissions` stays the truthful diagnostics lane when something feels blocked.
 Slash is recommended for the heavier config flows here. Prefix stays positional, so the examples below show the safest compact forms.
 
 | Slash | Prefix | Purpose |
@@ -367,14 +365,11 @@ Slash is recommended for the heavier config flows here. Prefix stays positional,
 | `/admin panel` | `bb!admin panel` | Open the interactive admin lifecycle control surface |
 | `/admin status` | `bb!admin status` | View overview counts or inspect one member |
 | `/admin followup` | `bb!admin followup true @Probation review 30d` | Configure returned-after-ban follow-up roles |
-| `/admin verification` | `bb!admin verification true @Verified must_have_role review 7d 2d` | Configure warning-before-kick verification cleanup and the shared review queue |
 | `/admin logs` | `bb!admin logs #admin-log @Mods` | Set the shared admin log channel and alert role |
 | `/admin exclusions` | `bb!admin exclusions` | Configure shared exclusions and trusted roles |
-| `/admin templates` | `bb!admin templates` | Configure warning/kick DMs and optional rejoin link |
 | `/admin permissions` | `bb!admin permissions` | Diagnose missing bot permissions and the affected feature lanes |
-| `/admin sync` | `bb!admin sync` | One-time catch-up scan for current unverified members |
 
-Follow-up and verification stay batch-first and review-lane focused: routine sweeps emit grouped summaries, review mode uses one persistent shared queue message per lane, startup reconciliation resumes quietly, and Babblebox does not post public channel reactions or reply callouts for weak evidence. Verification review now uses `Kick All Pending`, `Delay All 24h`, `Ignore All`, plus a member picker for one-off actions. `Ignore Forever` keeps that member out of verification cleanup until they verify, become exempt, or leave, and auto-kick attempts the final removal DM before kicking while logging whether delivery actually succeeded. The admin surface is intentionally narrower now: the panel is the premium interactive path for common changes, commands remain precise fallbacks, and the whole lane stays limited to follow-up, verification, exclusions, logs, templates, permission diagnostics, and sync.
+The admin surface is intentionally narrow: follow-up stays batch-first and review-lane focused, routine sweeps emit grouped summaries, review mode uses one persistent shared queue message, and the panel remains the premium path for common changes while commands stay precise fallbacks. The whole lane now stays limited to follow-up, exclusions, logs, permission diagnostics, direct locks, and timeout removal.
 
 ### Daily Arcade
 
@@ -594,18 +589,12 @@ Admin lifecycle storage stays row-based and compact:
 - `admin_guild_configs`
 - `admin_ban_return_candidates`
 - `admin_followup_roles`
-- `admin_verification_states`
-- `admin_verification_review_queues`
-- `admin_verification_notification_snapshots`
 
 Stored data is intentionally small:
 
 - one shared config row per guild
 - short-lived ban-return candidates with a 30-day purge window
 - active follow-up role rows only while Babblebox still manages that follow-up
-- active or ignored verification rows only while someone is still under the current verification rule
-- one shared verification review queue row only while overdue active review backlog exists
-- short-lived grouped verification notification snapshots only while restart-safe suppression state matters
 
 Not stored:
 
@@ -678,7 +667,7 @@ Not stored:
 - `babblebox/question_drops_store.py`: Question Drops persistence and config normalization
 - `babblebox/question_drops_style.py`: Question Drops emoji and presentation helpers
 - `babblebox/admin_store.py`: compact admin lifecycle config and pending-state persistence
-- `babblebox/admin_service.py`: returned-after-ban follow-up logic, verification cleanup, and bounded sweeping
+- `babblebox/admin_service.py`: returned-after-ban follow-up logic, locks, timeout removal, and bounded sweeping
 - `babblebox/shield_ai.py`: optional AI provider integration, redaction, truncation, and safe parsing
 - `babblebox/shield_store.py`: compact Shield config persistence
 - `babblebox/shield_service.py`: Shield matching, cache rebuilds, actions, and mod-log delivery
