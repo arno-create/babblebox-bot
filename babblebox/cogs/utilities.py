@@ -6,6 +6,7 @@ import discord
 from discord import app_commands
 from discord.ext import commands
 
+from babblebox.app_command_hardening import harden_admin_root_group
 from babblebox import game_engine as ge
 from babblebox.command_utils import defer_hybrid_response, require_channel_permissions, send_hybrid_response
 from babblebox.utility_helpers import build_bump_reminder_embed, build_bump_thanks_embed, build_jump_view, deserialize_datetime
@@ -182,6 +183,7 @@ class UtilityCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
         self.service = UtilityService(bot)
+        harden_admin_root_group(self.bremind_group)
 
     async def cog_load(self):
         await self.service.start()
@@ -595,7 +597,7 @@ class UtilityCog(commands.Cog):
         cycle = self.service.get_bump_cycle(guild.id, provider=provider)
         embed = discord.Embed(
             title="Babblebox Bump Reminders",
-            description="Verified provider output starts the cooldown. Babblebox does not use blind manual bump timers here.",
+            description="Babblebox starts this lane only from verified provider output. Disboard is the only supported provider in this build.",
             color=ge.EMBED_THEME["accent"],
         )
         detection_channels = self._resolve_watch_channel_mentions(guild, config.get("detection_channel_ids", []))
@@ -604,7 +606,7 @@ class UtilityCog(commands.Cog):
         role_id = config.get("reminder_role_id")
         reminder_role = guild.get_role(role_id) if isinstance(role_id, int) else None
         embed.add_field(
-            name="Configuration",
+            name="Setup",
             value=(
                 f"Enabled: **{'Yes' if config.get('enabled') else 'No'}**\n"
                 f"Provider: **{provider_label}**\n"
@@ -618,24 +620,25 @@ class UtilityCog(commands.Cog):
         reminder_text = self.service.resolved_bump_reminder_text(guild.id, provider=provider)
         thanks_text = self.service.resolved_bump_thanks_text(guild.id, provider=provider)
         embed.add_field(
-            name="Message Copy",
+            name="Copy",
             value=(
                 f"Reminder: {ge.safe_field_text(reminder_text, limit=140)}\n"
-                f"Thank-you: {ge.safe_field_text(thanks_text, limit=120)}"
+                f"Thank-you: {ge.safe_field_text(thanks_text, limit=220)}"
             ),
             inline=False,
         )
+        last_provider_event_at = deserialize_datetime(cycle.get("last_provider_event_at")) if isinstance(cycle, dict) else None
+        provider_health_lines = [f"Provider: **{provider_label}**"]
+        if last_provider_event_at is None:
+            provider_health_lines.append("Last provider event: None yet.")
+        else:
+            provider_health_lines.append(
+                f"Last provider event: **{str(cycle.get('last_provider_event_kind') or 'unknown').title()}** {ge.format_timestamp(last_provider_event_at, 'R')}"
+            )
         if cycle is None or cycle.get("last_bump_at") is None:
-            last_provider_event_at = deserialize_datetime(cycle.get("last_provider_event_at")) if isinstance(cycle, dict) else None
-            provider_note = "No provider event recorded yet."
-            if last_provider_event_at is not None:
-                provider_note = (
-                    f"Last provider event: **{str(cycle.get('last_provider_event_kind') or 'unknown').title()}** "
-                    f"{ge.format_timestamp(last_provider_event_at, 'R')}"
-                )
             embed.add_field(
                 name="Current Cycle",
-                value="No verified bump has been seen yet, so there is no active cooldown.\n" + provider_note,
+                value="No verified bump has been seen yet, so there is no active cooldown.",
                 inline=False,
             )
         else:
@@ -663,11 +666,12 @@ class UtilityCog(commands.Cog):
             if cycle.get("last_delivery_error"):
                 lines.append(f"Last delivery note: {ge.safe_field_text(cycle['last_delivery_error'], limit=180)}")
             embed.add_field(name="Current Cycle", value="\n".join(lines), inline=False)
+        embed.add_field(name="Provider Health", value="\n".join(provider_health_lines), inline=False)
         operability = self.service.get_bump_operability(guild)
         if operability:
-            embed.add_field(name="Current Blockers Or Warnings", value=ge.join_limited_lines(operability[:6], limit=1024, empty="None."), inline=False)
+            embed.add_field(name="Delivery Notes", value=ge.join_limited_lines(operability[:6], limit=1024, empty="None."), inline=False)
         else:
-            embed.add_field(name="Current Blockers Or Warnings", value="None detected in the current channel and role setup.", inline=False)
+            embed.add_field(name="Delivery Notes", value="No blockers detected in the current channel and role setup.", inline=False)
         return ge.style_embed(embed, footer="Babblebox Bump Reminders | /bremind status")
 
     def _bremind_preview_embed(self, guild: discord.Guild, *, kind: str) -> discord.Embed:
@@ -689,7 +693,7 @@ class UtilityCog(commands.Cog):
                 cycle=cycle,
                 delayed=False,
             )
-            embed.add_field(name="Preview", value="This is a preview only. No timer was started.", inline=False)
+            embed.add_field(name="Preview", value="Preview only. No timer was started.", inline=False)
             return embed
         if kind == "thanks":
             embed = build_bump_thanks_embed(
@@ -697,11 +701,11 @@ class UtilityCog(commands.Cog):
                 thanks_text=thanks_text,
                 bumper_name=ge.display_name_of(guild.me) if getattr(guild, "me", None) is not None else None,
             )
-            embed.add_field(name="Preview", value="This is a preview only. No thank-you message was posted.", inline=False)
+            embed.add_field(name="Preview", value="Preview only. No thank-you message was posted.", inline=False)
             return embed
         embed = discord.Embed(
             title="Bump Reminder Preview",
-            description="Previewing the stored copy and current delivery mode without mutating bump state.",
+            description="Review the stored copy and delivery mode without mutating bump state.",
             color=ge.EMBED_THEME["info"],
         )
         embed.add_field(name="Provider", value=provider_label, inline=True)

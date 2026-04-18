@@ -860,9 +860,9 @@ def build_bump_reminder_embed(
     cycle = cycle or {}
     due_at = deserialize_datetime(cycle.get("due_at"))
     last_bump_at = deserialize_datetime(cycle.get("last_bump_at"))
-    title = f"{provider_label} Bump Window Open"
+    title = f"{provider_label} bump window is open"
     if delayed:
-        title = f"{provider_label} Bump Window Open (Delayed Delivery)"
+        title = f"{provider_label} bump window is open"
     embed = discord.Embed(
         title=title,
         description=reminder_text,
@@ -871,13 +871,15 @@ def build_bump_reminder_embed(
     )
     embed.add_field(name="Provider", value=provider_label, inline=True)
     if due_at is not None:
-        embed.add_field(name="Opened", value=ge.format_timestamp(due_at, "f"), inline=True)
+        embed.add_field(name="Window opened", value=ge.format_timestamp(due_at, "f"), inline=True)
+    if delayed:
+        embed.add_field(name="Delivery", value="Sent late after a temporary interruption.", inline=False)
     if last_bump_at is not None:
-        embed.add_field(name="Last Verified Bump", value=ge.format_timestamp(last_bump_at, "R"), inline=False)
+        embed.add_field(name="Last verified bump", value=ge.format_timestamp(last_bump_at, "R"), inline=False)
     last_bumper_user_id = cycle.get("last_bumper_user_id")
     if isinstance(last_bumper_user_id, int) and last_bumper_user_id > 0:
-        embed.add_field(name="Last Bumper", value=f"<@{last_bumper_user_id}>", inline=True)
-    return ge.style_embed(embed, footer="Babblebox Bump Reminders | Verified provider success only.")
+        embed.add_field(name="Last bumper", value=f"<@{last_bumper_user_id}>", inline=True)
+    return ge.style_embed(embed, footer="Babblebox Bump Reminders | Verified provider success only")
 
 
 def build_bump_thanks_embed(
@@ -890,13 +892,13 @@ def build_bump_thanks_embed(
     if bumper_name:
         description = f"**{bumper_name}**\n{thanks_text}"
     embed = discord.Embed(
-        title=f"Thanks For The {provider_label} Bump",
+        title=f"{provider_label} bump confirmed",
         description=description,
         color=ge.EMBED_THEME["success"],
         timestamp=ge.now_utc(),
     )
     embed.add_field(name="Provider", value=provider_label, inline=True)
-    return ge.style_embed(embed, footer="Babblebox Bump Reminders | Quiet and verified.")
+    return ge.style_embed(embed, footer="Babblebox Bump Reminders | Quiet, verified, and low-noise")
 
 
 def build_afk_status_embed(user: discord.abc.User, record: dict, *, title: str | None = None) -> discord.Embed:

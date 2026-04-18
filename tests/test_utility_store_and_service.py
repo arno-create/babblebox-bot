@@ -21,7 +21,14 @@ from babblebox.shield_service import (
     ShieldFeatureDecision,
     ShieldFeatureSafetyGateway,
 )
-from babblebox.utility_helpers import build_afk_reason_text, compute_next_afk_schedule_start, deserialize_datetime, serialize_datetime
+from babblebox.utility_helpers import (
+    build_afk_reason_text,
+    build_bump_reminder_embed,
+    build_bump_thanks_embed,
+    compute_next_afk_schedule_start,
+    deserialize_datetime,
+    serialize_datetime,
+)
 from babblebox.utility_service import BUMP_PROVIDER_DISBOARD, UtilityService
 from babblebox.utility_store import UtilityStateStore, UtilityStorageUnavailable, _PostgresUtilityStore
 
@@ -1226,6 +1233,28 @@ class UtilityStoreAndServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIs(kwargs["reference"], message)
         self.assertIsNotNone(kwargs.get("embed"))
 
+    async def test_bump_thanks_text_accepts_three_normal_sentences_within_new_limit(self):
+        guild, _detection_channel, _reminder_channel, _bumper, _provider, _role = await self._configure_bump_fixture()
+        text = (
+            "Thanks for keeping our listing active today. "
+            "That extra visibility helps new people find the server. "
+            "Babblebox will quietly watch for the next verified window."
+        )
+
+        ok, result = await self.service.configure_bump(guild.id, thanks_text=text)
+
+        self.assertTrue(ok, result)
+        self.assertEqual(result["thanks_text"], text)
+
+    async def test_bump_thanks_text_rejects_four_sentences(self):
+        guild, _detection_channel, _reminder_channel, _bumper, _provider, _role = await self._configure_bump_fixture()
+        text = "One sentence. Two sentence. Three sentence. Four sentence."
+
+        ok, message = await self.service.configure_bump(guild.id, thanks_text=text)
+
+        self.assertFalse(ok)
+        self.assertIn("at most 3 short sentences", message.lower())
+
     async def test_bump_success_detection_accepts_embed_only_variant(self):
         guild, detection_channel, _reminder_channel, bumper, provider, _role = await self._configure_bump_fixture()
         embed = discord.Embed(title="DISBOARD", description="You can bump again right now.")
@@ -1300,6 +1329,63 @@ class UtilityStoreAndServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNone(cycle["last_bump_at"])
         self.assertIsNone(cycle["due_at"])
         self.assertEqual(detection_channel.sent, [])
+
+    def test_bremind_status_embed_uses_premium_minimal_sections(self):
+        bot_member = DummyMember(9990, bot=True, display_name="Babblebox")
+        bumper = DummyMember(601, display_name="Mira")
+        role = DummyRole(604, name="Bump Squad", mentionable=True)
+        guild = DummyGuild(600, members=[bot_member, bumper], roles=[role])
+        guild.me = bot_member
+        detection_channel = DummyChannel(602, guild=guild, name="partnerships", visible_user_ids={bot_member.id, bumper.id})
+        reminder_channel = DummyChannel(603, guild=guild, name="reminders", visible_user_ids={bot_member.id, bumper.id})
+        guild.add_channel(detection_channel)
+        guild.add_channel(reminder_channel)
+        self.bot.add_guild(guild)
+        self.bot.add_channel(detection_channel)
+        self.bot.add_channel(reminder_channel)
+        self.service.store.state["bump_configs"][str(guild.id)] = {
+            "guild_id": guild.id,
+            "enabled": True,
+            "provider": BUMP_PROVIDER_DISBOARD,
+            "detection_channel_ids": [detection_channel.id],
+            "reminder_channel_id": reminder_channel.id,
+            "reminder_role_id": role.id,
+            "reminder_text": "The next Disboard window is open.",
+            "thanks_text": "Thanks for the verified bump. Babblebox will keep an eye on the next window.",
+            "thanks_mode": "quiet",
+        }
+        self.service.store.state["bump_cycles"][f"{guild.id}:{BUMP_PROVIDER_DISBOARD}"] = {
+            "id": f"{guild.id}:{BUMP_PROVIDER_DISBOARD}",
+            "guild_id": guild.id,
+            "provider": BUMP_PROVIDER_DISBOARD,
+            "last_provider_event_at": serialize_datetime(ge.now_utc() - timedelta(minutes=5)),
+            "last_provider_event_kind": "success",
+            "last_bump_at": serialize_datetime(ge.now_utc() - timedelta(minutes=5)),
+            "last_bumper_user_id": bumper.id,
+            "last_success_message_id": 7000,
+            "last_success_channel_id": detection_channel.id,
+            "due_at": serialize_datetime(ge.now_utc() + timedelta(hours=2)),
+            "reminder_sent_at": None,
+            "delivery_attempts": 0,
+            "last_delivery_attempt_at": None,
+            "retry_after": None,
+            "last_delivery_error": None,
+        }
+        cog = object.__new__(UtilityCog)
+        cog.bot = self.bot
+        cog.service = self.service
+
+        embed = UtilityCog._bremind_status_embed(cog, guild)
+
+        self.assertEqual(embed.title, "Babblebox Bump Reminders")
+        self.assertIn("Disboard is the only supported provider", embed.description)
+        field_names = [field.name for field in embed.fields]
+        self.assertEqual(field_names, ["Setup", "Copy", "Current Cycle", "Provider Health", "Delivery Notes"])
+        self.assertIn("Provider: **Disboard**", embed.fields[0].value)
+        self.assertIn("Reminder destination", embed.fields[0].value)
+        self.assertIn("Last verified bump", embed.fields[2].value)
+        self.assertIn("Last provider event", embed.fields[3].value)
+        self.assertIn("No blockers detected", embed.fields[4].value)
 
     async def test_due_bump_cycle_delivers_once_and_marks_cycle_sent(self):
         guild, detection_channel, reminder_channel, bumper, provider, role = await self._configure_bump_fixture(reminder_role=True)
@@ -1401,6 +1487,7 @@ class UtilityStoreAndServiceTests(unittest.IsolatedAsyncioTestCase):
         _args, kwargs = detection_channel.sent[0]
         self.assertNotIn("delete_after", kwargs)
         self.assertIsNotNone(kwargs.get("embed"))
+        self.assertEqual(kwargs["embed"].title, "Disboard bump confirmed")
 
     async def test_bump_thanks_mode_off_sends_no_confirmation_message(self):
         guild, detection_channel, _reminder_channel, bumper, provider, _role = await self._configure_bump_fixture(thanks_mode="off")
@@ -1433,6 +1520,32 @@ class UtilityStoreAndServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(any("thank-you messages" in line.lower() and "plain text" in line.lower() for line in lines))
         self.assertTrue(any("reminders" in line.lower() and "plain text" in line.lower() for line in lines))
         self.assertTrue(any("post without that role mention" in line.lower() for line in lines))
+
+    def test_bump_preview_helpers_use_polished_titles(self):
+        cycle = {
+            "due_at": serialize_datetime(ge.now_utc()),
+            "last_bump_at": serialize_datetime(ge.now_utc() - timedelta(hours=2)),
+            "last_bumper_user_id": 777,
+        }
+
+        reminder_embed = build_bump_reminder_embed(
+            provider_label="Disboard",
+            reminder_text="The next listing window is ready.",
+            cycle=cycle,
+            delayed=True,
+        )
+        thanks_embed = build_bump_thanks_embed(
+            provider_label="Disboard",
+            thanks_text="Thanks for keeping the server visible.",
+            bumper_name="Mira",
+        )
+
+        self.assertEqual(reminder_embed.title, "Disboard bump window is open")
+        self.assertEqual(reminder_embed.fields[0].name, "Provider")
+        self.assertEqual(reminder_embed.fields[1].name, "Window opened")
+        self.assertEqual(reminder_embed.fields[2].name, "Delivery")
+        self.assertEqual(thanks_embed.title, "Disboard bump confirmed")
+        self.assertEqual(thanks_embed.fields[0].name, "Provider")
 
     async def test_afk_notice_lines_cover_reply_targets(self):
         user = DummyUser(77)
