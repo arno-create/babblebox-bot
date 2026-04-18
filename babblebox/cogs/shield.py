@@ -139,7 +139,7 @@ HIGH_RISK_RULE_PANEL_PACKS = ("scam", "adult", "severe")
 PACK_PANEL_DESCRIPTIONS = {
     "privacy": "Catches phone numbers, email drops, payment handles, and similar private-info leaks.",
     "promo": "Handles invite spam, promo blasts, and repetitive self-promotion without overfiring on normal info links.",
-    "scam": "Catches malicious domains, impersonation hosts, and suspicious lure patterns with stronger action lanes.",
+    "scam": "Catches malicious domains, impersonation hosts, and suspicious lure patterns, including no-link money, wins, and picks bait routed into private follow-up.",
     "spam": "Handles rate spam, duplicate floods, emoji clutter, capitals spam, and moderator handling for live-message raids.",
     "gif": "Controls one-user GIF floods, channel-wide streaks, pressure slices, and lightweight meaningful-text balance without polluting unrelated packs.",
     "adult": "Blocks adult domains and can optionally catch DM-gated adult solicitation text with a bounded carve-out lane.",

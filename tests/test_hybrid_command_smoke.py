@@ -1998,6 +1998,36 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await cog.service.close()
 
+    async def test_shield_test_command_surfaces_no_link_money_wins_lure(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
+        cog = ShieldCog(bot)
+        try:
+            cog.service.storage_ready = True
+            cog.service.store.state["guilds"]["10"] = {
+                "guild_id": 10,
+                "scam_enabled": True,
+                "scam_action": "delete_log",
+                "scam_sensitivity": "normal",
+            }
+            ctx = FakeContext(
+                interaction=FakeInteraction(),
+                guild=FakeGuild(10),
+                channel=FakeChannel(),
+                author=FakeAuthor(manage_guild=True),
+            )
+
+            await ShieldCog.shield_test_command.callback(
+                cog,
+                ctx,
+                text="Who is active let's get it up to $2,700 tonight. Hit me up to get wins.",
+            )
+
+            matches_field = next(field for field in ctx.send_calls[0]["embed"].fields if field.name == "Matches")
+            self.assertIn("Money / wins DM lure", matches_field.value)
+            self.assertIn("No-link DM lure", matches_field.value)
+        finally:
+            await cog.service.close()
+
     async def test_shield_test_command_marks_lookup_candidates_as_no_action(self):
         bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
         cog = ShieldCog(bot)
