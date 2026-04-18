@@ -684,7 +684,7 @@
             <p>
               Party servers usually start with <code>/play</code> and <code>/daily</code>. Retention-focused communities
               often add <code>/drops status</code> and scheduled Question Drops next. Smaller communities often start with
-              <code>/watch</code>, <code>/later</code>, or <code>/remind</code>. Identity-heavy servers tend to start with
+              <code>/watch</code>, <code>/later</code>, <code>/remind</code>, or <code>/bremind</code>. Identity-heavy servers tend to start with
               <code>/buddy</code> and <code>/profile</code>.
             </p>
             <div class="grid2">
@@ -706,7 +706,7 @@
             </p>
             <div class="grid2">
               <article class="info"><strong>Usually public</strong><p><code>/play</code>, most Daily Arcade outputs, <code>/buddy</code>, and <code>/profile</code> are designed to sit comfortably in chat.</p></article>
-              <article class="info"><strong>Usually private</strong><p><code>/watch</code>, <code>/later</code>, <code>/capture</code>, <code>/remind</code>, <code>/afk</code>, and most setup or failure states stay private or DM-oriented.</p></article>
+              <article class="info"><strong>Usually private</strong><p><code>/watch</code>, <code>/later</code>, <code>/capture</code>, <code>/remind</code>, <code>/bremind</code>, <code>/afk</code>, and most setup or failure states stay private or DM-oriented.</p></article>
               <article class="info"><strong>Moderator-private</strong><p>Shield configuration, admin cleanup tooling, and mod alerts are meant for admins and moderator channels, not public callouts.</p></article>
               <article class="info"><strong>Mobile-friendly intent</strong><p>Cards aim for short titles, compact lists, and spacing that still scans cleanly on Discord mobile.</p></article>
             </div>
@@ -783,6 +783,7 @@
               <div class="command-row"><div><code>/later mark</code></div><div><p>Save a place in a server so you can come back later.</p><span>Useful when you want to keep momentum without opening tabs or pinning messages everywhere.</span></div></div>
               <div class="command-row"><div><code>/capture</code></div><div><p>Send yourself a private recent-message snapshot.</p><span>Good when you want a clean recap with message context and a jump-back link, without turning the server into a scrapbook.</span></div></div>
               <div class="command-row"><div><code>/remind</code></div><div><p>Set reminders without needing a separate productivity bot.</p><span>Reminder setup and failure states stay private so channels do not fill with housekeeping, and Babblebox rechecks public reminder delivery through private Shield privacy, adult, and severe checks before posting it later.</span></div></div>
+              <div class="command-row"><div><code>/bremind setup</code>, <code>/bremind status</code>, <code>/bremind test</code></div><div><p>Configure verified Disboard bump reminders without fake manual timers.</p><span>Babblebox V1 only supports Disboard here, starts the cycle only from verified provider output in configured channels, shows the next due window plus blockers in <code>/bremind status</code>, and supports quiet, public, or off thank-you behavior.</span></div></div>
               <div class="command-row"><div><code>/afk</code>, <code>/afktimezone</code>, <code>/afkschedule</code></div><div><p>Set temporary AFK state, timezone hints, and repeating schedules.</p><span>This helps Babblebox explain absence cleanly without forcing manual status updates every time, while AFK reasons stay on a bounded private Shield lane for privacy, adult, and severe checks.</span></div></div>
             </div>
           </section>

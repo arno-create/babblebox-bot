@@ -850,6 +850,55 @@ def build_reminder_delivery_view(reminder: dict, *, delivered_in_guild_channel: 
     return build_jump_view(jump_url)
 
 
+def build_bump_reminder_embed(
+    *,
+    provider_label: str,
+    reminder_text: str,
+    cycle: dict | None = None,
+    delayed: bool = False,
+) -> discord.Embed:
+    cycle = cycle or {}
+    due_at = deserialize_datetime(cycle.get("due_at"))
+    last_bump_at = deserialize_datetime(cycle.get("last_bump_at"))
+    title = f"{provider_label} Bump Window Open"
+    if delayed:
+        title = f"{provider_label} Bump Window Open (Delayed Delivery)"
+    embed = discord.Embed(
+        title=title,
+        description=reminder_text,
+        color=ge.EMBED_THEME["accent"],
+        timestamp=due_at or ge.now_utc(),
+    )
+    embed.add_field(name="Provider", value=provider_label, inline=True)
+    if due_at is not None:
+        embed.add_field(name="Opened", value=ge.format_timestamp(due_at, "f"), inline=True)
+    if last_bump_at is not None:
+        embed.add_field(name="Last Verified Bump", value=ge.format_timestamp(last_bump_at, "R"), inline=False)
+    last_bumper_user_id = cycle.get("last_bumper_user_id")
+    if isinstance(last_bumper_user_id, int) and last_bumper_user_id > 0:
+        embed.add_field(name="Last Bumper", value=f"<@{last_bumper_user_id}>", inline=True)
+    return ge.style_embed(embed, footer="Babblebox Bump Reminders | Verified provider success only.")
+
+
+def build_bump_thanks_embed(
+    *,
+    provider_label: str,
+    thanks_text: str,
+    bumper_name: str | None = None,
+) -> discord.Embed:
+    description = thanks_text
+    if bumper_name:
+        description = f"**{bumper_name}**\n{thanks_text}"
+    embed = discord.Embed(
+        title=f"Thanks For The {provider_label} Bump",
+        description=description,
+        color=ge.EMBED_THEME["success"],
+        timestamp=ge.now_utc(),
+    )
+    embed.add_field(name="Provider", value=provider_label, inline=True)
+    return ge.style_embed(embed, footer="Babblebox Bump Reminders | Quiet and verified.")
+
+
 def build_afk_status_embed(user: discord.abc.User, record: dict, *, title: str | None = None) -> discord.Embed:
     status = record.get("status", "active")
     created_at = deserialize_datetime(record.get("created_at"))

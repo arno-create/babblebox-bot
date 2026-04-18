@@ -8,8 +8,15 @@ from discord.ext import commands
 
 from babblebox import game_engine as ge
 from babblebox.command_utils import defer_hybrid_response, require_channel_permissions, send_hybrid_response
-from babblebox.utility_helpers import build_jump_view, deserialize_datetime
-from babblebox.utility_service import WATCH_KEYWORD_LIMIT, UtilityService
+from babblebox.utility_helpers import build_bump_reminder_embed, build_bump_thanks_embed, build_jump_view, deserialize_datetime
+from babblebox.utility_service import (
+    BUMP_CONFIG_UNCHANGED,
+    BUMP_DETECTION_CHANNEL_LIMIT,
+    BUMP_PROVIDER_DISBOARD,
+    UtilityService,
+    WATCH_KEYWORD_LIMIT,
+    _bump_provider_label,
+)
 
 
 WATCH_SCOPE_CHOICES = [
@@ -29,6 +36,19 @@ WATCH_MODE_CHOICES = [
 REMINDER_DELIVERY_CHOICES = [
     app_commands.Choice(name="DM me", value="dm"),
     app_commands.Choice(name="This channel", value="here"),
+]
+BUMP_PROVIDER_CHOICES = [
+    app_commands.Choice(name="Disboard", value=BUMP_PROVIDER_DISBOARD),
+]
+BUMP_THANKS_MODE_CHOICES = [
+    app_commands.Choice(name="Quiet reply", value="quiet"),
+    app_commands.Choice(name="Public reply", value="public"),
+    app_commands.Choice(name="Off", value="off"),
+]
+BUMP_TEST_KIND_CHOICES = [
+    app_commands.Choice(name="Both", value="both"),
+    app_commands.Choice(name="Reminder", value="reminder"),
+    app_commands.Choice(name="Thank-you", value="thanks"),
 ]
 LATER_CLEAR_CHOICES = [
     app_commands.Choice(name="This channel", value="here"),
@@ -512,6 +532,183 @@ class UtilityCog(commands.Cog):
             lines.append(f"...and {len(reminders) - 10} more")
         embed.add_field(name="Scheduled", value="\n".join(lines), inline=False)
         return ge.style_embed(embed, footer="Babblebox Remind | Cancel with /remind cancel <id>.")
+
+    def _can_manage_bremind(self, actor: object) -> bool:
+        perms = getattr(actor, "guild_permissions", None)
+        return bool(getattr(perms, "administrator", False) or getattr(perms, "manage_guild", False))
+
+    async def _bremind_guard(self, ctx: commands.Context) -> bool:
+        await defer_hybrid_response(ctx, ephemeral=True)
+        if ctx.guild is None:
+            await self._send_private_embed(
+                ctx,
+                embed=ge.make_status_embed(
+                    "Server Only",
+                    "Bump reminders can only be configured inside a server.",
+                    tone="warning",
+                    footer="Babblebox Bump Reminders",
+                ),
+            )
+            return False
+        if not self._can_manage_bremind(ctx.author):
+            await self._send_private_embed(
+                ctx,
+                embed=ge.make_status_embed(
+                    "Manage Server Required",
+                    "You need **Manage Server** or administrator access to configure bump reminders.",
+                    tone="warning",
+                    footer="Babblebox Bump Reminders",
+                ),
+            )
+            return False
+        if not self.service.storage_ready:
+            await self._send_private_embed(
+                ctx,
+                embed=ge.make_status_embed(
+                    "Bump Reminders Unavailable",
+                    self.service.storage_message("Bump reminders"),
+                    tone="warning",
+                    footer="Babblebox Bump Reminders",
+                ),
+            )
+            return False
+        return True
+
+    async def _current_bremind_channel(self, ctx: commands.Context) -> discord.TextChannel | None:
+        if isinstance(ctx.channel, discord.TextChannel):
+            return ctx.channel
+        await self._send_private_embed(
+            ctx,
+            embed=ge.make_status_embed(
+                "Text Channel Required",
+                "Run that in a normal text channel, or pass a text channel explicitly.",
+                tone="warning",
+                footer="Babblebox Bump Reminders",
+            ),
+        )
+        return None
+
+    def _bremind_status_embed(self, guild: discord.Guild) -> discord.Embed:
+        config = self.service.get_bump_config(guild.id)
+        provider = config.get("provider", BUMP_PROVIDER_DISBOARD)
+        provider_label = _bump_provider_label(provider)
+        cycle = self.service.get_bump_cycle(guild.id, provider=provider)
+        embed = discord.Embed(
+            title="Babblebox Bump Reminders",
+            description="Verified provider output starts the cooldown. Babblebox does not use blind manual bump timers here.",
+            color=ge.EMBED_THEME["accent"],
+        )
+        detection_channels = self._resolve_watch_channel_mentions(guild, config.get("detection_channel_ids", []))
+        reminder_channel_id = config.get("reminder_channel_id")
+        reminder_channel = guild.get_channel(reminder_channel_id) if isinstance(reminder_channel_id, int) else None
+        role_id = config.get("reminder_role_id")
+        reminder_role = guild.get_role(role_id) if isinstance(role_id, int) else None
+        embed.add_field(
+            name="Configuration",
+            value=(
+                f"Enabled: **{'Yes' if config.get('enabled') else 'No'}**\n"
+                f"Provider: **{provider_label}**\n"
+                f"Detection: {detection_channels}\n"
+                f"Reminder destination: {reminder_channel.mention if reminder_channel is not None else ('Not set' if reminder_channel_id is None else f'<#{reminder_channel_id}>')}\n"
+                f"Role ping: {reminder_role.mention if reminder_role is not None else ('None' if role_id is None else f'<@&{role_id}>')}\n"
+                f"Thank-you mode: **{str(config.get('thanks_mode') or 'quiet').title()}**"
+            ),
+            inline=False,
+        )
+        reminder_text = self.service.resolved_bump_reminder_text(guild.id, provider=provider)
+        thanks_text = self.service.resolved_bump_thanks_text(guild.id, provider=provider)
+        embed.add_field(
+            name="Message Copy",
+            value=(
+                f"Reminder: {ge.safe_field_text(reminder_text, limit=140)}\n"
+                f"Thank-you: {ge.safe_field_text(thanks_text, limit=120)}"
+            ),
+            inline=False,
+        )
+        if cycle is None or cycle.get("last_bump_at") is None:
+            last_provider_event_at = deserialize_datetime(cycle.get("last_provider_event_at")) if isinstance(cycle, dict) else None
+            provider_note = "No provider event recorded yet."
+            if last_provider_event_at is not None:
+                provider_note = (
+                    f"Last provider event: **{str(cycle.get('last_provider_event_kind') or 'unknown').title()}** "
+                    f"{ge.format_timestamp(last_provider_event_at, 'R')}"
+                )
+            embed.add_field(
+                name="Current Cycle",
+                value="No verified bump has been seen yet, so there is no active cooldown.\n" + provider_note,
+                inline=False,
+            )
+        else:
+            last_bump_at = deserialize_datetime(cycle.get("last_bump_at"))
+            due_at = deserialize_datetime(cycle.get("due_at"))
+            reminder_sent_at = deserialize_datetime(cycle.get("reminder_sent_at"))
+            retry_after = deserialize_datetime(cycle.get("retry_after"))
+            last_delivery_attempt_at = deserialize_datetime(cycle.get("last_delivery_attempt_at"))
+            last_bumper_user_id = cycle.get("last_bumper_user_id")
+            lines = []
+            if last_bump_at is not None:
+                lines.append(f"Last verified bump: {ge.format_timestamp(last_bump_at, 'R')} ({ge.format_timestamp(last_bump_at, 'f')})")
+            if isinstance(last_bumper_user_id, int):
+                lines.append(f"Last bumper: <@{last_bumper_user_id}>")
+            if due_at is not None:
+                lines.append(f"Next window: {ge.format_timestamp(due_at, 'R')} ({ge.format_timestamp(due_at, 'f')})")
+            if reminder_sent_at is not None:
+                lines.append(f"Reminder sent: {ge.format_timestamp(reminder_sent_at, 'R')}")
+            elif retry_after is not None and retry_after > ge.now_utc():
+                lines.append(f"Retrying delivery: {ge.format_timestamp(retry_after, 'R')}")
+            elif due_at is not None and due_at <= ge.now_utc():
+                lines.append("Reminder is currently due and waiting to deliver.")
+            if last_delivery_attempt_at is not None:
+                lines.append(f"Last delivery attempt: {ge.format_timestamp(last_delivery_attempt_at, 'R')}")
+            if cycle.get("last_delivery_error"):
+                lines.append(f"Last delivery note: {ge.safe_field_text(cycle['last_delivery_error'], limit=180)}")
+            embed.add_field(name="Current Cycle", value="\n".join(lines), inline=False)
+        operability = self.service.get_bump_operability(guild)
+        if operability:
+            embed.add_field(name="Current Blockers Or Warnings", value=ge.join_limited_lines(operability[:6], limit=1024, empty="None."), inline=False)
+        else:
+            embed.add_field(name="Current Blockers Or Warnings", value="None detected in the current channel and role setup.", inline=False)
+        return ge.style_embed(embed, footer="Babblebox Bump Reminders | /bremind status")
+
+    def _bremind_preview_embed(self, guild: discord.Guild, *, kind: str) -> discord.Embed:
+        config = self.service.get_bump_config(guild.id)
+        provider = config.get("provider", BUMP_PROVIDER_DISBOARD)
+        provider_label = _bump_provider_label(provider)
+        cycle = self.service.get_bump_cycle(guild.id, provider=provider) or {
+            "provider": provider,
+            "last_bump_at": None,
+            "due_at": None,
+            "last_bumper_user_id": None,
+        }
+        reminder_text = self.service.resolved_bump_reminder_text(guild.id, provider=provider)
+        thanks_text = self.service.resolved_bump_thanks_text(guild.id, provider=provider)
+        if kind == "reminder":
+            embed = build_bump_reminder_embed(
+                provider_label=provider_label,
+                reminder_text=reminder_text,
+                cycle=cycle,
+                delayed=False,
+            )
+            embed.add_field(name="Preview", value="This is a preview only. No timer was started.", inline=False)
+            return embed
+        if kind == "thanks":
+            embed = build_bump_thanks_embed(
+                provider_label=provider_label,
+                thanks_text=thanks_text,
+                bumper_name=ge.display_name_of(guild.me) if getattr(guild, "me", None) is not None else None,
+            )
+            embed.add_field(name="Preview", value="This is a preview only. No thank-you message was posted.", inline=False)
+            return embed
+        embed = discord.Embed(
+            title="Bump Reminder Preview",
+            description="Previewing the stored copy and current delivery mode without mutating bump state.",
+            color=ge.EMBED_THEME["info"],
+        )
+        embed.add_field(name="Provider", value=provider_label, inline=True)
+        embed.add_field(name="Thank-you mode", value=str(config.get("thanks_mode") or "quiet").title(), inline=True)
+        embed.add_field(name="Reminder", value=reminder_text, inline=False)
+        embed.add_field(name="Thank-you", value=thanks_text, inline=False)
+        return ge.style_embed(embed, footer="Babblebox Bump Reminders | Preview only")
 
     async def _resolve_later_target(self, ctx: commands.Context) -> discord.Message | None:
         if ctx.guild is None or ctx.channel is None:
@@ -1060,6 +1257,391 @@ class UtilityCog(commands.Cog):
         await self._send_private_embed(
             ctx,
             embed=ge.make_status_embed("Reminder Updated", message, tone=tone, footer="Babblebox Remind"),
+        )
+
+    @app_commands.allowed_installs(guilds=True, users=False)
+    @app_commands.guild_only()
+    @app_commands.default_permissions(manage_guild=True)
+    @commands.hybrid_group(
+        name="bremind",
+        with_app_command=True,
+        description="Configure verified provider bump reminders",
+        invoke_without_command=True,
+    )
+    async def bremind_group(self, ctx: commands.Context):
+        if not await self._bremind_guard(ctx):
+            return
+        await self._send_private_embed(ctx, embed=self._bremind_status_embed(ctx.guild))
+
+    @bremind_group.command(name="status", with_app_command=True, description="See current bump reminder status and blockers")
+    async def bremind_status_command(self, ctx: commands.Context):
+        if not await self._bremind_guard(ctx):
+            return
+        await self._send_private_embed(ctx, embed=self._bremind_status_embed(ctx.guild))
+
+    @bremind_group.command(name="setup", with_app_command=True, description="Set up Disboard bump reminders for this server")
+    @app_commands.describe(
+        detection_channel="Where Babblebox should watch for the verified provider success",
+        reminder_channel="Where Babblebox should post the next-window reminder",
+        role="Optional role to ping when the next window opens",
+        thanks_mode="How the thank-you reply should behave after a verified bump",
+    )
+    @app_commands.choices(thanks_mode=BUMP_THANKS_MODE_CHOICES)
+    async def bremind_setup_command(
+        self,
+        ctx: commands.Context,
+        detection_channel: Optional[discord.TextChannel] = None,
+        reminder_channel: Optional[discord.TextChannel] = None,
+        role: Optional[discord.Role] = None,
+        thanks_mode: Optional[str] = None,
+    ):
+        if not await self._bremind_guard(ctx):
+            return
+        current_channel = await self._current_bremind_channel(ctx)
+        if current_channel is None:
+            return
+        current = self.service.get_bump_config(ctx.guild.id)
+        resolved_detection_ids = [detection_channel.id] if detection_channel is not None else list(current.get("detection_channel_ids", [])) or [current_channel.id]
+        resolved_reminder_channel_id = reminder_channel.id if reminder_channel is not None else current.get("reminder_channel_id") or current_channel.id
+        ok, result = await self.service.configure_bump(
+            ctx.guild.id,
+            enabled=True,
+            provider=BUMP_PROVIDER_DISBOARD,
+            detection_channel_ids=resolved_detection_ids,
+            reminder_channel_id=resolved_reminder_channel_id,
+            reminder_role_id=role.id if role is not None else current.get("reminder_role_id"),
+            thanks_mode=thanks_mode,
+        )
+        if not ok:
+            await self._send_private_embed(
+                ctx,
+                embed=ge.make_status_embed("Bump Reminder Setup Rejected", result, tone="warning", footer="Babblebox Bump Reminders"),
+            )
+            return
+        await self._send_private_embed(
+            ctx,
+            embed=ge.make_status_embed(
+                "Bump Reminders Ready",
+                (
+                    f"Provider: **{_bump_provider_label(BUMP_PROVIDER_DISBOARD)}**\n"
+                    f"Detection: {self._resolve_watch_channel_mentions(ctx.guild, result.get('detection_channel_ids', []))}\n"
+                    f"Reminder destination: <#{result.get('reminder_channel_id')}>\n"
+                    f"Thank-you mode: **{str(result.get('thanks_mode') or 'quiet').title()}**"
+                ),
+                tone="success",
+                footer="Babblebox Bump Reminders",
+            ),
+        )
+
+    @bremind_group.command(name="test", with_app_command=True, description="Preview the stored reminder and thank-you copy")
+    @app_commands.describe(kind="Preview the reminder, thank-you, or both")
+    @app_commands.choices(kind=BUMP_TEST_KIND_CHOICES)
+    async def bremind_test_command(self, ctx: commands.Context, kind: str = "both"):
+        if not await self._bremind_guard(ctx):
+            return
+        await self._send_private_embed(ctx, embed=self._bremind_preview_embed(ctx.guild, kind=kind))
+
+    @bremind_group.command(name="enable", with_app_command=True, description="Enable verified bump reminders")
+    async def bremind_enable_command(self, ctx: commands.Context):
+        if not await self._bremind_guard(ctx):
+            return
+        ok, result = await self.service.configure_bump(ctx.guild.id, enabled=True)
+        await self._send_private_embed(
+            ctx,
+            embed=ge.make_status_embed(
+                "Bump Reminders Enabled" if ok else "Bump Reminders Not Updated",
+                "Babblebox will now watch for verified provider success again." if ok else str(result),
+                tone="success" if ok else "warning",
+                footer="Babblebox Bump Reminders",
+            ),
+        )
+
+    @bremind_group.command(name="disable", with_app_command=True, description="Disable verified bump reminders")
+    async def bremind_disable_command(self, ctx: commands.Context):
+        if not await self._bremind_guard(ctx):
+            return
+        ok, result = await self.service.configure_bump(ctx.guild.id, enabled=False)
+        await self._send_private_embed(
+            ctx,
+            embed=ge.make_status_embed(
+                "Bump Reminders Disabled" if ok else "Bump Reminders Not Updated",
+                "Babblebox will stop watching for bump success and stop sending reminders until you enable the lane again." if ok else str(result),
+                tone="success" if ok else "warning",
+                footer="Babblebox Bump Reminders",
+            ),
+        )
+
+    @bremind_group.group(name="detect", with_app_command=True, invoke_without_command=True, description="Manage bump detection channels")
+    async def bremind_detect_group(self, ctx: commands.Context):
+        if not await self._bremind_guard(ctx):
+            return
+        config = self.service.get_bump_config(ctx.guild.id)
+        await self._send_private_embed(
+            ctx,
+            embed=ge.style_embed(
+                discord.Embed(
+                    title="Bump Detection Channels",
+                    description="Babblebox only starts the cycle from verified provider output in these channels.",
+                    color=ge.EMBED_THEME["info"],
+                ).add_field(
+                    name="Configured",
+                    value=self._resolve_watch_channel_mentions(ctx.guild, config.get("detection_channel_ids", [])),
+                    inline=False,
+                ),
+                footer=f"Babblebox Bump Reminders | Up to {BUMP_DETECTION_CHANNEL_LIMIT} channels",
+            ),
+        )
+
+    @bremind_detect_group.command(name="add", with_app_command=True, description="Add a text channel where provider bumps are expected")
+    @app_commands.describe(channel="Leave blank to use the current text channel")
+    async def bremind_detect_add_command(self, ctx: commands.Context, channel: Optional[discord.TextChannel] = None):
+        if not await self._bremind_guard(ctx):
+            return
+        target_channel = channel or await self._current_bremind_channel(ctx)
+        if target_channel is None:
+            return
+        current = self.service.get_bump_config(ctx.guild.id)
+        channel_ids = sorted({*current.get("detection_channel_ids", []), target_channel.id})
+        if len(channel_ids) == len(current.get("detection_channel_ids", [])):
+            await self._send_private_embed(
+                ctx,
+                embed=ge.make_status_embed(
+                    "Detection Channel Unchanged",
+                    f"{target_channel.mention} is already in the verified bump detection list.",
+                    tone="info",
+                    footer="Babblebox Bump Reminders",
+                ),
+            )
+            return
+        ok, result = await self.service.configure_bump(ctx.guild.id, detection_channel_ids=channel_ids)
+        await self._send_private_embed(
+            ctx,
+            embed=ge.make_status_embed(
+                "Detection Channel Added" if ok else "Detection Channel Not Added",
+                f"Babblebox will now watch {target_channel.mention} for verified provider success." if ok else str(result),
+                tone="success" if ok else "warning",
+                footer="Babblebox Bump Reminders",
+            ),
+        )
+
+    @bremind_detect_group.command(name="remove", with_app_command=True, description="Remove a configured detection channel")
+    @app_commands.describe(channel="Leave blank to use the current text channel")
+    async def bremind_detect_remove_command(self, ctx: commands.Context, channel: Optional[discord.TextChannel] = None):
+        if not await self._bremind_guard(ctx):
+            return
+        target_channel = channel or await self._current_bremind_channel(ctx)
+        if target_channel is None:
+            return
+        current = self.service.get_bump_config(ctx.guild.id)
+        channel_ids = [channel_id for channel_id in current.get("detection_channel_ids", []) if channel_id != target_channel.id]
+        if len(channel_ids) == len(current.get("detection_channel_ids", [])):
+            await self._send_private_embed(
+                ctx,
+                embed=ge.make_status_embed(
+                    "Detection Channel Not Found",
+                    f"{target_channel.mention} is not in the configured detection list.",
+                    tone="warning",
+                    footer="Babblebox Bump Reminders",
+                ),
+            )
+            return
+        ok, result = await self.service.configure_bump(ctx.guild.id, detection_channel_ids=channel_ids)
+        await self._send_private_embed(
+            ctx,
+            embed=ge.make_status_embed(
+                "Detection Channel Removed" if ok else "Detection Channel Not Removed",
+                f"Babblebox will stop watching {target_channel.mention} for verified provider output." if ok else str(result),
+                tone="success" if ok else "warning",
+                footer="Babblebox Bump Reminders",
+            ),
+        )
+
+    @bremind_detect_group.command(name="list", with_app_command=True, description="List configured detection channels")
+    async def bremind_detect_list_command(self, ctx: commands.Context):
+        if not await self._bremind_guard(ctx):
+            return
+        config = self.service.get_bump_config(ctx.guild.id)
+        embed = discord.Embed(
+            title="Bump Detection Channels",
+            description="Babblebox only starts a cycle from verified provider output in these channels.",
+            color=ge.EMBED_THEME["info"],
+        )
+        embed.add_field(name="Configured", value=self._resolve_watch_channel_mentions(ctx.guild, config.get("detection_channel_ids", [])), inline=False)
+        embed.add_field(name="Limit", value=f"Up to **{BUMP_DETECTION_CHANNEL_LIMIT}** text channels", inline=True)
+        embed.add_field(name="Provider", value=_bump_provider_label(config.get("provider")), inline=True)
+        await self._send_private_embed(ctx, embed=ge.style_embed(embed, footer="Babblebox Bump Reminders | /bremind detect"))
+
+    @bremind_group.command(name="destination", with_app_command=True, description="Set the reminder channel and optional role ping")
+    @app_commands.describe(
+        channel="Where Babblebox should post the next-window reminder",
+        role="Optional role to ping when the reminder posts",
+        clear_role="Remove the configured role ping",
+    )
+    async def bremind_destination_command(
+        self,
+        ctx: commands.Context,
+        channel: Optional[discord.TextChannel] = None,
+        role: Optional[discord.Role] = None,
+        clear_role: bool = False,
+    ):
+        if not await self._bremind_guard(ctx):
+            return
+        current = self.service.get_bump_config(ctx.guild.id)
+        if channel is None and role is None and not clear_role:
+            await self._send_private_embed(ctx, embed=self._bremind_status_embed(ctx.guild))
+            return
+        resolved_channel = channel.id if channel is not None else current.get("reminder_channel_id")
+        resolved_role = None if clear_role else (role.id if role is not None else current.get("reminder_role_id"))
+        ok, result = await self.service.configure_bump(
+            ctx.guild.id,
+            reminder_channel_id=resolved_channel,
+            reminder_role_id=resolved_role,
+        )
+        role_text = "None"
+        if ok:
+            saved_role_id = result.get("reminder_role_id")
+            if isinstance(saved_role_id, int):
+                role_text = f"<@&{saved_role_id}>"
+        description = (
+            f"Reminder destination: <#{result.get('reminder_channel_id')}>\n"
+            f"Role ping: {role_text}"
+            if ok
+            else str(result)
+        )
+        await self._send_private_embed(
+            ctx,
+            embed=ge.make_status_embed(
+                "Reminder Destination Updated" if ok else "Reminder Destination Not Updated",
+                description,
+                tone="success" if ok else "warning",
+                footer="Babblebox Bump Reminders",
+            ),
+        )
+
+    @bremind_group.group(name="message", with_app_command=True, invoke_without_command=True, description="Manage reminder and thank-you copy")
+    async def bremind_message_group(self, ctx: commands.Context):
+        if not await self._bremind_guard(ctx):
+            return
+        await self._send_private_embed(ctx, embed=self._bremind_preview_embed(ctx.guild, kind="both"))
+
+    @bremind_message_group.command(name="reminder", with_app_command=True, description="Set or reset the reminder message copy")
+    @app_commands.describe(text="Leave blank to review the current preview", reset="Return to Babblebox's default reminder copy")
+    async def bremind_message_reminder_command(self, ctx: commands.Context, text: Optional[str] = None, reset: bool = False):
+        if not await self._bremind_guard(ctx):
+            return
+        if text is None and not reset:
+            await self._send_private_embed(ctx, embed=self._bremind_preview_embed(ctx.guild, kind="reminder"))
+            return
+        if text is not None and reset:
+            await self._send_private_embed(
+                ctx,
+                embed=ge.make_status_embed(
+                    "Reminder Copy Not Updated",
+                    "Choose either new reminder copy or `reset:true`, not both in the same update.",
+                    tone="warning",
+                    footer="Babblebox Bump Reminders",
+                ),
+            )
+            return
+        ok, result = await self.service.configure_bump(
+            ctx.guild.id,
+            reminder_text=None if reset else text,
+        )
+        description = (
+            "Babblebox will use its default reminder copy again."
+            if ok and reset
+            else f"Saved reminder copy:\n{result.get('reminder_text') or self.service.resolved_bump_reminder_text(ctx.guild.id)}"
+            if ok
+            else str(result)
+        )
+        await self._send_private_embed(
+            ctx,
+            embed=ge.make_status_embed(
+                "Reminder Copy Updated" if ok else "Reminder Copy Not Updated",
+                description,
+                tone="success" if ok else "warning",
+                footer="Babblebox Bump Reminders",
+            ),
+        )
+
+    @bremind_message_group.command(name="thanks", with_app_command=True, description="Set or reset the thank-you message and mode")
+    @app_commands.describe(
+        text="Leave blank to keep the current thank-you copy",
+        mode="Choose quiet, public, or off",
+        reset="Return to Babblebox's default thank-you copy",
+    )
+    @app_commands.choices(mode=BUMP_THANKS_MODE_CHOICES)
+    async def bremind_message_thanks_command(
+        self,
+        ctx: commands.Context,
+        text: Optional[str] = None,
+        mode: Optional[str] = None,
+        reset: bool = False,
+    ):
+        if not await self._bremind_guard(ctx):
+            return
+        if text is None and mode is None and not reset:
+            await self._send_private_embed(ctx, embed=self._bremind_preview_embed(ctx.guild, kind="thanks"))
+            return
+        if text is not None and reset:
+            await self._send_private_embed(
+                ctx,
+                embed=ge.make_status_embed(
+                    "Thank-you Copy Not Updated",
+                    "Choose either new thank-you copy or `reset:true`, not both in the same update.",
+                    tone="warning",
+                    footer="Babblebox Bump Reminders",
+                ),
+            )
+            return
+        ok, result = await self.service.configure_bump(
+            ctx.guild.id,
+            thanks_text=None if reset else (text if text is not None else BUMP_CONFIG_UNCHANGED),
+            thanks_mode=mode,
+        )
+        description = (
+            f"Mode: **{str(result.get('thanks_mode') or 'quiet').title()}**\n"
+            f"Copy: {result.get('thanks_text') or self.service.resolved_bump_thanks_text(ctx.guild.id)}"
+            if ok
+            else str(result)
+        )
+        await self._send_private_embed(
+            ctx,
+            embed=ge.make_status_embed(
+                "Thank-you Settings Updated" if ok else "Thank-you Settings Not Updated",
+                description,
+                tone="success" if ok else "warning",
+                footer="Babblebox Bump Reminders",
+            ),
+        )
+
+    @bremind_group.command(name="provider", with_app_command=True, description="See or set the active bump provider")
+    @app_commands.describe(provider="Only Disboard is supported in this build")
+    @app_commands.choices(provider=BUMP_PROVIDER_CHOICES)
+    async def bremind_provider_command(self, ctx: commands.Context, provider: Optional[str] = None):
+        if not await self._bremind_guard(ctx):
+            return
+        if provider is None:
+            config = self.service.get_bump_config(ctx.guild.id)
+            await self._send_private_embed(
+                ctx,
+                embed=ge.make_status_embed(
+                    "Bump Provider",
+                    f"Current provider: **{_bump_provider_label(config.get('provider'))}**\nOnly verified provider output starts the cooldown.",
+                    tone="info",
+                    footer="Babblebox Bump Reminders",
+                ),
+            )
+            return
+        ok, result = await self.service.configure_bump(ctx.guild.id, provider=provider)
+        await self._send_private_embed(
+            ctx,
+            embed=ge.make_status_embed(
+                "Bump Provider Updated" if ok else "Bump Provider Not Updated",
+                f"Babblebox will now use **{_bump_provider_label(result.get('provider'))}**." if ok else str(result),
+                tone="success" if ok else "warning",
+                footer="Babblebox Bump Reminders",
+            ),
         )
 
 

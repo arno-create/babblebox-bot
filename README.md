@@ -77,6 +77,11 @@ Babblebox is intentionally compact:
   - private delivery with jump-back context
 - Remind
   - safe one-time reminders with small active limits
+- Bump Remind
+  - Disboard-only V1 with verified provider-success detection
+  - one persisted bump cycle per guild and provider
+  - restart-safe next-window reminders with bounded retry and dedupe
+  - admin setup, status, and preview flow with quiet, public, or off thank-you behavior
 - AFK
   - immediate, scheduled, or recurring away status
   - timezone-aware `start_at` and recurring local clock scheduling
@@ -293,6 +298,11 @@ Question Drops notes:
 | `/remind set` | `bb!remind set 2h dm take a break` | Create a reminder |
 | `/remind list` | `bb!remind list` | Review active reminders |
 | `/remind cancel` | `bb!remind cancel <id>` | Cancel a reminder |
+| `/bremind setup` | `bb!bremind setup` | Configure verified Disboard bump reminders |
+| `/bremind status` | `bb!bremind status` | See the next due window, last bump, and delivery blockers |
+| `/bremind test` | `bb!bremind test both` | Preview reminder and thank-you copy without starting a timer |
+| `/bremind detect add` | `bb!bremind detect add #partnerships` | Add a verified bump-detection channel |
+| `/bremind destination` | `bb!bremind destination #reminders @BumpPing` | Set reminder delivery channel and optional role ping |
 | `/afk` | `bb!afk` | Set, schedule, or clear AFK |
 | `/afkstatus` | `bb!afkstatus` | View AFK status |
 | `/afktimezone set` | `bb!afktimezone set UTC+04:00` | Save your AFK timezone |
@@ -309,6 +319,8 @@ AFK examples:
 - `/afktimezone set America/New_York`
 - `/afkschedule add repeat:weekdays at:18:00 preset:studying`
 - `bb!afk deep work 1h30m`
+
+`/bremind` is the separate admin utility lane for server-list bump reminders. V1 is intentionally Disboard-only, starts the cooldown only from verified provider output in configured channels, keeps one persisted cycle per guild/provider, exposes `/bremind status` plus `/bremind test`, and supports `quiet`, `public`, or `off` thank-you behavior without fake manual timers.
 
 Shield now backs the bounded safety lane for stored or fan-out utility text as well: AFK reasons plus reminder text and public reminder delivery keep their feature-local validation first, then run through private Shield privacy, adult, and severe checks. Watch keywords stay narrower and use only the privacy feature lane.
 
@@ -656,8 +668,8 @@ Not stored:
 - `babblebox/bot.py`: bot bootstrap, extension loading, dictionary setup, sync
 - `babblebox/game_engine.py`: lobby state, gameplay flow, recaps, help/manual, session stats
 - `babblebox/pattern_hunt_game.py`: Pattern Hunt hidden-rule engine, DM onboarding, and anchor flow
-- `babblebox/utility_store.py`: Postgres-first utility persistence, including Watch V2 schema
-- `babblebox/utility_service.py`: Watch, Later, Capture, Remind, and AFK orchestration
+- `babblebox/utility_store.py`: Postgres-first utility persistence, including Watch V2 and bump reminder state
+- `babblebox/utility_service.py`: Watch, Later, Capture, Remind, verified bump reminders, and AFK orchestration
 - `babblebox/utility_helpers.py`: utility preview rendering, transcript formatting, and utility delivery helpers
 - `babblebox/daily_challenges.py`: deterministic Daily Arcade booth generation
 - `babblebox/profile_store.py`: compact profile and daily persistence
@@ -677,7 +689,7 @@ Not stored:
 - `babblebox/cogs/party_games.py`: Pattern Hunt private command surface
 - `babblebox/cogs/question_drops.py`: Question Drops grouped command surface and mastery admin flows
 - `babblebox/cogs/shield.py`: admin-facing Shield command surface
-- `babblebox/cogs/utilities.py`: Watch V2, Later, Capture, and Remind commands
+- `babblebox/cogs/utilities.py`: Watch V2, Later, Capture, Remind, AFK, and Bump Remind commands
 
 ## Hosting Notes
 

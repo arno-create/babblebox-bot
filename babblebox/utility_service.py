@@ -24,6 +24,8 @@ from babblebox.text_safety import find_private_pattern, normalize_plain_text, sa
 from babblebox.utility_helpers import (
     build_afk_notice_line,
     build_afk_status_embed,
+    build_bump_reminder_embed,
+    build_bump_thanks_embed,
     build_capture_delivery_embed,
     build_capture_transcript_file,
     build_jump_view,
@@ -68,6 +70,25 @@ REMINDER_RETRY_BASE_SECONDS = 10 * 60
 REMINDER_RETRY_MAX_SECONDS = 6 * 3600
 AFK_NOTICE_COOLDOWN_SECONDS = 30.0
 AFK_SCHEDULE_LIMIT = 6
+BUMP_PROVIDER_DISBOARD = "disboard"
+BUMP_DETECTION_CHANNEL_LIMIT = 5
+BUMP_REMINDER_TEXT_MAX_LEN = 180
+BUMP_THANKS_TEXT_MAX_LEN = 120
+BUMP_REMINDER_SENTENCE_LIMIT = 2
+BUMP_THANKS_SENTENCE_LIMIT = 1
+BUMP_THANKS_DELETE_AFTER_SECONDS = 15.0
+BUMP_CYCLE_RETRY_BASE_SECONDS = REMINDER_RETRY_BASE_SECONDS
+BUMP_CYCLE_RETRY_MAX_SECONDS = REMINDER_RETRY_MAX_SECONDS
+BUMP_CONFIG_UNCHANGED = object()
+BUMP_PROVIDER_SPECS = {
+    BUMP_PROVIDER_DISBOARD: {
+        "label": "Disboard",
+        "bot_id": 302050872383242240,
+        "cooldown_seconds": 2 * 3600,
+        "success_fragments": ("bump done", "you can bump again"),
+        "cooldown_fragments": ("please wait another", "wait another"),
+    }
+}
 
 
 def _watch_default_config() -> dict:
@@ -82,6 +103,44 @@ def _watch_default_config() -> dict:
         "ignored_user_ids": [],
         "keywords": [],
     }
+
+
+def _bump_default_config(guild_id: int) -> dict:
+    return {
+        "guild_id": guild_id,
+        "enabled": False,
+        "provider": BUMP_PROVIDER_DISBOARD,
+        "detection_channel_ids": [],
+        "reminder_channel_id": None,
+        "reminder_role_id": None,
+        "reminder_text": None,
+        "thanks_text": None,
+        "thanks_mode": "quiet",
+    }
+
+
+def _bump_cycle_id(guild_id: int, provider: str) -> str:
+    return f"{guild_id}:{provider}"
+
+
+def _normalize_bump_provider(provider: str | None) -> str:
+    normalized = str(provider or "").strip().casefold()
+    return normalized or BUMP_PROVIDER_DISBOARD
+
+
+def _bump_provider_label(provider: str | None) -> str:
+    normalized = _normalize_bump_provider(provider)
+    return str(BUMP_PROVIDER_SPECS.get(normalized, {}).get("label") or normalized.replace("_", " ").title())
+
+
+def _default_bump_reminder_text(provider: str | None) -> str:
+    provider_label = _bump_provider_label(provider)
+    return f"The next {provider_label} bump window is open."
+
+
+def _default_bump_thanks_text(provider: str | None) -> str:
+    provider_label = _bump_provider_label(provider)
+    return f"Thanks for keeping the server visible on {provider_label}."
 
 
 def _build_keyword_matcher(phrase: str, mode: str):
@@ -178,6 +237,517 @@ class UtilityService:
 
     def _evaluate_feature_text(self, surface: str, text: str | None) -> ShieldFeatureDecision:
         return self._shield_feature_gateway().evaluate(surface, text)
+
+    def _bump_config_record(self, guild_id: int, *, create: bool = False) -> dict | None:
+        configs = self.store.state.setdefault("bump_configs", {})
+        key = str(guild_id)
+        record = configs.get(key)
+        if record is None and create:
+            record = _bump_default_config(guild_id)
+            configs[key] = record
+        if isinstance(record, dict):
+            return record
+        if create:
+            configs[key] = _bump_default_config(guild_id)
+            return configs[key]
+        return None
+
+    def _bump_cycle_record(self, guild_id: int, provider: str | None, *, create: bool = False) -> dict | None:
+        normalized_provider = _normalize_bump_provider(provider)
+        cycles = self.store.state.setdefault("bump_cycles", {})
+        cycle_id = _bump_cycle_id(guild_id, normalized_provider)
+        record = cycles.get(cycle_id)
+        if record is None and create:
+            record = {
+                "id": cycle_id,
+                "guild_id": guild_id,
+                "provider": normalized_provider,
+                "last_provider_event_at": None,
+                "last_provider_event_kind": None,
+                "last_bump_at": None,
+                "last_bumper_user_id": None,
+                "last_success_message_id": None,
+                "last_success_channel_id": None,
+                "due_at": None,
+                "reminder_sent_at": None,
+                "delivery_attempts": 0,
+                "last_delivery_attempt_at": None,
+                "retry_after": None,
+                "last_delivery_error": None,
+            }
+            cycles[cycle_id] = record
+        return record if isinstance(record, dict) else None
+
+    def get_bump_config(self, guild_id: int) -> dict:
+        record = self._bump_config_record(guild_id)
+        return dict(record) if record is not None else _bump_default_config(guild_id)
+
+    def get_bump_cycle(self, guild_id: int, *, provider: str | None = None) -> dict | None:
+        record = self._bump_cycle_record(guild_id, provider or self.get_bump_config(guild_id).get("provider"))
+        return dict(record) if isinstance(record, dict) else None
+
+    def resolved_bump_reminder_text(self, guild_id: int, *, provider: str | None = None) -> str:
+        config = self.get_bump_config(guild_id)
+        resolved_provider = provider or config.get("provider")
+        return str(config.get("reminder_text") or _default_bump_reminder_text(resolved_provider))
+
+    def resolved_bump_thanks_text(self, guild_id: int, *, provider: str | None = None) -> str:
+        config = self.get_bump_config(guild_id)
+        resolved_provider = provider or config.get("provider")
+        return str(config.get("thanks_text") or _default_bump_thanks_text(resolved_provider))
+
+    def _validate_bump_message_text(self, text: str, *, field_name: str, max_length: int, sentence_limit: int) -> tuple[bool, str]:
+        valid, cleaned_or_error = sanitize_short_plain_text(
+            text,
+            field_name=field_name,
+            max_length=max_length,
+            sentence_limit=sentence_limit,
+            reject_blocklist=False,
+            allow_empty=False,
+        )
+        if not valid:
+            return False, cleaned_or_error
+        feature_decision = self._evaluate_feature_text(FEATURE_SURFACE_REMINDER_CREATE, cleaned_or_error)
+        if not feature_decision.allowed:
+            return False, feature_decision.user_message or f"That {field_name.lower()} is not allowed."
+        return True, cleaned_or_error
+
+    async def configure_bump(
+        self,
+        guild_id: int,
+        *,
+        enabled: bool | None = None,
+        provider: str | None = None,
+        detection_channel_ids: list[int] | object = BUMP_CONFIG_UNCHANGED,
+        reminder_channel_id: int | None | object = BUMP_CONFIG_UNCHANGED,
+        reminder_role_id: int | None | object = BUMP_CONFIG_UNCHANGED,
+        reminder_text: str | None | object = BUMP_CONFIG_UNCHANGED,
+        thanks_text: str | None | object = BUMP_CONFIG_UNCHANGED,
+        thanks_mode: str | None = None,
+    ) -> tuple[bool, str | dict]:
+        if not self._has_storage():
+            return False, self.storage_message("Bump reminders")
+
+        normalized_provider = None
+        if provider is not None:
+            normalized_provider = _normalize_bump_provider(provider)
+            if normalized_provider not in BUMP_PROVIDER_SPECS:
+                return False, "Only `disboard` is supported right now."
+
+        normalized_detection_channel_ids: list[int] | object = BUMP_CONFIG_UNCHANGED
+        if detection_channel_ids is not BUMP_CONFIG_UNCHANGED:
+            normalized_detection_channel_ids = sorted(
+                {
+                    channel_id
+                    for channel_id in detection_channel_ids
+                    if isinstance(channel_id, int) and channel_id > 0
+                }
+            )
+            if len(normalized_detection_channel_ids) > BUMP_DETECTION_CHANNEL_LIMIT:
+                return False, f"You can keep up to {BUMP_DETECTION_CHANNEL_LIMIT} bump detection channels."
+
+        cleaned_reminder_text: str | None | object = BUMP_CONFIG_UNCHANGED
+        if reminder_text is not BUMP_CONFIG_UNCHANGED:
+            if reminder_text is None:
+                cleaned_reminder_text = None
+            else:
+                ok, cleaned_or_error = self._validate_bump_message_text(
+                    reminder_text,
+                    field_name="Reminder message",
+                    max_length=BUMP_REMINDER_TEXT_MAX_LEN,
+                    sentence_limit=BUMP_REMINDER_SENTENCE_LIMIT,
+                )
+                if not ok:
+                    return False, cleaned_or_error
+                cleaned_reminder_text = cleaned_or_error
+
+        cleaned_thanks_text: str | None | object = BUMP_CONFIG_UNCHANGED
+        if thanks_text is not BUMP_CONFIG_UNCHANGED:
+            if thanks_text is None:
+                cleaned_thanks_text = None
+            else:
+                ok, cleaned_or_error = self._validate_bump_message_text(
+                    thanks_text,
+                    field_name="Thank-you message",
+                    max_length=BUMP_THANKS_TEXT_MAX_LEN,
+                    sentence_limit=BUMP_THANKS_SENTENCE_LIMIT,
+                )
+                if not ok:
+                    return False, cleaned_or_error
+                cleaned_thanks_text = cleaned_or_error
+
+        normalized_thanks_mode = None
+        if thanks_mode is not None:
+            normalized_thanks_mode = str(thanks_mode).strip().casefold()
+            if normalized_thanks_mode not in {"quiet", "public", "off"}:
+                return False, "Thank-you mode must be `quiet`, `public`, or `off`."
+
+        async with self._lock:
+            record = self._bump_config_record(guild_id, create=True)
+            if record is None:
+                return False, "Babblebox could not update bump reminders right now."
+            if enabled is not None:
+                record["enabled"] = bool(enabled)
+            if normalized_provider is not None:
+                record["provider"] = normalized_provider
+            if normalized_detection_channel_ids is not BUMP_CONFIG_UNCHANGED:
+                record["detection_channel_ids"] = normalized_detection_channel_ids
+            if reminder_channel_id is not BUMP_CONFIG_UNCHANGED:
+                record["reminder_channel_id"] = reminder_channel_id if isinstance(reminder_channel_id, int) and reminder_channel_id > 0 else None
+            if reminder_role_id is not BUMP_CONFIG_UNCHANGED:
+                record["reminder_role_id"] = reminder_role_id if isinstance(reminder_role_id, int) and reminder_role_id > 0 else None
+            if cleaned_reminder_text is not BUMP_CONFIG_UNCHANGED:
+                record["reminder_text"] = cleaned_reminder_text
+            if cleaned_thanks_text is not BUMP_CONFIG_UNCHANGED:
+                record["thanks_text"] = cleaned_thanks_text
+            if normalized_thanks_mode is not None:
+                record["thanks_mode"] = normalized_thanks_mode
+            await self.store.flush()
+            self._wake_event.set()
+            return True, dict(record)
+
+    def _member_can_ping_role(self, guild: discord.Guild, role_id: int | None) -> bool:
+        if role_id is None:
+            return False
+        me = getattr(guild, "me", None)
+        bot_user = getattr(self.bot, "user", None)
+        if me is None and bot_user is not None:
+            me = guild.get_member(bot_user.id)
+        role = guild.get_role(role_id) if hasattr(guild, "get_role") else None
+        if me is None or role is None:
+            return False
+        if getattr(role, "mentionable", False):
+            return True
+        perms = getattr(me, "guild_permissions", None)
+        return bool(perms and getattr(perms, "mention_everyone", False))
+
+    def get_bump_operability(self, guild: discord.Guild) -> list[str]:
+        config = self.get_bump_config(guild.id)
+        me = getattr(guild, "me", None)
+        bot_user = getattr(self.bot, "user", None)
+        if me is None and bot_user is not None:
+            me = guild.get_member(bot_user.id)
+        if me is None:
+            return ["Babblebox could not resolve its own server member for bump-reminder checks."]
+        lines: list[str] = []
+        provider = _normalize_bump_provider(config.get("provider"))
+        if provider not in BUMP_PROVIDER_SPECS:
+            lines.append("The configured bump provider is not supported in this build.")
+        detection_channel_ids = [channel_id for channel_id in config.get("detection_channel_ids", []) if isinstance(channel_id, int)]
+        if not detection_channel_ids:
+            lines.append("No detection channels are configured, so verified bumps cannot start a cycle yet.")
+        thanks_mode = str(config.get("thanks_mode") or "quiet")
+        for channel_id in detection_channel_ids[:BUMP_DETECTION_CHANNEL_LIMIT]:
+            channel = self.bot.get_channel(channel_id) or guild.get_channel(channel_id)
+            if channel is None:
+                lines.append(f"Babblebox cannot see configured detection channel <#{channel_id}>.")
+                continue
+            perms = channel.permissions_for(me)
+            if thanks_mode != "off" and not getattr(perms, "send_messages", False):
+                lines.append(f"Babblebox cannot send thank-you messages in {channel.mention}.")
+            if thanks_mode != "off" and not getattr(perms, "embed_links", False):
+                lines.append(f"Thank-you messages in {channel.mention} will fall back to plain text because `Embed Links` is missing.")
+        reminder_channel_id = config.get("reminder_channel_id")
+        if reminder_channel_id is None:
+            lines.append("No reminder destination channel is configured yet.")
+        else:
+            channel = self.bot.get_channel(reminder_channel_id) or guild.get_channel(reminder_channel_id)
+            if channel is None:
+                lines.append(f"Babblebox cannot see the configured reminder channel <#{reminder_channel_id}>.")
+            else:
+                perms = channel.permissions_for(me)
+                if not getattr(perms, "send_messages", False):
+                    lines.append(f"Babblebox cannot send reminders in {channel.mention}.")
+                if not getattr(perms, "embed_links", False):
+                    lines.append(f"Reminders in {channel.mention} will fall back to plain text because `Embed Links` is missing.")
+        reminder_role_id = config.get("reminder_role_id")
+        if reminder_role_id is not None:
+            role = guild.get_role(reminder_role_id) if hasattr(guild, "get_role") else None
+            if role is None:
+                lines.append("The configured reminder role is missing or no longer accessible.")
+            elif not self._member_can_ping_role(guild, reminder_role_id):
+                lines.append("Babblebox cannot ping the configured reminder role with current permissions, so reminders will post without that role mention.")
+        return lines
+
+    def _extract_bump_message_text(self, message: discord.Message) -> str:
+        parts: list[str] = []
+        if isinstance(getattr(message, "content", None), str) and message.content.strip():
+            parts.append(message.content)
+        for embed in getattr(message, "embeds", []) or []:
+            title = getattr(embed, "title", None)
+            description = getattr(embed, "description", None)
+            footer = getattr(getattr(embed, "footer", None), "text", None)
+            if isinstance(title, str) and title.strip():
+                parts.append(title)
+            if isinstance(description, str) and description.strip():
+                parts.append(description)
+            if isinstance(footer, str) and footer.strip():
+                parts.append(footer)
+            for field in getattr(embed, "fields", []) or []:
+                field_name = getattr(field, "name", None)
+                field_value = getattr(field, "value", None)
+                if isinstance(field_name, str) and field_name.strip():
+                    parts.append(field_name)
+                if isinstance(field_value, str) and field_value.strip():
+                    parts.append(field_value)
+        return normalize_plain_text("\n".join(parts)).casefold()
+
+    def _classify_bump_provider_message(self, provider: str, text: str) -> str | None:
+        spec = BUMP_PROVIDER_SPECS.get(provider)
+        if spec is None or not text:
+            return None
+        cooldown_fragments = tuple(spec.get("cooldown_fragments", ()))
+        if any(fragment in text for fragment in cooldown_fragments):
+            return "cooldown"
+        success_fragments = tuple(spec.get("success_fragments", ()))
+        if any(fragment in text for fragment in success_fragments):
+            return "success"
+        return None
+
+    def _bump_initiator_user_id(self, message: discord.Message) -> int | None:
+        interaction_metadata = getattr(message, "interaction_metadata", None)
+        user = getattr(interaction_metadata, "user", None)
+        if isinstance(getattr(user, "id", None), int):
+            return user.id
+        interaction = getattr(message, "interaction", None)
+        user = getattr(interaction, "user", None)
+        if isinstance(getattr(user, "id", None), int):
+            return user.id
+        return None
+
+    async def handle_bump_provider_message(self, message: discord.Message):
+        if not self.storage_ready or message.guild is None:
+            return
+        config = self.get_bump_config(message.guild.id)
+        if not config.get("enabled"):
+            return
+        provider = _normalize_bump_provider(config.get("provider"))
+        spec = BUMP_PROVIDER_SPECS.get(provider)
+        if spec is None:
+            return
+        detection_channel_ids = set(channel_id for channel_id in config.get("detection_channel_ids", []) if isinstance(channel_id, int))
+        if message.channel.id not in detection_channel_ids:
+            return
+        if int(getattr(message.author, "id", 0) or 0) != int(spec["bot_id"]):
+            return
+        classification = self._classify_bump_provider_message(provider, self._extract_bump_message_text(message))
+        if classification is None:
+            return
+        event_time = message.created_at or ge.now_utc()
+        bumper_user_id = self._bump_initiator_user_id(message)
+        should_send_thanks = False
+        async with self._lock:
+            cycle = self._bump_cycle_record(message.guild.id, provider, create=True)
+            if cycle is None:
+                return
+            cycle["last_provider_event_at"] = serialize_datetime(event_time)
+            cycle["last_provider_event_kind"] = classification
+            if classification == "cooldown":
+                await self.store.flush()
+                return
+            if cycle.get("last_success_message_id") == message.id:
+                return
+            cycle["last_bump_at"] = serialize_datetime(event_time)
+            cycle["last_bumper_user_id"] = bumper_user_id
+            cycle["last_success_message_id"] = message.id
+            cycle["last_success_channel_id"] = message.channel.id
+            cycle["due_at"] = serialize_datetime(event_time + timedelta(seconds=int(spec["cooldown_seconds"])))
+            cycle["reminder_sent_at"] = None
+            cycle["delivery_attempts"] = 0
+            cycle["last_delivery_attempt_at"] = None
+            cycle["retry_after"] = None
+            cycle["last_delivery_error"] = None
+            await self.store.flush()
+            self._wake_event.set()
+            should_send_thanks = True
+        if should_send_thanks:
+            await self._send_bump_thanks(message, config=config, provider=provider, bumper_user_id=bumper_user_id)
+
+    async def _send_bump_thanks(
+        self,
+        message: discord.Message,
+        *,
+        config: dict,
+        provider: str,
+        bumper_user_id: int | None,
+    ):
+        thanks_mode = str(config.get("thanks_mode") or "quiet").casefold()
+        if thanks_mode == "off":
+            return
+        provider_label = _bump_provider_label(provider)
+        thanks_text = str(config.get("thanks_text") or _default_bump_thanks_text(provider))
+        feature_decision = self._evaluate_feature_text(FEATURE_SURFACE_REMINDER_PUBLIC_DELIVERY, thanks_text)
+        if not feature_decision.allowed:
+            return
+        guild = message.guild
+        channel = message.channel
+        me = getattr(guild, "me", None)
+        bot_user = getattr(self.bot, "user", None)
+        if me is None and bot_user is not None:
+            me = guild.get_member(bot_user.id)
+        if me is None:
+            return
+        perms = channel.permissions_for(me)
+        if not getattr(perms, "send_messages", False):
+            return
+        bumper_name = None
+        if isinstance(bumper_user_id, int):
+            bumper = guild.get_member(bumper_user_id) or self.bot.get_user(bumper_user_id)
+            bumper_name = ge.display_name_of(bumper) if bumper is not None else None
+        embed = build_bump_thanks_embed(
+            provider_label=provider_label,
+            thanks_text=thanks_text,
+            bumper_name=bumper_name,
+        )
+        send_kwargs = {
+            "reference": message,
+            "mention_author": False,
+            "allowed_mentions": discord.AllowedMentions.none(),
+        }
+        if getattr(perms, "embed_links", False):
+            send_kwargs["embed"] = embed
+        else:
+            fallback_text = thanks_text if bumper_name is None else f"{bumper_name} - {thanks_text}"
+            send_kwargs["content"] = fallback_text
+        if thanks_mode == "quiet":
+            send_kwargs["delete_after"] = BUMP_THANKS_DELETE_AFTER_SECONDS
+        with contextlib.suppress(discord.Forbidden, discord.HTTPException):
+            await channel.send(**send_kwargs)
+
+    def _build_bump_retry_update(self, cycle: dict, *, now: datetime | None = None, error: str | None = None) -> dict[str, int | str | None]:
+        current_time = now or ge.now_utc()
+        previous_attempts = cycle.get("delivery_attempts", 0)
+        attempts = int(previous_attempts) if isinstance(previous_attempts, int) and previous_attempts >= 0 else 0
+        attempts += 1
+        backoff_seconds = min(
+            BUMP_CYCLE_RETRY_MAX_SECONDS,
+            BUMP_CYCLE_RETRY_BASE_SECONDS * (2 ** min(attempts - 1, 5)),
+        )
+        return {
+            "delivery_attempts": attempts,
+            "last_delivery_attempt_at": serialize_datetime(current_time),
+            "retry_after": serialize_datetime(current_time + timedelta(seconds=backoff_seconds)),
+            "last_delivery_error": error,
+        }
+
+    async def _deliver_due_bump_cycles(self, cycles: list[dict]):
+        now = ge.now_utc()
+        success_updates: dict[str, dict[str, int | str | None]] = {}
+        retry_updates: dict[str, dict[str, int | str | None]] = {}
+        for cycle in cycles:
+            cycle_id = cycle.get("id")
+            if not isinstance(cycle_id, str):
+                continue
+            success, error = await self._deliver_single_bump_cycle(cycle)
+            if success:
+                attempts = cycle.get("delivery_attempts", 0)
+                attempts = int(attempts) if isinstance(attempts, int) and attempts >= 0 else 0
+                success_updates[cycle_id] = {
+                    "reminder_sent_at": serialize_datetime(now),
+                    "delivery_attempts": attempts + 1,
+                    "last_delivery_attempt_at": serialize_datetime(now),
+                    "retry_after": None,
+                    "last_delivery_error": None,
+                }
+            else:
+                retry_updates[cycle_id] = self._build_bump_retry_update(cycle, now=now, error=error)
+        if not success_updates and not retry_updates:
+            return
+        async with self._lock:
+            cycles_state = self.store.state.get("bump_cycles", {})
+            dirty = False
+            for cycle_id, update in success_updates.items():
+                current = cycles_state.get(cycle_id)
+                if not isinstance(current, dict):
+                    continue
+                current.update(update)
+                dirty = True
+            for cycle_id, update in retry_updates.items():
+                current = cycles_state.get(cycle_id)
+                if not isinstance(current, dict):
+                    continue
+                current.update(update)
+                dirty = True
+            if dirty:
+                await self.store.flush()
+                self._wake_event.set()
+
+    def _bump_plain_text_content(self, cycle: dict, *, provider_label: str, reminder_text: str, role_id: int | None, role_ping_allowed: bool) -> str:
+        parts = []
+        if role_ping_allowed and isinstance(role_id, int):
+            parts.append(f"<@&{role_id}>")
+        parts.append(reminder_text)
+        last_bump_at = deserialize_datetime(cycle.get("last_bump_at"))
+        if last_bump_at is not None:
+            parts.append(f"Last verified bump {ge.format_timestamp(last_bump_at, 'R')}.")
+        return "\n".join(parts)
+
+    async def _deliver_single_bump_cycle(self, cycle: dict) -> tuple[bool, str | None]:
+        guild_id = cycle.get("guild_id")
+        if not isinstance(guild_id, int):
+            return False, "Missing guild for bump reminder delivery."
+        config = self.get_bump_config(guild_id)
+        if not config.get("enabled"):
+            return False, "Bump reminders are disabled for this server."
+        provider = _normalize_bump_provider(cycle.get("provider") or config.get("provider"))
+        provider_label = _bump_provider_label(provider)
+        reminder_channel_id = config.get("reminder_channel_id")
+        if not isinstance(reminder_channel_id, int):
+            return False, "No reminder destination channel is configured."
+        get_guild = getattr(self.bot, "get_guild", None)
+        guild = get_guild(guild_id) if callable(get_guild) else None
+        if guild is None:
+            return False, "Babblebox could not resolve the guild for bump reminder delivery."
+        channel = self.bot.get_channel(reminder_channel_id) or guild.get_channel(reminder_channel_id)
+        if channel is None:
+            return False, "Babblebox cannot access the configured reminder channel."
+        me = getattr(guild, "me", None)
+        bot_user = getattr(self.bot, "user", None)
+        if me is None and bot_user is not None:
+            me = guild.get_member(bot_user.id)
+        if me is None:
+            return False, "Babblebox could not resolve its server member for bump reminder delivery."
+        perms = channel.permissions_for(me)
+        if not getattr(perms, "send_messages", False):
+            return False, "Babblebox cannot send messages in the configured reminder channel."
+        reminder_text = str(config.get("reminder_text") or _default_bump_reminder_text(provider))
+        feature_decision = self._evaluate_feature_text(FEATURE_SURFACE_REMINDER_PUBLIC_DELIVERY, reminder_text)
+        if not feature_decision.allowed:
+            return False, feature_decision.user_message or "Shield blocked that bump reminder text."
+        reminder_role_id = config.get("reminder_role_id")
+        role_ping_allowed = self._member_can_ping_role(guild, reminder_role_id if isinstance(reminder_role_id, int) else None)
+        due_at = deserialize_datetime(cycle.get("due_at"))
+        delayed = bool(due_at is not None and (ge.now_utc() - due_at).total_seconds() > 120)
+        if getattr(perms, "embed_links", False):
+            embed = build_bump_reminder_embed(
+                provider_label=provider_label,
+                reminder_text=reminder_text,
+                cycle=cycle,
+                delayed=delayed,
+            )
+            content = f"<@&{reminder_role_id}>" if role_ping_allowed and isinstance(reminder_role_id, int) else None
+            with contextlib.suppress(discord.Forbidden, discord.HTTPException):
+                await channel.send(
+                    content=content,
+                    embed=embed,
+                    allowed_mentions=discord.AllowedMentions(users=False, roles=True, everyone=False),
+                )
+                return True, None
+            return False, "Discord rejected the bump reminder embed delivery."
+        plain_text = self._bump_plain_text_content(
+            cycle,
+            provider_label=provider_label,
+            reminder_text=reminder_text,
+            role_id=reminder_role_id if isinstance(reminder_role_id, int) else None,
+            role_ping_allowed=role_ping_allowed,
+        )
+        with contextlib.suppress(discord.Forbidden, discord.HTTPException):
+            await channel.send(
+                content=plain_text,
+                allowed_mentions=discord.AllowedMentions(users=False, roles=True, everyone=False),
+            )
+            return True, None
+        return False, "Discord rejected the bump reminder text delivery."
 
     def _watch_config(self, user_id: int, *, create: bool = False) -> dict | None:
         configs = self.store.state.setdefault("watch", {})
@@ -1649,14 +2219,16 @@ class UtilityService:
             return
         while True:
             self._wake_event.clear()
-            due_reminders, afk_to_activate, afk_to_expire, afk_schedule_candidates, next_due = self._collect_due_records()
-            if due_reminders or afk_to_activate or afk_to_expire or afk_schedule_candidates:
+            due_reminders, due_bump_cycles, afk_to_activate, afk_to_expire, afk_schedule_candidates, next_due = self._collect_due_records()
+            if due_reminders or due_bump_cycles or afk_to_activate or afk_to_expire or afk_schedule_candidates:
                 if afk_to_activate:
                     await self._activate_due_afk(afk_to_activate)
                 if afk_schedule_candidates:
                     await self._activate_due_afk_schedules(afk_schedule_candidates)
                 if due_reminders:
                     await self._deliver_due_reminders(due_reminders)
+                if due_bump_cycles:
+                    await self._deliver_due_bump_cycles(due_bump_cycles)
                 if afk_to_expire:
                     await self._expire_due_afk(afk_to_expire)
                 continue
@@ -1669,9 +2241,10 @@ class UtilityService:
             except asyncio.TimeoutError:
                 continue
 
-    def _collect_due_records(self) -> tuple[list[dict], list[dict], list[dict], list[dict], datetime | None]:
+    def _collect_due_records(self) -> tuple[list[dict], list[dict], list[dict], list[dict], list[dict], datetime | None]:
         now = ge.now_utc()
         due_reminders: list[dict] = []
+        due_bump_cycles: list[dict] = []
         afk_to_activate: list[dict] = []
         afk_to_expire: list[dict] = []
         afk_schedule_candidates: list[dict] = []
@@ -1685,6 +2258,24 @@ class UtilityService:
             retry_after = deserialize_datetime(record.get("retry_after"))
             if due_at <= now and (retry_after is None or retry_after <= now):
                 due_reminders.append(record)
+                continue
+            candidate = retry_after if retry_after is not None and retry_after > now else due_at
+            if candidate > now and (next_due is None or candidate < next_due):
+                next_due = candidate
+        for cycle in self.store.state.get("bump_cycles", {}).values():
+            if not isinstance(cycle, dict):
+                continue
+            config = self.get_bump_config(int(cycle.get("guild_id", 0) or 0))
+            provider = _normalize_bump_provider(cycle.get("provider") or config.get("provider"))
+            if not config.get("enabled") or provider not in BUMP_PROVIDER_SPECS:
+                continue
+            due_at = deserialize_datetime(cycle.get("due_at"))
+            reminder_sent_at = deserialize_datetime(cycle.get("reminder_sent_at"))
+            if due_at is None or reminder_sent_at is not None:
+                continue
+            retry_after = deserialize_datetime(cycle.get("retry_after"))
+            if due_at <= now and (retry_after is None or retry_after <= now):
+                due_bump_cycles.append(cycle)
                 continue
             candidate = retry_after if retry_after is not None and retry_after > now else due_at
             if candidate > now and (next_due is None or candidate < next_due):
@@ -1717,7 +2308,7 @@ class UtilityService:
                 afk_schedule_candidates.append(schedule)
             elif next_due is None or next_start_at < next_due:
                 next_due = next_start_at
-        return due_reminders, afk_to_activate, afk_to_expire, afk_schedule_candidates, next_due
+        return due_reminders, due_bump_cycles, afk_to_activate, afk_to_expire, afk_schedule_candidates, next_due
 
     async def _activate_due_afk(self, records: list[dict]):
         async with self._lock:

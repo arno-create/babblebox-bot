@@ -295,3 +295,52 @@ class EventsCogTests(unittest.IsolatedAsyncioTestCase):
 
         shield_service.handle_message_edit.assert_awaited_once_with(before, after)
         confessions_service.handle_message_edit.assert_awaited_once_with(after)
+
+    async def test_bot_provider_messages_route_only_to_bump_detection(self):
+        utility_service = types.SimpleNamespace(
+            handle_bump_provider_message=AsyncMock(),
+            clear_afk_on_activity=AsyncMock(return_value=None),
+            collect_afk_notice_targets=lambda **kwargs: [],
+            handle_watch_message=AsyncMock(),
+            handle_return_watch_message=AsyncMock(),
+        )
+        confessions_service = types.SimpleNamespace(handle_member_response_message=AsyncMock())
+        question_drops_service = types.SimpleNamespace(observe_message_activity=Mock(), handle_message=AsyncMock(return_value=False))
+        bot = types.SimpleNamespace(
+            utility_service=utility_service,
+            shield_service=None,
+            confessions_service=confessions_service,
+            question_drops_service=question_drops_service,
+            get_cog=lambda name: None,
+        )
+        cog = EventsCog(bot)
+        message = FakeMessage(author=FakeAuthor(user_id=302050872383242240, bot=True), content="Bump done.")
+
+        await cog.on_message(message)
+
+        utility_service.handle_bump_provider_message.assert_awaited_once_with(message)
+        utility_service.clear_afk_on_activity.assert_not_awaited()
+        utility_service.handle_watch_message.assert_not_awaited()
+        utility_service.handle_return_watch_message.assert_not_awaited()
+        confessions_service.handle_member_response_message.assert_not_awaited()
+        question_drops_service.observe_message_activity.assert_not_called()
+        question_drops_service.handle_message.assert_not_awaited()
+
+    async def test_non_webhook_bot_message_edits_route_only_to_bump_detection(self):
+        utility_service = types.SimpleNamespace(handle_bump_provider_message=AsyncMock())
+        shield_service = types.SimpleNamespace(handle_message_edit=AsyncMock(return_value=None))
+        confessions_service = types.SimpleNamespace(handle_message_edit=AsyncMock())
+        bot = types.SimpleNamespace(
+            utility_service=utility_service,
+            shield_service=shield_service,
+            confessions_service=confessions_service,
+        )
+        cog = EventsCog(bot)
+        before = FakeMessage(author=FakeAuthor(user_id=302050872383242240, bot=True), content="before")
+        after = FakeMessage(author=FakeAuthor(user_id=302050872383242240, bot=True), content="after")
+
+        await cog.on_message_edit(before, after)
+
+        utility_service.handle_bump_provider_message.assert_awaited_once_with(after)
+        shield_service.handle_message_edit.assert_not_awaited()
+        confessions_service.handle_message_edit.assert_not_awaited()

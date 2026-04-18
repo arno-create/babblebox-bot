@@ -22,7 +22,7 @@ from babblebox.shield_service import (
     ShieldFeatureSafetyGateway,
 )
 from babblebox.utility_helpers import build_afk_reason_text, compute_next_afk_schedule_start, deserialize_datetime, serialize_datetime
-from babblebox.utility_service import UtilityService
+from babblebox.utility_service import BUMP_PROVIDER_DISBOARD, UtilityService
 from babblebox.utility_store import UtilityStateStore, UtilityStorageUnavailable, _PostgresUtilityStore
 
 
@@ -39,37 +39,98 @@ class DummyTarget(DummyUser):
 
 
 class DummyMember(DummyTarget):
-    def __init__(self, user_id: int, *, bot: bool = False, display_name: Optional[str] = None):
+    def __init__(
+        self,
+        user_id: int,
+        *,
+        bot: bool = False,
+        display_name: Optional[str] = None,
+        mention_everyone: bool = False,
+    ):
         super().__init__(user_id, bot=bot, display_name=display_name)
         self.mention = f"<@{user_id}>"
         self.send = AsyncMock()
+        self.guild_permissions = types.SimpleNamespace(mention_everyone=mention_everyone)
+
+
+class DummyRole:
+    def __init__(self, role_id: int, *, name: str = "Role", mentionable: bool = True):
+        self.id = role_id
+        self.name = name
+        self.mention = f"<@&{role_id}>"
+        self.mentionable = mentionable
 
 
 class DummyChannel:
-    def __init__(self, channel_id: int, *, guild, name: str = "general", visible_user_ids: Optional[set[int]] = None):
+    def __init__(
+        self,
+        channel_id: int,
+        *,
+        guild,
+        name: str = "general",
+        visible_user_ids: Optional[set[int]] = None,
+        can_send: bool = True,
+        can_embed: bool = True,
+    ):
         self.id = channel_id
         self.guild = guild
         self.name = name
         self.mention = f"#{name}"
         self._visible_user_ids = set(visible_user_ids or set())
+        self._can_send = can_send
+        self._can_embed = can_embed
         self.sent = []
 
     def permissions_for(self, member):
         allowed = getattr(member, "id", None) in self._visible_user_ids
-        return types.SimpleNamespace(view_channel=allowed, read_message_history=allowed)
+        return types.SimpleNamespace(
+            view_channel=allowed,
+            read_message_history=allowed,
+            send_messages=allowed and self._can_send,
+            embed_links=allowed and self._can_embed,
+        )
 
     async def send(self, *args, **kwargs):
         self.sent.append((args, kwargs))
 
 
 class DummyGuild:
-    def __init__(self, guild_id: int, *, name: str = "Guild", members: Optional[list[DummyMember]] = None):
+    def __init__(
+        self,
+        guild_id: int,
+        *,
+        name: str = "Guild",
+        members: Optional[list[DummyMember]] = None,
+        channels: Optional[list[DummyChannel]] = None,
+        roles: Optional[list[DummyRole]] = None,
+    ):
         self.id = guild_id
         self.name = name
         self._members = {member.id: member for member in (members or [])}
+        self._channels = {channel.id: channel for channel in (channels or [])}
+        self._roles = {role.id: role for role in (roles or [])}
+        self.me = None
 
     def get_member(self, user_id: int):
         return self._members.get(user_id)
+
+    def add_member(self, member):
+        self._members[member.id] = member
+        return member
+
+    def add_channel(self, channel):
+        self._channels[channel.id] = channel
+        return channel
+
+    def get_channel(self, channel_id: int):
+        return self._channels.get(channel_id)
+
+    def add_role(self, role):
+        self._roles[role.id] = role
+        return role
+
+    def get_role(self, role_id: int):
+        return self._roles.get(role_id)
 
 
 class DummyMessage:
@@ -84,6 +145,9 @@ class DummyMessage:
         created_at,
         message_type=discord.MessageType.default,
         raw_mentions: Optional[list[int]] = None,
+        embeds: Optional[list[discord.Embed]] = None,
+        interaction_metadata=None,
+        interaction=None,
     ):
         self.id = message_id
         self.author = author
@@ -97,12 +161,18 @@ class DummyMessage:
         self.reference = None
         self.type = message_type
         self.raw_mentions = list(raw_mentions or [])
+        self.embeds = list(embeds or [])
+        self.interaction_metadata = interaction_metadata
+        self.interaction = interaction
+        self.webhook_id = None
 
 
 class DummyBot:
     def __init__(self):
         self._users = {}
         self._channels = {}
+        self._guilds = {}
+        self.user = DummyUser(9990)
 
     def add_user(self, user):
         self._users[user.id] = user
@@ -121,6 +191,12 @@ class DummyBot:
 
     async def fetch_channel(self, channel_id: int):
         return self.get_channel(channel_id)
+
+    def add_guild(self, guild):
+        self._guilds[guild.id] = guild
+
+    def get_guild(self, guild_id: int):
+        return self._guilds.get(guild_id)
 
 
 class FeatureGatewaySpy(ShieldFeatureSafetyGateway):
@@ -165,10 +241,12 @@ class FakePool:
 
 
 class FakeReloadConnection:
-    def __init__(self, *, watch_rows=None, later_rows=None, reminder_rows=None):
+    def __init__(self, *, watch_rows=None, later_rows=None, reminder_rows=None, bump_config_rows=None, bump_cycle_rows=None):
         self._watch_rows = watch_rows or []
         self._later_rows = later_rows or []
         self._reminder_rows = reminder_rows or []
+        self._bump_config_rows = bump_config_rows or []
+        self._bump_cycle_rows = bump_cycle_rows or []
 
     async def fetch(self, query):
         if "FROM utility_watch_configs" in query:
@@ -181,6 +259,10 @@ class FakeReloadConnection:
             return self._later_rows
         if "FROM utility_reminders" in query:
             return self._reminder_rows
+        if "FROM utility_bump_configs" in query:
+            return self._bump_config_rows
+        if "FROM utility_bump_cycles" in query:
+            return self._bump_cycle_rows
         if "FROM utility_afk_settings" in query:
             return []
         if "FROM utility_afk_schedules" in query:
@@ -197,6 +279,98 @@ class UtilityStoreAndServiceTests(unittest.IsolatedAsyncioTestCase):
         self.bot = DummyBot()
         self.service = UtilityService(self.bot, store=self.store)
         self.service.storage_ready = True
+
+    async def _configure_bump_fixture(
+        self,
+        *,
+        thanks_mode: str = "quiet",
+        reminder_role: bool = False,
+        role_mentionable: bool = True,
+        bot_can_ping_role: bool = False,
+        detection_can_embed: bool = True,
+        reminder_can_send: bool = True,
+        reminder_can_embed: bool = True,
+    ):
+        bot_member = DummyMember(
+            self.bot.user.id,
+            bot=True,
+            display_name="Babblebox",
+            mention_everyone=bot_can_ping_role,
+        )
+        bumper = DummyMember(7001, display_name="Mira")
+        provider = DummyMember(302050872383242240, bot=True, display_name="DISBOARD")
+        guild = DummyGuild(901, members=[bot_member, bumper, provider])
+        guild.me = bot_member
+        detection_channel = DummyChannel(
+            902,
+            guild=guild,
+            name="bump-here",
+            visible_user_ids={bot_member.id, bumper.id, provider.id},
+            can_send=True,
+            can_embed=detection_can_embed,
+        )
+        reminder_channel = DummyChannel(
+            903,
+            guild=guild,
+            name="bump-reminders",
+            visible_user_ids={bot_member.id, bumper.id, provider.id},
+            can_send=reminder_can_send,
+            can_embed=reminder_can_embed,
+        )
+        guild.add_channel(detection_channel)
+        guild.add_channel(reminder_channel)
+        role = None
+        if reminder_role:
+            role = DummyRole(904, name="Bump Squad", mentionable=role_mentionable)
+            guild.add_role(role)
+        self.bot.add_user(bot_member)
+        self.bot.add_user(bumper)
+        self.bot.add_user(provider)
+        self.bot.add_channel(detection_channel)
+        self.bot.add_channel(reminder_channel)
+        self.bot.add_guild(guild)
+        ok, result = await self.service.configure_bump(
+            guild.id,
+            enabled=True,
+            provider=BUMP_PROVIDER_DISBOARD,
+            detection_channel_ids=[detection_channel.id],
+            reminder_channel_id=reminder_channel.id,
+            reminder_role_id=role.id if role is not None else None,
+            thanks_mode=thanks_mode,
+        )
+        self.assertTrue(ok, result)
+        return guild, detection_channel, reminder_channel, bumper, provider, role
+
+    def _make_disboard_message(
+        self,
+        *,
+        guild: DummyGuild,
+        channel: DummyChannel,
+        provider: DummyMember,
+        bumper: Optional[DummyUser],
+        message_id: int,
+        content: str = "",
+        embeds: Optional[list[discord.Embed]] = None,
+        created_at=None,
+        interaction_style: str = "metadata",
+    ) -> DummyMessage:
+        interaction_metadata = None
+        interaction = None
+        if bumper is not None and interaction_style == "metadata":
+            interaction_metadata = types.SimpleNamespace(user=bumper)
+        elif bumper is not None and interaction_style == "interaction":
+            interaction = types.SimpleNamespace(user=bumper)
+        return DummyMessage(
+            message_id=message_id,
+            author=provider,
+            guild=guild,
+            channel=channel,
+            content=content,
+            created_at=created_at or ge.now_utc(),
+            embeds=embeds,
+            interaction_metadata=interaction_metadata,
+            interaction=interaction,
+        )
 
     async def test_memory_store_loads_clean_state(self):
         self.assertEqual(self.store.backend_name, "memory")
@@ -970,7 +1144,7 @@ class UtilityStoreAndServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(ok)
         reminder["due_at"] = serialize_datetime(ge.now_utc() - timedelta(minutes=1))
 
-        due_reminders, _, _, _, _ = self.service._collect_due_records()
+        due_reminders, _, _, _, _, _ = self.service._collect_due_records()
         await self.service._deliver_due_reminders(due_reminders)
 
         stored = self.service.store.state["reminders"][reminder["id"]]
@@ -995,7 +1169,7 @@ class UtilityStoreAndServiceTests(unittest.IsolatedAsyncioTestCase):
         reminder["retry_after"] = serialize_datetime(retry_after)
         reminder["delivery_attempts"] = 1
 
-        due_reminders, _, _, _, next_due = self.service._collect_due_records()
+        due_reminders, _, _, _, _, next_due = self.service._collect_due_records()
 
         self.assertEqual(due_reminders, [])
         self.assertEqual(next_due, retry_after)
@@ -1017,11 +1191,248 @@ class UtilityStoreAndServiceTests(unittest.IsolatedAsyncioTestCase):
         reminder["retry_after"] = serialize_datetime(ge.now_utc() - timedelta(minutes=1))
         reminder["delivery_attempts"] = 2
 
-        due_reminders, _, _, _, _ = self.service._collect_due_records()
+        due_reminders, _, _, _, _, _ = self.service._collect_due_records()
         await self.service._deliver_due_reminders(due_reminders)
 
         user.send.assert_awaited_once()
         self.assertNotIn(reminder["id"], self.service.store.state["reminders"])
+
+    async def test_bump_success_detection_creates_cycle_from_verified_provider_message(self):
+        guild, detection_channel, _reminder_channel, bumper, provider, _role = await self._configure_bump_fixture()
+        event_time = ge.now_utc()
+        message = self._make_disboard_message(
+            guild=guild,
+            channel=detection_channel,
+            provider=provider,
+            bumper=bumper,
+            message_id=8801,
+            content="Bump done.",
+            created_at=event_time,
+        )
+
+        await self.service.handle_bump_provider_message(message)
+
+        cycle = self.service.get_bump_cycle(guild.id, provider=BUMP_PROVIDER_DISBOARD)
+        self.assertIsNotNone(cycle)
+        self.assertEqual(cycle["last_provider_event_kind"], "success")
+        self.assertEqual(cycle["last_success_message_id"], message.id)
+        self.assertEqual(cycle["last_success_channel_id"], detection_channel.id)
+        self.assertEqual(cycle["last_bumper_user_id"], bumper.id)
+        self.assertEqual(cycle["last_bump_at"], serialize_datetime(event_time))
+        self.assertEqual(cycle["due_at"], serialize_datetime(event_time + timedelta(hours=2)))
+        self.assertEqual(len(detection_channel.sent), 1)
+        _args, kwargs = detection_channel.sent[0]
+        self.assertEqual(kwargs["delete_after"], 15.0)
+        self.assertIs(kwargs["reference"], message)
+        self.assertIsNotNone(kwargs.get("embed"))
+
+    async def test_bump_success_detection_accepts_embed_only_variant(self):
+        guild, detection_channel, _reminder_channel, bumper, provider, _role = await self._configure_bump_fixture()
+        embed = discord.Embed(title="DISBOARD", description="You can bump again right now.")
+        message = self._make_disboard_message(
+            guild=guild,
+            channel=detection_channel,
+            provider=provider,
+            bumper=bumper,
+            message_id=8802,
+            embeds=[embed],
+        )
+
+        await self.service.handle_bump_provider_message(message)
+
+        cycle = self.service.get_bump_cycle(guild.id, provider=BUMP_PROVIDER_DISBOARD)
+        self.assertEqual(cycle["last_success_message_id"], message.id)
+        self.assertEqual(cycle["last_bumper_user_id"], bumper.id)
+
+    async def test_unrelated_bot_messages_do_not_start_bump_cycle(self):
+        guild, detection_channel, _reminder_channel, bumper, _provider, _role = await self._configure_bump_fixture()
+        other_bot = DummyMember(5555, bot=True, display_name="OtherBot")
+        message = DummyMessage(
+            message_id=8803,
+            author=other_bot,
+            guild=guild,
+            channel=detection_channel,
+            content="Bump done.",
+            created_at=ge.now_utc(),
+            interaction_metadata=types.SimpleNamespace(user=bumper),
+        )
+
+        await self.service.handle_bump_provider_message(message)
+
+        self.assertIsNone(self.service.get_bump_cycle(guild.id, provider=BUMP_PROVIDER_DISBOARD))
+        self.assertEqual(detection_channel.sent, [])
+
+    async def test_repeated_bump_success_message_does_not_duplicate_cycle_or_thanks(self):
+        guild, detection_channel, _reminder_channel, bumper, provider, _role = await self._configure_bump_fixture()
+        message = self._make_disboard_message(
+            guild=guild,
+            channel=detection_channel,
+            provider=provider,
+            bumper=bumper,
+            message_id=8804,
+            content="Bump done.",
+        )
+
+        await self.service.handle_bump_provider_message(message)
+        first_cycle = self.service.get_bump_cycle(guild.id, provider=BUMP_PROVIDER_DISBOARD)
+        await self.service.handle_bump_provider_message(message)
+        second_cycle = self.service.get_bump_cycle(guild.id, provider=BUMP_PROVIDER_DISBOARD)
+
+        self.assertEqual(first_cycle["last_success_message_id"], second_cycle["last_success_message_id"])
+        self.assertEqual(len(detection_channel.sent), 1)
+
+    async def test_bump_cooldown_message_updates_health_without_starting_timer(self):
+        guild, detection_channel, _reminder_channel, bumper, provider, _role = await self._configure_bump_fixture()
+        message = self._make_disboard_message(
+            guild=guild,
+            channel=detection_channel,
+            provider=provider,
+            bumper=bumper,
+            message_id=8805,
+            content="Please wait another 1 hour before the next bump.",
+        )
+
+        await self.service.handle_bump_provider_message(message)
+
+        cycle = self.service.get_bump_cycle(guild.id, provider=BUMP_PROVIDER_DISBOARD)
+        self.assertIsNotNone(cycle)
+        self.assertEqual(cycle["last_provider_event_kind"], "cooldown")
+        self.assertIsNone(cycle["last_bump_at"])
+        self.assertIsNone(cycle["due_at"])
+        self.assertEqual(detection_channel.sent, [])
+
+    async def test_due_bump_cycle_delivers_once_and_marks_cycle_sent(self):
+        guild, detection_channel, reminder_channel, bumper, provider, role = await self._configure_bump_fixture(reminder_role=True)
+        message = self._make_disboard_message(
+            guild=guild,
+            channel=detection_channel,
+            provider=provider,
+            bumper=bumper,
+            message_id=8806,
+            content="Bump done.",
+        )
+        await self.service.handle_bump_provider_message(message)
+        detection_channel.sent.clear()
+        cycle_id = f"{guild.id}:{BUMP_PROVIDER_DISBOARD}"
+        cycle = self.service.store.state["bump_cycles"][cycle_id]
+        cycle["due_at"] = serialize_datetime(ge.now_utc() - timedelta(minutes=1))
+
+        due_reminders, due_bump_cycles, _, _, _, _ = self.service._collect_due_records()
+        self.assertEqual(due_reminders, [])
+        self.assertEqual(len(due_bump_cycles), 1)
+        await self.service._deliver_due_bump_cycles(due_bump_cycles)
+
+        stored = self.service.store.state["bump_cycles"][cycle_id]
+        self.assertIsNotNone(stored["reminder_sent_at"])
+        self.assertIsNone(stored["retry_after"])
+        self.assertEqual(stored["delivery_attempts"], 1)
+        self.assertEqual(len(reminder_channel.sent), 1)
+        _args, kwargs = reminder_channel.sent[0]
+        self.assertEqual(kwargs["content"], role.mention)
+        self.assertIsNotNone(kwargs["embed"])
+
+        due_reminders, due_bump_cycles, _, _, _, _ = self.service._collect_due_records()
+        self.assertEqual(due_reminders, [])
+        self.assertEqual(due_bump_cycles, [])
+
+    async def test_due_bump_cycle_retries_when_reminder_delivery_fails(self):
+        guild, detection_channel, reminder_channel, bumper, provider, _role = await self._configure_bump_fixture()
+        response = types.SimpleNamespace(status=403, reason="Forbidden", text="Forbidden")
+        reminder_channel.send = AsyncMock(side_effect=discord.Forbidden(response=response, message="missing perms"))
+        message = self._make_disboard_message(
+            guild=guild,
+            channel=detection_channel,
+            provider=provider,
+            bumper=bumper,
+            message_id=8807,
+            content="Bump done.",
+        )
+        await self.service.handle_bump_provider_message(message)
+        cycle_id = f"{guild.id}:{BUMP_PROVIDER_DISBOARD}"
+        self.service.store.state["bump_cycles"][cycle_id]["due_at"] = serialize_datetime(ge.now_utc() - timedelta(minutes=1))
+
+        _due_reminders, due_bump_cycles, _, _, _, _ = self.service._collect_due_records()
+        await self.service._deliver_due_bump_cycles(due_bump_cycles)
+
+        stored = self.service.store.state["bump_cycles"][cycle_id]
+        self.assertIsNone(stored["reminder_sent_at"])
+        self.assertEqual(stored["delivery_attempts"], 1)
+        self.assertIsNotNone(stored["last_delivery_attempt_at"])
+        self.assertGreater(deserialize_datetime(stored["retry_after"]), ge.now_utc())
+        self.assertIn("rejected", stored["last_delivery_error"].lower())
+
+    async def test_due_bump_cycle_falls_back_to_plain_text_when_embed_links_missing(self):
+        guild, detection_channel, reminder_channel, bumper, provider, _role = await self._configure_bump_fixture(reminder_can_embed=False)
+        message = self._make_disboard_message(
+            guild=guild,
+            channel=detection_channel,
+            provider=provider,
+            bumper=bumper,
+            message_id=8808,
+            content="Bump done.",
+        )
+        await self.service.handle_bump_provider_message(message)
+        cycle_id = f"{guild.id}:{BUMP_PROVIDER_DISBOARD}"
+        self.service.store.state["bump_cycles"][cycle_id]["due_at"] = serialize_datetime(ge.now_utc() - timedelta(minutes=1))
+
+        _due_reminders, due_bump_cycles, _, _, _, _ = self.service._collect_due_records()
+        await self.service._deliver_due_bump_cycles(due_bump_cycles)
+
+        self.assertEqual(len(reminder_channel.sent), 1)
+        _args, kwargs = reminder_channel.sent[0]
+        self.assertIsNone(kwargs.get("embed"))
+        self.assertIn("bump window is open", kwargs["content"].lower())
+
+    async def test_bump_public_thanks_mode_stays_public_without_auto_delete(self):
+        guild, detection_channel, _reminder_channel, bumper, provider, _role = await self._configure_bump_fixture(thanks_mode="public")
+        message = self._make_disboard_message(
+            guild=guild,
+            channel=detection_channel,
+            provider=provider,
+            bumper=bumper,
+            message_id=8809,
+            content="Bump done.",
+            interaction_style="interaction",
+        )
+
+        await self.service.handle_bump_provider_message(message)
+
+        self.assertEqual(len(detection_channel.sent), 1)
+        _args, kwargs = detection_channel.sent[0]
+        self.assertNotIn("delete_after", kwargs)
+        self.assertIsNotNone(kwargs.get("embed"))
+
+    async def test_bump_thanks_mode_off_sends_no_confirmation_message(self):
+        guild, detection_channel, _reminder_channel, bumper, provider, _role = await self._configure_bump_fixture(thanks_mode="off")
+        message = self._make_disboard_message(
+            guild=guild,
+            channel=detection_channel,
+            provider=provider,
+            bumper=bumper,
+            message_id=8810,
+            content="Bump done.",
+        )
+
+        await self.service.handle_bump_provider_message(message)
+
+        cycle = self.service.get_bump_cycle(guild.id, provider=BUMP_PROVIDER_DISBOARD)
+        self.assertEqual(cycle["last_success_message_id"], message.id)
+        self.assertEqual(detection_channel.sent, [])
+
+    async def test_bump_operability_surfaces_degraded_permissions_and_role_ping_limits(self):
+        guild, _detection_channel, _reminder_channel, _bumper, _provider, _role = await self._configure_bump_fixture(
+            reminder_role=True,
+            role_mentionable=False,
+            bot_can_ping_role=False,
+            detection_can_embed=False,
+            reminder_can_embed=False,
+        )
+
+        lines = self.service.get_bump_operability(guild)
+
+        self.assertTrue(any("thank-you messages" in line.lower() and "plain text" in line.lower() for line in lines))
+        self.assertTrue(any("reminders" in line.lower() and "plain text" in line.lower() for line in lines))
+        self.assertTrue(any("post without that role mention" in line.lower() for line in lines))
 
     async def test_afk_notice_lines_cover_reply_targets(self):
         user = DummyUser(77)
@@ -1081,7 +1492,7 @@ class UtilityStoreAndServiceTests(unittest.IsolatedAsyncioTestCase):
         record["starts_at"] = serialize_datetime(now - timedelta(minutes=1))
         record["ends_at"] = serialize_datetime(now + timedelta(minutes=29))
 
-        _, afk_to_activate, _, _, _ = self.service._collect_due_records()
+        _, _, afk_to_activate, _, _, _ = self.service._collect_due_records()
         self.assertEqual(len(afk_to_activate), 1)
 
         await self.service._activate_due_afk(afk_to_activate)
@@ -1101,7 +1512,7 @@ class UtilityStoreAndServiceTests(unittest.IsolatedAsyncioTestCase):
         record = self.service.store.state["afk"][str(user.id)]
         record["ends_at"] = serialize_datetime(ge.now_utc() - timedelta(minutes=1))
 
-        _, _, afk_to_expire, _, _ = self.service._collect_due_records()
+        _, _, _, afk_to_expire, _, _ = self.service._collect_due_records()
         self.assertEqual(len(afk_to_expire), 1)
 
         await self.service._expire_due_afk(afk_to_expire)
@@ -1162,7 +1573,7 @@ class UtilityStoreAndServiceTests(unittest.IsolatedAsyncioTestCase):
         }
         self.service.store.state["afk_schedules"][schedule["id"]] = dict(schedule)
 
-        _, _, _, afk_schedule_candidates, _ = self.service._collect_due_records()
+        _, _, _, _, afk_schedule_candidates, _ = self.service._collect_due_records()
         self.assertEqual(len(afk_schedule_candidates), 1)
 
         await self.service._activate_due_afk_schedules(afk_schedule_candidates)
@@ -1254,7 +1665,7 @@ class UtilityStoreAndServiceTests(unittest.IsolatedAsyncioTestCase):
         reloaded_service._rebuild_return_watch_indexes()
         self.assertIn((10, 15), reloaded_service._return_user_watch_ids_by_target)
 
-    async def test_postgres_reload_preserves_later_attachments_and_reminder_retry_fields(self):
+    async def test_postgres_reload_preserves_later_attachments_reminder_retry_and_bump_state(self):
         now = ge.now_utc()
         connection = FakeReloadConnection(
             watch_rows=[
@@ -1305,6 +1716,38 @@ class UtilityStoreAndServiceTests(unittest.IsolatedAsyncioTestCase):
                     "retry_after": now + timedelta(minutes=10),
                 }
             ],
+            bump_config_rows=[
+                {
+                    "guild_id": 10,
+                    "enabled": True,
+                    "provider": BUMP_PROVIDER_DISBOARD,
+                    "detection_channel_ids": json.dumps([20, 21]),
+                    "reminder_channel_id": 22,
+                    "reminder_role_id": 23,
+                    "reminder_text": "Window is open.",
+                    "thanks_text": "Thanks for the bump.",
+                    "thanks_mode": "public",
+                }
+            ],
+            bump_cycle_rows=[
+                {
+                    "id": "10:disboard",
+                    "guild_id": 10,
+                    "provider": BUMP_PROVIDER_DISBOARD,
+                    "last_provider_event_at": now - timedelta(minutes=2),
+                    "last_provider_event_kind": "success",
+                    "last_bump_at": now - timedelta(minutes=2),
+                    "last_bumper_user_id": 7,
+                    "last_success_message_id": 30,
+                    "last_success_channel_id": 20,
+                    "due_at": now + timedelta(hours=2),
+                    "reminder_sent_at": None,
+                    "delivery_attempts": 1,
+                    "last_delivery_attempt_at": now - timedelta(minutes=1),
+                    "retry_after": now + timedelta(minutes=9),
+                    "last_delivery_error": "Discord rejected the bump reminder text delivery.",
+                }
+            ],
         )
         store = _PostgresUtilityStore("postgresql://utility-user:secret@db.example.com:5432/app")
         store._pool = FakePool(connection)
@@ -1314,6 +1757,8 @@ class UtilityStoreAndServiceTests(unittest.IsolatedAsyncioTestCase):
         watch = store.state["watch"]["1"]
         marker = store.state["later"]["1"]["20"]
         reminder = store.state["reminders"]["reminder1"]
+        bump_config = store.state["bump_configs"]["10"]
+        bump_cycle = store.state["bump_cycles"]["10:disboard"]
         self.assertTrue(watch["mention_global"])
         self.assertEqual(watch["mention_guild_ids"], [10, 11])
         self.assertEqual(watch["mention_channel_ids"], [20])
@@ -1324,6 +1769,10 @@ class UtilityStoreAndServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(marker["attachment_labels"], ["image.png", "clip.mp4"])
         self.assertEqual(reminder["delivery_attempts"], 2)
         self.assertEqual(reminder["retry_after"], serialize_datetime(now + timedelta(minutes=10)))
+        self.assertEqual(bump_config["detection_channel_ids"], [20, 21])
+        self.assertEqual(bump_config["thanks_mode"], "public")
+        self.assertEqual(bump_cycle["last_bumper_user_id"], 7)
+        self.assertEqual(bump_cycle["retry_after"], serialize_datetime(now + timedelta(minutes=9)))
 
     def test_reminder_list_embed_marks_retrying_delivery(self):
         cog = object.__new__(UtilityCog)
