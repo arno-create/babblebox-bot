@@ -1516,9 +1516,28 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             slash_roots = {command.name for command in bot.tree.get_commands()}
             prefix_commands = {command.name for command in cog.walk_commands()}
 
-            self.assertTrue({"watch", "later", "capture", "remind"}.issubset(slash_roots))
+            self.assertTrue({"watch", "later", "capture", "remind", "bremind"}.issubset(slash_roots))
             self.assertNotIn("moment", slash_roots)
             self.assertNotIn("moment", prefix_commands)
+        finally:
+            for loaded in list(bot.cogs.values()):
+                service = getattr(loaded, "service", None)
+                if service is not None:
+                    await service.close()
+            await bot.close()
+
+    async def test_bremind_root_keeps_expected_admin_children(self):
+        bot = commands.Bot(command_prefix="!", intents=discord.Intents.none())
+        try:
+            cog = UtilityCog(bot)
+            await bot.add_cog(cog)
+
+            slash_names = {command.name for command in cog.bremind_group.app_command.commands}
+            prefix_names = {command.name for command in cog.bremind_group.commands}
+
+            expected = {"status", "setup", "test", "enable", "disable", "detect", "destination", "message", "provider"}
+            self.assertEqual(slash_names, expected)
+            self.assertEqual(prefix_names, expected)
         finally:
             for loaded in list(bot.cogs.values()):
                 service = getattr(loaded, "service", None)

@@ -36,7 +36,7 @@ class WebsiteDocsTests(unittest.TestCase):
             'id="faq"',
         ):
             self.assertIn(anchor, help_html)
-        for command in ("/support", "/daily", "/buddy", "/profile", "/vault", "/watch", "/later", "/capture", "/remind", "/afk", "/shield panel", "/shield links", "/shield trusted", "/lock channel", "/lock remove", "/lock settings", "/timeout remove", "/admin panel", "/admin followup", "/admin logs", "/admin exclusions", "/admin permissions", "/confess", "/confessions moderate"):
+        for command in ("/support", "/daily", "/buddy", "/profile", "/vault", "/watch", "/later", "/capture", "/remind", "/bremind", "/bremind setup", "/bremind status", "/bremind test", "/afk", "/shield panel", "/shield links", "/shield trusted", "/lock channel", "/lock remove", "/lock settings", "/timeout remove", "/admin panel", "/admin followup", "/admin logs", "/admin exclusions", "/admin permissions", "/confess", "/confessions moderate"):
             self.assertIn(command, help_html)
         self.assertIn("Broken Telephone, Exquisite Corpse, Spyfall, Word Bomb, and Pattern Hunt", help_html)
         self.assertIn("1-10 drops per day", help_html)
@@ -169,6 +169,8 @@ class WebsiteDocsTests(unittest.TestCase):
             "CONFESSIONS_CONTENT_KEY_ID",
             "CONFESSIONS_CONTENT_LEGACY_KEYS",
             "Confessions Key Rotation",
+            "/bremind setup",
+            "/bremind status",
         ):
             self.assertIn(text, readme)
 
@@ -186,6 +188,7 @@ class WebsiteDocsTests(unittest.TestCase):
             "/lock channel",
             "/timeout remove",
             "/admin permissions",
+            "/bremind",
             "{user.mention}",
             "{category.name}",
             "Pattern Hunt coders need server DMs open before the round starts.",
@@ -202,6 +205,20 @@ class WebsiteDocsTests(unittest.TestCase):
         self.assertNotIn("dropscelebaiglobal", readme.casefold())
         self.assertNotIn("dropscelebaiglobal", index_html.casefold())
         self.assertNotIn("/drops panel", readme)
+
+    def test_bump_reminder_docs_stay_truthful_about_verified_disboard_scope(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        help_html = (ROOT / "help.html").read_text(encoding="utf-8")
+        index_html = (ROOT / "index.html").read_text(encoding="utf-8")
+
+        self.assertIn("Disboard-only V1", readme)
+        self.assertIn("verified provider output", readme)
+        self.assertIn("quiet, public, or off thank-you behavior", readme)
+        self.assertIn("verified provider output", help_html)
+        self.assertIn("quiet, public, or off thank-you behavior", help_html)
+        self.assertIn("without fake manual timers", help_html)
+        self.assertIn("blind two-hour guesses", index_html)
+        self.assertIn("/bremind", index_html)
 
     def test_shield_docs_keep_local_malicious_domain_feed_copy_grounded(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")

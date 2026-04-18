@@ -22,11 +22,13 @@ class UtilityStorageUnavailable(RuntimeError):
 
 def default_utility_state() -> dict[str, Any]:
     return {
-        "version": 5,
+        "version": 6,
         "watch": {},
         "return_watches": {},
         "later": {},
         "reminders": {},
+        "bump_configs": {},
+        "bump_cycles": {},
         "afk": {},
         "afk_settings": {},
         "afk_schedules": {},
@@ -104,7 +106,7 @@ class _BaseUtilityStore:
             return normalized
 
         version = payload.get("version")
-        normalized["version"] = version if isinstance(version, int) and version > 0 else 5
+        normalized["version"] = version if isinstance(version, int) and version > 0 else 6
 
         watch = payload.get("watch")
         if isinstance(watch, dict):
@@ -170,6 +172,8 @@ class _BaseUtilityStore:
             value = payload.get(section)
             if isinstance(value, dict):
                 normalized[section] = deepcopy(value)
+        normalized["bump_configs"] = self._normalize_bump_configs(payload.get("bump_configs"))
+        normalized["bump_cycles"] = self._normalize_bump_cycles(payload.get("bump_cycles"))
         normalized["afk"] = self._normalize_afk_state(payload.get("afk"))
         normalized["afk_settings"] = self._normalize_afk_settings(payload.get("afk_settings"))
         normalized["afk_schedules"] = self._normalize_afk_schedules(payload.get("afk_schedules"))
@@ -309,6 +313,89 @@ class _BaseUtilityStore:
             }
         return cleaned
 
+    def _normalize_bump_configs(self, payload: Any) -> dict[str, Any]:
+        cleaned: dict[str, Any] = {}
+        if not isinstance(payload, dict):
+            return cleaned
+        for guild_id_text, record in payload.items():
+            if not isinstance(record, dict):
+                continue
+            try:
+                guild_id = int(guild_id_text)
+            except (TypeError, ValueError):
+                continue
+            provider = str(record.get("provider") or "disboard").strip().casefold() or "disboard"
+            detection_channel_ids = sorted(
+                {
+                    channel_id
+                    for channel_id in record.get("detection_channel_ids", [])
+                    if isinstance(channel_id, int) and channel_id > 0
+                }
+            )
+            reminder_channel_id = record.get("reminder_channel_id")
+            reminder_role_id = record.get("reminder_role_id")
+            reminder_text = record.get("reminder_text")
+            thanks_text = record.get("thanks_text")
+            thanks_mode = str(record.get("thanks_mode") or "quiet").strip().casefold()
+            if thanks_mode not in {"quiet", "public", "off"}:
+                thanks_mode = "quiet"
+            cleaned[str(guild_id)] = {
+                "guild_id": guild_id,
+                "enabled": bool(record.get("enabled")),
+                "provider": provider,
+                "detection_channel_ids": detection_channel_ids,
+                "reminder_channel_id": reminder_channel_id if isinstance(reminder_channel_id, int) and reminder_channel_id > 0 else None,
+                "reminder_role_id": reminder_role_id if isinstance(reminder_role_id, int) and reminder_role_id > 0 else None,
+                "reminder_text": reminder_text.strip() if isinstance(reminder_text, str) and reminder_text.strip() else None,
+                "thanks_text": thanks_text.strip() if isinstance(thanks_text, str) and thanks_text.strip() else None,
+                "thanks_mode": thanks_mode,
+            }
+        return cleaned
+
+    def _normalize_bump_cycles(self, payload: Any) -> dict[str, Any]:
+        cleaned: dict[str, Any] = {}
+        if not isinstance(payload, dict):
+            return cleaned
+        for cycle_id, record in payload.items():
+            if not isinstance(record, dict):
+                continue
+            try:
+                guild_id = int(record.get("guild_id"))
+            except (TypeError, ValueError):
+                continue
+            provider = str(record.get("provider") or "").strip().casefold()
+            if not provider:
+                continue
+            last_bumper_user_id = record.get("last_bumper_user_id")
+            last_success_message_id = record.get("last_success_message_id")
+            last_success_channel_id = record.get("last_success_channel_id")
+            delivery_attempts = record.get("delivery_attempts")
+            if not isinstance(delivery_attempts, int) or delivery_attempts < 0:
+                delivery_attempts = 0
+            last_provider_event_kind = record.get("last_provider_event_kind")
+            cleaned[str(cycle_id or f"{guild_id}:{provider}")] = {
+                "id": str(cycle_id or f"{guild_id}:{provider}"),
+                "guild_id": guild_id,
+                "provider": provider,
+                "last_provider_event_at": self._serialize_datetime(self._parse_iso_datetime(record.get("last_provider_event_at"))),
+                "last_provider_event_kind": last_provider_event_kind.strip().casefold()
+                if isinstance(last_provider_event_kind, str) and last_provider_event_kind.strip()
+                else None,
+                "last_bump_at": self._serialize_datetime(self._parse_iso_datetime(record.get("last_bump_at"))),
+                "last_bumper_user_id": last_bumper_user_id if isinstance(last_bumper_user_id, int) and last_bumper_user_id > 0 else None,
+                "last_success_message_id": last_success_message_id if isinstance(last_success_message_id, int) and last_success_message_id > 0 else None,
+                "last_success_channel_id": last_success_channel_id if isinstance(last_success_channel_id, int) and last_success_channel_id > 0 else None,
+                "due_at": self._serialize_datetime(self._parse_iso_datetime(record.get("due_at"))),
+                "reminder_sent_at": self._serialize_datetime(self._parse_iso_datetime(record.get("reminder_sent_at"))),
+                "delivery_attempts": delivery_attempts,
+                "last_delivery_attempt_at": self._serialize_datetime(self._parse_iso_datetime(record.get("last_delivery_attempt_at"))),
+                "retry_after": self._serialize_datetime(self._parse_iso_datetime(record.get("retry_after"))),
+                "last_delivery_error": record.get("last_delivery_error").strip()
+                if isinstance(record.get("last_delivery_error"), str) and record.get("last_delivery_error").strip()
+                else None,
+            }
+        return cleaned
+
 
 class _MemoryUtilityStore(_BaseUtilityStore):
     backend_name = "memory"
@@ -401,6 +488,10 @@ class _PostgresUtilityStore(_BaseUtilityStore):
             "CREATE TABLE IF NOT EXISTS utility_reminders (id TEXT PRIMARY KEY, user_id BIGINT NOT NULL, text TEXT NOT NULL, delivery TEXT NOT NULL, created_at TIMESTAMPTZ NULL, due_at TIMESTAMPTZ NULL, guild_id BIGINT NULL, guild_name TEXT NULL, channel_id BIGINT NULL, channel_name TEXT NULL, origin_jump_url TEXT NULL, delivery_attempts INTEGER NOT NULL DEFAULT 0, last_attempt_at TIMESTAMPTZ NULL, retry_after TIMESTAMPTZ NULL)",
             "CREATE INDEX IF NOT EXISTS ix_utility_reminders_due_at ON utility_reminders (due_at)",
             "CREATE INDEX IF NOT EXISTS ix_utility_reminders_user ON utility_reminders (user_id)",
+            "CREATE TABLE IF NOT EXISTS utility_bump_configs (guild_id BIGINT PRIMARY KEY, enabled BOOLEAN NOT NULL DEFAULT FALSE, provider TEXT NOT NULL DEFAULT 'disboard', detection_channel_ids JSONB NOT NULL DEFAULT '[]'::jsonb, reminder_channel_id BIGINT NULL, reminder_role_id BIGINT NULL, reminder_text TEXT NULL, thanks_text TEXT NULL, thanks_mode TEXT NOT NULL DEFAULT 'quiet', updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc', now()))",
+            "CREATE TABLE IF NOT EXISTS utility_bump_cycles (id TEXT PRIMARY KEY, guild_id BIGINT NOT NULL, provider TEXT NOT NULL, last_provider_event_at TIMESTAMPTZ NULL, last_provider_event_kind TEXT NULL, last_bump_at TIMESTAMPTZ NULL, last_bumper_user_id BIGINT NULL, last_success_message_id BIGINT NULL, last_success_channel_id BIGINT NULL, due_at TIMESTAMPTZ NULL, reminder_sent_at TIMESTAMPTZ NULL, delivery_attempts INTEGER NOT NULL DEFAULT 0, last_delivery_attempt_at TIMESTAMPTZ NULL, retry_after TIMESTAMPTZ NULL, last_delivery_error TEXT NULL)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_utility_bump_cycles_guild_provider ON utility_bump_cycles (guild_id, provider)",
+            "CREATE INDEX IF NOT EXISTS ix_utility_bump_cycles_due_at ON utility_bump_cycles (due_at)",
             "CREATE TABLE IF NOT EXISTS utility_afk (user_id BIGINT PRIMARY KEY, status TEXT NOT NULL, reason TEXT NULL, created_at TIMESTAMPTZ NULL, set_at TIMESTAMPTZ NULL, starts_at TIMESTAMPTZ NULL, ends_at TIMESTAMPTZ NULL)",
             "CREATE INDEX IF NOT EXISTS ix_utility_afk_status ON utility_afk (status)",
             "CREATE INDEX IF NOT EXISTS ix_utility_afk_starts_at ON utility_afk (starts_at)",
@@ -480,6 +571,8 @@ class _PostgresUtilityStore(_BaseUtilityStore):
                 "SELECT 1 FROM utility_watch_configs "
                 "UNION ALL SELECT 1 FROM utility_later_markers "
                 "UNION ALL SELECT 1 FROM utility_reminders "
+                "UNION ALL SELECT 1 FROM utility_bump_configs "
+                "UNION ALL SELECT 1 FROM utility_bump_cycles "
                 "UNION ALL SELECT 1 FROM utility_afk "
                 "UNION ALL SELECT 1 FROM utility_afk_settings "
                 "UNION ALL SELECT 1 FROM utility_afk_schedules "
@@ -560,6 +653,12 @@ class _PostgresUtilityStore(_BaseUtilityStore):
             )
             later_rows = await conn.fetch("SELECT user_id, guild_id, guild_name, channel_id, channel_name, message_id, message_jump_url, message_created_at, saved_at, author_name, author_id, preview, attachment_labels FROM utility_later_markers")
             reminder_rows = await conn.fetch("SELECT id, user_id, text, delivery, created_at, due_at, guild_id, guild_name, channel_id, channel_name, origin_jump_url, delivery_attempts, last_attempt_at, retry_after FROM utility_reminders")
+            bump_config_rows = await conn.fetch(
+                "SELECT guild_id, enabled, provider, detection_channel_ids, reminder_channel_id, reminder_role_id, reminder_text, thanks_text, thanks_mode FROM utility_bump_configs"
+            )
+            bump_cycle_rows = await conn.fetch(
+                "SELECT id, guild_id, provider, last_provider_event_at, last_provider_event_kind, last_bump_at, last_bumper_user_id, last_success_message_id, last_success_channel_id, due_at, reminder_sent_at, delivery_attempts, last_delivery_attempt_at, retry_after, last_delivery_error FROM utility_bump_cycles"
+            )
             afk_rows = await conn.fetch("SELECT user_id, status, reason, preset, created_at, set_at, starts_at, ends_at, schedule_id, occurrence_at FROM utility_afk")
             afk_setting_rows = await conn.fetch("SELECT user_id, timezone FROM utility_afk_settings")
             afk_schedule_rows = await conn.fetch(
@@ -682,6 +781,43 @@ class _PostgresUtilityStore(_BaseUtilityStore):
                 "last_attempt_at": self._serialize_datetime(row["last_attempt_at"]),
                 "retry_after": self._serialize_datetime(row["retry_after"]),
             }
+        for row in bump_config_rows:
+            loaded["bump_configs"][str(row["guild_id"])] = {
+                "guild_id": row["guild_id"],
+                "enabled": bool(row["enabled"]),
+                "provider": row["provider"],
+                "detection_channel_ids": [
+                    channel_id
+                    for channel_id in decode_postgres_json_array(
+                        row["detection_channel_ids"],
+                        label="utility_bump_configs.detection_channel_ids",
+                    )
+                    if isinstance(channel_id, int)
+                ],
+                "reminder_channel_id": row["reminder_channel_id"],
+                "reminder_role_id": row["reminder_role_id"],
+                "reminder_text": row["reminder_text"],
+                "thanks_text": row["thanks_text"],
+                "thanks_mode": row["thanks_mode"],
+            }
+        for row in bump_cycle_rows:
+            loaded["bump_cycles"][row["id"]] = {
+                "id": row["id"],
+                "guild_id": row["guild_id"],
+                "provider": row["provider"],
+                "last_provider_event_at": self._serialize_datetime(row["last_provider_event_at"]),
+                "last_provider_event_kind": row["last_provider_event_kind"],
+                "last_bump_at": self._serialize_datetime(row["last_bump_at"]),
+                "last_bumper_user_id": row["last_bumper_user_id"],
+                "last_success_message_id": row["last_success_message_id"],
+                "last_success_channel_id": row["last_success_channel_id"],
+                "due_at": self._serialize_datetime(row["due_at"]),
+                "reminder_sent_at": self._serialize_datetime(row["reminder_sent_at"]),
+                "delivery_attempts": row["delivery_attempts"] if isinstance(row["delivery_attempts"], int) and row["delivery_attempts"] >= 0 else 0,
+                "last_delivery_attempt_at": self._serialize_datetime(row["last_delivery_attempt_at"]),
+                "retry_after": self._serialize_datetime(row["retry_after"]),
+                "last_delivery_error": row["last_delivery_error"],
+            }
         for row in afk_rows:
             loaded["afk"][str(row["user_id"])] = {
                 "user_id": row["user_id"],
@@ -717,7 +853,7 @@ class _PostgresUtilityStore(_BaseUtilityStore):
     async def _flush_snapshot(self, snapshot: dict[str, Any]):
         changed_sections = [
             section
-            for section in ("watch", "return_watches", "later", "reminders", "afk", "afk_settings", "afk_schedules")
+            for section in ("watch", "return_watches", "later", "reminders", "bump_configs", "bump_cycles", "afk", "afk_settings", "afk_schedules")
             if snapshot.get(section) != self._last_flushed_state.get(section)
         ]
         if not changed_sections:
@@ -732,6 +868,10 @@ class _PostgresUtilityStore(_BaseUtilityStore):
                     await self._replace_later_data(conn, snapshot.get("later", {}))
                 if "reminders" in changed_sections:
                     await self._replace_reminders_data(conn, snapshot.get("reminders", {}))
+                if "bump_configs" in changed_sections:
+                    await self._replace_bump_configs_data(conn, snapshot.get("bump_configs", {}))
+                if "bump_cycles" in changed_sections:
+                    await self._replace_bump_cycles_data(conn, snapshot.get("bump_cycles", {}))
                 if "afk" in changed_sections:
                     await self._replace_afk_data(conn, snapshot.get("afk", {}))
                 if "afk_settings" in changed_sections:
@@ -744,6 +884,8 @@ class _PostgresUtilityStore(_BaseUtilityStore):
         await self._replace_return_watches_data(conn, state.get("return_watches", {}))
         await self._replace_later_data(conn, state.get("later", {}))
         await self._replace_reminders_data(conn, state.get("reminders", {}))
+        await self._replace_bump_configs_data(conn, state.get("bump_configs", {}))
+        await self._replace_bump_cycles_data(conn, state.get("bump_cycles", {}))
         await self._replace_afk_data(conn, state.get("afk", {}))
         await self._replace_afk_settings_data(conn, state.get("afk_settings", {}))
         await self._replace_afk_schedules_data(conn, state.get("afk_schedules", {}))
@@ -880,6 +1022,68 @@ class _PostgresUtilityStore(_BaseUtilityStore):
             await conn.executemany(
                 "INSERT INTO utility_reminders (id, user_id, text, delivery, created_at, due_at, guild_id, guild_name, channel_id, channel_name, origin_jump_url, delivery_attempts, last_attempt_at, retry_after) "
                 "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)",
+                rows,
+            )
+
+    async def _replace_bump_configs_data(self, conn, bump_configs_state: dict[str, Any]):
+        await conn.execute("DELETE FROM utility_bump_configs")
+        rows = []
+        for guild_id_text, record in bump_configs_state.items():
+            if not isinstance(record, dict):
+                continue
+            try:
+                guild_id = int(guild_id_text)
+            except (TypeError, ValueError):
+                continue
+            rows.append(
+                (
+                    guild_id,
+                    bool(record.get("enabled")),
+                    record.get("provider"),
+                    json.dumps([channel_id for channel_id in record.get("detection_channel_ids", []) if isinstance(channel_id, int)]),
+                    record.get("reminder_channel_id"),
+                    record.get("reminder_role_id"),
+                    record.get("reminder_text"),
+                    record.get("thanks_text"),
+                    record.get("thanks_mode"),
+                )
+            )
+        if rows:
+            await conn.executemany(
+                "INSERT INTO utility_bump_configs (guild_id, enabled, provider, detection_channel_ids, reminder_channel_id, reminder_role_id, reminder_text, thanks_text, thanks_mode, updated_at) "
+                "VALUES ($1, $2, $3, $4::jsonb, $5, $6, $7, $8, $9, timezone('utc', now()))",
+                rows,
+            )
+
+    async def _replace_bump_cycles_data(self, conn, bump_cycles_state: dict[str, Any]):
+        await conn.execute("DELETE FROM utility_bump_cycles")
+        rows = []
+        for cycle_id, record in bump_cycles_state.items():
+            if not isinstance(record, dict):
+                continue
+            rows.append(
+                (
+                    cycle_id,
+                    record.get("guild_id"),
+                    record.get("provider"),
+                    self._parse_iso_datetime(record.get("last_provider_event_at")),
+                    record.get("last_provider_event_kind"),
+                    self._parse_iso_datetime(record.get("last_bump_at")),
+                    record.get("last_bumper_user_id"),
+                    record.get("last_success_message_id"),
+                    record.get("last_success_channel_id"),
+                    self._parse_iso_datetime(record.get("due_at")),
+                    self._parse_iso_datetime(record.get("reminder_sent_at")),
+                    record.get("delivery_attempts", 0),
+                    self._parse_iso_datetime(record.get("last_delivery_attempt_at")),
+                    self._parse_iso_datetime(record.get("retry_after")),
+                    record.get("last_delivery_error"),
+                )
+            )
+        if rows:
+            await conn.executemany(
+                "INSERT INTO utility_bump_cycles (id, guild_id, provider, last_provider_event_at, last_provider_event_kind, last_bump_at, last_bumper_user_id, last_success_message_id, last_success_channel_id, due_at, reminder_sent_at, delivery_attempts, last_delivery_attempt_at, retry_after, last_delivery_error) "
+                "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15)",
                 rows,
             )
 

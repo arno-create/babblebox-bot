@@ -38,6 +38,7 @@ class EventsCog(commands.Cog):
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         shield_service = getattr(self.bot, "shield_service", None)
+        utility_service = getattr(self.bot, "utility_service", None)
         is_webhook_message = message.guild is not None and getattr(message, "webhook_id", None) is not None
         if is_webhook_message:
             if shield_service is not None:
@@ -47,12 +48,14 @@ class EventsCog(commands.Cog):
             return
 
         if message.author.bot:
+            bump_handler = getattr(utility_service, "handle_bump_provider_message", None)
+            if callable(bump_handler) and message.guild is not None:
+                await bump_handler(message)
             return
 
         if await is_command_message(self.bot, message):
             return
 
-        utility_service = getattr(self.bot, "utility_service", None)
         confessions_service = getattr(self.bot, "confessions_service", None)
         question_drops_service = getattr(self.bot, "question_drops_service", None)
         author_afk = None
@@ -191,7 +194,11 @@ class EventsCog(commands.Cog):
     async def on_message_edit(self, before: discord.Message, after: discord.Message):
         if getattr(after, "guild", None) is None:
             return
+        utility_service = getattr(self.bot, "utility_service", None)
         if getattr(getattr(after, "author", None), "bot", False) and getattr(after, "webhook_id", None) is None:
+            bump_handler = getattr(utility_service, "handle_bump_provider_message", None)
+            if callable(bump_handler):
+                await bump_handler(after)
             return
         shield_service = getattr(self.bot, "shield_service", None)
         if shield_service is not None:
