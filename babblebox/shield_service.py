@@ -85,6 +85,7 @@ from babblebox.text_safety import (
     PHONE_RE,
     SSN_RE,
     URL_RE,
+    contains_safety_term,
     find_safety_term_hits,
     fold_confusable_text,
     is_harmful_context_suppressed,
@@ -447,7 +448,6 @@ SCAM_PRIZE_BAIT_RE = re.compile(
     r"(?i)\b(?:free nitro|nitro|crypto|btc|bitcoin|eth|ethereum|usdt|robux|reward|prize|gift(?:away)?|giveaway|cash|money|dollars?|bucks|steam gift|skin|account)\b"
 )
 SCAM_CLAIM_OR_DETAILS_RE = re.compile(r"(?i)\b(?:claim|redeem|collect|grab|get|receive|win|details?|info|more info|more details)\b")
-SCAM_CASH_AMOUNT_RE = re.compile(r"(?i)(?:[$£€]\s?\d{2,6}|\b\d{2,6}\s?(?:usd|dollars?|bucks)\b)")
 SCAM_OFFICIAL_FRAMING_RE = re.compile(r"(?i)\b(?:official|verified|trusted)\b")
 SCAM_ANNOUNCEMENT_RE = re.compile(r"(?i)\b(?:announcement|community post|server update|news update)\b")
 SCAM_PARTNERSHIP_RE = re.compile(r"(?i)\b(?:partnership|partnered|collaboration)\b")
@@ -481,6 +481,109 @@ SCAM_DIRECT_OFFER_RE = re.compile(
 )
 SCAM_BENIGN_TRADE_DISCUSSION_RE = re.compile(
     r"(?i)\b(?:price check|market value|msrp|resale value|worth|looking for|wtb|wts|is anyone selling|anyone selling|where can i buy|saw someone selling|someone is selling|discussion|report|reported|warning|beware|scam alert|article|news)\b"
+)
+SCAM_NO_LINK_SOFT_ROUTE_TERMS = frozenset(
+    {
+        "tap in",
+        "lock in with me",
+    }
+)
+SCAM_NO_LINK_STRONG_PRIVATE_ROUTE_TERMS = frozenset(
+    {
+        "dm me",
+        "dm us",
+        "message me",
+        "message us",
+        "msg me",
+        "msg us",
+        "pm me",
+        "pm us",
+        "inbox me",
+        "inbox us",
+        "my dms are open",
+        "my dm is open",
+        "contact me privately",
+        "details in dms",
+        "more info in dms",
+        "dm for details",
+        "dm for info",
+        "dm for more",
+        "hit me up",
+        "hmu",
+    }
+)
+SCAM_NO_LINK_ACTIVITY_PROBE_TERMS = frozenset(
+    {
+        "who active",
+        "who is active",
+        "who's active",
+        "who up",
+        "who is up",
+        "who's up",
+        "who tryna eat",
+        "who trying to eat",
+        "who needs money",
+        "who online",
+        "who is online",
+        "who's online",
+    }
+)
+SCAM_NO_LINK_EARNINGS_BAIT_TERMS = frozenset(
+    {
+        "easy money",
+        "cash tonight",
+        "get paid",
+        "make money",
+        "i can make you money",
+        "run it up",
+        "running it up",
+        "let's run it up",
+        "lets run it up",
+        "let's get it up to",
+        "lets get it up to",
+        "let's get it to",
+        "lets get it to",
+    }
+)
+SCAM_NO_LINK_GAMBLING_BAIT_TERMS = frozenset(
+    {
+        "wins",
+        "get wins",
+        "picks",
+        "free picks",
+        "premium picks",
+        "vip picks",
+        "vip plays",
+        "locks",
+        "slips",
+        "parlay",
+        "sportsbook method",
+        "betting method",
+    }
+)
+SCAM_NO_LINK_PRESSURE_TERMS = frozenset(
+    {
+        "tonight",
+        "right now",
+        "don't miss out",
+        "dont miss out",
+        "spots left",
+        "last spots",
+        "running it up",
+    }
+)
+SCAM_NO_LINK_BENIGN_SPORTS_DISCUSSION_RE = re.compile(
+    r"(?i)\b(?:tonight'?s game|game tonight|scrim|watch party|injury report|moneyline|spread|odds|analysis|recap|sportsbook article)\b"
+)
+SCAM_NO_LINK_BENIGN_DM_COORDINATION_RE = re.compile(
+    r"(?i)\b(?:dm|message|msg|pm|send)\s+me\b.{0,40}\b(?:later|the notes?|the article|the recap|the build|the link|the doc|the docs|the screenshot|the clip|the replay|the vod)\b"
+)
+SCAM_CASH_AMOUNT_RE = re.compile(
+    r"(?ix)(?:"
+    r"(?:[$]\s?(?:\d{1,3}(?:,\d{3})+|\d{2,6}|\d+(?:\.\d+)?k))"
+    r"|(?:\b\d+(?:\.\d+)?k\b(?:\s*(?:usd|dollars?|bucks))?)"
+    r"|(?:\b(?:\d{1,3}(?:,\d{3})+|\d{2,6})\b\s*(?:usd|dollars?|bucks)\b)"
+    r")"
 )
 SUSPICIOUS_FILE_RE = re.compile(r"(?i)\.(?:exe|scr|bat|cmd|msi|zip|rar|7z|iso)(?:$|[?#])")
 GENERIC_DIGIT_RE = re.compile(r"\b\d{4,12}\b")
@@ -974,6 +1077,12 @@ class ShieldScamFeatures:
     login_or_auth_flow: bool
     dm_route: bool
     off_platform_route: bool
+    soft_private_route: bool
+    activity_probe: bool
+    earnings_bait: bool
+    gambling_bait: bool
+    no_link_pressure: bool
+    emoji_hype: bool
     prize_or_money_bait: bool
     commodity_bait: bool
     too_good_offer: bool
@@ -982,6 +1091,8 @@ class ShieldScamFeatures:
     claim_or_details_language: bool
     nitro_or_crypto_bait: bool
     benign_trade_context: bool
+    benign_sports_context: bool
+    benign_dm_coordination: bool
     dangerous_link_target: bool
     suspicious_attachment_combo: bool
     scan_source: str
@@ -1486,14 +1597,83 @@ def _host_family_signature(assessment: ShieldLinkAssessment | None, *, domain: s
     return "|".join(sorted(families)[:3])
 
 
+def _contains_scam_phrase_signal(
+    term: str,
+    *,
+    text: str,
+    squashed: str,
+    folded_text: str,
+    folded_squashed: str,
+) -> bool:
+    normalized_term = normalize_plain_text(term).casefold()
+    if not normalized_term:
+        return False
+    folded_term = fold_confusable_text(normalized_term)
+    if contains_safety_term(normalized_term, text, squashed) or contains_safety_term(folded_term, folded_text, folded_squashed):
+        return True
+    if " " not in normalized_term and "'" not in normalized_term:
+        return False
+    squashed_term = squash_for_evasion_checks(normalized_term)
+    folded_squashed_term = squash_for_evasion_checks(folded_term)
+    return bool(
+        (squashed_term and squashed_term in squashed)
+        or (squashed_term and squashed_term in folded_squashed)
+        or (folded_squashed_term and folded_squashed_term in squashed)
+        or (folded_squashed_term and folded_squashed_term in folded_squashed)
+    )
+
+
+def _scam_phrase_signal_hits(
+    terms: frozenset[str],
+    *,
+    text: str,
+    squashed: str,
+    folded_text: str,
+    folded_squashed: str,
+) -> tuple[str, ...]:
+    return tuple(
+        sorted(
+            term
+            for term in terms
+            if _contains_scam_phrase_signal(
+                term,
+                text=text,
+                squashed=squashed,
+                folded_text=folded_text,
+                folded_squashed=folded_squashed,
+            )
+        )
+    )
+
+
+def _replace_scam_phrase_terms(text: str, terms: Sequence[str], replacement: str) -> str:
+    normalized = text
+    for term in terms:
+        folded_term = fold_confusable_text(term)
+        if not folded_term:
+            continue
+        if " " in folded_term or "'" in folded_term:
+            normalized = normalized.replace(folded_term, replacement)
+        else:
+            normalized = re.sub(rf"\b{re.escape(folded_term)}\b", replacement, normalized)
+    return normalized
+
+
+def _regex_signal(pattern: re.Pattern[str], *texts: str) -> bool:
+    return any(pattern.search(text) for text in texts if text)
+
+
 def _scam_lure_fingerprint(text: str) -> str | None:
     cleaned = normalize_plain_text(text).casefold()
     if len(cleaned) < 16:
         return None
-    normalized = cleaned
+    squashed = squash_for_evasion_checks(cleaned)
+    normalized = fold_confusable_text(SCAM_CASH_AMOUNT_RE.sub("[money_amt]", cleaned))
+    folded_squashed = squash_for_evasion_checks(normalized)
     replacements = (
         (BRAND_BAIT_RE, "[brand]"),
         (SCAM_PRIZE_BAIT_RE, "[prize]"),
+        (SCAM_CASH_AMOUNT_RE, "[money_amt]"),
         (SCAM_CTA_RE, "[cta]"),
         (SCAM_LOGIN_FLOW_RE, "[auth]"),
         (SCAM_DM_ROUTE_RE, "[dm]"),
@@ -1506,6 +1686,72 @@ def _scam_lure_fingerprint(text: str) -> str | None:
     )
     for pattern, replacement in replacements:
         normalized = pattern.sub(replacement, normalized)
+    normalized = _replace_scam_phrase_terms(
+        normalized,
+        _scam_phrase_signal_hits(
+            SCAM_NO_LINK_STRONG_PRIVATE_ROUTE_TERMS,
+            text=cleaned,
+            squashed=squashed,
+            folded_text=normalized,
+            folded_squashed=folded_squashed,
+        ),
+        "[dm]",
+    )
+    normalized = _replace_scam_phrase_terms(
+        normalized,
+        _scam_phrase_signal_hits(
+            SCAM_NO_LINK_SOFT_ROUTE_TERMS,
+            text=cleaned,
+            squashed=squashed,
+            folded_text=normalized,
+            folded_squashed=folded_squashed,
+        ),
+        "[dm]",
+    )
+    normalized = _replace_scam_phrase_terms(
+        normalized,
+        _scam_phrase_signal_hits(
+            SCAM_NO_LINK_ACTIVITY_PROBE_TERMS,
+            text=cleaned,
+            squashed=squashed,
+            folded_text=normalized,
+            folded_squashed=folded_squashed,
+        ),
+        "[activity]",
+    )
+    normalized = _replace_scam_phrase_terms(
+        normalized,
+        _scam_phrase_signal_hits(
+            SCAM_NO_LINK_EARNINGS_BAIT_TERMS,
+            text=cleaned,
+            squashed=squashed,
+            folded_text=normalized,
+            folded_squashed=folded_squashed,
+        ),
+        "[money]",
+    )
+    normalized = _replace_scam_phrase_terms(
+        normalized,
+        _scam_phrase_signal_hits(
+            SCAM_NO_LINK_GAMBLING_BAIT_TERMS,
+            text=cleaned,
+            squashed=squashed,
+            folded_text=normalized,
+            folded_squashed=folded_squashed,
+        ),
+        "[wins]",
+    )
+    normalized = _replace_scam_phrase_terms(
+        normalized,
+        _scam_phrase_signal_hits(
+            SCAM_NO_LINK_PRESSURE_TERMS,
+            text=cleaned,
+            squashed=squashed,
+            folded_text=normalized,
+            folded_squashed=folded_squashed,
+        ),
+        "[urgency]",
+    )
     normalized = re.sub(r"\s+", " ", normalized).strip()
     if len(normalized) < 16:
         return None
@@ -1518,19 +1764,84 @@ def _looks_like_no_link_dm_lure(text: str) -> bool:
         return False
     if SCAM_BENIGN_TRADE_DISCUSSION_RE.search(cleaned):
         return False
-    route = bool(SCAM_DM_ROUTE_RE.search(cleaned) or SCAM_OFF_PLATFORM_ROUTE_RE.search(cleaned))
+    squashed = squash_for_evasion_checks(cleaned)
+    folded = fold_confusable_text(cleaned)
+    folded_squashed = squash_for_evasion_checks(folded)
+    if SCAM_NO_LINK_BENIGN_SPORTS_DISCUSSION_RE.search(cleaned) or SCAM_NO_LINK_BENIGN_DM_COORDINATION_RE.search(cleaned):
+        return False
+    strong_private_route = bool(
+        SCAM_DM_ROUTE_RE.search(cleaned)
+        or SCAM_OFF_PLATFORM_ROUTE_RE.search(cleaned)
+        or _scam_phrase_signal_hits(
+            SCAM_NO_LINK_STRONG_PRIVATE_ROUTE_TERMS,
+            text=cleaned,
+            squashed=squashed,
+            folded_text=folded,
+            folded_squashed=folded_squashed,
+        )
+    )
+    soft_private_route = bool(
+        _scam_phrase_signal_hits(
+            SCAM_NO_LINK_SOFT_ROUTE_TERMS,
+            text=cleaned,
+            squashed=squashed,
+            folded_text=folded,
+            folded_squashed=folded_squashed,
+        )
+    )
+    activity_probe = bool(
+        _scam_phrase_signal_hits(
+            SCAM_NO_LINK_ACTIVITY_PROBE_TERMS,
+            text=cleaned,
+            squashed=squashed,
+            folded_text=folded,
+            folded_squashed=folded_squashed,
+        )
+    )
+    earnings_bait = bool(
+        _scam_phrase_signal_hits(
+            SCAM_NO_LINK_EARNINGS_BAIT_TERMS,
+            text=cleaned,
+            squashed=squashed,
+            folded_text=folded,
+            folded_squashed=folded_squashed,
+        )
+    )
+    gambling_bait = bool(
+        _scam_phrase_signal_hits(
+            SCAM_NO_LINK_GAMBLING_BAIT_TERMS,
+            text=cleaned,
+            squashed=squashed,
+            folded_text=folded,
+            folded_squashed=folded_squashed,
+        )
+    )
+    no_link_pressure = bool(
+        _scam_phrase_signal_hits(
+            SCAM_NO_LINK_PRESSURE_TERMS,
+            text=cleaned,
+            squashed=squashed,
+            folded_text=folded,
+            folded_squashed=folded_squashed,
+        )
+    )
+    route = strong_private_route or (soft_private_route and (activity_probe or no_link_pressure or bool(SCAM_CASH_AMOUNT_RE.search(cleaned))))
     bait = bool(
         SCAM_PRIZE_BAIT_RE.search(cleaned)
         or SCAM_CASH_AMOUNT_RE.search(cleaned)
         or SCAM_VALUABLE_ITEM_RE.search(cleaned)
         or SCAM_DEAL_TOO_GOOD_RE.search(cleaned)
+        or earnings_bait
+        or gambling_bait
     )
     corroboration = bool(
-        SCAM_CLAIM_OR_DETAILS_RE.search(cleaned)
-        or SCAM_URGENCY_RE.search(cleaned)
+        activity_probe
+        or no_link_pressure
+        or SCAM_CASH_AMOUNT_RE.search(cleaned)
         or SCAM_FAKE_AUTHORITY_RE.search(cleaned)
         or SCAM_OFFICIAL_FRAMING_RE.search(cleaned)
         or SCAM_DIRECT_OFFER_RE.search(cleaned)
+        or (soft_private_route and no_link_pressure)
     )
     return route and bait and corroboration
 
@@ -6597,6 +6908,8 @@ class ShieldService:
         scan_source: str,
         scam_context: ShieldScamContext,
     ) -> ShieldScamFeatures:
+        folded_context_text = fold_confusable_text(snapshot.context_text)
+        folded_context_squashed = squash_for_evasion_checks(folded_context_text)
         risky_domains = [
             assessment.normalized_domain
             for assessment in link_assessments
@@ -6607,9 +6920,9 @@ class ShieldService:
             _domain_in_set(domain, SHORTENER_DOMAINS) or "xn--" in domain
             for domain in risky_domains
         )
-        bait = bool(SCAM_BAIT_RE.search(snapshot.context_text) or SCAM_BAIT_RE.search(snapshot.context_squashed))
+        bait = _regex_signal(SCAM_BAIT_RE, snapshot.context_text, snapshot.context_squashed, folded_context_text, folded_context_squashed)
         social_engineering = bool(SOCIAL_ENGINEERING_RE.search(snapshot.context_text))
-        cta = bool(SCAM_CTA_RE.search(snapshot.context_text) or SCAM_CTA_RE.search(snapshot.context_squashed))
+        cta = _regex_signal(SCAM_CTA_RE, snapshot.context_text, snapshot.context_squashed, folded_context_text, folded_context_squashed)
         brand_bait = bool(BRAND_BAIT_RE.search(snapshot.context_text))
         official_framing = bool(SCAM_OFFICIAL_FRAMING_RE.search(snapshot.context_text))
         announcement_framing = bool(SCAM_ANNOUNCEMENT_RE.search(snapshot.context_text))
@@ -6617,20 +6930,91 @@ class ShieldService:
         support_framing = bool(SCAM_SUPPORT_RE.search(snapshot.context_text))
         security_notice = bool(SCAM_SECURITY_NOTICE_RE.search(snapshot.context_text))
         fake_authority = bool(SCAM_FAKE_AUTHORITY_RE.search(snapshot.context_text))
-        qr_setup_lure = bool(SCAM_QR_SETUP_RE.search(snapshot.context_text) or SCAM_QR_SETUP_RE.search(snapshot.context_squashed))
+        qr_setup_lure = _regex_signal(SCAM_QR_SETUP_RE, snapshot.context_text, snapshot.context_squashed, folded_context_text, folded_context_squashed)
         community_post_framing = "community post" in snapshot.context_text
         urgency = bool(SCAM_URGENCY_RE.search(snapshot.context_text))
-        wallet_or_mint = bool(SCAM_CRYPTO_MINT_RE.search(snapshot.context_text) or SCAM_CRYPTO_MINT_RE.search(snapshot.context_squashed))
-        login_or_auth_flow = bool(SCAM_LOGIN_FLOW_RE.search(snapshot.context_text) or SCAM_LOGIN_FLOW_RE.search(snapshot.context_squashed))
-        dm_route = bool(SCAM_DM_ROUTE_RE.search(snapshot.context_text) or SCAM_DM_ROUTE_RE.search(snapshot.context_squashed))
+        wallet_or_mint = _regex_signal(SCAM_CRYPTO_MINT_RE, snapshot.context_text, snapshot.context_squashed, folded_context_text, folded_context_squashed)
+        login_or_auth_flow = _regex_signal(SCAM_LOGIN_FLOW_RE, snapshot.context_text, snapshot.context_squashed, folded_context_text, folded_context_squashed)
+        strong_private_route_hits = _scam_phrase_signal_hits(
+            SCAM_NO_LINK_STRONG_PRIVATE_ROUTE_TERMS,
+            text=snapshot.context_text,
+            squashed=snapshot.context_squashed,
+            folded_text=folded_context_text,
+            folded_squashed=folded_context_squashed,
+        )
+        soft_private_route_hits = _scam_phrase_signal_hits(
+            SCAM_NO_LINK_SOFT_ROUTE_TERMS,
+            text=snapshot.context_text,
+            squashed=snapshot.context_squashed,
+            folded_text=folded_context_text,
+            folded_squashed=folded_context_squashed,
+        )
+        activity_probe_hits = _scam_phrase_signal_hits(
+            SCAM_NO_LINK_ACTIVITY_PROBE_TERMS,
+            text=snapshot.context_text,
+            squashed=snapshot.context_squashed,
+            folded_text=folded_context_text,
+            folded_squashed=folded_context_squashed,
+        )
+        earnings_bait_hits = _scam_phrase_signal_hits(
+            SCAM_NO_LINK_EARNINGS_BAIT_TERMS,
+            text=snapshot.context_text,
+            squashed=snapshot.context_squashed,
+            folded_text=folded_context_text,
+            folded_squashed=folded_context_squashed,
+        )
+        gambling_bait_hits = _scam_phrase_signal_hits(
+            SCAM_NO_LINK_GAMBLING_BAIT_TERMS,
+            text=snapshot.context_text,
+            squashed=snapshot.context_squashed,
+            folded_text=folded_context_text,
+            folded_squashed=folded_context_squashed,
+        )
+        no_link_pressure_hits = _scam_phrase_signal_hits(
+            SCAM_NO_LINK_PRESSURE_TERMS,
+            text=snapshot.context_text,
+            squashed=snapshot.context_squashed,
+            folded_text=folded_context_text,
+            folded_squashed=folded_context_squashed,
+        )
+        dm_route = bool(SCAM_DM_ROUTE_RE.search(snapshot.context_text) or SCAM_DM_ROUTE_RE.search(snapshot.context_squashed) or strong_private_route_hits)
         off_platform_route = bool(
             SCAM_OFF_PLATFORM_ROUTE_RE.search(snapshot.context_text) or SCAM_OFF_PLATFORM_ROUTE_RE.search(snapshot.context_squashed)
         )
-        prize_or_money_bait = bool(SCAM_PRIZE_BAIT_RE.search(snapshot.context_text) or SCAM_PRIZE_BAIT_RE.search(snapshot.context_squashed))
-        commodity_bait = bool(SCAM_VALUABLE_ITEM_RE.search(snapshot.context_text) or SCAM_VALUABLE_ITEM_RE.search(snapshot.context_squashed))
-        too_good_offer = bool(SCAM_DEAL_TOO_GOOD_RE.search(snapshot.context_text) or SCAM_DEAL_TOO_GOOD_RE.search(snapshot.context_squashed))
-        direct_offer = bool(SCAM_DIRECT_OFFER_RE.search(snapshot.context_text) or SCAM_DIRECT_OFFER_RE.search(snapshot.context_squashed))
-        cash_amount_bait = bool(SCAM_CASH_AMOUNT_RE.search(snapshot.context_text))
+        soft_private_route = bool(soft_private_route_hits)
+        activity_probe = bool(activity_probe_hits)
+        earnings_bait = bool(earnings_bait_hits)
+        gambling_bait = bool(gambling_bait_hits)
+        no_link_pressure = bool(no_link_pressure_hits)
+        prize_or_money_bait = _regex_signal(
+            SCAM_PRIZE_BAIT_RE,
+            snapshot.context_text,
+            snapshot.context_squashed,
+            folded_context_text,
+            folded_context_squashed,
+        )
+        commodity_bait = _regex_signal(
+            SCAM_VALUABLE_ITEM_RE,
+            snapshot.context_text,
+            snapshot.context_squashed,
+            folded_context_text,
+            folded_context_squashed,
+        )
+        too_good_offer = _regex_signal(
+            SCAM_DEAL_TOO_GOOD_RE,
+            snapshot.context_text,
+            snapshot.context_squashed,
+            folded_context_text,
+            folded_context_squashed,
+        )
+        direct_offer = _regex_signal(
+            SCAM_DIRECT_OFFER_RE,
+            snapshot.context_text,
+            snapshot.context_squashed,
+            folded_context_text,
+            folded_context_squashed,
+        )
+        cash_amount_bait = _regex_signal(SCAM_CASH_AMOUNT_RE, snapshot.context_text, folded_context_text)
         claim_or_details_language = bool(
             SCAM_CLAIM_OR_DETAILS_RE.search(snapshot.context_text) or SCAM_CLAIM_OR_DETAILS_RE.search(snapshot.context_squashed)
         )
@@ -6639,6 +7023,13 @@ class ShieldService:
             or re.search(r"(?i)\b(?:nitro|crypto|btc|bitcoin|eth|ethereum|usdt)\b", snapshot.context_squashed)
         )
         benign_trade_context = bool(SCAM_BENIGN_TRADE_DISCUSSION_RE.search(snapshot.context_text))
+        benign_sports_context = bool(SCAM_NO_LINK_BENIGN_SPORTS_DISCUSSION_RE.search(snapshot.context_text))
+        benign_dm_coordination = bool(SCAM_NO_LINK_BENIGN_DM_COORDINATION_RE.search(snapshot.context_text))
+        emoji_hype = (
+            snapshot.emoji_count > 0
+            and snapshot.plain_word_count <= 12
+            and (soft_private_route or activity_probe or earnings_bait or gambling_bait or prize_or_money_bait)
+        )
         dangerous_link_target = any(SUSPICIOUS_FILE_RE.search(url) for url in snapshot.urls)
         suspicious_attachment_combo = snapshot.has_suspicious_attachment and bool(social_engineering or cta or login_or_auth_flow)
         return ShieldScamFeatures(
@@ -6664,6 +7055,12 @@ class ShieldService:
             login_or_auth_flow=login_or_auth_flow,
             dm_route=dm_route,
             off_platform_route=off_platform_route,
+            soft_private_route=soft_private_route,
+            activity_probe=activity_probe,
+            earnings_bait=earnings_bait,
+            gambling_bait=gambling_bait,
+            no_link_pressure=no_link_pressure,
+            emoji_hype=emoji_hype,
             prize_or_money_bait=prize_or_money_bait,
             commodity_bait=commodity_bait,
             too_good_offer=too_good_offer,
@@ -6672,6 +7069,8 @@ class ShieldService:
             claim_or_details_language=claim_or_details_language,
             nitro_or_crypto_bait=nitro_or_crypto_bait,
             benign_trade_context=benign_trade_context,
+            benign_sports_context=benign_sports_context,
+            benign_dm_coordination=benign_dm_coordination,
             dangerous_link_target=dangerous_link_target,
             suspicious_attachment_combo=suspicious_attachment_combo,
             scan_source=scan_source,
@@ -6832,12 +7231,47 @@ class ShieldService:
                     match_class="scam_download",
                 )
             )
-        if (
+        no_link_lure_corrob = bool(
+            features.urgency
+            or features.no_link_pressure
+            or features.activity_probe
+            or features.cash_amount_bait
+            or features.emoji_hype
+            or (not features.automated_author and features.newcomer_early_message)
+            or (not features.automated_author and features.fresh_campaign_cluster_20m >= 2)
+        )
+        no_link_route_signal = bool(
+            features.dm_route
+            or features.off_platform_route
+            or (features.soft_private_route and no_link_lure_corrob)
+        )
+        no_link_bait_signal = bool(
+            features.prize_or_money_bait
+            or features.commodity_bait
+            or features.too_good_offer
+            or features.direct_offer
+            or features.earnings_bait
+            or features.gambling_bait
+        )
+        no_link_soft_family = bool(
+            features.earnings_bait
+            or features.gambling_bait
+            or features.soft_private_route
+        ) and not (
+            features.prize_or_money_bait
+            or features.commodity_bait
+            or features.too_good_offer
+            or features.direct_offer
+            or features.cash_amount_bait
+        )
+        should_check_no_link_lure = (
             not snapshot.has_links
-            and (features.dm_route or features.off_platform_route)
-            and (features.prize_or_money_bait or features.commodity_bait or features.too_good_offer or features.direct_offer)
-            and not features.benign_trade_context
-        ):
+            and no_link_route_signal
+            and no_link_bait_signal
+            and (not no_link_soft_family or no_link_lure_corrob)
+            and not (features.benign_trade_context or features.benign_sports_context or features.benign_dm_coordination)
+        )
+        if should_check_no_link_lure:
             dm_lure_score = 0
             reason_bits: list[str] = []
             if features.dm_route:
@@ -6846,6 +7280,9 @@ class ShieldService:
             if features.off_platform_route:
                 dm_lure_score += 1
                 reason_bits.append("off-platform routing")
+            if features.soft_private_route:
+                dm_lure_score += 1
+                reason_bits.append("private follow-up CTA")
             if features.prize_or_money_bait:
                 dm_lure_score += 2
                 reason_bits.append("prize, money, nitro, or crypto bait")
@@ -6858,6 +7295,12 @@ class ShieldService:
             if features.direct_offer:
                 dm_lure_score += 1
                 reason_bits.append("direct sale or giveaway framing")
+            if features.earnings_bait:
+                dm_lure_score += 2
+                reason_bits.append("money or payout bait")
+            if features.gambling_bait:
+                dm_lure_score += 2
+                reason_bits.append("wins, picks, or betting tout bait")
             if features.cash_amount_bait:
                 dm_lure_score += 1
                 reason_bits.append("cash-amount promise")
@@ -6870,9 +7313,18 @@ class ShieldService:
             if features.urgency:
                 dm_lure_score += 1
                 reason_bits.append("urgency or scarcity")
+            if features.no_link_pressure:
+                dm_lure_score += 1
+                reason_bits.append("time pressure or FOMO")
+            if features.activity_probe:
+                dm_lure_score += 1
+                reason_bits.append("activity probe or recruitment copy")
             if features.fake_authority or features.official_like_framing:
                 dm_lure_score += 1
                 reason_bits.append("fake authority or official framing")
+            if features.emoji_hype:
+                dm_lure_score += 1
+                reason_bits.append("emoji-heavy short hype")
             if not features.automated_author and features.newcomer_early_message:
                 dm_lure_score += 1
                 reason_bits.append("newcomer early-message delivery")
@@ -6889,13 +7341,24 @@ class ShieldService:
                 dm_lure_confidence = "low"
 
             if dm_lure_confidence is not None:
-                label = "No-link DM lure"
-                base_reason = "Prize or money bait routed members into DMs or off-platform contact without a safe public path."
+                label = "Money / wins DM lure"
+                base_reason = "Money, payout, or wins bait pushed members into DMs or private follow-up without a safe public path."
                 if features.commodity_bait or features.too_good_offer:
                     label = "Too-good-to-be-true DM lure"
                     base_reason = (
-                        "A suspicious high-value item, account, or giveaway offer pushed members into DMs or off-platform contact "
+                        "A suspicious high-value item, account, or giveaway offer pushed members into DMs or private follow-up "
                         "without a safe public path."
+                    )
+                elif features.gambling_bait and not (
+                    features.commodity_bait
+                    or features.too_good_offer
+                    or features.earnings_bait
+                    or features.prize_or_money_bait
+                    or features.cash_amount_bait
+                ):
+                    label = "Betting picks / wins lure"
+                    base_reason = (
+                        "Betting, picks, or guaranteed-wins style bait pushed members into DMs or private follow-up without a safe public path."
                     )
                 matches.append(
                     ShieldMatch(

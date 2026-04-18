@@ -3477,6 +3477,35 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("embeds", decision.scan_surface_labels)
         self.assertTrue(decision.deleted)
 
+    async def test_embed_only_no_link_money_wins_lure_is_scanned(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        author = FakeAuthor(420)
+        message = FakeMessage(
+            guild=guild,
+            channel=channel,
+            author=author,
+            content="",
+            embeds=[
+                FakeEmbed(
+                    title="Who is active tonight",
+                    description="Let's get it up to $2,700 tonight. Hit me up to get wins.",
+                )
+            ],
+        )
+
+        ok, _ = await self.service.set_module_enabled(guild.id, True)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_pack_config(guild.id, "scam", enabled=True, action="delete_log", sensitivity="normal")
+        self.assertTrue(ok)
+
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            decision = await self.service.handle_message(message)
+
+        self.assertIsNotNone(decision)
+        self.assertIn("embeds", decision.scan_surface_labels)
+        self.assertTrue([match for match in decision.reasons if match.match_class == "scam_dm_lure"])
+
     async def test_attachment_metadata_and_link_combo_increase_scam_confidence(self):
         ok, _ = await self.service.set_pack_config(10, "scam", enabled=True, action="delete_log", sensitivity="normal")
         self.assertTrue(ok)
@@ -3550,6 +3579,50 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(scam_matches[0].match_class, "scam_dm_lure")
         self.assertIn("Too-good-to-be-true", scam_matches[0].label)
 
+    async def test_no_link_money_wins_lure_family_is_caught(self):
+        ok, _ = await self.service.set_pack_config(10, "scam", enabled=True, action="delete_log", sensitivity="normal")
+        self.assertTrue(ok)
+
+        result = self.service.test_message_details(
+            10,
+            "Who is active let's get it up to $2,700 tonight Don't miss out Hit me up to get wins",
+        )
+
+        scam_matches = [match for match in result.matches if match.pack == "scam"]
+        self.assertTrue(scam_matches)
+        self.assertEqual(scam_matches[0].match_class, "scam_dm_lure")
+        self.assertEqual(scam_matches[0].label, "Money / wins DM lure")
+        self.assertEqual(scam_matches[0].confidence, "high")
+
+    async def test_no_link_money_and_betting_lure_corpus_is_caught(self):
+        ok, _ = await self.service.set_pack_config(10, "scam", enabled=True, action="delete_log", sensitivity="normal")
+        self.assertTrue(ok)
+
+        samples = (
+            "Tap in for VIP picks tonight, DM me",
+            "Message me for wins tonight",
+            "Tap in for easy money tonight DM me",
+            "w h o active lets get it to 2700 tonight hit me up",
+            "h1t me up to get w1ns tonight",
+            "d m me for w1ns tonight",
+            "Who active\nlets get it up to $2,700 tonight\nhit me up to get wins \U0001F525\U0001F4B8",
+            "Message me for premium picks tonight",
+        )
+        for text in samples:
+            with self.subTest(text=text):
+                result = self.service.test_message_details(10, text)
+                scam_matches = [match for match in result.matches if match.pack == "scam"]
+                self.assertTrue(scam_matches)
+                self.assertEqual(scam_matches[0].match_class, "scam_dm_lure")
+
+    async def test_short_no_link_wins_phrase_without_corroboration_stays_safe(self):
+        ok, _ = await self.service.set_pack_config(10, "scam", enabled=True, action="delete_log", sensitivity="high")
+        self.assertTrue(ok)
+
+        result = self.service.test_message_details(10, "Hit me up to get wins")
+
+        self.assertFalse([match for match in result.matches if match.pack == "scam"])
+
     async def test_benign_dm_chatter_does_not_false_positive_as_scam_lure(self):
         ok, _ = await self.service.set_pack_config(10, "scam", enabled=True, action="delete_log", sensitivity="high")
         self.assertTrue(ok)
@@ -3568,6 +3641,64 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertFalse([match for match in result.matches if match.pack == "scam"])
+
+    async def test_benign_sports_and_warning_corpus_stays_safe(self):
+        ok, _ = await self.service.set_pack_config(10, "scam", enabled=True, action="delete_log", sensitivity="high")
+        self.assertTrue(ok)
+
+        safe_samples = (
+            "Who is active tonight?",
+            "Tonight's picks: Lakers -4 and Celtics ML.",
+            "DM me if you want the sportsbook article link",
+            "Don't miss out on our event tonight",
+            "Scam warning: don't miss out + hit me up to get wins is a common lure",
+            "Message me later about the lock settings",
+        )
+        for text in safe_samples:
+            with self.subTest(text=text):
+                result = self.service.test_message_details(10, text)
+                self.assertFalse([match for match in result.matches if match.pack == "scam"])
+
+    async def test_no_link_money_wins_lures_feed_fresh_campaign_tracking(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+
+        ok, _ = await self.service.set_module_enabled(guild.id, True)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_pack_config(guild.id, "scam", enabled=True, action="delete_log", sensitivity="normal")
+        self.assertTrue(ok)
+
+        messages = (
+            "Who is active let's get it up to $2,700 tonight Hit me up to get wins",
+            "Who is active let's get it up to $3,100 tonight Hit me up to get wins",
+            "Who is active let's get it up to $4,200 tonight Hit me up to get wins",
+        )
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            for index, text in enumerate(messages, start=1):
+                author = self._make_member(
+                    guild,
+                    7000 + index,
+                    created_delta=timedelta(hours=2),
+                    joined_delta=timedelta(minutes=10),
+                )
+                decision = await self.service.handle_message(
+                    FakeMessage(
+                        guild=guild,
+                        channel=channel,
+                        author=author,
+                        content=text,
+                    )
+                )
+                self.assertIsNotNone(decision)
+                self.assertTrue([match for match in decision.reasons if match.match_class == "scam_dm_lure"])
+
+        lure_rows = [
+            rows
+            for (guild_id, kind, _signature), rows in self.service._recent_scam_campaigns.items()
+            if guild_id == guild.id and kind == "lure"
+        ]
+        self.assertTrue(lure_rows)
+        self.assertGreaterEqual(max(len(rows) for rows in lure_rows), 2)
 
     async def test_pack_specific_member_exemption_blocks_scam_only(self):
         guild = FakeGuild(10)
@@ -3753,6 +3884,34 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(decision)
         self.assertIn("forwarded_snapshot", decision.scan_surface_labels)
         self.assertTrue([match for match in decision.reasons if match.pack == "scam"])
+
+    async def test_forwarded_snapshot_no_link_money_wins_lure_is_scanned(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        author = FakeAuthor(4200)
+        message = FakeMessage(
+            guild=guild,
+            channel=channel,
+            author=author,
+            content="fwd",
+            message_snapshots=[
+                FakeMessageSnapshot(
+                    content="Who active? Let's get it up to $2,700 tonight. Hit me up to get wins.",
+                )
+            ],
+        )
+
+        ok, _ = await self.service.set_module_enabled(guild.id, True)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_pack_config(guild.id, "scam", enabled=True, action="delete_log", sensitivity="normal")
+        self.assertTrue(ok)
+
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            decision = await self.service.handle_message(message)
+
+        self.assertIsNotNone(decision)
+        self.assertIn("forwarded_snapshot", decision.scan_surface_labels)
+        self.assertTrue([match for match in decision.reasons if match.match_class == "scam_dm_lure"])
 
     async def test_message_edit_rescans_only_when_shield_surfaces_change(self):
         guild = FakeGuild(10)
