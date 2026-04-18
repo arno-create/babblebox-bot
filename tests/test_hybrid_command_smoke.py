@@ -539,7 +539,8 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/lock remove", shield_field.value)
         self.assertIn("/timeout remove", shield_field.value)
         self.assertIn("/admin followup", shield_field.value)
-        self.assertIn("/admin verification", shield_field.value)
+        self.assertIn("/admin logs", shield_field.value)
+        self.assertIn("/admin exclusions", shield_field.value)
         self.assertIn("/admin permissions", shield_field.value)
 
     def test_help_embeds_stay_within_discord_limits(self):
@@ -1553,7 +1554,7 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Enabled: Yes | Sensitivity: Normal", protection_field.value)
             self.assertIn("Emotes: Off | Caps: Off", protection_field.value)
             self.assertIn(
-                "Delete lane removes bounded GIF bursts; collective cleanup uses the exact streak or trims the newest excess GIFs inside the pressure window while personal abuse still targets one member.",
+                "Delete lane removes bounded GIF bursts; collective cleanup uses the exact streak or trims the newest contributing GIFs inside the active pressure slice while personal abuse still targets one member.",
                 protection_field.value,
             )
             self.assertIn("**Scam / Malicious Links**", link_safety_field.value)

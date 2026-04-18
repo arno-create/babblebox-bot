@@ -36,7 +36,7 @@ class WebsiteDocsTests(unittest.TestCase):
             'id="faq"',
         ):
             self.assertIn(anchor, help_html)
-        for command in ("/support", "/daily", "/buddy", "/profile", "/vault", "/watch", "/later", "/capture", "/remind", "/afk", "/shield panel", "/shield links", "/shield trusted", "/lock channel", "/lock remove", "/lock settings", "/timeout remove", "/admin panel", "/admin followup", "/admin verification", "/admin permissions", "/confess", "/confessions moderate"):
+        for command in ("/support", "/daily", "/buddy", "/profile", "/vault", "/watch", "/later", "/capture", "/remind", "/afk", "/shield panel", "/shield links", "/shield trusted", "/lock channel", "/lock remove", "/lock settings", "/timeout remove", "/admin panel", "/admin followup", "/admin logs", "/admin exclusions", "/admin permissions", "/confess", "/confessions moderate"):
             self.assertIn(command, help_html)
         self.assertIn("Broken Telephone, Exquisite Corpse, Spyfall, Word Bomb, and Pattern Hunt", help_html)
         self.assertIn("1-10 drops per day", help_html)
@@ -240,11 +240,17 @@ class WebsiteDocsTests(unittest.TestCase):
         index_html = (ROOT / "index.html").read_text(encoding="utf-8")
         help_html = (ROOT / "help.html").read_text(encoding="utf-8")
 
-        self.assertIn("one-member rate, low-text repeat gate, same-asset repeat, true channel-streak, and GIF-to-text pressure", help_html)
-        self.assertIn("configurable one-member rate, low-text repeat, same-asset, true channel-streak, and GIF-to-text pressure controls", index_html)
-        self.assertIn("true consecutive GIF streak or GIF-to-text imbalance", readme)
+        self.assertIn(
+            "one-member rate, low-text repeat gate, same-asset repeat, true channel-streak, and effective GIF-pressure settings with lightweight meaningful-text weighting",
+            help_html,
+        )
+        self.assertIn(
+            "configurable one-member rate, low-text repeat, same-asset, true channel-streak, and effective GIF-pressure controls with lightweight meaningful-text weighting",
+            index_html,
+        )
+        self.assertIn("true consecutive GIF streak or effective GIF pressure after lightweight meaningful-text weighting", readme)
         self.assertIn("exact live GIF streak", readme)
-        self.assertIn("newest excess GIF posts", readme)
+        self.assertIn("newest contributing GIF posts", readme)
         self.assertIn("collective pressure never adds strikes or timeouts on its own", readme)
         self.assertIn("shared cleanup with one member's personal enforcement", help_html)
         self.assertIn("shared cleanup with one member's personal GIF enforcement", index_html)
@@ -267,9 +273,8 @@ class WebsiteDocsTests(unittest.TestCase):
             "/timeout remove",
             "/admin panel",
             "/admin followup",
-            "/admin verification",
             "/admin logs",
-            "/admin templates",
+            "/admin exclusions",
             "/admin permissions",
         ):
             self.assertIn(text, readme)
@@ -290,7 +295,7 @@ class WebsiteDocsTests(unittest.TestCase):
         index_html = (ROOT / "index.html").read_text(encoding="utf-8")
 
         self.assertIn("interactive admin control surface", readme)
-        self.assertIn("commands remain precise fallbacks", readme)
+        self.assertIn("commands stay precise fallbacks", readme)
         self.assertIn("overview quick-config row", readme)
         self.assertIn("interactive admin lifecycle surface", help_html)
         self.assertIn("sectioned control surface", help_html)
@@ -300,20 +305,15 @@ class WebsiteDocsTests(unittest.TestCase):
         self.assertIn("illustrative rather than exhaustive", index_html)
         self.assertIn("overview quick-config row", index_html)
 
-    def test_admin_docs_cover_verification_queue_batch_and_durable_ignore(self):
+    def test_admin_docs_remove_verification_surfaces(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         help_html = (ROOT / "help.html").read_text(encoding="utf-8")
+        index_html = (ROOT / "index.html").read_text(encoding="utf-8")
 
-        for text in (
-            "Kick All Pending",
-            "Delay All 24h",
-            "Ignore All",
-            "Ignore Forever",
-            "until they verify, become exempt, or leave",
-            "final removal DM",
-        ):
-            self.assertIn(text, readme)
-            self.assertIn(text, help_html)
+        for text in ("/admin verification", "/admin templates", "/admin sync", "verification cleanup", "Ignore Forever", "final removal DM"):
+            self.assertNotIn(text, readme)
+            self.assertNotIn(text, help_html)
+            self.assertNotIn(text, index_html)
 
     def test_shield_docs_cover_no_link_dm_lure_and_truthful_ai_models(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
@@ -577,9 +577,7 @@ class WebsiteDocsTests(unittest.TestCase):
             "bb!shield rules pack promo enabled true action log sensitivity normal",
             "bb!shield filters only_included trusted_role_ids on @Mods",
             "bb!admin followup enabled true @Probation review 30d",
-            "bb!admin verification enabled true @Verified must_have_role 7d 2d",
             "bb!admin exclusions trusted_role_ids on @Mods",
-            "bb!admin templates invite_link https://discord.gg/example",
         ):
             self.assertNotIn(bad_example, readme)
 

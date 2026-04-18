@@ -131,7 +131,7 @@ Babblebox is intentionally compact:
   - privacy leak pack
   - promo / invite pack
 - first-class `Anti-Spam` pack for explicit message-rate and near-duplicate rules, mention, emoji, invite, and link pressure, bounded corroboration that suppresses healthy fast chat, and configured delete or timeout actions that actually execute
-- first-class `GIF Flood / Media Pressure` pack for one-user GIF floods, collective channel GIF pressure, repeated GIF reuse, configurable streak-plus-ratio pressure, grouped incident dedupe, and safer mixed chat
+- first-class `GIF Flood / Media Pressure` pack for one-user GIF floods, collective channel GIF pressure, lightweight meaningful-text weighting, repeated GIF reuse, grouped incident dedupe, and safer mixed chat
 - scam / malicious-link pack with local weighted scam-language scoring plus no-link DM-lure detection for nitro, crypto, prize, and cash bait routed into DMs or off-platform contact
 - hard local trusted-brand impersonation blocking for spoofed or lookalike safe domains
 - `Adult Links + Solicitation` pack for adult-domain intel plus optional solicitation / DM-ad text detection
@@ -161,9 +161,7 @@ Babblebox is intentionally compact:
   - returned-after-ban follow-up role assignment within a clear 30-day return window
   - auto-remove or moderator-review follow-up role expiry
 - review alerts with compact action buttons instead of a case system
-- verification retention with warning-before-kick cleanup
-- verification-help channel deadline extensions with a small extension cap
-- shared exclusions, trusted-role bypasses, templates, permission diagnostics, and compact admin logs
+- shared exclusions, trusted-role bypasses, permission diagnostics, and compact admin logs
 
 ### Daily Arcade
 
@@ -339,7 +337,7 @@ Slash is the best fit for multi-option admin setup here. Prefix stays positional
 | `/shield advanced list` | `bb!shield advanced list` | Review advanced patterns |
 | `/shield test` | `bb!shield test free nitro claim now https://bit.ly/x` | Dry-run a message through Shield |
 
-Shield's live-message link policy is intentionally separate from Confessions link mode. Confessions keeps `Disabled`, `Trusted Only`, and `Allow All Safe`, while Shield keeps `Default` plus the bounded `Trusted Links Only` mode. That stricter Shield mode allows the built-in trusted pack plus admin allowlisted domains and invite codes as policy exceptions, and `/shield trusted` now exposes the built-in families, direct domains, and any local built-in disables that affect trusted-only mode. Malicious, trusted-brand impersonation, adult-domain, and strong suspicious-link intel still wins over those trust exceptions. Shield phrase allowlists stay narrower: they suppress only targeted promo or adult-solicitation text matches. The live Shield packs are `Privacy Leak`, `Promo / Invite`, `Anti-Spam`, `GIF Flood / Media Pressure`, `Scam / Malicious Links`, `Adult Links + Solicitation`, and `Severe Harm / Hate`; no-link DM-lure bait lives under the scam pack, Anti-Spam stays grounded in explicit rate and duplicate rules with bounded corroboration, the GIF lane now splits one-user floods from collective channel pressure so collective cleanup can remove the exact live GIF streak for streak floods or only the newest excess GIF posts from the recent pressure window for ratio pressure while personal abuse can still enforce one member, never text, the channel lane can trigger on either a true consecutive GIF streak or GIF-to-text imbalance, collective pressure never adds strikes or timeouts on its own, tighter low-end GIF options exist for stricter rooms, optional emote and capitals lanes stay off until an admin enables them, moderators are exempt from Anti-Spam by default unless admins choose a stricter policy, `/shield panel` now keeps pack-local `Actions`, `Options`, and `Exemptions` together without mixing unrelated controls, `/shield module` owns the live on/off switch, `/shield escalation` owns repeated-hit escalation plus the global timeout fallback, `/shield logs` now carries global compact/no-ping defaults plus bounded per-pack overrides, each pack can inherit the global timeout or keep a dedicated timeout override, the trusted-link lane can do the same, live moderation stays opt-in, the first enable applies a recommended non-AI baseline, and Shield AI remains owner-managed second-pass review only.
+Shield's live-message link policy is intentionally separate from Confessions link mode. Confessions keeps `Disabled`, `Trusted Only`, and `Allow All Safe`, while Shield keeps `Default` plus the bounded `Trusted Links Only` mode. That stricter Shield mode allows the built-in trusted pack plus admin allowlisted domains and invite codes as policy exceptions, and `/shield trusted` now exposes the built-in families, direct domains, and any local built-in disables that affect trusted-only mode. Malicious, trusted-brand impersonation, adult-domain, and strong suspicious-link intel still wins over those trust exceptions. Shield phrase allowlists stay narrower: they suppress only targeted promo or adult-solicitation text matches. The live Shield packs are `Privacy Leak`, `Promo / Invite`, `Anti-Spam`, `GIF Flood / Media Pressure`, `Scam / Malicious Links`, `Adult Links + Solicitation`, and `Severe Harm / Hate`; no-link DM-lure bait lives under the scam pack, Anti-Spam stays grounded in explicit rate and duplicate rules with bounded corroboration, the GIF lane now splits one-user floods from collective channel pressure so collective cleanup can remove the exact live GIF streak for streak floods or only the newest contributing GIF posts from the active pressure slice for channel-pressure matches while personal abuse can still enforce one member, never text, the channel lane can trigger on either a true consecutive GIF streak or effective GIF pressure after lightweight meaningful-text weighting, collective pressure never adds strikes or timeouts on its own, tighter low-end GIF options exist for stricter rooms, optional emote and capitals lanes stay off until an admin enables them, moderators are exempt from Anti-Spam by default unless admins choose a stricter policy, `/shield panel` now keeps pack-local `Actions`, `Options`, and `Exemptions` together without mixing unrelated controls, `/shield module` owns the live on/off switch, `/shield escalation` owns repeated-hit escalation plus the global timeout fallback, `/shield logs` now carries global compact/no-ping defaults plus bounded per-pack overrides, each pack can inherit the global timeout or keep a dedicated timeout override, the trusted-link lane can do the same, live moderation stays opt-in, the first enable applies a recommended non-AI baseline, and Shield AI remains owner-managed second-pass review only.
 
 Shield also now governs eligible non-chat surfaces in a bounded way. Confessions keeps its own privacy, review, and workflow logic, but shares Shield link intelligence. AFK reasons plus reminder text and public reminder delivery use fixed private privacy, adult, and severe feature-surface policies. Watch keyword setup stays privacy-only. None of those private feature checks create mod-log spam or call Shield AI.
 
@@ -359,7 +357,7 @@ The default lock notice is configurable, one-off notice overrides stay optional 
 
 ### Admin Lifecycle
 
-Admin lifecycle commands stay private/admin-facing. `/admin panel` is now the interactive admin control surface: its overview quick-config row jumps straight into follow-up, verification policy, and logs, section buttons still open focused editors for follow-up, verification policy/timing/help path, exclusions, logs, and templates directly from the UI, `/admin permissions` stays the truthful diagnostics lane, and `/admin sync` stays the one-time catch-up tool.
+Admin lifecycle commands stay private/admin-facing. `/admin panel` is now the interactive admin control surface: its overview quick-config row jumps straight into follow-up, exclusions, and logs, section buttons open focused editors for follow-up, exclusions, and logs directly from the UI, and `/admin permissions` stays the truthful diagnostics lane when something feels blocked.
 Slash is recommended for the heavier config flows here. Prefix stays positional, so the examples below show the safest compact forms.
 
 | Slash | Prefix | Purpose |
@@ -367,14 +365,11 @@ Slash is recommended for the heavier config flows here. Prefix stays positional,
 | `/admin panel` | `bb!admin panel` | Open the interactive admin lifecycle control surface |
 | `/admin status` | `bb!admin status` | View overview counts or inspect one member |
 | `/admin followup` | `bb!admin followup true @Probation review 30d` | Configure returned-after-ban follow-up roles |
-| `/admin verification` | `bb!admin verification true @Verified must_have_role review 7d 2d` | Configure warning-before-kick verification cleanup and the shared review queue |
 | `/admin logs` | `bb!admin logs #admin-log @Mods` | Set the shared admin log channel and alert role |
 | `/admin exclusions` | `bb!admin exclusions` | Configure shared exclusions and trusted roles |
-| `/admin templates` | `bb!admin templates` | Configure warning/kick DMs and optional rejoin link |
 | `/admin permissions` | `bb!admin permissions` | Diagnose missing bot permissions and the affected feature lanes |
-| `/admin sync` | `bb!admin sync` | One-time catch-up scan for current unverified members |
 
-Follow-up and verification stay batch-first and review-lane focused: routine sweeps emit grouped summaries, review mode uses one persistent shared queue message per lane, startup reconciliation resumes quietly, and Babblebox does not post public channel reactions or reply callouts for weak evidence. Verification review now uses `Kick All Pending`, `Delay All 24h`, `Ignore All`, plus a member picker for one-off actions. `Ignore Forever` keeps that member out of verification cleanup until they verify, become exempt, or leave, and auto-kick attempts the final removal DM before kicking while logging whether delivery actually succeeded. The admin surface is intentionally narrower now: the panel is the premium interactive path for common changes, commands remain precise fallbacks, and the whole lane stays limited to follow-up, verification, exclusions, logs, templates, permission diagnostics, and sync.
+The admin surface is intentionally narrow: follow-up stays batch-first and review-lane focused, routine sweeps emit grouped summaries, review mode uses one persistent shared queue message, and the panel remains the premium path for common changes while commands stay precise fallbacks. The whole lane now stays limited to follow-up, exclusions, logs, permission diagnostics, direct locks, and timeout removal.
 
 ### Daily Arcade
 
@@ -485,7 +480,7 @@ Babblebox Shield is intentionally compact and conservative:
 - no full message-body retention in Postgres
 - moderator context goes to a configured log channel instead of a heavy database log
 - low-confidence repeated-link notes stay compact, no-ping, and cohort-deduped instead of repeatedly blasting the mod log
-- compact anti-spam uses short-lived per-user windows for duplicate spam, message-rate bursts, and link or invite floods, while the GIF lane keeps short-lived per-user grouping, a true live channel streak, a bounded recent pressure window, and soft channel-only suppression instead of a moderation archive
+- compact anti-spam uses short-lived per-user windows for duplicate spam, message-rate bursts, and link or invite floods, while the GIF lane keeps short-lived per-user grouping, a true live channel streak, a bounded recent pressure slice with lightweight meaningful-text weighting, and soft channel-only suppression instead of a moderation archive
 - Shield log delivery can stay `adaptive` or force `compact`, and alert-role pings can stay `smart` or `never`, with per-pack overrides where calmer delivery matters
 - repeated-hit escalation is in-memory and bounded
 - custom regex is intentionally not accepted; advanced mode uses safe text matching only
@@ -594,18 +589,12 @@ Admin lifecycle storage stays row-based and compact:
 - `admin_guild_configs`
 - `admin_ban_return_candidates`
 - `admin_followup_roles`
-- `admin_verification_states`
-- `admin_verification_review_queues`
-- `admin_verification_notification_snapshots`
 
 Stored data is intentionally small:
 
 - one shared config row per guild
 - short-lived ban-return candidates with a 30-day purge window
 - active follow-up role rows only while Babblebox still manages that follow-up
-- active or ignored verification rows only while someone is still under the current verification rule
-- one shared verification review queue row only while overdue active review backlog exists
-- short-lived grouped verification notification snapshots only while restart-safe suppression state matters
 
 Not stored:
 
@@ -678,7 +667,7 @@ Not stored:
 - `babblebox/question_drops_store.py`: Question Drops persistence and config normalization
 - `babblebox/question_drops_style.py`: Question Drops emoji and presentation helpers
 - `babblebox/admin_store.py`: compact admin lifecycle config and pending-state persistence
-- `babblebox/admin_service.py`: returned-after-ban follow-up logic, verification cleanup, and bounded sweeping
+- `babblebox/admin_service.py`: returned-after-ban follow-up logic, locks, timeout removal, and bounded sweeping
 - `babblebox/shield_ai.py`: optional AI provider integration, redaction, truncation, and safe parsing
 - `babblebox/shield_store.py`: compact Shield config persistence
 - `babblebox/shield_service.py`: Shield matching, cache rebuilds, actions, and mod-log delivery

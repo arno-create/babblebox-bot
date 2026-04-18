@@ -1,4 +1,4 @@
-from __future__ import annotations
+﻿from __future__ import annotations
 
 import asyncio
 from datetime import timedelta
@@ -14,13 +14,8 @@ from babblebox.admin_panel_views import (
     ExclusionsEditorView,
     FollowupEditorView,
     LogsEditorView,
-    TemplatesEditorView,
-    VerificationHelpEditorView,
-    VerificationPolicyEditorView,
-    VerificationSyncView,
-    VerificationTimingEditorView,
 )
-from babblebox.cogs.admin import AdminCog, AdminPanelView, FollowupReviewView, VerificationReviewQueueView
+from babblebox.cogs.admin import AdminCog, AdminPanelView, FollowupReviewView
 from babblebox.admin_service import AdminService
 from babblebox.admin_store import AdminStore
 
@@ -902,279 +897,6 @@ class AdminCogSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Timeout Members", missing.value)
         self.assertIn("/timeout remove", missing.value)
 
-    async def test_verification_panel_spells_out_verified_and_unverified_members(self):
-        ok, _ = await self.cog.service.set_verification_config(
-            self.guild.id,
-            enabled=True,
-            role_id=self.verified_role.id,
-            logic="must_have_role",
-            deadline_action="auto_kick",
-            kick_after_text="7d",
-            warning_lead_text="2d",
-            help_channel_id=None,
-            help_extension_text="1d",
-            max_extensions=1,
-        )
-        self.assertTrue(ok)
-
-        embed = await self.cog.build_panel_embed(self.guild.id, "verification")
-        current_rule = next(field for field in embed.fields if field.name == "Current Policy")
-        target = next(field for field in embed.fields if field.name == "Deadline Experience")
-
-        self.assertIn("Members are considered verified only if they HAVE <@&80>.", current_rule.value)
-        self.assertIn("Users WITHOUT <@&80> are treated as unverified.", current_rule.value)
-        self.assertIn("Deadline action: **Kick automatically**", current_rule.value)
-        self.assertIn("users who do NOT have <@&80> will be warned after 5 days and kicked after 1 week.", target.value)
-        self.assertIn("Exempt from warning/kick", target.value)
-
-    async def test_verification_panel_adds_review_note_for_confusing_role_name(self):
-        not_verified_role = FakeRole(81, position=10, name="Not Verified")
-        self.guild.roles[not_verified_role.id] = not_verified_role
-        ok, _ = await self.cog.service.set_verification_config(
-            self.guild.id,
-            enabled=True,
-            role_id=not_verified_role.id,
-            logic="must_not_have_role",
-            deadline_action="auto_kick",
-            kick_after_text="7d",
-            warning_lead_text="2d",
-            help_channel_id=None,
-            help_extension_text="1d",
-            max_extensions=1,
-        )
-        self.assertTrue(ok)
-
-        embed = await self.cog.build_panel_embed(self.guild.id, "verification")
-        review = next(field for field in embed.fields if field.name == "Please Review Carefully")
-        target = next(field for field in embed.fields if field.name == "Deadline Experience")
-
-        self.assertIn("sounds like an unverified-state role", review.value)
-        self.assertIn("users WITH <@&81> should be warned and kicked", review.value)
-        self.assertIn("users who still have <@&81> will be warned after 5 days and kicked after 1 week.", target.value)
-
-    async def test_verification_panel_review_mode_spells_out_moderator_review(self):
-        ok, _ = await self.cog.service.set_verification_config(
-            self.guild.id,
-            enabled=True,
-            role_id=self.verified_role.id,
-            logic="must_have_role",
-            deadline_action="review",
-            kick_after_text="7d",
-            warning_lead_text="2d",
-            help_channel_id=None,
-            help_extension_text="1d",
-            max_extensions=1,
-        )
-        self.assertTrue(ok)
-
-        embed = await self.cog.build_panel_embed(self.guild.id, "verification")
-        current_rule = next(field for field in embed.fields if field.name == "Current Policy")
-        target = next(field for field in embed.fields if field.name == "Deadline Experience")
-
-        self.assertIn("Deadline action: **Moderator review**", current_rule.value)
-        self.assertIn("sent for moderator review after 1 week", target.value)
-
-    async def test_admin_verification_command_updates_deadline_action(self):
-        ctx = FakeContext(
-            interaction=FakeInteraction(),
-            guild=self.guild,
-            channel=FakeChannel(20),
-            author=FakeAuthor(manage_guild=True),
-        )
-
-        await AdminCog.admin_verification_command.callback(
-            self.cog,
-            ctx,
-            enabled=True,
-            role=self.verified_role,
-            logic="must_have_role",
-            deadline_action="review",
-            kick_after="7d",
-            warning_lead="2d",
-            help_channel=None,
-            help_extension="1d",
-            max_extensions=1,
-            clear_role=False,
-            clear_help_channel=False,
-        )
-
-        config = self.cog.service.get_config(self.guild.id)
-        self.assertEqual(config["verification_deadline_action"], "review")
-        self.assertEqual(len(ctx.send_calls), 1)
-        self.assertTrue(ctx.send_calls[0]["ephemeral"])
-
-    async def test_verification_review_view_denies_non_admins_privately(self):
-        pending_rows = [
-            {
-                "guild_id": self.guild.id,
-                "user_id": 123,
-                "review_version": 1,
-                "kick_at": ge.now_utc().isoformat(),
-                "_kick_ready": True,
-                "_kick_issue_detail": None,
-            }
-        ]
-        view = VerificationReviewQueueView(guild_id=self.guild.id, snapshot_signature="sig-current", pending_rows=pending_rows)
-        message = FakeMessage(embed=None, view=view)
-        interaction = FakeInteraction(
-            user=FakeAuthor(manage_guild=False),
-            guild=self.guild,
-            message=message,
-        )
-        interaction.client = types.SimpleNamespace(admin_service=self.cog.service)
-        kick_button = next(child for child in view.children if child.label == "Kick All Pending")
-
-        await kick_button.callback(interaction)
-
-        self.assertEqual(len(interaction.response.sent_messages), 1)
-        self.assertTrue(interaction.response.sent_messages[0]["kwargs"]["ephemeral"])
-        self.assertIn("Manage Server", interaction.response.sent_messages[0]["kwargs"]["embed"].description)
-
-    async def test_verification_review_queue_batch_button_calls_batch_handler(self):
-        pending_rows = [
-            {
-                "guild_id": self.guild.id,
-                "user_id": 123,
-                "review_version": 1,
-                "kick_at": ge.now_utc().isoformat(),
-                "_kick_ready": True,
-                "_kick_issue_detail": None,
-            },
-            {
-                "guild_id": self.guild.id,
-                "user_id": 124,
-                "review_version": 2,
-                "kick_at": ge.now_utc().isoformat(),
-                "_kick_ready": False,
-                "_kick_issue_detail": "Needs review",
-            },
-        ]
-        view = VerificationReviewQueueView(guild_id=self.guild.id, snapshot_signature="sig-current", pending_rows=pending_rows)
-        message = FakeMessage(embed=discord.Embed(title="Verification Cleanup Queue"), view=view)
-        interaction = self._view_interaction(message=message)
-        interaction.client = types.SimpleNamespace(admin_service=self.cog.service)
-        self.cog.service.handle_verification_review_batch_action = AsyncMock(return_value=(True, "Kick All Pending finished."))
-        self.cog.service._active_verification_review_rows = AsyncMock(return_value=pending_rows)
-        self.cog.service.verification_review_snapshot_signature = mock.Mock(return_value="sig-next")
-        self.cog.service.build_verification_review_queue_embed = mock.Mock(return_value=discord.Embed(title="Verification Cleanup Queue"))
-        kick_button = next(child for child in view.children if child.label == "Kick All Pending")
-
-        await kick_button.callback(interaction)
-
-        self.cog.service.handle_verification_review_batch_action.assert_awaited_once_with(
-            guild_id=self.guild.id,
-            snapshot_signature="sig-current",
-            action="kick",
-            actor=interaction.user,
-        )
-        self.assertEqual(len(interaction.response.edits), 1)
-        self.assertIsInstance(interaction.response.edits[0]["view"], VerificationReviewQueueView)
-
-    async def test_verification_review_queue_member_picker_focuses_selected_member(self):
-        pending_rows = [
-            {
-                "guild_id": self.guild.id,
-                "user_id": 123,
-                "review_version": 1,
-                "kick_at": ge.now_utc().isoformat(),
-                "_kick_ready": True,
-                "_kick_issue_detail": None,
-            },
-            {
-                "guild_id": self.guild.id,
-                "user_id": 124,
-                "review_version": 2,
-                "kick_at": ge.now_utc().isoformat(),
-                "_kick_ready": False,
-                "_kick_issue_detail": "Needs review",
-            },
-        ]
-        view = VerificationReviewQueueView(guild_id=self.guild.id, snapshot_signature="sig-current", pending_rows=pending_rows)
-        message = FakeMessage(embed=discord.Embed(title="Verification Cleanup Queue"), view=view)
-        interaction = self._view_interaction(message=message)
-        interaction.client = types.SimpleNamespace(admin_service=self.cog.service)
-        self.cog.service._active_verification_review_rows = AsyncMock(return_value=pending_rows)
-        self.cog.service.verification_review_snapshot_signature = mock.Mock(return_value="sig-focused")
-        self.cog.service.build_verification_review_queue_embed = mock.Mock(return_value=discord.Embed(title="Verification Cleanup Queue"))
-        select = self._select(view, discord.ui.Select, placeholder_contains="Focus one queued member")
-        select._values = ["124:2"]
-
-        await select.callback(interaction)
-
-        self.assertEqual(len(interaction.response.edits), 1)
-        next_view = interaction.response.edits[0]["view"]
-        self.assertIsInstance(next_view, VerificationReviewQueueView)
-        self.assertEqual(next_view.focused_user_id, 124)
-        self.assertEqual(next_view.focused_version, 2)
-        self.assertIn("Kick Selected", [child.label for child in next_view.children if getattr(child, "label", None)])
-
-    async def test_verification_review_queue_selected_button_calls_single_action_handler(self):
-        pending_rows = [
-            {
-                "guild_id": self.guild.id,
-                "user_id": 123,
-                "review_version": 1,
-                "kick_at": ge.now_utc().isoformat(),
-                "_kick_ready": True,
-                "_kick_issue_detail": None,
-            }
-        ]
-        view = VerificationReviewQueueView(
-            guild_id=self.guild.id,
-            snapshot_signature="sig-current",
-            pending_rows=pending_rows,
-            focused_user_id=123,
-            focused_version=1,
-        )
-        message = FakeMessage(embed=discord.Embed(title="Verification Cleanup Queue"), view=view)
-        interaction = self._view_interaction(message=message)
-        interaction.client = types.SimpleNamespace(admin_service=self.cog.service)
-        self.cog.service.handle_verification_review_action = AsyncMock(return_value=(True, "Delayed by 24 hours.", pending_rows[0]))
-        self.cog.service._active_verification_review_rows = AsyncMock(return_value=pending_rows)
-        self.cog.service.verification_review_snapshot_signature = mock.Mock(return_value="sig-next")
-        self.cog.service.build_verification_review_queue_embed = mock.Mock(return_value=discord.Embed(title="Verification Cleanup Queue"))
-        delay_button = next(child for child in view.children if getattr(child, "label", None) == "Delay Selected 24h")
-
-        await delay_button.callback(interaction)
-
-        self.cog.service.handle_verification_review_action.assert_awaited_once_with(
-            guild_id=self.guild.id,
-            user_id=123,
-            version=1,
-            action="delay",
-            actor=interaction.user,
-        )
-        self.assertEqual(len(interaction.response.edits), 1)
-        self.assertIsInstance(interaction.response.edits[0]["view"], VerificationReviewQueueView)
-
-    async def test_cog_load_registers_followup_and_verification_review_views(self):
-        record_followup = {
-            "guild_id": self.guild.id,
-            "user_id": 501,
-            "review_version": 2,
-            "review_message_id": 1501,
-        }
-        record_queue = {
-            "guild_id": self.guild.id,
-            "channel_id": 31,
-            "message_id": 1502,
-            "updated_at": ge.now_utc().isoformat(),
-        }
-        pending_rows = [{"guild_id": self.guild.id, "user_id": 502, "review_version": 3, "_kick_ready": True}]
-        self.cog.service.start = AsyncMock(return_value=True)
-        self.cog.service.list_review_views = AsyncMock(return_value=[record_followup])
-        self.cog.service.list_verification_review_queues = AsyncMock(return_value=[record_queue])
-        self.cog.service._active_verification_review_rows = AsyncMock(return_value=pending_rows)
-        self.cog.service.verification_review_snapshot_signature = mock.Mock(return_value="sig-load")
-
-        await self.cog.cog_load()
-
-        self.assertEqual(len(self.bot.views), 2)
-        self.assertIsInstance(self.bot.views[0][0], FollowupReviewView)
-        self.assertEqual(self.bot.views[0][1], 1501)
-        self.assertIsInstance(self.bot.views[1][0], VerificationReviewQueueView)
-        self.assertEqual(self.bot.views[1][1], 1502)
-
     async def test_admin_panel_warns_when_operability_is_missing(self):
         blocked_log_channel = FakeChannel(
             31,
@@ -1197,18 +919,6 @@ class AdminCogSmokeTests(unittest.IsolatedAsyncioTestCase):
             duration_text="30d",
         )
         self.assertTrue(ok)
-        ok, _ = await self.cog.service.set_verification_config(
-            self.guild.id,
-            enabled=True,
-            role_id=self.verified_role.id,
-            logic="must_have_role",
-            kick_after_text="7d",
-            warning_lead_text="2d",
-            help_channel_id=None,
-            help_extension_text="1d",
-            max_extensions=1,
-        )
-        self.assertTrue(ok)
         ok, _ = await self.cog.service.set_logs_config(
             self.guild.id,
             channel_id=blocked_log_channel.id,
@@ -1220,10 +930,26 @@ class AdminCogSmokeTests(unittest.IsolatedAsyncioTestCase):
         operability = next(field for field in embed.fields if field.name == "Operability")
 
         self.assertIn("at or above", operability.value)
-        self.assertIn("Kick Members", operability.value)
         self.assertIn("cannot see", operability.value)
         self.assertIn("cannot send", operability.value)
         self.assertIn("cannot embed", operability.value)
+        self.assertIn("cannot ping", operability.value)
+
+    async def test_cog_load_registers_followup_review_views(self):
+        record_followup = {
+            "guild_id": self.guild.id,
+            "user_id": 501,
+            "review_version": 2,
+            "review_message_id": 1501,
+        }
+        self.cog.service.start = AsyncMock(return_value=True)
+        self.cog.service.list_review_views = AsyncMock(return_value=[record_followup])
+
+        await self.cog.cog_load()
+
+        self.assertEqual(len(self.bot.views), 1)
+        self.assertIsInstance(self.bot.views[0][0], FollowupReviewView)
+        self.assertEqual(self.bot.views[0][1], 1501)
 
     async def test_admin_panel_only_shows_focused_sections(self):
         view = AdminPanelView(self.cog, guild_id=self.guild.id, author_id=1)
@@ -1235,15 +961,11 @@ class AdminCogSmokeTests(unittest.IsolatedAsyncioTestCase):
             [
                 "Overview",
                 "Follow-up",
-                "Verification",
                 "Exclusions",
                 "Logs",
-                "Templates",
                 "Refresh",
                 "Edit Follow-up",
-                "Edit Verification Policy",
                 "Edit Logs",
-                "Open Sync Review",
                 "Run Permission Check",
             ],
         )
@@ -1256,17 +978,12 @@ class AdminCogSmokeTests(unittest.IsolatedAsyncioTestCase):
         message = await self._panel_message(view)
         interaction = self._view_interaction(message=message)
 
-        await self._button(view, "Verification").callback(interaction)
+        await self._button(view, "Exclusions").callback(interaction)
 
         labels = [child.label for child in view.children if hasattr(child, "label")]
-        self.assertEqual(view.section, "verification")
-        self.assertEqual(message.embed.title, "Verification Cleanup")
-        self.assertIn("Edit Policy", labels)
-        self.assertIn("Edit Timing", labels)
-        self.assertIn("Edit Help Path", labels)
-        self.assertIn("Preview Warning", labels)
-        self.assertIn("Preview Final Kick", labels)
-        self.assertIn("Open Sync Review", labels)
+        self.assertEqual(view.section, "exclusions")
+        self.assertEqual(message.embed.title, "Exclusions And Trusted Roles")
+        self.assertIn("Edit Exclusions", labels)
         self.assertNotIn("Run Permission Check", labels)
         self.assertEqual(len(interaction.response.defer_calls), 1)
         self.assertEqual(interaction.response.defer_calls[0][1]["thinking"], False)
@@ -1295,7 +1012,7 @@ class AdminCogSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("expired", interaction.response.sent_messages[-1]["kwargs"]["embed"].description.lower())
 
     async def test_admin_panel_timeout_disables_controls(self):
-        view = AdminPanelView(self.cog, guild_id=self.guild.id, author_id=1, section="verification")
+        view = AdminPanelView(self.cog, guild_id=self.guild.id, author_id=1, section="exclusions")
         message = await self._panel_message(view)
 
         await view.on_timeout()
@@ -1314,13 +1031,13 @@ class AdminCogSmokeTests(unittest.IsolatedAsyncioTestCase):
             edit_original_response_exception=discord.ClientException("edit failed"),
         )
 
-        await self._button(view, "Verification").callback(interaction)
+        await self._button(view, "Exclusions").callback(interaction)
 
         self.assertTrue(interaction.followup_calls)
         embed = interaction.followup_calls[-1]["kwargs"]["embed"]
         self.assertIn("expired", embed.description.lower())
 
-    async def test_admin_panel_overview_tools_open_permission_diagnostics_and_sync_view(self):
+    async def test_admin_panel_overview_tools_open_permission_diagnostics(self):
         view = AdminPanelView(self.cog, guild_id=self.guild.id, author_id=1)
         message = await self._panel_message(view)
 
@@ -1329,12 +1046,6 @@ class AdminCogSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(permission_interaction.followup_calls)
         self.assertEqual(permission_interaction.followup_calls[-1]["kwargs"]["embed"].title, "Babblebox Permission Health")
 
-        sync_interaction = self._view_interaction(message=message)
-        await self._button(view, "Open Sync Review").callback(sync_interaction)
-        self.assertTrue(sync_interaction.followup_calls)
-        self.assertIsInstance(sync_interaction._last_followup_message.view, VerificationSyncView)
-        self.assertEqual(sync_interaction._last_followup_message.embed.title, "Verification Sync Review")
-
     async def test_admin_panel_overview_quick_config_buttons_open_direct_editors(self):
         view = AdminPanelView(self.cog, guild_id=self.guild.id, author_id=1)
         message = await self._panel_message(view)
@@ -1342,10 +1053,6 @@ class AdminCogSmokeTests(unittest.IsolatedAsyncioTestCase):
         followup_interaction = self._view_interaction(message=message)
         await self._button(view, "Edit Follow-up").callback(followup_interaction)
         self.assertIsInstance(followup_interaction._last_followup_message.view, FollowupEditorView)
-
-        verification_interaction = self._view_interaction(message=message)
-        await self._button(view, "Edit Verification Policy").callback(verification_interaction)
-        self.assertIsInstance(verification_interaction._last_followup_message.view, VerificationPolicyEditorView)
 
         logs_interaction = self._view_interaction(message=message)
         await self._button(view, "Edit Logs").callback(logs_interaction)
@@ -1406,117 +1113,6 @@ class AdminCogSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(interaction.response.sent_messages)
         self.assertIn("could not open", interaction.response.sent_messages[-1]["kwargs"]["embed"].description.lower())
 
-    async def test_verification_policy_editor_updates_role_logic_action_and_toggle(self):
-        ok, _ = await self.cog.service.set_verification_config(
-            self.guild.id,
-            enabled=True,
-            role_id=self.verified_role.id,
-            logic="must_have_role",
-            deadline_action="auto_kick",
-            kick_after_text="7d",
-            warning_lead_text="2d",
-            help_channel_id=None,
-            help_extension_text="1d",
-            max_extensions=1,
-        )
-        self.assertTrue(ok)
-        view = VerificationPolicyEditorView(self.cog, guild_id=self.guild.id, author_id=1)
-        child_message = await self._panel_message(view)
-
-        toggle_interaction = self._view_interaction(message=child_message)
-        await self._button(view, "Disable Cleanup").callback(toggle_interaction)
-
-        role_select = self._select(view, discord.ui.RoleSelect, placeholder_contains="Verification role")
-        role_select._values = [types.SimpleNamespace(id=self.verified_role.id)]
-        await role_select.callback(self._view_interaction(message=child_message))
-
-        logic_select = self._select(view, discord.ui.Select, placeholder_contains="Who counts as unverified")
-        logic_select._values = ["must_not_have_role"]
-        await logic_select.callback(self._view_interaction(message=child_message))
-
-        action_select = self._select(view, discord.ui.Select, placeholder_contains="Deadline action")
-        action_select._values = ["review"]
-        await action_select.callback(self._view_interaction(message=child_message))
-
-        await self._button(view, "Clear Role").callback(self._view_interaction(message=child_message))
-
-        config = self.cog.service.get_config(self.guild.id)
-        self.assertFalse(config["verification_enabled"])
-        self.assertIsNone(config["verification_role_id"])
-        self.assertEqual(config["verification_logic"], "must_not_have_role")
-        self.assertEqual(config["verification_deadline_action"], "review")
-
-    async def test_verification_timing_editor_updates_presets_and_custom_modal(self):
-        ok, _ = await self.cog.service.set_verification_config(
-            self.guild.id,
-            enabled=True,
-            role_id=self.verified_role.id,
-            logic="must_have_role",
-            deadline_action="auto_kick",
-            kick_after_text="7d",
-            warning_lead_text="2d",
-            help_channel_id=None,
-            help_extension_text="1d",
-            max_extensions=1,
-        )
-        self.assertTrue(ok)
-        view = VerificationTimingEditorView(self.cog, guild_id=self.guild.id, author_id=1)
-        child_message = await self._panel_message(view)
-
-        kick_select = self._select(view, discord.ui.Select, placeholder_contains="Kick-after presets")
-        kick_select._values = ["14d"]
-        await kick_select.callback(self._view_interaction(message=child_message))
-
-        open_modal_interaction = self._view_interaction(message=child_message)
-        await self._button(view, "Custom Warning Lead").callback(open_modal_interaction)
-        warning_modal = open_modal_interaction.response.modal_calls[-1]
-        warning_modal.value_input._value = "12h"
-        await warning_modal.on_submit(self._view_interaction(message=child_message))
-
-        config = self.cog.service.get_config(self.guild.id)
-        self.assertEqual(config["verification_kick_after_seconds"], 14 * 24 * 3600)
-        self.assertEqual(config["verification_warning_lead_seconds"], 12 * 3600)
-
-    async def test_verification_help_editor_updates_channel_extension_cap_and_clear(self):
-        help_channel = FakeChannel(31, name="verify-help")
-        second_help_channel = FakeChannel(32, name="verify-help-2")
-        self.guild.channels[help_channel.id] = help_channel
-        self.guild.channels[second_help_channel.id] = second_help_channel
-        ok, _ = await self.cog.service.set_verification_config(
-            self.guild.id,
-            enabled=True,
-            role_id=self.verified_role.id,
-            logic="must_have_role",
-            deadline_action="review",
-            kick_after_text="7d",
-            warning_lead_text="2d",
-            help_channel_id=help_channel.id,
-            help_extension_text="1d",
-            max_extensions=1,
-        )
-        self.assertTrue(ok)
-        view = VerificationHelpEditorView(self.cog, guild_id=self.guild.id, author_id=1)
-        child_message = await self._panel_message(view)
-
-        channel_select = self._select(view, discord.ui.ChannelSelect, placeholder_contains="Verification-help channel")
-        channel_select._values = [types.SimpleNamespace(id=second_help_channel.id)]
-        await channel_select.callback(self._view_interaction(message=child_message))
-
-        extension_select = self._select(view, discord.ui.Select, placeholder_contains="Help-extension presets")
-        extension_select._values = ["2d"]
-        await extension_select.callback(self._view_interaction(message=child_message))
-
-        max_extensions_select = self._select(view, discord.ui.Select, placeholder_contains="Max extensions per member")
-        max_extensions_select._values = ["4"]
-        await max_extensions_select.callback(self._view_interaction(message=child_message))
-
-        await self._button(view, "Clear Channel").callback(self._view_interaction(message=child_message))
-
-        config = self.cog.service.get_config(self.guild.id)
-        self.assertIsNone(config["verification_help_channel_id"])
-        self.assertEqual(config["verification_help_extension_seconds"], 2 * 24 * 3600)
-        self.assertEqual(config["verification_max_extensions"], 4)
-
     async def test_logs_editor_updates_and_clears_delivery_targets(self):
         alert_role = FakeRole(91, position=11, name="Moderators")
         second_channel = FakeChannel(33, name="staff-log")
@@ -1547,7 +1143,7 @@ class AdminCogSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.guild.roles[trusted_role.id] = trusted_role
         view = ExclusionsEditorView(self.cog, guild_id=self.guild.id, author_id=1)
         child_message = await self._panel_message(view)
-        starting = self.cog.service.get_config(self.guild.id)["verification_exempt_bots"]
+        starting = self.cog.service.get_config(self.guild.id)["followup_exempt_staff"]
 
         user_select = self._select(view, discord.ui.UserSelect, placeholder_contains="Excluded members")
         user_select._values = [types.SimpleNamespace(id=member.id)]
@@ -1562,232 +1158,27 @@ class AdminCogSmokeTests(unittest.IsolatedAsyncioTestCase):
         await trusted_role_select.callback(self._view_interaction(message=child_message))
 
         await self._button(view, "Clear Members").callback(self._view_interaction(message=child_message))
-        toggle = next(child for child in view.children if getattr(child, "label", "").startswith("Verification Bots:"))
+        toggle = next(child for child in view.children if getattr(child, "label", "").startswith("Follow-up Staff:"))
         await toggle.callback(self._view_interaction(message=child_message))
 
         config = self.cog.service.get_config(self.guild.id)
         self.assertEqual(config["excluded_user_ids"], [])
         self.assertEqual(config["excluded_role_ids"], [self.followup_role.id])
         self.assertEqual(config["trusted_role_ids"], [trusted_role.id])
-        self.assertEqual(config["verification_exempt_bots"], (not starting))
-
-    async def test_templates_editor_updates_modal_fields_clears_and_previews(self):
-        ok, _ = await self.cog.service.set_verification_config(
-            self.guild.id,
-            enabled=True,
-            role_id=self.verified_role.id,
-            logic="must_have_role",
-            deadline_action="review",
-            kick_after_text="7d",
-            warning_lead_text="2d",
-            help_channel_id=self.log_channel.id,
-            help_extension_text="1d",
-            max_extensions=1,
-        )
-        self.assertTrue(ok)
-        view = TemplatesEditorView(self.cog, guild_id=self.guild.id, author_id=1)
-        child_message = await self._panel_message(view)
-
-        edit_warning_interaction = self._view_interaction(message=child_message)
-        await self._button(view, "Edit Warning").callback(edit_warning_interaction)
-        warning_modal = edit_warning_interaction.response.modal_calls[-1]
-        warning_modal.value_input._value = "Hi {member}, verify in {guild}."
-        await warning_modal.on_submit(self._view_interaction(message=child_message))
-
-        edit_kick_interaction = self._view_interaction(message=child_message)
-        await self._button(view, "Edit Final Kick").callback(edit_kick_interaction)
-        kick_modal = edit_kick_interaction.response.modal_calls[-1]
-        kick_modal.value_input._value = "Final notice for {guild}."
-        await kick_modal.on_submit(self._view_interaction(message=child_message))
-
-        edit_invite_interaction = self._view_interaction(message=child_message)
-        await self._button(view, "Edit Invite Link").callback(edit_invite_interaction)
-        invite_modal = edit_invite_interaction.response.modal_calls[-1]
-        invite_modal.value_input._value = "https://discord.gg/example"
-        await invite_modal.on_submit(self._view_interaction(message=child_message))
-
-        preview_interaction = self._view_interaction(message=child_message, user=FakeMember(1, self.guild, roles=[]))
-        await self._button(view, "Preview Warning").callback(preview_interaction)
-
-        await self._button(view, "Clear Invite").callback(self._view_interaction(message=child_message))
-
-        config = self.cog.service.get_config(self.guild.id)
-        self.assertEqual(config["warning_template"], "Hi {member}, verify in {guild}.")
-        self.assertEqual(config["kick_template"], "Final notice for {guild}.")
-        self.assertIsNone(config["invite_link"])
-        preview_embed = preview_interaction.followup_calls[-1]["kwargs"]["embed"]
-        self.assertTrue(any(field.name == "Preview Mode" for field in preview_embed.fields))
-        self.assertTrue(any(field.name == "Resolved Placeholders" for field in preview_embed.fields))
-
-    async def test_verification_panel_preview_button_renders_private_preview(self):
-        ok, _ = await self.cog.service.set_verification_config(
-            self.guild.id,
-            enabled=True,
-            role_id=self.verified_role.id,
-            logic="must_have_role",
-            deadline_action="review",
-            kick_after_text="7d",
-            warning_lead_text="2d",
-            help_channel_id=self.log_channel.id,
-            help_extension_text="1d",
-            max_extensions=1,
-        )
-        self.assertTrue(ok)
-        panel = AdminPanelView(self.cog, guild_id=self.guild.id, author_id=1, section="verification")
-        message = await self._panel_message(panel)
-        interaction = self._view_interaction(message=message, user=FakeMember(1, self.guild, roles=[]))
-
-        await self._button(panel, "Preview Warning").callback(interaction)
-
-        embed = interaction.followup_calls[-1]["kwargs"]["embed"]
-        self.assertTrue(any(field.name == "Preview Mode" for field in embed.fields))
-        self.assertTrue(any(field.name == "Resolved Placeholders" for field in embed.fields))
+        self.assertEqual(config["followup_exempt_staff"], (not starting))
 
     async def test_admin_panel_embeds_stay_compact_for_dense_config(self):
         dense = self.cog.service.get_config(self.guild.id)
         dense["excluded_user_ids"] = list(range(100, 120))
         dense["excluded_role_ids"] = list(range(200, 220))
         dense["trusted_role_ids"] = list(range(300, 320))
-        dense["warning_template"] = "Warn " + ("x" * 200)
-        dense["kick_template"] = "Kick " + ("y" * 200)
-        dense["invite_link"] = "https://discord.gg/example"
         await self.cog.service.store.upsert_config(dense)
         self.cog.service._compiled_configs.pop(self.guild.id, None)
 
-        for section in ("overview", "followup", "verification", "exclusions", "logs", "templates"):
+        for section in ("overview", "followup", "exclusions", "logs"):
             with self.subTest(section=section):
                 embed = await self.cog.build_panel_embed(self.guild.id, section)
                 self._assert_embed_valid(embed)
 
-    async def test_admin_sync_command_opens_confirmation_panel_with_preview_count(self):
-        ok, _ = await self.cog.service.set_verification_config(
-            self.guild.id,
-            enabled=True,
-            role_id=self.verified_role.id,
-            logic="must_have_role",
-            kick_after_text="7d",
-            warning_lead_text="2d",
-            help_channel_id=None,
-            help_extension_text="1d",
-            max_extensions=1,
-        )
-        self.assertTrue(ok)
-        self.guild.members[101] = FakeMember(101, self.guild, roles=[])
-        self.guild.members[102] = FakeMember(102, self.guild, roles=[self.verified_role])
-        ctx = FakeContext(
-            interaction=FakeInteraction(),
-            guild=self.guild,
-            channel=FakeChannel(20),
-            author=FakeAuthor(manage_guild=True),
-        )
 
-        await AdminCog.admin_sync_command.callback(self.cog, ctx)
-
-        self.assertEqual(len(ctx.send_calls), 1)
-        self.assertTrue(ctx.send_calls[0]["ephemeral"])
-        embed = ctx.send_calls[0]["embed"]
-        view = ctx.send_calls[0]["view"]
-        dry_run = next(field for field in embed.fields if field.name == "Dry Run")
-        self.assertIn("Currently **1** members match this rule.", dry_run.value)
-        self.assertIsNotNone(view)
-        labels = [child.label for child in view.children]
-        self.assertIn("Start Sync", labels)
-        self.assertIn("Cancel", labels)
-
-    async def test_sync_view_cancel_before_start_makes_no_changes(self):
-        ok, _ = await self.cog.service.set_verification_config(
-            self.guild.id,
-            enabled=True,
-            role_id=self.verified_role.id,
-            logic="must_have_role",
-            kick_after_text="7d",
-            warning_lead_text="2d",
-            help_channel_id=None,
-            help_extension_text="1d",
-            max_extensions=1,
-        )
-        self.assertTrue(ok)
-        self.guild.members[103] = FakeMember(103, self.guild, roles=[])
-        author = FakeAuthor(manage_guild=True)
-        ctx = FakeContext(
-            interaction=FakeInteraction(),
-            guild=self.guild,
-            channel=FakeChannel(20),
-            author=author,
-        )
-
-        await AdminCog.admin_sync_command.callback(self.cog, ctx)
-
-        message = FakeMessage(**ctx.send_calls[0])
-        view = ctx.send_calls[0]["view"]
-        view.message = message
-        interaction = FakeInteraction(user=author, guild=self.guild, message=message)
-        cancel_button = next(child for child in view.children if child.label == "Cancel")
-
-        await cancel_button.callback(interaction)
-
-        self.assertEqual(message.embed.title, "Verification Sync Cancelled")
-        counts = await self.cog.service.get_counts(self.guild.id)
-        self.assertEqual(counts["verification_pending"], 0)
-        self.assertTrue(all(child.disabled for child in view.children))
-
-    async def test_admin_test_warning_preview_renders_placeholders_safely(self):
-        ok, _ = await self.cog.service.set_verification_config(
-            self.guild.id,
-            enabled=True,
-            role_id=self.verified_role.id,
-            logic="must_have_role",
-            kick_after_text="7d",
-            warning_lead_text="2d",
-            help_channel_id=self.log_channel.id,
-            help_extension_text="1d",
-            max_extensions=1,
-        )
-        self.assertTrue(ok)
-        ok, _ = await self.cog.service.set_templates(
-            self.guild.id,
-            warning_template="Hi {member}, finish verification in {guild} before {deadline_relative}. Use {help_channel}. {invite_link}",
-            invite_link="https://discord.gg/example",
-        )
-        self.assertTrue(ok)
-        ctx = FakeContext(
-            interaction=FakeInteraction(),
-            guild=self.guild,
-            channel=FakeChannel(20),
-            author=FakeAuthor(manage_guild=True),
-        )
-
-        await AdminCog.admin_test_command.callback(self.cog, ctx, kind="warning_dm", member=None, dm_self=False, post_log=False)
-
-        self.assertEqual(len(ctx.send_calls), 1)
-        embed = ctx.send_calls[0]["embed"]
-        resolved = next(field for field in embed.fields if field.name == "Resolved Placeholders")
-        delivery = next(field for field in embed.fields if field.name == "Delivery")
-        self.assertIn("Guild", resolved.value)
-        self.assertIn("Invite link", resolved.value)
-        self.assertIn("Bulk sends started: **No**", delivery.value)
-
-    async def test_admin_test_logs_surfaces_log_delivery_failure(self):
-        blocked_log_channel = FakeChannel(
-            40,
-            name="verification-logs",
-            permissions=FakePermissionSnapshot(view_channel=True, send_messages=False, embed_links=False),
-        )
-        self.guild.channels[blocked_log_channel.id] = blocked_log_channel
-        ok, _ = await self.cog.service.set_logs_config(self.guild.id, channel_id=blocked_log_channel.id, alert_role_id=None)
-        self.assertTrue(ok)
-        ctx = FakeContext(
-            interaction=FakeInteraction(),
-            guild=self.guild,
-            channel=FakeChannel(20),
-            author=FakeAuthor(manage_guild=True),
-        )
-
-        await AdminCog.admin_test_command.callback(self.cog, ctx, kind="logs", member=None, dm_self=False, post_log=True)
-
-        embed = ctx.send_calls[0]["embed"]
-        delivery = next(field for field in embed.fields if field.name == "Delivery")
-        prechecks = next(field for field in embed.fields if field.name == "Prechecks")
-        self.assertIn("Could not post", delivery.value)
-        self.assertIn("cannot send messages", prechecks.value.lower())
 
