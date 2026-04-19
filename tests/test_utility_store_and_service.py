@@ -1273,6 +1273,43 @@ class UtilityStoreAndServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(cycle["last_success_message_id"], message.id)
         self.assertEqual(cycle["last_bumper_user_id"], bumper.id)
 
+    async def test_bump_webhook_style_success_embed_variant_creates_cycle_and_reminder(self):
+        guild, detection_channel, reminder_channel, bumper, provider, _role = await self._configure_bump_fixture()
+        embed = discord.Embed(
+            title="DISBOARD: The Public Server List",
+            description="Bump done! 👍\nCheck it out on DISBOARD.",
+        )
+        message = self._make_disboard_message(
+            guild=guild,
+            channel=detection_channel,
+            provider=provider,
+            bumper=bumper,
+            message_id=88021,
+            content="",
+            embeds=[embed],
+        )
+        message.webhook_id = 991
+
+        self.assertTrue(self.service.is_bump_provider_message_candidate(message))
+
+        await self.service.handle_bump_provider_message(message)
+
+        cycle_id = f"{guild.id}:{BUMP_PROVIDER_DISBOARD}"
+        cycle = self.service.store.state["bump_cycles"][cycle_id]
+        self.assertEqual(cycle["last_provider_event_kind"], "success")
+        self.assertEqual(cycle["last_success_message_id"], message.id)
+        self.assertEqual(len(detection_channel.sent), 1)
+
+        cycle["due_at"] = serialize_datetime(ge.now_utc() - timedelta(minutes=1))
+        _due_reminders, due_bump_cycles, _, _, _, _ = self.service._collect_due_records()
+        self.assertEqual(len(due_bump_cycles), 1)
+
+        await self.service._deliver_due_bump_cycles(due_bump_cycles)
+
+        self.assertEqual(len(reminder_channel.sent), 1)
+        _args, kwargs = reminder_channel.sent[0]
+        self.assertIsNotNone(kwargs.get("embed"))
+
     async def test_unrelated_bot_messages_do_not_start_bump_cycle(self):
         guild, detection_channel, _reminder_channel, bumper, _provider, _role = await self._configure_bump_fixture()
         other_bot = DummyMember(5555, bot=True, display_name="OtherBot")

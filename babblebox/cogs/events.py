@@ -35,12 +35,30 @@ class EventsCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
         self.bot = bot
 
+    async def _route_bump_provider_message(self, message: discord.Message) -> bool:
+        if getattr(message, "guild", None) is None:
+            return False
+        utility_service = getattr(self.bot, "utility_service", None)
+        bump_handler = getattr(utility_service, "handle_bump_provider_message", None)
+        if not callable(bump_handler):
+            return False
+        candidate_checker = getattr(utility_service, "is_bump_provider_message_candidate", None)
+        if callable(candidate_checker):
+            is_candidate = bool(candidate_checker(message))
+        else:
+            is_candidate = bool(getattr(getattr(message, "author", None), "bot", False))
+        if not is_candidate:
+            return False
+        await bump_handler(message)
+        return True
+
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message):
         shield_service = getattr(self.bot, "shield_service", None)
         utility_service = getattr(self.bot, "utility_service", None)
         is_webhook_message = message.guild is not None and getattr(message, "webhook_id", None) is not None
         if is_webhook_message:
+            await self._route_bump_provider_message(message)
             if shield_service is not None:
                 shield_decision = await shield_service.handle_message(message, scan_source="webhook_message")
                 if shield_decision is not None and shield_decision.matched:
@@ -48,9 +66,7 @@ class EventsCog(commands.Cog):
             return
 
         if message.author.bot:
-            bump_handler = getattr(utility_service, "handle_bump_provider_message", None)
-            if callable(bump_handler) and message.guild is not None:
-                await bump_handler(message)
+            await self._route_bump_provider_message(message)
             return
 
         if await is_command_message(self.bot, message):
@@ -194,17 +210,20 @@ class EventsCog(commands.Cog):
     async def on_message_edit(self, before: discord.Message, after: discord.Message):
         if getattr(after, "guild", None) is None:
             return
-        utility_service = getattr(self.bot, "utility_service", None)
-        if getattr(getattr(after, "author", None), "bot", False) and getattr(after, "webhook_id", None) is None:
-            bump_handler = getattr(utility_service, "handle_bump_provider_message", None)
-            if callable(bump_handler):
-                await bump_handler(after)
+        is_webhook_message = getattr(after, "webhook_id", None) is not None
+        is_bot_message = bool(getattr(getattr(after, "author", None), "bot", False))
+        provider_candidate = False
+        if is_bot_message or is_webhook_message:
+            provider_candidate = await self._route_bump_provider_message(after)
+        if is_bot_message and not is_webhook_message:
             return
         shield_service = getattr(self.bot, "shield_service", None)
         if shield_service is not None:
             shield_decision = await shield_service.handle_message_edit(before, after)
             if shield_decision is not None and shield_decision.matched:
                 return
+        if provider_candidate:
+            return
         confessions_service = getattr(self.bot, "confessions_service", None)
         if confessions_service is not None:
             await confessions_service.handle_message_edit(after)
