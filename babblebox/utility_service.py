@@ -504,6 +504,33 @@ class UtilityService:
             return "success"
         return None
 
+    def _bump_provider_message_context(
+        self,
+        message: discord.Message,
+    ) -> tuple[dict, str, dict] | None:
+        if not self.storage_ready or message.guild is None:
+            return None
+        config = self.get_bump_config(message.guild.id)
+        if not config.get("enabled"):
+            return None
+        provider = _normalize_bump_provider(config.get("provider"))
+        spec = BUMP_PROVIDER_SPECS.get(provider)
+        if spec is None:
+            return None
+        detection_channel_ids = {
+            channel_id for channel_id in config.get("detection_channel_ids", []) if isinstance(channel_id, int)
+        }
+        channel_id = int(getattr(getattr(message, "channel", None), "id", 0) or 0)
+        if channel_id not in detection_channel_ids:
+            return None
+        author_id = int(getattr(getattr(message, "author", None), "id", 0) or 0)
+        if author_id != int(spec["bot_id"]):
+            return None
+        return config, provider, spec
+
+    def is_bump_provider_message_candidate(self, message: discord.Message) -> bool:
+        return self._bump_provider_message_context(message) is not None
+
     def _bump_initiator_user_id(self, message: discord.Message) -> int | None:
         interaction_metadata = getattr(message, "interaction_metadata", None)
         user = getattr(interaction_metadata, "user", None)
@@ -516,20 +543,10 @@ class UtilityService:
         return None
 
     async def handle_bump_provider_message(self, message: discord.Message):
-        if not self.storage_ready or message.guild is None:
+        context = self._bump_provider_message_context(message)
+        if context is None:
             return
-        config = self.get_bump_config(message.guild.id)
-        if not config.get("enabled"):
-            return
-        provider = _normalize_bump_provider(config.get("provider"))
-        spec = BUMP_PROVIDER_SPECS.get(provider)
-        if spec is None:
-            return
-        detection_channel_ids = set(channel_id for channel_id in config.get("detection_channel_ids", []) if isinstance(channel_id, int))
-        if message.channel.id not in detection_channel_ids:
-            return
-        if int(getattr(message.author, "id", 0) or 0) != int(spec["bot_id"]):
-            return
+        config, provider, spec = context
         classification = self._classify_bump_provider_message(provider, self._extract_bump_message_text(message))
         if classification is None:
             return
