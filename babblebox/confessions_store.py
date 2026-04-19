@@ -12,6 +12,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 from babblebox.confessions_crypto import ConfessionsCrypto, ConfessionsCryptoError, ConfessionsKeyConfigError
 from babblebox.confessions_privacy import build_duplicate_signals
+from babblebox.premium_limits import LIMIT_CONFESSIONS_MAX_IMAGES, storage_ceiling as premium_storage_ceiling
 from babblebox.postgres_json import decode_postgres_json_array
 from babblebox.text_safety import normalize_plain_text
 
@@ -28,6 +29,7 @@ VALID_REVIEW_STATUSES = {"none", "pending", "approved", "denied", "overridden", 
 VALID_SUBMISSION_KINDS = {"confession", "reply"}
 VALID_REPLY_FLOWS = {"reply_to_confession", "owner_reply_to_user"}
 VALID_CASE_KINDS = {"review", "safety_block", "published_moderation"}
+CONFESSION_IMAGE_STORAGE_LIMIT = premium_storage_ceiling(LIMIT_CONFESSIONS_MAX_IMAGES, 3)
 VALID_CASE_STATUSES = {"open", "resolved"}
 VALID_SUPPORT_TICKET_KINDS = {"appeal", "report"}
 VALID_SUPPORT_TICKET_STATUSES = {"open", "resolved"}
@@ -310,7 +312,11 @@ def normalize_confession_config(guild_id: int, payload: Any) -> dict[str, Any]:
     cleaned["auto_moderation_exempt_admins"] = bool(payload.get("auto_moderation_exempt_admins", True))
     cleaned["auto_moderation_exempt_role_ids"] = _clean_int_list(payload.get("auto_moderation_exempt_role_ids"))
     max_images = payload.get("max_images")
-    cleaned["max_images"] = max_images if isinstance(max_images, int) and 1 <= max_images <= 3 else 3
+    cleaned["max_images"] = (
+        min(max_images, CONFESSION_IMAGE_STORAGE_LIMIT)
+        if isinstance(max_images, int) and max_images >= 1
+        else 3
+    )
     for field, default_value, minimum, maximum in (
         ("cooldown_seconds", 5 * 60, 15, 24 * 3600),
         ("burst_limit", 3, 1, 10),

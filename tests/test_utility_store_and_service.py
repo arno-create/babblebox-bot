@@ -12,6 +12,17 @@ import discord
 
 from babblebox import game_engine as ge
 from babblebox.cogs.utilities import UtilityCog
+from babblebox.premium_limits import (
+    LIMIT_AFK_SCHEDULES,
+    LIMIT_BUMP_DETECTION_CHANNELS,
+    LIMIT_REMINDERS_ACTIVE,
+    LIMIT_REMINDERS_PUBLIC_ACTIVE,
+    LIMIT_WATCH_FILTERS,
+    LIMIT_WATCH_KEYWORDS,
+    guild_limit as premium_guild_limit,
+    user_limit as premium_user_limit,
+)
+from babblebox.premium_models import PLAN_FREE, PLAN_GUILD_PRO, PLAN_PLUS
 from babblebox.shield_service import (
     FEATURE_SURFACE_AFK_REASON,
     FEATURE_SURFACE_AFK_SCHEDULE_REASON,
@@ -31,6 +42,31 @@ from babblebox.utility_helpers import (
 )
 from babblebox.utility_service import BUMP_PROVIDER_DISBOARD, UtilityService
 from babblebox.utility_store import UtilityStateStore, UtilityStorageUnavailable, _PostgresUtilityStore
+
+
+USER_PREMIUM_LIMIT_KEYS = {
+    LIMIT_WATCH_KEYWORDS,
+    LIMIT_WATCH_FILTERS,
+    LIMIT_REMINDERS_ACTIVE,
+    LIMIT_REMINDERS_PUBLIC_ACTIVE,
+    LIMIT_AFK_SCHEDULES,
+}
+
+
+class PremiumLimitStub:
+    def __init__(self, *, user_plans: Optional[dict[int, str]] = None, guild_plans: Optional[dict[int, str]] = None):
+        self.user_plans = dict(user_plans or {})
+        self.guild_plans = dict(guild_plans or {})
+
+    def resolve_user_limit(self, user_id: int, limit_key: str) -> int:
+        return premium_user_limit(self.user_plans.get(user_id, PLAN_FREE), limit_key)
+
+    def resolve_guild_limit(self, guild_id: int, limit_key: str) -> int:
+        return premium_guild_limit(self.guild_plans.get(guild_id, PLAN_FREE), limit_key)
+
+    def describe_limit_error(self, *, limit_key: str, limit_value: int) -> str:
+        plan_label = "Babblebox Plus" if limit_key in USER_PREMIUM_LIMIT_KEYS else "Babblebox Guild Pro"
+        return f"You reached the current limit of {limit_value}. {plan_label} unlocks more."
 
 
 class DummyUser:
@@ -286,6 +322,9 @@ class UtilityStoreAndServiceTests(unittest.IsolatedAsyncioTestCase):
         self.bot = DummyBot()
         self.service = UtilityService(self.bot, store=self.store)
         self.service.storage_ready = True
+
+    def _attach_premium(self, *, user_plans: Optional[dict[int, str]] = None, guild_plans: Optional[dict[int, str]] = None):
+        self.bot.premium_service = PremiumLimitStub(user_plans=user_plans, guild_plans=guild_plans)
 
     async def _configure_bump_fixture(
         self,
@@ -944,6 +983,99 @@ class UtilityStoreAndServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(ok)
         self.assertIn("at least", message)
+
+    async def test_watch_keywords_upgrade_from_free_to_plus_without_resetting_saved_state(self):
+        user_id = 4401
+        for index in range(10):
+            ok, _ = await self.service.add_watch_keyword(
+                user_id,
+                guild_id=None,
+                channel_id=None,
+                phrase=f"topic-{index}",
+                scope="global",
+                mode="contains",
+            )
+            self.assertTrue(ok)
+
+        ok, message = await self.service.add_watch_keyword(
+            user_id,
+            guild_id=None,
+            channel_id=None,
+            phrase="topic-10",
+            scope="global",
+            mode="contains",
+        )
+        self.assertFalse(ok)
+        self.assertIn("store up to 10 watch keywords", message)
+
+        self._attach_premium(user_plans={user_id: PLAN_PLUS})
+        ok, result = await self.service.add_watch_keyword(
+            user_id,
+            guild_id=None,
+            channel_id=None,
+            phrase="topic-10",
+            scope="global",
+            mode="contains",
+        )
+        self.assertTrue(ok, result)
+        self.assertEqual(self.service.watch_keyword_limit(user_id), 25)
+        self.assertEqual(self.service.get_watch_summary(user_id, guild_id=None)["total_keywords"], 11)
+
+    async def test_plus_reminders_can_grow_past_free_limit(self):
+        user = DummyUser(4402)
+        for index in range(3):
+            ok, record = await self.service.create_reminder(
+                user=user,
+                text=f"Reminder {index}",
+                delay_seconds=20 * 60,
+                delivery="dm",
+                guild=None,
+                channel=None,
+                origin_jump_url=None,
+            )
+            self.assertTrue(ok, record)
+            self.service._reminder_cooldowns[user.id] = 0.0
+
+        ok, message = await self.service.create_reminder(
+            user=user,
+            text="Reminder 3",
+            delay_seconds=20 * 60,
+            delivery="dm",
+            guild=None,
+            channel=None,
+            origin_jump_url=None,
+        )
+        self.assertFalse(ok)
+        self.assertIn("keep up to 3 active reminders", message)
+
+        self._attach_premium(user_plans={user.id: PLAN_PLUS})
+        ok, record = await self.service.create_reminder(
+            user=user,
+            text="Reminder 3",
+            delay_seconds=20 * 60,
+            delivery="dm",
+            guild=None,
+            channel=None,
+            origin_jump_url=None,
+        )
+        self.assertTrue(ok, record)
+        self.assertEqual(self.service.reminder_limit(user.id), 15)
+
+    async def test_watch_filters_preserve_over_limit_saved_state_after_downgrade(self):
+        user_id = 4403
+        self._attach_premium(user_plans={user_id: PLAN_PLUS})
+        for ignored_user_id in range(7000, 7010):
+            ok, message = await self.service.add_watch_ignored_user(user_id, ignored_user_id=ignored_user_id)
+            self.assertTrue(ok, message)
+
+        self._attach_premium()
+        summary = self.service.get_watch_summary(user_id, guild_id=None)
+        self.assertEqual(len(summary["ignored_user_ids"]), 10)
+
+        ok, message = await self.service.add_watch_ignored_user(user_id, ignored_user_id=7010)
+        self.assertFalse(ok)
+        self.assertIn("current limit of 8", message)
+        self.assertEqual(len(self.service.get_watch_summary(user_id, guild_id=None)["ignored_user_ids"]), 10)
 
     async def test_public_reminder_delivery_is_rechecked_and_withheld_privately_when_blocked(self):
         user = DummyMember(560, display_name="Mira")
@@ -1702,6 +1834,85 @@ class UtilityStoreAndServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(ok)
         self.assertIn("removed", message.lower())
         self.assertEqual(self.service.list_afk_schedules(user.id), [])
+
+    async def test_plus_afk_schedule_limit_expands_without_affecting_existing_free_baseline(self):
+        user = DummyUser(4404)
+        for index in range(6):
+            ok, schedule = await self.service.create_afk_schedule(
+                user=user,
+                repeat="weekly",
+                timezone_name="UTC+04:00",
+                local_hour=9,
+                local_minute=index,
+                weekday=index % 7,
+                reason=build_afk_reason_text(preset="working", custom_reason=f"Shift {index}"),
+                preset="working",
+                duration_seconds=8 * 3600,
+            )
+            self.assertTrue(ok, schedule)
+
+        ok, message = await self.service.create_afk_schedule(
+            user=user,
+            repeat="weekly",
+            timezone_name="UTC+04:00",
+            local_hour=10,
+            local_minute=0,
+            weekday=6,
+            reason=build_afk_reason_text(preset="working", custom_reason="Overflow"),
+            preset="working",
+            duration_seconds=8 * 3600,
+        )
+        self.assertFalse(ok)
+        self.assertIn("keep up to 6 recurring AFK schedules", message)
+
+        self._attach_premium(user_plans={user.id: PLAN_PLUS})
+        ok, schedule = await self.service.create_afk_schedule(
+            user=user,
+            repeat="weekly",
+            timezone_name="UTC+04:00",
+            local_hour=10,
+            local_minute=0,
+            weekday=6,
+            reason=build_afk_reason_text(preset="working", custom_reason="Overflow"),
+            preset="working",
+            duration_seconds=8 * 3600,
+        )
+        self.assertTrue(ok, schedule)
+        self.assertEqual(self.service.afk_schedule_limit(user.id), 20)
+
+    async def test_guild_pro_bump_detection_limit_allows_more_channels(self):
+        guild, detection_channel, reminder_channel, _bumper, provider, _role = await self._configure_bump_fixture()
+        extra_channels = []
+        for channel_id in range(904, 909):
+            channel = DummyChannel(
+                channel_id,
+                guild=guild,
+                name=f"bump-{channel_id}",
+                visible_user_ids={guild.me.id},
+            )
+            guild.add_channel(channel)
+            self.bot.add_channel(channel)
+            extra_channels.append(channel)
+
+        detection_ids = [detection_channel.id, *[channel.id for channel in extra_channels]]
+        ok, message = await self.service.configure_bump(
+            guild.id,
+            provider=BUMP_PROVIDER_DISBOARD,
+            detection_channel_ids=detection_ids,
+            reminder_channel_id=reminder_channel.id,
+        )
+        self.assertFalse(ok)
+        self.assertIn("keep up to 5 bump detection channels", message)
+
+        self._attach_premium(guild_plans={guild.id: PLAN_GUILD_PRO})
+        ok, result = await self.service.configure_bump(
+            guild.id,
+            provider=BUMP_PROVIDER_DISBOARD,
+            detection_channel_ids=detection_ids,
+            reminder_channel_id=reminder_channel.id,
+        )
+        self.assertTrue(ok, result)
+        self.assertEqual(self.service.bump_detection_channel_limit(guild.id), 15)
 
     async def test_recurring_afk_schedule_activates_and_advances_next_start(self):
         user = DummyUser(92)

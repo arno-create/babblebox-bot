@@ -1,6 +1,6 @@
 # Babblebox Terms of Service
 
-Last updated: March 26, 2026
+Last updated: April 19, 2026
 
 This document is the repository copy of the Babblebox Terms of Service. It describes the rules, responsibilities, and service limits that apply when using the Babblebox website or Discord bot.
 
@@ -95,7 +95,9 @@ Babblebox depends on:
 - Discord APIs, permissions, channels, and DM delivery
 - website hosting
 - Supabase or Postgres-backed storage
-- optional third-party providers for enabled features such as owner-managed, second-pass Shield AI review of already-flagged live messages
+- optional third-party providers for enabled features such as Patreon-linked premium entitlement checks or second-pass Shield AI review of already-flagged live messages
+
+Premium entitlements can depend on provider availability, webhook delivery, OAuth linking, and current verification state. If those checks fail, are delayed, or go stale, Babblebox may temporarily withhold premium-only expansion or premium-only runtime behavior until the entitlement is verified again. Babblebox is designed to preserve saved state on downgrade rather than intentionally deleting it just because a plan changed.
 
 Babblebox does not provide a paid SLA, guaranteed moderation coverage, guaranteed delivery outcome, or guaranteed uptime.
 

@@ -14,7 +14,6 @@ from babblebox.shield_ai import SHIELD_AI_SUPPORT_GUILD_ID, format_shield_ai_mod
 from babblebox.shield_service import (
     ACTION_LABELS,
     CONFIDENCE_LABELS,
-    CUSTOM_PATTERN_LIMIT,
     MATCH_CLASS_LABELS,
     PACK_LABELS,
     SEVERE_CATEGORY_LABELS,
@@ -1523,6 +1522,7 @@ class ShieldCog(commands.Cog):
             "support_default": "Support-server default",
             "ordinary_global": "Global ordinary-guild default",
             "guild_override": "Per-guild owner override",
+            "premium_required": "Guild Pro required",
         }
         return labels.get(source, source.replace("_", " ").title())
 
@@ -2025,6 +2025,7 @@ class ShieldCog(commands.Cog):
                     f"Guild: {guild_label}\n"
                     f"Enabled: **{'Yes' if ai_status['enabled'] else 'No'}**\n"
                     f"Source: {self._ai_policy_source_label(ai_status['policy_source'])}\n"
+                    f"Guild Pro: {'Unlocked' if ai_status.get('premium_unlocked') else 'Required for live review'}\n"
                     f"Allowed models: {self._format_ai_models(ai_status['allowed_models'])}\n"
                     f"Guild access mode: `{ai_status['guild_access_mode']}`\n"
                     f"Guild model override: {self._format_ai_models(ai_status['guild_allowed_models_override'])}"
@@ -2185,6 +2186,7 @@ class ShieldCog(commands.Cog):
             value=(
                 f"Readiness: {ai_status['status']}\n"
                 f"Policy source: {self._ai_policy_source_label(ai_status['policy_source'])}\n"
+                f"Guild Pro: {'Unlocked' if ai_status.get('premium_unlocked') else 'Required for live review'}\n"
                 f"Allowed models: {self._format_ai_models(ai_status['allowed_models'])}\n"
                 f"Routing: {self._ai_routing_label(ai_status['routing_strategy'])}\n"
                 f"Local-confidence threshold: `{ai_status['min_confidence']}`\n"
@@ -2241,7 +2243,7 @@ class ShieldCog(commands.Cog):
             value=(
                 f"Repeated-hit escalation: `{config['escalation_threshold']}` hits in `{config['escalation_window_minutes']}` minutes\n"
                 f"Global timeout fallback: `{config['timeout_minutes']}` minutes\n"
-                f"{len(config['custom_patterns'])}/{CUSTOM_PATTERN_LIMIT} configured\n"
+                f"{len(config['custom_patterns'])}/{self.service.custom_pattern_limit(guild_id)} configured\n"
                 "Advanced patterns stay safe-text only. Raw user regex is intentionally unsupported."
             ),
             inline=False,
@@ -2361,7 +2363,7 @@ class ShieldCog(commands.Cog):
         log_channel = self._format_mentions([int(config["log_channel_id"])], kind="channel") if config.get("log_channel_id") else "Not set"
         embed = discord.Embed(
             title="Shield AI Assist",
-            description="Second-pass review for already-flagged live messages only. Access is owner-managed; this page shows the resolved policy plus this guild's local review scope.",
+            description="Second-pass review for already-flagged live messages only. Guild Pro unlocks eligibility; this page shows the resolved policy plus this guild's local review scope.",
             color=ge.EMBED_THEME["info"],
         )
         embed.add_field(
@@ -2370,6 +2372,7 @@ class ShieldCog(commands.Cog):
                 f"Enabled: **{'Yes' if ai_status['enabled'] else 'No'}**\n"
                 f"Readiness: {ai_status['status']}\n"
                 f"Policy source: {self._ai_policy_source_label(ai_status['policy_source'])}\n"
+                f"Guild Pro: {'Unlocked' if ai_status.get('premium_unlocked') else 'Required for live review'}\n"
                 f"Support default: {'Yes' if ai_status['support_server_default'] else 'No'}\n"
                 f"Ordinary-guild default: {'Enabled' if ai_status['ordinary_global_enabled'] else 'Disabled'}\n"
                 f"Allowed models: {self._format_ai_models(ai_status['allowed_models'])}\n"
@@ -2421,7 +2424,7 @@ class ShieldCog(commands.Cog):
             value="`/shield ai min_confidence:high privacy:true promo:false scam:true adult:true severe:true`",
             inline=False,
         )
-        return self._finalize_shield_embed(embed, footer="Babblebox Shield AI | Review scope is admin-configurable; access is owner-managed")
+        return self._finalize_shield_embed(embed, footer="Babblebox Shield AI | Review scope is admin-configurable; Guild Pro unlocks eligibility")
 
     def _logs_embed(self, guild_id: int) -> discord.Embed:
         config = self.service.get_config(guild_id)

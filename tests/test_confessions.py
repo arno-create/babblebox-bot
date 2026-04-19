@@ -24,6 +24,8 @@ from babblebox.cogs.confessions import (
     StatelessPublishedConfessionReplyView,
     _validate_discord_modal_payload,
 )
+from babblebox.premium_limits import LIMIT_CONFESSIONS_MAX_IMAGES, guild_limit as premium_guild_limit
+from babblebox.premium_models import PLAN_FREE, PLAN_GUILD_PRO
 from babblebox.shield_link_safety import ShieldLinkAssessment
 from babblebox.shield_service import FEATURE_SURFACE_CONFESSIONS_LINKS, ShieldFeatureLinkScan
 from babblebox.confessions_service import CASE_ID_PREFIX, CONFESSION_ID_PREFIX, ConfessionSubmissionResult, ConfessionsService
@@ -67,6 +69,17 @@ def _view_custom_ids(view) -> list[str]:
     if view is None:
         return []
     return [child.custom_id for child in view.children if getattr(child, "custom_id", None)]
+
+
+class PremiumConfessionsStub:
+    def __init__(self, *, guild_plans: dict[int, str] | None = None):
+        self.guild_plans = dict(guild_plans or {})
+
+    def resolve_guild_limit(self, guild_id: int, limit_key: str) -> int:
+        return premium_guild_limit(self.guild_plans.get(guild_id, PLAN_FREE), limit_key)
+
+    def describe_limit_error(self, *, limit_key: str, limit_value: int) -> str:
+        return f"You reached the current limit of {limit_value}. Babblebox Guild Pro unlocks more."
 
 
 class FeatureLinkGatewaySpy:
@@ -735,6 +748,9 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
     async def asyncTearDown(self):
         await self.service.close()
 
+    def _attach_premium(self, *, guild_plans: dict[int, str] | None = None):
+        self.bot.premium_service = PremiumConfessionsStub(guild_plans=guild_plans)
+
     def _member(
         self,
         user_id: int,
@@ -1236,6 +1252,33 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(external.ok)
         self.assertEqual(external.state, "blocked")
         self.assertIn("safely accept", external.message.lower())
+
+    async def test_guild_pro_raises_confession_image_limit_without_paywalling_images_themselves(self):
+        await self._configure()
+
+        ok, message = await self.service.configure_guild(self.guild.id, allow_images=True, max_images=4)
+        self.assertFalse(ok)
+        self.assertIn("up to 3 on this plan", message)
+
+        self._attach_premium(guild_plans={self.guild.id: PLAN_GUILD_PRO})
+        ok, message = await self.service.configure_guild(self.guild.id, allow_images=True, max_images=6)
+        self.assertTrue(ok, message)
+        self.assertEqual(self.service.confession_image_limit(self.guild.id), 6)
+        self.assertEqual(self.service.get_config(self.guild.id)["max_images"], 6)
+
+    async def test_confession_image_setting_stays_visible_after_downgrade(self):
+        await self._configure()
+        self._attach_premium(guild_plans={self.guild.id: PLAN_GUILD_PRO})
+        ok, message = await self.service.configure_guild(self.guild.id, allow_images=True, max_images=6)
+        self.assertTrue(ok, message)
+
+        self._attach_premium()
+        config = self.service.get_config(self.guild.id)
+        self.assertEqual(config["max_images"], 6)
+        self.assertIn("over current plan limit", self.service._image_policy_label(config))
+
+        ok, message = await self.service.configure_guild(self.guild.id, max_images=6)
+        self.assertTrue(ok, message)
 
     async def test_strike_escalation_clear_action_and_guild_scoping(self):
         await self._configure()

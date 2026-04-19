@@ -17,6 +17,17 @@ import discord
 from discord.ext import commands
 
 from babblebox import game_engine as ge
+from babblebox.premium_limits import (
+    CAPABILITY_SHIELD_AI_REVIEW,
+    LIMIT_SHIELD_ALLOWLIST,
+    LIMIT_SHIELD_CUSTOM_PATTERNS,
+    LIMIT_SHIELD_FILTERS,
+    LIMIT_SHIELD_PACK_EXEMPTIONS,
+    LIMIT_SHIELD_SEVERE_TERMS,
+    guild_limit as premium_guild_limit,
+    storage_ceiling,
+)
+from babblebox.premium_models import PLAN_FREE
 from babblebox.shield_ai import (
     DEFAULT_SHIELD_AI_FAST_MODEL,
     SHIELD_AI_MIN_CONFIDENCE_CHOICES,
@@ -102,13 +113,14 @@ SHIELD_ACTIONS = {"disabled", "detect", "log", "delete_log", "delete_escalate", 
 SHIELD_SENSITIVITIES = {"low", "normal", "high"}
 CUSTOM_PATTERN_MODES = {"contains", "word", "wildcard"}
 
-FILTER_LIMIT = 20
-ALLOWLIST_LIMIT = 20
+FILTER_LIMIT = premium_guild_limit(PLAN_FREE, LIMIT_SHIELD_FILTERS)
+ALLOWLIST_LIMIT = premium_guild_limit(PLAN_FREE, LIMIT_SHIELD_ALLOWLIST)
 ALLOW_PHRASE_MAX_LEN = 60
-CUSTOM_PATTERN_LIMIT = 10
+CUSTOM_PATTERN_LIMIT = premium_guild_limit(PLAN_FREE, LIMIT_SHIELD_CUSTOM_PATTERNS)
 CUSTOM_PATTERN_LABEL_MAX_LEN = 32
 CUSTOM_PATTERN_MAX_LEN = 80
 CUSTOM_PATTERN_WILDCARD_LIMIT = 4
+SHIELD_SEVERE_COMPILED_LIMIT = storage_ceiling(LIMIT_SHIELD_SEVERE_TERMS, SHIELD_SEVERE_TERM_LIMIT)
 MAX_MESSAGE_PREVIEW = 220
 CHANNEL_ACTIVITY_LIMIT = 200
 ALERT_DEDUP_SECONDS = 30.0
@@ -874,8 +886,10 @@ class CompiledShieldConfig:
 class ShieldAIAccessPolicy:
     guild_id: int
     enabled: bool
+    policy_enabled: bool
     source: str
     support_default: bool
+    premium_unlocked: bool
     allowed_models: tuple[str, ...]
     ordinary_global_enabled: bool
     ordinary_global_allowed_models: tuple[str, ...]
@@ -2425,6 +2439,46 @@ class ShieldService:
     def storage_message(self, feature_name: str = "Shield") -> str:
         return f"{feature_name} is temporarily unavailable because Babblebox could not reach its Shield database."
 
+    def _premium_service(self):
+        premium_service = getattr(self.bot, "premium_service", None)
+        if callable(getattr(premium_service, "resolve_guild_limit", None)):
+            return premium_service
+        return None
+
+    def _resolve_guild_limit(self, guild_id: int, limit_key: str, fallback: int) -> int:
+        premium_service = self._premium_service()
+        if premium_service is None:
+            return fallback
+        return premium_service.resolve_guild_limit(guild_id, limit_key)
+
+    def _guild_has_capability(self, guild_id: int, capability: str) -> bool:
+        premium_service = self._premium_service()
+        return bool(premium_service is not None and premium_service.guild_has_capability(guild_id, capability))
+
+    def _premium_limit_error(self, *, guild_id: int, limit_key: str, limit_value: int, default_message: str) -> str:
+        premium_service = self._premium_service()
+        if premium_service is None:
+            return default_message
+        return premium_service.describe_limit_error(limit_key=limit_key, limit_value=limit_value)
+
+    def _count_change_exceeds_limit(self, *, previous_count: int, next_count: int, limit_value: int) -> bool:
+        return next_count > limit_value and next_count > previous_count
+
+    def filter_limit(self, guild_id: int) -> int:
+        return self._resolve_guild_limit(guild_id, LIMIT_SHIELD_FILTERS, FILTER_LIMIT)
+
+    def allowlist_limit(self, guild_id: int) -> int:
+        return self._resolve_guild_limit(guild_id, LIMIT_SHIELD_ALLOWLIST, ALLOWLIST_LIMIT)
+
+    def custom_pattern_limit(self, guild_id: int) -> int:
+        return self._resolve_guild_limit(guild_id, LIMIT_SHIELD_CUSTOM_PATTERNS, CUSTOM_PATTERN_LIMIT)
+
+    def pack_exemption_limit(self, guild_id: int) -> int:
+        return self._resolve_guild_limit(guild_id, LIMIT_SHIELD_PACK_EXEMPTIONS, FILTER_LIMIT)
+
+    def severe_term_limit(self, guild_id: int) -> int:
+        return self._resolve_guild_limit(guild_id, LIMIT_SHIELD_SEVERE_TERMS, SHIELD_SEVERE_TERM_LIMIT)
+
     def get_meta(self) -> dict[str, Any]:
         meta = self.store.state.get("meta")
         if isinstance(meta, dict):
@@ -2465,6 +2519,7 @@ class ShieldService:
         config = self.get_config(guild_id)
         meta = self.get_meta()
         support_default = shield_ai_available_in_guild(guild_id)
+        premium_enabled = support_default or self._guild_has_capability(guild_id, CAPABILITY_SHIELD_AI_REVIEW)
         ordinary_global_enabled = bool(meta["ordinary_ai_enabled"])
         ordinary_global_allowed_models = tuple(meta["ordinary_ai_allowed_models"]) or (DEFAULT_SHIELD_AI_FAST_MODEL,)
 
@@ -2502,12 +2557,17 @@ class ShieldService:
             source = "guild_override"
             updated_by = config.get("ai_access_updated_by")
             updated_at = config.get("ai_access_updated_at")
+        policy_enabled = enabled
+        if not premium_enabled:
+            enabled = False
 
         return ShieldAIAccessPolicy(
             guild_id=guild_id,
             enabled=enabled,
+            policy_enabled=policy_enabled,
             source=source,
             support_default=support_default,
+            premium_unlocked=premium_enabled,
             allowed_models=tuple(allowed_models),
             ordinary_global_enabled=ordinary_global_enabled,
             ordinary_global_allowed_models=ordinary_global_allowed_models,
@@ -2537,7 +2597,14 @@ class ShieldService:
             if not enabled_packs:
                 setup_blockers.append("Select at least one Shield pack for AI review.")
         status_message = provider_status
-        if not policy.enabled:
+        if not policy.premium_unlocked:
+            if policy.policy_enabled:
+                status_message = "Shield AI second-pass review requires Babblebox Guild Pro on this server."
+            elif policy.source == "guild_override":
+                status_message = "AI review is disabled for this guild by owner override. Babblebox Guild Pro is also required for live review."
+            else:
+                status_message = "AI review is off for ordinary guilds until the owner enables it. Babblebox Guild Pro is also required for live review."
+        elif not policy.enabled:
             if policy.support_default:
                 status_message = "AI review is disabled for the support server by owner override."
             elif policy.source == "guild_override":
@@ -2551,10 +2618,13 @@ class ShieldService:
         else:
             status_message = "Ready for second-pass review."
         return {
-            "supported": policy.enabled,
+            "supported": policy.premium_unlocked,
             "enabled": policy.enabled,
+            "policy_enabled": policy.policy_enabled,
             "policy_source": policy.source,
             "support_server_default": policy.support_default,
+            "premium_unlocked": policy.premium_unlocked,
+            "premium_required": not policy.premium_unlocked,
             "ordinary_global_enabled": policy.ordinary_global_enabled,
             "ordinary_global_allowed_models": list(policy.ordinary_global_allowed_models),
             "guild_access_mode": policy.guild_access_mode,
@@ -2825,7 +2895,7 @@ class ShieldService:
 
         message = f"Shield live-message moderation is now {'enabled' if enabled else 'disabled'} for this server."
         if enabled:
-            message += " Shield AI stays second-pass only and owner-managed."
+            message += " Shield AI stays second-pass only and requires Guild Pro outside the support server."
             if first_enable:
                 message += (
                     " On first enable, Babblebox applies its recommended non-AI baseline anywhere you had not already customized it. "
@@ -3237,6 +3307,7 @@ class ShieldService:
         if not ok:
             return False, cleaned_or_error
         term = cleaned_or_error
+        severe_limit = self.severe_term_limit(guild_id)
 
         def mutate(config: dict[str, Any]):
             custom_terms = list(_sorted_unique_text(config.get("severe_custom_terms", [])))
@@ -3244,8 +3315,15 @@ class ShieldService:
             if cleaned_action == "add":
                 if term in custom_terms or term in SEVERE_REMOVABLE_DEFAULT_TERMS:
                     raise ValueError("That severe term is already active.")
-                if len(custom_terms) >= SHIELD_SEVERE_TERM_LIMIT:
-                    raise ValueError(f"You can keep up to {SHIELD_SEVERE_TERM_LIMIT} custom severe terms.")
+                if len(custom_terms) >= severe_limit:
+                    raise ValueError(
+                        self._premium_limit_error(
+                            guild_id=guild_id,
+                            limit_key=LIMIT_SHIELD_SEVERE_TERMS,
+                            limit_value=severe_limit,
+                            default_message=f"You can keep up to {severe_limit} custom severe terms.",
+                        )
+                    )
                 custom_terms.append(term)
             elif cleaned_action == "remove_custom":
                 if term not in custom_terms:
@@ -3255,8 +3333,15 @@ class ShieldService:
                 if term not in SEVERE_REMOVABLE_DEFAULT_TERMS:
                     raise ValueError("That phrase is not one of Babblebox's removable bundled severe terms.")
                 if term not in removed_terms:
-                    if len(removed_terms) >= SHIELD_SEVERE_TERM_LIMIT:
-                        raise ValueError(f"You can keep up to {SHIELD_SEVERE_TERM_LIMIT} removed bundled severe terms.")
+                    if len(removed_terms) >= severe_limit:
+                        raise ValueError(
+                            self._premium_limit_error(
+                                guild_id=guild_id,
+                                limit_key=LIMIT_SHIELD_SEVERE_TERMS,
+                                limit_value=severe_limit,
+                                default_message=f"You can keep up to {severe_limit} removed bundled severe terms.",
+                            )
+                        )
                     removed_terms.append(term)
             elif cleaned_action == "restore_default":
                 if term not in removed_terms:
@@ -3464,15 +3549,24 @@ class ShieldService:
         label = {
             "adult_solicitation_excluded_channel_ids": "adult-solicitation carve-out channels",
         }.get(field, field.replace("_ids", "").replace("_", " "))
+        filter_limit = self.filter_limit(guild_id)
 
         def mutate(config: dict[str, Any]):
             values = set(_sorted_unique_ints(config.get(field, [])))
+            previous_count = len(values)
             if enabled:
                 values.add(target_id)
             else:
                 values.discard(target_id)
-            if len(values) > FILTER_LIMIT:
-                raise ValueError(f"You can keep up to {FILTER_LIMIT} entries in `{label}`.")
+            if self._count_change_exceeds_limit(previous_count=previous_count, next_count=len(values), limit_value=filter_limit):
+                raise ValueError(
+                    self._premium_limit_error(
+                        guild_id=guild_id,
+                        limit_key=LIMIT_SHIELD_FILTERS,
+                        limit_value=filter_limit,
+                        default_message=f"You can keep up to {filter_limit} entries in `{label}`.",
+                    )
+                )
             config[field] = sorted(values)
 
         return await self._update_config(
@@ -3489,17 +3583,26 @@ class ShieldService:
         bucket = {"channel": "channel_ids", "role": "role_ids", "user": "user_ids"}.get(cleaned_kind)
         if bucket is None:
             return False, "Pack exemptions must target a channel, role, or member."
+        exemption_limit = self.pack_exemption_limit(guild_id)
 
         def mutate(config: dict[str, Any]):
             pack_exemptions = dict(config.get("pack_exemptions", {}))
             pack_entry = dict(pack_exemptions.get(cleaned_pack, {}))
             values = set(_sorted_unique_ints(pack_entry.get(bucket, [])))
+            previous_count = len(values)
             if enabled:
                 values.add(target_id)
             else:
                 values.discard(target_id)
-            if len(values) > FILTER_LIMIT:
-                raise ValueError(f"You can keep up to {FILTER_LIMIT} {cleaned_kind} exemptions on a single Shield pack.")
+            if self._count_change_exceeds_limit(previous_count=previous_count, next_count=len(values), limit_value=exemption_limit):
+                raise ValueError(
+                    self._premium_limit_error(
+                        guild_id=guild_id,
+                        limit_key=LIMIT_SHIELD_PACK_EXEMPTIONS,
+                        limit_value=exemption_limit,
+                        default_message=f"You can keep up to {exemption_limit} {cleaned_kind} exemptions on a single Shield pack.",
+                    )
+                )
             pack_entry[bucket] = sorted(values)
             pack_exemptions[cleaned_pack] = pack_entry
             config["pack_exemptions"] = pack_exemptions
@@ -3528,8 +3631,17 @@ class ShieldService:
         if bucket is None:
             return False, "Pack exemptions must target a channel, role, or member."
         cleaned_ids = _sorted_unique_ints(target_ids)
-        if len(cleaned_ids) > FILTER_LIMIT:
-            return False, f"You can keep up to {FILTER_LIMIT} {cleaned_kind} exemptions on a single Shield pack."
+        exemption_limit = self.pack_exemption_limit(guild_id)
+        current = self.get_config(guild_id)
+        current_entry = (current.get("pack_exemptions", {}) or {}).get(cleaned_pack, {})
+        previous_count = len(_sorted_unique_ints((current_entry or {}).get(bucket, [])))
+        if self._count_change_exceeds_limit(previous_count=previous_count, next_count=len(cleaned_ids), limit_value=exemption_limit):
+            return False, self._premium_limit_error(
+                guild_id=guild_id,
+                limit_key=LIMIT_SHIELD_PACK_EXEMPTIONS,
+                limit_value=exemption_limit,
+                default_message=f"You can keep up to {exemption_limit} {cleaned_kind} exemptions on a single Shield pack.",
+            )
 
         def mutate(config: dict[str, Any]):
             pack_exemptions = dict(config.get("pack_exemptions", {}))
@@ -3605,15 +3717,24 @@ class ShieldService:
             return False, "Unknown allowlist bucket."
         if not valid:
             return False, cleaned
+        allowlist_limit = self.allowlist_limit(guild_id)
 
         def mutate(config: dict[str, Any]):
             values = set(_sorted_unique_text(config.get(field, [])))
+            previous_count = len(values)
             if enabled:
                 values.add(cleaned)
             else:
                 values.discard(cleaned)
-            if len(values) > ALLOWLIST_LIMIT:
-                raise ValueError(f"You can keep up to {ALLOWLIST_LIMIT} entries in that allowlist.")
+            if self._count_change_exceeds_limit(previous_count=previous_count, next_count=len(values), limit_value=allowlist_limit):
+                raise ValueError(
+                    self._premium_limit_error(
+                        guild_id=guild_id,
+                        limit_key=LIMIT_SHIELD_ALLOWLIST,
+                        limit_value=allowlist_limit,
+                        default_message=f"You can keep up to {allowlist_limit} entries in that allowlist.",
+                    )
+                )
             config[field] = sorted(values)
 
         pretty = field.replace("allow_", "").replace("_", " ")
@@ -3668,7 +3789,10 @@ class ShieldService:
         enabled_packs: Sequence[str] | None = None,
     ) -> tuple[bool, str]:
         if enabled is not None:
-            return False, "Shield AI access is owner-managed privately. `/shield ai` only changes review threshold and eligible packs."
+            return (
+                False,
+                "Shield AI eligibility is resolved outside `/shield ai`. Babblebox Guild Pro unlocks second-pass review; this command only changes review threshold and eligible packs.",
+            )
         cleaned_min_confidence = str(min_confidence).strip().lower() if isinstance(min_confidence, str) else None
         if cleaned_min_confidence is not None and cleaned_min_confidence not in SHIELD_AI_MIN_CONFIDENCE_CHOICES:
             return False, "AI review confidence threshold must be low, medium, or high."
@@ -3695,6 +3819,11 @@ class ShieldService:
         pack_summary = ", ".join(PACK_LABELS[pack] for pack in final_packs) if final_packs else "no packs selected"
         policy = self.resolve_ai_access_policy(guild_id)
         provider_status = self.ai_provider.diagnostics().get("status", "Unavailable.")
+        entitlement_note = (
+            "Guild Pro unlock is active for live second-pass review."
+            if policy.premium_unlocked
+            else "Guild Pro is still required for live second-pass review on this server."
+        )
         return await self._update_config(
             guild_id,
             mutate,
@@ -3702,6 +3831,7 @@ class ShieldService:
                 f"Shield AI review scope now uses `{final_min_confidence}` minimum local confidence for {pack_summary}. "
                 f"Owner policy source: `{policy.source}`. "
                 f"Allowed models: {format_shield_ai_model_list(policy.allowed_models)}. "
+                f"{entitlement_note} "
                 f"Provider status: {provider_status}"
             ),
         )
@@ -3719,11 +3849,19 @@ class ShieldService:
         if not valid:
             return False, payload_or_error
         payload = payload_or_error
+        custom_pattern_limit = self.custom_pattern_limit(guild_id)
 
         def mutate(config: dict[str, Any]):
             items = [item for item in config.get("custom_patterns", []) if isinstance(item, dict)]
-            if len(items) >= CUSTOM_PATTERN_LIMIT:
-                raise ValueError(f"You can keep up to {CUSTOM_PATTERN_LIMIT} advanced Shield patterns.")
+            if len(items) >= custom_pattern_limit:
+                raise ValueError(
+                    self._premium_limit_error(
+                        guild_id=guild_id,
+                        limit_key=LIMIT_SHIELD_CUSTOM_PATTERNS,
+                        limit_value=custom_pattern_limit,
+                        default_message=f"You can keep up to {custom_pattern_limit} advanced Shield patterns.",
+                    )
+                )
             items.append(payload)
             config["custom_patterns"] = items
 
@@ -8302,8 +8440,8 @@ class ShieldService:
                 for category in _sorted_unique_text(raw.get("severe_enabled_categories", DEFAULT_SHIELD_SEVERE_CATEGORIES))
                 if category in VALID_SHIELD_SEVERE_CATEGORIES
             ),
-            severe_custom_terms=tuple(_sorted_unique_text(raw.get("severe_custom_terms", []))[:SHIELD_SEVERE_TERM_LIMIT]),
-            severe_removed_terms=frozenset(_sorted_unique_text(raw.get("severe_removed_terms", []))[:SHIELD_SEVERE_TERM_LIMIT]),
+            severe_custom_terms=tuple(_sorted_unique_text(raw.get("severe_custom_terms", []))[:SHIELD_SEVERE_COMPILED_LIMIT]),
+            severe_removed_terms=frozenset(_sorted_unique_text(raw.get("severe_removed_terms", []))[:SHIELD_SEVERE_COMPILED_LIMIT]),
             link_policy_mode=link_policy_mode,
             link_policy=PackSettings(
                 enabled=link_policy_mode != DEFAULT_SHIELD_LINK_POLICY_MODE,
@@ -8326,7 +8464,7 @@ class ShieldService:
             escalation_threshold=int(raw.get("escalation_threshold", 3)),
             escalation_window_minutes=int(raw.get("escalation_window_minutes", 15)),
             timeout_minutes=int(raw.get("timeout_minutes", 10)),
-            custom_patterns=tuple(custom_patterns[:CUSTOM_PATTERN_LIMIT]),
+            custom_patterns=tuple(custom_patterns),
         )
 
     def _rebuild_config_cache(self):

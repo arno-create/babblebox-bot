@@ -16,6 +16,12 @@ import discord
 from discord.ext import commands
 
 from babblebox import game_engine as ge
+from babblebox.premium_limits import (
+    LIMIT_CONFESSIONS_MAX_IMAGES,
+    guild_limit as premium_guild_limit,
+    storage_ceiling as premium_storage_ceiling,
+)
+from babblebox.premium_models import PLAN_FREE
 from babblebox.confessions_privacy import (
     build_duplicate_signals,
     fuzzy_signature_ratio,
@@ -108,6 +114,9 @@ RASTER_IMAGE_CONTENT_TYPES = frozenset(
     {"image/png", "image/jpeg", "image/jpg", "image/gif", "image/webp", "image/bmp"}
 )
 RASTER_IMAGE_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"})
+CONFESSION_IMAGE_STORAGE_LIMIT = premium_storage_ceiling(LIMIT_CONFESSIONS_MAX_IMAGES, 3)
+
+
 def _moderation_action_payload(action: str) -> tuple[str, int | None, bool]:
     if action == "pause_24h":
         return "suspend", 24 * 3600, False
@@ -599,6 +608,27 @@ class ConfessionsService:
     def storage_message(self, feature_name: str = "Confessions") -> str:
         return f"{feature_name} are temporarily unavailable because Babblebox could not reach the confessions database."
 
+    def _premium_service(self):
+        premium_service = getattr(self.bot, "premium_service", None)
+        if callable(getattr(premium_service, "resolve_guild_limit", None)):
+            return premium_service
+        return None
+
+    def _resolve_guild_limit(self, guild_id: int, limit_key: str, fallback: int) -> int:
+        premium_service = self._premium_service()
+        if premium_service is None:
+            return fallback
+        return premium_service.resolve_guild_limit(guild_id, limit_key)
+
+    def _premium_limit_error(self, *, limit_key: str, limit_value: int, default_message: str) -> str:
+        premium_service = self._premium_service()
+        if premium_service is None:
+            return default_message
+        return premium_service.describe_limit_error(limit_key=limit_key, limit_value=limit_value)
+
+    def confession_image_limit(self, guild_id: int) -> int:
+        return self._resolve_guild_limit(guild_id, LIMIT_CONFESSIONS_MAX_IMAGES, premium_guild_limit(PLAN_FREE, LIMIT_CONFESSIONS_MAX_IMAGES))
+
     async def _rebuild_config_cache(self):
         self._compiled_configs = {}
         for guild_id, raw in (await self.store.fetch_all_configs()).items():
@@ -808,6 +838,10 @@ class ConfessionsService:
         clear_review_channel: bool = False,
         clear_appeals_channel: bool = False,
     ) -> tuple[bool, str]:
+        if max_images is not None and (not isinstance(max_images, int) or not (1 <= max_images <= CONFESSION_IMAGE_STORAGE_LIMIT)):
+            return False, f"Confession image limits must stay between 1 and {CONFESSION_IMAGE_STORAGE_LIMIT}."
+        image_limit = self.confession_image_limit(guild_id)
+
         def mutate(config: dict[str, Any]):
             if enabled is not None:
                 config["enabled"] = bool(enabled)
@@ -865,6 +899,15 @@ class ConfessionsService:
             if allow_self_edit is not None:
                 config["allow_self_edit"] = bool(allow_self_edit)
             if max_images is not None:
+                previous_value = int(config.get("max_images", 3) or 3)
+                if max_images > image_limit and max_images > previous_value:
+                    raise ValueError(
+                        self._premium_limit_error(
+                            limit_key=LIMIT_CONFESSIONS_MAX_IMAGES,
+                            limit_value=image_limit,
+                            default_message=f"Confession images can be set up to {image_limit} on this plan.",
+                        )
+                    )
                 config["max_images"] = max_images
             if cooldown_seconds is not None:
                 config["cooldown_seconds"] = cooldown_seconds
@@ -3996,9 +4039,12 @@ class ConfessionsService:
     def _image_policy_label(self, config: dict[str, Any]) -> str:
         if not config["allow_images"]:
             return "Off by default"
+        guild_id = int(config.get("guild_id") or 0)
+        active_limit = self.confession_image_limit(guild_id) if guild_id > 0 else premium_guild_limit(PLAN_FREE, LIMIT_CONFESSIONS_MAX_IMAGES)
+        over_limit_note = " | over current plan limit" if int(config.get("max_images", 3)) > active_limit else ""
         if config.get("image_review_required"):
-            return f"Enabled (max {config['max_images']}, private review)"
-        return f"Enabled (max {config['max_images']}, no forced review)"
+            return f"Enabled (max {config['max_images']}, private review{over_limit_note})"
+        return f"Enabled (max {config['max_images']}, no forced review{over_limit_note})"
 
     def _reply_policy_label(self, config: dict[str, Any]) -> str:
         if not config["allow_anonymous_replies"]:

@@ -15,6 +15,7 @@ from babblebox import game_engine as ge
 
 COGS = (
     "babblebox.cogs.meta",
+    "babblebox.cogs.premium",
     "babblebox.cogs.afk",
     "babblebox.cogs.gameplay",
     "babblebox.cogs.party_games",
@@ -28,6 +29,10 @@ COGS = (
 )
 
 REQUIRED_SLASH_CONTRACT: dict[str, dict[str, object]] = {
+    "premium": {
+        "children": frozenset({"status", "plans", "link", "refresh", "unlink", "guild"}),
+        "default_member_permissions": None,
+    },
     # A prefix-only emergency lock lane is not a releasable state.
     "lock": {
         "children": frozenset({"channel", "remove", "settings"}),

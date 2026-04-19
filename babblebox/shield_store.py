@@ -10,6 +10,11 @@ from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 from babblebox.postgres_json import decode_postgres_json_array, decode_postgres_json_object
+from babblebox.premium_limits import (
+    LIMIT_SHIELD_CUSTOM_PATTERNS,
+    LIMIT_SHIELD_SEVERE_TERMS,
+    storage_ceiling as premium_storage_ceiling,
+)
 from babblebox.shield_ai import (
     DEFAULT_SHIELD_AI_FAST_MODEL,
     SHIELD_AI_MIN_CONFIDENCE_CHOICES,
@@ -48,6 +53,8 @@ VALID_SHIELD_LOG_STYLES = {"adaptive", "compact"}
 VALID_SHIELD_LOG_PING_MODES = {"smart", "never"}
 VALID_PACK_LOG_OVERRIDE_STYLES = {"inherit"} | VALID_SHIELD_LOG_STYLES
 VALID_PACK_LOG_OVERRIDE_PING_MODES = {"inherit"} | VALID_SHIELD_LOG_PING_MODES
+SHIELD_SEVERE_STORAGE_LIMIT = premium_storage_ceiling(LIMIT_SHIELD_SEVERE_TERMS, SHIELD_SEVERE_TERM_LIMIT)
+SHIELD_CUSTOM_PATTERN_STORAGE_LIMIT = premium_storage_ceiling(LIMIT_SHIELD_CUSTOM_PATTERNS, 10)
 SHIELD_NUMERIC_CONFIG_SPECS: dict[str, tuple[int, int, int]] = {
     "escalation_threshold": (2, 6, 3),
     "escalation_window_minutes": (5, 120, 15),
@@ -415,8 +422,8 @@ def normalize_guild_shield_config(guild_id: int, config: Any) -> dict[str, Any]:
     cleaned["severe_enabled_categories"] = (
         severe_categories if "severe_enabled_categories" in config else severe_categories or list(DEFAULT_SHIELD_SEVERE_CATEGORIES)
     )
-    cleaned["severe_custom_terms"] = _clean_text_list(config.get("severe_custom_terms"))[:SHIELD_SEVERE_TERM_LIMIT]
-    cleaned["severe_removed_terms"] = _clean_text_list(config.get("severe_removed_terms"))[:SHIELD_SEVERE_TERM_LIMIT]
+    cleaned["severe_custom_terms"] = _clean_text_list(config.get("severe_custom_terms"))[:SHIELD_SEVERE_STORAGE_LIMIT]
+    cleaned["severe_removed_terms"] = _clean_text_list(config.get("severe_removed_terms"))[:SHIELD_SEVERE_STORAGE_LIMIT]
 
     link_policy_mode = str(config.get("link_policy_mode", DEFAULT_SHIELD_LINK_POLICY_MODE)).strip().lower()
     cleaned["link_policy_mode"] = link_policy_mode if link_policy_mode in VALID_SHIELD_LINK_POLICY_MODES else DEFAULT_SHIELD_LINK_POLICY_MODE
@@ -497,7 +504,7 @@ def normalize_guild_shield_config(guild_id: int, config: Any) -> dict[str, Any]:
                 "enabled": bool(item.get("enabled", True)),
             }
         )
-    cleaned["custom_patterns"] = patterns[:10]
+    cleaned["custom_patterns"] = patterns[:SHIELD_CUSTOM_PATTERN_STORAGE_LIMIT]
     return cleaned
 
 
