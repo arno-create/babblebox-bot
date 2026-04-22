@@ -10,6 +10,7 @@ from discord.ext import commands
 
 from babblebox import game_engine as ge
 from babblebox.command_utils import HybridPanelSendResult, require_channel_permissions, send_hybrid_panel_response, send_hybrid_response
+from babblebox.official_links import OFFICIAL_LINKS
 
 
 LEADERBOARD_LABELS = {
@@ -22,11 +23,6 @@ VISIBILITY_CHOICES = [
     app_commands.Choice(name="Public", value="public"),
     app_commands.Choice(name="Only me", value="private"),
 ]
-OFFICIAL_LINKS: tuple[tuple[str, str], ...] = (
-    ("Support Server", "https://discord.com/servers/inevitable-friendship-1322933864360050688"),
-    ("GitHub Repository", "https://github.com/arno-create/babblebox-bot"),
-    ("Official Website", "https://arno-create.github.io/babblebox-bot/"),
-)
 HELP_VIEW_TIMEOUT_SECONDS = 900
 EMBED_FIELD_VALUE_LIMIT = 1024
 SELECT_DESCRIPTION_LIMIT = 100
@@ -154,7 +150,8 @@ HELP_PAGES: list[dict[str, str]] = [
         "description": "Official places to get help, report issues, and inspect the product.",
         "body": (
             "Use `/support` for the standalone support card whenever you need the official links quickly.\n"
-            "If something breaks, feels confusing, or could be better, reporting it is genuinely appreciated and helps shape the next fix or polish pass."
+            "If something breaks, feels confusing, or could be better, reporting it is genuinely appreciated and helps shape the next fix or polish pass.\n"
+            "If you want to purchase Babblebox premium, the same support card also includes the official Patreon membership page."
         ),
         "links": official_links_markdown(),
         "try": "`/support`, `bb!support`, or use the link buttons below.",
@@ -353,7 +350,8 @@ def build_support_embed() -> discord.Embed:
         value=(
             "`Support Server` for live help and quick triage.\n"
             "`GitHub Repository` for bugs, issues, and open-source code.\n"
-            "`Official Website` for docs, policies, and public product info."
+            "`Official Website` for docs, policies, and public product info.\n"
+            "`Patreon Membership` to purchase Babblebox premium before linking it in Discord."
         ),
         inline=False,
     )

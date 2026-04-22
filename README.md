@@ -339,12 +339,15 @@ Question Drops notes:
 | --- | --- | --- |
 | `/premium status` | n/a | See your linked premium status, active plans, and current resolved limits |
 | `/premium plans` | n/a | Review `Supporter`, `Plus`, and `Guild Pro` plan behavior |
+| `/premium subscribe` | n/a | Open the official Patreon page where Babblebox premium is purchased |
 | `/premium link` | n/a | Start Patreon account linking in a private flow |
 | `/premium refresh` | n/a | Recheck your Patreon-backed entitlements |
 | `/premium unlink` | n/a | Remove the current premium account link and delete Babblebox's local encrypted Patreon tokens |
 | `/premium guild status` | n/a | See the current guild entitlement and claim state |
 | `/premium guild claim` | n/a | Claim a Guild Pro entitlement for the current server |
 | `/premium guild release` | n/a | Release the current guild claim |
+
+Buy the tier on Patreon first, then run `/premium link` in Discord to attach that Patreon account to Babblebox. If you bought Guild Pro, finish with `/premium guild claim` in the server you want to upgrade.
 
 If a Guild Pro claim source expires but the same owner still has another valid Guild Pro source, Babblebox can rebind that server claim without moving it to another user or deleting saved server configuration.
 

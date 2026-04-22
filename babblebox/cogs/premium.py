@@ -9,6 +9,7 @@ from discord.ext import commands
 
 from babblebox import game_engine as ge
 from babblebox.command_utils import send_hybrid_response
+from babblebox.official_links import PATREON_MEMBERSHIP_URL, SUPPORT_SERVER_URL
 from babblebox.premium_limits import (
     CAPABILITY_QUESTION_DROPS_AI_CELEBRATIONS,
     CAPABILITY_SHIELD_AI_REVIEW,
@@ -59,6 +60,12 @@ class PremiumCog(commands.Cog):
                 footer="Babblebox Premium",
             ),
         )
+
+    def _subscribe_view(self) -> discord.ui.View:
+        view = discord.ui.View()
+        view.add_item(discord.ui.Button(label="View Patreon", url=PATREON_MEMBERSHIP_URL))
+        view.add_item(discord.ui.Button(label="Support Server", url=SUPPORT_SERVER_URL))
+        return view
 
     async def _require_storage(self, ctx: commands.Context) -> bool:
         if self.service.storage_ready:
@@ -185,6 +192,8 @@ class PremiumCog(commands.Cog):
             color=ge.EMBED_THEME["accent"],
         )
         notes: list[str] = []
+        if link is None and not snapshot.get("active_plans") and not snapshot.get("system_access"):
+            notes.append("Need premium? Use `/premium subscribe` to open Patreon, then run `/premium link` after you join a Babblebox tier.")
         if snapshot.get("stale"):
             notes.append("Patreon data is stale. Babblebox is preserving the last verified entitlement until grace expires.")
         if snapshot.get("blocked"):
@@ -321,6 +330,16 @@ class PremiumCog(commands.Cog):
             ),
             inline=False,
         )
+        embed.add_field(
+            name="How To Start",
+            value=(
+                "1. Use `/premium subscribe` to open the Patreon membership page.\n"
+                "2. Join the Patreon tier you want.\n"
+                "3. Run `/premium link` to connect that Patreon account to Discord.\n"
+                "4. If you bought Guild Pro, use `/premium guild claim` in the server you want to upgrade."
+            ),
+            inline=False,
+        )
         return ge.style_embed(embed, footer="Babblebox Premium | Patreon-backed entitlements with safe manual overrides")
 
     def _admin_status_embed(self, *, title: str, note: str, user_id: int | None = None, guild_id: int | None = None) -> discord.Embed:
@@ -416,7 +435,19 @@ class PremiumCog(commands.Cog):
     async def premium_plans_command(self, ctx: commands.Context):
         if not await self._require_storage(ctx):
             return
-        await self._send_private(ctx, embed=self._plans_embed())
+        await self._send_private(ctx, embed=self._plans_embed(), view=self._subscribe_view())
+
+    @premium_group.command(name="subscribe", with_app_command=True, description="Open the Patreon page where Babblebox premium is purchased")
+    async def premium_subscribe_command(self, ctx: commands.Context):
+        if not await self._require_storage(ctx):
+            return
+        embed = ge.make_status_embed(
+            "Patreon Membership",
+            "Open Patreon to choose a Babblebox tier. After you join, come back to Discord and run `/premium link` to connect that Patreon account to your Babblebox premium status.",
+            tone="info",
+            footer="Babblebox Premium",
+        )
+        await self._send_private(ctx, embed=embed, view=self._subscribe_view())
 
     @premium_group.command(name="link", with_app_command=True, description="Start Patreon linking for this Discord user")
     async def premium_link_command(self, ctx: commands.Context):

@@ -97,7 +97,7 @@ class BabbleBotSetupHookTests(unittest.IsolatedAsyncioTestCase):
                 lock_root = next(command for command in bot.tree.get_commands() if command.name == "lock")
                 timeout_root = next(command for command in bot.tree.get_commands() if command.name == "timeout")
                 self.assertEqual(sync_targets, [None])
-                self.assertEqual({command.name for command in premium_root.commands}, {"status", "plans", "link", "refresh", "unlink", "guild"})
+                self.assertEqual({command.name for command in premium_root.commands}, {"status", "plans", "subscribe", "link", "refresh", "unlink", "guild"})
                 self.assertEqual({command.name for command in lock_root.commands}, {"channel", "remove", "settings"})
                 self.assertEqual({command.name for command in timeout_root.commands}, {"remove"})
                 self.assertIsNone(premium_root.default_permissions)
@@ -247,7 +247,7 @@ class BabbleBotCommandErrorTests(unittest.IsolatedAsyncioTestCase):
         with self._env():
             bot = BabbleBot()
 
-            synced_premium_root = _fake_synced_root("premium", ("status", "plans", "link", "refresh", "unlink", "guild"))
+            synced_premium_root = _fake_synced_root("premium", ("status", "plans", "subscribe", "link", "refresh", "unlink", "guild"))
             synced_lock_root = _fake_synced_root("lock", ("channel", "remove", "settings"))
             stale_timeout_root = _fake_synced_root("timeout", ("remove",), discord.Permissions(moderate_members=True))
 
@@ -273,7 +273,7 @@ class BabbleBotCommandErrorTests(unittest.IsolatedAsyncioTestCase):
         with self._env():
             bot = BabbleBot()
 
-            synced_premium_root = _fake_synced_root("premium", ("status", "plans", "link", "refresh", "unlink", "guild"))
+            synced_premium_root = _fake_synced_root("premium", ("status", "plans", "subscribe", "link", "refresh", "unlink", "guild"))
             stale_lock_root = _fake_synced_root("lock", ("channel", "remove", "settings"), discord.Permissions(manage_channels=True))
             synced_timeout_root = _fake_synced_root("timeout", ("remove",))
 
