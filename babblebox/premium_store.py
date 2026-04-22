@@ -430,24 +430,58 @@ class _PostgresPremiumStore(_BasePremiumStore):
             self._pool = None
 
     async def _ensure_schema(self):
-        statements = (
+        table_statements = (
             "CREATE TABLE IF NOT EXISTS premium_oauth_states (provider TEXT NOT NULL, state_token TEXT NOT NULL, discord_user_id BIGINT NOT NULL, action TEXT NOT NULL, created_at TIMESTAMPTZ NOT NULL, expires_at TIMESTAMPTZ NOT NULL, consumed_at TIMESTAMPTZ NULL, metadata JSONB NOT NULL DEFAULT '{}'::jsonb, PRIMARY KEY (provider, state_token))",
             "CREATE TABLE IF NOT EXISTS premium_links (provider TEXT NOT NULL, discord_user_id BIGINT NOT NULL, provider_user_id TEXT NOT NULL, link_status TEXT NOT NULL, linked_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL, access_token_ciphertext TEXT NULL, refresh_token_ciphertext TEXT NULL, token_expires_at TIMESTAMPTZ NULL, scopes JSONB NOT NULL DEFAULT '[]'::jsonb, email TEXT NULL, display_name TEXT NULL, metadata JSONB NOT NULL DEFAULT '{}'::jsonb, PRIMARY KEY (provider, discord_user_id))",
-            "CREATE UNIQUE INDEX IF NOT EXISTS ux_premium_links_provider_user ON premium_links (provider, provider_user_id)",
             "CREATE TABLE IF NOT EXISTS premium_entitlements (entitlement_id TEXT PRIMARY KEY, provider TEXT NOT NULL, source_ref TEXT NOT NULL, discord_user_id BIGINT NOT NULL, plan_code TEXT NOT NULL, status TEXT NOT NULL, linked_provider_user_id TEXT NOT NULL, last_verified_at TIMESTAMPTZ NOT NULL, stale_after TIMESTAMPTZ NOT NULL, grace_until TIMESTAMPTZ NOT NULL, current_period_end TIMESTAMPTZ NULL, metadata JSONB NOT NULL DEFAULT '{}'::jsonb)",
-            "CREATE UNIQUE INDEX IF NOT EXISTS ux_premium_entitlements_provider_source ON premium_entitlements (provider, source_ref)",
-            "CREATE INDEX IF NOT EXISTS ix_premium_entitlements_user ON premium_entitlements (discord_user_id)",
             "CREATE TABLE IF NOT EXISTS premium_manual_overrides (override_id TEXT PRIMARY KEY, target_type TEXT NOT NULL, target_id BIGINT NOT NULL, kind TEXT NOT NULL, plan_code TEXT NULL, active BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL, actor_user_id BIGINT NULL, reason TEXT NULL, metadata JSONB NOT NULL DEFAULT '{}'::jsonb)",
-            "CREATE INDEX IF NOT EXISTS ix_premium_manual_targets ON premium_manual_overrides (target_type, target_id)",
             "CREATE TABLE IF NOT EXISTS premium_guild_claims (claim_id TEXT PRIMARY KEY, guild_id BIGINT NOT NULL UNIQUE, plan_code TEXT NOT NULL, owner_user_id BIGINT NOT NULL, source_kind TEXT NOT NULL, source_id TEXT NOT NULL, status TEXT NOT NULL, claimed_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL, entitlement_id TEXT NULL, released_at TIMESTAMPTZ NULL, note TEXT NULL)",
-            "CREATE UNIQUE INDEX IF NOT EXISTS ux_premium_guild_claims_source_active ON premium_guild_claims (source_kind, source_id) WHERE status = 'active'",
-            "CREATE INDEX IF NOT EXISTS ix_premium_guild_claims_entitlement_active ON premium_guild_claims (entitlement_id) WHERE entitlement_id IS NOT NULL AND status = 'active'",
             "CREATE TABLE IF NOT EXISTS premium_provider_state (provider TEXT PRIMARY KEY, payload JSONB NOT NULL DEFAULT '{}'::jsonb, updated_at TIMESTAMPTZ NOT NULL)",
             "CREATE TABLE IF NOT EXISTS premium_webhook_events (event_key TEXT PRIMARY KEY, provider TEXT NOT NULL, event_type TEXT NOT NULL, payload_hash TEXT NOT NULL, status TEXT NOT NULL, error_text TEXT NULL, received_at TIMESTAMPTZ NOT NULL, processed_at TIMESTAMPTZ NULL, payload JSONB NOT NULL DEFAULT '{}'::jsonb)",
             "CREATE TABLE IF NOT EXISTS premium_audit_log (audit_id TEXT PRIMARY KEY, actor_user_id BIGINT NULL, action TEXT NOT NULL, target_type TEXT NOT NULL, target_id TEXT NOT NULL, detail JSONB NOT NULL DEFAULT '{}'::jsonb, created_at TIMESTAMPTZ NOT NULL)",
         )
+        alter_statements = (
+            "ALTER TABLE premium_guild_claims ADD COLUMN IF NOT EXISTS plan_code TEXT NULL",
+            "ALTER TABLE premium_guild_claims ADD COLUMN IF NOT EXISTS owner_user_id BIGINT NULL",
+            "ALTER TABLE premium_guild_claims ADD COLUMN IF NOT EXISTS source_kind TEXT NULL",
+            "ALTER TABLE premium_guild_claims ADD COLUMN IF NOT EXISTS source_id TEXT NULL",
+            "ALTER TABLE premium_guild_claims ADD COLUMN IF NOT EXISTS status TEXT NULL",
+            "ALTER TABLE premium_guild_claims ADD COLUMN IF NOT EXISTS claimed_at TIMESTAMPTZ NULL",
+            "ALTER TABLE premium_guild_claims ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NULL",
+            "ALTER TABLE premium_guild_claims ADD COLUMN IF NOT EXISTS entitlement_id TEXT NULL",
+            "ALTER TABLE premium_guild_claims ADD COLUMN IF NOT EXISTS released_at TIMESTAMPTZ NULL",
+            "ALTER TABLE premium_guild_claims ADD COLUMN IF NOT EXISTS note TEXT NULL",
+            "ALTER TABLE premium_provider_state ADD COLUMN IF NOT EXISTS payload JSONB NOT NULL DEFAULT '{}'::jsonb",
+            "ALTER TABLE premium_provider_state ADD COLUMN IF NOT EXISTS updated_at TIMESTAMPTZ NULL",
+            "ALTER TABLE premium_webhook_events ADD COLUMN IF NOT EXISTS provider TEXT NULL",
+            "ALTER TABLE premium_webhook_events ADD COLUMN IF NOT EXISTS event_type TEXT NULL",
+            "ALTER TABLE premium_webhook_events ADD COLUMN IF NOT EXISTS payload_hash TEXT NULL",
+            "ALTER TABLE premium_webhook_events ADD COLUMN IF NOT EXISTS status TEXT NULL",
+            "ALTER TABLE premium_webhook_events ADD COLUMN IF NOT EXISTS error_text TEXT NULL",
+            "ALTER TABLE premium_webhook_events ADD COLUMN IF NOT EXISTS received_at TIMESTAMPTZ NULL",
+            "ALTER TABLE premium_webhook_events ADD COLUMN IF NOT EXISTS processed_at TIMESTAMPTZ NULL",
+            "ALTER TABLE premium_webhook_events ADD COLUMN IF NOT EXISTS payload JSONB NOT NULL DEFAULT '{}'::jsonb",
+            "ALTER TABLE premium_audit_log ADD COLUMN IF NOT EXISTS actor_user_id BIGINT NULL",
+            "ALTER TABLE premium_audit_log ADD COLUMN IF NOT EXISTS action TEXT NULL",
+            "ALTER TABLE premium_audit_log ADD COLUMN IF NOT EXISTS target_type TEXT NULL",
+            "ALTER TABLE premium_audit_log ADD COLUMN IF NOT EXISTS target_id TEXT NULL",
+            "ALTER TABLE premium_audit_log ADD COLUMN IF NOT EXISTS detail JSONB NOT NULL DEFAULT '{}'::jsonb",
+            "ALTER TABLE premium_audit_log ADD COLUMN IF NOT EXISTS created_at TIMESTAMPTZ NULL",
+        )
+        index_statements = (
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_premium_links_provider_user ON premium_links (provider, provider_user_id)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_premium_entitlements_provider_source ON premium_entitlements (provider, source_ref)",
+            "CREATE INDEX IF NOT EXISTS ix_premium_entitlements_user ON premium_entitlements (discord_user_id)",
+            "CREATE INDEX IF NOT EXISTS ix_premium_manual_targets ON premium_manual_overrides (target_type, target_id)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_premium_guild_claims_source_active ON premium_guild_claims (source_kind, source_id) WHERE status = 'active'",
+            "CREATE INDEX IF NOT EXISTS ix_premium_guild_claims_entitlement_active ON premium_guild_claims (entitlement_id) WHERE entitlement_id IS NOT NULL AND status = 'active'",
+        )
         async with self._pool.acquire() as conn:
-            for statement in statements:
+            for statement in table_statements:
+                await conn.execute(statement)
+            for statement in alter_statements:
+                await conn.execute(statement)
+            for statement in index_statements:
                 await conn.execute(statement)
 
     def _oauth_state_from_row(self, row: Any) -> dict[str, Any] | None:

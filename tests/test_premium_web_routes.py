@@ -1,6 +1,7 @@
 import types
 import unittest
 from unittest.mock import patch
+from typing import Optional
 
 from babblebox import web
 from babblebox.premium_provider import PremiumProviderError, WebhookVerificationError
@@ -45,6 +46,7 @@ class PremiumWebRoutesTests(unittest.TestCase):
         storage_ready: bool = True,
         storage_error=None,
         patreon_configured: bool = True,
+        startup_state: Optional[str] = None,
         provider_monitor=None,
         confessions_readiness=None,
     ):
@@ -58,6 +60,25 @@ class PremiumWebRoutesTests(unittest.TestCase):
             complete_link_callback=lambda **kwargs: object(),
             handle_patreon_webhook=lambda **kwargs: object(),
         )
+        resolved_startup_state = startup_state or ("enabled_safe" if patreon_configured else "disabled")
+        stub.provider_diagnostics = lambda: {
+            "storage_ready": storage_ready,
+            "storage_error": stub.storage_error,
+            "storage_backend": configured_backend,
+            "database_url": "not-configured",
+            "crypto_source": "ephemeral",
+            "crypto_ephemeral": True,
+            "patreon_configured": patreon_configured,
+            "patreon_sync_ready": patreon_configured,
+            "patreon_config_errors": (),
+            "patreon_state": "configured" if patreon_configured else "disabled",
+            "startup_state": resolved_startup_state,
+            "link_count": 0,
+            "entitlement_count": 0,
+            "active_claim_count": 0,
+            "provider_monitor": dict(provider_monitor or {}),
+            "provider_state": {},
+        }
         if provider_monitor is not None:
             stub.public_provider_monitor_summary = lambda: dict(provider_monitor)
         if confessions_readiness is not None:
@@ -329,6 +350,30 @@ class PremiumWebRoutesTests(unittest.TestCase):
         self.assertEqual(payload["patreon_webhook_stats"]["total"], 0)
         self.assertTrue(payload["services"]["utility"]["storage_ready"])
         self.assertEqual(payload["premium"]["provider_monitor"]["invalid_signature_count"], 0)
+        self.assertEqual(payload["premium"]["startup_state"], "enabled_safe")
+
+    def test_health_stays_ready_when_patreon_is_intentionally_disabled(self):
+        with patch.dict(web.os.environ, {"PUBLIC_BASE_URL": "https://example.test"}, clear=False):
+            self._attach_runtime(
+                loop=_LoopStub(),
+                storage_ready=True,
+                patreon_configured=False,
+                service_overrides={
+                    "premium_service": self._service_stub(
+                        bot=None,
+                        storage_ready=True,
+                        patreon_configured=False,
+                        startup_state="disabled",
+                    )
+                },
+            )
+            response = self.client.get("/health")
+        payload = response.get_json()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["status"], "ok")
+        self.assertTrue(payload["public_premium_routes_ready"])
+        self.assertEqual(payload["premium"]["startup_state"], "disabled")
+        self.assertEqual(payload["premium"]["provider_monitor"]["status"], "disabled")
 
     def test_health_reports_degraded_public_premium_surface(self):
         with patch.dict(web.os.environ, {"PUBLIC_BASE_URL": "https://example.test"}, clear=False):
@@ -364,6 +409,41 @@ class PremiumWebRoutesTests(unittest.TestCase):
         self.assertFalse(payload["services"]["utility"]["storage_ready"])
         self.assertEqual(payload["services"]["utility"]["configured_backend"], "postgres")
         self.assertIn("utility_service_storage_unavailable", payload["issues"])
+
+    def test_health_reports_stale_provider_monitor_without_failing_readiness(self):
+        with patch.dict(web.os.environ, {"PUBLIC_BASE_URL": "https://example.test"}, clear=False):
+            self._attach_runtime(
+                loop=_LoopStub(),
+                storage_ready=True,
+                patreon_configured=True,
+                service_overrides={
+                    "premium_service": self._service_stub(
+                        bot=None,
+                        storage_ready=True,
+                        patreon_configured=True,
+                        startup_state="enabled_safe",
+                        provider_monitor={
+                            "status": "stale",
+                            "stale": True,
+                            "last_webhook_status": "error",
+                            "last_webhook_http_status": 500,
+                            "last_webhook_at": "2026-04-20T00:00:00+00:00",
+                            "invalid_signature_count": 0,
+                            "unresolved_issue_count": 1,
+                            "recent_unavailable_count": 1,
+                            "recent_server_error_count": 1,
+                            "last_issue_type": "webhook_unresolved",
+                            "last_issue_at": "2026-04-20T00:00:00+00:00",
+                        },
+                    )
+                },
+            )
+            response = self.client.get("/health")
+        payload = response.get_json()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["status"], "ok")
+        self.assertEqual(payload["premium"]["provider_monitor"]["status"], "stale")
+        self.assertTrue(payload["premium"]["provider_monitor"]["stale"])
 
     def test_readyz_hides_raw_storage_and_provider_details(self):
         with patch.dict(web.os.environ, {"PUBLIC_BASE_URL": "https://example.test"}, clear=False):

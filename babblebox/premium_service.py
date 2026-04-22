@@ -11,6 +11,7 @@ import uuid
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from typing import Any
+from urllib.parse import urlsplit
 
 from discord.ext import commands
 
@@ -70,6 +71,14 @@ PREMIUM_REPAIR_INTERVAL_SECONDS = 6 * 3600
 PREMIUM_LINK_STATE_MINUTES = 15
 PREMIUM_WEBHOOK_MAX_BYTES = 65536
 PREMIUM_REPAIR_REFRESH_WINDOW_SECONDS = 10 * 60
+PREMIUM_PROVIDER_MONITOR_STALE_HOURS = 48
+PREMIUM_STARTUP_STATE_DISABLED = "disabled"
+PREMIUM_STARTUP_STATE_ENABLED_SAFE = "enabled_safe"
+PREMIUM_STARTUP_STATE_ENABLED_UNSAFE = "enabled_unsafe"
+PREMIUM_PATREON_STATE_DISABLED = "disabled"
+PREMIUM_PATREON_STATE_CONFIGURED = "configured"
+PREMIUM_PATREON_STATE_MISCONFIGURED = "misconfigured"
+_LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1"})
 
 USER_LIMIT_KEYS = {
     LIMIT_WATCH_KEYWORDS,
@@ -164,6 +173,8 @@ class PremiumService:
         self.patreon = provider or PatreonPremiumProvider()
         self._lock = asyncio.Lock()
         self._repair_task: asyncio.Task | None = None
+        self._startup_state = PREMIUM_STARTUP_STATE_DISABLED
+        self._startup_validation_error: str | None = None
 
         self._links_by_user: dict[tuple[str, int], dict[str, Any]] = {}
         self._links_by_provider_user: dict[tuple[str, str], dict[str, Any]] = {}
@@ -184,6 +195,55 @@ class PremiumService:
     def _system_owner_claim_source_id(self, *, user_id: int, guild_id: int) -> str:
         return f"{SYSTEM_PREMIUM_CLAIM_KIND}:{int(user_id)}:{int(guild_id)}"
 
+    def _patreon_configuration_state(self) -> str:
+        state_getter = getattr(self.patreon, "configuration_state", None)
+        if callable(state_getter):
+            state = str(state_getter() or "").strip().lower()
+            if state in {
+                PREMIUM_PATREON_STATE_DISABLED,
+                PREMIUM_PATREON_STATE_CONFIGURED,
+                PREMIUM_PATREON_STATE_MISCONFIGURED,
+            }:
+                return state
+        if self.patreon.configured():
+            return PREMIUM_PATREON_STATE_CONFIGURED
+        configuration_errors = tuple(getattr(self.patreon, "configuration_errors", lambda: ())() or ())
+        if configuration_errors:
+            return PREMIUM_PATREON_STATE_MISCONFIGURED
+        return PREMIUM_PATREON_STATE_DISABLED
+
+    def _public_base_url_is_local_only(self) -> bool:
+        raw = str(os.getenv("PUBLIC_BASE_URL", "") or "").strip()
+        if not raw:
+            return False
+        parsed = urlsplit(raw)
+        hostname = str(parsed.hostname or "").strip().casefold()
+        return bool(hostname) and (hostname in _LOCAL_HOSTS or hostname.endswith(".local"))
+
+    def _startup_validation_result(self) -> tuple[str, str | None]:
+        patreon_state = self._patreon_configuration_state()
+        backend = getattr(self.store, "backend_name", None) or self.storage_backend_preference or "unknown"
+        if patreon_state == PREMIUM_PATREON_STATE_DISABLED:
+            return PREMIUM_STARTUP_STATE_DISABLED, None
+        if patreon_state == PREMIUM_PATREON_STATE_MISCONFIGURED:
+            return (
+                PREMIUM_STARTUP_STATE_ENABLED_UNSAFE,
+                (
+                    "Premium startup unsafe: Patreon premium configuration is incomplete or inconsistent. "
+                    f"{self._patreon_configuration_message()}"
+                ),
+            )
+        public_base_url = str(os.getenv("PUBLIC_BASE_URL", "") or "").strip()
+        if backend in {"memory", "test", "dev"} and public_base_url and not self._public_base_url_is_local_only():
+            return (
+                PREMIUM_STARTUP_STATE_ENABLED_UNSAFE,
+                (
+                    "Premium startup unsafe: Patreon-linked premium cannot use Postgres-less in-memory storage on "
+                    "a non-local public deployment. Configure Postgres-backed premium storage or disable Patreon premium."
+                ),
+            )
+        return PREMIUM_STARTUP_STATE_ENABLED_SAFE, None
+
     async def start(self) -> bool:
         if self._startup_storage_error is not None or self.store is None:
             self.storage_ready = False
@@ -199,6 +259,11 @@ class PremiumService:
             return False
         self.storage_ready = True
         self.storage_error = None
+        self._startup_state, self._startup_validation_error = self._startup_validation_result()
+        if self._startup_validation_error:
+            self.storage_ready = False
+            self.storage_error = self._startup_validation_error
+            raise RuntimeError(self._startup_validation_error)
         await self._reload_cache()
         self._register_web_runtime()
         if self.patreon.configured():
@@ -670,6 +735,7 @@ class PremiumService:
     def provider_diagnostics(self) -> dict[str, Any]:
         crypto_status = getattr(self.store, "crypto", None) if self.store is not None else None
         crypto_meta = getattr(crypto_status, "status", None)
+        patreon_state = self._patreon_configuration_state()
         return {
             "storage_ready": self.storage_ready,
             "storage_error": self.storage_error,
@@ -680,6 +746,9 @@ class PremiumService:
             "patreon_configured": self.patreon.configured(),
             "patreon_sync_ready": self.patreon.automation_ready(),
             "patreon_config_errors": tuple(getattr(self.patreon, "configuration_errors", lambda: ())()),
+            "patreon_state": patreon_state,
+            "startup_state": self._startup_state,
+            "startup_validation_error": self._startup_validation_error,
             "link_count": len(self._links_by_user),
             "entitlement_count": len(self._entitlements_by_id),
             "active_claim_count": len(self._claims_by_guild),
@@ -696,11 +765,19 @@ class PremiumService:
         recent_server_error_count = int(monitor.get("recent_server_error_count", 0) or 0)
         unresolved_issue_count = int(payload.get("unresolved_issue_count", 0) or 0)
         last_status = str(monitor.get("last_status") or "").strip().lower() or None
+        last_webhook_at = _parse_datetime(monitor.get("last_event_at"))
+        last_issue_at = _parse_datetime(last_issue.get("recorded_at"))
+        stale_cutoff = _utcnow() - timedelta(hours=PREMIUM_PROVIDER_MONITOR_STALE_HOURS)
+        stale = any(timestamp is not None and timestamp <= stale_cutoff for timestamp in (last_webhook_at, last_issue_at))
         status = "ready"
         if not self.storage_ready:
             status = "unavailable"
-        elif provider == PROVIDER_PATREON and not self.patreon.configured():
-            status = "not_configured"
+        elif provider == PROVIDER_PATREON and self._patreon_configuration_state() == PREMIUM_PATREON_STATE_DISABLED:
+            status = "disabled"
+        elif provider == PROVIDER_PATREON and self._patreon_configuration_state() == PREMIUM_PATREON_STATE_MISCONFIGURED:
+            status = "misconfigured"
+        elif stale and (monitor or last_issue):
+            status = "stale"
         elif last_status in {"invalid", "unresolved", "unavailable", "error"}:
             status = "degraded"
         return {
@@ -714,6 +791,7 @@ class PremiumService:
             "recent_server_error_count": recent_server_error_count,
             "last_issue_type": last_issue.get("issue_type"),
             "last_issue_at": last_issue.get("recorded_at"),
+            "stale": stale,
         }
 
     def resolve_user_limit(self, user_id: int, limit_key: str) -> int:

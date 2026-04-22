@@ -239,9 +239,13 @@ def _safe_provider_monitor_summary(service: Any) -> dict[str, Any]:
             candidate = getter()
             if isinstance(candidate, dict):
                 summary = dict(candidate)
+    diagnostics = _safe_premium_diagnostics(service)
     process_local = get_patreon_webhook_stats()
+    default_status = "ready" if summary else "process_local_only"
+    if not summary and str(diagnostics.get("startup_state") or "") == "disabled":
+        default_status = "disabled"
     return {
-        "status": str(summary.get("status") or ("ready" if summary else "process_local_only")),
+        "status": str(summary.get("status") or default_status),
         "last_webhook_status": summary.get("last_webhook_status") or process_local.get("last_status"),
         "last_webhook_http_status": summary.get("last_webhook_http_status") or process_local.get("last_http_status"),
         "last_webhook_at": summary.get("last_webhook_at") or process_local.get("last_event_at"),
@@ -260,7 +264,18 @@ def _safe_provider_monitor_summary(service: Any) -> dict[str, Any]:
         ),
         "last_issue_type": summary.get("last_issue_type"),
         "last_issue_at": summary.get("last_issue_at"),
+        "stale": bool(summary.get("stale", False)),
     }
+
+
+def _safe_premium_diagnostics(service: Any) -> dict[str, Any]:
+    getter = getattr(service, "provider_diagnostics", None)
+    if callable(getter):
+        with contextlib.suppress(Exception):
+            candidate = getter()
+            if isinstance(candidate, dict):
+                return dict(candidate)
+    return {}
 
 
 def _safe_confessions_readiness_summary(bot: Any) -> dict[str, Any]:
@@ -331,16 +346,25 @@ def _runtime_readiness_snapshot() -> dict[str, Any]:
             {*required_service_failures, *[name for name, snapshot in services.items() if not snapshot["attached"]]}
         )
     premium_snapshot = services["premium"]
+    premium_diagnostics = _safe_premium_diagnostics(service)
     patreon = getattr(service, "patreon", None)
-    patreon_configured = bool(callable(getattr(patreon, "configured", None)) and patreon.configured())
+    patreon_configured = bool(
+        premium_diagnostics.get("patreon_configured")
+        if "patreon_configured" in premium_diagnostics
+        else (callable(getattr(patreon, "configured", None)) and patreon.configured())
+    )
+    premium_startup_state = str(premium_diagnostics.get("startup_state") or ("enabled_safe" if patreon_configured else "enabled_unsafe"))
     provider_monitor = _safe_provider_monitor_summary(service)
     public_expected = _public_base_url_configured()
     public_premium_routes_ready = not public_expected or (
-        premium_snapshot["attached"]
-        and loop_attached
-        and not loop_closed
-        and premium_snapshot["storage_ready"]
-        and patreon_configured
+        premium_startup_state == "disabled"
+        or (
+            premium_snapshot["attached"]
+            and loop_attached
+            and not loop_closed
+            and premium_snapshot["storage_ready"]
+            and premium_startup_state == "enabled_safe"
+        )
     )
     issues: list[str] = []
     if not runtime_attached:
@@ -351,7 +375,7 @@ def _runtime_readiness_snapshot() -> dict[str, Any]:
         _safe_issue_append(issues, "runtime_loop_unavailable")
     elif loop_closed:
         _safe_issue_append(issues, "runtime_loop_closed")
-    if public_expected and not patreon_configured:
+    if public_expected and premium_startup_state == "enabled_unsafe":
         _safe_issue_append(issues, "premium_patreon_not_configured")
     if public_expected and not public_premium_routes_ready:
         _safe_issue_append(issues, "public_premium_routes_not_ready")
@@ -389,6 +413,7 @@ def _runtime_readiness_snapshot() -> dict[str, Any]:
             "storage_ready": premium_snapshot["storage_ready"],
             "public_routes_ready": public_premium_routes_ready,
             "patreon_configured": patreon_configured,
+            "startup_state": premium_startup_state,
             "provider_monitor": provider_monitor,
         },
         "confessions": confessions,
