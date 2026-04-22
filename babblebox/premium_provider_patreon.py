@@ -23,6 +23,7 @@ PATREON_SCOPES = (
     "identity",
     "identity[email]",
     "identity.memberships",
+    "campaigns",
     "campaigns.members",
 )
 PATREON_GRACE_DAYS = 7
@@ -363,7 +364,12 @@ class PatreonPremiumProvider(PremiumProviderAdapter):
         if not isinstance(selected_member, dict):
             raise PremiumProviderError(
                 "Patreon identity did not include a membership for the configured campaign.",
-                safe_message="Babblebox could not find an active Patreon membership for the configured campaign.",
+                safe_message=(
+                    "Babblebox could not find a Patreon membership for the configured campaign. "
+                    "Make sure this Patreon account is subscribed to the Babblebox campaign, not the creator account, "
+                    "then start again from `/premium link`."
+                ),
+                provider_code="campaign_membership_missing",
                 hard_failure=False,
             )
 
