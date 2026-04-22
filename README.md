@@ -34,12 +34,34 @@ Babblebox is intentionally compact:
 Babblebox premium is intentionally narrow:
 
 - free stays genuinely usable and keeps core trust, privacy, and local safety intact
-- `Supporter` is optional recognition and does not unlock core product power
-- `Plus` raises personal utility caps for Watch, reminders, and recurring AFK schedules
-- `Guild Pro` raises server-side admin caps, unlocks Shield AI's enhanced `gpt-5.4-mini` and `gpt-5.4` tiers, unlocks Question Drops AI celebrations, raises bounded Shield limits, raises bump-detection scale, and raises the safe Confessions image ceiling
 - Patreon is the initial premium source of truth, but entitlements are resolved through a separate provider-agnostic premium layer
+
+### Plan Comparison
+
+- `Free`: the real product lane stays intact, including party games, Daily Arcade, Question Drops, utilities, bounded Shield, and the current free Confessions baseline
+- `Supporter`: optional recognition and does not unlock core product power
+- `Plus`: raises personal utility caps for Watch, reminders, and recurring AFK schedules
+- `Guild Pro`: raises server-side admin caps, unlocks Shield AI's enhanced `gpt-5.4-mini` and `gpt-5.4` tiers, unlocks Question Drops AI celebrations, raises bounded Shield limits, raises bump-detection scale, and raises the safe Confessions image ceiling
+
+### How Premium Activates
+
+1. Use `/premium plans` to compare the real Babblebox tiers first.
+2. Use `/premium subscribe` to open Patreon and choose a Babblebox-labeled tier.
+3. Buy the tier on Patreon first, then run `/premium link` in Discord to attach that Patreon account to Babblebox.
+4. Run `/premium status` to confirm the linked plan and resolved premium state.
+5. If you bought Guild Pro, finish with `/premium guild claim` in the server you want to upgrade, then verify it with `/premium guild status`.
+
+### Mixed Patreon Note
+
+- the Patreon campaign also includes Inevitable Friendship support tiers
+- only Babblebox-labeled tiers unlock Babblebox premium unless the tier description explicitly says otherwise
+- if a linked Patreon account still looks free, run `/premium refresh` or check `/support` before assuming the purchase failed
+
+### Trust and Downgrade Behavior
+
 - hard Patreon auth failures, linked-account identity mismatches, or a local unlink immediately withdraw provider-backed runtime access while still preserving saved feature state
 - premium downgrades do not delete saved Watch keywords, reminders, AFK schedules, Shield patterns, or Confessions settings; over-limit saved state is preserved, but premium-only runtime capacity is paused until the saved state is reduced or premium returns
+- `/premium unlink` deletes Babblebox's local encrypted Patreon tokens only; it does not pretend to revoke Patreon-side app access for you
 
 ## Product Overview
 
@@ -337,17 +359,17 @@ Question Drops notes:
 
 | Slash | Prefix | Purpose |
 | --- | --- | --- |
-| `/premium status` | n/a | See your linked premium status, active plans, and current resolved limits |
-| `/premium plans` | n/a | Review `Supporter`, `Plus`, and `Guild Pro` plan behavior |
-| `/premium subscribe` | n/a | Open the official Patreon page where Babblebox premium is purchased |
-| `/premium link` | n/a | Start Patreon account linking in a private flow |
-| `/premium refresh` | n/a | Recheck your Patreon-backed entitlements |
-| `/premium unlink` | n/a | Remove the current premium account link and delete Babblebox's local encrypted Patreon tokens |
-| `/premium guild status` | n/a | See the current guild entitlement and claim state |
-| `/premium guild claim` | n/a | Claim a Guild Pro entitlement for the current server |
-| `/premium guild release` | n/a | Release the current guild claim |
+| `/premium status` | n/a | See linked Patreon state, active plans, resolved limits, claim availability, and the next step |
+| `/premium plans` | n/a | Compare `Supporter`, `Plus`, and `Guild Pro`, plus the honest Free baseline |
+| `/premium subscribe` | n/a | Open the official Patreon page and follow the buy-then-link onboarding path |
+| `/premium link` | n/a | Start Patreon account linking privately with the same account that owns the Babblebox tier |
+| `/premium refresh` | n/a | Recheck Patreon-backed entitlements and stale or mismatched state |
+| `/premium unlink` | n/a | Remove the current premium account link, delete Babblebox's local encrypted Patreon tokens, and keep saved config preserved |
+| `/premium guild status` | n/a | See the current guild entitlement, claim state, and what Guild Pro changes on this server |
+| `/premium guild claim` | n/a | Claim a Guild Pro entitlement for the current server explicitly |
+| `/premium guild release` | n/a | Release the current guild claim without deleting saved server configuration |
 
-Buy the tier on Patreon first, then run `/premium link` in Discord to attach that Patreon account to Babblebox. If you bought Guild Pro, finish with `/premium guild claim` in the server you want to upgrade.
+Buy the tier on Patreon first, then run `/premium link` in Discord to attach that Patreon account to Babblebox. On the mixed Patreon campaign, choose a Babblebox-labeled tier unless the tier description explicitly says it also unlocks Babblebox.
 
 If a Guild Pro claim source expires but the same owner still has another valid Guild Pro source, Babblebox can rebind that server claim without moving it to another user or deleting saved server configuration.
 

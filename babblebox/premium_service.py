@@ -737,7 +737,11 @@ class PremiumService:
         return "Babblebox Premium"
 
     def describe_limit_error(self, *, limit_key: str, limit_value: int) -> str:
-        return f"You reached the current limit of {limit_value}. {self.get_plan_upgrade_label_for_limit(limit_key)} unlocks more."
+        return (
+            f"You reached the current limit of {limit_value}. "
+            f"{self.get_plan_upgrade_label_for_limit(limit_key)} unlocks more. "
+            "Use `/premium plans` to compare tiers."
+        )
 
     def over_limit_label(self, *, current_count: int, limit_value: int) -> str | None:
         if current_count <= limit_value:
@@ -749,17 +753,50 @@ class PremiumService:
             {
                 "plan_code": PLAN_SUPPORTER,
                 "title": "Supporter",
-                "summary": "Status-only support tier for launch. It does not unlock product power.",
+                "audience": "People who want to support Babblebox without changing the product lane.",
+                "summary": "Recognition-focused support tier with no power unlocks.",
+                "unlocks": (
+                    "Visible premium recognition in your Babblebox premium status.",
+                ),
+                "does_not_unlock": (
+                    "Higher personal utility limits.",
+                    "Guild Pro server upgrades or higher Shield AI model tiers.",
+                ),
+                "best_for": "Supporters who want to back the project and keep free behavior unchanged.",
             },
             {
                 "plan_code": PLAN_PLUS,
                 "title": "Plus",
-                "summary": "Higher personal utility limits for Watch, reminders, and AFK scheduling.",
+                "audience": "People who use Babblebox as a personal utility bot inside Discord.",
+                "summary": "Higher personal limits for Watch, reminders, and recurring AFK scheduling.",
+                "unlocks": (
+                    "Up to 25 Watch keywords and 25 Watch filters.",
+                    "Up to 15 active reminders and 5 active channel reminders.",
+                    "Up to 20 recurring AFK schedules.",
+                ),
+                "does_not_unlock": (
+                    "Guild Pro server upgrades.",
+                    "Server-side Shield AI model upgrades or Question Drops AI celebrations.",
+                ),
+                "best_for": "Members who rely on Watch, reminders, or AFK routines and want much more room.",
             },
             {
                 "plan_code": PLAN_GUILD_PRO,
                 "title": "Guild Pro",
-                "summary": "Server-level premium for larger caps, Shield AI review, Question Drops AI celebrations, and advanced admin power.",
+                "audience": "Admins who want one server to get Babblebox's higher-cap admin lane.",
+                "summary": "Server-level premium for higher bounded caps, richer admin power, and premium-only server extras.",
+                "unlocks": (
+                    "Up to 15 bump detection channels.",
+                    "Higher bounded Shield config ceilings for patterns, filters, allowlists, exemptions, and severe terms.",
+                    "Shield AI's higher gpt-5.4-mini and gpt-5.4 tiers when owner policy enables review.",
+                    "Question Drops AI celebrations.",
+                    "Confessions max_images up to 6.",
+                ),
+                "does_not_unlock": (
+                    "Automatic upgrades for every server; Guild Pro still has to be claimed explicitly.",
+                    "Plus utility caps for every individual user.",
+                ),
+                "best_for": "Servers that want one explicit premium claim with clearer admin headroom.",
             },
         )
 

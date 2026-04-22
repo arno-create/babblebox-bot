@@ -907,6 +907,139 @@
       grid-column: 1 / -1;
     }
 
+    .section-premium {
+      position: relative;
+    }
+
+    .section-premium::before {
+      content: "";
+      position: absolute;
+      inset: 8% 0 auto;
+      height: 78%;
+      background:
+        radial-gradient(circle at 14% 20%, rgba(255, 190, 118, 0.1), transparent 22%),
+        radial-gradient(circle at 82% 18%, rgba(131, 221, 255, 0.08), transparent 22%),
+        linear-gradient(180deg, rgba(255, 255, 255, 0.02), rgba(5, 9, 19, 0));
+      pointer-events: none;
+    }
+
+    .premium-shell {
+      display: grid;
+      gap: 22px;
+    }
+
+    .premium-grid {
+      display: grid;
+      grid-template-columns: repeat(4, minmax(0, 1fr));
+      gap: 16px;
+    }
+
+    .premium-card,
+    .premium-steps,
+    .premium-note {
+      position: relative;
+      z-index: 1;
+      padding: 22px;
+      border-radius: 24px;
+      border: 1px solid var(--line);
+      background: linear-gradient(180deg, rgba(12, 18, 32, 0.78), rgba(8, 13, 24, 0.94));
+      box-shadow: 0 22px 54px rgba(0, 0, 0, 0.18);
+    }
+
+    .premium-card.featured {
+      border-color: rgba(255, 190, 118, 0.32);
+      background:
+        linear-gradient(180deg, rgba(23, 18, 14, 0.88), rgba(10, 14, 23, 0.96)),
+        radial-gradient(circle at top right, rgba(255, 190, 118, 0.12), transparent 34%);
+    }
+
+    .premium-plan {
+      display: inline-flex;
+      align-items: center;
+      min-height: 34px;
+      padding: 0 12px;
+      border-radius: 999px;
+      border: 1px solid rgba(173, 196, 255, 0.14);
+      background: rgba(255, 255, 255, 0.04);
+      color: var(--soft);
+      font-size: 0.76rem;
+      font-weight: 800;
+      letter-spacing: 0.12em;
+      text-transform: uppercase;
+    }
+
+    .premium-card h3,
+    .premium-steps h3,
+    .premium-note h3 {
+      margin-top: 16px;
+      max-width: 14ch;
+      font-size: 1.32rem;
+      line-height: 1.16;
+    }
+
+    .premium-card p,
+    .premium-steps p,
+    .premium-note p {
+      margin-top: 12px;
+      color: var(--muted);
+      font-size: 0.96rem;
+      line-height: 1.76;
+    }
+
+    .premium-points {
+      display: grid;
+      gap: 10px;
+      margin: 18px 0 0;
+      padding: 0;
+      list-style: none;
+    }
+
+    .premium-points li {
+      position: relative;
+      padding-left: 16px;
+      color: var(--soft);
+      font-size: 0.93rem;
+      line-height: 1.7;
+    }
+
+    .premium-points li::before {
+      content: "";
+      position: absolute;
+      top: 0.72em;
+      left: 0;
+      width: 7px;
+      height: 7px;
+      border-radius: 999px;
+      background: linear-gradient(135deg, var(--amber), var(--cyan));
+    }
+
+    .premium-detail {
+      display: grid;
+      grid-template-columns: minmax(0, 1.05fr) minmax(0, 0.95fr);
+      gap: 16px;
+    }
+
+    .premium-steps ol {
+      margin: 18px 0 0;
+      padding-left: 20px;
+      color: var(--soft);
+    }
+
+    .premium-steps li + li {
+      margin-top: 10px;
+    }
+
+    .premium-actions {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 12px;
+      margin-top: 18px;
+    }
+
+    .premium-actions .btn {
+      min-height: 44px;
+    }
+
     .admin-media {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -1054,9 +1187,14 @@
 
     @media (max-width: 1040px) {
       .proof-strip,
+      .premium-grid,
       .trust-rail,
       .trust-grid {
         grid-template-columns: repeat(2, minmax(0, 1fr));
+      }
+
+      .premium-detail {
+        grid-template-columns: 1fr;
       }
 
       .utility-points {
@@ -1071,6 +1209,7 @@
     @media (max-width: 920px) {
       .hero-scan,
       .proof-strip,
+      .premium-grid,
       .trust-rail,
       .trust-grid {
         grid-template-columns: 1fr;
@@ -1234,6 +1373,7 @@
                 <a href="#product">Product</a>
                 <a href="#showcase">Showcase</a>
                 <a href="#utilities">Utilities</a>
+                <a href="#premium">Premium</a>
                 <a href="#safety">Safety</a>
                 <a href="help.html">Help</a>
               </div>
@@ -1246,6 +1386,7 @@
                 target="_blank"
                 rel="noopener noreferrer"
               >Support</a>
+              <a class="btn btn-secondary" href="#premium">View Premium</a>
               <a
                 class="btn btn-primary nav-invite"
                 href="https://discord.com/oauth2/authorize?client_id=1480903089518022739"
@@ -1294,6 +1435,7 @@
                 <a href="#product">Product</a>
                 <a href="#showcase">Showcase</a>
                 <a href="#utilities">Utilities</a>
+                <a href="#premium">Premium</a>
                 <a href="#safety">Safety</a>
                 <a href="help.html">Help</a>
               </div>
@@ -1334,6 +1476,7 @@
               target="_blank"
               rel="noopener noreferrer"
             >Invite Babblebox</a>
+            <a class="btn btn-secondary" href="#premium">View Premium</a>
             <a class="btn btn-secondary" href="help.html">Read Help</a>
           </div>
           <div class="hero-links">
@@ -1759,6 +1902,105 @@ categories, scholar progress, and mastery announcement setup in one readable sur
         </div>
       </section>
 
+      <section id="premium" class="section section-premium">
+        <div class="container">
+          <div class="section-head">
+            <div class="section-kicker">Premium</div>
+            <h2>Free stays useful. Premium raises the ceiling cleanly.</h2>
+            <p class="section-copy">
+              Babblebox premium is meant to feel clear, not slippery. Free keeps the real product, Supporter is
+              recognition-only, Plus raises personal headroom, and Guild Pro is the admin/server plan. Core safety,
+              privacy, and the baseline product lane stay outside the paywall.
+            </p>
+          </div>
+
+          <div class="premium-shell">
+            <div class="premium-grid">
+              <article class="premium-card">
+                <span class="premium-plan">Free</span>
+                <h3>Start here without pressure.</h3>
+                <p>For servers and members who want the real Babblebox product before spending anything.</p>
+                <ul class="premium-points">
+                  <li>Party games, Daily Arcade, Buddy, Profile, Vault, Question Drops, utilities, and bounded Shield all stay real.</li>
+                  <li>Core local safety, Confessions privacy, and the current free utility baseline stay intact.</li>
+                  <li>Good for trying Babblebox honestly before deciding whether extra headroom matters.</li>
+                </ul>
+              </article>
+
+              <article class="premium-card">
+                <span class="premium-plan">Supporter</span>
+                <h3>Back the project without changing product limits.</h3>
+                <p>For people who want to support Babblebox and keep the premium lane straightforward.</p>
+                <ul class="premium-points">
+                  <li>Recognition-focused support tier for people who want to keep the project moving.</li>
+                  <li>Same product limits as Free, so it never feels like a disguised power plan.</li>
+                  <li>Good for users who value the bot and want to support it without changing how it behaves.</li>
+                </ul>
+              </article>
+
+              <article class="premium-card">
+                <span class="premium-plan">Plus</span>
+                <h3>For people who actually live in Watch, reminders, and AFK.</h3>
+                <p>For members who want more personal utility headroom without turning premium into a server-only story.</p>
+                <ul class="premium-points">
+                  <li>Raises Watch keyword and filter limits for heavier private monitoring setups.</li>
+                  <li>Raises reminder limits, including the bounded public reminder lane.</li>
+                  <li>Raises recurring AFK schedule headroom for people who rely on structured away-time routines.</li>
+                </ul>
+              </article>
+
+              <article class="premium-card featured">
+                <span class="premium-plan">Guild Pro</span>
+                <h3>The server plan for admins who want more room.</h3>
+                <p>For communities that want higher bounded admin ceilings, richer optional AI layers, and more Guild Pro headroom in one server.</p>
+                <ul class="premium-points">
+                  <li>Raises bounded server caps like bump-detection channels and other higher-limit admin surfaces.</li>
+                  <li>Unlocks Shield AI's higher <code>gpt-5.4-mini</code> and <code>gpt-5.4</code> tiers when owner policy enables second-pass review.</li>
+                  <li>Unlocks Question Drops AI celebrations and raises the safe Confessions image ceiling to the Guild Pro range.</li>
+                </ul>
+              </article>
+            </div>
+
+            <div class="premium-detail">
+              <article class="premium-steps">
+                <span class="premium-plan">Activation Flow</span>
+                <h3>Buy, link, then claim only if you need Guild Pro.</h3>
+                <p>Babblebox keeps purchase, identity linking, and server claiming separate on purpose so ownership stays explicit and auditable.</p>
+                <ol>
+                  <li>Use Patreon and choose a Babblebox-labeled tier.</li>
+                  <li>Run <code>/premium link</code> in Discord with that same Patreon account.</li>
+                  <li>Check <code>/premium status</code> to confirm the resolved plan and linked state.</li>
+                  <li>If you bought Guild Pro, finish in the target server with <code>/premium guild claim</code>, then verify it with <code>/premium guild status</code>.</li>
+                </ol>
+              </article>
+
+              <article class="premium-note">
+                <span class="premium-plan">Trust Notes</span>
+                <h3>Mixed Patreon campaign, clear rules, safe downgrade behavior.</h3>
+                <p>
+                  The Patreon campaign also includes Inevitable Friendship support tiers. Only Babblebox-labeled tiers
+                  unlock Babblebox unless a tier description explicitly says otherwise.
+                </p>
+                <p>
+                  Unlink, downgrade, or Guild Pro release never deletes saved Watch, reminder, AFK, Shield, or
+                  Confessions configuration. Premium-only runtime headroom pauses until premium returns or the saved
+                  state is reduced.
+                </p>
+                <div class="premium-actions">
+                  <a
+                    class="btn btn-secondary"
+                    href="https://www.patreon.com/cw/InevitableFriendship"
+                    target="_blank"
+                    rel="noopener noreferrer"
+                  >Subscribe on Patreon</a>
+                  <a class="btn btn-secondary" href="help.html#premium">Read Premium Help</a>
+                </div>
+              </article>
+            </div>
+          </div>
+        </div>
+      </section>
+
       <section id="safety" class="section">
         <div class="container">
           <div class="section-head">
@@ -1877,6 +2119,13 @@ categories, scholar progress, and mastery announcement setup in one readable sur
             </div>
             <div class="support-links">
               <a class="btn btn-secondary" href="help.html">Read Help</a>
+              <a class="btn btn-secondary" href="#premium">View Premium</a>
+              <a
+                class="btn btn-secondary"
+                href="https://www.patreon.com/cw/InevitableFriendship"
+                target="_blank"
+                rel="noopener noreferrer"
+              >Subscribe on Patreon</a>
               <a href="privacy.html">Privacy Policy</a>
               <a href="terms.html">Terms of Service</a>
               <a
@@ -1909,8 +2158,15 @@ categories, scholar progress, and mastery announcement setup in one readable sur
                 target="_blank"
                 rel="noopener noreferrer"
               >Invite Babblebox</a>
+              <a class="btn btn-secondary" href="#premium">View Premium</a>
               <a
-                class="btn btn-secondary"
+                class="link-quiet"
+                href="https://www.patreon.com/cw/InevitableFriendship"
+                target="_blank"
+                rel="noopener noreferrer"
+              >Subscribe on Patreon</a>
+              <a
+                class="link-quiet"
                 href="https://discord.com/servers/inevitable-friendship-1322933864360050688"
                 target="_blank"
                 rel="noopener noreferrer"
@@ -1943,6 +2199,7 @@ categories, scholar progress, and mastery announcement setup in one readable sur
               <div class="site-footer-label">Product</div>
               <div class="site-footer-links">
                 <a href="index.html">Main Website</a>
+                <a href="index.html#premium">Premium</a>
                 <a href="help.html">Help</a>
                 <a href="privacy.html">Privacy Policy</a>
                 <a href="terms.html">Terms of Service</a>
@@ -1953,6 +2210,7 @@ categories, scholar progress, and mastery announcement setup in one readable sur
               <div class="site-footer-links">
                 <a href="https://discord.com/oauth2/authorize?client_id=1480903089518022739" target="_blank" rel="noopener noreferrer">Invite</a>
                 <a href="https://discord.com/servers/inevitable-friendship-1322933864360050688" target="_blank" rel="noopener noreferrer">Support Server</a>
+                <a href="https://www.patreon.com/cw/InevitableFriendship" target="_blank" rel="noopener noreferrer">Patreon</a>
                 <a href="https://github.com/arno-create/babblebox-bot" target="_blank" rel="noopener noreferrer">GitHub</a>
                 <a href="https://arno-create.github.io/Bdayblaze/" target="_blank" rel="noopener noreferrer">Bdayblaze</a>
               </div>
