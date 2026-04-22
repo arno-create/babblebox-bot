@@ -57,6 +57,11 @@ DIGEST_MENTION_CHOICES = [
     app_commands.Choice(name="No pings", value="none"),
     app_commands.Choice(name="@here", value="here"),
 ]
+PING_MODE_CHOICES = [
+    app_commands.Choice(name="Status", value="status"),
+    app_commands.Choice(name="Set", value="set"),
+    app_commands.Choice(name="Clear", value="clear"),
+]
 TEMPLATE_ACTION_CHOICES = [
     app_commands.Choice(name="Status", value="status"),
     app_commands.Choice(name="Edit", value="edit"),
@@ -371,6 +376,75 @@ class QuestionDropsCog(commands.Cog):
             return
         snapshot = await self.service.get_status_snapshot(ctx.guild)
         await send_hybrid_response(ctx, embed=self.service.build_digest_status_embed(ctx.guild, snapshot), ephemeral=True)
+
+    async def _handle_drops_ping(self, ctx: commands.Context, *, mode: str = "status", role: Optional[discord.Role] = None):
+        if ctx.guild is None:
+            await self._send_server_only_notice(ctx)
+            return
+        if not await self._require_storage(ctx, "Question Drops"):
+            return
+        if not await self._require_admin(ctx):
+            return
+        normalized_mode = str(mode or "status").strip().casefold()
+        if normalized_mode not in {"status", "set", "clear"}:
+            await send_hybrid_response(
+                ctx,
+                embed=ge.make_status_embed(
+                    "Question Drops Live Ping",
+                    "Use `status`, `set`, or `clear`.",
+                    tone="warning",
+                    footer="Babblebox Question Drops",
+                ),
+                ephemeral=True,
+            )
+            return
+        if normalized_mode == "status":
+            await send_hybrid_response(ctx, embed=self.service.build_drop_ping_status_embed(ctx.guild), ephemeral=True)
+            return
+        if normalized_mode == "set":
+            if role is None:
+                await send_hybrid_response(
+                    ctx,
+                    embed=ge.make_status_embed(
+                        "Question Drops Live Ping",
+                        "Pick a role when using `set`.",
+                        tone="warning",
+                        footer="Babblebox Question Drops",
+                    ),
+                    ephemeral=True,
+                )
+                return
+            is_default_role = bool(callable(getattr(role, "is_default", None)) and role.is_default())
+            if is_default_role or int(getattr(role, "id", 0) or 0) == int(ctx.guild.id):
+                await send_hybrid_response(
+                    ctx,
+                    embed=ge.make_status_embed(
+                        "Question Drops Live Ping",
+                        "`@everyone` cannot be used as the live drop ping role.",
+                        tone="warning",
+                        footer="Babblebox Question Drops",
+                    ),
+                    ephemeral=True,
+                )
+                return
+            ok, message = await self.service.update_drop_ping_role(ctx.guild, role_id=role.id)
+        else:
+            ok, message = await self.service.update_drop_ping_role(ctx.guild, role_id=None)
+        if not ok:
+            await send_hybrid_response(
+                ctx,
+                embed=ge.make_status_embed(
+                    "Question Drops Live Ping",
+                    message,
+                    tone="warning",
+                    footer="Babblebox Question Drops",
+                ),
+                ephemeral=True,
+            )
+            return
+        embed = self.service.build_drop_ping_status_embed(ctx.guild)
+        embed.description = f"{message}\n\n{embed.description}"
+        await send_hybrid_response(ctx, embed=embed, ephemeral=True)
 
     async def _handle_drops_config(
         self,
@@ -819,6 +893,12 @@ class QuestionDropsCog(commands.Cog):
     async def drops_categories_command(self, ctx: commands.Context, action: str, category: Optional[str] = None):
         await self._handle_drops_categories(ctx, action, category)
 
+    @drops_group.command(name="ping", with_app_command=False, description="View or update the optional Question Drops live role ping")
+    @app_commands.describe(mode="View, set, or clear the live drop ping role", role="Role to mention when using set")
+    @app_commands.choices(mode=PING_MODE_CHOICES)
+    async def drops_ping_command(self, ctx: commands.Context, mode: str = "status", role: Optional[discord.Role] = None):
+        await self._handle_drops_ping(ctx, mode=mode, role=role)
+
     @drops_group.command(name="stats", with_app_command=True, description="View guild-first Question Drops mastery progress")
     @app_commands.describe(user="Whose Question Drops stats to view", visibility="Show the card publicly or only to you")
     @app_commands.choices(visibility=VISIBILITY_CHOICES)
@@ -1161,6 +1241,12 @@ class QuestionDropsCog(commands.Cog):
     @app_commands.choices(action=CATEGORY_ACTION_CHOICES, category=CATEGORY_CHOICES)
     async def dropsadmin_categories_command(self, ctx: commands.Context, action: str, category: Optional[str] = None):
         await self._handle_drops_categories(ctx, action, category)
+
+    @dropsadmin_group.command(name="ping", with_app_command=True, description="View or update the optional Question Drops live role ping")
+    @app_commands.describe(mode="View, set, or clear the live drop ping role", role="Role to mention when using set")
+    @app_commands.choices(mode=PING_MODE_CHOICES)
+    async def dropsadmin_ping_command(self, ctx: commands.Context, mode: str = "status", role: Optional[discord.Role] = None):
+        await self._handle_drops_ping(ctx, mode=mode, role=role)
 
     @dropsadmin_group.group(name="digest", with_app_command=True, invoke_without_command=True, description="Configure weekly and monthly knowledge digests")
     async def dropsadmin_digest_group(self, ctx: commands.Context):

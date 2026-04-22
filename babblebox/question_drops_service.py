@@ -61,6 +61,8 @@ from babblebox.question_drops_store import (
     normalize_question_drops_config,
     normalize_question_drops_meta,
 )
+from babblebox.premium_limits import CAPABILITY_QUESTION_DROPS_AI_CELEBRATIONS, guild_capabilities
+from babblebox.premium_models import PLAN_GUILD_PRO, SYSTEM_PREMIUM_SUPPORT_GUILD_ID
 from babblebox.text_safety import contains_blocklisted_term, find_private_pattern, normalize_plain_text, sanitize_short_plain_template
 from babblebox.utility_helpers import canonicalize_afk_timezone, load_afk_timezone
 
@@ -78,8 +80,8 @@ QUESTION_DROP_LATE_CORRECT_WINDOW_SECONDS = 8
 QUESTION_DROP_LATE_CORRECT_MAX_ACKS = 2
 QUESTION_DROP_CLOSE_BUFFER_SECONDS = 3
 QUESTION_DROP_PRUNE_INTERVAL_SECONDS = 6 * 60 * 60
-QUESTION_DROP_EXPOSURE_FETCH_LIMIT = 220
-QUESTION_DROP_GENERATED_VARIANTS_PER_SEED = 8
+QUESTION_DROP_EXPOSURE_FETCH_LIMIT = 420
+QUESTION_DROP_GENERATED_VARIANTS_PER_SEED = 12
 QUESTION_DROP_PARTICIPATION_RETENTION_DAYS = 180
 QUESTION_DROP_DIGEST_LEASE_SECONDS = 10 * 60
 QUESTION_DROP_DIGEST_POST_HOUR = 9
@@ -432,6 +434,93 @@ class QuestionDropsService:
             return f"Partial ({configured_count}/{enabled_count} ready)"
         return "Ready"
 
+    def _premium_service(self):
+        premium_service = getattr(self.bot, "premium_service", None)
+        if callable(getattr(premium_service, "guild_has_capability", None)):
+            return premium_service
+        return None
+
+    def _guild_has_capability(self, guild_id: int, capability: str) -> bool:
+        premium_service = self._premium_service()
+        if premium_service is not None:
+            return bool(premium_service.guild_has_capability(guild_id, capability))
+        if int(guild_id or 0) == SYSTEM_PREMIUM_SUPPORT_GUILD_ID:
+            return capability in guild_capabilities(PLAN_GUILD_PRO)
+        return False
+
+    def _delivery_channel_issue(self, guild: discord.Guild, channel_id: int | None, *, label: str) -> str | None:
+        if not isinstance(channel_id, int) or channel_id <= 0 or not hasattr(guild, "get_channel"):
+            return f"{label}: delivery channel is missing."
+        channel = guild.get_channel(channel_id)
+        if channel is None:
+            return f"{label}: delivery channel is missing."
+        permissions_for = getattr(channel, "permissions_for", None)
+        bot_member = self._bot_member_for_guild(guild)
+        if callable(permissions_for) and bot_member is not None:
+            perms = permissions_for(bot_member)
+            if not bool(getattr(perms, "view_channel", False)):
+                return f"{label}: cannot view {getattr(channel, 'mention', '#channel')}."
+            if not bool(getattr(perms, "send_messages", False)):
+                return f"{label}: cannot send messages in {getattr(channel, 'mention', '#channel')}."
+            if not bool(getattr(perms, "embed_links", False)):
+                return f"{label}: missing `Embed Links` in {getattr(channel, 'mention', '#channel')}."
+        return None
+
+    def _drop_ping_channel_issue(self, guild: discord.Guild, channel_id: int, role_id: int | None) -> str | None:
+        if not isinstance(role_id, int) or role_id <= 0:
+            return None
+        role = guild.get_role(role_id) if hasattr(guild, "get_role") else None
+        if role is None:
+            return "configured role is missing"
+        channel = guild.get_channel(channel_id) if hasattr(guild, "get_channel") else None
+        if channel is None:
+            return "channel is missing"
+        permissions_for = getattr(channel, "permissions_for", None)
+        bot_member = self._bot_member_for_guild(guild)
+        if callable(permissions_for) and bot_member is not None:
+            perms = permissions_for(bot_member)
+            if not bool(getattr(perms, "view_channel", False)):
+                return "cannot view channel"
+            if not bool(getattr(perms, "send_messages", False)):
+                return "cannot send messages"
+            if not bool(getattr(perms, "embed_links", False)):
+                return "missing Embed Links"
+            if not bool(getattr(role, "mentionable", True)) and not bool(getattr(perms, "mention_everyone", False)):
+                return "role is not mentionable and Babblebox lacks Mention Everyone"
+        return None
+
+    def _drop_ping_summary(self, guild: discord.Guild, config: dict[str, Any]) -> dict[str, Any]:
+        role_id = config.get("drop_ping_role_id")
+        if not isinstance(role_id, int) or role_id <= 0:
+            return {"status": "Off", "role": None, "lines": ["No live drop role ping is configured."]}
+        role = guild.get_role(role_id) if hasattr(guild, "get_role") else None
+        if role is None:
+            return {"status": "Blocked", "role": None, "lines": ["Configured role is missing."]}
+        enabled_channels = [int(channel_id) for channel_id in config.get("enabled_channel_ids", []) if isinstance(channel_id, int) and channel_id > 0]
+        if not enabled_channels:
+            return {
+                "status": "Configured",
+                "role": role,
+                "lines": [f"{role.mention if hasattr(role, 'mention') else f'<@&{role.id}>'} is ready once delivery channels are enabled."],
+            }
+        ready_lines: list[str] = []
+        blocked_lines: list[str] = []
+        for channel_id in enabled_channels:
+            channel = guild.get_channel(channel_id) if hasattr(guild, "get_channel") else None
+            channel_label = getattr(channel, "mention", f"<#{channel_id}>")
+            issue = self._drop_ping_channel_issue(guild, channel_id, role_id)
+            if issue is None:
+                ready_lines.append(f"{channel_label}: role ping will post with the live drop.")
+            else:
+                blocked_lines.append(f"{channel_label}: {issue}.")
+        if ready_lines and blocked_lines:
+            status = "Partial"
+        elif blocked_lines:
+            status = "Blocked"
+        else:
+            status = "Configured"
+        return {"status": status, "role": role, "lines": ready_lines + blocked_lines}
+
     def _announcement_channel_issue(self, guild: discord.Guild, channel_id: int | None, *, label: str) -> str | None:
         if not isinstance(channel_id, int) or channel_id <= 0 or not hasattr(guild, "get_channel"):
             return None
@@ -620,7 +709,16 @@ class QuestionDropsService:
             await self.store.upsert_config(normalized)
             self._configs[guild_id] = normalized
         self._wake_event.set()
-        return True, "Question Drops settings updated."
+        note_bits: list[str] = []
+        if normalized.get("ai_celebrations_enabled"):
+            if not self._guild_has_capability(guild_id, CAPABILITY_QUESTION_DROPS_AI_CELEBRATIONS):
+                note_bits.append("AI celebrations stay saved as an opt-in, but live AI copy needs Guild Pro.")
+            if str(self.get_meta().get("ai_celebration_mode", "off")).casefold() == "off":
+                note_bits.append("Owner policy is currently off, so AI celebration copy is paused.")
+        message = "Question Drops settings updated."
+        if note_bits:
+            message += " " + " ".join(note_bits)
+        return True, message
 
     async def update_digest_config(
         self,
@@ -750,6 +848,23 @@ class QuestionDropsService:
             self._configs[guild_id] = normalized
         self._wake_event.set()
         return True, "Question Drops categories updated."
+
+    async def update_drop_ping_role(self, guild: discord.Guild, *, role_id: int | None) -> tuple[bool, str]:
+        if not self.storage_ready:
+            return False, self.storage_message()
+        guild_id = int(getattr(guild, "id", 0) or 0)
+        if guild_id <= 0:
+            return False, "This update needs a server context."
+        async with self._lock:
+            config = dict(self.get_config(guild_id))
+            config["drop_ping_role_id"] = int(role_id) if isinstance(role_id, int) and role_id > 0 else None
+            normalized = normalize_question_drops_config(guild_id, config)
+            await self.store.upsert_config(normalized)
+            self._configs[guild_id] = normalized
+        self._wake_event.set()
+        if isinstance(role_id, int) and role_id > 0:
+            return True, "Live drop ping role updated."
+        return True, "Live drop ping cleared."
 
     async def set_global_ai_celebration_mode(self, mode: str, *, actor_id: int) -> tuple[bool, str]:
         if not self.storage_ready:
@@ -1758,6 +1873,31 @@ class QuestionDropsService:
             digest_status=await self._build_digest_status_snapshot(guild, config),
         )
 
+    def build_drop_ping_status_embed(self, guild: discord.Guild) -> discord.Embed:
+        config = self.get_config(guild.id)
+        summary = self._drop_ping_summary(guild, config)
+        role = summary.get("role")
+        role_label = "Off"
+        if role is not None:
+            role_label = getattr(role, "mention", f"<@&{getattr(role, 'id', 0)}>")
+        delivery_lines = summary.get("lines", [])[:8] or ["No live drop delivery checks yet."]
+        embed = discord.Embed(
+            title="Question Drops Live Ping",
+            description="Optional role ping posted with live Question Drops when the configured role can be mentioned safely.",
+            color=ge.EMBED_THEME["accent"],
+        )
+        embed.add_field(
+            name="Status",
+            value=f"State: **{summary['status']}**\nRole: **{role_label}**",
+            inline=False,
+        )
+        embed.add_field(
+            name="Delivery Checks",
+            value="\n".join(delivery_lines),
+            inline=False,
+        )
+        return ge.style_embed(embed, footer="Babblebox Question Drops | Safe role mentions only")
+
     def build_status_embed(self, guild: discord.Guild, snapshot: QuestionDropStatusSnapshot) -> discord.Embed:
         config = snapshot.config
         digest_status = snapshot.digest_status
@@ -1766,6 +1906,26 @@ class QuestionDropsService:
         enabled_category_labels = [category_label_with_emoji(category) for category in enabled_categories]
         meta = self.get_meta()
         scholar = dict(config.get("scholar_ladder", {}))
+        ping_summary = self._drop_ping_summary(guild, config)
+        ai_diagnostics = self._ai_provider.diagnostics()
+        ai_opt_in = bool(config.get("ai_celebrations_enabled"))
+        ai_mode = str(meta.get("ai_celebration_mode", "off")).casefold()
+        ai_mode_label = ai_mode.replace("_", " ").title() if ai_mode else "Off"
+        ai_unlocked = self._guild_has_capability(guild.id, CAPABILITY_QUESTION_DROPS_AI_CELEBRATIONS)
+        if int(getattr(guild, "id", 0) or 0) == SYSTEM_PREMIUM_SUPPORT_GUILD_ID:
+            ai_entitlement = "Support guild full access"
+        else:
+            ai_entitlement = "Guild Pro" if ai_unlocked else "Free"
+        if not ai_opt_in:
+            ai_live_state = "Off"
+        elif ai_mode == "off":
+            ai_live_state = "Paused by owner policy"
+        elif not ai_unlocked:
+            ai_live_state = "Requires Guild Pro"
+        elif not bool(ai_diagnostics.get("available")):
+            ai_live_state = "Provider unavailable"
+        else:
+            ai_live_state = "Ready"
         description = "Guild-first knowledge mastery with compact drops, visible thresholds, and low-noise role prestige."
         if not config.get("enabled"):
             description = "Question Drops are off for this server."
@@ -1779,6 +1939,7 @@ class QuestionDropsService:
         bot_member = self._bot_member_for_guild(guild)
         bot_perms = getattr(bot_member, "guild_permissions", None)
         operability_lines = []
+        ready_delivery_count = 0
         if bot_member is None:
             operability_lines.append("Bot member could not be resolved for role checks.")
         elif not bool(getattr(bot_perms, "manage_roles", False)):
@@ -1787,7 +1948,19 @@ class QuestionDropsService:
             operability_lines.append("No categories are enabled, so scheduled drops cannot post yet.")
         if config.get("enabled") and not config.get("enabled_channel_ids"):
             operability_lines.append("No delivery channels are enabled, so scheduled drops cannot post yet.")
+        for channel_id in config.get("enabled_channel_ids", []):
+            issue = self._delivery_channel_issue(guild, channel_id, label=f"Live drops <#{int(channel_id)}>") 
+            if issue is not None:
+                operability_lines.append(issue)
+            else:
+                ready_delivery_count += 1
         operability_lines.extend(digest_status.get("issues", []) if isinstance(digest_status, dict) else [])
+        if ping_summary.get("status") in {"Blocked", "Partial"}:
+            operability_lines.extend(
+                f"Live ping: {line}"
+                for line in ping_summary.get("lines", [])
+                if "will post with the live drop" not in str(line)
+            )
         enabled_mastery_categories = [
             category
             for category in QUESTION_DROP_CATEGORIES
@@ -1893,9 +2066,10 @@ class QuestionDropsService:
             name="Delivery",
             value=(
                 f"Tone: **{str(config.get('tone_mode', 'clean')).title()}**\n"
-                f"Channels: **{len(snapshot.enabled_channel_mentions)}**\n"
+                f"Channels: **{len(snapshot.enabled_channel_mentions)}** ({ready_delivery_count} ready)\n"
                 f"Live now: **{snapshot.active_drop_count}**\n"
-                f"Mix: **{QUESTION_DROP_DIFFICULTY_PROFILE_LABELS.get(str(config.get('difficulty_profile', 'standard')).casefold(), QUESTION_DROP_DIFFICULTY_PROFILE_LABELS['standard'])}**"
+                f"Mix: **{QUESTION_DROP_DIFFICULTY_PROFILE_LABELS.get(str(config.get('difficulty_profile', 'standard')).casefold(), QUESTION_DROP_DIFFICULTY_PROFILE_LABELS['standard'])}**\n"
+                f"Live ping: **{ping_summary.get('status', 'Off')}**"
             ),
             inline=True,
         )
@@ -1925,6 +2099,14 @@ class QuestionDropsService:
             ),
             inline=True,
         )
+        ping_role = ping_summary.get("role")
+        ping_role_label = getattr(ping_role, "mention", "Not set") if ping_role is not None else "Not set"
+        ping_lines = [
+            f"Status: **{ping_summary.get('status', 'Off')}**",
+            f"Role: **{ping_role_label}**",
+        ]
+        ping_lines.extend(ping_summary.get("lines", [])[:2])
+        embed.add_field(name="Live Ping", value="\n".join(ping_lines), inline=False)
         embed.add_field(
             name="Categories",
             value=", ".join(enabled_category_labels) if enabled_category_labels else "No enabled categories. Re-enable one to resume scheduled drops.",
@@ -1979,12 +2161,15 @@ class QuestionDropsService:
         embed.add_field(
             name="AI Celebrations",
             value=(
-                f"Guild opt-in: **{'On' if config.get('ai_celebrations_enabled') else 'Off'}**\n"
-                f"Global override: **{meta.get('ai_celebration_mode', 'off')}**\n"
-                f"Provider: **{self._ai_provider.diagnostics().get('status', 'Unavailable')}**"
+                f"Guild opt-in: **{'On' if ai_opt_in else 'Off'}**\n"
+                f"Owner policy: **{ai_mode_label}**\n"
+                f"Entitlement: **{ai_entitlement}**\n"
+                f"Live state: **{ai_live_state}**\n"
+                f"Provider: **{ai_diagnostics.get('status', 'Unavailable')}**"
             ),
             inline=False,
         )
+        operability_lines = list(dict.fromkeys(str(line) for line in operability_lines if str(line).strip()))
         if operability_lines:
             embed.add_field(name="Operability", value="\n".join(operability_lines[:6]), inline=False)
         return ge.style_embed(embed, footer="Babblebox Question Drops | Compact, offline, channel-safe")
@@ -4143,11 +4328,16 @@ class QuestionDropsService:
         update: dict[str, Any],
         flags: dict[str, Any],
     ) -> str | None:
-        config = self.get_config(int(update.get("guild_id", 0) or 0))
+        guild_id = int(update.get("guild_id", 0) or 0)
+        config = self.get_config(guild_id)
         if not config.get("ai_celebrations_enabled"):
+            return None
+        if not self._guild_has_capability(guild_id, CAPABILITY_QUESTION_DROPS_AI_CELEBRATIONS):
             return None
         mode = str(self.get_meta().get("ai_celebration_mode", "off")).casefold()
         if not self._ai_event_allowed(mode=mode, flags=flags):
+            return None
+        if not bool(self._ai_provider.diagnostics().get("available")):
             return None
         return await self._ai_provider.highlight(
             {
@@ -4613,8 +4803,18 @@ class QuestionDropsService:
         )
         embed = ge.style_embed(embed, footer="Babblebox Question Drops | First correct answer wins")
         message = None
+        guild = getattr(channel, "guild", None)
+        if guild is None:
+            get_guild = getattr(self.bot, "get_guild", None)
+            guild = get_guild(guild_id) if callable(get_guild) else None
+        send_kwargs: dict[str, Any] = {"embed": embed}
+        role_id = config.get("drop_ping_role_id")
+        if guild is not None and isinstance(role_id, int) and role_id > 0:
+            if self._drop_ping_channel_issue(guild, channel_id, role_id) is None:
+                send_kwargs["content"] = f"<@&{role_id}>"
+                send_kwargs["allowed_mentions"] = discord.AllowedMentions(users=False, roles=True, everyone=False)
         try:
-            message = await channel.send(embed=embed)
+            message = await channel.send(**send_kwargs)
             await self.store.attach_pending_post_message(guild_id, slot_key, message.id)
             self._pending_posts[(guild_id, slot_key)]["message_id"] = message.id
         except Exception:
@@ -4701,6 +4901,29 @@ class QuestionDropsService:
             preferred_variant_days,
         )
 
+    def _tag_values(self, tags: tuple[str, ...] | list[str], prefix: str) -> tuple[str, ...]:
+        return tuple(
+            sorted(
+                {
+                    str(tag)[len(prefix) :].strip().casefold()
+                    for tag in tags
+                    if isinstance(tag, str) and str(tag).startswith(prefix) and str(tag)[len(prefix) :].strip()
+                }
+            )
+        )
+
+    def _seed_tag_values(self, seed: dict[str, Any], prefix: str) -> tuple[str, ...]:
+        return self._tag_values(tuple(seed.get("tags", ())), prefix)
+
+    def _variant_tag_values(self, variant: QuestionDropVariant, prefix: str) -> tuple[str, ...]:
+        return self._tag_values(getattr(variant, "tags", ()), prefix)
+
+    def _variant_answer_shape(self, variant: QuestionDropVariant) -> str:
+        shape_values = self._variant_tag_values(variant, "shape:")
+        if shape_values:
+            return shape_values[0]
+        return str(variant.answer_spec.get("type") or "text").strip().casefold()
+
     def _select_variant(
         self,
         guild_id: int,
@@ -4725,15 +4948,22 @@ class QuestionDropsService:
         category_counts = Counter()
         difficulty_counts = Counter()
         family_counts = Counter()
-        source_counts = Counter()
+        short_family_counts = Counter()
+        short_tag_counts = Counter()
+        short_shape_counts = Counter()
+        short_combo_counts = Counter()
         category_concept_counts = Counter()
         category_variant_capacity = Counter()
         candidate_categories = {candidate.category for candidate in candidates}
         same_day_concepts: set[str] = set()
+        same_day_families: set[str] = set()
         seen_category_concepts: set[tuple[str, str]] = set()
         now = ge.now_utc()
         slot_day_key = str(slot_key).split(":", 1)[0]
         recent_records: list[tuple[datetime, dict[str, Any]]] = []
+        drop_pressure = max(0, int(config.get("drops_per_day", 2) or 2) - 2)
+        short_window_days = 5 if drop_pressure <= 3 else 7
+        medium_window_days = 21
         for candidate in candidates:
             category_variant_capacity[candidate.category] += 1
             concept_key = (candidate.category, candidate.concept_id)
@@ -4741,32 +4971,76 @@ class QuestionDropsService:
                 seen_category_concepts.add(concept_key)
                 category_concept_counts[candidate.category] += 1
         for record in exposures:
-            asked_at = datetime.fromisoformat(record["asked_at"])
-            if asked_at.tzinfo is None:
-                asked_at = asked_at.replace(tzinfo=timezone.utc)
-            recent_records.append((asked_at, record))
-            recent_by_concept.setdefault(record["concept_id"], asked_at)
-            recent_by_variant.setdefault(record["variant_hash"], asked_at)
+            asked_at_raw = record.get("asked_at")
+            if isinstance(asked_at_raw, datetime):
+                asked_at = asked_at_raw.astimezone(timezone.utc) if asked_at_raw.tzinfo else asked_at_raw.replace(tzinfo=timezone.utc)
+            elif isinstance(asked_at_raw, str):
+                asked_at = datetime.fromisoformat(asked_at_raw)
+                if asked_at.tzinfo is None:
+                    asked_at = asked_at.replace(tzinfo=timezone.utc)
+            else:
+                continue
+            concept_id = str(record.get("concept_id") or "").strip()
+            variant_hash = str(record.get("variant_hash") or "").strip()
+            seed = question_drop_seed_for_concept(concept_id) or {}
+            family_id = str(seed.get("family_id") or "").strip()
+            tag_values = tuple(
+                tag
+                for tag in tuple(seed.get("tags", ()))
+                if isinstance(tag, str) and str(tag).startswith(("sub:", "mode:", "shape:"))
+            )
+            shape_values = self._seed_tag_values(seed, "shape:")
+            shape_key = shape_values[0] if shape_values else ""
+            recent_records.append(
+                (
+                    asked_at,
+                    {
+                        **record,
+                        "concept_id": concept_id,
+                        "variant_hash": variant_hash,
+                        "family_id": family_id,
+                        "tag_values": tag_values,
+                        "shape_key": shape_key,
+                    },
+                )
+            )
+            previous_concept = recent_by_concept.get(concept_id)
+            if concept_id and (previous_concept is None or asked_at > previous_concept):
+                recent_by_concept[concept_id] = asked_at
+            previous_variant = recent_by_variant.get(variant_hash)
+            if variant_hash and (previous_variant is None or asked_at > previous_variant):
+                recent_by_variant[variant_hash] = asked_at
             if str(record.get("slot_key") or "").split(":", 1)[0] == slot_day_key:
-                same_day_concepts.add(str(record["concept_id"]))
-            if (now - asked_at).days <= 14:
-                category_counts[record["category"]] += 1
-                difficulty_counts[int(record["difficulty"])] += 1
-                seed = question_drop_seed_for_concept(record["concept_id"]) or {}
-                family_id = str(seed.get("family_id") or "").strip()
+                if concept_id:
+                    same_day_concepts.add(concept_id)
+                if family_id:
+                    same_day_families.add(family_id)
+            age_days = max(0.0, (now - asked_at).total_seconds() / 86400.0)
+            if age_days <= medium_window_days:
+                category = str(record.get("category") or "").strip().casefold()
+                if category:
+                    category_counts[category] += 1
+                difficulty = int(record.get("difficulty", 0) or 0)
+                if difficulty > 0:
+                    difficulty_counts[difficulty] += 1
                 if family_id:
                     family_counts[family_id] += 1
-                source_counts[str(seed.get("source_type", "curated"))] += 1
+            if age_days <= short_window_days:
+                if family_id:
+                    short_family_counts[family_id] += 1
+                for tag in tag_values:
+                    short_tag_counts[str(tag)] += 1
+                if shape_key:
+                    short_shape_counts[shape_key] += 1
+                if family_id and shape_key:
+                    short_combo_counts[(family_id, shape_key)] += 1
         recent_records.sort(key=lambda item: item[0], reverse=True)
-        recent_family_window = [
-            str((question_drop_seed_for_concept(record["concept_id"]) or {}).get("family_id") or "").strip()
-            for _, record in recent_records[:4]
-        ]
-        recent_difficulty_window = [int(record["difficulty"]) for _, record in recent_records[:4]]
+        recent_family_window = [str(record.get("family_id") or "").strip() for _, record in recent_records[:8] if str(record.get("family_id") or "").strip()]
+        recent_shape_window = [str(record.get("shape_key") or "").strip() for _, record in recent_records[:6] if str(record.get("shape_key") or "").strip()]
+        recent_difficulty_window = [int(record.get("difficulty", 0) or 0) for _, record in recent_records[:4]]
         scored: list[tuple[float, QuestionDropVariant]] = []
-        same_day_scored: list[tuple[float, QuestionDropVariant]] = []
-        generated_gap = max(0, source_counts["curated"] - source_counts["generated"])
-        drop_pressure = max(0, int(config.get("drops_per_day", 2) or 2) - 2)
+        same_day_family_scored: list[tuple[float, QuestionDropVariant]] = []
+        same_day_concept_scored: list[tuple[float, QuestionDropVariant]] = []
         category_floor = min((category_counts[category] for category in candidate_categories), default=0)
         target_mix = _difficulty_mix_for(config)
         recent_total = sum(difficulty_counts.values())
@@ -4776,13 +5050,6 @@ class QuestionDropsService:
                 category_variant_capacity=category_variant_capacity,
                 category_concept_counts=category_concept_counts,
             )
-            if drop_pressure:
-                if variant.source_type == "generated":
-                    preferred_concept_days += min(drop_pressure * 0.25, 1.5)
-                    preferred_variant_days += min(drop_pressure * 0.35, 2.0)
-                else:
-                    preferred_concept_days += min(drop_pressure * 0.75, 3.0)
-                    preferred_variant_days += min(drop_pressure * 0.9, 4.0)
             concept_seen_at = recent_by_concept.get(variant.concept_id)
             days_since_concept = ((now - concept_seen_at).total_seconds() / 86400.0) if concept_seen_at is not None else None
             if days_since_concept is not None and days_since_concept < concept_cooldown_days:
@@ -4791,47 +5058,66 @@ class QuestionDropsService:
             days_since_variant = ((now - variant_seen_at).total_seconds() / 86400.0) if variant_seen_at is not None else None
             if days_since_variant is not None and days_since_variant < variant_cooldown_days:
                 continue
-            freshness = 18.0 if concept_seen_at is None else min(days_since_concept * 4.0, 16.0)
-            variant_freshness = 9.0 if variant_seen_at is None else min(days_since_variant * 2.0, 8.0)
+            freshness = 20.0 if concept_seen_at is None else min((days_since_concept or 0.0) * 3.5, 18.0)
+            variant_freshness = 10.0 if variant_seen_at is None else min((days_since_variant or 0.0) * 2.2, 9.0)
             if days_since_concept is not None and days_since_concept < preferred_concept_days:
-                freshness -= (preferred_concept_days - days_since_concept) * (6.0 if variant.source_type == "curated" else 2.5)
+                freshness -= (preferred_concept_days - days_since_concept) * 4.2
             if days_since_variant is not None and days_since_variant < preferred_variant_days:
-                variant_freshness -= (preferred_variant_days - days_since_variant) * (4.0 if variant.source_type == "curated" else 1.75)
-            category_balance = 8.0 - category_counts[variant.category]
+                variant_freshness -= (preferred_variant_days - days_since_variant) * 3.2
+            category_balance = 6.5 - max(0, category_counts[variant.category] - category_floor) * (1.15 + min(drop_pressure * 0.12, 0.9))
+            if category_counts[variant.category] == category_floor:
+                category_balance += 1.0
             category_gap = max(0, category_counts[variant.category] - category_floor)
-            free_category_repeats = 2 if drop_pressure >= 4 else 1
+            free_category_repeats = 1
             if category_gap > free_category_repeats:
                 spread_penalty = category_gap - free_category_repeats
-                category_balance -= spread_penalty * (0.9 + min(drop_pressure * 0.2, 1.6))
-                if variant.source_type == "generated":
-                    category_balance -= spread_penalty * min(drop_pressure * 0.18, 1.2)
+                category_balance -= spread_penalty * (0.9 + min(drop_pressure * 0.2, 1.4))
             target_share = float(target_mix.get(int(variant.difficulty), 0)) / 100.0
             expected_count = recent_total * target_share
-            difficulty_balance = 4.5 + ((expected_count - difficulty_counts[int(variant.difficulty)]) * 1.15)
+            difficulty_balance = 4.0 + ((expected_count - difficulty_counts[int(variant.difficulty)]) * 1.05)
             if recent_total < 6:
-                difficulty_balance += target_share * 1.5
+                difficulty_balance += target_share * 1.25
             if int(variant.difficulty) == 3 and recent_difficulty_window[:2] == [3, 3]:
-                difficulty_balance -= 9.0
+                difficulty_balance -= 7.0
             elif int(variant.difficulty) == 3 and recent_difficulty_window[:1] == [3]:
                 difficulty_balance -= 2.5
-            family_balance = 2.5 - min(family_counts[variant.family_id], 4) * 0.9
+            family_penalty = short_family_counts[variant.family_id] * 2.8
+            family_penalty += max(0, family_counts[variant.family_id] - 1) * 0.55
             for index, family_id in enumerate(recent_family_window):
                 if family_id and family_id == variant.family_id:
-                    family_balance -= max(2.0, 5.5 - index)
-            if variant.source_type == "generated":
-                source_balance = 2.5 + min(generated_gap * 0.75, 4.0) + min(drop_pressure * 0.5, 3.0)
-                pool_depth_bonus = (min(category_variant_capacity[variant.category], 12) * 0.16) + min(drop_pressure * 0.2, 1.2)
-            else:
-                source_balance = 1.5 - min(generated_gap * 0.25, 2.0) - min(drop_pressure * 0.35, 2.0)
-                pool_depth_bonus = min(category_variant_capacity[variant.category], 12) * 0.06
+                    family_penalty += max(1.6, 7.4 - (index * 1.15))
+            variant_tags = tuple(
+                tag
+                for tag in getattr(variant, "tags", ())
+                if isinstance(tag, str) and str(tag).startswith(("sub:", "mode:", "shape:"))
+            )
+            variant_shape = self._variant_answer_shape(variant)
+            tag_penalty = 0.0
+            novelty_bonus = 0.0
+            for tag in variant_tags:
+                tag_penalty += short_tag_counts[str(tag)] * (1.15 if str(tag).startswith("shape:") else 0.6)
+                if short_tag_counts[str(tag)] == 0:
+                    novelty_bonus += 0.35
+            if variant_shape:
+                tag_penalty += short_shape_counts[variant_shape] * 0.9
+            if variant.family_id and variant_shape:
+                tag_penalty += short_combo_counts[(variant.family_id, variant_shape)] * 1.35
+            for index, shape_key in enumerate(recent_shape_window):
+                if shape_key == variant_shape:
+                    tag_penalty += max(0.6, 2.8 - (index * 0.55))
+            pool_depth_bonus = min(category_concept_counts[variant.category], 18) * 0.08
             jitter = (int(build_variant_hash(slot_key, variant.variant_hash), 16) % 1000) / 1000.0
-            score = freshness + variant_freshness + category_balance + difficulty_balance + family_balance + source_balance + pool_depth_bonus + jitter
+            score = freshness + variant_freshness + category_balance + difficulty_balance + novelty_bonus + pool_depth_bonus - family_penalty - tag_penalty + jitter
             if variant.concept_id in same_day_concepts:
-                same_day_scored.append((score - 12.0, variant))
+                same_day_concept_scored.append((score - 18.0, variant))
+            elif variant.family_id in same_day_families:
+                same_day_family_scored.append((score - 10.0, variant))
             else:
                 scored.append((score, variant))
         if not scored:
-            scored = same_day_scored
+            scored = same_day_family_scored
+        if not scored:
+            scored = same_day_concept_scored
         if not scored:
             return None
         scored.sort(key=lambda item: item[0], reverse=True)

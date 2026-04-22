@@ -36,7 +36,7 @@ Babblebox premium is intentionally narrow:
 - free stays genuinely usable and keeps core trust, privacy, and local safety intact
 - `Supporter` is optional recognition and does not unlock core product power
 - `Plus` raises personal utility caps for Watch, reminders, and recurring AFK schedules
-- `Guild Pro` raises server-side admin caps, unlocks Shield AI's enhanced `gpt-5.4-mini` and `gpt-5.4` tiers, raises bounded Shield limits, raises bump-detection scale, and raises the safe Confessions image ceiling
+- `Guild Pro` raises server-side admin caps, unlocks Shield AI's enhanced `gpt-5.4-mini` and `gpt-5.4` tiers, unlocks Question Drops AI celebrations, raises bounded Shield limits, raises bump-detection scale, and raises the safe Confessions image ceiling
 - Patreon is the initial premium source of truth, but entitlements are resolved through a separate provider-agnostic premium layer
 - hard Patreon auth failures or a local unlink immediately withdraw provider-backed runtime access while still preserving saved feature state
 - premium downgrades do not delete saved Watch keywords, reminders, AFK schedules, Shield patterns, or Confessions settings; over-limit saved state is preserved, but premium-only runtime capacity is paused until the saved state is reduced or premium returns
@@ -63,11 +63,13 @@ Babblebox premium is intentionally narrow:
 - guild-first knowledge lane with `/drops status`, `/drops stats`, and `/drops leaderboard`
 - member role controls with `/drops roles status`, `/drops roles remove`, and `/drops roles preference`
 - configurable channels, categories, timing, activity gating, and tone
+- admin-configurable live-drop role ping with safe mention checks
 - category mastery roles
 - guild scholar ladder
 - custom mastery announcement templates managed inside `/dropsadmin mastery category` and `/dropsadmin mastery scholar`
 - profile / buddy / vault knowledge tie-ins
-- rare AI celebration copy as a public-facing optional layer
+- larger offline content packs with smarter repeat resistance and category shaping
+- rare AI celebration copy as an optional Guild Pro layer
 - numeric, number-word, safe multiple-choice, one-shot ordered-sequence, and spoiler-aware answer judging
 
 ### Everyday Utilities
@@ -272,6 +274,7 @@ Slash is recommended for multi-option setup here. Prefix stays positional, so th
 | `/dropsadmin config` | `bb!drops config true 4` | Configure cadence, timing, tone, difficulty profile, and AI opt-in |
 | `/dropsadmin channels` | `bb!drops channels add #trivia` | Add or remove Question Drops channels |
 | `/dropsadmin categories` | `bb!drops categories disable math` | Enable, disable, or reset knowledge categories |
+| `/dropsadmin ping` | `bb!drops ping set @Role` | View, set, or clear the optional live-drop ping role |
 | `/drops stats` | `bb!drops stats @name` | View guild-first Question Drops progress |
 | `/drops leaderboard` | `bb!drops leaderboard science` | View the guild knowledge board |
 | `/drops roles status` | `bb!drops roles status` | View your current Babblebox-managed Question Drops roles and future-grant state |
@@ -286,8 +289,10 @@ Question Drops notes:
 - 1-10 drops per day
 - `/dropsadmin config` now carries a compact difficulty profile: Standard stays welcoming, Smart leans medium and hard, Hard is noticeably tougher without changing point values
 - live drops stay compact and block `/play` only in the same channel while unresolved
+- `/dropsadmin ping` configures one optional role mention for live drops; Babblebox skips the ping automatically when the role is missing, unmentionable, or unsafe in that channel
 - numeric answers accept clean digits, and simple number words only for whole-number prompts
-- category and family repeat protection now keep higher-volume lanes from turning into a trivial farm
+- smarter concept, family, tag, and answer-shape rotation now keep higher-volume lanes from turning into a trivial farm
+- Question Drops AI celebrations require Guild Pro, while the offline content expansion and smarter rotation stay part of the core lane
 - removing current Babblebox roles does not erase earned mastery history, and opt-out is the durable "do not re-grant" switch
 - mastery announcements can use Babblebox's default copy, a scope default template, or a tier override with fallback order: tier override -> scope default -> Babblebox default
 - category template tokens: `{user.mention}` `{user.name}` `{user.display_name}` `{role.name}` `{tier.label}` `{threshold}` `{category.name}`

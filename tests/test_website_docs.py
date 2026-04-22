@@ -44,8 +44,10 @@ class WebsiteDocsTests(unittest.TestCase):
         self.assertIn("/drops leaderboard", help_html)
         self.assertIn("/drops roles status", help_html)
         self.assertIn("/dropsadmin config", help_html)
+        self.assertIn("/dropsadmin ping", help_html)
         self.assertIn("/dropsadmin mastery category", help_html)
         self.assertIn("difficulty profile", help_html)
+        self.assertIn("Guild Pro", help_html)
         self.assertIn("Difficulty, Length, and the booth Profile", help_html)
         self.assertIn("template_action", help_html)
         self.assertIn("{user.mention}", help_html)
@@ -126,8 +128,10 @@ class WebsiteDocsTests(unittest.TestCase):
             "/drops leaderboard",
             "/drops roles status",
             "/dropsadmin config",
+            "/dropsadmin ping",
             "/dropsadmin mastery category",
             "difficulty profile",
+            "Guild Pro",
             "Difficulty, Length, and Profile",
             "template_action",
             "{user.mention}",
@@ -185,6 +189,7 @@ class WebsiteDocsTests(unittest.TestCase):
             "/drops status",
             "/drops roles status",
             "/dropsadmin config",
+            "/dropsadmin ping",
             "/dropsadmin mastery category",
             "/lock channel",
             "/timeout remove",
@@ -640,6 +645,8 @@ class WebsiteDocsTests(unittest.TestCase):
         self.assertIn("/drops status", help_html)
         self.assertIn("/dropsadmin config", readme)
         self.assertIn("/dropsadmin config", help_html)
+        self.assertIn("/dropsadmin ping", readme)
+        self.assertIn("/dropsadmin ping", help_html)
         self.assertNotIn("/drops panel", readme)
         self.assertNotIn("/drops panel", help_html)
         self.assertNotIn("category-template", readme)

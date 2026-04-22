@@ -76,7 +76,7 @@ HELP_PAGES: list[dict[str, str]] = [
             "`/dropsadmin config` also controls the difficulty profile: Standard stays welcoming, Smart leans medium/hard, and Hard makes the lane noticeably tougher without changing point values.\n"
             "Template editing stays inside those mastery commands with `template_action`, supports a default template plus optional tier overrides, and falls back as: tier override -> scope default -> Babblebox default.\n"
             "Category tokens: `{user.mention}` `{user.name}` `{user.display_name}` `{role.name}` `{tier.label}` `{threshold}` `{category.name}`. Scholar tokens: `{user.mention}` `{user.name}` `{user.display_name}` `{role.name}` `{tier.label}` `{threshold}`.\n"
-            "Admins can use `/dropsadmin` to run 1-10 drops a day, pick channels and categories, and opt into rare AI celebration copy without turning the lane into spam."
+            "Admins can use `/dropsadmin` to run 1-10 drops a day, pick channels and categories, set `/dropsadmin ping` for one safe live role mention, and opt into Guild Pro AI celebration copy while the smarter offline question rotation stays core."
         ),
         "fields": [
             (
@@ -84,14 +84,16 @@ HELP_PAGES: list[dict[str, str]] = [
                 (
                     "`/drops status` shows the guild knowledge lane clearly.\n"
                     "`/drops stats` and `/drops leaderboard` stay guild-first, while Buddy and Profile surfaces fold the knowledge lane into identity cleanly.\n"
-                    "`/drops roles status`, `/drops roles remove`, and `/drops roles preference` give members a private way to remove current Babblebox roles or stop future grants without touching achievement history."
+                    "`/drops roles status`, `/drops roles remove`, and `/drops roles preference` give members a private way to remove current Babblebox roles or stop future grants without touching achievement history.\n"
+                    "Babblebox now keeps a wider offline pool in rotation so one busy server sees fewer near-clones and fewer same-family repeats."
                 ),
             ),
             (
                 "Config / Cadence",
                 (
                     "`/dropsadmin config` also controls the difficulty profile: Standard stays welcoming, Smart leans medium/hard, and Hard makes the lane noticeably tougher without changing point values.\n"
-                    "Admins can use `/dropsadmin` to run 1-10 drops a day, pick channels and categories, and opt into rare AI celebration copy without turning the lane into spam."
+                    "Admins can use `/dropsadmin` to run 1-10 drops a day, pick channels and categories, set `/dropsadmin ping` for one safe live role mention, and opt into rare AI celebration copy without turning the lane into spam.\n"
+                    "Question Drops AI celebrations are Guild Pro only; the offline content upgrade and smarter repeat resistance stay available on the core lane."
                 ),
             ),
             (

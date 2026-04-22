@@ -485,10 +485,12 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/drops status", question_drops_page["body"])
         self.assertIn("/drops roles status", question_drops_page["body"])
         self.assertIn("/dropsadmin config", question_drops_page["body"])
+        self.assertIn("/dropsadmin ping", question_drops_page["body"])
         self.assertNotIn("/drops panel", question_drops_page["body"])
         self.assertIn("/dropsadmin mastery category", question_drops_page["body"])
         self.assertNotIn("/drops mastery category", question_drops_page["body"])
         self.assertIn("difficulty profile", question_drops_page["body"])
+        self.assertIn("Guild Pro", question_drops_page["body"])
         self.assertIn("template_action", question_drops_page["body"])
         self.assertIn("{user.mention}", question_drops_page["body"])
         self.assertIn("{category.name}", question_drops_page["body"])
@@ -613,8 +615,8 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         admin_slash_mastery_names = {command.name for command in cog.dropsadmin_mastery_group.app_command.commands}
 
         self.assertEqual(public_slash_names, {"leaderboard", "roles", "stats", "status"})
-        self.assertTrue({"config", "channels", "categories", "digest", "mastery"}.issubset(prefix_alias_names))
-        self.assertEqual(admin_slash_names, {"categories", "channels", "config", "digest", "mastery"})
+        self.assertTrue({"config", "channels", "categories", "digest", "mastery", "ping"}.issubset(prefix_alias_names))
+        self.assertEqual(admin_slash_names, {"categories", "channels", "config", "digest", "mastery", "ping"})
         self.assertEqual(prefix_mastery_names, {"category", "recalc", "scholar"})
         self.assertEqual(admin_slash_mastery_names, {"category", "recalc", "scholar"})
 

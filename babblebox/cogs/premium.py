@@ -10,6 +10,7 @@ from discord.ext import commands
 from babblebox import game_engine as ge
 from babblebox.command_utils import send_hybrid_response
 from babblebox.premium_limits import (
+    CAPABILITY_QUESTION_DROPS_AI_CELEBRATIONS,
     CAPABILITY_SHIELD_AI_REVIEW,
     LIMIT_AFK_SCHEDULES,
     LIMIT_BUMP_DETECTION_CHANNELS,
@@ -291,6 +292,7 @@ class PremiumCog(commands.Cog):
                         limit_value=self.service.resolve_guild_limit(guild.id, LIMIT_CONFESSIONS_MAX_IMAGES),
                     ),
                     f"Shield AI review: {'Unlocked' if self.service.guild_has_capability(guild.id, CAPABILITY_SHIELD_AI_REVIEW) else 'Requires Guild Pro'}",
+                    f"Question Drops AI celebrations: {'Unlocked' if self.service.guild_has_capability(guild.id, CAPABILITY_QUESTION_DROPS_AI_CELEBRATIONS) else 'Requires Guild Pro'}",
                 )
             ),
             inline=False,
@@ -309,7 +311,7 @@ class PremiumCog(commands.Cog):
             name="Current Premium Hooks",
             value=(
                 "Plus: higher Watch, reminder, and recurring AFK limits.\n"
-                "Guild Pro: more bump detection channels, larger Shield caps, Shield AI review eligibility, and a higher Confessions image ceiling."
+                "Guild Pro: more bump detection channels, larger Shield caps, Shield AI review eligibility, Question Drops AI celebrations, and a higher Confessions image ceiling."
             ),
             inline=False,
         )

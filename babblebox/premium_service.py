@@ -726,7 +726,7 @@ class PremiumService:
             {
                 "plan_code": PLAN_GUILD_PRO,
                 "title": "Guild Pro",
-                "summary": "Server-level premium for larger caps, Shield AI review, and advanced admin power.",
+                "summary": "Server-level premium for larger caps, Shield AI review, Question Drops AI celebrations, and advanced admin power.",
             },
         )
 

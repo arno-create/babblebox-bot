@@ -19,6 +19,7 @@ LIMIT_SHIELD_SEVERE_TERMS = "shield_severe_terms"
 LIMIT_CONFESSIONS_MAX_IMAGES = "confessions_max_images"
 
 CAPABILITY_SHIELD_AI_REVIEW = "shield_ai_review"
+CAPABILITY_QUESTION_DROPS_AI_CELEBRATIONS = "question_drops_ai_celebrations"
 
 USER_PLAN_ORDER = (PLAN_FREE, PLAN_SUPPORTER, PLAN_PLUS)
 GUILD_PLAN_ORDER = (PLAN_FREE, PLAN_GUILD_PRO)
@@ -80,7 +81,7 @@ STORAGE_CEILINGS = {
 
 GUILD_CAPABILITIES = {
     PLAN_FREE: frozenset(),
-    PLAN_GUILD_PRO: frozenset({CAPABILITY_SHIELD_AI_REVIEW}),
+    PLAN_GUILD_PRO: frozenset({CAPABILITY_SHIELD_AI_REVIEW, CAPABILITY_QUESTION_DROPS_AI_CELEBRATIONS}),
 }
 
 
@@ -116,4 +117,3 @@ def storage_ceiling(limit_key: str, fallback: int) -> int:
 
 def guild_capabilities(plan_code: str) -> frozenset[str]:
     return GUILD_CAPABILITIES.get(plan_code, frozenset())
-
