@@ -32,6 +32,16 @@ PATREON_STALE_HOURS = 24
 _LOCAL_HOSTS = frozenset({"localhost", "127.0.0.1"})
 _HEX_MD5_RE = re.compile(r"^[A-Fa-f0-9]{32}$")
 _PATREON_ID_RE = re.compile(r"^[0-9]+$")
+_PATREON_ENV_NAMES = (
+    "PATREON_CLIENT_ID",
+    "PATREON_CLIENT_SECRET",
+    "PATREON_REDIRECT_URI",
+    "PATREON_WEBHOOK_SECRET",
+    "PATREON_CAMPAIGN_ID",
+    "PATREON_SUPPORTER_TIER_IDS",
+    "PATREON_PLUS_TIER_IDS",
+    "PATREON_GUILD_PRO_TIER_IDS",
+)
 
 
 def _utcnow() -> datetime:
@@ -108,6 +118,7 @@ class PatreonPremiumProvider(PremiumProviderAdapter):
         timeout = aiohttp.ClientTimeout(total=30)
         self._session: aiohttp.ClientSession | None = None
         self._timeout = timeout
+        self._provider_env_present = any(str(os.getenv(name, "") or "").strip() for name in _PATREON_ENV_NAMES)
         self._configuration_errors = self._validate_configuration()
 
     def _parse_tier_env(self, env_name: str) -> frozenset[str]:
@@ -133,6 +144,8 @@ class PatreonPremiumProvider(PremiumProviderAdapter):
         return parsed, errors
 
     def _validate_configuration(self) -> tuple[str, ...]:
+        if not self._provider_env_present:
+            return ()
         errors: list[str] = []
         if not self.client_id:
             errors.append("PATREON_CLIENT_ID is missing.")
@@ -187,13 +200,22 @@ class PatreonPremiumProvider(PremiumProviderAdapter):
     def configuration_errors(self) -> tuple[str, ...]:
         return self._configuration_errors
 
+    def configuration_state(self) -> str:
+        if not self._provider_env_present:
+            return "disabled"
+        if self._configuration_errors:
+            return "misconfigured"
+        return "configured"
+
     def configuration_message(self) -> str:
+        if self.configuration_state() == "disabled":
+            return "Patreon premium is not enabled on this deployment."
         if not self._configuration_errors:
             return "Patreon premium is configured."
         return self._configuration_errors[0]
 
     def configured(self) -> bool:
-        return not self._configuration_errors
+        return self.configuration_state() == "configured"
 
     def automation_ready(self) -> bool:
         return self.configured()

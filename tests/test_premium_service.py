@@ -942,12 +942,69 @@ class PremiumServiceTests(unittest.IsolatedAsyncioTestCase):
         with patch.dict(os.environ, env, clear=False):
             provider = PatreonPremiumProvider()
             service = PremiumService(self.bot, store=PremiumStore(backend="memory"), provider=provider)
+            with self.assertRaises(RuntimeError) as error_context:
+                await service.start()
+            self.assertIn("Premium startup unsafe", str(error_context.exception))
+            self.assertIn("Patreon premium configuration is incomplete or inconsistent", str(error_context.exception))
+
+    async def test_disabled_patreon_deployment_returns_honest_message_and_state(self):
+        with patch.dict(os.environ, {}, clear=False):
+            provider = PatreonPremiumProvider()
+            service = PremiumService(self.bot, store=PremiumStore(backend="memory"), provider=provider)
             started = await service.start()
             self.assertTrue(started)
-            ok, message = await service.create_link_url(91)
-            self.assertFalse(ok)
-            self.assertIn("PATREON_CAMPAIGN_ID", message)
-            await service.close()
+            try:
+                ok, message = await service.create_link_url(91)
+                self.assertFalse(ok)
+                self.assertIn("not enabled on this deployment", message)
+                diagnostics = service.provider_diagnostics()
+                self.assertEqual(diagnostics["startup_state"], "disabled")
+                self.assertEqual(diagnostics["patreon_state"], "disabled")
+                self.assertFalse(diagnostics["patreon_configured"])
+            finally:
+                await service.close()
+
+    async def test_local_memory_premium_is_allowed_for_explicit_local_work(self):
+        env = {
+            "PATREON_CLIENT_ID": "client",
+            "PATREON_CLIENT_SECRET": "secret",
+            "PUBLIC_BASE_URL": "http://127.0.0.1:8000",
+            "PATREON_REDIRECT_URI": "http://127.0.0.1:8000/premium/patreon/callback",
+            "PATREON_WEBHOOK_SECRET": "secret",
+            "PATREON_CAMPAIGN_ID": "1234",
+            "PATREON_PLUS_TIER_IDS": "123",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            provider = PatreonPremiumProvider()
+            service = PremiumService(self.bot, store=PremiumStore(backend="memory"), provider=provider)
+            started = await service.start()
+            self.assertTrue(started)
+            try:
+                diagnostics = service.provider_diagnostics()
+                self.assertEqual(diagnostics["startup_state"], "enabled_safe")
+                ok, url = await service.create_link_url(91)
+                self.assertTrue(ok)
+                self.assertIn("state=", url)
+            finally:
+                await service.close()
+
+    async def test_public_memory_premium_is_rejected_at_startup(self):
+        env = {
+            "PATREON_CLIENT_ID": "client",
+            "PATREON_CLIENT_SECRET": "secret",
+            "PUBLIC_BASE_URL": "https://example.test",
+            "PATREON_REDIRECT_URI": "https://example.test/premium/patreon/callback",
+            "PATREON_WEBHOOK_SECRET": "secret",
+            "PATREON_CAMPAIGN_ID": "1234",
+            "PATREON_PLUS_TIER_IDS": "123",
+        }
+        with patch.dict(os.environ, env, clear=False):
+            provider = PatreonPremiumProvider()
+            service = PremiumService(self.bot, store=PremiumStore(backend="memory"), provider=provider)
+            with self.assertRaises(RuntimeError) as error_context:
+                await service.start()
+            self.assertIn("Premium startup unsafe", str(error_context.exception))
+            self.assertIn("Postgres-backed premium storage", str(error_context.exception))
 
     async def test_patreon_linking_rejects_redirect_base_mismatch(self):
         env = {
@@ -1045,6 +1102,34 @@ class PremiumServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(summary["last_webhook_status"], "processed")
         self.assertEqual(summary["unresolved_issue_count"], 1)
         self.assertEqual(summary["last_issue_type"], "webhook_unresolved")
+
+    async def test_stale_provider_monitor_summary_marks_old_incidents_stale_without_changing_entitlements(self):
+        await self._link_identity(user_id=811, plan_codes=(PLAN_PLUS,))
+        stale_at = _serialize_datetime(_utcnow() - timedelta(days=3))
+        await self.service._store_provider_state_payload(
+            PROVIDER_PATREON,
+            {
+                "webhook_monitor": {
+                    "last_status": "error",
+                    "last_http_status": 500,
+                    "last_event_at": stale_at,
+                    "invalid_signature_count": 0,
+                    "recent_unavailable_count": 1,
+                    "recent_server_error_count": 1,
+                },
+                "last_issue": {
+                    "issue_type": "webhook_unresolved",
+                    "recorded_at": stale_at,
+                },
+                "unresolved_issue_count": 1,
+            },
+        )
+
+        summary = self.service.public_provider_monitor_summary()
+
+        self.assertEqual(summary["status"], "stale")
+        self.assertTrue(summary["stale"])
+        self.assertEqual(self.service.get_user_snapshot(811)["plan_code"], PLAN_PLUS)
 
     async def test_webhook_processing_is_idempotent_for_canonical_duplicate_json(self):
         await self._link_identity(user_id=643, plan_codes=(PLAN_PLUS,))

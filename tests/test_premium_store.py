@@ -1,4 +1,5 @@
 import types
+import types
 import unittest
 from datetime import datetime, timezone
 
@@ -73,6 +74,25 @@ class PostgresPremiumStoreSchemaTests(unittest.IsolatedAsyncioTestCase):
             "CREATE UNIQUE INDEX IF NOT EXISTS ux_premium_guild_claims_source_active ON premium_guild_claims (source_kind, source_id) WHERE status = 'active'",
             connection.executed,
         )
+
+    async def test_ensure_schema_adds_legacy_columns_before_dependent_indexes(self):
+        store = _PostgresPremiumStore("postgresql://premium-user:secret@db.example.com/app")
+        connection = _SchemaConnection()
+        store._pool = _FakePool(connection)
+
+        await store._ensure_schema()
+
+        claim_note_alter = "ALTER TABLE premium_guild_claims ADD COLUMN IF NOT EXISTS note TEXT NULL"
+        claim_source_index = "CREATE UNIQUE INDEX IF NOT EXISTS ux_premium_guild_claims_source_active ON premium_guild_claims (source_kind, source_id) WHERE status = 'active'"
+        provider_payload_alter = "ALTER TABLE premium_provider_state ADD COLUMN IF NOT EXISTS payload JSONB NOT NULL DEFAULT '{}'::jsonb"
+        webhook_payload_alter = "ALTER TABLE premium_webhook_events ADD COLUMN IF NOT EXISTS payload JSONB NOT NULL DEFAULT '{}'::jsonb"
+        audit_detail_alter = "ALTER TABLE premium_audit_log ADD COLUMN IF NOT EXISTS detail JSONB NOT NULL DEFAULT '{}'::jsonb"
+
+        self.assertIn(claim_note_alter, connection.executed)
+        self.assertIn(provider_payload_alter, connection.executed)
+        self.assertIn(webhook_payload_alter, connection.executed)
+        self.assertIn(audit_detail_alter, connection.executed)
+        self.assertLess(connection.executed.index(claim_note_alter), connection.executed.index(claim_source_index))
 
 
 class PostgresPremiumStoreConflictTests(unittest.IsolatedAsyncioTestCase):

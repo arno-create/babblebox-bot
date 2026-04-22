@@ -483,3 +483,69 @@ class BabbleBotCommandErrorTests(unittest.IsolatedAsyncioTestCase):
                         self.assertIn("configured backend `postgres`", message)
                     finally:
                         await self._close_bot(bot)
+
+    async def test_setup_hook_fails_closed_when_patreon_configuration_is_partial(self):
+        with self._env(
+            PUBLIC_BASE_URL="https://example.test",
+            PATREON_CLIENT_ID="client-only",
+        ):
+            bot = BabbleBot()
+
+            try:
+                with patch.object(BabbleBot, "_load_dictionary", new=_fake_load_dictionary):
+                    with self.assertRaises(Exception) as error_context:
+                        await bot.setup_hook()
+
+                message = str(error_context.exception)
+                self.assertIn("Premium startup unsafe", message)
+                self.assertIn("Patreon premium configuration is incomplete or inconsistent", message)
+            finally:
+                await self._close_bot(bot)
+
+    async def test_setup_hook_fails_closed_when_public_premium_uses_memory_storage(self):
+        with self._env(
+            PUBLIC_BASE_URL="https://example.test",
+            PREMIUM_STORAGE_BACKEND="memory",
+            PATREON_CLIENT_ID="client",
+            PATREON_CLIENT_SECRET="secret",
+            PATREON_REDIRECT_URI="https://example.test/premium/patreon/callback",
+            PATREON_WEBHOOK_SECRET="webhook-secret",
+            PATREON_CAMPAIGN_ID="1234",
+            PATREON_PLUS_TIER_IDS="9876",
+        ):
+            bot = BabbleBot()
+
+            try:
+                with patch.object(BabbleBot, "_load_dictionary", new=_fake_load_dictionary):
+                    with self.assertRaises(Exception) as error_context:
+                        await bot.setup_hook()
+
+                message = str(error_context.exception)
+                self.assertIn("Premium startup unsafe", message)
+                self.assertIn("Postgres-backed premium storage", message)
+            finally:
+                await self._close_bot(bot)
+
+    async def test_setup_hook_allows_disabled_patreon_on_free_only_deployment(self):
+        with self._env(PUBLIC_BASE_URL="https://example.test"):
+            bot = BabbleBot()
+            sync_targets: list[int | None] = []
+
+            async def fake_sync(*, guild=None):
+                sync_targets.append(guild.id if guild else None)
+                return bot.tree.get_commands(guild=guild)
+
+            try:
+                with patch.object(BabbleBot, "_load_dictionary", new=_fake_load_dictionary), patch.object(
+                    bot.tree,
+                    "sync",
+                    new=AsyncMock(side_effect=fake_sync),
+                ):
+                    await bot.setup_hook()
+
+                self.assertEqual(sync_targets, [None])
+                diagnostics = bot.premium_service.provider_diagnostics()
+                self.assertEqual(diagnostics["startup_state"], "disabled")
+                self.assertFalse(diagnostics["patreon_configured"])
+            finally:
+                await self._close_bot(bot)
