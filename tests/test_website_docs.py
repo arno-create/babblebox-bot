@@ -33,6 +33,7 @@ class WebsiteDocsTests(unittest.TestCase):
             'id="daily-arcade"',
             'id="buddy-profile-vault"',
             'id="utilities"',
+            'id="premium"',
             'id="shield-admin"',
             'id="faq"',
         ):
@@ -83,6 +84,8 @@ class WebsiteDocsTests(unittest.TestCase):
         self.assertIn("ordered-sequence prompts are one-shot", help_html)
         self.assertNotIn("jump-nav", help_html)
         self.assertIn("guide-band", help_html)
+        self.assertIn("Best first premium command", help_html)
+        self.assertIn("How do I actually buy and activate premium?", help_html)
         self.assertIn("Anti-Spam", help_html)
         self.assertNotIn("/admin risk", help_html)
         self.assertNotIn("/admin emergency", help_html)
@@ -643,6 +646,43 @@ class WebsiteDocsTests(unittest.TestCase):
         ):
             self.assertIn(f"assets/{asset_name}", readme)
             self.assertTrue((assets_dir / asset_name).exists())
+
+    def test_premium_docs_and_homepage_surface_clear_activation_funnel(self):
+        index_html = (ROOT / "index.html").read_text(encoding="utf-8")
+        help_html = (ROOT / "help.html").read_text(encoding="utf-8")
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+
+        for text in (
+            'href="#premium"',
+            "View Premium",
+            "Subscribe on Patreon",
+            "Free stays useful. Premium raises the ceiling cleanly.",
+            "Buy, link, then claim only if you need Guild Pro.",
+            "Only Babblebox-labeled tiers",
+            "help.html#premium",
+        ):
+            self.assertIn(text, index_html)
+
+        for text in (
+            'href="#premium"',
+            "Compare Premium",
+            "Best first premium command",
+            "How do I actually buy and activate premium?",
+            "Only Babblebox-labeled tiers unlock Babblebox premium",
+            "Buy on Patreon, link in Discord, then claim Guild Pro",
+        ):
+            self.assertIn(text, help_html)
+
+        for text in (
+            "### Plan Comparison",
+            "### How Premium Activates",
+            "### Mixed Patreon Note",
+            "### Trust and Downgrade Behavior",
+            "choose a Babblebox-labeled tier",
+            "Supporter",
+            "Guild Pro",
+        ):
+            self.assertIn(text, readme)
 
     def test_help_and_readme_do_not_reintroduce_duplicate_drops_panel_copy(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")

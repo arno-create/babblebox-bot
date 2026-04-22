@@ -145,16 +145,56 @@ HELP_PAGES: list[dict[str, str]] = [
         "try": "`/buddy`, `/profile`, `/vault`",
     },
     {
+        "title": "Premium / Plans",
+        "emoji": "\U0001f48e",
+        "description": "Buy on Patreon, link privately in Discord, and claim Guild Pro only where you want it.",
+        "fields": [
+            (
+                "Choose a Plan",
+                (
+                    "`Supporter` is a recognition tier for people who want to back Babblebox without changing the product lane.\n"
+                    "`Plus` is for people who lean on Watch, reminders, and recurring AFK schedules and want much higher personal limits.\n"
+                    "`Guild Pro` is for server admins who want higher bounded server caps, Shield AI's higher model tiers when owner policy enables review, Question Drops AI celebrations, and the larger safe Confessions image ceiling."
+                ),
+            ),
+            (
+                "How Premium Activates",
+                (
+                    "1. Use `/premium plans` to compare the real Babblebox plans.\n"
+                    "2. Use `/premium subscribe` to open Patreon and choose a Babblebox-labeled tier on the mixed campaign.\n"
+                    "3. Use `/premium link` in Discord so Babblebox can connect that Patreon account to your Discord user.\n"
+                    "4. If you bought Guild Pro, use `/premium guild claim` inside the server you want to upgrade, then confirm with `/premium guild status`."
+                ),
+            ),
+            (
+                "Mixed Patreon Note",
+                (
+                    "The Patreon campaign also supports the Inevitable Friendship server. Only Babblebox-labeled tiers unlock Babblebox premium unless a tier description explicitly says it does.\n"
+                    "If you are linked but still see Free, run `/premium status` or `/premium refresh`, then use `/support` if the mapped Babblebox tier still does not appear."
+                ),
+            ),
+            (
+                "Trust / Downgrade",
+                (
+                    "Free keeps core safety, privacy, and the baseline utility lane. Unlinking deletes Babblebox's local encrypted Patreon tokens only.\n"
+                    "Downgrades or Guild Pro release do not delete saved Watch, reminder, AFK, Shield, or Confessions settings; premium-only runtime capacity simply pauses until the saved state is reduced or premium returns."
+                ),
+            ),
+        ],
+        "try": "`/premium plans`, `/premium status`, `/premium subscribe`, `/premium guild status`",
+    },
+    {
         "title": "Support / Links",
         "emoji": "\U0001f6df\ufe0f",
         "description": "Official places to get help, report issues, and inspect the product.",
         "body": (
             "Use `/support` for the standalone support card whenever you need the official links quickly.\n"
             "If something breaks, feels confusing, or could be better, reporting it is genuinely appreciated and helps shape the next fix or polish pass.\n"
-            "If you want to purchase Babblebox premium, the same support card also includes the official Patreon membership page."
+            "Use `/premium plans`, `/premium subscribe`, and `/premium status` when the question is specifically about buying, linking, or checking Babblebox premium.\n"
+            "If you want to purchase Babblebox premium, the same support card also includes the official Patreon membership page and points you to the right next step after purchase."
         ),
         "links": official_links_markdown(),
-        "try": "`/support`, `bb!support`, or use the link buttons below.",
+        "try": "`/support`, `/premium plans`, `/premium status`, or use the link buttons below.",
     },
     {
         "title": "Shield / Admin Safety",
@@ -276,7 +316,7 @@ def build_help_embed() -> discord.Embed:
         title="\U0001f3e0 Babblebox Help",
         description=(
             "Babblebox is organized into clear lanes so it stays easy to learn in a live server. "
-            "Start with the lane you need, then use `/support` any time you want the official links or bug-report routes."
+            "Start with the lane you need, use `/premium plans` when you want the upgrade path, and use `/support` any time you want the official links or bug-report routes."
         ),
         color=discord.Color.gold(),
     )
@@ -313,6 +353,14 @@ def build_help_embed() -> discord.Embed:
         inline=False,
     )
     embed.add_field(
+        name="Premium",
+        value=(
+            "`/premium plans`, `/premium status`, `/premium subscribe`, and `/premium guild status` "
+            "cover plan comparison, Patreon purchase, private linking, and Guild Pro server claims."
+        ),
+        inline=False,
+    )
+    embed.add_field(
         name="Shield / Admin",
         value=(
             "`/shield panel`, `/shield rules`, `/shield exemptions`, `/shield links`, `/shield filters`, `/shield severe category`, "
@@ -324,7 +372,10 @@ def build_help_embed() -> discord.Embed:
     )
     embed.add_field(
         name="Support / Links",
-        value=f"Use `/support` for the official support card.\n{official_links_markdown()}",
+        value=(
+            "Use `/support` for the official support card, and `/premium plans` or `/premium status` if you are buying, linking, or checking Babblebox premium.\n"
+            f"{official_links_markdown()}"
+        ),
         inline=False,
     )
     embed.add_field(
@@ -340,18 +391,28 @@ def build_support_embed() -> discord.Embed:
         title="\U0001f6df\ufe0f Babblebox Support",
         description=(
             "If something breaks, feels confusing, or could be better, please report it. "
-            "Bug reports and issue notes directly help shape fixes and polish, and they are always appreciated."
+            "This is also the quickest official route for buying Babblebox premium, checking mixed Patreon tier confusion, or getting live help when a link or claim looks wrong."
         ),
         color=discord.Color.gold(),
     )
     embed.add_field(name="Official Links", value=official_links_markdown(), inline=False)
     embed.add_field(
+        name="Premium",
+        value=(
+            "`Patreon Membership` is where Babblebox premium is purchased.\n"
+            "After you buy a Babblebox-labeled tier, use `/premium link` in Discord.\n"
+            "If you bought Guild Pro, finish with `/premium guild claim` in the server you want to upgrade.\n"
+            "If your Patreon link or entitlement still looks wrong, check `/premium status` or `/premium refresh`, then use the support server for live help."
+        ),
+        inline=False,
+    )
+    embed.add_field(
         name="Best Route",
         value=(
-            "`Support Server` for live help and quick triage.\n"
-            "`GitHub Repository` for bugs, issues, and open-source code.\n"
-            "`Official Website` for docs, policies, and public product info.\n"
-            "`Patreon Membership` to purchase Babblebox premium before linking it in Discord."
+            "`Support Server` for live help, mixed-tier questions, and stale premium or Guild Pro claim states.\n"
+            "`Patreon Membership` to buy Babblebox premium before linking it in Discord.\n"
+            "`Official Website` for the public premium guide, help page, and policies.\n"
+            "`GitHub Repository` for bug reports, issues, and the open-source code."
         ),
         inline=False,
     )

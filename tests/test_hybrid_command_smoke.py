@@ -19,7 +19,7 @@ from babblebox.cogs.admin import AdminCog
 from babblebox.cogs.confessions import ConfessionsCog
 from babblebox.cogs.gameplay import GameplayCog
 from babblebox.cogs.identity import IdentityCog
-from babblebox.cogs.meta import HELP_PAGES, MetaCog, build_help_embed, build_help_page_embed
+from babblebox.cogs.meta import HELP_PAGES, MetaCog, build_help_embed, build_help_page_embed, build_support_embed
 from babblebox.cogs.premium import PremiumCog
 from babblebox.cogs.question_drops import QuestionDropsCog
 from babblebox.cogs.shield import ShieldCog, ShieldPanelView
@@ -439,6 +439,13 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
     def _sent_view(self, ctx: FakeContext):
         return self._sent_kwargs(ctx)["view"]
 
+    def _link_button_labels(self, view) -> list[str]:
+        return [
+            child.label
+            for child in getattr(view, "children", [])
+            if getattr(child, "style", None) == discord.ButtonStyle.link
+        ]
+
     def _assert_embed_within_discord_limits(self, embed: discord.Embed):
         self.assertLessEqual(len(embed.title or ""), 256)
         self.assertLessEqual(len(embed.description or ""), 4096)
@@ -505,7 +512,9 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertIn("/support", support_page["body"])
-        self.assertIn("genuinely appreciated", support_page["body"])
+        self.assertIn("/premium plans", support_page["body"])
+        self.assertIn("/premium subscribe", support_page["body"])
+        self.assertIn("/premium status", support_page["body"])
         self.assertIn("discord.com/servers/inevitable-friendship-1322933864360050688", support_page["links"])
         self.assertIn("github.com/arno-create/babblebox-bot", support_page["links"])
         self.assertIn("arno-create.github.io/babblebox-bot/", support_page["links"])
@@ -518,6 +527,26 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Support Server", fields["Links"])
         self.assertIn("Official Website", fields["Links"])
         self.assertIn("Patreon Membership", fields["Links"])
+
+    def test_help_pages_include_premium_lane(self):
+        premium_index, premium_page = next(
+            (index, page) for index, page in enumerate(HELP_PAGES) if page["title"] == "Premium / Plans"
+        )
+
+        self.assertIn("Buy on Patreon", premium_page["description"])
+        self.assertIn("How Premium Activates", "\n".join(name for name, _value in premium_page["fields"]))
+        self.assertIn("Mixed Patreon Note", "\n".join(name for name, _value in premium_page["fields"]))
+        self.assertIn("/premium subscribe", premium_page["try"])
+        self.assertIn("/premium guild status", premium_page["try"])
+
+        embed = build_help_page_embed(premium_index)
+        fields = {field.name: field.value for field in embed.fields}
+        self.assertIn("Choose a Plan", fields)
+        self.assertIn("How Premium Activates", fields)
+        self.assertIn("Mixed Patreon Note", fields)
+        self.assertIn("Trust / Downgrade", fields)
+        self.assertIn("Babblebox-labeled tiers", fields["Mixed Patreon Note"])
+        self.assertIn("Downgrades or Guild Pro release do not delete saved", fields["Trust / Downgrade"])
 
     def test_help_surfaces_do_not_reference_removed_moment_feature(self):
         for page in HELP_PAGES:
@@ -579,8 +608,26 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         fields = {field.name: field.value for field in embed.fields}
         self.assertIn("Party Games", fields)
         self.assertIn("Question Drops", fields)
+        self.assertIn("Premium", fields)
         self.assertIn("Support / Links", fields)
+        self.assertIn("/premium plans", fields["Premium"])
+        self.assertIn("/premium status", fields["Premium"])
         self.assertIn("/support", fields["Support / Links"])
+        self.assertIn("/premium plans", fields["Support / Links"])
+
+    def test_support_embed_highlights_premium_routes(self):
+        embed = build_support_embed()
+        fields = {field.name: field.value for field in embed.fields}
+
+        self.assertIn("Babblebox Support", embed.title)
+        self.assertIn("buying Babblebox premium", embed.description)
+        self.assertEqual(tuple(fields.keys()), ("Official Links", "Premium", "Best Route"))
+        self.assertIn("`Patreon Membership` is where Babblebox premium is purchased.", fields["Premium"])
+        self.assertIn("/premium link", fields["Premium"])
+        self.assertIn("/premium guild claim", fields["Premium"])
+        self.assertIn("/premium refresh", fields["Premium"])
+        self.assertIn("`Support Server` for live help", fields["Best Route"])
+        self.assertIn("`Official Website` for the public premium guide", fields["Best Route"])
 
     def test_question_drops_help_page_is_split_across_multiple_fields(self):
         page_index = next(index for index, page in enumerate(HELP_PAGES) if page["title"] == "Question Drops")
@@ -711,14 +758,234 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
 
             payload = self._sent_kwargs(ctx)
             self.assertTrue(payload["ephemeral"])
-            self.assertIn("Patreon Membership", payload["embed"].title)
+            self.assertEqual(payload["embed"].title, "Subscribe on Patreon")
+            self.assertIn("Discord linking is the second step", payload["embed"].description)
+            fields = {field.name: field.value for field in payload["embed"].fields}
+            self.assertIn("Choose The Right Tier", fields)
+            self.assertIn("After You Buy", fields)
+            self.assertIn("Need Help?", fields)
+            self.assertEqual(self._link_button_labels(payload["view"]), ["View Patreon", "Compare Plans", "Support Server"])
             self.assertEqual(
                 self._link_buttons(payload["view"]),
                 {
                     "View Patreon": "https://www.patreon.com/cw/InevitableFriendship",
+                    "Compare Plans": "https://arno-create.github.io/babblebox-bot/help.html#premium",
                     "Support Server": "https://discord.com/servers/inevitable-friendship-1322933864360050688",
                 },
             )
+        finally:
+            await cog.service.close()
+
+    async def test_premium_status_not_linked_guides_subscribe_then_link(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
+        cog = PremiumCog(bot)
+        try:
+            cog.service.storage_ready = True
+            cog.service.get_user_snapshot = lambda _user_id: {
+                "plan_code": "free",
+                "active_plans": (),
+                "claimable_sources": (),
+                "blocked": False,
+                "stale": False,
+                "system_access": False,
+                "system_guild_claims": 0,
+            }
+            cog.service.get_link = lambda _user_id, provider=None: None
+            cog.service.list_cached_claims_for_user = lambda _user_id: []
+            limit_values = {
+                "watch_keywords": 10,
+                "watch_filters": 8,
+                "reminders_active": 3,
+                "reminders_public_active": 1,
+                "afk_schedules": 6,
+            }
+            cog.service.resolve_user_limit = lambda _user_id, limit_key: limit_values[limit_key]
+            ctx = FakeContext(interaction=FakeInteraction(), guild=FakeGuild(), channel=FakeChannel(), author=FakeAuthor())
+
+            await PremiumCog.premium_status_command.callback(cog, ctx)
+
+            payload = self._sent_kwargs(ctx)
+            embed = payload["embed"]
+            fields = {field.name: field.value for field in embed.fields}
+            self.assertEqual(embed.title, "Premium Status")
+            self.assertIn("Current plan: **Free**", embed.description)
+            self.assertIn("Patreon link: **Not linked**", embed.description)
+            self.assertIn("/premium subscribe", fields["Next Step"])
+            self.assertIn("/premium link", fields["Next Step"])
+            self.assertEqual(self._link_button_labels(payload["view"]), ["View Patreon", "Compare Plans", "Support Server"])
+        finally:
+            await cog.service.close()
+
+    async def test_premium_status_warns_when_linked_account_has_no_mapped_babblebox_tier(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
+        cog = PremiumCog(bot)
+        try:
+            cog.service.storage_ready = True
+            cog.service.get_user_snapshot = lambda _user_id: {
+                "plan_code": "free",
+                "active_plans": (),
+                "claimable_sources": (),
+                "blocked": False,
+                "stale": False,
+                "system_access": False,
+                "system_guild_claims": 0,
+            }
+            cog.service.get_link = lambda _user_id, provider=None: {
+                "link_status": "active",
+                "display_name": "Patreon Tester",
+                "email": "tester@example.com",
+                "metadata": {},
+            }
+            cog.service.list_cached_claims_for_user = lambda _user_id: []
+            cog.service.resolve_user_limit = lambda _user_id, _limit_key: 10
+            ctx = FakeContext(interaction=FakeInteraction(), guild=FakeGuild(), channel=FakeChannel(), author=FakeAuthor())
+
+            await PremiumCog.premium_status_command.callback(cog, ctx)
+
+            fields = {field.name: field.value for field in self._sent_kwargs(ctx)["embed"].fields}
+            self.assertIn("No mapped Babblebox tier detected yet", fields["Current Access"])
+            self.assertIn("Inevitable Friendship support tiers", fields["Status Notes"])
+            self.assertIn("Babblebox-labeled tier", fields["Next Step"])
+        finally:
+            await cog.service.close()
+
+    async def test_premium_link_command_explains_linking_and_privacy_boundary(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
+        cog = PremiumCog(bot)
+        try:
+            cog.service.storage_ready = True
+            cog.service.create_link_url = AsyncMock(return_value=(True, "https://example.com/patreon-link"))
+            ctx = FakeContext(interaction=FakeInteraction(), guild=FakeGuild(), channel=FakeChannel(), author=FakeAuthor())
+
+            await PremiumCog.premium_link_command.callback(cog, ctx)
+
+            payload = self._sent_kwargs(ctx)
+            fields = {field.name: field.value for field in payload["embed"].fields}
+            self.assertEqual(payload["embed"].title, "Link Patreon to Babblebox")
+            self.assertIn("does not buy the tier for you", payload["embed"].description)
+            self.assertIn("What Linking Does", fields)
+            self.assertIn("Use The Right Patreon Account", fields)
+            self.assertIn("Privacy Boundary", fields)
+            self.assertIn("Link Session", fields)
+            self.assertEqual(self._link_button_labels(payload["view"]), ["Link Patreon", "Compare Plans", "Support Server"])
+        finally:
+            await cog.service.close()
+
+    async def test_premium_refresh_without_link_routes_back_to_linking(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
+        cog = PremiumCog(bot)
+        try:
+            cog.service.storage_ready = True
+            cog.service.refresh_user_link = AsyncMock(return_value=(False, "No Patreon account is linked for this Discord user."))
+            cog.service.get_user_snapshot = lambda _user_id: {
+                "plan_code": "free",
+                "active_plans": (),
+                "claimable_sources": (),
+                "blocked": False,
+                "stale": False,
+                "system_access": False,
+                "system_guild_claims": 0,
+            }
+            cog.service.get_link = lambda _user_id, provider=None: None
+            ctx = FakeContext(interaction=FakeInteraction(), guild=FakeGuild(), channel=FakeChannel(), author=FakeAuthor())
+
+            await PremiumCog.premium_refresh_command.callback(cog, ctx)
+
+            payload = self._sent_kwargs(ctx)
+            self.assertEqual(payload["embed"].title, "No Patreon Link")
+            self.assertIn("Buy the Babblebox tier on Patreon first", payload["embed"].description)
+            self.assertEqual(self._link_button_labels(payload["view"]), ["View Patreon", "Compare Plans", "Support Server"])
+        finally:
+            await cog.service.close()
+
+    async def test_premium_unlink_success_keeps_saved_state_reassurance(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
+        cog = PremiumCog(bot)
+        try:
+            cog.service.storage_ready = True
+            cog.service.unlink_user = AsyncMock(return_value=(True, "ok"))
+            ctx = FakeContext(interaction=FakeInteraction(), guild=FakeGuild(), channel=FakeChannel(), author=FakeAuthor())
+
+            await PremiumCog.premium_unlink_command.callback(cog, ctx)
+
+            payload = self._sent_kwargs(ctx)
+            self.assertEqual(payload["embed"].title, "Patreon Unlinked")
+            self.assertIn("Saved Watch, reminder, AFK, Shield, and Confessions configuration stays preserved.", payload["embed"].description)
+        finally:
+            await cog.service.close()
+
+    async def test_premium_guild_status_unclaimed_guides_claim_flow(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
+        cog = PremiumCog(bot)
+        try:
+            cog.service.storage_ready = True
+            cog.service.get_guild_snapshot = lambda _guild_id: {
+                "plan_code": "free",
+                "active_plans": (),
+                "blocked": False,
+                "system_access": False,
+                "stale": False,
+                "claim": None,
+            }
+            cog.service.resolve_guild_limit = lambda _guild_id, _limit_key: 3
+            cog.service.guild_has_capability = lambda _guild_id, _capability: False
+            ctx = FakeContext(
+                interaction=FakeInteraction(),
+                guild=FakeGuild(),
+                channel=FakeChannel(),
+                author=FakeAuthor(manage_guild=True),
+            )
+
+            await PremiumCog.premium_guild_status_command.callback(cog, ctx)
+
+            payload = self._sent_kwargs(ctx)
+            fields = {field.name: field.value for field in payload["embed"].fields}
+            self.assertEqual(payload["embed"].title, "Guild Premium Status")
+            self.assertIn("Claim state: **Unclaimed**", payload["embed"].description)
+            self.assertIn("No Guild Pro claim is attached", fields["Claim Summary"])
+            self.assertIn("/premium guild claim", fields["Next Step"])
+        finally:
+            await cog.service.close()
+
+    async def test_premium_guild_claim_failure_explains_missing_guild_pro_source(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
+        cog = PremiumCog(bot)
+        try:
+            cog.service.storage_ready = True
+            cog.service.claim_guild = AsyncMock(return_value=(False, "No unclaimed Guild Pro entitlement is available for this user."))
+            ctx = FakeContext(
+                interaction=FakeInteraction(),
+                guild=FakeGuild(),
+                channel=FakeChannel(),
+                author=FakeAuthor(manage_guild=True),
+            )
+
+            await PremiumCog.premium_guild_claim_command.callback(cog, ctx)
+
+            payload = self._sent_kwargs(ctx)
+            self.assertEqual(payload["embed"].title, "Guild Pro Claim")
+            self.assertIn("Buy the Babblebox-labeled Guild Pro tier", payload["embed"].description)
+        finally:
+            await cog.service.close()
+
+    async def test_premium_guild_release_success_preserves_saved_configuration_copy(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
+        cog = PremiumCog(bot)
+        try:
+            cog.service.storage_ready = True
+            cog.service.release_guild = AsyncMock(return_value=(True, "ok"))
+            ctx = FakeContext(
+                interaction=FakeInteraction(),
+                guild=FakeGuild(),
+                channel=FakeChannel(),
+                author=FakeAuthor(manage_guild=True),
+            )
+
+            await PremiumCog.premium_guild_release_command.callback(cog, ctx)
+
+            payload = self._sent_kwargs(ctx)
+            self.assertEqual(payload["embed"].title, "Guild Pro Released")
+            self.assertIn("preserved the saved server configuration", payload["embed"].description)
         finally:
             await cog.service.close()
 
@@ -2606,7 +2873,19 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             await cog.service.close()
 
     def test_hidden_override_command_is_not_in_public_help_pages(self):
-        serialized_help = " ".join(page["body"] + " " + page.get("try", "") for page in HELP_PAGES).casefold()
+        serialized_help = " ".join(
+            " ".join(
+                filter(
+                    None,
+                    [
+                        page.get("body", ""),
+                        " ".join(value for _name, value in page.get("fields", ())),
+                        page.get("try", ""),
+                    ],
+                )
+            )
+            for page in HELP_PAGES
+        ).casefold()
 
         self.assertNotIn("shieldai", serialized_help)
         self.assertNotIn("dropscelebaiglobal", serialized_help)
