@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import logging
 import os
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -10,6 +11,8 @@ from urllib.parse import urlsplit, urlunsplit
 
 from babblebox.postgres_json import decode_postgres_json_array
 
+
+LOGGER = logging.getLogger(__name__)
 
 DEFAULT_BACKEND = "postgres"
 VALID_FOLLOWUP_MODES = {"auto_remove", "review"}
@@ -752,7 +755,13 @@ class AdminStore:
         self._construct_store(requested_backend)
 
     def _construct_store(self, requested_backend: str):
-        print("Admin storage init: " f"backend_preference={requested_backend}, " f"database_url_configured={'yes' if self.database_url else 'no'}, " f"database_url_source={self.database_url_source or 'none'}, " f"database_target={_redact_database_url(self.database_url)}")
+        LOGGER.info(
+            "Admin storage init: backend_preference=%s database_url_configured=%s database_url_source=%s database_target=%s",
+            requested_backend,
+            "yes" if self.database_url else "no",
+            self.database_url_source or "none",
+            _redact_database_url(self.database_url),
+        )
         if requested_backend in {"memory", "test", "dev"}:
             self._store = _MemoryAdminStore()
         elif requested_backend in {"postgres", "postgresql", "supabase", "auto"}:
@@ -762,7 +771,7 @@ class AdminStore:
         else:
             raise AdminStorageUnavailable(f"Unsupported admin storage backend '{requested_backend}'.")
         self.backend_name = self._store.backend_name
-        print(f"Admin storage init succeeded: backend={self.backend_name}")
+        LOGGER.info("Admin storage init succeeded: backend=%s", self.backend_name)
 
     async def load(self):
         if self._store is None:

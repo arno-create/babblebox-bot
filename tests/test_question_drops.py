@@ -35,22 +35,29 @@ from babblebox.question_drops_content import (
 )
 from babblebox.question_drops_service import QUESTION_DROP_LATE_CORRECT_WINDOW_SECONDS, QuestionDropsService
 from babblebox.question_drops_store import QuestionDropsStore, _active_drop_from_row, _config_from_row
+from babblebox.premium_limits import CAPABILITY_QUESTION_DROPS_AI_CELEBRATIONS
 from babblebox.profile_service import ProfileService
 from babblebox.profile_store import ProfileStore
 
 
 class DummyRole:
-    def __init__(self, role_id: int, *, position: int = 10, name: str | None = None):
+    def __init__(self, role_id: int, *, position: int = 10, name: str | None = None, mentionable: bool = True, is_default: bool = False):
         self.id = role_id
         self.position = position
         self.name = name or f"Role {role_id}"
+        self.mentionable = mentionable
+        self.mention = f"<@&{role_id}>"
+        self._is_default = is_default
+
+    def is_default(self) -> bool:
+        return self._is_default
 
 
 class DummyBotMember:
-    def __init__(self, user_id: int = 999, *, position: int = 50):
+    def __init__(self, user_id: int = 999, *, position: int = 50, manage_roles: bool = True, mention_everyone: bool = False):
         self.id = user_id
         self.top_role = DummyRole(100000 + user_id, position=position)
-        self.guild_permissions = types.SimpleNamespace(manage_roles=True)
+        self.guild_permissions = types.SimpleNamespace(manage_roles=manage_roles, mention_everyone=mention_everyone)
 
 
 class DummyUser:
@@ -103,6 +110,7 @@ class DummyChannel:
         can_embed: bool = True,
         can_read_history: bool = True,
         can_add_reactions: bool = True,
+        can_mention_everyone: bool = False,
     ):
         self.id = channel_id
         self.mention = f"<#{channel_id}>"
@@ -113,7 +121,9 @@ class DummyChannel:
         self.can_embed = can_embed
         self.can_read_history = can_read_history
         self.can_add_reactions = can_add_reactions
+        self.can_mention_everyone = can_mention_everyone
         self._messages: dict[int, DummySentMessage] = {}
+        self.guild = None
 
     async def send(self, *args, **kwargs):
         if self.fail_send:
@@ -137,6 +147,7 @@ class DummyChannel:
             embed_links=self.can_embed,
             read_message_history=self.can_read_history,
             add_reactions=self.can_add_reactions,
+            mention_everyone=self.can_mention_everyone,
         )
 
 
@@ -147,6 +158,8 @@ class DummyGuild:
         self._channels = {channel.id: channel for channel in (channels or [])}
         self._roles = {role.id: role for role in (roles or [])}
         self.me = me or DummyBotMember()
+        for channel in self._channels.values():
+            channel.guild = self
         member_list = list(members or [])
         self._members = {member.id: member for member in member_list}
         if self.me is not None:
@@ -168,6 +181,7 @@ class DummyBot:
         self.guild = guild
         self.user = types.SimpleNamespace(id=999)
         self._channels = {channel.id: channel for channel in channels}
+        self.premium_service = None
         self.profile_service = types.SimpleNamespace(
             storage_ready=True,
             record_question_drop_result=AsyncMock(),
@@ -259,24 +273,34 @@ class QuestionDropsContentTests(unittest.TestCase):
         self.assertIsNone(message)
 
     def test_content_pack_has_family_depth_and_real_hard_inventory(self):
-        self.assertGreaterEqual(len(QUESTION_DROP_SEEDS), 60)
+        self.assertGreaterEqual(len(QUESTION_DROP_SEEDS), 150)
         hard_seeds = [seed for seed in QUESTION_DROP_SEEDS if int(seed["difficulty"]) == 3]
-        self.assertGreaterEqual(len(hard_seeds), 20)
+        self.assertGreaterEqual(len(hard_seeds), 35)
         self.assertTrue(all(str(seed.get("family_id") or "").strip() for seed in QUESTION_DROP_SEEDS))
         for category in QUESTION_DROP_CATEGORIES:
             with self.subTest(category=category):
+                family_ids = {seed["family_id"] for seed in QUESTION_DROP_SEEDS if seed["category"] == category}
+                self.assertGreaterEqual(len(family_ids), 18)
                 self.assertGreaterEqual(
                     sum(1 for seed in hard_seeds if seed["category"] == category),
-                    1,
+                    1 if category == "culture" else 4,
                 )
         self.assertGreaterEqual(
             len({seed["family_id"] for seed in QUESTION_DROP_SEEDS if seed["category"] == "math"}),
-            10,
+            18,
         )
         self.assertGreaterEqual(
             len({seed["family_id"] for seed in QUESTION_DROP_SEEDS if seed["category"] == "logic"}),
-            10,
+            18,
         )
+
+    def test_content_pack_tags_cover_subcategory_reasoning_and_answer_shape(self):
+        for seed in QUESTION_DROP_SEEDS:
+            with self.subTest(concept_id=seed["concept_id"]):
+                tags = tuple(seed.get("tags", ()))
+                self.assertTrue(any(str(tag).startswith("sub:") for tag in tags))
+                self.assertTrue(any(str(tag).startswith("mode:") for tag in tags))
+                self.assertTrue(any(str(tag).startswith("shape:") for tag in tags))
 
     def test_generator_variants_are_deterministic(self):
         seed = {
@@ -338,12 +362,25 @@ class QuestionDropsContentTests(unittest.TestCase):
         self.assertTrue(expected_math_generators.issubset(seen_generators))
         self.assertTrue(expected_logic_generators.issubset(seen_generators))
 
+    def test_generated_live_rotation_samples_keep_unique_prompts(self):
+        generated_seeds = [seed for seed in QUESTION_DROP_SEEDS if seed["source_type"] == "generated"]
+
+        for seed in generated_seeds:
+            with self.subTest(concept_id=seed["concept_id"]):
+                prompts = [
+                    " ".join(str(build_variant(seed, seed_material=f"audit:{seed['concept_id']}", variant_index=index).prompt).casefold().split())
+                    for index in range(12)
+                ]
+                self.assertEqual(len(prompts), len(set(prompts)))
+
     def test_candidate_iteration_preserves_family_ids_for_generated_depth(self):
-        variants = iter_candidate_variants(categories={"math", "logic"}, seed_material="coverage", variants_per_seed=3)
+        variants = iter_candidate_variants(categories=set(QUESTION_DROP_CATEGORIES), seed_material="coverage", variants_per_seed=12)
         self.assertTrue(variants)
         self.assertTrue(all(variant.family_id for variant in variants))
-        self.assertGreaterEqual(len({variant.family_id for variant in variants if variant.category == "math"}), 10)
-        self.assertGreaterEqual(len({variant.family_id for variant in variants if variant.category == "logic"}), 10)
+        self.assertGreaterEqual(len(variants), 800)
+        for category in QUESTION_DROP_CATEGORIES:
+            with self.subTest(category=category):
+                self.assertGreaterEqual(len({variant.family_id for variant in variants if variant.category == category}), 18)
 
     def test_answer_judging_is_strict_for_numeric_and_natural_for_multiple_choice(self):
         self.assertTrue(judge_answer({"type": "text", "accepted": ["Mars"]}, " mars!! "))
@@ -566,6 +603,7 @@ class QuestionDropsPostgresDecodeTests(unittest.TestCase):
             "activity_gate": "light",
             "active_start_hour": 9,
             "active_end_hour": 22,
+            "drop_ping_role_id": 555,
             "enabled_channel_ids": json.dumps([20, 30, 30]),
             "enabled_categories": json.dumps(["science", "math", "invalid"]),
             "category_mastery": json.dumps(
@@ -606,6 +644,7 @@ class QuestionDropsPostgresDecodeTests(unittest.TestCase):
         self.assertEqual(config["enabled_channel_ids"], [20, 30])
         self.assertEqual(config["enabled_categories"], ["math", "science"])
         self.assertEqual(config["difficulty_profile"], "hard")
+        self.assertEqual(config["drop_ping_role_id"], 555)
         self.assertTrue(config["category_mastery"]["science"]["enabled"])
         self.assertEqual(config["category_mastery"]["science"]["announcement_channel_id"], 88)
         self.assertEqual(config["category_mastery"]["science"]["announcement_template"], "{user.mention} reached {category.name}.")
@@ -630,6 +669,7 @@ class QuestionDropsPostgresDecodeTests(unittest.TestCase):
             "activity_gate": "light",
             "active_start_hour": 10,
             "active_end_hour": 22,
+            "drop_ping_role_id": "bad",
             "enabled_channel_ids": "{\"broken\": true}",
             "enabled_categories": '{"broken"',
             "category_mastery": '["wrong-shape"]',
@@ -643,6 +683,7 @@ class QuestionDropsPostgresDecodeTests(unittest.TestCase):
         self.assertEqual(config["enabled_channel_ids"], [])
         self.assertEqual(config["enabled_categories"], [])
         self.assertEqual(config["difficulty_profile"], "standard")
+        self.assertIsNone(config["drop_ping_role_id"])
         self.assertFalse(config["category_mastery"]["science"]["enabled"])
         self.assertFalse(config["scholar_ladder"]["enabled"])
         self.assertFalse(config["digest_settings"]["weekly_enabled"])
@@ -978,7 +1019,7 @@ class QuestionDropsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(next_variant)
         self.assertNotEqual(next_variant.concept_id, first_variant.concept_id)
 
-    async def test_selector_high_drop_pressure_prefers_generated_depth_over_curated_reuse(self):
+    async def test_selector_high_drop_pressure_does_not_force_generated_source_bias(self):
         curated_variant = QuestionDropVariant(
             concept_id="custom:science-curated",
             category="science",
@@ -1040,7 +1081,7 @@ class QuestionDropsServiceTests(unittest.IsolatedAsyncioTestCase):
             )
 
         self.assertEqual(low_pick, curated_variant)
-        self.assertEqual(high_pick, generated_variant)
+        self.assertEqual(high_pick, curated_variant)
 
     async def test_selector_high_drop_pressure_keeps_category_spread_healthier(self):
         high_config = {**self.service.get_config(self.guild.id), "drops_per_day": 10}
@@ -1099,6 +1140,224 @@ class QuestionDropsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Profile", rules_field)
         self.assertIn("**Smart**", rules_field)
         self.assertIn("More medium and hard, less farmable", delivery_field)
+
+    async def test_update_config_ai_opt_in_stays_truthful_without_guild_pro(self):
+        await self.service.set_global_ai_celebration_mode("rare", actor_id=1)
+
+        ok, message = await self.service.update_config(self.guild.id, ai_celebrations_enabled=True)
+
+        self.assertTrue(ok, message)
+        self.assertIn("needs Guild Pro", message)
+
+    async def test_build_status_embed_surfaces_live_ping_and_ai_premium_state(self):
+        role = DummyRole(777, name="Drops Squad")
+        self.guild._roles[role.id] = role
+        await self.service.set_global_ai_celebration_mode("rare", actor_id=1)
+        ok, message = await self.service.update_config(self.guild.id, ai_celebrations_enabled=True)
+        self.assertTrue(ok, message)
+        ok, message = await self.service.update_drop_ping_role(self.guild, role_id=role.id)
+        self.assertTrue(ok, message)
+
+        embed = self.service.build_status_embed(self.guild, await self.service.get_status_snapshot(self.guild))
+        ai_field = next(field.value for field in embed.fields if field.name == "AI Celebrations")
+        ping_field = next(field.value for field in embed.fields if field.name == "Live Ping")
+
+        self.assertIn("Entitlement: **Free**", ai_field)
+        self.assertIn("Live state: **Requires Guild Pro**", ai_field)
+        self.assertIn("Status: **Configured**", ping_field)
+        self.assertIn(role.mention, ping_field)
+
+    async def test_build_drop_ping_status_embed_reports_missing_role(self):
+        ok, message = await self.service.update_drop_ping_role(self.guild, role_id=9191)
+        self.assertTrue(ok, message)
+
+        embed = self.service.build_drop_ping_status_embed(self.guild)
+        status_field = next(field.value for field in embed.fields if field.name == "Status")
+        checks_field = next(field.value for field in embed.fields if field.name == "Delivery Checks")
+
+        self.assertIn("State: **Blocked**", status_field)
+        self.assertIn("Configured role is missing.", checks_field)
+
+    async def test_build_drop_ping_status_embed_reports_unmentionable_role_blockers(self):
+        role = DummyRole(818, mentionable=False)
+        self.guild._roles[role.id] = role
+        ok, message = await self.service.update_drop_ping_role(self.guild, role_id=role.id)
+        self.assertTrue(ok, message)
+
+        embed = self.service.build_drop_ping_status_embed(self.guild)
+        status_field = next(field.value for field in embed.fields if field.name == "Status")
+        checks_field = next(field.value for field in embed.fields if field.name == "Delivery Checks")
+
+        self.assertIn("State: **Blocked**", status_field)
+        self.assertIn("role is not mentionable", checks_field.lower())
+
+    async def test_post_drop_uses_safe_role_ping_when_configured_and_allowed(self):
+        role = DummyRole(828, mentionable=True)
+        self.guild._roles[role.id] = role
+        ok, message = await self.service.update_drop_ping_role(self.guild, role_id=role.id)
+        self.assertTrue(ok, message)
+
+        await self._post_one_drop()
+
+        payload = self.channel.sent[0][1]
+        allowed_mentions = payload.get("allowed_mentions")
+        self.assertEqual(payload.get("content"), role.mention)
+        self.assertIsNotNone(allowed_mentions)
+        self.assertTrue(allowed_mentions.roles)
+        self.assertFalse(allowed_mentions.users)
+        self.assertFalse(allowed_mentions.everyone)
+
+    async def test_post_drop_omits_role_ping_when_role_cannot_be_mentioned(self):
+        role = DummyRole(838, mentionable=False)
+        self.guild._roles[role.id] = role
+        ok, message = await self.service.update_drop_ping_role(self.guild, role_id=role.id)
+        self.assertTrue(ok, message)
+
+        await self._post_one_drop()
+
+        payload = self.channel.sent[0][1]
+        self.assertNotIn("content", payload)
+        self.assertNotIn("allowed_mentions", payload)
+
+    async def test_maybe_ai_highlight_requires_guild_pro_capability(self):
+        provider = types.SimpleNamespace(
+            diagnostics=lambda: {"available": True, "status": "Ready."},
+            highlight=AsyncMock(return_value="Premium celebration line."),
+            close=AsyncMock(),
+        )
+        self.service._ai_provider = provider
+        await self.service.set_global_ai_celebration_mode("rare", actor_id=1)
+        ok, message = await self.service.update_config(self.guild.id, ai_celebrations_enabled=True)
+        self.assertTrue(ok, message)
+        payload = {
+            "guild_id": self.guild.id,
+            "points_awarded": 20,
+            "guild_after": {"current_streak": 2, "best_streak": 2},
+            "guild_rank_before": 3,
+            "guild_rank_after": 1,
+            "category_rank_before": 2,
+            "category_rank_after": 1,
+        }
+        flags = {
+            "category_role_events": [],
+            "scholar_role_events": [],
+            "took_guild_first": True,
+            "took_category_first": False,
+            "guild_points_milestone": None,
+            "new_best_streak": False,
+            "guild_rank_jump": 2,
+        }
+
+        without_premium = await self.service._maybe_ai_highlight(
+            winner=DummyUser(42, display_name="Winner"),
+            category="science",
+            answer="gravity",
+            update=payload,
+            flags=flags,
+        )
+
+        self.assertIsNone(without_premium)
+        provider.highlight.assert_not_awaited()
+
+        self.bot.premium_service = types.SimpleNamespace(
+            guild_has_capability=lambda guild_id, capability: capability == CAPABILITY_QUESTION_DROPS_AI_CELEBRATIONS
+        )
+        with_premium = await self.service._maybe_ai_highlight(
+            winner=DummyUser(42, display_name="Winner"),
+            category="science",
+            answer="gravity",
+            update=payload,
+            flags=flags,
+        )
+
+        self.assertEqual(with_premium, "Premium celebration line.")
+        provider.highlight.assert_awaited_once()
+
+    async def test_selector_avoids_same_day_family_reuse_when_alternatives_exist(self):
+        first_variant = self.service._select_variant(
+            self.guild.id,
+            self.channel.id,
+            exposures=[],
+            slot_key="2026-03-30:0",
+            config=self.service.get_config(self.guild.id),
+        )
+        self.assertIsNotNone(first_variant)
+        exposure = await self.store.insert_exposure(
+            {
+                "guild_id": self.guild.id,
+                "channel_id": self.channel.id,
+                "concept_id": first_variant.concept_id,
+                "variant_hash": first_variant.variant_hash,
+                "category": first_variant.category,
+                "difficulty": first_variant.difficulty,
+                "asked_at": ge.now_utc(),
+                "resolved_at": None,
+                "winner_user_id": None,
+                "slot_key": "2026-03-30:1",
+            }
+        )
+
+        next_variant = self.service._select_variant(
+            self.guild.id,
+            self.channel.id,
+            exposures=[exposure],
+            slot_key="2026-03-30:2",
+            config=self.service.get_config(self.guild.id),
+        )
+
+        self.assertIsNotNone(next_variant)
+        self.assertNotEqual(next_variant.family_id, first_variant.family_id)
+
+    async def test_selector_keeps_answer_shape_spread_under_repeated_scheduling(self):
+        ok, message = await self.service.update_config(self.guild.id, drops_per_day=8, difficulty_profile="smart")
+        self.assertTrue(ok, message)
+        exposures: list[dict[str, object]] = []
+        shapes: list[str] = []
+        base = datetime(2026, 2, 1, 12, 0, tzinfo=timezone.utc)
+
+        for day in range(10):
+            current_time = base + timedelta(days=day)
+            with patch("babblebox.question_drops_service.ge.now_utc", return_value=current_time):
+                for slot in range(8):
+                    slot_key = f"{current_time.date().isoformat()}:{slot}"
+                    variant = self.service._select_variant(
+                        self.guild.id,
+                        self.channel.id,
+                        exposures=exposures,
+                        slot_key=slot_key,
+                        config=self.service.get_config(self.guild.id),
+                    )
+                    self.assertIsNotNone(variant)
+                    shapes.append(str(variant.answer_spec.get("type") or "text"))
+                    exposures.insert(
+                        0,
+                        {
+                            "guild_id": self.guild.id,
+                            "channel_id": self.channel.id,
+                            "concept_id": variant.concept_id,
+                            "variant_hash": variant.variant_hash,
+                            "category": variant.category,
+                            "difficulty": variant.difficulty,
+                            "asked_at": (current_time - timedelta(minutes=(8 - slot))).isoformat(),
+                            "resolved_at": None,
+                            "winner_user_id": None,
+                            "slot_key": slot_key,
+                        },
+                    )
+
+        max_run = 0
+        current_run = 0
+        previous_shape = None
+        for shape in shapes:
+            if shape == previous_shape:
+                current_run += 1
+            else:
+                current_run = 1
+                previous_shape = shape
+            max_run = max(max_run, current_run)
+
+        self.assertGreaterEqual(len(set(shapes)), 4)
+        self.assertLessEqual(max_run, 4)
 
     async def test_selector_profiles_shift_mix_and_avoid_family_spam_over_time(self):
         results: dict[tuple[str, int], dict[str, object]] = {}
@@ -2748,7 +3007,7 @@ class QuestionDropsMemberRolePreferenceTests(QuestionDropsServiceTests):
         self.assertEqual([record["role_id"] for record in payload["held_records"]], [science_role.id])
         self.assertEqual(payload["stale_managed_count"], 1)
         self.assertIn("Status: **On**", field_map["Future Grants"])
-        self.assertIn("Science I", field_map["Current Roles"])
+        self.assertIn(science_role.mention, field_map["Current Roles"])
         self.assertNotIn("Unrelated", field_map["Current Roles"])
 
     async def test_remove_specific_managed_role_only_removes_that_role_and_keeps_history(self):

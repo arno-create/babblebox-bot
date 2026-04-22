@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+import logging
 import os
 from copy import deepcopy
 from pathlib import Path
@@ -10,6 +11,11 @@ from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 from babblebox.postgres_json import decode_postgres_json_array, decode_postgres_json_object
+from babblebox.premium_limits import (
+    LIMIT_SHIELD_CUSTOM_PATTERNS,
+    LIMIT_SHIELD_SEVERE_TERMS,
+    storage_ceiling as premium_storage_ceiling,
+)
 from babblebox.shield_ai import (
     DEFAULT_SHIELD_AI_FAST_MODEL,
     SHIELD_AI_MIN_CONFIDENCE_CHOICES,
@@ -17,6 +23,8 @@ from babblebox.shield_ai import (
     parse_shield_ai_model_list,
 )
 
+
+LOGGER = logging.getLogger(__name__)
 
 DEFAULT_DATABASE_URL_ENV_ORDER = ("UTILITY_DATABASE_URL", "SUPABASE_DB_URL", "DATABASE_URL")
 DEFAULT_BACKEND = "postgres"
@@ -48,6 +56,8 @@ VALID_SHIELD_LOG_STYLES = {"adaptive", "compact"}
 VALID_SHIELD_LOG_PING_MODES = {"smart", "never"}
 VALID_PACK_LOG_OVERRIDE_STYLES = {"inherit"} | VALID_SHIELD_LOG_STYLES
 VALID_PACK_LOG_OVERRIDE_PING_MODES = {"inherit"} | VALID_SHIELD_LOG_PING_MODES
+SHIELD_SEVERE_STORAGE_LIMIT = premium_storage_ceiling(LIMIT_SHIELD_SEVERE_TERMS, SHIELD_SEVERE_TERM_LIMIT)
+SHIELD_CUSTOM_PATTERN_STORAGE_LIMIT = premium_storage_ceiling(LIMIT_SHIELD_CUSTOM_PATTERNS, 10)
 SHIELD_NUMERIC_CONFIG_SPECS: dict[str, tuple[int, int, int]] = {
     "escalation_threshold": (2, 6, 3),
     "escalation_window_minutes": (5, 120, 15),
@@ -415,8 +425,8 @@ def normalize_guild_shield_config(guild_id: int, config: Any) -> dict[str, Any]:
     cleaned["severe_enabled_categories"] = (
         severe_categories if "severe_enabled_categories" in config else severe_categories or list(DEFAULT_SHIELD_SEVERE_CATEGORIES)
     )
-    cleaned["severe_custom_terms"] = _clean_text_list(config.get("severe_custom_terms"))[:SHIELD_SEVERE_TERM_LIMIT]
-    cleaned["severe_removed_terms"] = _clean_text_list(config.get("severe_removed_terms"))[:SHIELD_SEVERE_TERM_LIMIT]
+    cleaned["severe_custom_terms"] = _clean_text_list(config.get("severe_custom_terms"))[:SHIELD_SEVERE_STORAGE_LIMIT]
+    cleaned["severe_removed_terms"] = _clean_text_list(config.get("severe_removed_terms"))[:SHIELD_SEVERE_STORAGE_LIMIT]
 
     link_policy_mode = str(config.get("link_policy_mode", DEFAULT_SHIELD_LINK_POLICY_MODE)).strip().lower()
     cleaned["link_policy_mode"] = link_policy_mode if link_policy_mode in VALID_SHIELD_LINK_POLICY_MODES else DEFAULT_SHIELD_LINK_POLICY_MODE
@@ -497,7 +507,7 @@ def normalize_guild_shield_config(guild_id: int, config: Any) -> dict[str, Any]:
                 "enabled": bool(item.get("enabled", True)),
             }
         )
-    cleaned["custom_patterns"] = patterns[:10]
+    cleaned["custom_patterns"] = patterns[:SHIELD_CUSTOM_PATTERN_STORAGE_LIMIT]
     return cleaned
 
 
@@ -628,7 +638,7 @@ class _PostgresShieldStore(_BaseShieldStore):
             try:
                 await self._flush_snapshot(snapshot)
             except Exception as exc:
-                print(f"Shield Postgres store flush failed: {exc}")
+                LOGGER.warning("Shield Postgres store flush failed: error_type=%s", type(exc).__name__)
                 return False
         self.state = snapshot
         self._last_flushed_state = deepcopy(snapshot)
@@ -1335,12 +1345,12 @@ class ShieldStateStore:
         self._construct_store(requested_backend)
 
     def _construct_store(self, requested_backend: str):
-        print(
-            "Shield storage init: "
-            f"backend_preference={requested_backend}, "
-            f"database_url_configured={'yes' if self.database_url else 'no'}, "
-            f"database_url_source={self.database_url_source}, "
-            f"database_target={_redact_database_url(self.database_url)}"
+        LOGGER.info(
+            "Shield storage init: backend_preference=%s database_url_configured=%s database_url_source=%s database_target=%s",
+            requested_backend,
+            "yes" if self.database_url else "no",
+            self.database_url_source,
+            _redact_database_url(self.database_url),
         )
         if requested_backend == "memory":
             self._store = _MemoryShieldStore()
@@ -1352,7 +1362,7 @@ class ShieldStateStore:
             raise ShieldStorageUnavailable(f"Unsupported Shield storage backend '{requested_backend}'.")
         self.backend_name = self._store.backend_name
         self.state = self._store.state
-        print(f"Shield storage init succeeded: backend={self.backend_name}")
+        LOGGER.info("Shield storage init succeeded: backend=%s", self.backend_name)
 
     async def load(self) -> dict[str, Any]:
         if self._store is None:

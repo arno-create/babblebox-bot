@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 import hashlib
 import logging
+import os
 import re
 import secrets
 import time
@@ -16,6 +17,12 @@ import discord
 from discord.ext import commands
 
 from babblebox import game_engine as ge
+from babblebox.premium_limits import (
+    LIMIT_CONFESSIONS_MAX_IMAGES,
+    guild_limit as premium_guild_limit,
+    storage_ceiling as premium_storage_ceiling,
+)
+from babblebox.premium_models import PLAN_FREE, PLAN_GUILD_PRO, SYSTEM_PREMIUM_SUPPORT_GUILD_ID
 from babblebox.confessions_privacy import (
     build_duplicate_signals,
     fuzzy_signature_ratio,
@@ -108,6 +115,9 @@ RASTER_IMAGE_CONTENT_TYPES = frozenset(
     {"image/png", "image/jpeg", "image/jpg", "image/gif", "image/webp", "image/bmp"}
 )
 RASTER_IMAGE_EXTENSIONS = frozenset({".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"})
+CONFESSION_IMAGE_STORAGE_LIMIT = premium_storage_ceiling(LIMIT_CONFESSIONS_MAX_IMAGES, 3)
+
+
 def _moderation_action_payload(action: str) -> tuple[str, int | None, bool]:
     if action == "pause_24h":
         return "suspend", 24 * 3600, False
@@ -508,11 +518,16 @@ class ConfessionsService:
         self.storage_ready = False
         self.storage_error: str | None = None
         self._startup_storage_error: str | None = None
+        self.storage_backend_preference = (
+            getattr(store, "backend_preference", None)
+            or (os.getenv("CONFESSIONS_STORAGE_BACKEND", "").strip() or "postgres")
+        ).strip().lower()
         if store is not None:
             self.store = store
         else:
             try:
                 self.store = ConfessionsStore()
+                self.storage_backend_preference = getattr(self.store, "backend_preference", self.storage_backend_preference)
             except ConfessionsStorageUnavailable as exc:
                 LOGGER.warning("Confessions storage constructor failed: %s", exc)
                 self.store = ConfessionsStore(backend="memory")
@@ -592,12 +607,35 @@ class ConfessionsService:
         parts.append(f"backend={getattr(self.store, 'backend_name', 'unknown')}")
         message = f"Confessions admin diagnostic: {', '.join(parts)}"
         if exc is not None:
-            LOGGER.exception(message)
+            LOGGER.error(message)
             return
         LOGGER.warning(message)
 
     def storage_message(self, feature_name: str = "Confessions") -> str:
         return f"{feature_name} are temporarily unavailable because Babblebox could not reach the confessions database."
+
+    def _premium_service(self):
+        premium_service = getattr(self.bot, "premium_service", None)
+        if callable(getattr(premium_service, "resolve_guild_limit", None)):
+            return premium_service
+        return None
+
+    def _resolve_guild_limit(self, guild_id: int, limit_key: str, fallback: int) -> int:
+        premium_service = self._premium_service()
+        if premium_service is None:
+            if int(guild_id or 0) == SYSTEM_PREMIUM_SUPPORT_GUILD_ID:
+                return premium_guild_limit(PLAN_GUILD_PRO, limit_key)
+            return fallback
+        return premium_service.resolve_guild_limit(guild_id, limit_key)
+
+    def _premium_limit_error(self, *, limit_key: str, limit_value: int, default_message: str) -> str:
+        premium_service = self._premium_service()
+        if premium_service is None:
+            return default_message
+        return premium_service.describe_limit_error(limit_key=limit_key, limit_value=limit_value)
+
+    def confession_image_limit(self, guild_id: int) -> int:
+        return self._resolve_guild_limit(guild_id, LIMIT_CONFESSIONS_MAX_IMAGES, premium_guild_limit(PLAN_FREE, LIMIT_CONFESSIONS_MAX_IMAGES))
 
     async def _rebuild_config_cache(self):
         self._compiled_configs = {}
@@ -653,6 +691,8 @@ class ConfessionsService:
     def _compile_config(self, guild_id: int, raw: Any) -> dict[str, Any]:
         config = normalize_confession_config(guild_id, raw)
         compiled = dict(config)
+        active_image_limit = self.confession_image_limit(guild_id)
+        compiled["effective_max_images"] = min(int(config.get("max_images", 3) or 3), active_image_limit)
         compiled["custom_allow_domain_set"] = frozenset(config["custom_allow_domains"])
         compiled["custom_block_domain_set"] = frozenset(config["custom_block_domains"])
         compiled["allowed_role_id_set"] = frozenset(config["allowed_role_ids"])
@@ -664,6 +704,7 @@ class ConfessionsService:
         compiled = self._compiled_configs.get(guild_id)
         if compiled is not None:
             config = dict(compiled)
+            config.pop("effective_max_images", None)
             config.pop("custom_allow_domain_set", None)
             config.pop("custom_block_domain_set", None)
             config.pop("allowed_role_id_set", None)
@@ -808,6 +849,10 @@ class ConfessionsService:
         clear_review_channel: bool = False,
         clear_appeals_channel: bool = False,
     ) -> tuple[bool, str]:
+        if max_images is not None and (not isinstance(max_images, int) or not (1 <= max_images <= CONFESSION_IMAGE_STORAGE_LIMIT)):
+            return False, f"Confession image limits must stay between 1 and {CONFESSION_IMAGE_STORAGE_LIMIT}."
+        image_limit = self.confession_image_limit(guild_id)
+
         def mutate(config: dict[str, Any]):
             if enabled is not None:
                 config["enabled"] = bool(enabled)
@@ -865,6 +910,15 @@ class ConfessionsService:
             if allow_self_edit is not None:
                 config["allow_self_edit"] = bool(allow_self_edit)
             if max_images is not None:
+                previous_value = int(config.get("max_images", 3) or 3)
+                if max_images > image_limit and max_images > previous_value:
+                    raise ValueError(
+                        self._premium_limit_error(
+                            limit_key=LIMIT_CONFESSIONS_MAX_IMAGES,
+                            limit_value=image_limit,
+                            default_message=f"Confession images can be set up to {image_limit} on this plan.",
+                        )
+                    )
                 config["max_images"] = max_images
             if cooldown_seconds is not None:
                 config["cooldown_seconds"] = cooldown_seconds
@@ -1265,12 +1319,27 @@ class ConfessionsService:
             return "Confessions are currently off."
         if config["confession_channel_id"] is None:
             return "Set a confession channel before members can submit."
-        if config["review_mode"]:
-            if config["review_channel_id"] is None:
-                return "Review mode is on, so a review channel is still required."
-            if config["review_channel_id"] == config["confession_channel_id"]:
-                return "Use different channels for public confessions and private review."
+        if self._review_features_required(config):
+            guild = self.bot.get_guild(guild_id)
+            if guild is not None:
+                review_snapshot = self.review_channel_snapshot(guild)
+                if not review_snapshot["ok"]:
+                    return str(review_snapshot["message"])
+            else:
+                if config["review_channel_id"] is None:
+                    return "Review mode is on, so a review channel is still required."
+                if config["review_channel_id"] == config["confession_channel_id"]:
+                    return "Use different channels for public confessions and private review."
         return "Confessions are ready."
+
+    @staticmethod
+    def _review_features_required(config: dict[str, Any]) -> bool:
+        return bool(
+            config.get("review_mode")
+            or config.get("image_review_required")
+            or config.get("anonymous_reply_review_required")
+            or config.get("owner_reply_review_mode")
+        )
 
     def _privacy_category_labels(self, status: dict[str, Any] | None) -> list[str]:
         if not isinstance(status, dict):
@@ -1505,7 +1574,7 @@ class ConfessionsService:
                         result=ConfessionSubmissionResult(
                             False,
                             "blocked",
-                            self._review_channel_requirement_message(),
+                            self._review_channel_requirement_message(guild.id),
                             submission_kind=normalized_kind,
                             reply_flow=normalized_reply_flow,
                         ),
@@ -1644,9 +1713,19 @@ class ConfessionsService:
     def _has_review_channel(self, guild_id: int) -> bool:
         compiled = self.get_compiled_config(guild_id)
         review_channel_id = compiled.get("review_channel_id")
-        return isinstance(review_channel_id, int) and review_channel_id != compiled.get("confession_channel_id")
+        if not isinstance(review_channel_id, int) or review_channel_id == compiled.get("confession_channel_id"):
+            return False
+        guild = self.bot.get_guild(guild_id)
+        if guild is None:
+            return True
+        return bool(self.review_channel_snapshot(guild, channel_id=review_channel_id)["ok"])
 
-    def _review_channel_requirement_message(self, *, for_images: bool = False) -> str:
+    def _review_channel_requirement_message(self, guild_id: int, *, for_images: bool = False) -> str:
+        guild = self.bot.get_guild(guild_id)
+        if guild is not None:
+            review_snapshot = self.review_channel_snapshot(guild)
+            if not review_snapshot["ok"]:
+                return str(review_snapshot["message"])
         if for_images:
             return "This image flow still needs a separate private review channel before Babblebox can review it safely."
         return "This confession needs moderator review, but the server has not configured a separate private review channel yet."
@@ -1754,8 +1833,9 @@ class ConfessionsService:
             return True, ""
         if not compiled["allow_images"]:
             return False, "Image attachments are currently disabled for confessions in this server."
-        if len(attachments) > int(compiled["max_images"]):
-            return False, f"You can attach up to {compiled['max_images']} images per confession."
+        effective_limit = int(compiled.get("effective_max_images", compiled.get("max_images", 3)) or 3)
+        if len(attachments) > effective_limit:
+            return False, f"You can attach up to {effective_limit} images per confession on the current plan."
         for attachment in attachments:
             if not self._is_allowed_image(attachment):
                 return False, "Confessions only allow images right now."
@@ -2228,7 +2308,7 @@ class ConfessionsService:
             return ConfessionSubmissionResult(
                 False,
                 "blocked",
-                self._review_channel_requirement_message(for_images=image_policy_review),
+                self._review_channel_requirement_message(guild.id, for_images=image_policy_review),
                 submission_kind=submission_kind,
                 reply_flow=normalized_reply_flow,
                 parent_confession_id=normalized_parent_confession_id,
@@ -3121,6 +3201,85 @@ class ConfessionsService:
                     return resolved
         return getattr(self.bot, "user", None)
 
+    def review_channel_snapshot(self, guild: discord.Guild, *, channel_id: int | None = None) -> dict[str, Any]:
+        configured_id = channel_id
+        if configured_id is None:
+            configured_id = self.get_config(guild.id).get("review_channel_id")
+        confession_channel_id = self.get_config(guild.id).get("confession_channel_id")
+        snapshot = {
+            "ok": False,
+            "status": "missing",
+            "status_label": "Missing",
+            "channel_id": configured_id,
+            "channel": None,
+            "message": "Babblebox cannot review submissions safely until admins configure a separate private review channel.",
+            "detail": "No private review channel is configured yet.",
+            "missing_permissions": (),
+        }
+        if not isinstance(configured_id, int):
+            return snapshot
+        if configured_id == confession_channel_id:
+            snapshot["status"] = "same_channel"
+            snapshot["status_label"] = "Same As Public Channel"
+            snapshot["message"] = (
+                "Babblebox can only use a separate private review channel. "
+                "The configured review channel matches the public confession channel."
+            )
+            snapshot["detail"] = "The review channel matches the public confession channel."
+            return snapshot
+        channel = guild.get_channel(configured_id)
+        snapshot["channel"] = channel
+        if channel is None:
+            snapshot["status"] = "unavailable"
+            snapshot["status_label"] = "Unavailable"
+            snapshot["message"] = "The configured review channel is unavailable."
+            snapshot["detail"] = "The stored review channel no longer exists in this server."
+            return snapshot
+        permissions_for = getattr(channel, "permissions_for", None)
+        everyone_perms = None
+        if callable(permissions_for):
+            with contextlib.suppress(Exception):
+                everyone_perms = permissions_for(guild.default_role)
+        if getattr(everyone_perms, "view_channel", False):
+            snapshot["status"] = "public"
+            snapshot["status_label"] = "Public / Unsafe"
+            snapshot["message"] = (
+                "Babblebox can only use a private review channel. "
+                "This channel is visible to @everyone, so review is unavailable until an admin fixes it."
+            )
+            snapshot["detail"] = f"{getattr(channel, 'mention', self._format_channel_label(configured_id))} is visible to @everyone."
+            return snapshot
+        bot_target = self._bot_member_for_guild(guild)
+        bot_perms = None
+        if callable(permissions_for) and bot_target is not None:
+            with contextlib.suppress(Exception):
+                bot_perms = permissions_for(bot_target)
+        required_permissions = (
+            ("view_channel", "View Channel"),
+            ("send_messages", "Send Messages"),
+            ("embed_links", "Embed Links"),
+            ("read_message_history", "Read Message History"),
+        )
+        missing_permissions = tuple(
+            label for attr, label in required_permissions if not getattr(bot_perms, attr, False)
+        )
+        if missing_permissions:
+            snapshot["status"] = "bot_missing_permissions"
+            snapshot["status_label"] = "Bot Missing Permissions"
+            snapshot["message"] = (
+                "Babblebox cannot use the configured review channel until it has "
+                f"{', '.join(missing_permissions)}."
+            )
+            snapshot["detail"] = f"Missing bot permissions: {', '.join(missing_permissions)}."
+            snapshot["missing_permissions"] = missing_permissions
+            return snapshot
+        snapshot["ok"] = True
+        snapshot["status"] = "ready"
+        snapshot["status_label"] = "Ready"
+        snapshot["message"] = "Private review is ready."
+        snapshot["detail"] = "Private and ready for review queue delivery."
+        return snapshot
+
     def support_channel_snapshot(self, guild: discord.Guild, *, channel_id: int | None = None) -> dict[str, Any]:
         configured_id = channel_id
         if configured_id is None:
@@ -3168,6 +3327,7 @@ class ConfessionsService:
             ("view_channel", "View Channel"),
             ("send_messages", "Send Messages"),
             ("embed_links", "Embed Links"),
+            ("read_message_history", "Read Message History"),
         )
         missing_permissions = tuple(
             label for attr, label in required_permissions if not getattr(bot_perms, attr, False)
@@ -3188,6 +3348,95 @@ class ConfessionsService:
         snapshot["message"] = "Private support is ready."
         snapshot["detail"] = "Private and ready for anonymous appeals and reports."
         return snapshot
+
+    def readiness_snapshot(self) -> dict[str, Any]:
+        enabled_configs = [
+            (guild_id, config)
+            for guild_id, config in sorted(self._compiled_configs.items())
+            if config.get("enabled")
+        ]
+        privacy_status = self._privacy_status_global if isinstance(self._privacy_status_global, dict) else None
+        review_issue_counts = {
+            "missing": 0,
+            "unavailable": 0,
+            "same_channel": 0,
+            "public": 0,
+            "bot_missing_permissions": 0,
+            "guild_unavailable": 0,
+        }
+        support_issue_counts = {
+            "missing": 0,
+            "unavailable": 0,
+            "public": 0,
+            "bot_missing_permissions": 0,
+            "guild_unavailable": 0,
+        }
+        issue_codes: list[str] = []
+        if not self.storage_ready:
+            issue_codes.append("confessions_storage_unavailable")
+        privacy_ready = bool(self.storage_ready and privacy_status is not None and not privacy_status.get("needs_backfill"))
+        if self.storage_ready:
+            if privacy_status is None:
+                issue_codes.append("confessions_privacy_status_unknown")
+            elif privacy_status.get("needs_backfill"):
+                issue_codes.append("confessions_privacy_backfill_incomplete")
+        review_required_guild_count = 0
+        for guild_id, config in enabled_configs:
+            guild = self.bot.get_guild(guild_id)
+            if guild is None:
+                if self._review_features_required(config):
+                    review_required_guild_count += 1
+                    review_issue_counts["guild_unavailable"] += 1
+                support_issue_counts["guild_unavailable"] += 1
+                continue
+            if self._review_features_required(config):
+                review_required_guild_count += 1
+                review_snapshot = self.review_channel_snapshot(guild)
+                if not review_snapshot["ok"]:
+                    review_issue_counts[str(review_snapshot["status"])] += 1
+            support_snapshot = self.support_channel_snapshot(guild)
+            if not support_snapshot["ok"]:
+                support_issue_counts[str(support_snapshot["status"])] += 1
+        review_ready = not any(review_issue_counts.values())
+        support_ready = not any(support_issue_counts.values())
+        for status, count in review_issue_counts.items():
+            if count:
+                issue_codes.append(f"confessions_review_channel_{status}")
+        for status, count in support_issue_counts.items():
+            if count:
+                issue_codes.append(f"confessions_support_channel_{status}")
+        ready = bool(self.storage_ready and privacy_ready and review_ready and support_ready)
+        return {
+            "status": "ready" if ready else "degraded",
+            "ready": ready,
+            "storage_ready": self.storage_ready,
+            "configured_guild_count": len(enabled_configs),
+            "review_required_guild_count": review_required_guild_count,
+            "privacy_ready": privacy_ready,
+            "privacy_backfill_pending": bool(privacy_status and privacy_status.get("needs_backfill")),
+            "review_ready": review_ready,
+            "support_ready": support_ready,
+            "review_issue_counts": {name: count for name, count in review_issue_counts.items() if count},
+            "support_issue_counts": {name: count for name, count in support_issue_counts.items() if count},
+            "issue_codes": tuple(issue_codes),
+        }
+
+    def log_readiness_summary(self):
+        snapshot = self.readiness_snapshot()
+        issue_codes = ", ".join(snapshot["issue_codes"]) or "none"
+        if snapshot["ready"]:
+            LOGGER.info(
+                "Confessions readiness: ready configured_guilds=%s review_required_guilds=%s",
+                snapshot["configured_guild_count"],
+                snapshot["review_required_guild_count"],
+            )
+            return
+        LOGGER.warning(
+            "Confessions readiness degraded: configured_guilds=%s review_required_guilds=%s issue_codes=%s",
+            snapshot["configured_guild_count"],
+            snapshot["review_required_guild_count"],
+            issue_codes,
+        )
 
     def _restriction_label(self, state: dict[str, Any]) -> str:
         if state.get("is_permanent_ban"):
@@ -3996,9 +4245,12 @@ class ConfessionsService:
     def _image_policy_label(self, config: dict[str, Any]) -> str:
         if not config["allow_images"]:
             return "Off by default"
+        guild_id = int(config.get("guild_id") or 0)
+        active_limit = self.confession_image_limit(guild_id) if guild_id > 0 else premium_guild_limit(PLAN_FREE, LIMIT_CONFESSIONS_MAX_IMAGES)
+        over_limit_note = " | over current plan limit" if int(config.get("max_images", 3)) > active_limit else ""
         if config.get("image_review_required"):
-            return f"Enabled (max {config['max_images']}, private review)"
-        return f"Enabled (max {config['max_images']}, no forced review)"
+            return f"Enabled (max {config['max_images']}, private review{over_limit_note})"
+        return f"Enabled (max {config['max_images']}, no forced review{over_limit_note})"
 
     def _reply_policy_label(self, config: dict[str, Any]) -> str:
         if not config["allow_anonymous_replies"]:
@@ -4112,10 +4364,11 @@ class ConfessionsService:
 
     def build_member_panel_help_embed(self, guild: discord.Guild) -> discord.Embed:
         config = self.get_config(guild.id)
+        compiled = self.get_compiled_config(guild.id)
         role_snapshot = self._role_policy_snapshot(guild)
         support_snapshot = self.support_channel_snapshot(guild)
         image_line = (
-            f"Up to {MAX_CONFESSION_LENGTH} characters, one link total under the server policy, and up to {config['max_images']} images only if admins explicitly enable them. "
+            f"Up to {MAX_CONFESSION_LENGTH} characters, one link total under the server policy, and up to {compiled['effective_max_images']} images only if admins explicitly enable them. "
             + (
                 "This server routes enabled images through private review before posting."
                 if config.get("image_review_required")
@@ -4197,6 +4450,7 @@ class ConfessionsService:
         config = self.get_config(guild.id)
         role_snapshot = self._role_policy_snapshot(guild)
         exemption_snapshot = self._automatic_moderation_exemptions_snapshot(guild)
+        review_snapshot = self.review_channel_snapshot(guild)
         support_snapshot = self.support_channel_snapshot(guild)
         privacy_status = await self._guild_privacy_status(guild.id, stage="build_dashboard_privacy")
         role_value = (
@@ -4224,6 +4478,11 @@ class ConfessionsService:
             f"Channel: {self._format_channel_label(support_snapshot['channel_id'])}\n"
             f"Status: **{support_snapshot['status_label']}**\n"
             f"{support_snapshot['detail']}"
+        )
+        review_value = (
+            f"Channel: {self._format_channel_label(review_snapshot['channel_id'])}\n"
+            f"Status: **{review_snapshot['status_label']}**\n"
+            f"{review_snapshot['detail']}"
         )
         counts = dict(DASHBOARD_EMPTY_COUNTS)
         if self.storage_ready:
@@ -4295,12 +4554,14 @@ class ConfessionsService:
                 value=(
                     f"Review mode: **{'On' if config['review_mode'] else 'Off'}**\n"
                     f"Review channel: {self._format_channel_label(config['review_channel_id'])}\n"
+                    f"Review status: **{review_snapshot['status_label']}**\n"
                     f"Open queue: **{counts['open_review_cases']}** case(s)\n"
                     f"Open safety blocks: **{counts['open_safety_cases']}**\n"
                     f"Open moderation cases: **{counts['open_moderation_cases']}**"
                 ),
                 inline=False,
             )
+            embed.add_field(name="Review Channel", value=ge.safe_field_text(review_value, limit=1024), inline=False)
             embed.add_field(name="Support Channel", value=ge.safe_field_text(support_value, limit=1024), inline=False)
             embed.add_field(
                 name="Quick Help",
@@ -4350,6 +4611,7 @@ class ConfessionsService:
                 inline=False,
             )
             embed.add_field(name="Role Eligibility", value=ge.safe_field_text(role_value, limit=1024), inline=False)
+            embed.add_field(name="Review Channel", value=ge.safe_field_text(review_value, limit=1024), inline=False)
             embed.add_field(name="Support Channel", value=ge.safe_field_text(support_value, limit=1024), inline=False)
             embed.add_field(name="Operability", value=self.operability_message(guild.id), inline=False)
         embed.add_field(name="Privacy Hardening", value=ge.safe_field_text(self._privacy_dashboard_value(privacy_status), limit=1024), inline=False)
@@ -5192,7 +5454,7 @@ class ConfessionsService:
 
             if requires_review:
                 if not self._has_review_channel(guild.id):
-                    return False, self._review_channel_requirement_message(for_images=bool(attachment_meta))
+                    return False, self._review_channel_requirement_message(guild.id, for_images=bool(attachment_meta))
                 new_case_id = await self._queue_existing_submission_for_review(guild.id, submission, now_iso=now_iso)
                 case["status"] = "resolved"
                 case["resolution_action"] = action

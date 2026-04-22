@@ -1602,14 +1602,14 @@ This is where Babblebox stops feeling like a one-night party bot. Question Drops
                 </p>
                 <p>
                   <code>/drops status</code> anchors the knowledge lane with schedule, answer windows, digest timing,
-categories, scholar progress, and mastery announcement setup in one readable surface, while <code>/drops roles status</code> keeps member role control clear and private. Admins handle cadence, difficulty profile, and safe default or tier-specific mastery copy inside <code>/dropsadmin config</code>, <code>/dropsadmin mastery category</code>, and <code>/dropsadmin mastery scholar</code>, with approved tokens like <code>{user.mention}</code>, <code>{role.name}</code>, <code>{tier.label}</code>, <code>{threshold}</code>, and <code>{category.name}</code> where that scope allows it. Daily Arcade keeps a consistent daily ritual.
+categories, scholar progress, and mastery announcement setup in one readable surface, while <code>/drops roles status</code> keeps member role control clear and private. Admins handle cadence, difficulty profile, one safe live ping role, and safe default or tier-specific mastery copy inside <code>/dropsadmin config</code>, <code>/dropsadmin ping</code>, <code>/dropsadmin mastery category</code>, and <code>/dropsadmin mastery scholar</code>, with approved tokens like <code>{user.mention}</code>, <code>{role.name}</code>, <code>{tier.label}</code>, <code>{threshold}</code>, and <code>{category.name}</code> where that scope allows it. The offline lane stays fresher with smarter repeat resistance, while AI celebration copy is optional and reserved for Guild Pro. Daily Arcade keeps a consistent daily ritual.
                   Buddy, mastery, and scholar progress make that return loop visible in a surface that still feels clean
                   in a real channel.
                 </p>
                 <div class="story-points">
                   <article class="story-point">
                     <h4>Question Drops stay structured and legible</h4>
-                    <p>That lane adds shared knowledge, schedule logic, mastery flavor, digests, and scholar progression without turning the server into a spammy trivia cannon.</p>
+                    <p>That lane adds shared knowledge, schedule logic, mastery flavor, digests, and scholar progression without turning the server into a spammy trivia cannon, and the smarter rotation keeps busy servers from farming one thin question family.</p>
                   </article>
                   <article class="story-point">
                     <h4>Buddy and profile feel showable</h4>
@@ -1767,7 +1767,7 @@ categories, scholar progress, and mastery announcement setup in one readable sur
             <p class="section-copy">
               Babblebox utilities are not the only disciplined part of the product. Shield and admin helpers stay compact,
               conservative, and admin-facing: useful when a server needs them, but never positioned as a giant all-seeing
-              moderation suite. Live moderation stays optional; bounded feature-surface protection stays private and always on where the product actually needs it, while the focused safety lane now doubles down on trustworthy anti-spam, anti-GIF spam, scam / safety moderation, follow-up, and compact admin operations instead of turning into a giant control-plane product. The panel-first rules flow now keeps one selected pack in focus at a time, with pack-local actions, options, exemptions, and timeout profiles instead of one noisy settings slab.
+              moderation suite. Live moderation stays optional; bounded feature-surface protection stays private and always on where the product actually needs it, while the focused safety lane now doubles down on trustworthy anti-spam, anti-GIF spam, scam / safety moderation, follow-up, and compact admin operations instead of turning into a giant control-plane product. Optional premium is about higher limits, richer admin power, and Shield AI second-pass review, not paywalling basic safety or privacy. The panel-first rules flow now keeps one selected pack in focus at a time, with pack-local actions, options, exemptions, and timeout profiles instead of one noisy settings slab.
             </p>
           </div>
 
@@ -1785,7 +1785,7 @@ categories, scholar progress, and mastery announcement setup in one readable sur
               </div>
               <figcaption>
                 <strong><code>/shield panel</code> keeps moderation control compact.</strong>
-                  <span>Optional Shield live moderation stays opt-in, applies a recommended non-AI baseline on first enable, and stays built around scoped rules, allowlists, pack-specific exemptions, visible trusted-pack controls, explicit anti-spam thresholds with bounded corroboration, optional emote and capitals lanes, moderator anti-spam policy that defaults to exempt, a first-class GIF Flood / Media Pressure lane with grouped incident dedupe for one-user floods and separate channel grouping for collective pressure, configurable one-member rate, low-text repeat, same-asset, true channel-streak, and effective GIF-pressure controls with lightweight meaningful-text weighting for channel floods, global compact or no-ping log delivery with bounded per-pack overrides, local-first link safety, stronger no-link DM-lure scam coverage, meaningful edit or webhook rescans with about 200k known malicious domains, hard trusted-brand impersonation blocking, conservative bot-link handling, and no public bot callouts for weak evidence. The panel-first pack selector keeps Actions, Options, and Exemptions focused on one pack at a time, so spam-only controls stay out of Severe work and each pack or the trusted-link lane can inherit the global timeout or keep a dedicated timeout profile. Shield AI stays second-pass only and owner-managed, and its diagnostics now report the resolved routing lane plus local readiness, while that same safety lane keeps private feature-surface checks on for Confessions links, AFK, reminders, and watch keywords.</span>
+                  <span>Optional Shield live moderation stays opt-in, applies a recommended non-AI baseline on first enable, and stays built around scoped rules, allowlists, pack-specific exemptions, visible trusted-pack controls, explicit anti-spam thresholds with bounded corroboration, optional emote and capitals lanes, moderator anti-spam policy that defaults to exempt, a first-class GIF Flood / Media Pressure lane with grouped incident dedupe for one-user floods and separate channel grouping for collective pressure, configurable one-member rate, low-text repeat, same-asset, true channel-streak, and effective GIF-pressure controls with lightweight meaningful-text weighting for channel floods, global compact or no-ping log delivery with bounded per-pack overrides, local-first link safety, stronger no-link DM-lure scam coverage, meaningful edit or webhook rescans with about 200k known malicious domains, hard trusted-brand impersonation blocking, conservative bot-link handling, and no public bot callouts for weak evidence. The panel-first pack selector keeps Actions, Options, and Exemptions focused on one pack at a time, so spam-only controls stay out of Severe work and each pack or the trusted-link lane can inherit the global timeout or keep a dedicated timeout profile. Shield AI stays second-pass only, the support server has it by default, and other servers need Guild Pro plus owner policy while diagnostics report the resolved routing lane plus local readiness, along with entitlement state. That same safety lane keeps private feature-surface checks on for Confessions links, AFK, reminders, and watch keywords.</span>
               </figcaption>
             </figure>
 
@@ -1822,7 +1822,7 @@ categories, scholar progress, and mastery announcement setup in one readable sur
             </article>
             <article>
               <strong>AI stays second-pass only</strong>
-              <p>Optional AI review only sees already-flagged, sanitized live-message text, stays second-pass only, keeps support-server full access by default, leaves ordinary guilds off by default until the owner enables them globally or per guild, and never becomes the primary punishment engine.</p>
+              <p>Optional AI review only sees already-flagged, sanitized live-message text, stays second-pass only, keeps support-server full access by default, needs Guild Pro plus owner policy for other servers, and never becomes the primary punishment engine.</p>
             </article>
             <article>
               <strong>GIF pressure stays grouped</strong>
@@ -1873,7 +1873,7 @@ categories, scholar progress, and mastery announcement setup in one readable sur
           <div class="support-bar">
             <div>
               <strong>Need the details before you invite it?</strong>
-              <p>Babblebox is easier to trust because the supporting pages are specific: help for actual command lanes, privacy for bounded storage and private-first behavior, and terms for service boundaries.</p>
+              <p>Babblebox is easier to trust because the supporting pages are specific: help for actual command lanes, premium docs for real plan behavior, privacy for bounded storage and private-first behavior, and terms for service boundaries.</p>
             </div>
             <div class="support-links">
               <a class="btn btn-secondary" href="help.html">Read Help</a>
@@ -1894,10 +1894,12 @@ categories, scholar progress, and mastery announcement setup in one readable sur
           <div class="final-cta">
             <div>
               <div class="section-kicker">Invite Babblebox</div>
-              <h2>A premium Discord-native bot for busy nights and quiet days.</h2>
+              <h2>A trust-first Discord-native bot with optional premium power.</h2>
               <p>
                 If your server wants replayable party games, real return value, quieter utilities, and compact optional
-                safety without feature sprawl, Babblebox is built for that exact mix.
+                safety without feature sprawl, Babblebox is built for that exact mix. Plus and Guild Pro add higher limits,
+                richer admin power, and optional premium AI layers like Shield review and Question Drops celebrations without
+                removing the core safety, privacy, or offline Question Drops baseline from free servers.
               </p>
             </div>
             <div class="final-actions">

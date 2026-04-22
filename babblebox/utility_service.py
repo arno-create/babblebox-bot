@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
+import os
 import re
 import uuid
 from collections import defaultdict
@@ -11,6 +13,17 @@ import discord
 from discord.ext import commands
 
 from babblebox import game_engine as ge
+from babblebox.premium_limits import (
+    LIMIT_AFK_SCHEDULES,
+    LIMIT_BUMP_DETECTION_CHANNELS,
+    LIMIT_REMINDERS_ACTIVE,
+    LIMIT_REMINDERS_PUBLIC_ACTIVE,
+    LIMIT_WATCH_FILTERS,
+    LIMIT_WATCH_KEYWORDS,
+    guild_limit as premium_guild_limit,
+    user_limit as premium_user_limit,
+)
+from babblebox.premium_models import PLAN_FREE, PLAN_GUILD_PRO, PLAN_PLUS, SYSTEM_PREMIUM_OWNER_USER_IDS, SYSTEM_PREMIUM_SUPPORT_GUILD_ID
 from babblebox.shield_service import (
     FEATURE_SURFACE_AFK_REASON,
     FEATURE_SURFACE_AFK_SCHEDULE_REASON,
@@ -47,21 +60,22 @@ from babblebox.utility_helpers import (
     make_attachment_labels,
     make_message_preview,
     parse_duration_string,
+    sanitize_attachment_labels,
     serialize_datetime,
 )
 from babblebox.utility_store import UtilityStateStore, UtilityStorageUnavailable
 
 
-WATCH_KEYWORD_LIMIT = 10
-WATCH_FILTER_LIMIT = 8
+WATCH_KEYWORD_LIMIT = premium_user_limit(PLAN_FREE, LIMIT_WATCH_KEYWORDS)
+WATCH_FILTER_LIMIT = premium_user_limit(PLAN_FREE, LIMIT_WATCH_FILTERS)
 WATCH_KEYWORD_MAX_LEN = 40
 WATCH_DM_COOLDOWN_SECONDS = 20.0
 WATCH_DEDUP_TTL_SECONDS = 300.0
 RETURN_WATCH_ALLOWED_SECONDS = (3600, 6 * 3600, 24 * 3600)
 CAPTURE_COOLDOWN_SECONDS = 45.0
 REMINDER_COOLDOWN_SECONDS = 60.0
-REMINDER_MAX_ACTIVE = 3
-REMINDER_MAX_PUBLIC_ACTIVE = 1
+REMINDER_MAX_ACTIVE = premium_user_limit(PLAN_FREE, LIMIT_REMINDERS_ACTIVE)
+REMINDER_MAX_PUBLIC_ACTIVE = premium_user_limit(PLAN_FREE, LIMIT_REMINDERS_PUBLIC_ACTIVE)
 REMINDER_TEXT_MAX_LEN = 120
 REMINDER_MIN_SECONDS = 5 * 60
 REMINDER_PUBLIC_MIN_SECONDS = 15 * 60
@@ -69,9 +83,9 @@ REMINDER_MAX_SECONDS = 14 * 24 * 3600
 REMINDER_RETRY_BASE_SECONDS = 10 * 60
 REMINDER_RETRY_MAX_SECONDS = 6 * 3600
 AFK_NOTICE_COOLDOWN_SECONDS = 30.0
-AFK_SCHEDULE_LIMIT = 6
+AFK_SCHEDULE_LIMIT = premium_user_limit(PLAN_FREE, LIMIT_AFK_SCHEDULES)
 BUMP_PROVIDER_DISBOARD = "disboard"
-BUMP_DETECTION_CHANNEL_LIMIT = 5
+BUMP_DETECTION_CHANNEL_LIMIT = premium_guild_limit(PLAN_FREE, LIMIT_BUMP_DETECTION_CHANNELS)
 BUMP_REMINDER_TEXT_MAX_LEN = 180
 BUMP_THANKS_TEXT_MAX_LEN = 240
 BUMP_REMINDER_SENTENCE_LIMIT = 2
@@ -89,6 +103,8 @@ BUMP_PROVIDER_SPECS = {
         "cooldown_fragments": ("please wait another", "wait another"),
     }
 }
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _watch_default_config() -> dict:
@@ -157,14 +173,18 @@ class UtilityService:
         self.storage_ready = False
         self.storage_error: str | None = None
         self._startup_storage_error: str | None = None
+        self.storage_backend_preference = (
+            getattr(store, "backend_preference", None)
+            or os.getenv("UTILITY_STORAGE_BACKEND", "postgres")
+        ).strip().lower()
         if store is not None:
             self.store = store
         else:
             try:
                 self.store = UtilityStateStore()
+                self.storage_backend_preference = getattr(self.store, "backend_preference", self.storage_backend_preference)
             except UtilityStorageUnavailable as exc:
-                # Keep the bot loadable when the utility database is missing or offline.
-                print(f"Utility storage constructor failed: {exc}")
+                LOGGER.warning("Utility storage constructor failed: %s", exc)
                 self.store = UtilityStateStore(backend="memory")
                 self._startup_storage_error = str(exc)
                 self.storage_error = str(exc)
@@ -199,17 +219,19 @@ class UtilityService:
         if self._startup_storage_error is not None:
             self.storage_ready = False
             self.storage_error = self._startup_storage_error
-            print(f"Utility storage unavailable: {self._startup_storage_error}")
+            LOGGER.warning("Utility storage unavailable: %s", self._startup_storage_error)
             return False
         try:
             await self.store.load()
         except UtilityStorageUnavailable as exc:
             self.storage_ready = False
             self.storage_error = str(exc)
-            print(f"Utility storage unavailable: {exc}")
+            LOGGER.warning("Utility storage unavailable: %s", exc)
             return False
         self.storage_ready = True
         self.storage_error = None
+        if self._sanitize_later_markers():
+            await self.store.flush()
         self._rebuild_watch_indexes()
         self._rebuild_return_watch_indexes()
         self._scheduler_task = asyncio.create_task(self._scheduler_loop(), name="babblebox-utility-scheduler")
@@ -230,10 +252,160 @@ class UtilityService:
     def _has_storage(self) -> bool:
         return self.storage_ready
 
+    def _sanitize_later_markers(self) -> bool:
+        changed = False
+        later_state = self.store.state.get("later", {})
+        if not isinstance(later_state, dict):
+            return False
+        for per_user in later_state.values():
+            if not isinstance(per_user, dict):
+                continue
+            for marker in per_user.values():
+                if not isinstance(marker, dict):
+                    continue
+                sanitized_labels = sanitize_attachment_labels(marker.get("attachment_labels") or [])
+                if marker.get("attachment_labels") != sanitized_labels:
+                    marker["attachment_labels"] = sanitized_labels
+                    changed = True
+        return changed
+
     def _shield_feature_gateway(self) -> ShieldFeatureSafetyGateway:
         shield_service = getattr(self.bot, "shield_service", None)
         gateway = getattr(shield_service, "feature_gateway", None)
         return gateway if callable(getattr(gateway, "evaluate", None)) else self._shield_feature_gateway_fallback
+
+    def _premium_service(self):
+        premium_service = getattr(self.bot, "premium_service", None)
+        if callable(getattr(premium_service, "resolve_user_limit", None)):
+            return premium_service
+        return None
+
+    def _resolve_user_limit(self, user_id: int, limit_key: str, fallback: int) -> int:
+        premium_service = self._premium_service()
+        if premium_service is None:
+            if int(user_id or 0) in SYSTEM_PREMIUM_OWNER_USER_IDS:
+                return premium_user_limit(PLAN_PLUS, limit_key)
+            return fallback
+        return premium_service.resolve_user_limit(user_id, limit_key)
+
+    def _resolve_guild_limit(self, guild_id: int, limit_key: str, fallback: int) -> int:
+        premium_service = self._premium_service()
+        if premium_service is None:
+            if int(guild_id or 0) == SYSTEM_PREMIUM_SUPPORT_GUILD_ID:
+                return premium_guild_limit(PLAN_GUILD_PRO, limit_key)
+            return fallback
+        return premium_service.resolve_guild_limit(guild_id, limit_key)
+
+    def _premium_limit_error(self, *, limit_key: str, limit_value: int, default_message: str) -> str:
+        premium_service = self._premium_service()
+        if premium_service is None:
+            return default_message
+        return premium_service.describe_limit_error(limit_key=limit_key, limit_value=limit_value)
+
+    def _count_change_exceeds_limit(
+        self,
+        *,
+        previous_count: int,
+        next_count: int,
+        limit_value: int,
+    ) -> bool:
+        return next_count > limit_value and next_count > previous_count
+
+    def watch_keyword_limit(self, user_id: int) -> int:
+        return self._resolve_user_limit(user_id, LIMIT_WATCH_KEYWORDS, WATCH_KEYWORD_LIMIT)
+
+    def watch_filter_limit(self, user_id: int) -> int:
+        return self._resolve_user_limit(user_id, LIMIT_WATCH_FILTERS, WATCH_FILTER_LIMIT)
+
+    def reminder_limit(self, user_id: int) -> int:
+        return self._resolve_user_limit(user_id, LIMIT_REMINDERS_ACTIVE, REMINDER_MAX_ACTIVE)
+
+    def public_reminder_limit(self, user_id: int) -> int:
+        return self._resolve_user_limit(user_id, LIMIT_REMINDERS_PUBLIC_ACTIVE, REMINDER_MAX_PUBLIC_ACTIVE)
+
+    def afk_schedule_limit(self, user_id: int) -> int:
+        return self._resolve_user_limit(user_id, LIMIT_AFK_SCHEDULES, AFK_SCHEDULE_LIMIT)
+
+    def bump_detection_channel_limit(self, guild_id: int) -> int:
+        return self._resolve_guild_limit(guild_id, LIMIT_BUMP_DETECTION_CHANNELS, BUMP_DETECTION_CHANNEL_LIMIT)
+
+    def _effective_watch_config(self, user_id: int, config: dict | None = None) -> dict:
+        saved = dict(config or self._watch_config(user_id) or _watch_default_config())
+        keyword_limit = self.watch_keyword_limit(user_id)
+        filter_limit = self.watch_filter_limit(user_id)
+        saved["keywords"] = list(saved.get("keywords", []))[:keyword_limit]
+        for key in ("mention_channel_ids", "reply_channel_ids", "excluded_channel_ids", "ignored_user_ids"):
+            saved[key] = list(saved.get(key, []))[:filter_limit]
+        return saved
+
+    def _effective_reminders_for_user(self, user_id: int) -> list[dict]:
+        reminders = self.list_reminders(user_id)
+        reminder_limit = self.reminder_limit(user_id)
+        public_limit = self.public_reminder_limit(user_id)
+        effective: list[dict] = []
+        public_count = 0
+        for record in reminders:
+            if len(effective) >= reminder_limit:
+                break
+            delivery = str(record.get("delivery") or "dm")
+            if delivery == "here":
+                if public_count >= public_limit:
+                    continue
+                public_count += 1
+            effective.append(record)
+        return effective
+
+    def _effective_reminder_ids(self) -> set[str]:
+        reminders_by_user: defaultdict[int, list[dict]] = defaultdict(list)
+        for record in self.store.state.get("reminders", {}).values():
+            if not isinstance(record, dict):
+                continue
+            user_id = record.get("user_id")
+            if not isinstance(user_id, int):
+                continue
+            reminders_by_user[user_id].append(record)
+        for records in reminders_by_user.values():
+            records.sort(key=lambda item: (item.get("due_at", ""), item.get("id", "")))
+        active_ids: set[str] = set()
+        for user_id in reminders_by_user:
+            for record in self._effective_reminders_for_user(user_id):
+                reminder_id = record.get("id")
+                if isinstance(reminder_id, str):
+                    active_ids.add(reminder_id)
+        return active_ids
+
+    def _effective_afk_schedules_for_user(self, user_id: int) -> list[dict]:
+        schedules = [
+            dict(record)
+            for record in self.store.state.get("afk_schedules", {}).values()
+            if isinstance(record, dict) and record.get("user_id") == user_id
+        ]
+        schedules.sort(key=lambda item: ((item.get("next_start_at") or ""), item.get("id", "")))
+        return schedules[: self.afk_schedule_limit(user_id)]
+
+    def _effective_afk_schedule_ids(self) -> set[str]:
+        schedules_by_user: defaultdict[int, list[dict]] = defaultdict(list)
+        for record in self.store.state.get("afk_schedules", {}).values():
+            if not isinstance(record, dict):
+                continue
+            user_id = record.get("user_id")
+            if not isinstance(user_id, int):
+                continue
+            schedules_by_user[user_id].append(record)
+        for records in schedules_by_user.values():
+            records.sort(key=lambda item: ((item.get("next_start_at") or ""), item.get("id", "")))
+        active_ids: set[str] = set()
+        for user_id, records in schedules_by_user.items():
+            for record in records[: self.afk_schedule_limit(user_id)]:
+                schedule_id = record.get("id")
+                if isinstance(schedule_id, str):
+                    active_ids.add(schedule_id)
+        return active_ids
+
+    def get_effective_bump_config(self, guild_id: int) -> dict:
+        config = self.get_bump_config(guild_id)
+        config["detection_channel_ids"] = list(config.get("detection_channel_ids", []))[: self.bump_detection_channel_limit(guild_id)]
+        return config
 
     def _evaluate_feature_text(self, surface: str, text: str | None) -> ShieldFeatureDecision:
         return self._shield_feature_gateway().evaluate(surface, text)
@@ -327,6 +499,8 @@ class UtilityService:
     ) -> tuple[bool, str | dict]:
         if not self._has_storage():
             return False, self.storage_message("Bump reminders")
+        current_config = self.get_bump_config(guild_id)
+        bump_limit = self.bump_detection_channel_limit(guild_id)
 
         normalized_provider = None
         if provider is not None:
@@ -343,8 +517,17 @@ class UtilityService:
                     if isinstance(channel_id, int) and channel_id > 0
                 }
             )
-            if len(normalized_detection_channel_ids) > BUMP_DETECTION_CHANNEL_LIMIT:
-                return False, f"You can keep up to {BUMP_DETECTION_CHANNEL_LIMIT} bump detection channels."
+            previous_count = len(current_config.get("detection_channel_ids", []))
+            if self._count_change_exceeds_limit(
+                previous_count=previous_count,
+                next_count=len(normalized_detection_channel_ids),
+                limit_value=bump_limit,
+            ):
+                return False, self._premium_limit_error(
+                    limit_key=LIMIT_BUMP_DETECTION_CHANNELS,
+                    limit_value=bump_limit,
+                    default_message=f"You can keep up to {bump_limit} bump detection channels.",
+                )
 
         cleaned_reminder_text: str | None | object = BUMP_CONFIG_UNCHANGED
         if reminder_text is not BUMP_CONFIG_UNCHANGED:
@@ -437,7 +620,7 @@ class UtilityService:
         if not detection_channel_ids:
             lines.append("No detection channels are configured, so verified bumps cannot start a cycle yet.")
         thanks_mode = str(config.get("thanks_mode") or "quiet")
-        for channel_id in detection_channel_ids[:BUMP_DETECTION_CHANNEL_LIMIT]:
+        for channel_id in detection_channel_ids:
             channel = self.bot.get_channel(channel_id) or guild.get_channel(channel_id)
             if channel is None:
                 lines.append(f"Babblebox cannot see configured detection channel <#{channel_id}>.")
@@ -510,7 +693,7 @@ class UtilityService:
     ) -> tuple[dict, str, dict] | None:
         if not self.storage_ready or message.guild is None:
             return None
-        config = self.get_bump_config(message.guild.id)
+        config = self.get_effective_bump_config(message.guild.id)
         if not config.get("enabled"):
             return None
         provider = _normalize_bump_provider(config.get("provider"))
@@ -817,25 +1000,30 @@ class UtilityService:
                 continue
             if not isinstance(config, dict):
                 continue
-            if config.get("mention_global"):
+            effective_config = self._effective_watch_config(user_id, config)
+            if effective_config.get("mention_global"):
                 mention_global.add(user_id)
-            for guild_id in config.get("mention_guild_ids", []):
+            for guild_id in effective_config.get("mention_guild_ids", []):
                 if isinstance(guild_id, int):
                     mention_by_guild[guild_id].add(user_id)
-            for channel_id in config.get("mention_channel_ids", []):
+            for channel_id in effective_config.get("mention_channel_ids", []):
                 if isinstance(channel_id, int):
                     mention_by_channel[channel_id].add(user_id)
-            if config.get("reply_global"):
+            if effective_config.get("reply_global"):
                 reply_global.add(user_id)
-            for guild_id in config.get("reply_guild_ids", []):
+            for guild_id in effective_config.get("reply_guild_ids", []):
                 if isinstance(guild_id, int):
                     reply_by_guild[guild_id].add(user_id)
-            for channel_id in config.get("reply_channel_ids", []):
+            for channel_id in effective_config.get("reply_channel_ids", []):
                 if isinstance(channel_id, int):
                     reply_by_channel[channel_id].add(user_id)
-            excluded_channels_by_user[user_id] = {channel_id for channel_id in config.get("excluded_channel_ids", []) if isinstance(channel_id, int)}
-            ignored_users_by_user[user_id] = {other_user_id for other_user_id in config.get("ignored_user_ids", []) if isinstance(other_user_id, int)}
-            for item in config.get("keywords", []):
+            excluded_channels_by_user[user_id] = {
+                channel_id for channel_id in effective_config.get("excluded_channel_ids", []) if isinstance(channel_id, int)
+            }
+            ignored_users_by_user[user_id] = {
+                other_user_id for other_user_id in effective_config.get("ignored_user_ids", []) if isinstance(other_user_id, int)
+            }
+            for item in effective_config.get("keywords", []):
                 if not isinstance(item, dict):
                     continue
                 phrase = normalize_plain_text(item.get("phrase"))
@@ -1028,9 +1216,15 @@ class UtilityService:
             values.discard(target_id)
         return sorted(values)
 
-    def _check_watch_target_limits(self, items: list[int], *, item_name: str) -> tuple[bool, str | None]:
-        if len(self._sorted_unique_ints(items)) > WATCH_FILTER_LIMIT:
-            return False, f"You can keep up to {WATCH_FILTER_LIMIT} watched {item_name}."
+    def _check_watch_target_limits(self, user_id: int, items: list[int], *, item_name: str, previous_count: int) -> tuple[bool, str | None]:
+        next_count = len(self._sorted_unique_ints(items))
+        limit_value = self.watch_filter_limit(user_id)
+        if self._count_change_exceeds_limit(previous_count=previous_count, next_count=next_count, limit_value=limit_value):
+            return False, self._premium_limit_error(
+                limit_key=LIMIT_WATCH_FILTERS,
+                limit_value=limit_value,
+                default_message=f"You can keep up to {limit_value} watched {item_name}.",
+            )
         return True, None
 
     def _watch_filters_block(self, user_id: int, *, author_id: int, channel_id: int) -> bool:
@@ -1084,12 +1278,18 @@ class UtilityService:
             elif scope == "channel":
                 if guild_id is None or channel_id is None:
                     return False, "Channel-scoped mention watch can only be changed inside a server channel."
+                previous_count = len(self._sorted_unique_ints(config.get("mention_channel_ids", [])))
                 config["mention_channel_ids"] = self._upsert_watch_scope_target(
                     config.get("mention_channel_ids", []),
                     target_id=channel_id,
                     enabled=enabled,
                 )
-                ok, error = self._check_watch_target_limits(config["mention_channel_ids"], item_name="watch channels")
+                ok, error = self._check_watch_target_limits(
+                    user_id,
+                    config["mention_channel_ids"],
+                    item_name="watch channels",
+                    previous_count=previous_count,
+                )
                 if not ok:
                     return False, error
             else:
@@ -1125,12 +1325,18 @@ class UtilityService:
             elif scope == "channel":
                 if guild_id is None or channel_id is None:
                     return False, "Channel-scoped reply watch can only be changed inside a server channel."
+                previous_count = len(self._sorted_unique_ints(config.get("reply_channel_ids", [])))
                 config["reply_channel_ids"] = self._upsert_watch_scope_target(
                     config.get("reply_channel_ids", []),
                     target_id=channel_id,
                     enabled=enabled,
                 )
-                ok, error = self._check_watch_target_limits(config["reply_channel_ids"], item_name="reply channels")
+                ok, error = self._check_watch_target_limits(
+                    user_id,
+                    config["reply_channel_ids"],
+                    item_name="reply channels",
+                    previous_count=previous_count,
+                )
                 if not ok:
                     return False, error
             else:
@@ -1147,12 +1353,18 @@ class UtilityService:
             return False, "Channel ignores can only be changed inside a server channel."
         async with self._lock:
             config = self._watch_config(user_id, create=True)
+            previous_count = len(self._sorted_unique_ints(config.get("excluded_channel_ids", [])))
             ignored_channels = self._upsert_watch_scope_target(
                 config.get("excluded_channel_ids", []),
                 target_id=channel_id,
                 enabled=True,
             )
-            ok, error = self._check_watch_target_limits(ignored_channels, item_name="ignored channels")
+            ok, error = self._check_watch_target_limits(
+                user_id,
+                ignored_channels,
+                item_name="ignored channels",
+                previous_count=previous_count,
+            )
             if not ok:
                 return False, error
             config["excluded_channel_ids"] = ignored_channels
@@ -1185,12 +1397,18 @@ class UtilityService:
             return False, "You cannot ignore yourself."
         async with self._lock:
             config = self._watch_config(user_id, create=True)
+            previous_count = len(self._sorted_unique_ints(config.get("ignored_user_ids", [])))
             ignored_users = self._upsert_watch_scope_target(
                 config.get("ignored_user_ids", []),
                 target_id=ignored_user_id,
                 enabled=True,
             )
-            ok, error = self._check_watch_target_limits(ignored_users, item_name="ignored users")
+            ok, error = self._check_watch_target_limits(
+                user_id,
+                ignored_users,
+                item_name="ignored users",
+                previous_count=previous_count,
+            )
             if not ok:
                 return False, error
             config["ignored_user_ids"] = ignored_users
@@ -1237,8 +1455,13 @@ class UtilityService:
         async with self._lock:
             config = self._watch_config(user_id, create=True)
             keywords = list(config.get("keywords", []))
-            if len(keywords) >= WATCH_KEYWORD_LIMIT:
-                return False, f"You can store up to {WATCH_KEYWORD_LIMIT} watch keywords."
+            keyword_limit = self.watch_keyword_limit(user_id)
+            if len(keywords) >= keyword_limit:
+                return False, self._premium_limit_error(
+                    limit_key=LIMIT_WATCH_KEYWORDS,
+                    limit_value=keyword_limit,
+                    default_message=f"You can store up to {keyword_limit} watch keywords.",
+                )
             duplicate = next(
                 (
                     item
@@ -1646,7 +1869,7 @@ class UtilityService:
             "author_name": ge.display_name_of(message.author),
             "author_id": message.author.id,
             "preview": make_message_preview(message.content, attachments=message.attachments, limit=280),
-            "attachment_labels": make_attachment_labels(message, include_urls=True),
+            "attachment_labels": make_attachment_labels(message),
         }
         async with self._lock:
             self.store.state.setdefault("later", {}).setdefault(str(user.id), {})[str(channel.id)] = marker
@@ -1727,11 +1950,21 @@ class UtilityService:
         if remaining > 0:
             return False, f"Reminder creation is on cooldown. Try again in about {int(remaining)} seconds."
         active = [item for item in self.store.state.get("reminders", {}).values() if isinstance(item, dict) and item.get("user_id") == user.id]
-        if len(active) >= REMINDER_MAX_ACTIVE:
-            return False, f"You can keep up to {REMINDER_MAX_ACTIVE} active reminders."
+        reminder_limit = self.reminder_limit(user.id)
+        if len(active) >= reminder_limit:
+            return False, self._premium_limit_error(
+                limit_key=LIMIT_REMINDERS_ACTIVE,
+                limit_value=reminder_limit,
+                default_message=f"You can keep up to {reminder_limit} active reminders.",
+            )
         public_active = [item for item in active if item.get("delivery") == "here"]
-        if delivery == "here" and len(public_active) >= REMINDER_MAX_PUBLIC_ACTIVE:
-            return False, f"You can keep only {REMINDER_MAX_PUBLIC_ACTIVE} active channel reminder at a time."
+        public_limit = self.public_reminder_limit(user.id)
+        if delivery == "here" and len(public_active) >= public_limit:
+            return False, self._premium_limit_error(
+                limit_key=LIMIT_REMINDERS_PUBLIC_ACTIVE,
+                limit_value=public_limit,
+                default_message=f"You can keep only {public_limit} active channel reminder at a time.",
+            )
         created_at = ge.now_utc()
         due_at = created_at + timedelta(seconds=delay_seconds)
         reminder_id = uuid.uuid4().hex
@@ -2168,8 +2401,13 @@ class UtilityService:
 
         async with self._lock:
             user_schedules = [item for item in self.store.state.get("afk_schedules", {}).values() if isinstance(item, dict) and item.get("user_id") == user.id]
-            if len(user_schedules) >= AFK_SCHEDULE_LIMIT:
-                return False, f"You can keep up to {AFK_SCHEDULE_LIMIT} recurring AFK schedules."
+            schedule_limit = self.afk_schedule_limit(user.id)
+            if len(user_schedules) >= schedule_limit:
+                return False, self._premium_limit_error(
+                    limit_key=LIMIT_AFK_SCHEDULES,
+                    limit_value=schedule_limit,
+                    default_message=f"You can keep up to {schedule_limit} recurring AFK schedules.",
+                )
             duplicate = next(
                 (
                     item
@@ -2266,8 +2504,13 @@ class UtilityService:
         afk_to_expire: list[dict] = []
         afk_schedule_candidates: list[dict] = []
         next_due = None
+        active_reminder_ids = self._effective_reminder_ids()
+        active_afk_schedule_ids = self._effective_afk_schedule_ids()
         for record in self.store.state.get("reminders", {}).values():
             if not isinstance(record, dict):
+                continue
+            reminder_id = record.get("id")
+            if not isinstance(reminder_id, str) or reminder_id not in active_reminder_ids:
                 continue
             due_at = deserialize_datetime(record.get("due_at"))
             if due_at is None:
@@ -2319,6 +2562,9 @@ class UtilityService:
                     next_due = ends_at
         for schedule in self.store.state.get("afk_schedules", {}).values():
             if not isinstance(schedule, dict):
+                continue
+            schedule_id = schedule.get("id")
+            if not isinstance(schedule_id, str) or schedule_id not in active_afk_schedule_ids:
                 continue
             next_start_at = deserialize_datetime(schedule.get("next_start_at"))
             if next_start_at is None or next_start_at <= now:

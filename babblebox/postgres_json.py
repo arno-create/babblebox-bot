@@ -1,9 +1,13 @@
 from __future__ import annotations
 
 import json
+import logging
 from collections.abc import Mapping
 from copy import deepcopy
 from typing import Any
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _decode_postgres_json(value: Any, *, label: str, default: Any, expected_kind: str) -> Any:
@@ -14,16 +18,25 @@ def _decode_postgres_json(value: Any, *, label: str, default: Any, expected_kind
         try:
             parsed = json.loads(parsed)
         except json.JSONDecodeError:
-            print(f"Postgres JSON decode fallback ({label}): invalid JSON; using default.")
+            LOGGER.warning(
+                "Postgres JSON decode fallback (%s): invalid JSON; using default.",
+                label,
+            )
             return deepcopy(default)
     if expected_kind == "object":
         if isinstance(parsed, Mapping):
             return deepcopy(dict(parsed))
-        print(f"Postgres JSON decode fallback ({label}): expected object; using default.")
+        LOGGER.warning(
+            "Postgres JSON decode fallback (%s): expected object; using default.",
+            label,
+        )
         return deepcopy(default)
     if isinstance(parsed, (list, tuple)):
         return deepcopy(list(parsed))
-    print(f"Postgres JSON decode fallback ({label}): expected array; using default.")
+    LOGGER.warning(
+        "Postgres JSON decode fallback (%s): expected array; using default.",
+        label,
+    )
     return deepcopy(default)
 
 

@@ -1,4 +1,5 @@
 import asyncio
+import os
 import types
 import unittest
 from datetime import datetime, timezone
@@ -19,6 +20,7 @@ from babblebox.cogs.confessions import ConfessionsCog
 from babblebox.cogs.gameplay import GameplayCog
 from babblebox.cogs.identity import IdentityCog
 from babblebox.cogs.meta import HELP_PAGES, MetaCog, build_help_embed, build_help_page_embed
+from babblebox.cogs.premium import PremiumCog
 from babblebox.cogs.question_drops import QuestionDropsCog
 from babblebox.cogs.shield import ShieldCog, ShieldPanelView
 from babblebox.cogs.utilities import AfkReturnWatchDurationSelect, UtilityCog
@@ -383,19 +385,38 @@ class FakeLobbyView:
 
 
 class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
+    def _service_env_patch(self):
+        return patch.dict(
+            os.environ,
+            {
+                "ADMIN_STORAGE_BACKEND": "memory",
+                "SHIELD_STORAGE_BACKEND": "memory",
+                "CONFESSIONS_STORAGE_BACKEND": "memory",
+                "QUESTION_DROPS_STORAGE_BACKEND": "memory",
+                "UTILITY_STORAGE_BACKEND": "memory",
+                "PROFILE_STORAGE_BACKEND": "memory",
+                "PREMIUM_STORAGE_BACKEND": "memory",
+                "PREMIUM_SECRET_KEY": "p" * 32,
+                "CONFESSIONS_CONTENT_KEY": "c" * 32,
+                "CONFESSIONS_IDENTITY_KEY": "i" * 32,
+            },
+            clear=False,
+        )
+
     async def _registered_root(self, cog_factory, *, root_name: str):
-        bot = commands.Bot(command_prefix="!", intents=discord.Intents.none())
-        try:
-            cog = cog_factory(bot)
-            await bot.add_cog(cog)
-            command = next(command for command in bot.tree.get_commands() if command.name == root_name)
-            return command, command.to_dict(bot.tree)
-        finally:
-            for loaded in list(bot.cogs.values()):
-                service = getattr(loaded, "service", None)
-                if service is not None:
-                    await service.close()
-            await bot.close()
+        with self._service_env_patch():
+            bot = commands.Bot(command_prefix="!", intents=discord.Intents.none())
+            try:
+                cog = cog_factory(bot)
+                await bot.add_cog(cog)
+                command = next(command for command in bot.tree.get_commands() if command.name == root_name)
+                return command, command.to_dict(bot.tree)
+            finally:
+                for loaded in list(bot.cogs.values()):
+                    service = getattr(loaded, "service", None)
+                    if service is not None:
+                        await service.close()
+                await bot.close()
 
     def _link_buttons(self, view) -> dict[str, str]:
         return {
@@ -464,10 +485,12 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("/drops status", question_drops_page["body"])
         self.assertIn("/drops roles status", question_drops_page["body"])
         self.assertIn("/dropsadmin config", question_drops_page["body"])
+        self.assertIn("/dropsadmin ping", question_drops_page["body"])
         self.assertNotIn("/drops panel", question_drops_page["body"])
         self.assertIn("/dropsadmin mastery category", question_drops_page["body"])
         self.assertNotIn("/drops mastery category", question_drops_page["body"])
         self.assertIn("difficulty profile", question_drops_page["body"])
+        self.assertIn("Guild Pro", question_drops_page["body"])
         self.assertIn("template_action", question_drops_page["body"])
         self.assertIn("{user.mention}", question_drops_page["body"])
         self.assertIn("{category.name}", question_drops_page["body"])
@@ -592,8 +615,8 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         admin_slash_mastery_names = {command.name for command in cog.dropsadmin_mastery_group.app_command.commands}
 
         self.assertEqual(public_slash_names, {"leaderboard", "roles", "stats", "status"})
-        self.assertTrue({"config", "channels", "categories", "digest", "mastery"}.issubset(prefix_alias_names))
-        self.assertEqual(admin_slash_names, {"categories", "channels", "config", "digest", "mastery"})
+        self.assertTrue({"config", "channels", "categories", "digest", "mastery", "ping"}.issubset(prefix_alias_names))
+        self.assertEqual(admin_slash_names, {"categories", "channels", "config", "digest", "mastery", "ping"})
         self.assertEqual(prefix_mastery_names, {"category", "recalc", "scholar"})
         self.assertEqual(admin_slash_mastery_names, {"category", "recalc", "scholar"})
 
@@ -662,6 +685,18 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             {option["name"] for option in confess_payload["options"]},
             {"about", "appeal", "create", "manage", "reply-to-user", "report"},
         )
+
+    async def test_premium_root_keeps_public_status_commands_and_managed_guild_subgroup(self):
+        command, payload = await self._registered_root(PremiumCog, root_name="premium")
+
+        self.assertIsNone(payload["default_member_permissions"])
+        self.assertEqual({option["name"] for option in payload["options"]}, {"status", "plans", "link", "refresh", "unlink", "guild"})
+
+        guild_group = next(child for child in command.commands if child.name == "guild")
+        guild_app_command = getattr(guild_group, "app_command", guild_group)
+        self.assertTrue(guild_group.guild_only)
+        self.assertEqual(int(guild_app_command.default_permissions.value), int(discord.Permissions(manage_guild=True).value))
+        self.assertEqual({child.name for child in guild_group.commands}, {"status", "claim", "release"})
 
     async def test_registered_tree_requires_instance_hardening_for_hybrid_root_visibility(self):
         class UnhardenedHybridRoot(commands.Cog):
@@ -1480,7 +1515,14 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             await cog.service.close()
 
     async def test_shield_ai_command_updates_scope_without_owner_access_toggle(self):
-        bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
+        bot = types.SimpleNamespace(
+            loop=asyncio.get_running_loop(),
+            premium_service=types.SimpleNamespace(
+                guild_has_capability=lambda guild_id, capability: True,
+                resolve_guild_limit=lambda guild_id, limit_key: 50,
+                describe_limit_error=lambda **kwargs: "premium",
+            ),
+        )
         cog = ShieldCog(bot)
         try:
             cog.service.storage_ready = True
@@ -1509,42 +1551,44 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             await cog.service.close()
 
     async def test_utility_command_surface_excludes_removed_moment_feature(self):
-        bot = commands.Bot(command_prefix="!", intents=discord.Intents.none())
-        try:
-            cog = UtilityCog(bot)
-            await bot.add_cog(cog)
+        with self._service_env_patch():
+            bot = commands.Bot(command_prefix="!", intents=discord.Intents.none())
+            try:
+                cog = UtilityCog(bot)
+                await bot.add_cog(cog)
 
-            slash_roots = {command.name for command in bot.tree.get_commands()}
-            prefix_commands = {command.name for command in cog.walk_commands()}
+                slash_roots = {command.name for command in bot.tree.get_commands()}
+                prefix_commands = {command.name for command in cog.walk_commands()}
 
-            self.assertTrue({"watch", "later", "capture", "remind", "bremind"}.issubset(slash_roots))
-            self.assertNotIn("moment", slash_roots)
-            self.assertNotIn("moment", prefix_commands)
-        finally:
-            for loaded in list(bot.cogs.values()):
-                service = getattr(loaded, "service", None)
-                if service is not None:
-                    await service.close()
-            await bot.close()
+                self.assertTrue({"watch", "later", "capture", "remind", "bremind"}.issubset(slash_roots))
+                self.assertNotIn("moment", slash_roots)
+                self.assertNotIn("moment", prefix_commands)
+            finally:
+                for loaded in list(bot.cogs.values()):
+                    service = getattr(loaded, "service", None)
+                    if service is not None:
+                        await service.close()
+                await bot.close()
 
     async def test_bremind_root_keeps_expected_admin_children(self):
-        bot = commands.Bot(command_prefix="!", intents=discord.Intents.none())
-        try:
-            cog = UtilityCog(bot)
-            await bot.add_cog(cog)
+        with self._service_env_patch():
+            bot = commands.Bot(command_prefix="!", intents=discord.Intents.none())
+            try:
+                cog = UtilityCog(bot)
+                await bot.add_cog(cog)
 
-            slash_names = {command.name for command in cog.bremind_group.app_command.commands}
-            prefix_names = {command.name for command in cog.bremind_group.commands}
+                slash_names = {command.name for command in cog.bremind_group.app_command.commands}
+                prefix_names = {command.name for command in cog.bremind_group.commands}
 
-            expected = {"status", "setup", "test", "enable", "disable", "detect", "destination", "message", "provider"}
-            self.assertEqual(slash_names, expected)
-            self.assertEqual(prefix_names, expected)
-        finally:
-            for loaded in list(bot.cogs.values()):
-                service = getattr(loaded, "service", None)
-                if service is not None:
-                    await service.close()
-            await bot.close()
+                expected = {"status", "setup", "test", "enable", "disable", "detect", "destination", "message", "provider"}
+                self.assertEqual(slash_names, expected)
+                self.assertEqual(prefix_names, expected)
+            finally:
+                for loaded in list(bot.cogs.values()):
+                    service = getattr(loaded, "service", None)
+                    if service is not None:
+                        await service.close()
+                await bot.close()
 
     async def test_shield_panel_overview_reflects_legacy_pack_state(self):
         bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
@@ -1597,7 +1641,7 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await cog.service.close()
 
-    async def test_shield_ai_panel_embed_keeps_owner_policy_explanation_without_extra_control(self):
+    async def test_shield_ai_panel_embed_keeps_premium_policy_explanation_without_extra_control(self):
         bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
         cog = ShieldCog(bot)
         try:
@@ -1607,14 +1651,15 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             fields = {field.name: field.value for field in embed.fields}
 
             self.assertEqual(embed.title, "Shield AI Assist")
-            self.assertIn("owner-managed", embed.description.lower())
+            self.assertIn("owner policy controls availability", embed.description.lower())
             self.assertIn("Access Policy", fields)
             self.assertIn("Provider and Routing", fields)
             self.assertIn("Runtime Policy", fields)
             self.assertIn("Policy source", fields["Access Policy"])
             self.assertIn("Allowed models", fields["Access Policy"])
             self.assertIn("Ordinary-guild default", fields["Access Policy"])
-            self.assertIn("Review scope is admin-configurable; access is owner-managed", embed.footer.text)
+            self.assertIn("review scope is admin-configurable", embed.footer.text.lower())
+            self.assertIn("guild pro unlocks mini/full", embed.footer.text.lower())
         finally:
             await cog.service.close()
 
@@ -2185,7 +2230,7 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("enabled", ctx.send_calls[1]["embed"].description.lower())
             self.assertIn("guild shield ai access", ctx.send_calls[2]["embed"].description.lower())
             self.assertIn("inherits", ctx.send_calls[3]["embed"].description.lower())
-            self.assertIn("restored", ctx.send_calls[4]["embed"].description.lower())
+            self.assertIn("inherits", ctx.send_calls[4]["embed"].description.lower())
             self.assertTrue(cog.service.get_meta()["ordinary_ai_enabled"])
         finally:
             await cog.service.close()

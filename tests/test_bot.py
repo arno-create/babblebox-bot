@@ -3,6 +3,7 @@ import unittest
 from unittest.mock import AsyncMock, patch
 
 import discord
+from discord import app_commands
 
 from babblebox.bot import BabbleBot, DISCORD_MAX_COMMAND_CHOICES, DISCORD_MAX_COMMAND_OPTIONS
 
@@ -14,11 +15,43 @@ MEMORY_STORAGE_ENV = {
     "PROFILE_STORAGE_BACKEND": "memory",
     "QUESTION_DROPS_STORAGE_BACKEND": "memory",
     "CONFESSIONS_STORAGE_BACKEND": "memory",
+    "PREMIUM_STORAGE_BACKEND": "memory",
 }
 
 
 async def _fake_load_dictionary(self):
     self.dictionary_ready = True
+
+
+def _fake_synced_root(name: str, children: tuple[str, ...], default_member_permissions=None):
+    return type(
+        f"FakeSynced{name.title()}Command",
+        (),
+        {
+            "name": name,
+            "options": [type("FakeOption", (), {"name": child})() for child in children],
+            "default_member_permissions": default_member_permissions,
+        },
+    )()
+
+
+class _FakeInteractionResponse:
+    def __init__(self, *, done: bool):
+        self._done = done
+        self.send_message = AsyncMock()
+
+    def is_done(self) -> bool:
+        return self._done
+
+
+class _FakeInteraction:
+    def __init__(self, *, done: bool):
+        self.command = type("FakeCommand", (), {"qualified_name": "premium link"})()
+        self.guild = type("FakeGuild", (), {"id": 123})()
+        self.channel = type("FakeChannel", (), {"id": 456})()
+        self.user = type("FakeUser", (), {"id": 789})()
+        self.response = _FakeInteractionResponse(done=done)
+        self.followup = type("FakeFollowup", (), {"send": AsyncMock()})()
 
 
 class BabbleBotSetupHookTests(unittest.IsolatedAsyncioTestCase):
@@ -43,7 +76,7 @@ class BabbleBotSetupHookTests(unittest.IsolatedAsyncioTestCase):
         values.update(extra)
         return patch.dict(os.environ, values, clear=False)
 
-    async def test_setup_hook_syncs_and_verifies_lock_root(self):
+    async def test_setup_hook_syncs_and_verifies_required_roots(self):
         with self._env():
             bot = BabbleBot()
             sync_targets: list[int | None] = []
@@ -60,15 +93,104 @@ class BabbleBotSetupHookTests(unittest.IsolatedAsyncioTestCase):
                 ):
                     await bot.setup_hook()
 
+                premium_root = next(command for command in bot.tree.get_commands() if command.name == "premium")
                 lock_root = next(command for command in bot.tree.get_commands() if command.name == "lock")
                 timeout_root = next(command for command in bot.tree.get_commands() if command.name == "timeout")
                 self.assertEqual(sync_targets, [None])
+                self.assertEqual({command.name for command in premium_root.commands}, {"status", "plans", "link", "refresh", "unlink", "guild"})
                 self.assertEqual({command.name for command in lock_root.commands}, {"channel", "remove", "settings"})
                 self.assertEqual({command.name for command in timeout_root.commands}, {"remove"})
+                self.assertIsNone(premium_root.default_permissions)
                 self.assertIsNone(lock_root.default_permissions)
                 self.assertIsNone(timeout_root.default_permissions)
             finally:
                 await self._close_bot(bot)
+
+
+class BabbleBotCommandErrorTests(unittest.IsolatedAsyncioTestCase):
+    def _iter_command_schema_paths(self, payload: dict, *, path: str):
+        yield path, payload
+        for option in payload.get("options", []):
+            if not isinstance(option, dict):
+                continue
+            option_name = option.get("name")
+            next_path = f"{path} {option_name}" if option_name else path
+            yield from self._iter_command_schema_paths(option, path=next_path)
+
+    async def _close_bot(self, bot: BabbleBot) -> None:
+        for loaded in list(bot.cogs.values()):
+            service = getattr(loaded, "service", None)
+            if service is not None:
+                await service.close()
+        await bot.close()
+
+    def _env(self, **extra: str):
+        values = dict(MEMORY_STORAGE_ENV)
+        values.update(extra)
+        return patch.dict(os.environ, values, clear=False)
+
+    async def test_invalid_dev_guild_id_logs_warning(self):
+        with self._env(DEV_GUILD_ID="not-a-number"), patch("babblebox.bot.LOGGER.warning") as warning_log:
+            bot = BabbleBot()
+            try:
+                self.assertIsNone(bot.dev_guild_id)
+                warning_log.assert_called_once_with(
+                    "Invalid DEV_GUILD_ID '%s'. Ignoring dev guild sync.",
+                    "not-a-number",
+                )
+            finally:
+                await bot.close()
+
+    async def test_check_failures_log_metadata_and_reply_privately(self):
+        bot = BabbleBot()
+        interaction = _FakeInteraction(done=False)
+
+        try:
+            with patch("babblebox.bot.LOGGER.info") as info_log:
+                await bot.on_app_command_error(interaction, app_commands.CheckFailure())
+
+            info_log.assert_called_once_with(
+                "App command failure: command=%s guild_id=%s channel_id=%s user_id=%s error_type=%s",
+                "premium link",
+                123,
+                456,
+                789,
+                "CheckFailure",
+            )
+            interaction.response.send_message.assert_awaited_once_with(
+                "This command can only be used in a server.",
+                ephemeral=True,
+            )
+            interaction.followup.send.assert_not_awaited()
+        finally:
+            await bot.close()
+
+    async def test_unexpected_failures_log_type_only_and_use_followup_when_response_started(self):
+        class FakeAppCommandError(app_commands.AppCommandError):
+            pass
+
+        bot = BabbleBot()
+        interaction = _FakeInteraction(done=True)
+
+        try:
+            with patch("babblebox.bot.LOGGER.error") as error_log:
+                await bot.on_app_command_error(interaction, FakeAppCommandError("sensitive details"))
+
+            error_log.assert_called_once_with(
+                "App command failure: command=%s guild_id=%s channel_id=%s user_id=%s error_type=%s",
+                "premium link",
+                123,
+                456,
+                789,
+                "FakeAppCommandError",
+            )
+            interaction.followup.send.assert_awaited_once_with(
+                "Something went wrong while running that command.",
+                ephemeral=True,
+            )
+            interaction.response.send_message.assert_not_awaited()
+        finally:
+            await bot.close()
 
     async def test_setup_hook_syncs_dev_guild_before_global_when_configured(self):
         with self._env(DEV_GUILD_ID="42"):
@@ -98,12 +220,12 @@ class BabbleBotSetupHookTests(unittest.IsolatedAsyncioTestCase):
             finally:
                 await self._close_bot(bot)
 
-    async def test_setup_hook_raises_when_synced_result_is_missing_lock_root(self):
+    async def test_setup_hook_raises_when_synced_result_is_missing_required_roots(self):
         with self._env():
             bot = BabbleBot()
 
             async def fake_sync(*, guild=None):
-                return [command for command in bot.tree.get_commands(guild=guild) if command.name not in {"lock", "timeout"}]
+                return [command for command in bot.tree.get_commands(guild=guild) if command.name not in {"premium", "lock", "timeout"}]
 
             try:
                 with patch.object(BabbleBot, "_load_dictionary", new=_fake_load_dictionary), patch.object(
@@ -114,6 +236,7 @@ class BabbleBotSetupHookTests(unittest.IsolatedAsyncioTestCase):
                     with self.assertRaises(RuntimeError) as error_context:
                         await bot.setup_hook()
 
+                self.assertIn("missing `/premium`", str(error_context.exception))
                 self.assertIn("missing `/lock`", str(error_context.exception))
                 self.assertIn("missing `/timeout`", str(error_context.exception))
                 self.assertIn("global commands sync result", str(error_context.exception))
@@ -124,27 +247,12 @@ class BabbleBotSetupHookTests(unittest.IsolatedAsyncioTestCase):
         with self._env():
             bot = BabbleBot()
 
-            synced_lock_root = type(
-                "FakeSyncedLockCommand",
-                (),
-                {
-                    "name": "lock",
-                    "options": [type("FakeOption", (), {"name": name})() for name in ("channel", "remove", "settings")],
-                    "default_member_permissions": None,
-                },
-            )()
-            stale_timeout_root = type(
-                "FakeSyncedTimeoutCommand",
-                (),
-                {
-                    "name": "timeout",
-                    "options": [type("FakeOption", (), {"name": "remove"})()],
-                    "default_member_permissions": discord.Permissions(moderate_members=True),
-                },
-            )()
+            synced_premium_root = _fake_synced_root("premium", ("status", "plans", "link", "refresh", "unlink", "guild"))
+            synced_lock_root = _fake_synced_root("lock", ("channel", "remove", "settings"))
+            stale_timeout_root = _fake_synced_root("timeout", ("remove",), discord.Permissions(moderate_members=True))
 
             async def fake_sync(*, guild=None):
-                return [synced_lock_root, stale_timeout_root]
+                return [synced_premium_root, synced_lock_root, stale_timeout_root]
 
             try:
                 with patch.object(BabbleBot, "_load_dictionary", new=_fake_load_dictionary), patch.object(
@@ -165,18 +273,12 @@ class BabbleBotSetupHookTests(unittest.IsolatedAsyncioTestCase):
         with self._env():
             bot = BabbleBot()
 
-            stale_lock_root = type(
-                "FakeSyncedCommand",
-                (),
-                {
-                    "name": "lock",
-                    "options": [type("FakeOption", (), {"name": name})() for name in ("channel", "remove", "settings")],
-                    "default_member_permissions": discord.Permissions(manage_channels=True),
-                },
-            )()
+            synced_premium_root = _fake_synced_root("premium", ("status", "plans", "link", "refresh", "unlink", "guild"))
+            stale_lock_root = _fake_synced_root("lock", ("channel", "remove", "settings"), discord.Permissions(manage_channels=True))
+            synced_timeout_root = _fake_synced_root("timeout", ("remove",))
 
             async def fake_sync(*, guild=None):
-                return [stale_lock_root]
+                return [synced_premium_root, stale_lock_root, synced_timeout_root]
 
             try:
                 with patch.object(BabbleBot, "_load_dictionary", new=_fake_load_dictionary), patch.object(
@@ -345,3 +447,39 @@ class BabbleBotSetupHookTests(unittest.IsolatedAsyncioTestCase):
                 self.assertIn("boom", str(error_context.exception))
             finally:
                 await self._close_bot(bot)
+
+    async def test_setup_hook_fails_closed_when_required_service_storage_is_unavailable(self):
+        failure_cases = (
+            ("PREMIUM_STORAGE_BACKEND", "Premium"),
+            ("CONFESSIONS_STORAGE_BACKEND", "Confessions"),
+            ("SHIELD_STORAGE_BACKEND", "Shield"),
+            ("ADMIN_STORAGE_BACKEND", "Admin"),
+            ("UTILITY_STORAGE_BACKEND", "Utilities"),
+            ("PROFILE_STORAGE_BACKEND", "Profile"),
+            ("QUESTION_DROPS_STORAGE_BACKEND", "Question Drops"),
+        )
+        forced_missing_database_env = {
+            "PREMIUM_DATABASE_URL": "",
+            "QUESTION_DROPS_DATABASE_URL": "",
+            "UTILITY_DATABASE_URL": "",
+            "SUPABASE_DB_URL": "",
+            "DATABASE_URL": "",
+            "CONFESSIONS_CONTENT_KEY": "c" * 32,
+            "CONFESSIONS_IDENTITY_KEY": "i" * 32,
+        }
+
+        for env_name, service_label in failure_cases:
+            with self.subTest(service=service_label):
+                with self._env(**forced_missing_database_env, **{env_name: "postgres"}):
+                    bot = BabbleBot()
+
+                    try:
+                        with patch.object(BabbleBot, "_load_dictionary", new=_fake_load_dictionary):
+                            with self.assertRaises(Exception) as error_context:
+                                await bot.setup_hook()
+
+                        message = str(error_context.exception)
+                        self.assertIn(f"{service_label} startup failed", message)
+                        self.assertIn("configured backend `postgres`", message)
+                    finally:
+                        await self._close_bot(bot)

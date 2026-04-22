@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+import logging
 import os
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -13,6 +14,8 @@ from babblebox.question_drops_content import QUESTION_DROP_DIFFICULTY_PROFILES
 from babblebox.postgres_json import decode_postgres_json_array, decode_postgres_json_object
 from babblebox.text_safety import normalize_plain_text
 
+
+LOGGER = logging.getLogger(__name__)
 
 DEFAULT_BACKEND = "postgres"
 QUESTION_DROP_MIN_DROPS_PER_DAY = 1
@@ -49,6 +52,7 @@ def default_question_drops_config(guild_id: int | None = None) -> dict[str, Any]
         "activity_gate": "light",
         "active_start_hour": 10,
         "active_end_hour": 22,
+        "drop_ping_role_id": None,
         "enabled_channel_ids": [],
         "enabled_categories": list(QUESTION_DROP_KNOWLEDGE_CATEGORIES),
         "category_mastery": default_question_drop_category_mastery(),
@@ -226,6 +230,7 @@ def normalize_question_drops_config(guild_id: int, payload: Any) -> dict[str, An
     for field, default_value in (("active_start_hour", 10), ("active_end_hour", 22)):
         value = payload.get(field)
         cleaned[field] = value if isinstance(value, int) and 0 <= value <= 23 else default_value
+    cleaned["drop_ping_role_id"] = _normalize_positive_int(payload.get("drop_ping_role_id"))
     cleaned["enabled_channel_ids"] = sorted({value for value in payload.get("enabled_channel_ids", []) if isinstance(value, int) and value > 0})
     cleaned["enabled_categories"] = sorted(
         {
@@ -966,6 +971,7 @@ def _config_from_row(row) -> dict[str, Any]:
             "activity_gate": row["activity_gate"],
             "active_start_hour": row["active_start_hour"],
             "active_end_hour": row["active_end_hour"],
+            "drop_ping_role_id": row.get("drop_ping_role_id"),
             "enabled_channel_ids": decode_postgres_json_array(
                 row["enabled_channel_ids"],
                 label="question_drop_configs.enabled_channel_ids",
@@ -1160,6 +1166,7 @@ class _PostgresQuestionDropsStore(_BaseQuestionDropsStore):
                 "activity_gate TEXT NOT NULL DEFAULT 'light', "
                 "active_start_hour INTEGER NOT NULL DEFAULT 10, "
                 "active_end_hour INTEGER NOT NULL DEFAULT 22, "
+                "drop_ping_role_id BIGINT NULL, "
                 "enabled_channel_ids JSONB NOT NULL DEFAULT '[]'::jsonb, "
                 "enabled_categories JSONB NOT NULL DEFAULT '[]'::jsonb, "
                 "category_mastery JSONB NOT NULL DEFAULT '{}'::jsonb, "
@@ -1196,6 +1203,7 @@ class _PostgresQuestionDropsStore(_BaseQuestionDropsStore):
             "ALTER TABLE question_drop_configs ADD COLUMN IF NOT EXISTS digest_settings JSONB NOT NULL DEFAULT '{}'::jsonb",
             "ALTER TABLE question_drop_configs ADD COLUMN IF NOT EXISTS ai_celebrations_enabled BOOLEAN NOT NULL DEFAULT FALSE",
             "ALTER TABLE question_drop_configs ADD COLUMN IF NOT EXISTS difficulty_profile TEXT NOT NULL DEFAULT 'standard'",
+            "ALTER TABLE question_drop_configs ADD COLUMN IF NOT EXISTS drop_ping_role_id BIGINT NULL",
             "CREATE INDEX IF NOT EXISTS ix_question_drop_exposures_guild_asked ON question_drop_exposures (guild_id, asked_at DESC)",
             "CREATE INDEX IF NOT EXISTS ix_question_drop_exposures_guild_concept ON question_drop_exposures (guild_id, concept_id, asked_at DESC)",
             "CREATE INDEX IF NOT EXISTS ix_question_drop_exposures_guild_variant ON question_drop_exposures (guild_id, variant_hash, asked_at DESC)",
@@ -1293,7 +1301,7 @@ class _PostgresQuestionDropsStore(_BaseQuestionDropsStore):
                 (
                     "SELECT guild_id, enabled, drops_per_day, timezone, answer_window_seconds, tone_mode, difficulty_profile, activity_gate, "
                     "active_start_hour, active_end_hour, enabled_channel_ids, enabled_categories, "
-                    "category_mastery, scholar_ladder, digest_settings, ai_celebrations_enabled "
+                    "drop_ping_role_id, category_mastery, scholar_ladder, digest_settings, ai_celebrations_enabled "
                     "FROM question_drop_configs"
                 )
             )
@@ -1305,7 +1313,7 @@ class _PostgresQuestionDropsStore(_BaseQuestionDropsStore):
                 (
                     "SELECT guild_id, enabled, drops_per_day, timezone, answer_window_seconds, tone_mode, difficulty_profile, activity_gate, "
                     "active_start_hour, active_end_hour, enabled_channel_ids, enabled_categories, "
-                    "category_mastery, scholar_ladder, digest_settings, ai_celebrations_enabled "
+                    "drop_ping_role_id, category_mastery, scholar_ladder, digest_settings, ai_celebrations_enabled "
                     "FROM question_drop_configs WHERE guild_id = $1"
                 ),
                 guild_id,
@@ -1327,10 +1335,10 @@ class _PostgresQuestionDropsStore(_BaseQuestionDropsStore):
                     (
                         "INSERT INTO question_drop_configs ("
                         "guild_id, enabled, drops_per_day, timezone, answer_window_seconds, tone_mode, difficulty_profile, activity_gate, "
-                        "active_start_hour, active_end_hour, enabled_channel_ids, enabled_categories, "
+                        "active_start_hour, active_end_hour, drop_ping_role_id, enabled_channel_ids, enabled_categories, "
                         "category_mastery, scholar_ladder, digest_settings, ai_celebrations_enabled, updated_at"
                         ") VALUES ("
-                        "$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11::jsonb, $12::jsonb, $13::jsonb, $14::jsonb, $15::jsonb, $16, timezone('utc', now())"
+                        "$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12::jsonb, $13::jsonb, $14::jsonb, $15::jsonb, $16::jsonb, $17, timezone('utc', now())"
                         ") ON CONFLICT (guild_id) DO UPDATE SET "
                         "enabled = EXCLUDED.enabled, "
                         "drops_per_day = EXCLUDED.drops_per_day, "
@@ -1341,6 +1349,7 @@ class _PostgresQuestionDropsStore(_BaseQuestionDropsStore):
                         "activity_gate = EXCLUDED.activity_gate, "
                         "active_start_hour = EXCLUDED.active_start_hour, "
                         "active_end_hour = EXCLUDED.active_end_hour, "
+                        "drop_ping_role_id = EXCLUDED.drop_ping_role_id, "
                         "enabled_channel_ids = EXCLUDED.enabled_channel_ids, "
                         "enabled_categories = EXCLUDED.enabled_categories, "
                         "category_mastery = EXCLUDED.category_mastery, "
@@ -1359,6 +1368,7 @@ class _PostgresQuestionDropsStore(_BaseQuestionDropsStore):
                     normalized["activity_gate"],
                     normalized["active_start_hour"],
                     normalized["active_end_hour"],
+                    normalized["drop_ping_role_id"],
                     json.dumps(normalized["enabled_channel_ids"]),
                     json.dumps(normalized["enabled_categories"]),
                     json.dumps(normalized["category_mastery"]),
@@ -1960,12 +1970,12 @@ class QuestionDropsStore:
         self._construct_store(requested_backend)
 
     def _construct_store(self, requested_backend: str):
-        print(
-            "Question Drops storage init: "
-            f"backend_preference={requested_backend}, "
-            f"database_url_configured={'yes' if self.database_url else 'no'}, "
-            f"database_url_source={self.database_url_source or 'none'}, "
-            f"database_target={_redact_database_url(self.database_url)}"
+        LOGGER.info(
+            "Question Drops storage init: backend_preference=%s database_url_configured=%s database_url_source=%s database_target=%s",
+            requested_backend,
+            "yes" if self.database_url else "no",
+            self.database_url_source or "none",
+            _redact_database_url(self.database_url),
         )
         if requested_backend in {"memory", "test", "dev"}:
             self._store = _MemoryQuestionDropsStore()
@@ -1978,7 +1988,7 @@ class QuestionDropsStore:
         else:
             raise QuestionDropsStorageUnavailable(f"Unsupported Question Drops storage backend '{requested_backend}'.")
         self.backend_name = self._store.backend_name
-        print(f"Question Drops storage init succeeded: backend={self.backend_name}")
+        LOGGER.info("Question Drops storage init succeeded: backend=%s", self.backend_name)
 
     async def load(self):
         if self._store is None:

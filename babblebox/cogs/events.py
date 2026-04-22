@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import contextlib
+import logging
 
 import discord
 from discord.ext import commands
@@ -8,6 +9,8 @@ from discord.ext import commands
 from babblebox import game_engine as ge
 from babblebox.command_utils import is_command_message
 from babblebox.utility_helpers import build_afk_notice_line
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _collect_away_targets(message: discord.Message) -> list[discord.abc.User]:
@@ -322,7 +325,7 @@ class EventsCog(commands.Cog):
 
     @commands.Cog.listener()
     async def on_ready(self):
-        print(f"Bot {self.bot.user} is ready.")
+        LOGGER.info("Bot %s is ready.", self.bot.user)
 
 
 async def setup(bot: commands.Bot):

@@ -76,7 +76,7 @@ HELP_PAGES: list[dict[str, str]] = [
             "`/dropsadmin config` also controls the difficulty profile: Standard stays welcoming, Smart leans medium/hard, and Hard makes the lane noticeably tougher without changing point values.\n"
             "Template editing stays inside those mastery commands with `template_action`, supports a default template plus optional tier overrides, and falls back as: tier override -> scope default -> Babblebox default.\n"
             "Category tokens: `{user.mention}` `{user.name}` `{user.display_name}` `{role.name}` `{tier.label}` `{threshold}` `{category.name}`. Scholar tokens: `{user.mention}` `{user.name}` `{user.display_name}` `{role.name}` `{tier.label}` `{threshold}`.\n"
-            "Admins can use `/dropsadmin` to run 1-10 drops a day, pick channels and categories, and opt into rare AI celebration copy without turning the lane into spam."
+            "Admins can use `/dropsadmin` to run 1-10 drops a day, pick channels and categories, set `/dropsadmin ping` for one safe live role mention, and opt into Guild Pro AI celebration copy while the smarter offline question rotation stays core."
         ),
         "fields": [
             (
@@ -84,14 +84,16 @@ HELP_PAGES: list[dict[str, str]] = [
                 (
                     "`/drops status` shows the guild knowledge lane clearly.\n"
                     "`/drops stats` and `/drops leaderboard` stay guild-first, while Buddy and Profile surfaces fold the knowledge lane into identity cleanly.\n"
-                    "`/drops roles status`, `/drops roles remove`, and `/drops roles preference` give members a private way to remove current Babblebox roles or stop future grants without touching achievement history."
+                    "`/drops roles status`, `/drops roles remove`, and `/drops roles preference` give members a private way to remove current Babblebox roles or stop future grants without touching achievement history.\n"
+                    "Babblebox now keeps a wider offline pool in rotation so one busy server sees fewer near-clones and fewer same-family repeats."
                 ),
             ),
             (
                 "Config / Cadence",
                 (
                     "`/dropsadmin config` also controls the difficulty profile: Standard stays welcoming, Smart leans medium/hard, and Hard makes the lane noticeably tougher without changing point values.\n"
-                    "Admins can use `/dropsadmin` to run 1-10 drops a day, pick channels and categories, and opt into rare AI celebration copy without turning the lane into spam."
+                    "Admins can use `/dropsadmin` to run 1-10 drops a day, pick channels and categories, set `/dropsadmin ping` for one safe live role mention, and opt into rare AI celebration copy without turning the lane into spam.\n"
+                    "Question Drops AI celebrations are Guild Pro only; the offline content upgrade and smarter repeat resistance stay available on the core lane."
                 ),
             ),
             (
@@ -112,7 +114,7 @@ HELP_PAGES: list[dict[str, str]] = [
         "body": (
             "`/watch mentions`, `/watch replies`, and `/watch keyword ...` keep private DM alerts tidy.\n"
             "`/later`, `/capture`, `/remind`, `/afk`, `/afktimezone`, and `/afkschedule` stay personal by default.\n"
-            "Capture sends a private recent-message snapshot, Later keeps your place, and Watch stays quiet until something relevant happens."
+            "Capture sends a private recent-message snapshot whose transcript file may include currently available attachment URLs at send time, Later keeps compact attachment labels instead of raw attachment URLs, and Watch stays quiet until something relevant happens."
         ),
         "try": "`/watch settings`, `/later mark`, `/capture`, `/remind set`",
     },
@@ -174,7 +176,7 @@ HELP_PAGES: list[dict[str, str]] = [
             "Each live pack can inherit the global timeout or keep a dedicated timeout profile, and the trusted-link lane can do the same without turning the UI into a giant matrix.\n"
             "Trusted Links Only now exposes its built-in trusted families and domains under `/shield trusted`, keeps Confessions link mode separate, and still lets malicious, impersonation, adult, or suspicious-link intel override local trust exceptions.\n"
             "Configured anti-spam stays explainable: admins set message and near-duplicate thresholds, optional emote or capitals lanes stay off until enabled, moderators are exempt from Anti-Spam by default unless you opt into delete-only or full enforcement, pack-specific exemptions stay separate from global filters, GIF incidents are grouped per offender and window, spam and GIF delete actions remove the matched burst, and bot or webhook posts stay on a more conservative scam threshold unless the evidence is genuinely strong.\n"
-            "Shield AI is second-pass only, live-message-only, and owner-managed. The support server has full AI access by default, ordinary guilds stay off by default, `/shield ai` only configures review scope, runtime routes between gpt-5.4-nano, gpt-5.4-mini, and gpt-5.4, diagnostics report the resolved routing lane plus local readiness, and AI never punishes on its own.\n"
+            "Shield AI is second-pass only, live-message-only, and owner-managed. Owner policy controls whether review runs, `/shield ai` only configures review scope, runtime routes between gpt-5.4-nano, gpt-5.4-mini, and gpt-5.4, Guild Pro unlocks the higher two model tiers, diagnostics report the resolved routing lane plus local readiness, and AI never punishes on its own.\n"
             "Admin lifecycle helpers stay compact: no giant control-plane dashboard, no giant case archive, and no per-member task explosion."
         ),
         "try": "`/shield panel`, `/shield rules`, `/shield exemptions`, `/shield trusted`, `/shield filters`, `/admin panel`",

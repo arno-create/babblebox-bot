@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import os
 import re
 from dataclasses import dataclass
@@ -9,6 +10,7 @@ from typing import Any, Iterable, Sequence
 
 import aiohttp
 
+from babblebox.premium_models import SYSTEM_PREMIUM_SUPPORT_GUILD_ID
 from babblebox.text_safety import (
     CARD_RE,
     EMAIL_RE,
@@ -23,7 +25,10 @@ from babblebox.text_safety import (
 )
 
 
-SHIELD_AI_SUPPORT_GUILD_ID = 1322933864360050688
+LOGGER = logging.getLogger(__name__)
+
+
+SHIELD_AI_SUPPORT_GUILD_ID = SYSTEM_PREMIUM_SUPPORT_GUILD_ID
 SHIELD_AI_ALLOWED_GUILD_ID = SHIELD_AI_SUPPORT_GUILD_ID
 SHIELD_AI_REVIEW_PACKS = ("privacy", "promo", "scam", "adult", "severe")
 SHIELD_AI_MIN_CONFIDENCE_CHOICES = ("low", "medium", "high")
@@ -374,19 +379,19 @@ class OpenAIShieldAIProvider(ShieldAIProvider):
         invalid_settings_note = ""
         if self.ignored_model_settings:
             invalid_settings_note = f", ignored_invalid_model_settings={','.join(self.ignored_model_settings)}"
-        print(
-            "Shield AI init: "
-            f"provider={OPENAI_PROVIDER_NAME.lower()}, "
-            f"configured={'yes' if self.api_key else 'no'}, "
-            f"fast_model={self.fast_model}, "
-            f"complex_model={self.complex_model}, "
-            f"top_model={self.top_model}, "
-            f"top_tier_enabled={'yes' if self.top_tier_enabled else 'no'}, "
-            f"single_model_override={self.single_model_override or 'none'}"
-            f"{invalid_settings_note}, "
-            f"timeout_seconds={self.timeout_seconds}, "
-            f"max_chars={self.max_chars}, "
-            f"support_default_guild_id={SHIELD_AI_SUPPORT_GUILD_ID}"
+        LOGGER.info(
+            "Shield AI init: provider=%s configured=%s fast_model=%s complex_model=%s top_model=%s top_tier_enabled=%s single_model_override=%s%s timeout_seconds=%s max_chars=%s support_guild_id=%s",
+            OPENAI_PROVIDER_NAME.lower(),
+            "yes" if self.api_key else "no",
+            self.fast_model,
+            self.complex_model,
+            self.top_model,
+            "yes" if self.top_tier_enabled else "no",
+            self.single_model_override or "none",
+            invalid_settings_note,
+            self.timeout_seconds,
+            self.max_chars,
+            SHIELD_AI_SUPPORT_GUILD_ID,
         )
 
     def diagnostics(self) -> dict[str, Any]:
@@ -429,7 +434,7 @@ class OpenAIShieldAIProvider(ShieldAIProvider):
             await asyncio.wait_for(self._semaphore.acquire(), timeout=0.05)
             acquired = True
         except asyncio.TimeoutError:
-            print("Shield AI review skipped: reviewer queue is busy.")
+            LOGGER.info("Shield AI review skipped: reviewer queue is busy.")
             return None
 
         try:
@@ -442,11 +447,11 @@ class OpenAIShieldAIProvider(ShieldAIProvider):
                     break
                 except _RetryableProviderFailure:
                     if attempt_index + 1 >= len(route.attempted_models):
-                        print("Shield AI review skipped: retryable provider failure with no fallback remaining.")
+                        LOGGER.info("Shield AI review skipped: retryable provider failure with no fallback remaining.")
                         return None
                     continue
                 except _TimeoutProviderFailure:
-                    print("Shield AI review skipped: provider timeout.")
+                    LOGGER.info("Shield AI review skipped: provider timeout.")
                     return None
                 except _NonRetryableProviderFailure:
                     return None
@@ -468,7 +473,10 @@ class OpenAIShieldAIProvider(ShieldAIProvider):
                 policy_capped=route.policy_capped,
             )
         except (KeyError, TypeError, ValueError, json.JSONDecodeError) as exc:
-            print(f"Shield AI review skipped: malformed provider output ({type(exc).__name__}).")
+            LOGGER.info(
+                "Shield AI review skipped: malformed provider output (%s).",
+                type(exc).__name__,
+            )
             return None
 
     async def _get_session(self) -> aiohttp.ClientSession:
@@ -490,23 +498,26 @@ class OpenAIShieldAIProvider(ShieldAIProvider):
                 json=self._build_payload(request, model=model),
             ) as response:
                 if response.status == 429:
-                    print("Shield AI review retryable: provider rate limit.")
+                    LOGGER.info("Shield AI review retryable: provider rate limit.")
                     raise _RetryableProviderFailure("rate_limit")
                 if response.status >= 500:
-                    print(f"Shield AI review retryable: provider server error ({response.status}).")
+                    LOGGER.info("Shield AI review retryable: provider server error (%s).", response.status)
                     raise _RetryableProviderFailure("server_error")
                 if response.status >= 400:
-                    print(f"Shield AI review skipped: provider request error ({response.status}).")
+                    LOGGER.info("Shield AI review skipped: provider request error (%s).", response.status)
                     raise _NonRetryableProviderFailure("request_error")
                 try:
                     return await response.json(content_type=None)
                 except json.JSONDecodeError as exc:
-                    print("Shield AI review skipped: provider returned non-JSON output.")
+                    LOGGER.info("Shield AI review skipped: provider returned non-JSON output.")
                     raise _NonRetryableProviderFailure("malformed_json") from exc
         except asyncio.TimeoutError as exc:
             raise _TimeoutProviderFailure("timeout") from exc
         except aiohttp.ClientError as exc:
-            print(f"Shield AI review retryable: transport failure ({type(exc).__name__}).")
+            LOGGER.info(
+                "Shield AI review retryable: transport failure (%s).",
+                type(exc).__name__,
+            )
             raise _RetryableProviderFailure("client_error") from exc
 
     def _route_request(self, request: ShieldAIReviewRequest) -> ShieldAIRoutePlan:

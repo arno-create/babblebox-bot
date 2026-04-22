@@ -9,6 +9,8 @@ from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
 from typing import Any, Callable
 
+from babblebox.question_drops_packs import EXPANDED_STATIC_SEEDS
+
 
 QUESTION_DROP_CATEGORIES = (
     "science",
@@ -73,7 +75,13 @@ _AVERAGE_PROMPT_RE = re.compile(r"^Find the average: ([\d,\s]+)$")
 _MEDIAN_PROMPT_RE = re.compile(r"^Find the median: ([\d,\s]+)$")
 _PERCENT_CHANGE_PROMPT_RE = re.compile(r"^A \$(\d+) item is discounted by (\d+)%\. What is the sale price\?$")
 _ANAGRAM_PROMPT_RE = re.compile(r"^Unscramble the clue-backed word\. Clue: (.+?) Letters: \*\*([A-Z]+)\*\*$")
-QUESTION_DROP_VALIDATION_VARIANTS_PER_GENERATOR = 24
+_BLAND_MATH_PROMPT_RE = re.compile(
+    r"^(?:What is \d+ [+\-*] \d+\?|What number makes this true\? \? [+\-*] \d+ = \d+|Start with \d+\. .+ What do you get\?)$"
+)
+_BLAND_LOGIC_PROMPT_RE = re.compile(
+    r"^(?:True or false: [A-Z][a-z]+ finished before [A-Z][a-z]+, and [A-Z][a-z]+ finished before [A-Z][a-z]+\. Therefore .+|Which direction comes next\? A\) .+ Sequence: .+)$"
+)
+QUESTION_DROP_VALIDATION_VARIANTS_PER_GENERATOR = 32
 _SMART_PUNCT_TRANSLATION = str.maketrans(
     {
         "\u2018": "'",
@@ -953,56 +961,106 @@ def _build_choice_variant(seed: dict[str, Any], *, prompt: str, choices: list[st
     )
 
 
+def _build_ordered_variant(seed: dict[str, Any], *, prompt: str, tokens: list[str]) -> QuestionDropVariant:
+    family_id = _seed_family_id(seed)
+    return QuestionDropVariant(
+        concept_id=seed["concept_id"],
+        family_id=family_id,
+        category=seed["category"],
+        difficulty=seed["difficulty"],
+        source_type=seed["source_type"],
+        generator_type=seed["generator_type"],
+        prompt=prompt,
+        answer_spec={"type": "ordered_tokens", "tokens": tokens},
+        variant_hash=build_variant_hash(seed["concept_id"], family_id, prompt, "|".join(tokens)),
+        tags=tuple(seed.get("tags", ())),
+    )
+
+
 def _math_addition(seed: dict[str, Any], *, seed_material: str, variant_index: int) -> QuestionDropVariant:
-    rng = _make_rng(f"{seed_material}:{seed['concept_id']}:{variant_index}")
-    left = rng.randint(14, 68)
-    right = rng.randint(12, 57)
-    return _build_numeric_variant(seed, prompt=f"What is {left} + {right}?", answer=left + right)
+    rotation = int(hashlib.sha256(f"{seed_material}:{seed['concept_id']}".encode("utf-8")).hexdigest()[:6], 16)
+    lane = (variant_index // 3) + (rotation % 5)
+    kind = ("compensation", "friendly-tens", "quick-total")[variant_index % 3]
+    if kind == "compensation":
+        left = (39, 49, 59, 79, 89, 99, 199)[lane % 7]
+        right = 13 + (lane * 3)
+        prompt = (
+            f"Use a quick compensation trick: {left} + {right} is the same as "
+            f"{left + 1} + {right - 1}. What is the sum?"
+        )
+    elif kind == "friendly-tens":
+        left = 21 + (lane * 4)
+        right = (19, 29, 39)[lane % 3]
+        prompt = f"Mental math: {left} + {right} can be seen as {left + 1} + {right - 1}. What total do you get?"
+    else:
+        left = 18 + (lane * 3)
+        right = 16 + (lane * 2)
+        prompt = f"A cafe sold {left} pastries before lunch and {right} after lunch. How many did it sell altogether?"
+    return _build_numeric_variant(seed, prompt=prompt, answer=left + right)
 
 
 def _math_multiplication(seed: dict[str, Any], *, seed_material: str, variant_index: int) -> QuestionDropVariant:
-    rng = _make_rng(f"{seed_material}:{seed['concept_id']}:{variant_index}")
-    left = rng.randint(6, 12)
-    right = rng.randint(4, 11)
-    return _build_numeric_variant(seed, prompt=f"What is {left} * {right}?", answer=left * right)
+    rotation = int(hashlib.sha256(f"{seed_material}:{seed['concept_id']}".encode("utf-8")).hexdigest()[:6], 16)
+    lane = (variant_index // 3) + (rotation % 5)
+    kind = ("double-and-half", "quarter-trick", "near-ten")[variant_index % 3]
+    if kind == "double-and-half":
+        left = (12, 14, 16, 18, 24)[lane % 5]
+        right = 15 + (5 * lane)
+        prompt = (
+            f"Use double-and-half mental math: {left} x {right} has the same product as "
+            f"{left // 2} x {right * 2}. What is it?"
+        )
+    elif kind == "quarter-trick":
+        left = 25
+        right = 12 + (4 * lane)
+        prompt = f"Quarter trick: 25 x {right} is the same as 100 x {right // 4}. What is the product?"
+    else:
+        left = 9
+        right = 12 + lane
+        prompt = f"Near-ten mental math: 9 x {right} is one {right} less than 10 x {right}. What is it?"
+    return _build_numeric_variant(seed, prompt=prompt, answer=left * right)
 
 
 def _math_order_operations(seed: dict[str, Any], *, seed_material: str, variant_index: int) -> QuestionDropVariant:
-    rng = _make_rng(f"{seed_material}:{seed['concept_id']}:{variant_index}")
-    if int(seed["difficulty"]) >= 3:
-        left = rng.randint(3, 9)
-        middle = rng.randint(2, 6)
-        right = rng.randint(2, 5)
-        tail = rng.randint(3, 11)
-        prompt = f"Use standard order of operations: ({left} + {middle}) * {right} - {tail}"
-        answer = ((left + middle) * right) - tail
-    else:
-        left = rng.randint(4, 14)
-        middle = rng.randint(2, 8)
-        right = rng.randint(2, 6)
+    rotation = int(hashlib.sha256(f"{seed_material}:{seed['concept_id']}".encode("utf-8")).hexdigest()[:6], 16)
+    lane = variant_index + (rotation % 5)
+    if variant_index % 2 == 0:
+        left = 6 + lane
+        middle = 2 + (lane % 5)
+        right = 2 + (lane % 4)
         prompt = f"Use standard order of operations: {left} + {middle} * {right}"
         answer = left + (middle * right)
+    else:
+        left = 3 + (lane % 9)
+        middle = 2 + (lane % 6)
+        right = 2 + ((lane + 1) % 4)
+        tail = 3 + (lane % 8)
+        prompt = f"Use standard order of operations: ({left} + {middle}) * {right} - {tail}"
+        answer = ((left + middle) * right) - tail
     return _build_numeric_variant(seed, prompt=prompt, answer=answer)
 
 
 def _math_missing_value(seed: dict[str, Any], *, seed_material: str, variant_index: int) -> QuestionDropVariant:
-    rng = _make_rng(f"{seed_material}:{seed['concept_id']}:{variant_index}")
-    kind = rng.choice(("addition", "subtraction", "multiplication"))
-    if kind == "addition":
-        missing = rng.randint(7, 28)
-        other = rng.randint(12, 35)
-        total = missing + other
-        prompt = f"What number makes this true? ? + {other} = {total}"
-    elif kind == "subtraction":
-        missing = rng.randint(10, 36)
-        other = rng.randint(4, 14)
-        total = missing - other
-        prompt = f"What number makes this true? ? - {other} = {total}"
+    rotation = int(hashlib.sha256(f"{seed_material}:{seed['concept_id']}".encode("utf-8")).hexdigest()[:6], 16)
+    lane = (variant_index // 3) + (rotation % 5)
+    kind = ("score-jump", "receipt", "equal-groups")[variant_index % 3]
+    if kind == "score-jump":
+        start = 18 + (lane * 3)
+        missing = 7 + lane
+        total = start + missing
+        prompt = f"A team's score rose from {start} to {total}. By how many points did it increase?"
+    elif kind == "receipt":
+        subtotal = 22 + (lane * 4)
+        fee = (4, 6, 8, 10, 12)[lane % 5]
+        missing = subtotal
+        total = subtotal + fee
+        prompt = f"A receipt total is {total} after a {fee}-dollar fee was added. What was the subtotal?"
     else:
-        missing = rng.randint(4, 11)
-        other = rng.randint(3, 9)
-        total = missing * other
-        prompt = f"What number makes this true? ? * {other} = {total}"
+        per_group = 4 + (lane % 11)
+        groups = 3 + (lane % 6)
+        missing = per_group
+        total = per_group * groups
+        prompt = f"{groups} equal boxes hold {total} oranges altogether. How many oranges are in each box?"
     return _build_numeric_variant(seed, prompt=prompt, answer=missing)
 
 
@@ -1040,13 +1098,29 @@ def _math_compare_expressions(seed: dict[str, Any], *, seed_material: str, varia
 
 
 def _math_multi_step(seed: dict[str, Any], *, seed_material: str, variant_index: int) -> QuestionDropVariant:
-    rng = _make_rng(f"{seed_material}:{seed['concept_id']}:{variant_index}")
-    start = rng.randint(14, 36)
-    subtract = rng.randint(3, 9)
-    multiplier = rng.randint(2, 4)
-    bonus = rng.randint(4, 12)
-    answer = (start - subtract) * multiplier + bonus
-    prompt = f"Start with {start}. Subtract {subtract}, multiply by {multiplier}, then add {bonus}. What do you get?"
+    rotation = int(hashlib.sha256(f"{seed_material}:{seed['concept_id']}".encode("utf-8")).hexdigest()[:6], 16)
+    lane = (variant_index // 3) + (rotation % 5)
+    kind = ("halve-add-triple", "coupon-and-pair", "double-then-fee")[variant_index % 3]
+    if kind == "halve-add-triple":
+        start = (24, 30, 36, 42, 48, 54)[lane % 6]
+        add = 3 + (lane % 7)
+        answer = ((start // 2) + add) * 3
+        prompt = f"Mental-math path: halve {start}, add {add}, then triple the result. What do you get?"
+    elif kind == "coupon-and-pair":
+        price = 18 + (lane * 2)
+        discount = (3, 4, 5, 6, 8)[lane % 5]
+        fee = (2, 3, 4)[lane % 3]
+        answer = ((price - discount) + fee) * 2
+        prompt = (
+            f"Two friends each buy a ticket priced at {price}. A coupon removes {discount} from each ticket, "
+            f"then a {fee}-dollar fee is added to each. What is the total bill for both tickets?"
+        )
+    else:
+        start = 14 + lane
+        doubled = start * 2
+        add = 5 + (lane % 9)
+        answer = doubled + add
+        prompt = f"A score starts at {start}, gets doubled, then gains {add} bonus points. What is the final score?"
     return _build_numeric_variant(seed, prompt=prompt, answer=answer)
 
 
@@ -1083,9 +1157,11 @@ def _math_remainder(seed: dict[str, Any], *, seed_material: str, variant_index: 
 
 
 def _math_percent_change(seed: dict[str, Any], *, seed_material: str, variant_index: int) -> QuestionDropVariant:
-    rng = _make_rng(f"{seed_material}:{seed['concept_id']}:{variant_index}")
-    base_price = rng.choice((20, 24, 30, 32, 36, 40, 48, 60, 72))
-    percent = rng.choice((10, 15, 20, 25, 30, 40))
+    rotation = int(hashlib.sha256(f"{seed_material}:{seed['concept_id']}".encode("utf-8")).hexdigest()[:6], 16)
+    base_prices = (20, 24, 30, 32, 36, 40, 48, 60, 72)
+    percents = (10, 15, 20, 25, 30, 40)
+    base_price = base_prices[(rotation + variant_index) % len(base_prices)]
+    percent = percents[((rotation // len(base_prices)) + (variant_index // len(base_prices))) % len(percents)]
     sale_price = Decimal(base_price) * (Decimal("1") - (Decimal(percent) / Decimal("100")))
     prompt = f"A ${base_price} item is discounted by {percent}%. What is the sale price?"
     return _build_numeric_variant(seed, prompt=prompt, answer=_json_numeric_value(sale_price))
@@ -1121,19 +1197,20 @@ def _math_algebra_lite(seed: dict[str, Any], *, seed_material: str, variant_inde
 
 
 def _math_number_pattern(seed: dict[str, Any], *, seed_material: str, variant_index: int) -> QuestionDropVariant:
-    rng = _make_rng(f"{seed_material}:{seed['concept_id']}:{variant_index}")
-    kind = rng.choice(("squares_plus_one", "triangular", "alternating"))
+    rotation = int(hashlib.sha256(f"{seed_material}:{seed['concept_id']}".encode("utf-8")).hexdigest()[:6], 16)
+    lane = (variant_index // 3) + (rotation % 5)
+    kind = ("squares_plus_one", "triangular", "alternating")[variant_index % 3]
     if kind == "squares_plus_one":
-        start = rng.randint(2, 4)
+        start = 2 + lane
         values = [(index * index) + 1 for index in range(start, start + 4)]
         answer = ((start + 4) * (start + 4)) + 1
     elif kind == "triangular":
-        start = rng.randint(2, 5)
+        start = 2 + lane
         values = [int((n * (n + 1)) / 2) for n in range(start, start + 4)]
         next_n = start + 4
         answer = int((next_n * (next_n + 1)) / 2)
     else:
-        start = rng.randint(5, 11)
+        start = 5 + (lane * 2)
         values = [start]
         deltas = [2, 4, 2, 4]
         for delta in deltas[:3]:
@@ -1144,160 +1221,379 @@ def _math_number_pattern(seed: dict[str, Any], *, seed_material: str, variant_in
 
 
 def _logic_sequence(seed: dict[str, Any], *, seed_material: str, variant_index: int) -> QuestionDropVariant:
-    rng = _make_rng(f"{seed_material}:{seed['concept_id']}:{variant_index}")
-    kind = rng.choice(("alternating_gap", "double_plus_one", "position_square"))
-    if kind == "alternating_gap":
-        start = rng.randint(4, 12)
+    family_offset = int(hashlib.sha256(f"{seed_material}:{seed['concept_id']}".encode("utf-8")).hexdigest()[:4], 16) % 5
+    mode = variant_index % 4
+    lane = (variant_index // 4) + family_offset
+    if mode == 0:
+        start = 5 + lane
+        gap_a = 2 + (lane % 3)
+        gap_b = gap_a + 2
         values = [start]
-        gaps = [2, 4, 2, 4]
-        for gap in gaps[:3]:
+        for gap in (gap_a, gap_b, gap_a):
             values.append(values[-1] + gap)
-        answer = values[-1] + gaps[3]
-    elif kind == "double_plus_one":
-        start = rng.randint(2, 5)
+        answer = values[-1] + gap_b
+    elif mode == 1:
+        start = 2 + (lane % 5)
+        bump = 1 + (lane % 4)
         values = [start]
         for _ in range(3):
-            values.append((values[-1] * 2) + 1)
-        answer = (values[-1] * 2) + 1
-    else:
-        start = rng.randint(1, 4)
-        values = [index * index + index for index in range(start, start + 4)]
+            values.append((values[-1] * 2) + bump)
+        answer = (values[-1] * 2) + bump
+    elif mode == 2:
+        start = 1 + (lane % 4)
+        values = [(index * index) + index + lane for index in range(start, start + 4)]
         next_index = start + 4
-        answer = next_index * next_index + next_index
-    prompt = "What number comes next? " + ", ".join(str(value) for value in values)
+        answer = (next_index * next_index) + next_index + lane
+    else:
+        start = 3 + lane
+        step = 3 + (lane % 4)
+        values = [start]
+        for index in range(1, 4):
+            values.append(values[-1] + (step * index))
+        answer = values[-1] + (step * 4)
+    templates = (
+        "What number comes next? {sequence}",
+        "Continue the logic pattern: {sequence}",
+        "Complete the sequence: {sequence}",
+        "Number pattern round: {sequence}",
+    )
+    prompt = templates[variant_index % len(templates)].format(sequence=", ".join(str(value) for value in values))
     return _build_numeric_variant(seed, prompt=prompt, answer=answer)
 
 
 def _logic_analogy(seed: dict[str, Any], *, seed_material: str, variant_index: int) -> QuestionDropVariant:
-    rng = _make_rng(f"{seed_material}:{seed['concept_id']}:{variant_index}")
-    prompts = (
-        ("Bird is to nest as bee is to ?", ["hive", "the hive"]),
-        ("Painter is to brush as writer is to ?", ["pen", "a pen"]),
-        ("Book is to read as song is to ?", ["listen", "listen to", "listening"]),
-        ("Chef is to kitchen as pilot is to ?", ["cockpit", "the cockpit"]),
-        ("Clock is to time as thermometer is to ?", ["temperature"]),
+    rotation = int(hashlib.sha256(f"{seed_material}:{seed['concept_id']}".encode("utf-8")).hexdigest()[:6], 16)
+    analogies = (
+        ("bird", "nest", "bee", ["hive", "the hive"]),
+        ("chef", "kitchen", "pilot", ["cockpit", "the cockpit"]),
+        ("painter", "brush", "writer", ["pen", "a pen"]),
+        ("clock", "time", "thermometer", ["temperature"]),
+        ("key", "lock", "password", ["account", "login", "system"]),
+        ("seed", "plant", "egg", ["animal", "bird", "creature"]),
+        ("map", "navigate", "recipe", ["cook", "cooking"]),
+        ("glove", "hand", "sock", ["foot", "the foot"]),
+        ("orbit", "planet", "nest", ["bird", "a bird"]),
+        ("score", "game", "grade", ["class", "schoolwork", "course"]),
     )
-    prompt, accepted = prompts[rng.randrange(len(prompts))]
+    templates = (
+        "{a} is to {b} as {c} is to ?",
+        "Complete the analogy: {a}:{b} :: {c}:?",
+        "Which word finishes the analogy {a} -> {b}, {c} -> ?",
+        "Analogy round: {a} belongs with {b}; {c} belongs with what?",
+    )
+    subject_a, subject_b, subject_c, accepted = analogies[(rotation + variant_index) % len(analogies)]
+    prompt = templates[(rotation + (variant_index // len(analogies))) % len(templates)].format(
+        a=subject_a.title(),
+        b=subject_b,
+        c=subject_c,
+    )
     return _build_text_variant(seed, prompt=prompt, accepted=accepted)
 
 
 def _logic_odd_one_out(seed: dict[str, Any], *, seed_material: str, variant_index: int) -> QuestionDropVariant:
-    rng = _make_rng(f"{seed_material}:{seed['concept_id']}:{variant_index}")
+    rotation = int(hashlib.sha256(f"{seed_material}:{seed['concept_id']}".encode("utf-8")).hexdigest()[:6], 16)
     sets = (
-        (["violin", "flute", "clarinet"], "violin", "Which is the odd one out? A) violin B) flute C) clarinet"),
-        (["triangle", "square", "circle"], "circle", "Which is the odd one out? A) triangle B) square C) circle"),
-        (["whale", "sparrow", "maple"], "maple", "Which is the odd one out? A) whale B) sparrow C) maple"),
-        (["gold", "silver", "birch"], "birch", "Which is the odd one out? A) gold B) silver C) birch"),
+        (["violin", "cello", "cedar"], "cedar", "Which item does not belong with the other two?"),
+        (["mercury", "venus", "granite"], "granite", "Which option breaks the category?"),
+        (["ruby", "sapphire", "oak"], "oak", "Pick the odd one out."),
+        (["triangle", "square", "sparrow"], "sparrow", "Which item comes from a different kind of set?"),
+        (["salmon", "trout", "tulip"], "tulip", "Which option is the outsider?"),
+        (["piano", "flute", "maple"], "maple", "Which one does not fit the group?"),
+        (["hexagon", "pentagon", "thermometer"], "thermometer", "Choose the item that does not belong."),
+        (["honey", "maple syrup", "granite"], "granite", "Which answer is the mismatch?"),
+        (["oxygen", "nitrogen", "emerald"], "emerald", "Which item falls outside the category?"),
+        (["eagle", "falcon", "fern"], "fern", "Which choice is the odd one out?"),
     )
-    choices, answer, prompt = sets[rng.randrange(len(sets))]
+    templates = (
+        "{lead} A) {a} B) {b} C) {c}",
+        "Logic lane: {lead} A) {a} B) {b} C) {c}",
+        "Quick classification: {lead} A) {a} B) {b} C) {c}",
+        "Lock in the odd one out. {lead} A) {a} B) {b} C) {c}",
+    )
+    choices, answer, lead = sets[(rotation + variant_index) % len(sets)]
+    prompt = templates[(rotation + (variant_index // len(sets))) % len(templates)].format(
+        lead=lead,
+        a=choices[0],
+        b=choices[1],
+        c=choices[2],
+    )
     return _build_choice_variant(seed, prompt=prompt, choices=choices, answer=answer)
 
 
 def _logic_elimination(seed: dict[str, Any], *, seed_material: str, variant_index: int) -> QuestionDropVariant:
-    rng = _make_rng(f"{seed_material}:{seed['concept_id']}:{variant_index}")
-    names = rng.choice(
-        (
-            ("Mina", "Sol", "Theo"),
-            ("Ava", "Ben", "Cole"),
-            ("Lena", "Rui", "Tess"),
-        )
+    name_sets = (
+        ("Mina", "Sol", "Theo"),
+        ("Ava", "Ben", "Cole"),
+        ("Lena", "Rui", "Tess"),
+        ("Iris", "Jae", "Niko"),
+        ("Pia", "Remy", "Sana"),
+        ("Dara", "Eli", "Moss"),
+        ("Nia", "Omar", "Paz"),
+        ("Kira", "Luca", "Tao"),
     )
-    items = rng.choice(
-        (
-            ("tea", "juice", "cocoa"),
-            ("red", "blue", "green"),
-            ("cake", "fruit", "soup"),
-        )
+    item_sets = (
+        ("tea", "juice", "cocoa"),
+        ("red", "blue", "green"),
+        ("cake", "fruit", "soup"),
+        ("violin", "drum", "flute"),
+        ("silver", "gold", "bronze"),
+        ("bus", "train", "ferry"),
     )
-    answer_name = names[2]
-    prompt = (
+    rotation = int(hashlib.sha256(f"{seed_material}:{seed['concept_id']}".encode("utf-8")).hexdigest()[:6], 16)
+    names = name_sets[(rotation + variant_index) % len(name_sets)]
+    items = item_sets[(rotation + (variant_index * 2)) % len(item_sets)]
+    answer_index = (rotation + variant_index) % 3
+    answer_name = names[answer_index]
+    other_index = (answer_index + 1) % 3
+    templates = (
+        "{body}",
+        "Elimination round: {body}",
+        "Reason it out. {body}",
+        "Logic lane elimination: {body}",
+    )
+    body = (
         f"{names[0]}, {names[1]}, and {names[2]} each picked one of these: {items[0]}, {items[1]}, {items[2]}. "
-        f"{names[0]} did not pick {items[0]}. {names[2]} picked neither {items[0]} nor {items[1]}. "
+        f"{answer_name} picked neither {items[0]} nor {items[1]}. "
+        f"{names[other_index]} did not pick {items[2]}. "
         f"Who picked {items[2]}?"
     )
+    prompt = templates[(rotation + (variant_index // len(name_sets))) % len(templates)].format(body=body)
     return _build_text_variant(seed, prompt=prompt, accepted=[answer_name.casefold()])
 
 
 def _logic_conditional(seed: dict[str, Any], *, seed_material: str, variant_index: int) -> QuestionDropVariant:
-    rng = _make_rng(f"{seed_material}:{seed['concept_id']}:{variant_index}")
+    rotation = int(hashlib.sha256(f"{seed_material}:{seed['concept_id']}".encode("utf-8")).hexdigest()[:6], 16)
     stems = (
         ("Every glorp is a blip, and no blip is silent.", "Can a glorp be silent?", False),
         ("Every rune is marked, and every marked object glows.", "Must every rune glow?", True),
         ("No silver key opens the vault, and every vault key is silver.", "Can a vault key open the vault?", False),
-        ("Every comet trail is bright, and some bright things fade fast.", "Does the rule prove that every comet trail fades fast?", False),
+        ("Every lantern in the parade is lit, and every lit lantern is visible from the hill.", "Must every parade lantern be visible from the hill?", True),
+        ("Every desert fox is nocturnal, and no nocturnal animal is active at noon.", "Can a desert fox be active at noon under those rules?", False),
+        ("Every choir member rehearses, and every person who rehearses gets the schedule.", "Must every choir member get the schedule?", True),
+        ("No cracked screen is waterproof, and every tablet in the test group is waterproof.", "Can a test-group tablet have a cracked screen?", False),
+        ("Every archive key is numbered, and every numbered key is logged.", "Must every archive key be logged?", True),
+        ("Every comet trail is bright, and some bright things fade fast.", "Does that prove every comet trail fades fast?", False),
+        ("Every certified diver has training, and every trained diver passed the exam.", "Must every certified diver have passed the exam?", True),
     )
-    stem, question, value = stems[rng.randrange(len(stems))]
-    return _build_boolean_variant(seed, prompt=f"True or false: {stem} {question}", value=value)
+    stem, question, value = stems[(rotation + variant_index) % len(stems)]
+    templates = (
+        "True or false: {stem} {question}",
+        "Conditional check, true or false: {stem} {question}",
+        "Reasoning T/F: {stem} {question}",
+        "Does this conclusion follow? {stem} {question}",
+    )
+    prompt = templates[(rotation + (variant_index // len(stems))) % len(templates)].format(stem=stem, question=question)
+    return _build_boolean_variant(seed, prompt=prompt, value=value)
 
 
 def _logic_parity_grouping(seed: dict[str, Any], *, seed_material: str, variant_index: int) -> QuestionDropVariant:
-    rng = _make_rng(f"{seed_material}:{seed['concept_id']}:{variant_index}")
-    offset = rng.randint(0, 5) * 2
-    set_a = [offset + 1, offset + 3, offset + 6]
-    set_b = [offset + 1, offset + 2, offset + 4]
-    set_c = [offset + 2, offset + 4, offset + 5]
-    even_set = "set a"
-    prompt = (
-        f"Which set has an even total? A) {set_a[0]}, {set_a[1]}, {set_a[2]} "
-        f"B) {set_b[0]}, {set_b[1]}, {set_b[2]} C) {set_c[0]}, {set_c[1]}, {set_c[2]}"
+    rotation = int(hashlib.sha256(f"{seed_material}:{seed['concept_id']}".encode("utf-8")).hexdigest()[:6], 16)
+    offset = 2 * ((rotation % 7) + variant_index)
+    mode = variant_index % 3
+    if mode == 0:
+        set_a = [offset + 1, offset + 3, offset + 6]
+        set_b = [offset + 1, offset + 2, offset + 4]
+        set_c = [offset + 2, offset + 4, offset + 5]
+        answer = "set a"
+        lead = "Which set has an even total?"
+    elif mode == 1:
+        set_a = [offset + 1, offset + 2, offset + 5]
+        set_b = [offset + 2, offset + 4, offset + 6]
+        set_c = [offset + 3, offset + 5, offset + 6]
+        answer = "set c"
+        lead = "Which set contains exactly two odd numbers?"
+    else:
+        base = 3 * ((rotation % 5) + variant_index + 2)
+        set_a = [base, base + 3, base + 6]
+        set_b = [base + 1, base + 4, base + 6]
+        set_c = [base + 2, base + 3, base + 7]
+        answer = "set a"
+        lead = "Which set adds to a multiple of 3?"
+    templates = (
+        "{lead} A) {a0}, {a1}, {a2} B) {b0}, {b1}, {b2} C) {c0}, {c1}, {c2}",
+        "Parity round: {lead} A) {a0}, {a1}, {a2} B) {b0}, {b1}, {b2} C) {c0}, {c1}, {c2}",
+        "Choose the set that fits the rule. {lead} A) {a0}, {a1}, {a2} B) {b0}, {b1}, {b2} C) {c0}, {c1}, {c2}",
+        "Logic grouping: {lead} A) {a0}, {a1}, {a2} B) {b0}, {b1}, {b2} C) {c0}, {c1}, {c2}",
     )
-    return _build_choice_variant(seed, prompt=prompt, choices=["set a", "set b", "set c"], answer=even_set)
+    prompt = templates[(rotation + (variant_index // 3)) % len(templates)].format(
+        lead=lead,
+        a0=set_a[0],
+        a1=set_a[1],
+        a2=set_a[2],
+        b0=set_b[0],
+        b1=set_b[1],
+        b2=set_b[2],
+        c0=set_c[0],
+        c1=set_c[1],
+        c2=set_c[2],
+    )
+    return _build_choice_variant(seed, prompt=prompt, choices=["set a", "set b", "set c"], answer=answer)
 
 
 def _logic_true_false(seed: dict[str, Any], *, seed_material: str, variant_index: int) -> QuestionDropVariant:
-    rng = _make_rng(f"{seed_material}:{seed['concept_id']}:{variant_index}")
-    sets = (
-        ("Ana finished before Ben, and Ben finished before Cam. Therefore Cam finished before Ana.", False),
-        ("Jules scored more than Micah, and Micah scored more than Priya. Therefore Jules scored more than Priya.", True),
-        ("North of Oak Street means farther north than Oak Street. Mira lives north of Oak Street, so Mira lives south of Oak Street.", False),
+    rotation = int(hashlib.sha256(f"{seed_material}:{seed['concept_id']}".encode("utf-8")).hexdigest()[:6], 16)
+    name_sets = (
+        ("Ana", "Ben", "Cam"),
+        ("Jules", "Micah", "Priya"),
+        ("Mira", "Noor", "Pax"),
+        ("Eden", "Finn", "Gia"),
+        ("Lio", "Mara", "Sol"),
+        ("Tara", "Vale", "Wren"),
+        ("Iris", "Jae", "Kian"),
+        ("Nova", "Orin", "Pia"),
     )
-    statement, value = sets[rng.randrange(len(sets))]
-    return _build_boolean_variant(seed, prompt=f"True or false: {statement}", value=value)
+    relation_sets = (
+        ("finished before", "finished before"),
+        ("scored more than", "scored more than"),
+        ("is taller than", "is taller than"),
+        ("arrived earlier than", "arrived earlier than"),
+    )
+    names = name_sets[(rotation + variant_index) % len(name_sets)]
+    relation_index = ((rotation // len(name_sets)) + (variant_index // len(name_sets))) % len(relation_sets)
+    relation, conclusion = relation_sets[relation_index]
+    if (variant_index // len(name_sets)) % 2 == 0:
+        statement = f"{names[0]} {relation} {names[1]}, and {names[1]} {relation} {names[2]}. Therefore {names[0]} {conclusion} {names[2]}."
+        value = True
+    else:
+        statement = f"{names[0]} {relation} {names[1]}, and {names[1]} {relation} {names[2]}. Therefore {names[2]} {conclusion} {names[0]}."
+        value = False
+    templates = (
+        "Call this deduction true or false: {statement}",
+        "Does this conclusion hold up? {statement}",
+        "Reasoning check: {statement} True or false?",
+        "Logic verdict: {statement} True or false?",
+    )
+    prompt = templates[(rotation + relation_index) % len(templates)].format(statement=statement)
+    return _build_boolean_variant(seed, prompt=prompt, value=value)
 
 
 def _logic_classification(seed: dict[str, Any], *, seed_material: str, variant_index: int) -> QuestionDropVariant:
-    rng = _make_rng(f"{seed_material}:{seed['concept_id']}:{variant_index}")
+    rotation = int(hashlib.sha256(f"{seed_material}:{seed['concept_id']}".encode("utf-8")).hexdigest()[:6], 16)
     sets = (
-        ("Which word fits with level, radar, and civic? A) river B) candle C) rotor", ["river", "candle", "rotor"], "rotor"),
-        ("Which item belongs with ruby, sapphire, and emerald? A) cedar B) diamond C) copper", ["cedar", "diamond", "copper"], "diamond"),
-        ("Which item belongs with piano, violin, and flute? A) trumpet B) bookshelf C) cello", ["trumpet", "bookshelf", "cello"], "cello"),
+        ("Which word fits with level, radar, and civic?", ["river", "candle", "rotor"], "rotor"),
+        ("Which item belongs with ruby, sapphire, and emerald?", ["cedar", "diamond", "copper"], "diamond"),
+        ("Which item belongs with piano, violin, and flute?", ["trumpet", "bookshelf", "cello"], "cello"),
+        ("Which item belongs with haiku, sonnet, and ode?", ["novel", "ballad", "bridge"], "ballad"),
+        ("Which option belongs with mercury, venus, and mars?", ["jupiter", "granite", "sapphire"], "jupiter"),
+        ("Which option belongs with cedar, pine, and spruce?", ["maple", "steel", "linen"], "maple"),
+        ("Which item belongs with circle, square, and triangle?", ["hexagon", "violin", "harbor"], "hexagon"),
+        ("Which option belongs with copper, silver, and gold?", ["bronze", "willow", "granite"], "bronze"),
     )
-    prompt, choices, answer = sets[rng.randrange(len(sets))]
+    templates = (
+        "{question} A) {a} B) {b} C) {c}",
+        "Classification round: {question} A) {a} B) {b} C) {c}",
+        "Which answer belongs with the set? {question} A) {a} B) {b} C) {c}",
+        "Logic lane classification: {question} A) {a} B) {b} C) {c}",
+    )
+    question, choices, answer = sets[(rotation + variant_index) % len(sets)]
+    prompt = templates[(rotation + (variant_index // len(sets))) % len(templates)].format(
+        question=question,
+        a=choices[0],
+        b=choices[1],
+        c=choices[2],
+    )
     return _build_choice_variant(seed, prompt=prompt, choices=choices, answer=answer)
 
 
 def _logic_mini_deduction(seed: dict[str, Any], *, seed_material: str, variant_index: int) -> QuestionDropVariant:
-    rng = _make_rng(f"{seed_material}:{seed['concept_id']}:{variant_index}")
+    rotation = int(hashlib.sha256(f"{seed_material}:{seed['concept_id']}".encode("utf-8")).hexdigest()[:6], 16)
     sets = (
         (
             "Three lockers are labeled A, B, and C. Exactly one label is true. "
             "Locker A says 'The prize is in locker B.' Locker B says 'The prize is not in locker B.' "
-            "Locker C says 'The prize is in locker C.' Where is the prize? "
-            "A) locker a B) locker b C) locker c",
+            "Locker C says 'The prize is in locker C.' Where is the prize?",
             ["locker a", "locker b", "locker c"],
             "locker b",
         ),
         (
             "Exactly one statement is true. Nia says 'The code is blue.' Omar says 'The code is red.' "
-            "Paz says 'The code is not blue.' What color is the code? A) blue B) red C) green",
+            "Paz says 'The code is not blue.' What color is the code?",
+            ["blue", "red", "green"],
+            "red",
+        ),
+        (
+            "Exactly one statement is true. Ivo says 'The gem is silver.' June says 'The gem is gold.' "
+            "Kai says 'Ivo is telling the truth.' What color is the gem?",
+            ["silver", "gold", "green"],
+            "gold",
+        ),
+        (
+            "Three cups are labeled left, middle, and right. Exactly one label is true. "
+            "Left says 'The coin is in the middle cup.' Middle says 'The coin is not in the middle cup.' "
+            "Right says 'The coin is in the right cup.' Which cup holds the coin?",
+            ["left cup", "middle cup", "right cup"],
+            "middle cup",
+        ),
+        (
+            "Exactly one of these clues is true. Ava says 'The meeting is on Tuesday.' Ben says 'The meeting is on Thursday.' "
+            "Cora says 'Ava is wrong.' Which day is the meeting on?",
+            ["tuesday", "thursday", "wednesday"],
+            "thursday",
+        ),
+        (
+            "Exactly one statement is true. Remy says 'The package is heavy.' Sora says 'The package is light.' "
+            "Tao says 'Remy is telling the truth.' Which description fits the package?",
+            ["heavy", "light", "fragile"],
+            "light",
+        ),
+        (
+            "Exactly one statement is true. A says 'The note is in drawer B.' B says 'The note is not in drawer B.' "
+            "C says 'The note is in drawer C.' Which drawer has the note?",
+            ["drawer a", "drawer b", "drawer c"],
+            "drawer b",
+        ),
+        (
+            "Exactly one statement is true. Mina says 'The mural is blue.' Sol says 'The mural is red.' "
+            "Theo says 'Mina is wrong.' What color is the mural?",
             ["blue", "red", "green"],
             "red",
         ),
     )
-    prompt, choices, answer = sets[rng.randrange(len(sets))]
+    templates = (
+        "{core} A) {a} B) {b} C) {c}",
+        "Deduction round: {core} A) {a} B) {b} C) {c}",
+        "Reason it out. {core} A) {a} B) {b} C) {c}",
+        "Mini deduction: {core} A) {a} B) {b} C) {c}",
+    )
+    core, choices, answer = sets[(rotation + variant_index) % len(sets)]
+    prompt = templates[(rotation + (variant_index // len(sets))) % len(templates)].format(
+        core=core,
+        a=choices[0],
+        b=choices[1],
+        c=choices[2],
+    )
     return _build_choice_variant(seed, prompt=prompt, choices=choices, answer=answer)
 
 
 def _logic_rotation(seed: dict[str, Any], *, seed_material: str, variant_index: int) -> QuestionDropVariant:
-    rng = _make_rng(f"{seed_material}:{seed['concept_id']}:{variant_index}")
-    patterns = (
-        (["up", "right", "down", "right", "up"], "right", "Which direction comes next? A) left B) right C) down", ["left", "right", "down"]),
-        (["north", "east", "south", "east", "north"], "east", "Which direction comes next? A) east B) west C) south", ["east", "west", "south"]),
-        (["left", "up", "right", "up", "left"], "up", "Which direction comes next? A) down B) up C) right", ["down", "up", "right"]),
+    rotation = int(hashlib.sha256(f"{seed_material}:{seed['concept_id']}".encode("utf-8")).hexdigest()[:6], 16)
+    token_sets = (
+        ("north", "east", "south", "west"),
+        ("up", "right", "down", "left"),
+        ("northeast", "southeast", "southwest", "northwest"),
     )
-    values, answer, prompt, choices = patterns[rng.randrange(len(patterns))]
-    prompt = f"{prompt} Sequence: {', '.join(values)}"
-    return _build_choice_variant(seed, prompt=prompt, choices=choices, answer=answer)
+    tokens = token_sets[(rotation + variant_index) % len(token_sets)]
+    step_options = (1, -1, 2, -2)
+    step = step_options[(rotation + (variant_index // len(token_sets))) % len(step_options)]
+    start_index = (rotation + variant_index) % len(tokens)
+    length = 5 + (variant_index // (len(token_sets) * len(step_options)))
+    values = [tokens[(start_index + (step * index)) % len(tokens)] for index in range(length)]
+    answer = tokens[(start_index + (step * length)) % len(tokens)]
+    distractors = [token for token in tokens if token != answer]
+    unique_choices = [answer, distractors[0], distractors[1]]
+    templates = (
+        "Which direction comes next in this turning pattern? Sequence: {sequence}. A) {a} B) {b} C) {c}",
+        "Rotation round: Sequence: {sequence}. Which direction comes next? A) {a} B) {b} C) {c}",
+        "Keep the turn pattern going. Sequence: {sequence}. A) {a} B) {b} C) {c}",
+        "Logic lane rotation: Sequence: {sequence}. Which option is next? A) {a} B) {b} C) {c}",
+    )
+    prompt = templates[(rotation + (variant_index // len(token_sets))) % len(templates)].format(
+        sequence=", ".join(values),
+        a=unique_choices[0],
+        b=unique_choices[1],
+        c=unique_choices[2],
+    )
+    return _build_choice_variant(seed, prompt=prompt, choices=unique_choices, answer=answer)
 
 
 def _language_anagram(seed: dict[str, Any], *, seed_material: str, variant_index: int) -> QuestionDropVariant:
@@ -1314,8 +1610,37 @@ def _language_anagram(seed: dict[str, Any], *, seed_material: str, variant_index
         ("rocket", "a vehicle launched into space"),
         ("blanket", "a soft cover used for warmth"),
         ("harvest", "the season or act of gathering crops"),
+        ("lantern", "a portable light source"),
+        ("compass", "a tool that points north"),
+        ("harbor", "a sheltered place for ships"),
+        ("thunder", "the sound that follows lightning"),
+        ("velvet", "a soft woven fabric"),
+        ("glacier", "a slow-moving river of ice"),
+        ("orchard", "a place where fruit trees grow"),
+        ("kingdom", "a realm ruled by a monarch"),
+        ("bicycle", "a two-wheeled vehicle powered by pedals"),
+        ("shelter", "a place offering protection"),
+        ("journal", "a daily written record"),
+        ("meadow", "an open field full of grass"),
+        ("crystal", "a solid with a repeating pattern"),
+        ("violin", "a bowed string instrument"),
+        ("sunrise", "the moment the sun first appears"),
+        ("blanket", "a soft cover used for warmth"),
+        ("gallery", "a place where art is displayed"),
+        ("network", "a connected system of people or things"),
+        ("harpoon", "a spear used for hunting large sea animals"),
+        ("laneway", "a narrow passage between buildings"),
+        ("marble", "a stone used in sculpture and flooring"),
+        ("quarter", "one fourth of a whole"),
+        ("cabinet", "a piece of furniture with doors"),
+        ("miracle", "an event seen as extraordinary"),
+        ("citadel", "a fortified stronghold"),
+        ("journey", "travel from one place to another"),
+        ("kingfisher", "a brightly colored bird that hunts fish"),
+        ("triangle", "a shape with three sides"),
+        ("wildfire", "an uncontrolled fire in natural land"),
     )
-    target, clue = targets[rng.randrange(len(targets))]
+    target, clue = targets[(variant_index + rng.randrange(len(targets))) % len(targets)]
     letters = list(target.upper())
     scrambled = target.upper()
     for _ in range(12):
@@ -1357,7 +1682,34 @@ GENERATOR_HANDLERS: dict[str, Callable[..., QuestionDropVariant]] = {
 }
 
 
-QUESTION_DROP_SEEDS: tuple[dict[str, Any], ...] = (
+_ANSWER_SHAPE_BY_GENERATOR = {
+    "math_addition": "numeric",
+    "math_multiplication": "numeric",
+    "math_order_operations": "numeric",
+    "math_missing_value": "numeric",
+    "math_compare_expressions": "multiple_choice",
+    "math_multi_step": "numeric",
+    "math_divisibility": "multiple_choice",
+    "math_remainder": "numeric",
+    "math_percent_change": "numeric",
+    "math_average_or_median": "numeric",
+    "math_algebra_lite": "numeric",
+    "math_number_pattern": "numeric",
+    "logic_sequence": "numeric",
+    "logic_analogy": "text",
+    "logic_odd_one_out": "multiple_choice",
+    "logic_elimination": "text",
+    "logic_conditional": "boolean",
+    "logic_parity_grouping": "multiple_choice",
+    "logic_true_false": "boolean",
+    "logic_classification": "multiple_choice",
+    "logic_mini_deduction": "multiple_choice",
+    "logic_rotation": "multiple_choice",
+    "language_anagram": "text",
+}
+
+
+_BASE_QUESTION_DROP_SEEDS: tuple[dict[str, Any], ...] = (
     _static_seed(
         "science:planet-red",
         "science",
@@ -1822,6 +2174,82 @@ QUESTION_DROP_SEEDS: tuple[dict[str, Any], ...] = (
     ),
 )
 
+
+def _seed_answer_shape(seed: dict[str, Any]) -> str:
+    generator_type = str(seed.get("generator_type") or "").strip()
+    if generator_type == "static_pack":
+        variants = seed.get("variants") or ()
+        if variants:
+            return str((variants[0] or {}).get("answer_spec", {}).get("type") or "text").strip().casefold() or "text"
+        return "text"
+    return _ANSWER_SHAPE_BY_GENERATOR.get(generator_type, "text")
+
+
+def _seed_subcategory(seed: dict[str, Any]) -> str:
+    family_id = str(seed.get("family_id") or "").strip().casefold()
+    category = str(seed.get("category") or "question-drops").strip().casefold()
+    if "." in family_id:
+        tail = family_id.split(".", 1)[1]
+        if tail:
+            return tail
+    return family_id or category
+
+
+def _seed_reasoning_mode(seed: dict[str, Any], answer_shape: str) -> str:
+    seed_blob = " ".join(
+        str(value or "").casefold()
+        for value in (
+            seed.get("concept_id"),
+            seed.get("family_id"),
+            seed.get("generator_type"),
+        )
+    )
+    keyword_modes = (
+        ("ordering", ("order", "timeline", "chronology", "sequence", "rotation", "relative-position")),
+        ("analogy", ("analogy",)),
+        ("inference", ("conditional", "deduction", "inference", "elimination", "truth", "parity")),
+        ("definition", ("word-parts", "roots", "grammar", "definition", "terms", "usage")),
+        ("causal", ("photosynthesis", "ecology", "process", "weather", "motion", "climate", "immunology", "experimental")),
+        ("comparison", ("compare", "classification", "country-traits", "patterns")),
+        ("number-sense", ("math", "divisibility", "remainder", "average", "pattern", "algebra", "ratio")),
+    )
+    for mode, keywords in keyword_modes:
+        if any(keyword in seed_blob for keyword in keywords):
+            return mode
+    if answer_shape == "ordered_tokens":
+        return "ordering"
+    if answer_shape == "boolean":
+        return "verification"
+    if answer_shape == "multiple_choice":
+        return "classification"
+    if answer_shape == "numeric":
+        return "number-sense" if str(seed.get("category") or "").strip().casefold() == "math" else "fact"
+    return "fact"
+
+
+def _merge_seed_tags(seed: dict[str, Any]) -> tuple[str, ...]:
+    answer_shape = _seed_answer_shape(seed)
+    required = (
+        f"sub:{_seed_subcategory(seed)}",
+        f"mode:{_seed_reasoning_mode(seed, answer_shape)}",
+        f"shape:{answer_shape}",
+    )
+    merged: list[str] = []
+    for tag in tuple(seed.get("tags", ())) + required:
+        cleaned = str(tag or "").strip().casefold()
+        if cleaned and cleaned not in merged:
+            merged.append(cleaned)
+    return tuple(merged)
+
+
+def _decorate_seed(seed: dict[str, Any]) -> dict[str, Any]:
+    return {**seed, "tags": _merge_seed_tags(seed)}
+
+
+QUESTION_DROP_SEEDS: tuple[dict[str, Any], ...] = tuple(
+    _decorate_seed(seed) for seed in (_BASE_QUESTION_DROP_SEEDS + EXPANDED_STATIC_SEEDS)
+)
+
 QUESTION_DROP_SEED_BY_CONCEPT_ID = {seed["concept_id"]: seed for seed in QUESTION_DROP_SEEDS}
 
 
@@ -1833,8 +2261,21 @@ def _parse_prompt_number_list(raw: str) -> list[int]:
     return [int(token.strip()) for token in raw.split(",") if token.strip()]
 
 
+def _normalize_prompt_for_audit(prompt: str) -> str:
+    return normalize_answer_text(prompt)
+
+
 def _audit_generated_variant(seed: dict[str, Any], variant: QuestionDropVariant) -> str | None:
     generator_type = str(seed.get("generator_type") or "")
+    answer_type = str(variant.answer_spec.get("type") or "").strip().casefold()
+    if answer_type == "multiple_choice":
+        choices = [str(choice).strip().casefold() for choice in variant.answer_spec.get("choices", []) if str(choice).strip()]
+        if len(choices) != len(set(choices)):
+            return "Multiple-choice options must be distinct."
+    if variant.category == "math" and _BLAND_MATH_PROMPT_RE.fullmatch(variant.prompt):
+        return "Math prompt slipped back into a bland worksheet shell."
+    if variant.category == "logic" and _BLAND_LOGIC_PROMPT_RE.fullmatch(variant.prompt):
+        return "Logic prompt slipped back into a stale shell."
     if generator_type == "math_percent_change":
         match = _PERCENT_CHANGE_PROMPT_RE.fullmatch(variant.prompt)
         if match is None:
@@ -1911,6 +2352,13 @@ def validate_content_pack(seeds: tuple[dict[str, Any], ...] | None = None) -> tu
         family_id = str(seed.get("family_id") or "").strip()
         if not family_id:
             return False, f"Seed '{concept_id}' needs a family_id."
+        tags = tuple(seed.get("tags", ()))
+        if not any(str(tag).startswith("sub:") for tag in tags):
+            return False, f"Seed '{concept_id}' needs a subcategory tag."
+        if not any(str(tag).startswith("mode:") for tag in tags):
+            return False, f"Seed '{concept_id}' needs a reasoning-mode tag."
+        if not any(str(tag).startswith("shape:") for tag in tags):
+            return False, f"Seed '{concept_id}' needs an answer-shape tag."
         category = seed.get("category")
         if category not in QUESTION_DROP_CATEGORIES:
             return False, f"Seed '{concept_id}' uses unknown category '{category}'."
@@ -1924,13 +2372,20 @@ def validate_content_pack(seeds: tuple[dict[str, Any], ...] | None = None) -> tu
             variants = seed.get("variants")
             if not isinstance(variants, (list, tuple)) or not variants:
                 return False, f"Seed '{concept_id}' needs at least one static variant."
+            prompt_audit: set[str] = set()
             for payload in variants:
                 if not isinstance(payload, dict) or not isinstance(payload.get("prompt"), str) or not payload["prompt"].strip():
                     return False, f"Seed '{concept_id}' has an invalid prompt."
+                prompt_key = _normalize_prompt_for_audit(payload["prompt"])
+                if prompt_key in prompt_audit:
+                    return False, f"Seed '{concept_id}' repeats a static prompt too closely."
+                prompt_audit.add(prompt_key)
                 valid, message = validate_answer_spec(payload.get("answer_spec", {}))
                 if not valid:
                     return False, f"Seed '{concept_id}' has an invalid answer spec: {message}"
         else:
+            prompt_audit: list[str] = []
+            live_rotation_prompts: set[str] = set()
             for variant_index in range(QUESTION_DROP_VALIDATION_VARIANTS_PER_GENERATOR):
                 try:
                     variant = build_variant(
@@ -1940,9 +2395,17 @@ def validate_content_pack(seeds: tuple[dict[str, Any], ...] | None = None) -> tu
                     )
                 except Exception as exc:
                     return False, f"Seed '{concept_id}' failed to build validation variant {variant_index}: {exc}"
+                prompt_key = _normalize_prompt_for_audit(variant.prompt)
+                prompt_audit.append(prompt_key)
+                if variant_index < 12:
+                    if prompt_key in live_rotation_prompts:
+                        return False, f"Seed '{concept_id}' repeated a generated prompt inside the live rotation sample."
+                    live_rotation_prompts.add(prompt_key)
                 message = _audit_generated_variant(seed, variant)
                 if message is not None:
                     return False, f"Seed '{concept_id}' failed generated audit at variant {variant_index}: {message}"
+            if len(set(prompt_audit)) < 24:
+                return False, f"Seed '{concept_id}' does not have enough prompt diversity across the 32-variant audit."
     return True, None
 
 

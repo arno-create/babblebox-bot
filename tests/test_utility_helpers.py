@@ -15,9 +15,12 @@ from babblebox.utility_helpers import (
     compute_next_afk_schedule_start,
     default_afk_weekday_mask,
     format_duration_brief,
+    make_attachment_labels,
     make_message_preview,
     parse_afk_start_at,
     parse_duration_string,
+    sanitize_attachment_label,
+    sanitize_attachment_labels,
 )
 
 
@@ -65,6 +68,36 @@ class UtilityHelperTests(unittest.TestCase):
                 }
             )
         )
+
+    def test_attachment_label_sanitizers_strip_urls_from_compact_later_labels(self):
+        self.assertEqual(
+            sanitize_attachment_label("clip.png (https://cdn.example/clip.png)"),
+            "clip.png",
+        )
+        self.assertEqual(
+            sanitize_attachment_label("clip.mp4 - https://cdn.example/clip.mp4"),
+            "clip.mp4",
+        )
+        self.assertEqual(
+            sanitize_attachment_label("https://cdn.example/clip.mp4"),
+            "attachment",
+        )
+        self.assertEqual(
+            sanitize_attachment_labels(
+                [
+                    "clip.png (https://cdn.example/clip.png)",
+                    "https://cdn.example/clip.mp4",
+                    "notes.txt - https://cdn.example/notes.txt",
+                ]
+            ),
+            ["clip.png", "attachment", "notes.txt"],
+        )
+
+    def test_make_attachment_labels_defaults_to_compact_names_only(self):
+        message = SimpleNamespace(attachments=[DummyAttachment("clip.mp4", "video/mp4")])
+
+        self.assertEqual(make_attachment_labels(message), ["clip.mp4"])
+        self.assertEqual(make_attachment_labels(message, include_urls=True), ["clip.mp4"])
 
     def test_later_marker_embed_prioritizes_location_and_compact_attachments(self):
         embed = build_later_marker_embed(

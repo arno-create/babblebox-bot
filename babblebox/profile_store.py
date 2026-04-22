@@ -4,11 +4,14 @@ import asyncio
 import copy
 import importlib
 import json
+import logging
 import os
 from datetime import date, datetime, timezone
 from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
+
+LOGGER = logging.getLogger(__name__)
 
 PROFILE_COLUMNS = (
     "user_id",
@@ -1073,27 +1076,27 @@ class ProfileStore:
         return getattr(self._store, "backend_name", "unknown")
 
     async def load(self):
-        print(
-            "Profile storage init: "
-            f"backend_preference={self.backend_preference}, "
-            f"database_url_configured={'yes' if self.database_url else 'no'}, "
-            f"database_url_source={self.database_url_source or 'none'}, "
-            f"database_target={self.redacted_database_url()}"
+        LOGGER.info(
+            "Profile storage init: backend_preference=%s database_url_configured=%s database_url_source=%s database_target=%s",
+            self.backend_preference,
+            "yes" if self.database_url else "no",
+            self.database_url_source or "none",
+            self.redacted_database_url(),
         )
         self._store = self._build_primary_store()
         try:
             await self._store.load()
         except ProfileStorageUnavailable as exc:
-            print(
-                "Profile storage init failed: "
-                f"backend_preference={self.backend_preference}, "
-                f"database_url_configured={'yes' if self.database_url else 'no'}, "
-                f"database_url_source={self.database_url_source or 'none'}, "
-                f"database_target={self.redacted_database_url()}, "
-                f"error={exc}"
+            LOGGER.warning(
+                "Profile storage init failed: backend_preference=%s database_url_configured=%s database_url_source=%s database_target=%s error=%s",
+                self.backend_preference,
+                "yes" if self.database_url else "no",
+                self.database_url_source or "none",
+                self.redacted_database_url(),
+                exc,
             )
             raise
-        print(f"Profile storage init succeeded: backend={self.backend_name}")
+        LOGGER.info("Profile storage init succeeded: backend=%s", self.backend_name)
 
     async def close(self):
         await self._store.close()

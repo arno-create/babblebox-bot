@@ -192,7 +192,7 @@ class ConfessionsStoreNormalizationTests(unittest.TestCase):
         self.assertTrue(config["allow_self_edit"])
         self.assertFalse(config["auto_moderation_exempt_admins"])
         self.assertEqual(config["auto_moderation_exempt_role_ids"], [999, 1000])
-        self.assertEqual(config["max_images"], 3)
+        self.assertEqual(config["max_images"], 6)
         self.assertEqual(config["cooldown_seconds"], 300)
         self.assertEqual(config["burst_limit"], 3)
         self.assertEqual(config["burst_window_seconds"], 1800)

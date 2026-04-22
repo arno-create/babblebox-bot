@@ -9,13 +9,12 @@ from discord.ext import commands
 from babblebox.app_command_hardening import harden_admin_root_group
 from babblebox import game_engine as ge
 from babblebox.command_utils import defer_hybrid_response, require_channel_permissions, send_hybrid_response
+from babblebox.runtime_health import bind_started_service
 from babblebox.utility_helpers import build_bump_reminder_embed, build_bump_thanks_embed, build_jump_view, deserialize_datetime
 from babblebox.utility_service import (
     BUMP_CONFIG_UNCHANGED,
-    BUMP_DETECTION_CHANNEL_LIMIT,
     BUMP_PROVIDER_DISBOARD,
     UtilityService,
-    WATCH_KEYWORD_LIMIT,
     _bump_provider_label,
 )
 
@@ -186,8 +185,7 @@ class UtilityCog(commands.Cog):
         harden_admin_root_group(self.bremind_group)
 
     async def cog_load(self):
-        await self.service.start()
-        setattr(self.bot, "utility_service", self.service)
+        await bind_started_service(self.bot, attr_name="utility_service", service=self.service, label="Utilities")
 
     def cog_unload(self):
         if getattr(self.bot, "utility_service", None) is self.service:
@@ -409,7 +407,7 @@ class UtilityCog(commands.Cog):
                 f"Global: **{len(summary['global_keywords'])}**\n"
                 f"Server: **{len(summary['server_keywords'])}**\n"
                 f"Channel: **{len(summary['channel_keywords'])}**\n"
-                f"Saved total: **{summary['total_keywords']} / {WATCH_KEYWORD_LIMIT}**"
+                f"Saved total: **{summary['total_keywords']} / {self.service.watch_keyword_limit(user.id)}**"
             ),
             inline=True,
         )
@@ -1380,6 +1378,7 @@ class UtilityCog(commands.Cog):
         if not await self._bremind_guard(ctx):
             return
         config = self.service.get_bump_config(ctx.guild.id)
+        bump_limit = self.service.bump_detection_channel_limit(ctx.guild.id)
         await self._send_private_embed(
             ctx,
             embed=ge.style_embed(
@@ -1392,7 +1391,7 @@ class UtilityCog(commands.Cog):
                     value=self._resolve_watch_channel_mentions(ctx.guild, config.get("detection_channel_ids", [])),
                     inline=False,
                 ),
-                footer=f"Babblebox Bump Reminders | Up to {BUMP_DETECTION_CHANNEL_LIMIT} channels",
+                footer=f"Babblebox Bump Reminders | Up to {bump_limit} channels",
             ),
         )
 
@@ -1465,13 +1464,14 @@ class UtilityCog(commands.Cog):
         if not await self._bremind_guard(ctx):
             return
         config = self.service.get_bump_config(ctx.guild.id)
+        bump_limit = self.service.bump_detection_channel_limit(ctx.guild.id)
         embed = discord.Embed(
             title="Bump Detection Channels",
             description="Babblebox only starts a cycle from verified provider output in these channels.",
             color=ge.EMBED_THEME["info"],
         )
         embed.add_field(name="Configured", value=self._resolve_watch_channel_mentions(ctx.guild, config.get("detection_channel_ids", [])), inline=False)
-        embed.add_field(name="Limit", value=f"Up to **{BUMP_DETECTION_CHANNEL_LIMIT}** text channels", inline=True)
+        embed.add_field(name="Limit", value=f"Up to **{bump_limit}** text channels", inline=True)
         embed.add_field(name="Provider", value=_bump_provider_label(config.get("provider")), inline=True)
         await self._send_private_embed(ctx, embed=ge.style_embed(embed, footer="Babblebox Bump Reminders | /bremind detect"))
 
