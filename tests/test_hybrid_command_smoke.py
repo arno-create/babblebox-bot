@@ -509,6 +509,7 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("discord.com/servers/inevitable-friendship-1322933864360050688", support_page["links"])
         self.assertIn("github.com/arno-create/babblebox-bot", support_page["links"])
         self.assertIn("arno-create.github.io/babblebox-bot/", support_page["links"])
+        self.assertIn("patreon.com/cw/InevitableFriendship", support_page["links"])
 
         embed = build_help_page_embed(support_index)
         fields = {field.name: field.value for field in embed.fields}
@@ -516,6 +517,7 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("GitHub Repository", fields["Links"])
         self.assertIn("Support Server", fields["Links"])
         self.assertIn("Official Website", fields["Links"])
+        self.assertIn("Patreon Membership", fields["Links"])
 
     def test_help_surfaces_do_not_reference_removed_moment_feature(self):
         for page in HELP_PAGES:
@@ -690,13 +692,35 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         command, payload = await self._registered_root(PremiumCog, root_name="premium")
 
         self.assertIsNone(payload["default_member_permissions"])
-        self.assertEqual({option["name"] for option in payload["options"]}, {"status", "plans", "link", "refresh", "unlink", "guild"})
+        self.assertEqual({option["name"] for option in payload["options"]}, {"status", "plans", "subscribe", "link", "refresh", "unlink", "guild"})
 
         guild_group = next(child for child in command.commands if child.name == "guild")
         guild_app_command = getattr(guild_group, "app_command", guild_group)
         self.assertTrue(guild_group.guild_only)
         self.assertEqual(int(guild_app_command.default_permissions.value), int(discord.Permissions(manage_guild=True).value))
         self.assertEqual({child.name for child in guild_group.commands}, {"status", "claim", "release"})
+
+    async def test_premium_subscribe_command_opens_patreon_and_support_server(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
+        cog = PremiumCog(bot)
+        try:
+            cog.service.storage_ready = True
+            ctx = FakeContext(interaction=FakeInteraction(), guild=FakeGuild(), channel=FakeChannel(), author=FakeAuthor())
+
+            await PremiumCog.premium_subscribe_command.callback(cog, ctx)
+
+            payload = self._sent_kwargs(ctx)
+            self.assertTrue(payload["ephemeral"])
+            self.assertIn("Patreon Membership", payload["embed"].title)
+            self.assertEqual(
+                self._link_buttons(payload["view"]),
+                {
+                    "View Patreon": "https://www.patreon.com/cw/InevitableFriendship",
+                    "Support Server": "https://discord.com/servers/inevitable-friendship-1322933864360050688",
+                },
+            )
+        finally:
+            await cog.service.close()
 
     async def test_registered_tree_requires_instance_hardening_for_hybrid_root_visibility(self):
         class UnhardenedHybridRoot(commands.Cog):
@@ -1351,6 +1375,7 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
                 "Support Server": "https://discord.com/servers/inevitable-friendship-1322933864360050688",
                 "GitHub Repository": "https://github.com/arno-create/babblebox-bot",
                 "Official Website": "https://arno-create.github.io/babblebox-bot/",
+                "Patreon Membership": "https://www.patreon.com/cw/InevitableFriendship",
             },
         )
 
