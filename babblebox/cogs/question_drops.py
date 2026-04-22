@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Optional
 
 import discord
@@ -11,7 +12,10 @@ from babblebox import game_engine as ge
 from babblebox.command_utils import defer_hybrid_response, send_hybrid_response
 from babblebox.question_drops_content import QUESTION_DROP_CATEGORIES, QUESTION_DROP_DIFFICULTY_PROFILES, QUESTION_DROP_TONES
 from babblebox.question_drops_service import QuestionDropsService
+from babblebox.runtime_health import bind_started_service
 
+
+LOGGER = logging.getLogger(__name__)
 
 OWNER_AI_OVERRIDE_IDS = {1266444952779620413, 1345860619836063754}
 
@@ -204,8 +208,7 @@ class QuestionDropsCog(commands.Cog):
         harden_admin_root_group(self.dropsadmin_group)
 
     async def cog_load(self):
-        await self.service.start()
-        setattr(self.bot, "question_drops_service", self.service)
+        await bind_started_service(self.bot, attr_name="question_drops_service", service=self.service, label="Question Drops")
 
     def cog_unload(self):
         if getattr(self.bot, "question_drops_service", None) is self.service:
@@ -1300,7 +1303,10 @@ class QuestionDropsCog(commands.Cog):
             return
         author_id = getattr(ctx.author, "id", 0)
         if not self._is_override_owner(author_id):
-            print(f"Question Drops AI override denied: unauthorized_dm_user_id={author_id}")
+            LOGGER.warning(
+                "Question Drops AI override denied: unauthorized_dm_user_id=%s",
+                author_id,
+            )
             await ctx.send(content="That command is unavailable.")
             return
         normalized_mode = str(mode or "status").strip().lower()

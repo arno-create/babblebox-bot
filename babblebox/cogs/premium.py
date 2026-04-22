@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 from typing import Any
 
 import discord
@@ -19,11 +20,13 @@ from babblebox.premium_limits import (
     LIMIT_WATCH_FILTERS,
     LIMIT_WATCH_KEYWORDS,
 )
-from babblebox.premium_models import MANUAL_KIND_BLOCK, MANUAL_KIND_GRANT, PLAN_GUILD_PRO, PROVIDER_PATREON, SCOPE_GUILD, SCOPE_USER
+from babblebox.premium_models import LINK_STATUS_ACTIVE, LINK_STATUS_BROKEN, LINK_STATUS_REVOKED, MANUAL_KIND_BLOCK, MANUAL_KIND_GRANT, PLAN_GUILD_PRO, PROVIDER_PATREON, SCOPE_GUILD, SCOPE_USER
+from babblebox.runtime_health import bind_started_service, runtime_service_lines
+from babblebox.premium_store import PremiumStorageUnavailable
 from babblebox.premium_service import PremiumService
 
 
-PREMIUM_OVERRIDE_OWNER_IDS = {1266444952779620413, 1345860619836063754}
+LOGGER = logging.getLogger(__name__)
 
 
 class PremiumCog(commands.Cog):
@@ -32,8 +35,7 @@ class PremiumCog(commands.Cog):
         self.service = PremiumService(bot)
 
     async def cog_load(self):
-        await self.service.start()
-        setattr(self.bot, "premium_service", self.service)
+        await bind_started_service(self.bot, attr_name="premium_service", service=self.service, label="Premium")
 
     def cog_unload(self):
         if getattr(self.bot, "premium_service", None) is self.service:
@@ -41,7 +43,7 @@ class PremiumCog(commands.Cog):
         self.bot.loop.create_task(self.service.close())
 
     def _is_override_owner(self, user_id: int) -> bool:
-        return user_id in PREMIUM_OVERRIDE_OWNER_IDS
+        return self.service.is_system_owner(user_id)
 
     async def _send_private(self, ctx: commands.Context, *, embed: discord.Embed, view: discord.ui.View | None = None):
         await send_hybrid_response(ctx, embed=embed, view=view, ephemeral=True)
@@ -160,12 +162,23 @@ class PremiumCog(commands.Cog):
         snapshot = self.service.get_user_snapshot(user.id)
         counts = self._utility_counts(user.id)
         link = self.service.get_link(user.id, provider=PROVIDER_PATREON)
+        link_status = str((link or {}).get("link_status") or "").strip().lower()
+        if link is None:
+            link_label = "Not linked"
+        elif link_status == LINK_STATUS_ACTIVE:
+            link_label = "Connected"
+        elif link_status == LINK_STATUS_REVOKED:
+            link_label = "Reconnect required"
+        elif link_status == LINK_STATUS_BROKEN:
+            link_label = "Link needs repair"
+        else:
+            link_label = "Unavailable"
         embed = discord.Embed(
             title="Premium Status",
             description=(
                 f"Plan: **{self.service.plan_title(snapshot['plan_code'])}**\n"
                 f"Active plans: {self._active_plan_text(snapshot)}\n"
-                f"Patreon link: {'Connected' if link is not None else 'Not linked'}"
+                f"Patreon link: {link_label}"
             ),
             color=ge.EMBED_THEME["accent"],
         )
@@ -174,6 +187,10 @@ class PremiumCog(commands.Cog):
             notes.append("Patreon data is stale. Babblebox is preserving the last verified entitlement until grace expires.")
         if snapshot.get("blocked"):
             notes.append("A manual premium suspension is active on this user.")
+        if snapshot.get("system_access"):
+            notes.append("This Discord user has permanent Babblebox operator premium access, including internal Guild Pro claim power.")
+        if link_status in {LINK_STATUS_REVOKED, LINK_STATUS_BROKEN}:
+            notes.append("Patreon needs to be linked again before Babblebox can trust provider-backed premium access.")
         if notes:
             embed.add_field(name="State", value="\n".join(notes), inline=False)
         embed.add_field(
@@ -210,9 +227,13 @@ class PremiumCog(commands.Cog):
             inline=False,
         )
         claimable = len(snapshot.get("claimable_sources", ()))
+        if snapshot.get("system_guild_claims") == "unlimited":
+            claim_text = "Available claim units: **Unlimited internal operator claims**"
+        else:
+            claim_text = f"Available claim units: **{claimable}**"
         embed.add_field(
             name="Guild Pro Claims",
-            value=f"Available claim units: **{claimable}**",
+            value=claim_text,
             inline=False,
         )
         if link is not None:
@@ -234,7 +255,12 @@ class PremiumCog(commands.Cog):
         )
         claim = snapshot.get("claim")
         claim_lines = []
-        if claim is None:
+        if snapshot.get("system_access"):
+            claim_lines.append("This server has permanent Babblebox operator premium.")
+            if claim is not None:
+                claim_lines.append(f"Stored claim owner: <@{int(claim.get('owner_user_id', 0))}>")
+                claim_lines.append("Stored claim is not required for support-guild premium.")
+        elif claim is None:
             claim_lines.append("No Guild Pro claim is attached to this server.")
         else:
             claim_lines.append(f"Claim owner: <@{int(claim.get('owner_user_id', 0))}>")
@@ -298,11 +324,14 @@ class PremiumCog(commands.Cog):
                 f"Storage ready: {'Yes' if diagnostics['storage_ready'] else 'No'}\n"
                 f"Backend: `{diagnostics['storage_backend']}`\n"
                 f"Patreon configured: {'Yes' if diagnostics['patreon_configured'] else 'No'}\n"
-                f"Automation-ready: {'Yes' if diagnostics['patreon_automation_ready'] else 'No'}\n"
+                f"Sync-ready: {'Yes' if diagnostics['patreon_sync_ready'] else 'No'}\n"
                 f"Crypto source: `{diagnostics['crypto_source']}`"
             ),
             inline=False,
         )
+        config_errors = tuple(diagnostics.get("patreon_config_errors", ()))
+        if config_errors:
+            embed.add_field(name="Patreon Config", value="\n".join(config_errors[:4]), inline=False)
         embed.add_field(
             name="Cache",
             value=(
@@ -314,6 +343,22 @@ class PremiumCog(commands.Cog):
         )
         if diagnostics.get("storage_error"):
             embed.add_field(name="Storage Error", value=str(diagnostics["storage_error"]), inline=False)
+        runtime_lines = runtime_service_lines(self.bot)
+        if runtime_lines:
+            embed.add_field(name="Bot Services", value="\n".join(runtime_lines), inline=False)
+        webhook_stats = diagnostics.get("provider_monitor") or {}
+        if webhook_stats:
+            embed.add_field(
+                name="Patreon Webhooks",
+                value=(
+                    f"Invalid signatures: **{webhook_stats['invalid_signature_count']}**\n"
+                    f"Unresolved issues: **{webhook_stats['unresolved_issue_count']}**\n"
+                    f"503 unavailable: **{webhook_stats['recent_unavailable_count']}**\n"
+                    f"5xx errors: **{webhook_stats['recent_server_error_count']}**\n"
+                    f"Last: `{webhook_stats['last_webhook_status'] or 'none'}` / `{webhook_stats['last_webhook_http_status'] or 'n/a'}`"
+                ),
+                inline=False,
+            )
         if user_id is not None:
             snapshot = self.service.get_user_snapshot(user_id)
             embed.add_field(
@@ -415,14 +460,14 @@ class PremiumCog(commands.Cog):
     async def premium_guild_claim_command(self, ctx: commands.Context):
         if not await self._require_storage(ctx) or not await self._guild_admin_guard(ctx):
             return
-        ok, message = await self.service.claim_guild(guild_id=ctx.guild.id, user_id=ctx.author.id)
+        ok, message = await self.service.claim_guild(guild=ctx.guild, actor=ctx.author)
         await self._send_result(ctx, title="Guild Pro Claim", message=message, ok=ok)
 
     @premium_guild_group.command(name="release", with_app_command=True, description="Release Guild Pro from this server")
     async def premium_guild_release_command(self, ctx: commands.Context):
         if not await self._require_storage(ctx) or not await self._guild_admin_guard(ctx):
             return
-        ok, message = await self.service.release_guild(guild_id=ctx.guild.id, user_id=ctx.author.id)
+        ok, message = await self.service.release_guild(guild=ctx.guild, actor=ctx.author)
         await self._send_result(ctx, title="Guild Pro Release", message=message, ok=ok)
 
     @commands.command(name="premiumadmin", hidden=True)
@@ -432,7 +477,10 @@ class PremiumCog(commands.Cog):
             return
         author_id = getattr(ctx.author, "id", 0)
         if not self._is_override_owner(author_id):
-            print(f"Premium owner command denied: unauthorized_dm_user_id={author_id}")
+            LOGGER.warning(
+                "Premium owner command denied: unauthorized_dm_user_id=%s",
+                author_id,
+            )
             await ctx.send(content="That command is unavailable.")
             return
         tokens = [str(part).strip() for part in parts if str(part).strip()]
@@ -480,14 +528,18 @@ class PremiumCog(commands.Cog):
                 await ctx.send(embed=self._admin_status_embed(title="Premium Override", note="Plan codes must be supporter, plus, or guild_pro."))
                 return
             reason = " ".join(tokens[4:]) or None
-            record = await self.service.create_manual_override(
-                target_type=target_type,
-                target_id=target_id,
-                kind=MANUAL_KIND_GRANT,
-                plan_code=plan_code,
-                actor_user_id=author_id,
-                reason=reason,
-            )
+            try:
+                record = await self.service.create_manual_override(
+                    target_type=target_type,
+                    target_id=target_id,
+                    kind=MANUAL_KIND_GRANT,
+                    plan_code=plan_code,
+                    actor_user_id=author_id,
+                    reason=reason,
+                )
+            except (PremiumStorageUnavailable, ValueError) as exc:
+                await ctx.send(embed=self._admin_status_embed(title="Premium Override", note=f"Grant failed: {exc}"))
+                return
             await ctx.send(embed=self._admin_status_embed(title="Premium Override", note=f"Manual grant `{record['override_id']}` saved for {target_type} `{target_id}` at `{plan_code}`."))
             return
         if root == "block":
@@ -504,14 +556,18 @@ class PremiumCog(commands.Cog):
                 await ctx.send(embed=self._admin_status_embed(title="Premium Override", note="Block targets must be `user` or `guild`."))
                 return
             reason = " ".join(tokens[3:]) or None
-            record = await self.service.create_manual_override(
-                target_type=target_type,
-                target_id=target_id,
-                kind=MANUAL_KIND_BLOCK,
-                plan_code=None,
-                actor_user_id=author_id,
-                reason=reason,
-            )
+            try:
+                record = await self.service.create_manual_override(
+                    target_type=target_type,
+                    target_id=target_id,
+                    kind=MANUAL_KIND_BLOCK,
+                    plan_code=None,
+                    actor_user_id=author_id,
+                    reason=reason,
+                )
+            except (PremiumStorageUnavailable, ValueError) as exc:
+                await ctx.send(embed=self._admin_status_embed(title="Premium Override", note=f"Block failed: {exc}"))
+                return
             await ctx.send(embed=self._admin_status_embed(title="Premium Override", note=f"Premium suspension `{record['override_id']}` is active for {target_type} `{target_id}`."))
             return
         if root == "unblock":

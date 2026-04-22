@@ -5,6 +5,8 @@ import contextlib
 import difflib
 import hashlib
 import ipaddress
+import logging
+import os
 import re
 import time
 import uuid
@@ -24,10 +26,11 @@ from babblebox.premium_limits import (
     LIMIT_SHIELD_FILTERS,
     LIMIT_SHIELD_PACK_EXEMPTIONS,
     LIMIT_SHIELD_SEVERE_TERMS,
+    guild_capabilities,
     guild_limit as premium_guild_limit,
     storage_ceiling,
 )
-from babblebox.premium_models import PLAN_FREE
+from babblebox.premium_models import PLAN_FREE, PLAN_GUILD_PRO, SYSTEM_PREMIUM_SUPPORT_GUILD_ID
 from babblebox.shield_ai import (
     DEFAULT_SHIELD_AI_FAST_MODEL,
     SHIELD_AI_MIN_CONFIDENCE_CHOICES,
@@ -41,7 +44,6 @@ from babblebox.shield_ai import (
     format_shield_ai_model_list,
     parse_shield_ai_model_list,
     sanitize_message_for_ai,
-    shield_ai_available_in_guild,
     summarize_attachment_extensions,
 )
 from babblebox.shield_link_safety import (
@@ -106,6 +108,9 @@ from babblebox.text_safety import (
     squash_for_evasion_checks,
 )
 from babblebox.utility_helpers import deserialize_datetime, make_attachment_labels, make_message_preview
+
+
+LOGGER = logging.getLogger(__name__)
 
 
 RULE_PACKS = ("privacy", "promo", "scam", "spam", "gif", "adult", "severe")
@@ -888,9 +893,9 @@ class ShieldAIAccessPolicy:
     enabled: bool
     policy_enabled: bool
     source: str
-    support_default: bool
     premium_unlocked: bool
     allowed_models: tuple[str, ...]
+    plan_allowed_models: tuple[str, ...]
     ordinary_global_enabled: bool
     ordinary_global_allowed_models: tuple[str, ...]
     guild_access_mode: str
@@ -2382,13 +2387,18 @@ class ShieldService:
         self.storage_ready = False
         self.storage_error: str | None = None
         self._startup_storage_error: str | None = None
+        self.storage_backend_preference = (
+            getattr(store, "backend_preference", None)
+            or (os.getenv("SHIELD_STORAGE_BACKEND", "").strip() or "postgres")
+        ).strip().lower()
         if store is not None:
             self.store = store
         else:
             try:
                 self.store = ShieldStateStore()
+                self.storage_backend_preference = getattr(self.store, "backend_preference", self.storage_backend_preference)
             except ShieldStorageUnavailable as exc:
-                print(f"Shield storage constructor failed: {exc}")
+                LOGGER.warning("Shield storage constructor failed: %s", exc)
                 self.store = ShieldStateStore(backend="memory")
                 self._startup_storage_error = str(exc)
                 self.storage_error = str(exc)
@@ -2415,14 +2425,14 @@ class ShieldService:
         if self._startup_storage_error is not None:
             self.storage_ready = False
             self.storage_error = self._startup_storage_error
-            print(f"Shield storage unavailable: {self._startup_storage_error}")
+            LOGGER.warning("Shield storage unavailable: %s", self._startup_storage_error)
             return False
         try:
             await self.store.load()
         except ShieldStorageUnavailable as exc:
             self.storage_ready = False
             self.storage_error = str(exc)
-            print(f"Shield storage unavailable: {exc}")
+            LOGGER.warning("Shield storage unavailable: %s", exc)
             return False
         self.storage_ready = True
         self.storage_error = None
@@ -2448,12 +2458,18 @@ class ShieldService:
     def _resolve_guild_limit(self, guild_id: int, limit_key: str, fallback: int) -> int:
         premium_service = self._premium_service()
         if premium_service is None:
+            if int(guild_id or 0) == SYSTEM_PREMIUM_SUPPORT_GUILD_ID:
+                return premium_guild_limit(PLAN_GUILD_PRO, limit_key)
             return fallback
         return premium_service.resolve_guild_limit(guild_id, limit_key)
 
     def _guild_has_capability(self, guild_id: int, capability: str) -> bool:
         premium_service = self._premium_service()
-        return bool(premium_service is not None and premium_service.guild_has_capability(guild_id, capability))
+        if premium_service is not None:
+            return bool(premium_service.guild_has_capability(guild_id, capability))
+        if int(guild_id or 0) == SYSTEM_PREMIUM_SUPPORT_GUILD_ID:
+            return capability in guild_capabilities(PLAN_GUILD_PRO)
+        return False
 
     def _premium_limit_error(self, *, guild_id: int, limit_key: str, limit_value: int, default_message: str) -> str:
         premium_service = self._premium_service()
@@ -2518,23 +2534,14 @@ class ShieldService:
     def resolve_ai_access_policy(self, guild_id: int) -> ShieldAIAccessPolicy:
         config = self.get_config(guild_id)
         meta = self.get_meta()
-        support_default = shield_ai_available_in_guild(guild_id)
-        premium_enabled = support_default or self._guild_has_capability(guild_id, CAPABILITY_SHIELD_AI_REVIEW)
+        premium_enabled = self._guild_has_capability(guild_id, CAPABILITY_SHIELD_AI_REVIEW)
         ordinary_global_enabled = bool(meta["ordinary_ai_enabled"])
         ordinary_global_allowed_models = tuple(meta["ordinary_ai_allowed_models"]) or (DEFAULT_SHIELD_AI_FAST_MODEL,)
-
-        if support_default:
-            enabled = True
-            allowed_models = SHIELD_AI_MODEL_ORDER
-            source = "support_default"
-            updated_by = None
-            updated_at = None
-        else:
-            enabled = ordinary_global_enabled
-            allowed_models = ordinary_global_allowed_models
-            source = "ordinary_global"
-            updated_by = meta["ordinary_ai_updated_by"]
-            updated_at = meta["ordinary_ai_updated_at"]
+        enabled = ordinary_global_enabled
+        allowed_models = ordinary_global_allowed_models
+        source = "ordinary_global"
+        updated_by = meta["ordinary_ai_updated_by"]
+        updated_at = meta["ordinary_ai_updated_at"]
 
         guild_access_mode = str(config.get("ai_access_mode", "inherit")).strip().lower()
         if guild_access_mode not in VALID_SHIELD_AI_ACCESS_MODES:
@@ -2558,17 +2565,19 @@ class ShieldService:
             updated_by = config.get("ai_access_updated_by")
             updated_at = config.get("ai_access_updated_at")
         policy_enabled = enabled
-        if not premium_enabled:
-            enabled = False
+        plan_allowed_models = SHIELD_AI_MODEL_ORDER if premium_enabled else (DEFAULT_SHIELD_AI_FAST_MODEL,)
+        effective_allowed_models = tuple(model for model in allowed_models if model in plan_allowed_models)
+        if not effective_allowed_models:
+            effective_allowed_models = (DEFAULT_SHIELD_AI_FAST_MODEL,)
 
         return ShieldAIAccessPolicy(
             guild_id=guild_id,
-            enabled=enabled,
+            enabled=policy_enabled,
             policy_enabled=policy_enabled,
             source=source,
-            support_default=support_default,
             premium_unlocked=premium_enabled,
-            allowed_models=tuple(allowed_models),
+            allowed_models=effective_allowed_models,
+            plan_allowed_models=plan_allowed_models,
             ordinary_global_enabled=ordinary_global_enabled,
             ordinary_global_allowed_models=ordinary_global_allowed_models,
             guild_access_mode=guild_access_mode,
@@ -2597,34 +2606,29 @@ class ShieldService:
             if not enabled_packs:
                 setup_blockers.append("Select at least one Shield pack for AI review.")
         status_message = provider_status
-        if not policy.premium_unlocked:
-            if policy.policy_enabled:
-                status_message = "Shield AI second-pass review requires Babblebox Guild Pro on this server."
-            elif policy.source == "guild_override":
-                status_message = "AI review is disabled for this guild by owner override. Babblebox Guild Pro is also required for live review."
-            else:
-                status_message = "AI review is off for ordinary guilds until the owner enables it. Babblebox Guild Pro is also required for live review."
-        elif not policy.enabled:
-            if policy.support_default:
-                status_message = "AI review is disabled for the support server by owner override."
-            elif policy.source == "guild_override":
+        if not policy.enabled:
+            if policy.source == "guild_override":
                 status_message = "AI review is disabled for this guild by owner override."
             else:
-                status_message = "AI review is off for ordinary guilds until the owner enables it."
+                status_message = "AI review is off until the owner enables it."
         elif not diagnostics["available"]:
             status_message = "AI review is enabled by policy but the provider is not configured."
         elif setup_blockers:
             status_message = setup_blockers[0] if len(setup_blockers) == 1 else "AI review is enabled by policy, but local Shield setup is incomplete."
-        else:
+        elif policy.premium_unlocked:
             status_message = "Ready for second-pass review."
+        else:
+            status_message = "Ready for second-pass review with the nano tier."
         return {
-            "supported": policy.premium_unlocked,
+            "supported": True,
             "enabled": policy.enabled,
             "policy_enabled": policy.policy_enabled,
             "policy_source": policy.source,
-            "support_server_default": policy.support_default,
             "premium_unlocked": policy.premium_unlocked,
             "premium_required": not policy.premium_unlocked,
+            "enhanced_models_unlocked": policy.premium_unlocked,
+            "enhanced_models_required": not policy.premium_unlocked,
+            "plan_allowed_models": list(policy.plan_allowed_models),
             "ordinary_global_enabled": policy.ordinary_global_enabled,
             "ordinary_global_allowed_models": list(policy.ordinary_global_allowed_models),
             "guild_access_mode": policy.guild_access_mode,
@@ -2829,7 +2833,7 @@ class ShieldService:
         ok, message = await self.inherit_guild_ai_access_policy(SHIELD_AI_SUPPORT_GUILD_ID, actor_id=actor_id)
         if not ok:
             return False, message
-        return True, "Support server Shield AI access restored to full default access."
+        return True, "Support server Shield AI now inherits the ordinary owner policy again."
 
     async def set_global_ai_override(self, enabled: bool, *, actor_id: int) -> tuple[bool, str]:
         return await self.set_ordinary_ai_policy(enabled=enabled, actor_id=actor_id)
@@ -2895,7 +2899,7 @@ class ShieldService:
 
         message = f"Shield live-message moderation is now {'enabled' if enabled else 'disabled'} for this server."
         if enabled:
-            message += " Shield AI stays second-pass only and requires Guild Pro outside the support server."
+            message += " Shield AI stays second-pass only, owner policy controls whether review runs, and Guild Pro unlocks gpt-5.4-mini plus gpt-5.4."
             if first_enable:
                 message += (
                     " On first enable, Babblebox applies its recommended non-AI baseline anywhere you had not already customized it. "
@@ -3791,7 +3795,7 @@ class ShieldService:
         if enabled is not None:
             return (
                 False,
-                "Shield AI eligibility is resolved outside `/shield ai`. Babblebox Guild Pro unlocks second-pass review; this command only changes review threshold and eligible packs.",
+                "Shield AI availability is resolved by owner policy outside `/shield ai`. This command only changes review threshold and eligible packs, and Guild Pro only unlocks gpt-5.4-mini and gpt-5.4.",
             )
         cleaned_min_confidence = str(min_confidence).strip().lower() if isinstance(min_confidence, str) else None
         if cleaned_min_confidence is not None and cleaned_min_confidence not in SHIELD_AI_MIN_CONFIDENCE_CHOICES:
@@ -3820,9 +3824,9 @@ class ShieldService:
         policy = self.resolve_ai_access_policy(guild_id)
         provider_status = self.ai_provider.diagnostics().get("status", "Unavailable.")
         entitlement_note = (
-            "Guild Pro unlock is active for live second-pass review."
+            "Guild Pro enhanced models are active on this server."
             if policy.premium_unlocked
-            else "Guild Pro is still required for live second-pass review on this server."
+            else "Guild Pro is still required for gpt-5.4-mini and gpt-5.4 on this server."
         )
         return await self._update_config(
             guild_id,
@@ -3830,7 +3834,7 @@ class ShieldService:
             success_message=(
                 f"Shield AI review scope now uses `{final_min_confidence}` minimum local confidence for {pack_summary}. "
                 f"Owner policy source: `{policy.source}`. "
-                f"Allowed models: {format_shield_ai_model_list(policy.allowed_models)}. "
+                f"Allowed models right now: {format_shield_ai_model_list(policy.allowed_models)}. "
                 f"{entitlement_note} "
                 f"Provider status: {provider_status}"
             ),
@@ -8251,6 +8255,11 @@ class ShieldService:
         return None
 
     def _compile_config(self, guild_id: int, raw: dict[str, Any]) -> CompiledShieldConfig:
+        filter_limit = self.filter_limit(guild_id)
+        allowlist_limit = self.allowlist_limit(guild_id)
+        pack_exemption_limit = self.pack_exemption_limit(guild_id)
+        severe_term_limit = min(self.severe_term_limit(guild_id), SHIELD_SEVERE_COMPILED_LIMIT)
+        custom_pattern_limit = self.custom_pattern_limit(guild_id)
         custom_patterns: list[CompiledCustomPattern] = []
         for item in raw.get("custom_patterns", []):
             if not isinstance(item, dict) or not item.get("enabled", True):
@@ -8277,6 +8286,7 @@ class ShieldService:
                     wildcard_tokens=wildcard_tokens,
                 )
             )
+        custom_patterns = custom_patterns[:custom_pattern_limit]
 
         link_policy_mode = str(raw.get("link_policy_mode", DEFAULT_SHIELD_LINK_POLICY_MODE)).strip().lower()
         if link_policy_mode not in VALID_SHIELD_LINK_POLICY_MODES:
@@ -8284,9 +8294,9 @@ class ShieldService:
         raw_pack_exemptions = raw.get("pack_exemptions", {})
         compiled_pack_exemptions = {
             pack: PackExemptionScope(
-                channel_ids=frozenset(_sorted_unique_ints(((raw_pack_exemptions.get(pack) or {}).get("channel_ids", [])) if isinstance(raw_pack_exemptions, dict) else [])),
-                role_ids=frozenset(_sorted_unique_ints(((raw_pack_exemptions.get(pack) or {}).get("role_ids", [])) if isinstance(raw_pack_exemptions, dict) else [])),
-                user_ids=frozenset(_sorted_unique_ints(((raw_pack_exemptions.get(pack) or {}).get("user_ids", [])) if isinstance(raw_pack_exemptions, dict) else [])),
+                channel_ids=frozenset(_sorted_unique_ints(((raw_pack_exemptions.get(pack) or {}).get("channel_ids", [])) if isinstance(raw_pack_exemptions, dict) else [])[:pack_exemption_limit]),
+                role_ids=frozenset(_sorted_unique_ints(((raw_pack_exemptions.get(pack) or {}).get("role_ids", [])) if isinstance(raw_pack_exemptions, dict) else [])[:pack_exemption_limit]),
+                user_ids=frozenset(_sorted_unique_ints(((raw_pack_exemptions.get(pack) or {}).get("user_ids", [])) if isinstance(raw_pack_exemptions, dict) else [])[:pack_exemption_limit]),
             )
             for pack in RULE_PACKS
         }
@@ -8327,16 +8337,16 @@ class ShieldService:
                 else "smart"
             ),
             scan_mode=raw.get("scan_mode", "all"),
-            included_channel_ids=frozenset(_sorted_unique_ints(raw.get("included_channel_ids", []))),
-            excluded_channel_ids=frozenset(_sorted_unique_ints(raw.get("excluded_channel_ids", []))),
-            included_user_ids=frozenset(_sorted_unique_ints(raw.get("included_user_ids", []))),
-            excluded_user_ids=frozenset(_sorted_unique_ints(raw.get("excluded_user_ids", []))),
-            included_role_ids=frozenset(_sorted_unique_ints(raw.get("included_role_ids", []))),
-            excluded_role_ids=frozenset(_sorted_unique_ints(raw.get("excluded_role_ids", []))),
-            trusted_role_ids=frozenset(_sorted_unique_ints(raw.get("trusted_role_ids", []))),
-            allow_domains=frozenset(_sorted_unique_text(raw.get("allow_domains", []))),
-            allow_invite_codes=frozenset(_sorted_unique_text(raw.get("allow_invite_codes", []))),
-            allow_phrases=tuple(_sorted_unique_text(raw.get("allow_phrases", []))),
+            included_channel_ids=frozenset(_sorted_unique_ints(raw.get("included_channel_ids", []))[:filter_limit]),
+            excluded_channel_ids=frozenset(_sorted_unique_ints(raw.get("excluded_channel_ids", []))[:filter_limit]),
+            included_user_ids=frozenset(_sorted_unique_ints(raw.get("included_user_ids", []))[:filter_limit]),
+            excluded_user_ids=frozenset(_sorted_unique_ints(raw.get("excluded_user_ids", []))[:filter_limit]),
+            included_role_ids=frozenset(_sorted_unique_ints(raw.get("included_role_ids", []))[:filter_limit]),
+            excluded_role_ids=frozenset(_sorted_unique_ints(raw.get("excluded_role_ids", []))[:filter_limit]),
+            trusted_role_ids=frozenset(_sorted_unique_ints(raw.get("trusted_role_ids", []))[:filter_limit]),
+            allow_domains=frozenset(_sorted_unique_text(raw.get("allow_domains", []))[:allowlist_limit]),
+            allow_invite_codes=frozenset(_sorted_unique_text(raw.get("allow_invite_codes", []))[:allowlist_limit]),
+            allow_phrases=tuple(_sorted_unique_text(raw.get("allow_phrases", []))[:allowlist_limit]),
             trusted_builtin_disabled_families=frozenset(_sorted_unique_text(raw.get("trusted_builtin_disabled_families", []))),
             trusted_builtin_disabled_domains=frozenset(_sorted_unique_text(raw.get("trusted_builtin_disabled_domains", []))),
             pack_exemptions=compiled_pack_exemptions,
@@ -8426,7 +8436,7 @@ class ShieldService:
             ),
             adult_solicitation_enabled=bool(raw.get("adult_solicitation_enabled")),
             adult_solicitation_excluded_channel_ids=frozenset(
-                _sorted_unique_ints(raw.get("adult_solicitation_excluded_channel_ids", []))
+                _sorted_unique_ints(raw.get("adult_solicitation_excluded_channel_ids", []))[:filter_limit]
             ),
             severe=PackSettings(
                 enabled=bool(raw.get("severe_enabled")),
@@ -8440,8 +8450,8 @@ class ShieldService:
                 for category in _sorted_unique_text(raw.get("severe_enabled_categories", DEFAULT_SHIELD_SEVERE_CATEGORIES))
                 if category in VALID_SHIELD_SEVERE_CATEGORIES
             ),
-            severe_custom_terms=tuple(_sorted_unique_text(raw.get("severe_custom_terms", []))[:SHIELD_SEVERE_COMPILED_LIMIT]),
-            severe_removed_terms=frozenset(_sorted_unique_text(raw.get("severe_removed_terms", []))[:SHIELD_SEVERE_COMPILED_LIMIT]),
+            severe_custom_terms=tuple(_sorted_unique_text(raw.get("severe_custom_terms", []))[:severe_term_limit]),
+            severe_removed_terms=frozenset(_sorted_unique_text(raw.get("severe_removed_terms", []))[:severe_term_limit]),
             link_policy_mode=link_policy_mode,
             link_policy=PackSettings(
                 enabled=link_policy_mode != DEFAULT_SHIELD_LINK_POLICY_MODE,

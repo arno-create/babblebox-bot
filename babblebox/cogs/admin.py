@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import logging
 from datetime import timedelta
 from typing import Any, Awaitable, Callable, Optional
 
@@ -25,8 +26,11 @@ from babblebox.command_utils import (
     send_hybrid_panel_response,
 )
 from babblebox.admin_panel_views import AdminPanelView
+from babblebox.runtime_health import bind_started_service
 from babblebox.utility_helpers import deserialize_datetime, format_duration_brief, parse_duration_string
 
+
+LOGGER = logging.getLogger(__name__)
 
 FOLLOWUP_MODE_CHOICES = [
     app_commands.Choice(name="Auto remove", value="auto_remove"),
@@ -190,8 +194,7 @@ class AdminCog(commands.Cog):
         harden_timeout_root_group(self.timeout_group)
 
     async def cog_load(self):
-        await self.service.start()
-        setattr(self.bot, "admin_service", self.service)
+        await bind_started_service(self.bot, attr_name="admin_service", service=self.service, label="Admin")
         for record in await self.service.list_review_views():
             message_id = record.get("review_message_id")
             if not isinstance(message_id, int):
@@ -752,7 +755,7 @@ class AdminCog(commands.Cog):
         try:
             ok, message = await action()
         except Exception as exc:
-            print(f"{title} action failed: {exc}")
+            LOGGER.warning("%s action failed: error_type=%s", title, type(exc).__name__)
             ok, message = False, unexpected_message
         await self._send_result(
             ctx,

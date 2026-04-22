@@ -25,7 +25,7 @@ from babblebox.cogs.confessions import (
     _validate_discord_modal_payload,
 )
 from babblebox.premium_limits import LIMIT_CONFESSIONS_MAX_IMAGES, guild_limit as premium_guild_limit
-from babblebox.premium_models import PLAN_FREE, PLAN_GUILD_PRO
+from babblebox.premium_models import PLAN_FREE, PLAN_GUILD_PRO, SYSTEM_PREMIUM_SUPPORT_GUILD_ID
 from babblebox.shield_link_safety import ShieldLinkAssessment
 from babblebox.shield_service import FEATURE_SURFACE_CONFESSIONS_LINKS, ShieldFeatureLinkScan
 from babblebox.confessions_service import CASE_ID_PREFIX, CONFESSION_ID_PREFIX, ConfessionSubmissionResult, ConfessionsService
@@ -750,6 +750,8 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
 
     def _attach_premium(self, *, guild_plans: dict[int, str] | None = None):
         self.bot.premium_service = PremiumConfessionsStub(guild_plans=guild_plans)
+        for guild_id in list(self.service._compiled_configs):
+            self.service._compiled_configs[guild_id] = self.service._compile_config(guild_id, self.service.get_config(guild_id))
 
     def _member(
         self,
@@ -1266,7 +1268,10 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.service.confession_image_limit(self.guild.id), 6)
         self.assertEqual(self.service.get_config(self.guild.id)["max_images"], 6)
 
-    async def test_confession_image_setting_stays_visible_after_downgrade(self):
+    async def test_support_guild_confession_image_limit_fallback_applies_without_attached_premium_runtime(self):
+        self.assertEqual(self.service.confession_image_limit(SYSTEM_PREMIUM_SUPPORT_GUILD_ID), 6)
+
+    async def test_confession_image_setting_stays_visible_after_downgrade_but_runtime_enforces_current_plan(self):
         await self._configure()
         self._attach_premium(guild_plans={self.guild.id: PLAN_GUILD_PRO})
         ok, message = await self.service.configure_guild(self.guild.id, allow_images=True, max_images=6)
@@ -1279,6 +1284,14 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
 
         ok, message = await self.service.configure_guild(self.guild.id, max_images=6)
         self.assertTrue(ok, message)
+        compiled = self.service.get_compiled_config(self.guild.id)
+        self.assertEqual(compiled["effective_max_images"], 3)
+        allowed, validation_message = self.service._validate_attachments(
+            compiled,
+            [FakeAttachment(f"image-{index}.png", url=f"https://cdn.example/{index}.png") for index in range(4)],
+        )
+        self.assertFalse(allowed)
+        self.assertIn("up to 3 images", validation_message)
 
     async def test_strike_escalation_clear_action_and_guild_scoping(self):
         await self._configure()
@@ -2963,6 +2976,37 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(snapshot["status"], "bot_missing_permissions")
         self.assertIn("Embed Links", snapshot["message"])
 
+    async def test_review_channel_snapshot_rejects_public_channel(self):
+        await self._configure(review_mode=True, review_channel=True, appeals_channel=True)
+        self.review_channel.public_view = True
+
+        snapshot = self.service.review_channel_snapshot(self.guild)
+
+        self.assertFalse(snapshot["ok"])
+        self.assertEqual(snapshot["status"], "public")
+        self.assertIn("@everyone", snapshot["message"])
+
+    async def test_review_channel_snapshot_rejects_same_public_channel(self):
+        await self._configure(review_mode=True, review_channel=True, appeals_channel=True)
+        compiled = self.service.get_compiled_config(self.guild.id)
+        compiled["review_channel_id"] = self.confession_channel.id
+
+        snapshot = self.service.review_channel_snapshot(self.guild)
+
+        self.assertFalse(snapshot["ok"])
+        self.assertEqual(snapshot["status"], "same_channel")
+        self.assertIn("matches the public confession channel", snapshot["message"])
+
+    async def test_review_channel_snapshot_requires_read_message_history(self):
+        await self._configure(review_mode=True, review_channel=True, appeals_channel=True)
+        self.review_channel.bot_can_read_history = False
+
+        snapshot = self.service.review_channel_snapshot(self.guild)
+
+        self.assertFalse(snapshot["ok"])
+        self.assertEqual(snapshot["status"], "bot_missing_permissions")
+        self.assertIn("Read Message History", snapshot["message"])
+
     async def test_support_requests_fail_closed_when_channel_becomes_public(self):
         await self._configure(review_mode=True, review_channel=True, appeals_channel=True)
         blocked = await self.service.submit_confession(self.guild, author_id=952, content="nigger", attachments=[])
@@ -3001,6 +3045,16 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
         rendered = json.dumps(embed.to_dict())
 
         self.assertIn("Support Channel", rendered)
+        self.assertIn("Public / Unsafe", rendered)
+
+    async def test_dashboard_embed_reports_review_channel_health(self):
+        await self._configure(review_mode=True, review_channel=True, appeals_channel=True)
+        self.review_channel.public_view = True
+
+        embed = await self.service.build_dashboard_embed(self.guild, section="review")
+        rendered = json.dumps(embed.to_dict())
+
+        self.assertIn("Review Channel", rendered)
         self.assertIn("Public / Unsafe", rendered)
 
     async def test_image_only_restriction_blocks_attachments_but_not_text_and_clear_restores(self):
@@ -3109,6 +3163,28 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("State: **Partial**", rendered)
         self.assertIn("Backfill: **Still needed for this server**", rendered)
 
+    async def test_readiness_snapshot_aggregates_privacy_review_and_support_issues(self):
+        await self._configure(review_mode=True, review_channel=True, appeals_channel=True)
+        self.review_channel.public_view = True
+        self.appeals_channel.bot_can_embed = False
+        self.service._privacy_status_global = {
+            "state": "partial",
+            "needs_backfill": True,
+            "categories": ["plaintext_submission_content"],
+        }
+
+        snapshot = self.service.readiness_snapshot()
+
+        self.assertFalse(snapshot["ready"])
+        self.assertFalse(snapshot["privacy_ready"])
+        self.assertFalse(snapshot["review_ready"])
+        self.assertFalse(snapshot["support_ready"])
+        self.assertEqual(snapshot["review_issue_counts"]["public"], 1)
+        self.assertEqual(snapshot["support_issue_counts"]["bot_missing_permissions"], 1)
+        self.assertIn("confessions_privacy_backfill_incomplete", snapshot["issue_codes"])
+        self.assertIn("confessions_review_channel_public", snapshot["issue_codes"])
+        self.assertIn("confessions_support_channel_bot_missing_permissions", snapshot["issue_codes"])
+
     async def test_start_logs_privacy_warning_when_backfill_is_needed(self):
         service = ConfessionsService(self.bot, store=ConfessionsStore(backend="memory"))
         try:
@@ -3145,6 +3221,22 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Confessions privacy status: hardening is ready.", rendered)
         finally:
             await service.close()
+
+    async def test_service_diagnostic_logs_exception_type_without_raw_error_detail(self):
+        with mock.patch("babblebox.confessions_service.LOGGER.error") as error_log:
+            self.service.log_admin_diagnostic(
+                code="diag",
+                stage="review",
+                guild_id=self.guild.id,
+                note="member note with https://example.test/path",
+                exc=RuntimeError("raw secret detail"),
+            )
+
+        error_log.assert_called_once()
+        logged = error_log.call_args.args[0]
+        self.assertIn("exception=RuntimeError", logged)
+        self.assertIn("note=member note with https://example.test/path", logged)
+        self.assertNotIn("raw secret detail", logged)
 
 
 class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
@@ -3238,6 +3330,39 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(ctx.send_calls[0]["ephemeral"])
         self.assertEqual(ctx.send_calls[0]["embed"].title, "Confessions Control Panel")
         self.assertIsNotNone(ctx.send_calls[0]["view"])
+
+    async def test_cog_create_diagnostic_sanitizes_note_and_omits_raw_error_detail(self):
+        with mock.patch("babblebox.cogs.confessions.LOGGER.error") as error_log:
+            self.cog.log_create_diagnostic(
+                code="diag",
+                stage="compose",
+                guild_id=self.guild.id,
+                note="Line one\nLine two",
+                exc=RuntimeError("stack detail"),
+            )
+
+        error_log.assert_called_once()
+        logged = error_log.call_args.args[0]
+        self.assertIn("exception=RuntimeError", logged)
+        self.assertIn("note=Line one Line two", logged)
+        self.assertNotIn("stack detail", logged)
+
+    async def test_modal_diagnostic_logs_exception_type_without_raw_error_detail(self):
+        with mock.patch("babblebox.cogs.confessions.LOGGER.error") as error_log:
+            self.cog.log_modal_diagnostic(
+                code="diag",
+                stage="submit",
+                modal_kind="confession",
+                guild_id=self.guild.id,
+                storage_ready=True,
+                operability_ready=True,
+                exc=RuntimeError("payload leak"),
+            )
+
+        error_log.assert_called_once()
+        logged = error_log.call_args.args[0]
+        self.assertIn("exception=RuntimeError", logged)
+        self.assertNotIn("payload leak", logged)
 
     async def test_status_command_denies_members_privately(self):
         ctx = FakeContext(guild=self.guild, author=self._member(2))

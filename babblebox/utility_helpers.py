@@ -8,6 +8,7 @@ from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
 import discord
 
 from babblebox import game_engine as ge
+from babblebox.text_safety import normalize_plain_text
 
 
 DURATION_PATTERN = re.compile(
@@ -117,6 +118,9 @@ AFK_REPEAT_LABELS = {
     "weekly": "Every week",
     "custom": "Selected weekdays",
 }
+ATTACHMENT_URL_SUFFIX_RE = re.compile(r"\s*\((https?://[^)]+)\)\s*$", re.IGNORECASE)
+ATTACHMENT_URL_TRAIL_RE = re.compile(r"\s*(?:-|:)\s*(https?://\S+)\s*$", re.IGNORECASE)
+BARE_URL_RE = re.compile(r"^https?://\S+$", re.IGNORECASE)
 
 AFK_QUICK_REASONS = {
     "sleeping": {
@@ -664,14 +668,37 @@ def _attachment_display_name(attachment) -> str:
     return _attachment_kind(attachment)
 
 
-def make_attachment_labels(message: discord.Message, *, include_urls: bool = True) -> list[str]:
+def sanitize_attachment_label(raw_label: str | None) -> str | None:
+    cleaned = normalize_plain_text(raw_label)
+    if not cleaned:
+        return None
+    had_only_url = bool(BARE_URL_RE.fullmatch(cleaned))
+    cleaned = ATTACHMENT_URL_SUFFIX_RE.sub("", cleaned).strip()
+    cleaned = ATTACHMENT_URL_TRAIL_RE.sub("", cleaned).strip()
+    if not cleaned:
+        return "attachment" if had_only_url else None
+    if BARE_URL_RE.fullmatch(cleaned):
+        return "attachment"
+    return cleaned
+
+
+def sanitize_attachment_labels(values: list[str] | tuple[str, ...] | None) -> list[str]:
+    sanitized: list[str] = []
+    for value in values or ():
+        cleaned = sanitize_attachment_label(value)
+        if cleaned:
+            sanitized.append(cleaned)
+    return sanitized
+
+
+def make_attachment_labels(message: discord.Message, *, include_urls: bool = False) -> list[str]:
     labels = []
     for attachment in message.attachments:
         label = _attachment_display_name(attachment)
         if include_urls and getattr(attachment, "url", None):
             label = f"{label} ({attachment.url})"
         labels.append(label)
-    return labels
+    return sanitize_attachment_labels(labels)
 
 
 def build_attachment_summary(attachments, *, include_names: bool = True) -> str | None:
@@ -762,7 +789,7 @@ def build_later_marker_embed(marker: dict) -> discord.Embed:
     embed.add_field(name="Saved", value=ge.format_timestamp(deserialize_datetime(marker.get("saved_at")), "R"), inline=True)
     embed.add_field(name="Author", value=marker.get("author_name", "Unknown"), inline=True)
     embed.add_field(name="Preview", value=marker.get("preview", "[quiet message]"), inline=False)
-    attachment_lines = marker.get("attachment_labels") or []
+    attachment_lines = sanitize_attachment_labels(marker.get("attachment_labels") or [])
     if attachment_lines:
         shown = attachment_lines[:3]
         if len(attachment_lines) > len(shown):

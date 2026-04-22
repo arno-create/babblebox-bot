@@ -1,6 +1,7 @@
 from pathlib import Path
 import unittest
 
+from babblebox import web
 from babblebox.web import app
 
 
@@ -355,6 +356,45 @@ class WebsiteDocsTests(unittest.TestCase):
         self.assertNotIn("gpt-4.1-mini", help_html)
         self.assertNotIn("gpt-4.1-mini", index_html)
 
+    def test_shield_ai_docs_describe_tiered_models_without_support_server_bypass(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        help_html = (ROOT / "help.html").read_text(encoding="utf-8")
+        privacy_md = (ROOT / "PRIVACY.md").read_text(encoding="utf-8")
+        privacy_html = (ROOT / "privacy.html").read_text(encoding="utf-8")
+
+        for text in (
+            "Guild Pro unlocks the higher models",
+            "Guild Pro unlocks the higher",
+            "gpt-5.4-nano` is the baseline tier",
+            "owner policy controls whether review runs",
+        ):
+            self.assertTrue(any(text in content for content in (readme, help_html, privacy_md, privacy_html)))
+
+        for text in (
+            "support server has full Shield AI access by default",
+            "requires Guild Pro outside the support server",
+            "outside the support server it needs both owner policy and Babblebox Guild Pro",
+            "support server AI is on by default with full model access",
+        ):
+            self.assertNotIn(text, readme)
+            self.assertNotIn(text, help_html)
+            self.assertNotIn(text, privacy_md)
+            self.assertNotIn(text, privacy_html)
+
+    def test_docs_keep_capture_and_later_attachment_privacy_claims_aligned(self):
+        for path in (
+            "README.md",
+            "PRIVACY.md",
+            "TERMS.md",
+            "help.html",
+            "privacy.html",
+            "terms.html",
+            "babblebox/cogs/meta.py",
+        ):
+            content = (ROOT / path).read_text(encoding="utf-8")
+            self.assertIn("compact attachment", content, msg=path)
+            self.assertIn("currently available attachment URLs at send time", content, msg=path)
+
     def test_shield_docs_cover_panel_first_pack_local_editing_and_timeout_profiles(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         help_html = (ROOT / "help.html").read_text(encoding="utf-8")
@@ -538,8 +578,42 @@ class WebsiteDocsTests(unittest.TestCase):
             "used only during key rotation or compatibility windows",
             "code deploy plus keys is not enough",
             "privacy hardening is `Ready` or `Partial`",
+            "in-process `Waitress`",
+            "`/readyz` is the deployment and monitoring gate",
         ):
             self.assertIn(text, readme)
+        for text in (
+            "The embedded HTTP surface uses in-process Waitress.",
+            "/livez is liveness only, /health is the public-safe summary, and /readyz is the rollout + alert gate.",
+            "Confessions readiness stays degraded until the privacy backfill is complete",
+        ):
+            self.assertIn(text, env_example)
+
+    def test_patreon_docs_reflect_fail_closed_local_disconnect_contract(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        help_html = (ROOT / "help.html").read_text(encoding="utf-8")
+        privacy_html = (ROOT / "privacy.html").read_text(encoding="utf-8")
+        privacy_md = (ROOT / "PRIVACY.md").read_text(encoding="utf-8")
+        terms_html = (ROOT / "terms.html").read_text(encoding="utf-8")
+        terms_md = (ROOT / "TERMS.md").read_text(encoding="utf-8")
+        env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
+        combined = "\n".join((readme, help_html, privacy_html, privacy_md, terms_html, terms_md, env_example))
+
+        self.assertIn("PATREON_REDIRECT_URI must exactly match PUBLIC_BASE_URL", readme)
+        self.assertIn("PATREON_REDIRECT_URI must exactly match PUBLIC_BASE_URL", env_example)
+        self.assertIn("Tier ID lists must be disjoint numeric Patreon tier IDs.", env_example)
+        self.assertIn("delete Babblebox's local encrypted Patreon tokens", readme)
+        self.assertIn("deletes Babblebox's local encrypted Patreon tokens", help_html)
+        self.assertIn("compact sanitized webhook event metadata", privacy_html)
+        self.assertIn("compact sanitized webhook event metadata", privacy_md)
+        self.assertIn("hard provider-auth failure", terms_html)
+        self.assertIn("hard provider-auth failure", terms_md)
+        self.assertIn("Public status endpoints expose only non-sensitive liveness/readiness summaries", privacy_html)
+        self.assertIn("public liveness/readiness pages", terms_html)
+        self.assertIn("public liveness/readiness pages", terms_md)
+
+        for text in ("PATREON_CREATOR_ACCESS_TOKEN", "PATREON_SCOPES_OVERRIDE", "w:campaigns.webhook"):
+            self.assertNotIn(text, combined)
 
     def test_homepage_and_readme_use_current_proof_assets(self):
         index_html = (ROOT / "index.html").read_text(encoding="utf-8")
@@ -623,7 +697,15 @@ class WebsiteDocsTests(unittest.TestCase):
             self.assertNotIn("Moment Cards", content, msg=path)
             self.assertNotIn("Babblebox Moment", content, msg=path)
 
-        response = app.test_client().get("/health")
-        self.assertEqual(response.status_code, 200)
-        payload = response.get_json()
-        self.assertNotIn("/moment recent", payload["commands"])
+        original_premium_runtime = getattr(web, "_premium_runtime", None)
+        original_bot_runtime = getattr(web, "_bot_runtime", None)
+        try:
+            web.set_premium_runtime(None)
+            web.set_bot_runtime(None)
+            response = app.test_client().get("/health")
+        finally:
+            web.set_premium_runtime(original_premium_runtime)
+            web.set_bot_runtime(original_bot_runtime)
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(response.get_json()["status"], "degraded")
+        self.assertNotIn("/moment recent", response.get_data(as_text=True))

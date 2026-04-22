@@ -585,7 +585,7 @@
             compact instead of turning into an everything archive.
           </p>
           <p>
-            Effective date: <strong>April 19, 2026</strong>. By using Babblebox in a Discord server or through Babblebox's
+            Effective date: <strong>April 22, 2026</strong>. By using Babblebox in a Discord server or through Babblebox's
             Discord-based features, you agree to the practices described on this page.
           </p>
           <div class="hero-actions">
@@ -669,7 +669,7 @@
             <h3>Feature configuration and compact state</h3>
             <ul>
               <li>Watch preferences, filters, ignored channels or users, and scoped keywords.</li>
-              <li>Later markers, reminders, AFK state, AFK schedules, and related user preferences.</li>
+              <li>Later markers with compact attachment labels, reminders, AFK state, AFK schedules, and related user preferences.</li>
               <li>Daily Arcade scores, attempts, streak counters, Buddy and profile state, and other compact identity or progression fields.</li>
               <li>Shield and admin configuration such as enabled modules, scope controls, allowlists, trusted roles, log destinations, and short-lived admin lifecycle state.</li>
               <li>Premium linking and entitlement state such as linked Discord and Patreon account IDs, encrypted provider tokens or secrets, resolved plans, guild claims, sync timestamps, webhook dedupe markers, manual overrides, and support-grade audit metadata.</li>
@@ -680,13 +680,14 @@
             <h3>Limited message and attachment context</h3>
             <ul>
               <li>Babblebox may read message content or metadata needed to respond to commands, deliver Watch alerts, process Capture requests, or evaluate locally flagged Shield events, including visible message text, embed text, forwarded message snapshots, and attachment labels.</li>
-              <li>Attachment names or URLs may be used at send time when needed for previews or private transcript delivery.</li>
+              <li>Later markers keep compact attachment labels instead of raw attachment URLs, while private Capture transcript files may include currently available attachment URLs at send time.</li>
               <li>For anonymous confessions, raw attachment filenames and raw Discord CDN URLs are kept out of staff-visible review surfaces.</li>
             </ul>
             <h3>What Babblebox is designed not to store durably</h3>
             <ul>
               <li>No general-purpose message archive.</li>
               <li>No media or attachment blob storage in Postgres.</li>
+              <li>No durable raw attachment URLs in Later markers.</li>
               <li>No durable storage of raw confession attachment filenames or raw Discord CDN URLs in staff-facing moderation records.</li>
               <li>No full deleted-message archive table.</li>
               <li>No long-term storage of DM bodies or full Capture transcript archives.</li>
@@ -728,8 +729,8 @@
             <ul>
               <li>Public profile-style surfaces, Daily Arcade sharing, and similar outputs are intended to be visible in-server.</li>
               <li>Watch alerts are delivered through Discord DMs.</li>
-              <li>Capture transcripts are delivered privately rather than kept as a long-term database archive.</li>
-              <li>Later markers, reminders, anonymous confessions, and sensitive setup flows are designed to avoid unnecessary public exposure.</li>
+              <li>Capture transcripts are delivered privately; private Capture transcript files may include currently available attachment URLs at send time, but Babblebox does not keep full transcript archives long-term.</li>
+              <li>Later markers store compact attachment labels instead of durable raw attachment URLs, and reminders, anonymous confessions, plus sensitive setup flows are designed to avoid unnecessary public exposure.</li>
               <li>Premium account linking, status, refresh, and guild-claim flows are private-first so entitlement checks and provider identity handling do not spill into public channels.</li>
               <li>AFK reasons, reminder text, public reminder delivery, watch keywords, and Confessions link checks now use bounded private Shield feature-surface evaluation instead of bypassing Babblebox core safety entirely.</li>
               <li>Anonymous confessions are optional, keep the author hidden from staff, and are moderated by confession ID and case ID only while Babblebox still enforces safety internally.</li>
@@ -760,14 +761,16 @@
               If premium linking is enabled, Babblebox may exchange data with Patreon to link a Discord user to a Patreon
               member identity, verify active tiers, refresh entitlement state, process webhook updates, and support manual
               recovery when provider delivery is stale or interrupted. That can include Patreon member IDs, tier IDs,
-              campaign IDs, encrypted OAuth tokens, webhook event metadata, and guild-claim state. Babblebox is not designed
-              to receive or store payment card data from Patreon.
+              campaign IDs, encrypted OAuth tokens, compact sanitized webhook event metadata, and guild-claim state.
+              Babblebox deletes the local encrypted Patreon tokens when a user unlinks and is not designed to receive or
+              store payment card data from Patreon.
             </p>
             <h3>Optional AI-assisted Shield review</h3>
             <p>
               Babblebox does not perform always-on AI scanning by default. If optional AI-assisted Shield review is enabled
-              where available, it only runs after local Shield logic has already flagged live-message content. The support server has full Shield AI
-              access by default, while ordinary guilds need both owner policy and Babblebox Guild Pro. In that flow, only minimal,
+              where available, it only runs after local Shield logic has already flagged live-message content. Owner policy controls whether Shield AI
+              runs at all, <code>gpt-5.4-nano</code> is the baseline tier, and Babblebox Guild Pro only unlocks the higher
+              <code>gpt-5.4-mini</code> and <code>gpt-5.4</code> tiers. In that flow, only minimal,
               sanitized, and truncated flagged text needed for that review is intended to be sent to the configured AI provider,
               even when the local signal came from embed text, attachment labels, or forwarded message snapshots instead of the
               raw message body alone. Shield's private feature-surface checks for AFK, reminders, watch keywords, and Confessions link parity stay AI-free in this release.
@@ -785,7 +788,7 @@
               <li>Ban-return candidate records are intended to have a bounded purge window rather than indefinite retention.</li>
               <li>Resolved anonymous confession rows scrub previews, body text, link fields, and attachment metadata after the moderation workflow is complete while compact keyed duplicate signatures are retained for abuse prevention.</li>
               <li>Keyed duplicate-abuse signals are guild-scoped instead of global across every server.</li>
-              <li>Watch configuration, Later markers, reminders, AFK settings, and similar utility records remain until changed, cleared, expired, or removed.</li>
+              <li>Watch configuration, Later markers, reminders, AFK settings, and similar utility records remain until changed, cleared, expired, or removed, with Later retaining compact attachment-label state rather than raw attachment URLs.</li>
               <li>Premium link, entitlement, claim, and webhook-dedupe records remain until they are superseded, unlinked, expired, revoked, or no longer needed for support, abuse prevention, or operational recovery.</li>
             </ul>
             <p>Deletion timing can depend on when a reminder expires, a schedule ends, a configuration is removed, or a short-lived moderation workflow finishes.</p>
@@ -800,6 +803,7 @@
               <li>Private-first flows are used for utilities and other sensitive feature surfaces when appropriate.</li>
               <li>Sensitive Confessions content and identity linkage use separate application-managed encryption domains and keyed lookup hashes.</li>
               <li>Babblebox exposes operator-facing warnings when Confessions privacy hardening is only partial and the backfill or key rotation cleanup is still incomplete.</li>
+              <li>Public status endpoints expose only non-sensitive liveness/readiness summaries plus sanitized premium-provider aggregates; they are not authenticated operator consoles.</li>
               <li>Administrators remain responsible for the Discord permissions, channels, and server practices they configure around the bot.</li>
             </ul>
             <p>Babblebox does not claim to be zero-knowledge or operator-proof. Infrastructure operators with code, runtime, and key control are still part of the trust model even after these privacy hardening measures.</p>

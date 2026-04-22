@@ -1,6 +1,7 @@
 ﻿from __future__ import annotations
 
 import contextlib
+import logging
 from typing import Optional
 
 import discord
@@ -10,6 +11,8 @@ from discord.ext import commands
 from babblebox.app_command_hardening import harden_admin_root_group
 from babblebox import game_engine as ge
 from babblebox.command_utils import defer_hybrid_response, send_hybrid_response
+from babblebox.premium_models import SYSTEM_PREMIUM_OWNER_USER_IDS
+from babblebox.runtime_health import bind_started_service
 from babblebox.shield_ai import SHIELD_AI_SUPPORT_GUILD_ID, format_shield_ai_model_list
 from babblebox.shield_service import (
     ACTION_LABELS,
@@ -22,6 +25,8 @@ from babblebox.shield_service import (
 )
 from babblebox.shield_store import SHIELD_NUMERIC_CONFIG_SPECS
 
+
+LOGGER = logging.getLogger(__name__)
 
 PACK_CHOICES = [
     app_commands.Choice(name="Privacy Leak", value="privacy"),
@@ -131,7 +136,6 @@ SEVERE_TERM_ACTION_CHOICES = [
     app_commands.Choice(name="Restore bundled", value="restore_default"),
     app_commands.Choice(name="Remove custom", value="remove_custom"),
 ]
-SHIELD_AI_OVERRIDE_OWNER_IDS = {1266444952779620413, 1345860619836063754}
 RULE_PANEL_PACKS = ("privacy", "promo", "scam", "spam", "gif", "adult", "severe")
 CORE_RULE_PANEL_PACKS = ("privacy", "promo", "spam", "gif")
 HIGH_RISK_RULE_PANEL_PACKS = ("scam", "adult", "severe")
@@ -1377,8 +1381,7 @@ class ShieldCog(commands.Cog):
         harden_admin_root_group(self.shield_group)
 
     async def cog_load(self):
-        await self.service.start()
-        setattr(self.bot, "shield_service", self.service)
+        await bind_started_service(self.bot, attr_name="shield_service", service=self.service, label="Shield")
 
     def cog_unload(self):
         if hasattr(self.bot, "shield_service"):
@@ -1519,10 +1522,8 @@ class ShieldCog(commands.Cog):
 
     def _ai_policy_source_label(self, source: str) -> str:
         labels = {
-            "support_default": "Support-server default",
-            "ordinary_global": "Global ordinary-guild default",
+            "ordinary_global": "Global owner default",
             "guild_override": "Per-guild owner override",
-            "premium_required": "Guild Pro required",
         }
         return labels.get(source, source.replace("_", " ").title())
 
@@ -1984,7 +1985,7 @@ class ShieldCog(commands.Cog):
         return "safe family"
 
     def _is_override_owner(self, user_id: int) -> bool:
-        return user_id in SHIELD_AI_OVERRIDE_OWNER_IDS
+        return user_id in SYSTEM_PREMIUM_OWNER_USER_IDS
 
     def _build_ai_override_embed(self, *, title: str, note: str, guild_id: int | None = None) -> discord.Embed:
         meta = self.service.get_meta()
@@ -1997,16 +1998,16 @@ class ShieldCog(commands.Cog):
             color=ge.EMBED_THEME["accent"] if meta["ordinary_ai_enabled"] else ge.EMBED_THEME["info"],
         )
         embed.add_field(
-            name="Support Defaults",
+            name="AI Model Tiers",
             value=(
-                "Enabled: **Yes**\n"
-                "Policy source: `support_default`\n"
-                f"Allowed models: {self._format_ai_models(['gpt-5.4-nano', 'gpt-5.4-mini', 'gpt-5.4'])}"
+                f"Baseline tier: {self._format_ai_models(['gpt-5.4-nano'])}\n"
+                f"Guild Pro tiers: {self._format_ai_models(['gpt-5.4-mini', 'gpt-5.4'])}\n"
+                "AI stays second-pass only and owner policy still controls whether review runs at all."
             ),
             inline=False,
         )
         embed.add_field(
-            name="Ordinary-Guild Default",
+            name="Default Owner Policy",
             value=(
                 f"Enabled: **{'Yes' if meta['ordinary_ai_enabled'] else 'No'}**\n"
                 f"Allowed models: {self._format_ai_models(list(meta['ordinary_ai_allowed_models']))}\n"
@@ -2025,7 +2026,7 @@ class ShieldCog(commands.Cog):
                     f"Guild: {guild_label}\n"
                     f"Enabled: **{'Yes' if ai_status['enabled'] else 'No'}**\n"
                     f"Source: {self._ai_policy_source_label(ai_status['policy_source'])}\n"
-                    f"Guild Pro: {'Unlocked' if ai_status.get('premium_unlocked') else 'Required for live review'}\n"
+                    f"Enhanced models: {'Unlocked' if ai_status.get('premium_unlocked') else 'Guild Pro required for mini/full'}\n"
                     f"Allowed models: {self._format_ai_models(ai_status['allowed_models'])}\n"
                     f"Guild access mode: `{ai_status['guild_access_mode']}`\n"
                     f"Guild model override: {self._format_ai_models(ai_status['guild_allowed_models_override'])}"
@@ -2186,7 +2187,7 @@ class ShieldCog(commands.Cog):
             value=(
                 f"Readiness: {ai_status['status']}\n"
                 f"Policy source: {self._ai_policy_source_label(ai_status['policy_source'])}\n"
-                f"Guild Pro: {'Unlocked' if ai_status.get('premium_unlocked') else 'Required for live review'}\n"
+                f"Enhanced models: {'Unlocked' if ai_status.get('premium_unlocked') else 'Guild Pro required for mini/full'}\n"
                 f"Allowed models: {self._format_ai_models(ai_status['allowed_models'])}\n"
                 f"Routing: {self._ai_routing_label(ai_status['routing_strategy'])}\n"
                 f"Local-confidence threshold: `{ai_status['min_confidence']}`\n"
@@ -2363,7 +2364,7 @@ class ShieldCog(commands.Cog):
         log_channel = self._format_mentions([int(config["log_channel_id"])], kind="channel") if config.get("log_channel_id") else "Not set"
         embed = discord.Embed(
             title="Shield AI Assist",
-            description="Second-pass review for already-flagged live messages only. Guild Pro unlocks eligibility; this page shows the resolved policy plus this guild's local review scope.",
+            description="Second-pass review for already-flagged live messages only. Owner policy controls availability, and Guild Pro unlocks gpt-5.4-mini plus gpt-5.4.",
             color=ge.EMBED_THEME["info"],
         )
         embed.add_field(
@@ -2372,8 +2373,8 @@ class ShieldCog(commands.Cog):
                 f"Enabled: **{'Yes' if ai_status['enabled'] else 'No'}**\n"
                 f"Readiness: {ai_status['status']}\n"
                 f"Policy source: {self._ai_policy_source_label(ai_status['policy_source'])}\n"
-                f"Guild Pro: {'Unlocked' if ai_status.get('premium_unlocked') else 'Required for live review'}\n"
-                f"Support default: {'Yes' if ai_status['support_server_default'] else 'No'}\n"
+                f"Enhanced models: {'Unlocked' if ai_status.get('premium_unlocked') else 'Guild Pro required for mini/full'}\n"
+                f"Plan-allowed models: {self._format_ai_models(ai_status['plan_allowed_models'])}\n"
                 f"Ordinary-guild default: {'Enabled' if ai_status['ordinary_global_enabled'] else 'Disabled'}\n"
                 f"Allowed models: {self._format_ai_models(ai_status['allowed_models'])}\n"
                 f"Guild model override: {self._format_ai_models(ai_status['guild_allowed_models_override'])}\n"
@@ -2424,7 +2425,7 @@ class ShieldCog(commands.Cog):
             value="`/shield ai min_confidence:high privacy:true promo:false scam:true adult:true severe:true`",
             inline=False,
         )
-        return self._finalize_shield_embed(embed, footer="Babblebox Shield AI | Review scope is admin-configurable; Guild Pro unlocks eligibility")
+        return self._finalize_shield_embed(embed, footer="Babblebox Shield AI | Review scope is admin-configurable; Guild Pro unlocks mini/full")
 
     def _logs_embed(self, guild_id: int) -> discord.Embed:
         config = self.service.get_config(guild_id)
@@ -3131,7 +3132,10 @@ class ShieldCog(commands.Cog):
             return
         author_id = getattr(ctx.author, "id", 0)
         if not self._is_override_owner(author_id):
-            print(f"Shield AI owner command denied: unauthorized_dm_user_id={author_id}")
+            LOGGER.warning(
+                "Shield AI owner command denied: unauthorized_dm_user_id=%s",
+                author_id,
+            )
             await ctx.send(content="That command is unavailable.")
             return
 
@@ -3237,7 +3241,7 @@ class ShieldCog(commands.Cog):
                 await ctx.send(
                     embed=self._build_ai_override_embed(
                         title="Shield AI Support Policy",
-                        note="Private maintainer status for the support server defaults.",
+                        note="Private maintainer status for the support server's inherited Shield AI policy.",
                         guild_id=SHIELD_AI_SUPPORT_GUILD_ID,
                     )
                 )

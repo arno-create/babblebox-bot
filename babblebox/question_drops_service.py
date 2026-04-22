@@ -4,8 +4,8 @@ import asyncio
 import contextlib
 import hashlib
 import logging
+import os
 import random
-import traceback
 from collections import Counter, defaultdict
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta, timezone
@@ -233,13 +233,18 @@ class QuestionDropsService:
         self.storage_ready = False
         self.storage_error: str | None = None
         self._startup_storage_error: str | None = None
+        self.storage_backend_preference = (
+            getattr(store, "backend_preference", None)
+            or (os.getenv("QUESTION_DROPS_STORAGE_BACKEND", "").strip() or "postgres")
+        ).strip().lower()
         if store is not None:
             self.store = store
         else:
             try:
                 self.store = QuestionDropsStore()
+                self.storage_backend_preference = getattr(self.store, "backend_preference", self.storage_backend_preference)
             except QuestionDropsStorageUnavailable as exc:
-                print(f"Question Drops storage constructor failed: {exc}")
+                LOGGER.warning("Question Drops storage constructor failed: %s", exc)
                 self.store = QuestionDropsStore(backend="memory")
                 self._startup_storage_error = str(exc)
                 self.storage_error = str(exc)
@@ -262,19 +267,19 @@ class QuestionDropsService:
         if not valid:
             self.storage_ready = False
             self.storage_error = message or "Question Drops content pack validation failed."
-            print(f"Question Drops content pack validation failed: {self.storage_error}")
+            LOGGER.warning("Question Drops content pack validation failed: %s", self.storage_error)
             return False
         if self._startup_storage_error is not None:
             self.storage_ready = False
             self.storage_error = self._startup_storage_error
-            print(f"Question Drops storage unavailable: {self._startup_storage_error}")
+            LOGGER.warning("Question Drops storage unavailable: %s", self._startup_storage_error)
             return False
         try:
             await self.store.load()
         except QuestionDropsStorageUnavailable as exc:
             self.storage_ready = False
             self.storage_error = str(exc)
-            print(f"Question Drops storage unavailable: {exc}")
+            LOGGER.warning("Question Drops storage unavailable: %s", exc)
             return False
         try:
             self._configs = await self.store.fetch_all_configs()
@@ -293,8 +298,7 @@ class QuestionDropsService:
             self._attempt_counts_by_user.clear()
             self._next_prune_at = None
             self._meta = default_question_drops_meta()
-            print(f"Question Drops storage hydration failed: {exc}")
-            traceback.print_exc()
+            LOGGER.error("Question Drops storage hydration failed: error_type=%s", type(exc).__name__)
             return False
         self.storage_ready = True
         self.storage_error = None

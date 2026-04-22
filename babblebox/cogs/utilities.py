@@ -9,6 +9,7 @@ from discord.ext import commands
 from babblebox.app_command_hardening import harden_admin_root_group
 from babblebox import game_engine as ge
 from babblebox.command_utils import defer_hybrid_response, require_channel_permissions, send_hybrid_response
+from babblebox.runtime_health import bind_started_service
 from babblebox.utility_helpers import build_bump_reminder_embed, build_bump_thanks_embed, build_jump_view, deserialize_datetime
 from babblebox.utility_service import (
     BUMP_CONFIG_UNCHANGED,
@@ -184,8 +185,7 @@ class UtilityCog(commands.Cog):
         harden_admin_root_group(self.bremind_group)
 
     async def cog_load(self):
-        await self.service.start()
-        setattr(self.bot, "utility_service", self.service)
+        await bind_started_service(self.bot, attr_name="utility_service", service=self.service, label="Utilities")
 
     def cog_unload(self):
         if getattr(self.bot, "utility_service", None) is self.service:

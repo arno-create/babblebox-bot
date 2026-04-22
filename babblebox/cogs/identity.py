@@ -10,6 +10,7 @@ from babblebox import game_engine as ge
 from babblebox.command_utils import defer_hybrid_response, send_hybrid_response
 from babblebox.daily_challenges import DAILY_DEFAULT_MODE
 from babblebox.profile_service import BUDDY_STYLES, ProfileService
+from babblebox.runtime_health import bind_started_service
 
 
 DAILY_LEADERBOARD_CHOICES = [
@@ -40,8 +41,7 @@ class IdentityCog(commands.Cog):
         self._public_channel_cooldowns: dict[tuple[str, int], float] = {}
 
     async def cog_load(self):
-        await self.service.start()
-        setattr(self.bot, "profile_service", self.service)
+        await bind_started_service(self.bot, attr_name="profile_service", service=self.service, label="Profile")
 
     def cog_unload(self):
         if getattr(self.bot, "profile_service", None) is self.service:

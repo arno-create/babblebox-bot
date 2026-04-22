@@ -21,6 +21,10 @@ class PremiumStorageUnavailable(RuntimeError):
     pass
 
 
+class PremiumStoreConflict(RuntimeError):
+    pass
+
+
 def _resolve_database_url(configured: str | None = None) -> tuple[str, str | None]:
     if configured is not None and configured.strip():
         return configured.strip(), "argument"
@@ -83,7 +87,17 @@ class _BasePremiumStore:
     async def create_oauth_state(self, record: dict[str, Any]):
         raise NotImplementedError
 
-    async def consume_oauth_state(self, provider: str, state_token: str) -> dict[str, Any] | None:
+    async def invalidate_oauth_states(self, provider: str, discord_user_id: int, *, action: str | None = None):
+        raise NotImplementedError
+
+    async def consume_oauth_state(
+        self,
+        provider: str,
+        state_token: str,
+        *,
+        action: str | None = None,
+        now: datetime | None = None,
+    ) -> dict[str, Any] | None:
         raise NotImplementedError
 
     async def upsert_link(self, record: dict[str, Any]):
@@ -166,16 +180,54 @@ class _MemoryPremiumStore(_BasePremiumStore):
     async def create_oauth_state(self, record: dict[str, Any]):
         self.oauth_states[(str(record["provider"]), str(record["state_token"]))] = deepcopy(record)
 
-    async def consume_oauth_state(self, provider: str, state_token: str) -> dict[str, Any] | None:
+    async def invalidate_oauth_states(self, provider: str, discord_user_id: int, *, action: str | None = None):
+        consumed_at = _serialize_datetime(datetime.now(timezone.utc))
+        for key, record in list(self.oauth_states.items()):
+            if key[0] != provider:
+                continue
+            if int(record.get("discord_user_id", 0) or 0) != discord_user_id:
+                continue
+            if action is not None and str(record.get("action") or "") != action:
+                continue
+            if record.get("consumed_at") is not None:
+                continue
+            updated = deepcopy(record)
+            updated["consumed_at"] = consumed_at
+            self.oauth_states[key] = updated
+
+    async def consume_oauth_state(
+        self,
+        provider: str,
+        state_token: str,
+        *,
+        action: str | None = None,
+        now: datetime | None = None,
+    ) -> dict[str, Any] | None:
         key = (provider, state_token)
         record = deepcopy(self.oauth_states.get(key))
         if record is None or record.get("consumed_at") is not None:
+            return None
+        if action is not None and str(record.get("action") or "") != action:
+            return None
+        expires_at = _parse_datetime(record.get("expires_at"))
+        current_time = now or datetime.now(timezone.utc)
+        if expires_at is not None and expires_at <= current_time:
             return None
         record["consumed_at"] = _serialize_datetime(datetime.now(timezone.utc))
         self.oauth_states[key] = deepcopy(record)
         return record
 
     async def upsert_link(self, record: dict[str, Any]):
+        provider = str(record["provider"])
+        discord_user_id = int(record["discord_user_id"])
+        provider_user_id = str(record.get("provider_user_id") or "").strip()
+        for existing in self.links.values():
+            if existing.get("provider") != provider:
+                continue
+            if str(existing.get("provider_user_id") or "") != provider_user_id:
+                continue
+            if int(existing.get("discord_user_id", 0) or 0) != discord_user_id:
+                raise PremiumStoreConflict("That provider identity is already linked to another Discord user.")
         self.links[(str(record["provider"]), int(record["discord_user_id"]))] = deepcopy(record)
 
     async def fetch_link(self, provider: str, discord_user_id: int) -> dict[str, Any] | None:
@@ -272,7 +324,13 @@ class _MemoryPremiumStore(_BasePremiumStore):
 
     async def fetch_provider_state(self, provider: str) -> dict[str, Any] | None:
         record = self.provider_state.get(provider)
-        return deepcopy(record) if record is not None else None
+        if record is None:
+            return None
+        return {
+            "provider": provider,
+            "payload": deepcopy(record),
+            "updated_at": _serialize_datetime(datetime.now(timezone.utc)),
+        }
 
     async def record_webhook_event(self, record: dict[str, Any]) -> bool:
         event_key = str(record["event_key"])
@@ -441,37 +499,77 @@ class _PostgresPremiumStore(_BasePremiumStore):
                 json.dumps(record.get("metadata", {})),
             )
 
-    async def consume_oauth_state(self, provider: str, state_token: str) -> dict[str, Any] | None:
+    async def invalidate_oauth_states(self, provider: str, discord_user_id: int, *, action: str | None = None):
         async with self._io_lock, self._pool.acquire() as conn:
-            row = await conn.fetchrow(
-                "UPDATE premium_oauth_states SET consumed_at = timezone('utc', now()) WHERE provider = $1 AND state_token = $2 AND consumed_at IS NULL RETURNING provider, state_token, discord_user_id, action, created_at, expires_at, consumed_at, metadata",
-                provider,
-                state_token,
-            )
+            if action is None:
+                await conn.execute(
+                    "UPDATE premium_oauth_states SET consumed_at = timezone('utc', now()) WHERE provider = $1 AND discord_user_id = $2 AND consumed_at IS NULL",
+                    provider,
+                    discord_user_id,
+                )
+            else:
+                await conn.execute(
+                    "UPDATE premium_oauth_states SET consumed_at = timezone('utc', now()) WHERE provider = $1 AND discord_user_id = $2 AND action = $3 AND consumed_at IS NULL",
+                    provider,
+                    discord_user_id,
+                    action,
+                )
+
+    async def consume_oauth_state(
+        self,
+        provider: str,
+        state_token: str,
+        *,
+        action: str | None = None,
+        now: datetime | None = None,
+    ) -> dict[str, Any] | None:
+        current_time = now or datetime.now(timezone.utc)
+        async with self._io_lock, self._pool.acquire() as conn:
+            if action is None:
+                row = await conn.fetchrow(
+                    "UPDATE premium_oauth_states SET consumed_at = timezone('utc', now()) WHERE provider = $1 AND state_token = $2 AND consumed_at IS NULL AND expires_at > $3 RETURNING provider, state_token, discord_user_id, action, created_at, expires_at, consumed_at, metadata",
+                    provider,
+                    state_token,
+                    current_time,
+                )
+            else:
+                row = await conn.fetchrow(
+                    "UPDATE premium_oauth_states SET consumed_at = timezone('utc', now()) WHERE provider = $1 AND state_token = $2 AND action = $3 AND consumed_at IS NULL AND expires_at > $4 RETURNING provider, state_token, discord_user_id, action, created_at, expires_at, consumed_at, metadata",
+                    provider,
+                    state_token,
+                    action,
+                    current_time,
+                )
         return self._oauth_state_from_row(row)
 
     async def upsert_link(self, record: dict[str, Any]):
-        async with self._io_lock, self._pool.acquire() as conn:
-            await conn.execute(
-                (
-                    "INSERT INTO premium_links (provider, discord_user_id, provider_user_id, link_status, linked_at, updated_at, access_token_ciphertext, refresh_token_ciphertext, token_expires_at, scopes, email, display_name, metadata) "
-                    "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13::jsonb) "
-                    "ON CONFLICT (provider, discord_user_id) DO UPDATE SET provider_user_id = EXCLUDED.provider_user_id, link_status = EXCLUDED.link_status, linked_at = EXCLUDED.linked_at, updated_at = EXCLUDED.updated_at, access_token_ciphertext = EXCLUDED.access_token_ciphertext, refresh_token_ciphertext = EXCLUDED.refresh_token_ciphertext, token_expires_at = EXCLUDED.token_expires_at, scopes = EXCLUDED.scopes, email = EXCLUDED.email, display_name = EXCLUDED.display_name, metadata = EXCLUDED.metadata"
-                ),
-                record["provider"],
-                record["discord_user_id"],
-                record["provider_user_id"],
-                record["link_status"],
-                _parse_datetime(record["linked_at"]),
-                _parse_datetime(record["updated_at"]),
-                record.get("access_token_ciphertext"),
-                record.get("refresh_token_ciphertext"),
-                _parse_datetime(record.get("token_expires_at")),
-                json.dumps(list(record.get("scopes", ()))),
-                record.get("email"),
-                record.get("display_name"),
-                json.dumps(record.get("metadata", {})),
-            )
+        try:
+            async with self._io_lock, self._pool.acquire() as conn:
+                await conn.execute(
+                    (
+                        "INSERT INTO premium_links (provider, discord_user_id, provider_user_id, link_status, linked_at, updated_at, access_token_ciphertext, refresh_token_ciphertext, token_expires_at, scopes, email, display_name, metadata) "
+                        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10::jsonb, $11, $12, $13::jsonb) "
+                        "ON CONFLICT (provider, discord_user_id) DO UPDATE SET provider_user_id = EXCLUDED.provider_user_id, link_status = EXCLUDED.link_status, linked_at = EXCLUDED.linked_at, updated_at = EXCLUDED.updated_at, access_token_ciphertext = EXCLUDED.access_token_ciphertext, refresh_token_ciphertext = EXCLUDED.refresh_token_ciphertext, token_expires_at = EXCLUDED.token_expires_at, scopes = EXCLUDED.scopes, email = EXCLUDED.email, display_name = EXCLUDED.display_name, metadata = EXCLUDED.metadata"
+                    ),
+                    record["provider"],
+                    record["discord_user_id"],
+                    record["provider_user_id"],
+                    record["link_status"],
+                    _parse_datetime(record["linked_at"]),
+                    _parse_datetime(record["updated_at"]),
+                    record.get("access_token_ciphertext"),
+                    record.get("refresh_token_ciphertext"),
+                    _parse_datetime(record.get("token_expires_at")),
+                    json.dumps(list(record.get("scopes", ()))),
+                    record.get("email"),
+                    record.get("display_name"),
+                    json.dumps(record.get("metadata", {})),
+                )
+        except Exception as exc:
+            unique_violation = getattr(getattr(self._asyncpg, "exceptions", None), "UniqueViolationError", None)
+            if unique_violation is not None and isinstance(exc, unique_violation):
+                raise PremiumStoreConflict("That provider identity is already linked to another Discord user.") from exc
+            raise
 
     async def fetch_link(self, provider: str, discord_user_id: int) -> dict[str, Any] | None:
         async with self._pool.acquire() as conn:
@@ -731,8 +829,18 @@ class PremiumStore:
     async def create_oauth_state(self, record: dict[str, Any]):
         await self._store.create_oauth_state(record)
 
-    async def consume_oauth_state(self, provider: str, state_token: str) -> dict[str, Any] | None:
-        return await self._store.consume_oauth_state(provider, state_token)
+    async def invalidate_oauth_states(self, provider: str, discord_user_id: int, *, action: str | None = None):
+        await self._store.invalidate_oauth_states(provider, discord_user_id, action=action)
+
+    async def consume_oauth_state(
+        self,
+        provider: str,
+        state_token: str,
+        *,
+        action: str | None = None,
+        now: datetime | None = None,
+    ) -> dict[str, Any] | None:
+        return await self._store.consume_oauth_state(provider, state_token, action=action, now=now)
 
     async def upsert_link(self, record: dict[str, Any]):
         await self._store.upsert_link(record)
@@ -796,4 +904,3 @@ class PremiumStore:
 
     async def append_audit(self, record: dict[str, Any]):
         await self._store.append_audit(record)
-

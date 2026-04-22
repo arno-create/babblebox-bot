@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+import logging
 import os
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -11,7 +12,10 @@ from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 
 from babblebox.postgres_json import decode_postgres_json_array
+from babblebox.utility_helpers import sanitize_attachment_labels
 
+
+LOGGER = logging.getLogger(__name__)
 
 DEFAULT_LEGACY_JSON_PATH = Path(__file__).resolve().parent.parent / ".cache" / "utility_state.json"
 
@@ -428,7 +432,7 @@ class _PostgresUtilityStore(_BaseUtilityStore):
         await self._maybe_import_legacy_json_seed()
         await self._reload_from_db()
         self._last_flushed_state = deepcopy(self.state)
-        print("Utility storage backend: postgres")
+        LOGGER.info("Utility storage backend: postgres")
         return self.state
 
     async def flush(self) -> bool:
@@ -437,7 +441,7 @@ class _PostgresUtilityStore(_BaseUtilityStore):
             try:
                 await self._flush_snapshot(snapshot)
             except Exception as exc:
-                print(f"Utility Postgres store flush failed: {exc}")
+                LOGGER.warning("Utility Postgres store flush failed: error_type=%s", type(exc).__name__)
                 return False
         self.state = snapshot
         self._last_flushed_state = deepcopy(snapshot)
@@ -599,14 +603,14 @@ class _PostgresUtilityStore(_BaseUtilityStore):
                     "legacy_json_seed_v2",
                     json.dumps({"status": "imported", "source": str(self.legacy_json_path), "summary": summary}),
                 )
-        print(f"Imported legacy utility JSON seed into Postgres: {summary}")
+        LOGGER.info("Imported legacy utility JSON seed into Postgres: %s", summary)
 
     async def _load_legacy_json_seed(self, path: Path) -> tuple[dict[str, Any] | None, dict[str, int]]:
         try:
             raw = await asyncio.to_thread(path.read_text, encoding="utf-8")
             payload = json.loads(raw)
         except (OSError, json.JSONDecodeError) as exc:
-            print(f"Legacy utility JSON import skipped: {exc}")
+            LOGGER.warning("Legacy utility JSON import skipped: error_type=%s", type(exc).__name__)
             return None, {"watch_users": 0, "later_markers": 0, "reminders": 0, "afk_users": 0}
         normalized = self.normalize_state(payload)
         normalized["afk"] = self._merge_legacy_brb_into_afk(payload, normalized.get("afk", {}))
@@ -755,14 +759,16 @@ class _PostgresUtilityStore(_BaseUtilityStore):
                 "author_name": row["author_name"],
                 "author_id": row["author_id"],
                 "preview": row["preview"],
-                "attachment_labels": [
-                    label
-                    for label in decode_postgres_json_array(
-                        row["attachment_labels"],
-                        label="utility_later_markers.attachment_labels",
-                    )
-                    if isinstance(label, str) and label.strip()
-                ],
+                "attachment_labels": sanitize_attachment_labels(
+                    [
+                        label
+                        for label in decode_postgres_json_array(
+                            row["attachment_labels"],
+                            label="utility_later_markers.attachment_labels",
+                        )
+                        if isinstance(label, str) and label.strip()
+                    ]
+                ),
             }
         for row in reminder_rows:
             loaded["reminders"][row["id"]] = {
@@ -985,7 +991,7 @@ class _PostgresUtilityStore(_BaseUtilityStore):
                             marker.get("author_name"),
                             marker.get("author_id"),
                             marker.get("preview"),
-                            json.dumps([label for label in marker.get("attachment_labels", []) if isinstance(label, str) and label.strip()]),
+                            json.dumps(sanitize_attachment_labels([label for label in marker.get("attachment_labels", []) if isinstance(label, str) and label.strip()])),
                         )
                     )
         if rows:
@@ -1182,28 +1188,28 @@ class UtilityStateStore:
         return getattr(self._store, "backend_name", "unknown")
 
     async def load(self) -> dict[str, Any]:
-        print(
-            "Utility storage init: "
-            f"backend_preference={self.backend_preference}, "
-            f"database_url_configured={'yes' if self.database_url else 'no'}, "
-            f"database_url_source={self.database_url_source or 'none'}, "
-            f"database_target={self.redacted_database_url()}"
+        LOGGER.info(
+            "Utility storage init: backend_preference=%s database_url_configured=%s database_url_source=%s database_target=%s",
+            self.backend_preference,
+            "yes" if self.database_url else "no",
+            self.database_url_source or "none",
+            self.redacted_database_url(),
         )
         self._store = self._build_primary_store()
         try:
             self.state = await self._store.load()
         except UtilityStorageUnavailable as exc:
-            print(
-                "Utility storage init failed: "
-                f"backend_preference={self.backend_preference}, "
-                f"database_url_configured={'yes' if self.database_url else 'no'}, "
-                f"database_url_source={self.database_url_source or 'none'}, "
-                f"database_target={self.redacted_database_url()}, "
-                f"error={exc}"
+            LOGGER.warning(
+                "Utility storage init failed: backend_preference=%s database_url_configured=%s database_url_source=%s database_target=%s error=%s",
+                self.backend_preference,
+                "yes" if self.database_url else "no",
+                self.database_url_source or "none",
+                self.redacted_database_url(),
+                exc,
             )
             raise
         self._store.state = self.state
-        print(f"Utility storage init succeeded: backend={self.backend_name}")
+        LOGGER.info("Utility storage init succeeded: backend=%s", self.backend_name)
         return self.state
 
     async def flush(self) -> bool:

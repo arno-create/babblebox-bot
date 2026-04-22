@@ -585,7 +585,7 @@
             utilities, and optional compact safety tools.
           </p>
           <p>
-            Last updated: <strong>April 19, 2026</strong>. By inviting, installing, accessing, or using Babblebox, you agree
+            Last updated: <strong>April 22, 2026</strong>. By inviting, installing, accessing, or using Babblebox, you agree
             to these Terms. If you use Babblebox on behalf of a server, team, or community, you represent that you have
             authority to do so for that Discord environment.
           </p>
@@ -770,6 +770,10 @@
               or administrator-supplied templates and moderation settings. That does not make Babblebox a
               general media host, backup service, or permanent record system.
             </p>
+            <p>
+              Private Capture transcript files may include currently available attachment URLs at send time. Later markers
+              remain compact attachment-label state instead of durable raw attachment URLs.
+            </p>
             <h3>Your content and configuration</h3>
             <ul>
               <li>You are responsible for the legality, accuracy, and appropriateness of the content or configuration you submit through Babblebox.</li>
@@ -811,9 +815,15 @@
             </div>
             <p>
               Premium entitlements can depend on provider availability, webhook delivery, OAuth linking, and current
-              verification state. If those checks fail, are delayed, or go stale, Babblebox may temporarily withhold
-              premium-only expansion or premium-only runtime behavior until the entitlement is verified again. Babblebox is
-              designed to preserve saved state on downgrade rather than intentionally deleting it just because a plan changed.
+              verification state. If those checks fail, are delayed, go stale, hit a hard provider-auth failure, or a user
+              unlinks Patreon locally, Babblebox may immediately withhold provider-backed premium-only expansion or
+              premium-only runtime behavior until the entitlement is verified again or relinked. Babblebox is designed to
+              preserve saved state on downgrade rather than intentionally deleting it just because a plan changed.
+            </p>
+            <p>
+              Babblebox may expose public liveness/readiness pages for hosting and rollout monitoring, but those pages
+              are intentionally limited to non-sensitive readiness state and sanitized provider aggregates rather than
+              authenticated operator detail.
             </p>
           </article>
 

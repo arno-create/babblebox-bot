@@ -22,7 +22,7 @@ from babblebox.premium_limits import (
     guild_limit as premium_guild_limit,
     user_limit as premium_user_limit,
 )
-from babblebox.premium_models import PLAN_FREE, PLAN_GUILD_PRO, PLAN_PLUS
+from babblebox.premium_models import PLAN_FREE, PLAN_GUILD_PRO, PLAN_PLUS, SYSTEM_PREMIUM_OWNER_USER_IDS, SYSTEM_PREMIUM_SUPPORT_GUILD_ID
 from babblebox.shield_service import (
     FEATURE_SURFACE_AFK_REASON,
     FEATURE_SURFACE_AFK_SCHEDULE_REASON,
@@ -325,6 +325,7 @@ class UtilityStoreAndServiceTests(unittest.IsolatedAsyncioTestCase):
 
     def _attach_premium(self, *, user_plans: Optional[dict[int, str]] = None, guild_plans: Optional[dict[int, str]] = None):
         self.bot.premium_service = PremiumLimitStub(user_plans=user_plans, guild_plans=guild_plans)
+        self.service._rebuild_watch_indexes()
 
     async def _configure_bump_fixture(
         self,
@@ -1061,7 +1062,16 @@ class UtilityStoreAndServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(ok, record)
         self.assertEqual(self.service.reminder_limit(user.id), 15)
 
-    async def test_watch_filters_preserve_over_limit_saved_state_after_downgrade(self):
+    async def test_system_owner_limit_fallback_applies_without_attached_premium_runtime(self):
+        owner_user_id = next(iter(SYSTEM_PREMIUM_OWNER_USER_IDS))
+        self.assertEqual(self.service.watch_keyword_limit(owner_user_id), 25)
+        self.assertEqual(self.service.reminder_limit(owner_user_id), 15)
+        self.assertEqual(self.service.afk_schedule_limit(owner_user_id), 20)
+
+    async def test_support_guild_limit_fallback_applies_without_attached_premium_runtime(self):
+        self.assertEqual(self.service.bump_detection_channel_limit(SYSTEM_PREMIUM_SUPPORT_GUILD_ID), 15)
+
+    async def test_watch_filters_preserve_saved_state_but_only_active_subset_blocks_runtime(self):
         user_id = 4403
         self._attach_premium(user_plans={user_id: PLAN_PLUS})
         for ignored_user_id in range(7000, 7010):
@@ -1069,13 +1079,73 @@ class UtilityStoreAndServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(ok, message)
 
         self._attach_premium()
+        self.service._rebuild_watch_indexes()
         summary = self.service.get_watch_summary(user_id, guild_id=None)
         self.assertEqual(len(summary["ignored_user_ids"]), 10)
+        self.assertEqual(len(self.service._ignored_users_by_user[user_id]), 8)
+        self.assertTrue(self.service._watch_filters_block(user_id, author_id=7000, channel_id=1))
+        self.assertFalse(self.service._watch_filters_block(user_id, author_id=7009, channel_id=1))
 
         ok, message = await self.service.add_watch_ignored_user(user_id, ignored_user_id=7010)
         self.assertFalse(ok)
         self.assertIn("current limit of 8", message)
         self.assertEqual(len(self.service.get_watch_summary(user_id, guild_id=None)["ignored_user_ids"]), 10)
+
+    async def test_downgraded_saved_reminders_keep_all_rows_but_only_due_subset_runs(self):
+        user = DummyUser(4404)
+        self._attach_premium(user_plans={user.id: PLAN_PLUS})
+        now = ge.now_utc()
+        for index in range(5):
+            self.service.store.state.setdefault("reminders", {})[f"rem-{index}"] = {
+                "id": f"rem-{index}",
+                "user_id": user.id,
+                "text": f"Reminder {index}",
+                "delivery": "dm",
+                "created_at": serialize_datetime(now),
+                "due_at": serialize_datetime(now),
+                "guild_id": None,
+                "guild_name": None,
+                "channel_id": None,
+                "channel_name": None,
+                "origin_jump_url": None,
+                "delivery_attempts": 0,
+                "last_attempt_at": None,
+                "retry_after": None,
+            }
+
+        self._attach_premium()
+        due_reminders, _due_bump_cycles, _afk_to_activate, _afk_to_expire, _afk_schedule_candidates, _next_due = self.service._collect_due_records()
+
+        self.assertEqual(len(self.service.list_reminders(user.id)), 5)
+        self.assertEqual([record["id"] for record in due_reminders], ["rem-0", "rem-1", "rem-2"])
+
+    async def test_downgraded_saved_afk_schedules_keep_all_rows_but_only_active_subset_triggers(self):
+        user = DummyUser(4405)
+        self._attach_premium(user_plans={user.id: PLAN_PLUS})
+        now = ge.now_utc()
+        for index in range(8):
+            self.service.store.state.setdefault("afk_schedules", {})[f"afk-{index}"] = {
+                "id": f"afk-{index}",
+                "user_id": user.id,
+                "status": "scheduled",
+                "reason": None,
+                "preset": None,
+                "repeat": "daily",
+                "timezone": "UTC",
+                "weekday_mask": 0,
+                "local_hour": index % 24,
+                "local_minute": 0,
+                "duration_seconds": 3600,
+                "created_at": serialize_datetime(now),
+                "next_start_at": serialize_datetime(now),
+            }
+
+        self._attach_premium()
+        _due_reminders, _due_bump_cycles, _afk_to_activate, _afk_to_expire, afk_schedule_candidates, _next_due = self.service._collect_due_records()
+
+        self.assertEqual(len(self.service.list_afk_schedules(user.id)), 8)
+        self.assertEqual(len(afk_schedule_candidates), 6)
+        self.assertEqual([record["id"] for record in afk_schedule_candidates], [f"afk-{index}" for index in range(6)])
 
     async def test_public_reminder_delivery_is_rechecked_and_withheld_privately_when_blocked(self):
         user = DummyMember(560, display_name="Mira")
@@ -2026,7 +2096,7 @@ class UtilityStoreAndServiceTests(unittest.IsolatedAsyncioTestCase):
         reloaded_service._rebuild_return_watch_indexes()
         self.assertIn((10, 15), reloaded_service._return_user_watch_ids_by_target)
 
-    async def test_postgres_reload_preserves_later_attachments_reminder_retry_and_bump_state(self):
+    async def test_postgres_reload_sanitizes_later_attachment_labels_and_preserves_other_state(self):
         now = ge.now_utc()
         connection = FakeReloadConnection(
             watch_rows=[
@@ -2056,7 +2126,13 @@ class UtilityStoreAndServiceTests(unittest.IsolatedAsyncioTestCase):
                     "author_name": "Mira",
                     "author_id": 1,
                     "preview": "Saved message",
-                    "attachment_labels": json.dumps(["image.png", "clip.mp4"]),
+                    "attachment_labels": json.dumps(
+                        [
+                            "image.png (https://cdn.example/image.png)",
+                            "https://cdn.example/clip.mp4",
+                            "notes.pdf - https://cdn.example/notes.pdf",
+                        ]
+                    ),
                 }
             ],
             reminder_rows=[
@@ -2127,13 +2203,38 @@ class UtilityStoreAndServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(watch["reply_channel_ids"], [21, 22])
         self.assertEqual(watch["excluded_channel_ids"], [99])
         self.assertEqual(watch["ignored_user_ids"], [5])
-        self.assertEqual(marker["attachment_labels"], ["image.png", "clip.mp4"])
+        self.assertEqual(marker["attachment_labels"], ["image.png", "attachment", "notes.pdf"])
         self.assertEqual(reminder["delivery_attempts"], 2)
         self.assertEqual(reminder["retry_after"], serialize_datetime(now + timedelta(minutes=10)))
         self.assertEqual(bump_config["detection_channel_ids"], [20, 21])
         self.assertEqual(bump_config["thanks_mode"], "public")
         self.assertEqual(bump_cycle["last_bumper_user_id"], 7)
         self.assertEqual(bump_cycle["retry_after"], serialize_datetime(now + timedelta(minutes=9)))
+
+    async def test_save_later_marker_stores_compact_attachment_labels_only(self):
+        user = DummyMember(64, display_name="Mira")
+        guild = DummyGuild(10, members=[user])
+        channel = DummyChannel(20, guild=guild, visible_user_ids={user.id})
+        message = DummyMessage(
+            message_id=30,
+            author=user,
+            guild=guild,
+            channel=channel,
+            content="Saved message",
+            created_at=ge.now_utc(),
+        )
+        message.attachments = [
+            types.SimpleNamespace(filename="clip.png", url="https://cdn.example/clip.png", content_type="image/png"),
+            types.SimpleNamespace(filename="", url="https://cdn.example/raw.bin", content_type="application/octet-stream"),
+        ]
+
+        ok, marker = await self.service.save_later_marker(user=user, channel=channel, message=message)
+
+        self.assertTrue(ok)
+        self.assertEqual(marker["attachment_labels"], ["clip.png", "attachment"])
+        self.assertNotIn("https://", " ".join(marker["attachment_labels"]))
+        stored_marker = self.store.state["later"][str(user.id)][str(channel.id)]
+        self.assertEqual(stored_marker["attachment_labels"], ["clip.png", "attachment"])
 
     def test_reminder_list_embed_marks_retrying_delivery(self):
         cog = object.__new__(UtilityCog)
@@ -2231,6 +2332,8 @@ class UtilityStoreAndServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(kwargs["embed"].title, "Capture Ready")
         self.assertEqual(kwargs["view"].children[0].label, "Back to Channel")
         self.assertEqual(kwargs["file"].filename, "babblebox-capture-general.txt")
+        transcript = kwargs["file"].fp.getvalue().decode("utf-8")
+        self.assertIn("Attachment: clip.png - https://cdn.example/clip.png", transcript)
 
     async def test_user_return_watch_triggers_on_next_message_after_creation(self):
         watcher = DummyMember(41, display_name="Mira")

@@ -506,6 +506,8 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
 
     def _attach_premium(self, *, guild_plans: Optional[dict[int, str]] = None, capabilities: Optional[dict[int, set[str]]] = None):
         self.bot.premium_service = PremiumShieldStub(guild_plans=guild_plans, capabilities=capabilities)
+        for guild_id in list(self.service._compiled_configs):
+            self.service._compiled_configs[guild_id] = self.service._compile_config(guild_id, self.service.get_config(guild_id))
 
     def _content_fingerprint(self, content: str, *, attachments=None) -> str:
         return _alert_content_fingerprint(_build_snapshot(content, attachments))
@@ -681,7 +683,7 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         ok, message = await self.service.set_module_enabled(10, True)
 
         self.assertTrue(ok)
-        self.assertIn("Shield AI stays second-pass only and requires Guild Pro", message)
+        self.assertIn("Shield AI stays second-pass only, owner policy controls whether review runs", message)
         self.assertIn("recommended non-AI baseline", message)
         config = self.service.get_config(10)
         self.assertTrue(config["module_enabled"])
@@ -743,7 +745,7 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         ok, message = await self.service.set_module_enabled(10, True)
 
         self.assertTrue(ok)
-        self.assertIn("Shield AI stays second-pass only and requires Guild Pro", message)
+        self.assertIn("Shield AI stays second-pass only, owner policy controls whether review runs", message)
         self.assertNotIn("recommended non-AI baseline", message)
         config = self.service.get_config(10)
         self.assertTrue(config["module_enabled"])
@@ -3325,7 +3327,7 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(matches)
         self.assertEqual(matches[0].pack, "advanced")
 
-    async def test_custom_patterns_survive_downgrade_but_expansion_is_blocked(self):
+    async def test_custom_patterns_stay_saved_after_downgrade_but_only_free_subset_stays_active(self):
         self._attach_premium(guild_plans={10: PLAN_GUILD_PRO})
         for index in range(11):
             ok, result = await self.service.add_custom_pattern(
@@ -3341,7 +3343,9 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         config = self.service.get_config(10)
         compiled = self.service._compiled_configs[10]
         self.assertEqual(len(config["custom_patterns"]), 11)
-        self.assertEqual(len(compiled.custom_patterns), 11)
+        self.assertEqual(len(compiled.custom_patterns), 10)
+        active_pattern_ids = {pattern.pattern_id for pattern in compiled.custom_patterns}
+        self.assertNotIn(config["custom_patterns"][-1]["pattern_id"], active_pattern_ids)
 
         ok, message = await self.service.add_custom_pattern(
             10,
@@ -4515,12 +4519,13 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual((gif_delivery.style, gif_delivery.ping_mode), ("compact", "never"))
         self.assertEqual((privacy_delivery.style, privacy_delivery.ping_mode), ("adaptive", "smart"))
 
-    async def test_support_guild_ai_policy_defaults_to_enabled_with_full_models(self):
+    async def test_support_guild_keeps_paid_ai_models_unlocked_without_bypassing_owner_policy(self):
         status = self.service.get_ai_status(SHIELD_AI_ALLOWED_GUILD_ID)
 
-        self.assertTrue(status["enabled"])
-        self.assertEqual(status["policy_source"], "support_default")
-        self.assertEqual(status["allowed_models"], ["gpt-5.4-nano", "gpt-5.4-mini", "gpt-5.4"])
+        self.assertFalse(status["enabled"])
+        self.assertEqual(status["policy_source"], "ordinary_global")
+        self.assertTrue(status["premium_unlocked"])
+        self.assertEqual(status["allowed_models"], ["gpt-5.4-nano"])
 
     async def test_ordinary_guild_ai_policy_defaults_to_disabled_with_nano(self):
         status = self.service.get_ai_status(10)
@@ -4529,10 +4534,12 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status["policy_source"], "ordinary_global")
         self.assertFalse(status["premium_unlocked"])
         self.assertEqual(status["allowed_models"], ["gpt-5.4-nano"])
-        self.assertIn("guild pro", status["status"].lower())
+        self.assertIn("owner enables it", status["status"].lower())
 
     async def test_ai_status_reports_log_channel_blocker_when_policy_and_provider_are_ready(self):
         self.service.ai_provider = FakeAIProvider(available=True)
+        ok, _ = await self.service.set_ordinary_ai_policy(enabled=True, allowed_models="nano", actor_id=1266444952779620413)
+        self.assertTrue(ok)
         ok, _ = await self.service.set_module_enabled(SHIELD_AI_ALLOWED_GUILD_ID, True)
         self.assertTrue(ok)
 
@@ -4546,6 +4553,8 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.service.ai_provider = FakeAIProvider(available=True)
         log_channel = FakeChannel(99, name="shield-log")
         self.bot.register_channel(log_channel)
+        ok, _ = await self.service.set_ordinary_ai_policy(enabled=True, allowed_models="nano", actor_id=1266444952779620413)
+        self.assertTrue(ok)
         ok, _ = await self.service.set_module_enabled(SHIELD_AI_ALLOWED_GUILD_ID, True)
         self.assertTrue(ok)
         ok, _ = await self.service.set_log_channel(SHIELD_AI_ALLOWED_GUILD_ID, log_channel.id)
@@ -4561,22 +4570,22 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
     async def test_public_ai_config_only_changes_scope(self):
         ok, message = await self.service.set_ai_config(10, enabled=True)
         self.assertFalse(ok)
-        self.assertIn("eligibility is resolved outside", message.lower())
-        self.assertIn("guild pro", message.lower())
+        self.assertIn("availability is resolved by owner policy", message.lower())
+        self.assertIn("gpt-5.4-mini", message)
 
         ok, message = await self.service.set_ai_config(10, enabled_packs=["privacy", "adult", "severe"], min_confidence="medium")
         self.assertTrue(ok)
         self.assertIn("review scope", message.lower())
-        self.assertIn("Guild Pro is still required", message)
+        self.assertIn("gpt-5.4-mini", message)
         self.assertIn("Adult Links + Solicitation", message)
         self.assertIn("Severe Harm / Hate", message)
         config = self.service.get_config(10)
         self.assertEqual(set(config["ai_enabled_packs"]), {"privacy", "adult", "severe"})
         self.assertEqual(config["ai_min_confidence"], "medium")
 
-    async def test_guild_pro_unlocks_ai_eligibility_when_global_policy_allows_ordinary_guilds(self):
+    async def test_guild_pro_unlocks_enhanced_ai_models_when_global_policy_allows_ordinary_guilds(self):
         self._attach_premium(guild_plans={10: PLAN_GUILD_PRO})
-        ok, _ = await self.service.set_ordinary_ai_policy(enabled=True, allowed_models="nano", actor_id=1266444952779620413)
+        ok, _ = await self.service.set_ordinary_ai_policy(enabled=True, allowed_models="nano,mini", actor_id=1266444952779620413)
         self.assertTrue(ok)
 
         ok, message = await self.service.set_ai_config(10, enabled_packs=["privacy"], min_confidence="high")
@@ -4586,6 +4595,17 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(status["enabled"])
         self.assertTrue(status["premium_unlocked"])
         self.assertEqual(status["policy_source"], "ordinary_global")
+        self.assertEqual(status["allowed_models"], ["gpt-5.4-nano", "gpt-5.4-mini"])
+
+    async def test_support_guild_gets_enhanced_models_when_owner_policy_allows_them(self):
+        ok, _ = await self.service.set_ordinary_ai_policy(enabled=True, allowed_models="nano,mini,full", actor_id=1266444952779620413)
+        self.assertTrue(ok)
+
+        status = self.service.get_ai_status(SHIELD_AI_ALLOWED_GUILD_ID)
+
+        self.assertTrue(status["enabled"])
+        self.assertTrue(status["premium_unlocked"])
+        self.assertEqual(status["allowed_models"], ["gpt-5.4-nano", "gpt-5.4-mini", "gpt-5.4"])
 
     async def test_allowlist_limit_scales_with_guild_pro(self):
         for index in range(20):
@@ -4645,11 +4665,11 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
 
         ok, message = await self.service.restore_support_ai_defaults(actor_id=1266444952779620413)
         self.assertTrue(ok)
-        self.assertIn("restored", message.lower())
+        self.assertIn("inherits", message.lower())
         status = self.service.get_ai_status(SHIELD_AI_ALLOWED_GUILD_ID)
-        self.assertTrue(status["enabled"])
-        self.assertEqual(status["policy_source"], "support_default")
-        self.assertEqual(status["allowed_models"], ["gpt-5.4-nano", "gpt-5.4-mini", "gpt-5.4"])
+        self.assertFalse(status["enabled"])
+        self.assertEqual(status["policy_source"], "ordinary_global")
+        self.assertEqual(status["allowed_models"], ["gpt-5.4-nano"])
 
     async def test_support_guild_flagged_message_can_enrich_alert_with_ai_review(self):
         guild = FakeGuild(SHIELD_AI_ALLOWED_GUILD_ID)
@@ -4673,6 +4693,8 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
+        ok, _ = await self.service.set_ordinary_ai_policy(enabled=True, allowed_models="nano,mini", actor_id=1266444952779620413)
+        self.assertTrue(ok)
         ok, _ = await self.service.set_module_enabled(guild.id, True)
         self.assertTrue(ok)
         ok, _ = await self.service.set_pack_config(guild.id, "privacy", enabled=True, action="log", sensitivity="normal")
@@ -4688,7 +4710,7 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(decision.ai_review)
         self.service.ai_provider.review.assert_awaited_once()
         request = self.service.ai_provider.review.await_args.args[0]
-        self.assertEqual(request.allowed_models, ("gpt-5.4-nano", "gpt-5.4-mini", "gpt-5.4"))
+        self.assertEqual(request.allowed_models, ("gpt-5.4-nano", "gpt-5.4-mini"))
         embed = log_channel.sent[0]["embed"]
         ai_field = next(field for field in embed.fields if field.name == "AI Assist")
         self.assertIn("Likely privacy leak", ai_field.value)
@@ -4719,6 +4741,8 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
+        ok, _ = await self.service.set_ordinary_ai_policy(enabled=True, allowed_models="nano", actor_id=1266444952779620413)
+        self.assertTrue(ok)
         ok, _ = await self.service.set_module_enabled(guild.id, True)
         self.assertTrue(ok)
         ok, _ = await self.service.set_pack_config(guild.id, "privacy", enabled=True, action="log", sensitivity="normal")
@@ -4736,8 +4760,7 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Contact me at [EMAIL]", request.sanitized_content)
         self.assertIn("embeds", decision.scan_surface_labels)
 
-    async def test_global_ordinary_policy_can_enable_nano_for_other_guilds(self):
-        self._attach_premium(guild_plans={10: PLAN_GUILD_PRO})
+    async def test_global_ordinary_policy_can_enable_nano_for_other_guilds_without_guild_pro(self):
         guild = FakeGuild(10)
         public_channel = FakeChannel(20)
         log_channel = FakeChannel(99, name="shield-log")
@@ -4828,6 +4851,8 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
             )
         )
 
+        ok, _ = await self.service.set_ordinary_ai_policy(enabled=True, allowed_models="nano", actor_id=1266444952779620413)
+        self.assertTrue(ok)
         ok, _ = await self.service.set_module_enabled(guild.id, True)
         self.assertTrue(ok)
         ok, _ = await self.service.set_pack_config(guild.id, "promo", enabled=True, action="log", sensitivity="normal")
@@ -4860,6 +4885,8 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         message = FakeMessage(guild=guild, channel=public_channel, author=author, content="Email me at friend@example.com")
         self.service.ai_provider = FakeAIProvider(result=None)
 
+        ok, _ = await self.service.set_ordinary_ai_policy(enabled=True, allowed_models="nano", actor_id=1266444952779620413)
+        self.assertTrue(ok)
         ok, _ = await self.service.set_module_enabled(guild.id, True)
         self.assertTrue(ok)
         ok, _ = await self.service.set_pack_config(guild.id, "privacy", enabled=True, action="log", sensitivity="normal")
@@ -4890,14 +4917,17 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(config["pack_exemptions"]["spam"]["user_ids"], [31, 32])
         self.assertEqual(config["pack_exemptions"]["severe"]["channel_ids"], [])
 
-    async def test_pack_exemptions_preserve_over_limit_saved_state_after_downgrade(self):
+    async def test_pack_exemptions_stay_saved_after_downgrade_but_runtime_only_uses_free_subset(self):
         self._attach_premium(guild_plans={10: PLAN_GUILD_PRO})
         ok, _ = await self.service.replace_pack_exemptions(10, "spam", "channel", list(range(100, 121)))
         self.assertTrue(ok)
 
         self._attach_premium()
+        config = self.service.get_config(10)
         compiled = self.service._compiled_configs[10]
-        self.assertEqual(len(compiled.pack_exemptions["spam"].channel_ids), 21)
+        self.assertEqual(len(config["pack_exemptions"]["spam"]["channel_ids"]), 21)
+        self.assertEqual(len(compiled.pack_exemptions["spam"].channel_ids), 20)
+        self.assertNotIn(120, compiled.pack_exemptions["spam"].channel_ids)
 
         ok, message = await self.service.replace_pack_exemptions(10, "spam", "channel", list(range(100, 122)))
         self.assertFalse(ok)

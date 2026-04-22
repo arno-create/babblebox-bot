@@ -36,9 +36,10 @@ Babblebox premium is intentionally narrow:
 - free stays genuinely usable and keeps core trust, privacy, and local safety intact
 - `Supporter` is optional recognition and does not unlock core product power
 - `Plus` raises personal utility caps for Watch, reminders, and recurring AFK schedules
-- `Guild Pro` raises server-side admin caps, unlocks Shield AI second-pass review outside the support server, raises bounded Shield limits, raises bump-detection scale, and raises the safe Confessions image ceiling
+- `Guild Pro` raises server-side admin caps, unlocks Shield AI's enhanced `gpt-5.4-mini` and `gpt-5.4` tiers, raises bounded Shield limits, raises bump-detection scale, and raises the safe Confessions image ceiling
 - Patreon is the initial premium source of truth, but entitlements are resolved through a separate provider-agnostic premium layer
-- premium downgrades do not delete saved Watch keywords, reminders, AFK schedules, Shield patterns, or Confessions settings; over-limit saved state is preserved and only future expansion is blocked until it is reduced or premium returns
+- hard Patreon auth failures or a local unlink immediately withdraw provider-backed runtime access while still preserving saved feature state
+- premium downgrades do not delete saved Watch keywords, reminders, AFK schedules, Shield patterns, or Confessions settings; over-limit saved state is preserved, but premium-only runtime capacity is paused until the saved state is reduced or premium returns
 
 ## Product Overview
 
@@ -146,7 +147,7 @@ Babblebox premium is intentionally narrow:
   - Babblebox's bounded cross-feature immunity layer
   - admin-only configuration for administrators or Manage Server users
   - live-message moderation remains optional and admin-configurable
-  - first enable applies a recommended non-AI baseline once, while Shield AI stays second-pass only and requires Guild Pro outside the support server
+  - first enable applies a recommended non-AI baseline once, while Shield AI stays second-pass only, owner policy controls availability, and Guild Pro only unlocks the higher model tiers
   - always-on private feature-surface checks for Confessions unsafe-link parity, AFK reasons, reminder text plus public reminder delivery, and watch keyword setup
   - AFK reasons and reminders use privacy, adult, and severe checks; watch keyword setup stays privacy-only
   - privacy leak pack
@@ -166,7 +167,7 @@ Babblebox premium is intentionally narrow:
 - bot and webhook scam handling stays conservative by default unless the evidence is clearly dangerous
 - optional AI-assisted second-pass review for moderator context only
 - Shield AI stays live-message-only; AFK, reminders, watch keywords, and Confessions feature checks remain local-first and AI-free
-- support server AI is on by default with routed `gpt-5.4-nano`, `gpt-5.4-mini`, and `gpt-5.4`, and Shield diagnostics report the resolved routing lane plus local readiness
+- Shield AI can route between `gpt-5.4-nano`, `gpt-5.4-mini`, and `gpt-5.4`; `gpt-5.4-nano` is the baseline tier, Guild Pro unlocks the higher models, and diagnostics report the resolved routing lane plus local readiness
 - ordinary guild AI needs both owner policy and Babblebox Guild Pro
 - `/shield ai` only configures review scope; Guild Pro plus owner policy controls real AI access and allowed models
 - log-first defaults with global `adaptive` vs `compact` delivery, `smart` vs `never` ping policy, and bounded per-pack delivery overrides
@@ -335,7 +336,7 @@ Question Drops notes:
 | `/premium plans` | n/a | Review `Supporter`, `Plus`, and `Guild Pro` plan behavior |
 | `/premium link` | n/a | Start Patreon account linking in a private flow |
 | `/premium refresh` | n/a | Recheck your Patreon-backed entitlements |
-| `/premium unlink` | n/a | Remove the current premium account link |
+| `/premium unlink` | n/a | Remove the current premium account link and delete Babblebox's local encrypted Patreon tokens |
 | `/premium guild status` | n/a | See the current guild entitlement and claim state |
 | `/premium guild claim` | n/a | Claim a Guild Pro entitlement for the current server |
 | `/premium guild release` | n/a | Release the current guild claim |
@@ -358,7 +359,7 @@ Utility premium notes:
 - free remains useful: Watch keeps 10 keywords and 8 filters, reminders keep 3 active and 1 public, AFK keeps 6 recurring schedules, and bump reminders keep 5 detection channels
 - Babblebox Plus raises the personal Watch, reminder, and AFK caps
 - Babblebox Guild Pro raises the bump-detection channel cap
-- downgrade never deletes saved utility state; it only blocks new expansion once the current plan limit is exceeded
+- downgrade never deletes saved utility state; over-limit reminders, Watch filters, keywords, AFK schedules, and bump channels stay saved, but only the current-plan subset remains active until the saved state is reduced or premium returns
 
 ### Shield / Safety
 
@@ -385,7 +386,7 @@ Slash is the best fit for multi-option admin setup here. Prefix stays positional
 | `/shield advanced list` | `bb!shield advanced list` | Review advanced patterns |
 | `/shield test` | `bb!shield test free nitro claim now https://bit.ly/x` | Dry-run a message through Shield |
 
-Shield's live-message link policy is intentionally separate from Confessions link mode. Confessions keeps `Disabled`, `Trusted Only`, and `Allow All Safe`, while Shield keeps `Default` plus the bounded `Trusted Links Only` mode. That stricter Shield mode allows the built-in trusted pack plus admin allowlisted domains and invite codes as policy exceptions, and `/shield trusted` now exposes the built-in families, direct domains, and any local built-in disables that affect trusted-only mode. Malicious, trusted-brand impersonation, adult-domain, and strong suspicious-link intel still wins over those trust exceptions. Shield phrase allowlists stay narrower: they suppress only targeted promo or adult-solicitation text matches. The live Shield packs are `Privacy Leak`, `Promo / Invite`, `Anti-Spam`, `GIF Flood / Media Pressure`, `Scam / Malicious Links`, `Adult Links + Solicitation`, and `Severe Harm / Hate`; no-link DM-lure bait lives under the scam pack and now covers money, wins, picks, and similar private-route payout lures, Anti-Spam stays grounded in explicit rate and duplicate rules with bounded corroboration, the GIF lane now splits one-user floods from collective channel pressure so collective cleanup can remove the exact live GIF streak for streak floods or only the newest contributing GIF posts from the active pressure slice for channel-pressure matches while personal abuse can still enforce one member, never text, the channel lane can trigger on either a true consecutive GIF streak or effective GIF pressure after lightweight meaningful-text weighting, collective pressure never adds strikes or timeouts on its own, tighter low-end GIF options exist for stricter rooms, optional emote and capitals lanes stay off until an admin enables them, moderators are exempt from Anti-Spam by default unless admins choose a stricter policy, `/shield panel` now keeps pack-local `Actions`, `Options`, and `Exemptions` together without mixing unrelated controls, `/shield module` owns the live on/off switch, `/shield escalation` owns repeated-hit escalation plus the global timeout fallback, `/shield logs` now carries global compact/no-ping defaults plus bounded per-pack overrides, each pack can inherit the global timeout or keep a dedicated timeout override, the trusted-link lane can do the same, live moderation stays opt-in, the first enable applies a recommended non-AI baseline, and Shield AI remains second-pass review only with Guild Pro required outside the support server.
+Shield's live-message link policy is intentionally separate from Confessions link mode. Confessions keeps `Disabled`, `Trusted Only`, and `Allow All Safe`, while Shield keeps `Default` plus the bounded `Trusted Links Only` mode. That stricter Shield mode allows the built-in trusted pack plus admin allowlisted domains and invite codes as policy exceptions, and `/shield trusted` now exposes the built-in families, direct domains, and any local built-in disables that affect trusted-only mode. Malicious, trusted-brand impersonation, adult-domain, and strong suspicious-link intel still wins over those trust exceptions. Shield phrase allowlists stay narrower: they suppress only targeted promo or adult-solicitation text matches. The live Shield packs are `Privacy Leak`, `Promo / Invite`, `Anti-Spam`, `GIF Flood / Media Pressure`, `Scam / Malicious Links`, `Adult Links + Solicitation`, and `Severe Harm / Hate`; no-link DM-lure bait lives under the scam pack and now covers money, wins, picks, and similar private-route payout lures, Anti-Spam stays grounded in explicit rate and duplicate rules with bounded corroboration, the GIF lane now splits one-user floods from collective channel pressure so collective cleanup can remove the exact live GIF streak for streak floods or only the newest contributing GIF posts from the active pressure slice for channel-pressure matches while personal abuse can still enforce one member, never text, the channel lane can trigger on either a true consecutive GIF streak or effective GIF pressure after lightweight meaningful-text weighting, collective pressure never adds strikes or timeouts on its own, tighter low-end GIF options exist for stricter rooms, optional emote and capitals lanes stay off until an admin enables them, moderators are exempt from Anti-Spam by default unless admins choose a stricter policy, `/shield panel` now keeps pack-local `Actions`, `Options`, and `Exemptions` together without mixing unrelated controls, `/shield module` owns the live on/off switch, `/shield escalation` owns repeated-hit escalation plus the global timeout fallback, `/shield logs` now carries global compact/no-ping defaults plus bounded per-pack overrides, each pack can inherit the global timeout or keep a dedicated timeout override, the trusted-link lane can do the same, live moderation stays opt-in, the first enable applies a recommended non-AI baseline, and Shield AI remains second-pass review only while Guild Pro unlocks `gpt-5.4-mini` plus `gpt-5.4`.
 
 Shield also now governs eligible non-chat surfaces in a bounded way. Confessions keeps its own privacy, review, and workflow logic, but shares Shield link intelligence. AFK reasons plus reminder text and public reminder delivery use fixed private privacy, adult, and severe feature-surface policies. Watch keyword setup stays privacy-only. None of those private feature checks create mod-log spam or call Shield AI.
 
@@ -538,8 +539,8 @@ Babblebox Shield is intentionally compact and conservative:
 - local scam decisions combine host/path/query risk with brand bait, official-looking framing, CTA wording, urgency, newcomer first-link context, fresh-campaign reuse, and explicit warning/education suppressors
 - optional AI review never becomes the primary moderation engine
 - AI review only runs after local Shield already flagged a message
-- support server AI is on by default with full model access; ordinary guild AI needs both owner policy and Babblebox Guild Pro
-- AI review is admin-visible, Guild Pro-gated outside the support server, and never punishes by itself
+- Shield AI defaults to the routed `gpt-5.4-nano` tier when owner policy enables it; Guild Pro unlocks `gpt-5.4-mini` and `gpt-5.4`
+- AI review is admin-visible, tiered by model rather than support-server carveout, and never punishes by itself
 - AI review can cover privacy, promo, scam, adult, and severe once admins opt those packs in
 - only minimal, sanitized, truncated flagged text from the scanned surfaces is sent to the AI provider
 
@@ -557,8 +558,8 @@ Examples:
 Important rules:
 
 - no media blobs are stored in Postgres
-- attachment URLs are only used at send time when available
-- Capture transcripts are delivered privately, not archived long-term
+- Later markers keep compact attachment labels instead of raw attachment URLs
+- private Capture transcript files may include currently available attachment URLs at send time, but are not archived long-term
 
 ## Daily Arcade Storage Discipline
 
@@ -781,16 +782,18 @@ UTILITY_DATABASE_URL=postgresql://...
 # PREMIUM_SECRET_KEY=replace-with-a-random-secret-at-least-32-characters
 # PREMIUM_SECRET_KEY_ID=active
 # PUBLIC_BASE_URL=https://your-public-babblebox-domain.example
+# Optional embedded web bind override. Defaults to 127.0.0.1 and only auto-binds 0.0.0.0 when PUBLIC_BASE_URL is set.
+# BABBLEBOX_WEB_HOST=127.0.0.1
 # PATREON_CLIENT_ID=your_patreon_client_id
 # PATREON_CLIENT_SECRET=your_patreon_client_secret
+# PATREON_REDIRECT_URI must exactly match PUBLIC_BASE_URL + /premium/patreon/callback
 # PATREON_REDIRECT_URI=https://your-public-babblebox-domain.example/premium/patreon/callback
 # PATREON_WEBHOOK_SECRET=your_patreon_webhook_secret
 # PATREON_CAMPAIGN_ID=your_patreon_campaign_id
+# Tier ID lists must be numeric Patreon tier IDs, and one tier ID cannot appear in more than one plan map.
 # PATREON_SUPPORTER_TIER_IDS=123456,234567
 # PATREON_PLUS_TIER_IDS=345678
 # PATREON_GUILD_PRO_TIER_IDS=456789
-# PATREON_CREATOR_ACCESS_TOKEN=creator_access_token
-# PATREON_CREATOR_REFRESH_TOKEN=creator_refresh_token
 OPENAI_API_KEY=sk-...
 # optional Shield AI tuning:
 # SHIELD_AI_FAST_MODEL=gpt-5.4-nano
@@ -820,8 +823,12 @@ Environment variable notes:
 - `PREMIUM_SECRET_KEY_ID` is optional but recommended; if omitted it defaults to `active`
 - `PREMIUM_SECRET_LEGACY_KEYS` is an optional comma-separated `key_id=secret` list used only during premium key rotation or compatibility windows
 - `PUBLIC_BASE_URL` is required for Patreon OAuth callback and webhook routes
-- `PATREON_CLIENT_ID`, `PATREON_CLIENT_SECRET`, `PATREON_REDIRECT_URI`, `PATREON_WEBHOOK_SECRET`, `PATREON_CAMPAIGN_ID`, `PATREON_SUPPORTER_TIER_IDS`, `PATREON_PLUS_TIER_IDS`, and `PATREON_GUILD_PRO_TIER_IDS` are required for Patreon-linked premium automation
-- `PATREON_CREATOR_ACCESS_TOKEN` and `PATREON_CREATOR_REFRESH_TOKEN` are optional unless you want creator-token membership repair sync in addition to webhook-driven updates
+- `BABBLEBOX_WEB_HOST` optionally overrides the embedded web bind host. Without it, Babblebox stays on `127.0.0.1` by default and only auto-binds `0.0.0.0` when `PUBLIC_BASE_URL` is configured
+- The embedded HTTP surface now runs through in-process `Waitress`; keep it behind external TLS and reverse proxying in production instead of exposing the raw process directly
+- `/livez` is liveness only, `/health` is the public-safe summary, and `/readyz` is the rollout and alert gate; those public routes expose non-sensitive readiness only
+- `PATREON_CLIENT_ID`, `PATREON_CLIENT_SECRET`, `PATREON_REDIRECT_URI`, `PATREON_WEBHOOK_SECRET`, `PATREON_CAMPAIGN_ID`, `PATREON_SUPPORTER_TIER_IDS`, `PATREON_PLUS_TIER_IDS`, and `PATREON_GUILD_PRO_TIER_IDS` are required for Patreon-linked premium linking, verified webhooks, and user refresh
+- `PATREON_REDIRECT_URI` must exactly match `PUBLIC_BASE_URL` plus `/premium/patreon/callback`, and the Patreon tier ID lists must be disjoint numeric IDs; Babblebox fails the Patreon surface closed when that configuration is incomplete or inconsistent
+- The embedded public web surface serves only `/`, `/help.html`, `/privacy.html`, `/terms.html`, `/sitemap.xml`, and `/assets/...`; repo files, dotfiles, Markdown, tests, and source paths are never public routes
 - `CONFESSIONS_CONTENT_KEY` and `CONFESSIONS_IDENTITY_KEY` are required for Postgres-backed Confessions and should be separate random secrets of at least 32 characters each
 - `CONFESSIONS_CONTENT_KEY_ID` and `CONFESSIONS_IDENTITY_KEY_ID` are optional but recommended active key labels; if omitted they default to `active`
 - `CONFESSIONS_CONTENT_LEGACY_KEYS` and `CONFESSIONS_IDENTITY_LEGACY_KEYS` are optional comma-separated `key_id=secret` lists used only during key rotation or compatibility windows so Babblebox can read old Confessions rows while writing with the new active key
@@ -849,6 +856,7 @@ Important operator note:
 
 - code deploy plus keys is not enough; old Confessions rows stay only partially hardened until this backfill finishes
 - Babblebox now warns on startup when Confessions privacy hardening is still partial
+- Confessions readiness stays degraded until that privacy backfill is complete and every enabled guild has a safe private review channel plus a safe private appeals/report channel
 - the private `/confessions` status/dashboard surfaces also show whether privacy hardening is `Ready` or `Partial` for that server
 
 ### Confessions Key Rotation
@@ -877,6 +885,14 @@ Enable:
 ```bash
 python main.py
 ```
+
+### HTTP Status
+
+- `babblebox.web:create_app` is the WSGI app factory if you want to front Babblebox with a separate ingress layer
+- the default same-process HTTP path uses embedded `Waitress`, not Flask's development server
+- `/livez` is liveness only and should not gate rollouts
+- `/health` is the compact public-safe summary
+- `/readyz` is the deployment and monitoring gate because it includes whole-bot readiness, Confessions readiness, and sanitized premium provider aggregates
 
 ### Tests
 

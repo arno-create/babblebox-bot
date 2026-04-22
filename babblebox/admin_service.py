@@ -3,6 +3,8 @@ from __future__ import annotations
 import asyncio
 import calendar
 import contextlib
+import logging
+import os
 import re
 import unicodedata
 from dataclasses import dataclass
@@ -69,6 +71,8 @@ LOCK_MODERATOR_PERMISSION_NAMES = (
 LOCK_ADMIN_ONLY_ACCESS_SUMMARY = "Admins only"
 LOCK_MODERATOR_ACCESS_SUMMARY = "Moderators who can manage channels or messages, timeout, kick, or ban members, plus admins"
 FOLLOWUP_DURATION_RE = re.compile(r"(?ix)^\s*(\d+)\s*(d|day|days|w|week|weeks|mo|mon|month|months|y|yr|year|years)\s*$")
+
+LOGGER = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -207,13 +211,18 @@ class AdminService:
         self.storage_ready = False
         self.storage_error: str | None = None
         self._startup_storage_error: str | None = None
+        self.storage_backend_preference = (
+            getattr(store, "backend_preference", None)
+            or (os.getenv("ADMIN_STORAGE_BACKEND", "").strip() or "postgres")
+        ).strip().lower()
         if store is not None:
             self.store = store
         else:
             try:
                 self.store = AdminStore()
+                self.storage_backend_preference = getattr(self.store, "backend_preference", self.storage_backend_preference)
             except AdminStorageUnavailable as exc:
-                print(f"Admin storage constructor failed: {exc}")
+                LOGGER.warning("Admin storage constructor failed: %s", exc)
                 self.store = AdminStore(backend="memory")
                 self._startup_storage_error = str(exc)
                 self.storage_error = str(exc)
@@ -227,14 +236,14 @@ class AdminService:
         if self._startup_storage_error is not None:
             self.storage_ready = False
             self.storage_error = self._startup_storage_error
-            print(f"Admin storage unavailable: {self._startup_storage_error}")
+            LOGGER.warning("Admin storage unavailable: %s", self._startup_storage_error)
             return False
         try:
             await self.store.load()
         except AdminStorageUnavailable as exc:
             self.storage_ready = False
             self.storage_error = str(exc)
-            print(f"Admin storage unavailable: {exc}")
+            LOGGER.warning("Admin storage unavailable: %s", exc)
             return False
         self.storage_ready = True
         self.storage_error = None
@@ -1500,7 +1509,7 @@ class AdminService:
         embed = ge.make_status_embed(title, message, tone="warning", footer=footer)
         sent = await self.send_log(guild, compiled, embed=embed, alert=alert)
         if not sent:
-            print(f"Admin automation warning for guild {guild.id}: {message}")
+            LOGGER.warning("Admin automation warning: guild_id=%s note=%s", guild.id, message)
 
 
 

@@ -15,6 +15,7 @@ from babblebox.app_command_hardening import harden_admin_root_group
 from babblebox import game_engine as ge
 from babblebox.command_utils import defer_hybrid_response, send_hybrid_response
 from babblebox.confessions_service import MAX_CONFESSION_LENGTH, ConfessionSubmissionResult, ConfessionsService
+from babblebox.runtime_health import bind_started_service
 from babblebox.text_safety import normalize_plain_text
 
 
@@ -2257,8 +2258,7 @@ class ConfessionsCog(commands.Cog):
         harden_admin_root_group(self.confessions_group)
 
     async def cog_load(self):
-        await self.service.start()
-        setattr(self.bot, "confessions_service", self.service)
+        await bind_started_service(self.bot, attr_name="confessions_service", service=self.service, label="Confessions")
         self._register_global_persistent_views()
         if self.service.storage_ready and self._bot_is_ready():
             await self._restore_runtime_surfaces_once()
@@ -2323,6 +2323,7 @@ class ConfessionsCog(commands.Cog):
     @commands.Cog.listener()
     async def on_ready(self):
         await self._restore_runtime_surfaces_once()
+        self.service.log_readiness_summary()
 
     def _is_admin(self, member: object) -> bool:
         perms = getattr(member, "guild_permissions", None)
@@ -2650,13 +2651,15 @@ class ConfessionsCog(commands.Cog):
             f"guild_id={guild_id if guild_id is not None else 'none'}",
         ]
         if note:
-            parts.append(f"note={str(note)[:160]}")
+            cleaned_note = normalize_plain_text(note)
+            if cleaned_note:
+                parts.append(f"note={cleaned_note[:160]}")
         if exc is not None:
             parts.append(f"exception={type(exc).__name__}")
         parts.append(f"backend={getattr(self.service.store, 'backend_name', 'unknown')}")
         message = f"Confessions admin diagnostic: {', '.join(parts)}"
         if exc is not None:
-            LOGGER.exception(message)
+            LOGGER.error(message)
             return
         LOGGER.warning(message)
 
@@ -2679,13 +2682,15 @@ class ConfessionsCog(commands.Cog):
         if message_id is not None:
             parts.append(f"message_id={message_id}")
         if note:
-            parts.append(f"note={str(note)[:160]}")
+            cleaned_note = normalize_plain_text(note)
+            if cleaned_note:
+                parts.append(f"note={cleaned_note[:160]}")
         if exc is not None:
             parts.append(f"exception={type(exc).__name__}")
         parts.append(f"backend={getattr(self.service.store, 'backend_name', 'unknown')}")
         message = f"Confessions member diagnostic: {', '.join(parts)}"
         if exc is not None:
-            LOGGER.exception(message)
+            LOGGER.error(message)
             return
         LOGGER.warning(message)
 
@@ -2724,13 +2729,15 @@ class ConfessionsCog(commands.Cog):
         if upload_present is not None:
             parts.append(f"upload_present={bool(upload_present)}")
         if note:
-            parts.append(f"note={str(note)[:160]}")
+            cleaned_note = normalize_plain_text(note)
+            if cleaned_note:
+                parts.append(f"note={cleaned_note[:160]}")
         if exc is not None:
             parts.append(f"exception={type(exc).__name__}")
         parts.append(f"backend={getattr(self.service.store, 'backend_name', 'unknown')}")
         message = f"Confessions create diagnostic: {', '.join(parts)}"
         if exc is not None:
-            LOGGER.exception(message)
+            LOGGER.error(message)
             return
         if info:
             LOGGER.info(message)
@@ -3338,7 +3345,7 @@ class ConfessionsCog(commands.Cog):
         parts.append(f"backend={getattr(self.service.store, 'backend_name', 'unknown')}")
         message = f"Confessions modal diagnostic: {', '.join(parts)}"
         if exc is not None:
-            LOGGER.exception(message)
+            LOGGER.error(message)
             return
         LOGGER.warning(message)
 

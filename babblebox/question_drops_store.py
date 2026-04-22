@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import importlib
 import json
+import logging
 import os
 from copy import deepcopy
 from datetime import datetime, timezone
@@ -13,6 +14,8 @@ from babblebox.question_drops_content import QUESTION_DROP_DIFFICULTY_PROFILES
 from babblebox.postgres_json import decode_postgres_json_array, decode_postgres_json_object
 from babblebox.text_safety import normalize_plain_text
 
+
+LOGGER = logging.getLogger(__name__)
 
 DEFAULT_BACKEND = "postgres"
 QUESTION_DROP_MIN_DROPS_PER_DAY = 1
@@ -1960,12 +1963,12 @@ class QuestionDropsStore:
         self._construct_store(requested_backend)
 
     def _construct_store(self, requested_backend: str):
-        print(
-            "Question Drops storage init: "
-            f"backend_preference={requested_backend}, "
-            f"database_url_configured={'yes' if self.database_url else 'no'}, "
-            f"database_url_source={self.database_url_source or 'none'}, "
-            f"database_target={_redact_database_url(self.database_url)}"
+        LOGGER.info(
+            "Question Drops storage init: backend_preference=%s database_url_configured=%s database_url_source=%s database_target=%s",
+            requested_backend,
+            "yes" if self.database_url else "no",
+            self.database_url_source or "none",
+            _redact_database_url(self.database_url),
         )
         if requested_backend in {"memory", "test", "dev"}:
             self._store = _MemoryQuestionDropsStore()
@@ -1978,7 +1981,7 @@ class QuestionDropsStore:
         else:
             raise QuestionDropsStorageUnavailable(f"Unsupported Question Drops storage backend '{requested_backend}'.")
         self.backend_name = self._store.backend_name
-        print(f"Question Drops storage init succeeded: backend={self.backend_name}")
+        LOGGER.info("Question Drops storage init succeeded: backend=%s", self.backend_name)
 
     async def load(self):
         if self._store is None:

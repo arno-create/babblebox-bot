@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import asyncio
+import logging
+import os
 from datetime import date, datetime, timedelta, timezone
 from typing import Any
 
@@ -138,6 +140,8 @@ GAME_TYPE_FIELDS = {
     "bomb": "bomb_rounds",
     "pattern_hunt": "pattern_hunt_rounds",
 }
+
+LOGGER = logging.getLogger(__name__)
 
 
 def _profile_default(user_id: int) -> dict[str, Any]:
@@ -484,13 +488,18 @@ class ProfileService:
         self.storage_ready = False
         self.storage_error: str | None = None
         self._startup_storage_error: str | None = None
+        self.storage_backend_preference = (
+            getattr(store, "backend_preference", None)
+            or (os.getenv("PROFILE_STORAGE_BACKEND", "").strip() or os.getenv("UTILITY_STORAGE_BACKEND", "postgres").strip() or "postgres")
+        ).strip().lower()
         if store is not None:
             self.store = store
         else:
             try:
                 self.store = ProfileStore()
+                self.storage_backend_preference = getattr(self.store, "backend_preference", self.storage_backend_preference)
             except ProfileStorageUnavailable as exc:
-                print(f"Profile storage constructor failed: {exc}")
+                LOGGER.warning("Profile storage constructor failed: %s", exc)
                 self.store = ProfileStore(backend="memory")
                 self._startup_storage_error = str(exc)
                 self.storage_error = str(exc)
@@ -500,7 +509,7 @@ class ProfileService:
         if self._startup_storage_error is not None:
             self.storage_ready = False
             self.storage_error = self._startup_storage_error
-            print(f"Profile storage unavailable: {self._startup_storage_error}")
+            LOGGER.warning("Profile storage unavailable: %s", self._startup_storage_error)
             return False
         try:
             await self.store.load()
@@ -508,7 +517,7 @@ class ProfileService:
         except ProfileStorageUnavailable as exc:
             self.storage_ready = False
             self.storage_error = str(exc)
-            print(f"Profile storage unavailable: {exc}")
+            LOGGER.warning("Profile storage unavailable: %s", exc)
             return False
         self.storage_ready = True
         self.storage_error = None

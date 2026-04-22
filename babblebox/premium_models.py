@@ -14,10 +14,15 @@ SCOPE_USER = "user"
 SCOPE_GUILD = "guild"
 PROVIDER_PATREON = "patreon"
 
+SYSTEM_PREMIUM_OWNER_USER_IDS = frozenset({1266444952779620413, 1345860619836063754})
+SYSTEM_PREMIUM_SUPPORT_GUILD_ID = 1322933864360050688
+SYSTEM_PREMIUM_CLAIM_KIND = "system_owner"
+
 MANUAL_KIND_GRANT = "grant"
 MANUAL_KIND_BLOCK = "block"
 
 LINK_STATUS_ACTIVE = "active"
+LINK_STATUS_BROKEN = "broken"
 LINK_STATUS_REVOKED = "revoked"
 
 ENTITLEMENT_STATUS_ACTIVE = "active"
@@ -29,6 +34,7 @@ CLAIM_STATUS_RELEASED = "released"
 WEBHOOK_STATUS_PENDING = "pending"
 WEBHOOK_STATUS_PROCESSED = "processed"
 WEBHOOK_STATUS_FAILED = "failed"
+WEBHOOK_STATUS_UNRESOLVED = "unresolved"
 
 
 @dataclass(frozen=True)
@@ -134,4 +140,3 @@ class ProviderSyncResult:
     grace_until: datetime
     current_period_end: datetime | None
     metadata: dict[str, Any]
-

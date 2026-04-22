@@ -1,7 +1,7 @@
 from __future__ import annotations
 
+import logging
 import os
-import traceback
 from pathlib import Path
 from typing import Any
 
@@ -11,6 +11,8 @@ from discord import app_commands
 from discord.ext import commands
 
 from babblebox import game_engine as ge
+
+LOGGER = logging.getLogger(__name__)
 
 
 COGS = (
@@ -62,7 +64,7 @@ class BabbleBot(commands.Bot):
             try:
                 self.dev_guild_id = int(dev_guild_raw)
             except ValueError:
-                print(f"Invalid DEV_GUILD_ID '{dev_guild_raw}'. Ignoring dev guild sync.")
+                LOGGER.warning("Invalid DEV_GUILD_ID '%s'. Ignoring dev guild sync.", dev_guild_raw)
 
     def _required_slash_contract(self) -> dict[str, dict[str, object]]:
         return REQUIRED_SLASH_CONTRACT
@@ -198,12 +200,20 @@ class BabbleBot(commands.Bot):
             raise RuntimeError(f"Command sync failed for {target_label}: {exc}") from exc
 
         self._verify_required_slash_contract(synced, target_label=f"{target_label} sync result")
-        print(f"Commands synced to {target_label}: {len(synced)}")
+        LOGGER.info("Commands synced to %s: %s", target_label, len(synced))
         return synced
 
     async def setup_hook(self):
         ge.set_runtime_bot(self)
         self.tree.on_error = self.on_app_command_error
+        try:
+            from babblebox import web
+        except Exception:
+            web = None
+        if web is not None:
+            setter = getattr(web, "set_bot_runtime", None)
+            if callable(setter):
+                setter(self)
 
         await self._load_dictionary()
 
@@ -242,21 +252,31 @@ class BabbleBot(commands.Bot):
                                 cache_file.write(chunk)
             except Exception as exc:
                 self.dictionary_ready = False
-                print(f"Failed to download dictionary: {exc}")
+                LOGGER.warning("Failed to download dictionary: error_type=%s", type(exc).__name__)
                 return
 
         try:
             with cache_path.open("r", encoding="utf-8") as handle:
                 ge.VALID_WORDS.update(line.strip().lower() for line in handle if line.strip())
             self.dictionary_ready = True
-            print(f"Dictionary loaded: {len(ge.VALID_WORDS)} words ready for Word Bomb.")
+            LOGGER.info("Dictionary loaded: %s words ready for Word Bomb.", len(ge.VALID_WORDS))
         except Exception as exc:
             self.dictionary_ready = False
-            print(f"Failed to load cached dictionary: {exc}")
+            LOGGER.warning("Failed to load cached dictionary: error_type=%s", type(exc).__name__)
 
     async def on_app_command_error(self, interaction: discord.Interaction, error: app_commands.AppCommandError):
-        print(f"App command error: {error}")
-        traceback.print_exception(type(error), error, error.__traceback__)
+        command = getattr(interaction, "command", None)
+        command_name = getattr(command, "qualified_name", None) or getattr(command, "name", None) or "unknown"
+        root_error = getattr(error, "original", error)
+        logger = LOGGER.info if isinstance(error, app_commands.errors.CheckFailure) else LOGGER.error
+        logger(
+            "App command failure: command=%s guild_id=%s channel_id=%s user_id=%s error_type=%s",
+            command_name,
+            getattr(getattr(interaction, "guild", None), "id", None),
+            getattr(getattr(interaction, "channel", None), "id", None),
+            getattr(getattr(interaction, "user", None), "id", None),
+            type(root_error).__name__,
+        )
 
         if isinstance(error, app_commands.errors.CheckFailure):
             message = "This command can only be used in a server."
