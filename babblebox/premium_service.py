@@ -58,7 +58,7 @@ from babblebox.premium_models import (
     WEBHOOK_STATUS_PROCESSED,
     WEBHOOK_STATUS_UNRESOLVED,
 )
-from babblebox.premium_provider import PremiumProviderError
+from babblebox.premium_provider import PremiumProviderError, WebhookVerificationError
 from babblebox.premium_crypto import PremiumCryptoError
 from babblebox.premium_provider_patreon import PatreonPremiumProvider
 from babblebox.premium_store import PremiumStorageUnavailable, PremiumStore, PremiumStoreConflict
@@ -403,16 +403,23 @@ class PremiumService:
             if self._claim_source_state(claim)[0]
         ]
 
+    def _preferred_claim_source(self, user_id: int) -> dict[str, Any] | None:
+        sources = self._claimable_guild_sources(user_id)
+        if not sources:
+            return None
+        return sorted(sources, key=lambda item: (str(item["source_kind"]), str(item["source_id"])))[0]
+
     async def _reconcile_invalid_claims(self):
         if not self.storage_ready or self.store is None:
             return
         releases: list[tuple[dict[str, Any], str]] = []
-        released_at = _utcnow()
+        rebinds: list[tuple[dict[str, Any], dict[str, Any], str]] = []
+        changed_at = _utcnow()
         for claim in list(self._claims_by_guild.values()):
             if self.is_support_guild(int(claim.get("guild_id", 0) or 0)):
                 released = await self.store.release_guild_claim(
                     int(claim["guild_id"]),
-                    released_at=released_at,
+                    released_at=changed_at,
                     note="Auto-released because the support guild keeps permanent full-access premium.",
                 )
                 if released is not None:
@@ -421,16 +428,47 @@ class PremiumService:
             effective, _stale, _in_grace, reason = self._claim_source_state(claim)
             if effective:
                 continue
+            rebound_source = self._preferred_claim_source(int(claim.get("owner_user_id", 0) or 0))
+            if rebound_source is not None:
+                rebound = await self.store.reassign_guild_claim_source(
+                    int(claim["guild_id"]),
+                    owner_user_id=int(claim["owner_user_id"]),
+                    source_kind=str(rebound_source["source_kind"]),
+                    source_id=str(rebound_source["source_id"]),
+                    entitlement_id=rebound_source.get("entitlement_id"),
+                    updated_at=changed_at,
+                    note=f"Auto-rebound after premium source check: {reason or 'claim_source_invalid'}",
+                )
+                if rebound is not None:
+                    rebinds.append((claim, rebound, reason or "claim_source_invalid"))
+                    continue
             released = await self.store.release_guild_claim(
                 int(claim["guild_id"]),
-                released_at=released_at,
+                released_at=changed_at,
                 note=f"Auto-released after premium source check: {reason or 'claim_source_invalid'}",
             )
             if released is not None:
                 releases.append((claim, reason or "claim_source_invalid"))
-        if not releases:
+        if not releases and not rebinds:
             return
         await self._load_cache_state()
+        for prior_claim, rebound_claim, reason in rebinds:
+            await self._audit(
+                action="guild_claim_source_rebind",
+                target_type=SCOPE_GUILD,
+                target_id=str(prior_claim["guild_id"]),
+                detail={
+                    "claim_id": prior_claim.get("claim_id"),
+                    "owner_user_id": prior_claim.get("owner_user_id"),
+                    "reason": reason,
+                    "old_source_kind": prior_claim.get("source_kind"),
+                    "old_source_id": prior_claim.get("source_id"),
+                    "old_entitlement_id": prior_claim.get("entitlement_id"),
+                    "new_source_kind": rebound_claim.get("source_kind"),
+                    "new_source_id": rebound_claim.get("source_id"),
+                    "new_entitlement_id": rebound_claim.get("entitlement_id"),
+                },
+            )
         for claim, reason in releases:
             await self._audit(
                 action="guild_claim_auto_release",
@@ -657,22 +695,17 @@ class PremiumService:
         recent_unavailable_count = int(monitor.get("recent_unavailable_count", 0) or 0)
         recent_server_error_count = int(monitor.get("recent_server_error_count", 0) or 0)
         unresolved_issue_count = int(payload.get("unresolved_issue_count", 0) or 0)
+        last_status = str(monitor.get("last_status") or "").strip().lower() or None
         status = "ready"
         if not self.storage_ready:
             status = "unavailable"
         elif provider == PROVIDER_PATREON and not self.patreon.configured():
             status = "not_configured"
-        elif (
-            invalid_signature_count
-            or recent_unavailable_count
-            or recent_server_error_count
-            or unresolved_issue_count
-            or last_issue.get("issue_type")
-        ):
+        elif last_status in {"invalid", "unresolved", "unavailable", "error"}:
             status = "degraded"
         return {
             "status": status,
-            "last_webhook_status": monitor.get("last_status"),
+            "last_webhook_status": last_status,
             "last_webhook_http_status": monitor.get("last_http_status"),
             "last_webhook_at": monitor.get("last_event_at"),
             "invalid_signature_count": invalid_signature_count,
@@ -777,11 +810,13 @@ class PremiumService:
         payload = dict(current_row.get("payload") or {})
         now = _serialize_datetime(_utcnow())
         recent_issues = list(payload.get("recent_issues") or [])
-        issue_record = {"issue_type": issue_type, "recorded_at": now, **detail}
+        requires_review = issue_type == "webhook_unresolved"
+        issue_record = {"issue_type": issue_type, "recorded_at": now, "requires_review": requires_review, **detail}
         recent_issues.insert(0, issue_record)
         payload["recent_issues"] = recent_issues[:10]
         payload["last_issue"] = issue_record
-        payload["unresolved_issue_count"] = int(payload.get("unresolved_issue_count", 0) or 0) + 1
+        if requires_review:
+            payload["unresolved_issue_count"] = int(payload.get("unresolved_issue_count", 0) or 0) + 1
         await self._store_provider_state_payload(provider, payload)
 
     async def record_webhook_monitor_event(self, *, status: str, status_code: int, invalid_signature: bool = False):
@@ -894,15 +929,6 @@ class PremiumService:
             "payload_hash": payload_hash,
         }
 
-    async def _release_guild_pro_claims_for_entitlements(self, *, owner_user_id: int, entitlement_ids: set[str], note: str):
-        if not entitlement_ids or self.store is None:
-            return
-        now = _utcnow()
-        for claim in list(self._claims_by_owner.get(owner_user_id, ())):
-            if str(claim.get("entitlement_id") or "") not in entitlement_ids:
-                continue
-            await self.store.release_guild_claim(int(claim["guild_id"]), released_at=now, note=note)
-
     async def _set_patreon_entitlements_inactive(
         self,
         *,
@@ -968,7 +994,7 @@ class PremiumService:
     ) -> tuple[bool, str]:
         self._require_storage_ready()
         now = _utcnow()
-        revoked_entitlement_ids = await self._set_patreon_entitlements_inactive(
+        await self._set_patreon_entitlements_inactive(
             user_id=user_id,
             now=now,
             stale_after=now,
@@ -976,11 +1002,6 @@ class PremiumService:
             current_period_end=now,
         )
         await self._set_patreon_link_status(user_id=user_id, status=link_status, reason=reason, scrub_tokens=True)
-        await self._release_guild_pro_claims_for_entitlements(
-            owner_user_id=user_id,
-            entitlement_ids=revoked_entitlement_ids,
-            note=f"Patreon access revoked: {reason}",
-        )
         await self._reload_cache()
         await self._audit(
             action=action,
@@ -990,6 +1011,37 @@ class PremiumService:
             detail={"reason": reason},
         )
         return False, safe_message
+
+    async def _handle_patreon_identity_mismatch(
+        self,
+        *,
+        user_id: int,
+        stage: str,
+        expected_provider_user_id: str,
+        identity,
+    ) -> tuple[bool, str]:
+        safe_message = (
+            "Patreon returned a different account than the one linked to this Discord user. "
+            "Re-link Patreon from `/premium link` before Babblebox can trust provider-backed premium access."
+        )
+        await self._record_provider_issue(
+            provider=PROVIDER_PATREON,
+            issue_type="patreon_identity_mismatch",
+            detail={
+                "user_id": user_id,
+                "stage": stage,
+                "expected_provider_user_id": expected_provider_user_id,
+                "observed_provider_user_id": identity.provider_user_id,
+                "member_id": identity.member_id,
+            },
+        )
+        return await self._revoke_patreon_access(
+            user_id=user_id,
+            reason="identity_provider_user_mismatch",
+            safe_message=safe_message,
+            action="patreon_identity_mismatch",
+            link_status=LINK_STATUS_REVOKED,
+        )
 
     async def _handle_patreon_sync_failure(self, *, user_id: int, stage: str, exc: Exception) -> tuple[bool, str]:
         safe_message = self._safe_provider_message(exc, "Babblebox could not verify Patreon safely right now.")
@@ -1105,7 +1157,7 @@ class PremiumService:
         current = await self.store.list_entitlements_for_user(discord_user_id, provider=PROVIDER_PATREON)
         effective_plan_codes = _effective_patreon_plan_codes(identity.plan_codes)
         if _patreon_plan_families(effective_plan_codes) == frozenset({"user", "guild"}):
-            revoked_entitlement_ids = await self._set_patreon_entitlements_inactive(
+            await self._set_patreon_entitlements_inactive(
                 user_id=discord_user_id,
                 now=now,
                 stale_after=now,
@@ -1117,11 +1169,6 @@ class PremiumService:
                 status=LINK_STATUS_ACTIVE,
                 reason="ambiguous_plan_mapping",
                 scrub_tokens=False,
-            )
-            await self._release_guild_pro_claims_for_entitlements(
-                owner_user_id=discord_user_id,
-                entitlement_ids=revoked_entitlement_ids,
-                note="Patreon mapping became ambiguous across personal and guild premium families",
             )
             await self._reload_cache()
             await self._record_provider_issue(
@@ -1298,6 +1345,14 @@ class PremiumService:
             )
         try:
             identity = await self.patreon.fetch_identity(access_token=access_token)
+            expected_provider_user_id = str(link.get("provider_user_id") or "").strip()
+            if expected_provider_user_id and identity.provider_user_id != expected_provider_user_id:
+                return await self._handle_patreon_identity_mismatch(
+                    user_id=user_id,
+                    stage="identity",
+                    expected_provider_user_id=expected_provider_user_id,
+                    identity=identity,
+                )
             await self._sync_identity(
                 discord_user_id=user_id,
                 identity=identity,
@@ -1330,13 +1385,9 @@ class PremiumService:
                     "current_period_end": _serialize_datetime(now),
                 }
             )
-            if record.get("plan_code") == PLAN_GUILD_PRO:
-                for claim in list(self._claims_by_owner.get(user_id, ())):
-                    if claim.get("entitlement_id") == record.get("entitlement_id"):
-                        await self.store.release_guild_claim(int(claim["guild_id"]), released_at=now, note="Patreon link removed")
         await self._reload_cache()
         await self._audit(action="patreon_unlink", target_type="user", target_id=str(user_id), actor_user_id=user_id)
-        return True, "Patreon was unlinked and provider-backed entitlements were released."
+        return True, "Patreon was unlinked and provider-backed entitlements were withdrawn."
 
     async def claim_guild(self, *, guild: Any, actor: Any) -> tuple[bool, str]:
         if not self.storage_ready:
@@ -1361,7 +1412,7 @@ class PremiumService:
             sources = self._claimable_guild_sources(user_id)
             if not sources:
                 return False, "No unclaimed Guild Pro entitlement is available for this user."
-            source = sorted(sources, key=lambda item: (str(item["source_kind"]), str(item["source_id"])))[0]
+            source = self._preferred_claim_source(user_id) or sources[0]
         now = _utcnow()
         claimed = await self.store.claim_guild(
             {
@@ -1379,6 +1430,14 @@ class PremiumService:
             }
         )
         if claimed is None:
+            await self._reload_cache()
+            current = self._claims_by_guild.get(guild_id)
+            if current is not None and current.get("status") == CLAIM_STATUS_ACTIVE:
+                if int(current.get("owner_user_id", 0) or 0) == user_id:
+                    return False, "This server already uses one of your Guild Pro claims."
+                return False, "This server already has an active Guild Pro claim."
+            if not self.is_system_owner(user_id) and not self._claimable_guild_sources(user_id):
+                return False, "No unclaimed Guild Pro entitlement is available for this user."
             return False, "Babblebox could not claim Guild Pro for this server right now."
         await self._reload_cache()
         await self._audit(action="guild_claim", target_type="guild", target_id=str(guild_id), actor_user_id=user_id, detail={"source_id": source["source_id"], "source_kind": source["source_kind"]})
@@ -1482,22 +1541,31 @@ class PremiumService:
         if not self.storage_ready:
             return PatreonWebhookResult("unavailable", self.storage_message())
         if not self.patreon.configured():
+            await self.record_webhook_monitor_event(status="unavailable", status_code=503)
             return PatreonWebhookResult("unavailable", self._patreon_configuration_message())
         if len(body) > PREMIUM_WEBHOOK_MAX_BYTES:
+            await self.record_webhook_monitor_event(status="invalid", status_code=413)
             return PatreonWebhookResult("invalid", "Patreon webhook payload exceeded the safe size limit.")
         secret = os.getenv("PATREON_WEBHOOK_SECRET", "").strip()
         if not secret:
+            await self.record_webhook_monitor_event(status="unavailable", status_code=503)
             return PatreonWebhookResult("unavailable", "Patreon webhook secret is not configured.")
-        self.patreon.verify_webhook(body=body, signature=signature, secret=secret)
+        try:
+            self.patreon.verify_webhook(body=body, signature=signature, secret=secret)
+        except WebhookVerificationError:
+            await self.record_webhook_monitor_event(status="invalid", status_code=400, invalid_signature=True)
+            raise
         try:
             payload = json.loads(body.decode("utf-8") or "{}")
         except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+            await self.record_webhook_monitor_event(status="invalid", status_code=400)
             raise PremiumProviderError(
                 "Patreon webhook payload was not valid JSON.",
                 safe_message="Patreon webhook payload was invalid.",
                 status_code=400,
             ) from exc
         if not isinstance(payload, dict):
+            await self.record_webhook_monitor_event(status="invalid", status_code=400)
             raise PremiumProviderError(
                 "Patreon webhook payload was not an object.",
                 safe_message="Patreon webhook payload was invalid.",
@@ -1519,6 +1587,7 @@ class PremiumService:
             }
         )
         if not accepted:
+            await self.record_webhook_monitor_event(status="duplicate", status_code=200)
             return PatreonWebhookResult("duplicate", "Duplicate Patreon webhook ignored.")
         try:
             campaign_id = self._extract_webhook_campaign_id(payload)
@@ -1532,6 +1601,7 @@ class PremiumService:
                 }
                 await self._record_provider_issue(provider=PROVIDER_PATREON, issue_type="webhook_unresolved", detail=issue)
                 await self.store.finish_webhook_event(event_key, status=WEBHOOK_STATUS_UNRESOLVED, error_text="Webhook campaign id did not match the configured Patreon campaign.")
+                await self.record_webhook_monitor_event(status="unresolved", status_code=200)
                 return PatreonWebhookResult("unresolved", "Patreon webhook stored for manual review.")
             if not provider_user_id:
                 issue = {
@@ -1542,6 +1612,7 @@ class PremiumService:
                 }
                 await self._record_provider_issue(provider=PROVIDER_PATREON, issue_type="webhook_unresolved", detail=issue)
                 await self.store.finish_webhook_event(event_key, status=WEBHOOK_STATUS_UNRESOLVED, error_text="Missing provider user id in webhook payload.")
+                await self.record_webhook_monitor_event(status="unresolved", status_code=200)
                 return PatreonWebhookResult("unresolved", "Patreon webhook stored for manual review.")
             link = self._links_by_provider_user.get((PROVIDER_PATREON, provider_user_id))
             if link is None:
@@ -1554,6 +1625,7 @@ class PremiumService:
                 }
                 await self._record_provider_issue(provider=PROVIDER_PATREON, issue_type="webhook_unresolved", detail=issue)
                 await self.store.finish_webhook_event(event_key, status=WEBHOOK_STATUS_UNRESOLVED, error_text="Webhook did not match a linked Discord user.")
+                await self.record_webhook_monitor_event(status="unresolved", status_code=200)
                 return PatreonWebhookResult("unresolved", "Patreon webhook stored for manual review.")
             ok, message = await self.refresh_user_link(int(link["discord_user_id"]))
             if not ok:
@@ -1565,7 +1637,25 @@ class PremiumService:
                         target_id=str(link["discord_user_id"]),
                         detail={"event_type": event_type, "provider_user_id": provider_user_id, "reason": "ambiguous_plan_mapping"},
                     )
+                    await self.record_webhook_monitor_event(status="unresolved", status_code=200)
                     return PatreonWebhookResult("unresolved", "Patreon webhook stored for manual review.")
+                refreshed_link = self.get_link(int(link["discord_user_id"]))
+                refreshed_status = str((refreshed_link or {}).get("link_status") or "").strip().lower()
+                if refreshed_status in {LINK_STATUS_REVOKED, LINK_STATUS_BROKEN}:
+                    await self.store.finish_webhook_event(event_key, status=WEBHOOK_STATUS_PROCESSED)
+                    await self._audit(
+                        action="patreon_webhook_processed",
+                        target_type=SCOPE_USER,
+                        target_id=str(link["discord_user_id"]),
+                        detail={
+                            "event_type": event_type,
+                            "provider_user_id": provider_user_id,
+                            "degraded_safely": True,
+                            "link_status": refreshed_status,
+                        },
+                    )
+                    await self.record_webhook_monitor_event(status="processed", status_code=200)
+                    return PatreonWebhookResult("processed", "Patreon webhook processed.")
                 raise PremiumProviderError(
                     message,
                     safe_message="Babblebox could not process the Patreon webhook safely.",
@@ -1578,6 +1668,7 @@ class PremiumService:
                 target_id=str(link["discord_user_id"]),
                 detail={"event_type": event_type, "provider_user_id": provider_user_id},
             )
+            await self.record_webhook_monitor_event(status="processed", status_code=200)
             return PatreonWebhookResult("processed", "Patreon webhook processed.")
         except Exception as exc:
             await self.store.finish_webhook_event(
@@ -1585,6 +1676,8 @@ class PremiumService:
                 status=WEBHOOK_STATUS_FAILED,
                 error_text=self._event_error_text(exc, "Patreon webhook processing failed."),
             )
+            status_code = int(getattr(exc, "status_code", 0) or 500)
+            await self.record_webhook_monitor_event(status="invalid" if status_code < 500 else "error", status_code=status_code)
             raise
 
     def _extract_provider_user_id_from_webhook(self, payload: dict[str, Any]) -> str | None:

@@ -164,6 +164,7 @@ class PremiumCog(commands.Cog):
         counts = self._utility_counts(user.id)
         link = self.service.get_link(user.id, provider=PROVIDER_PATREON)
         link_status = str((link or {}).get("link_status") or "").strip().lower()
+        link_reason = str(((link or {}).get("metadata") or {}).get("last_link_status_reason") or "").strip().lower()
         if link is None:
             link_label = "Not linked"
         elif link_status == LINK_STATUS_ACTIVE:
@@ -191,7 +192,10 @@ class PremiumCog(commands.Cog):
         if snapshot.get("system_access"):
             notes.append("This Discord user has permanent Babblebox operator premium access, including internal Guild Pro claim power.")
         if link_status in {LINK_STATUS_REVOKED, LINK_STATUS_BROKEN}:
-            notes.append("Patreon needs to be linked again before Babblebox can trust provider-backed premium access.")
+            if link_reason == "identity_provider_user_mismatch":
+                notes.append("Patreon returned a different account than the one Babblebox previously linked. Re-link Patreon before provider-backed premium access can be trusted again.")
+            else:
+                notes.append("Patreon needs to be linked again before Babblebox can trust provider-backed premium access.")
         if notes:
             embed.add_field(name="State", value="\n".join(notes), inline=False)
         embed.add_field(
@@ -267,6 +271,8 @@ class PremiumCog(commands.Cog):
             claim_lines.append(f"Claim owner: <@{int(claim.get('owner_user_id', 0))}>")
             claim_lines.append(f"Source: `{claim.get('source_kind')}`")
             claim_lines.append(f"Claimed at: {claim.get('claimed_at') or 'Unknown'}")
+            if claim.get("note"):
+                claim_lines.append(f"Note: {claim.get('note')}")
         if snapshot.get("stale"):
             claim_lines.append("Provider-backed status is stale and currently riding the grace window.")
         if snapshot.get("blocked"):
@@ -353,10 +359,10 @@ class PremiumCog(commands.Cog):
             embed.add_field(
                 name="Patreon Webhooks",
                 value=(
-                    f"Invalid signatures: **{webhook_stats['invalid_signature_count']}**\n"
-                    f"Unresolved issues: **{webhook_stats['unresolved_issue_count']}**\n"
-                    f"503 unavailable: **{webhook_stats['recent_unavailable_count']}**\n"
-                    f"5xx errors: **{webhook_stats['recent_server_error_count']}**\n"
+                    f"Observed invalid signatures: **{webhook_stats['invalid_signature_count']}**\n"
+                    f"Stored unresolved review items: **{webhook_stats['unresolved_issue_count']}**\n"
+                    f"Observed 503 responses: **{webhook_stats['recent_unavailable_count']}**\n"
+                    f"Observed 5xx responses: **{webhook_stats['recent_server_error_count']}**\n"
                     f"Last: `{webhook_stats['last_webhook_status'] or 'none'}` / `{webhook_stats['last_webhook_http_status'] or 'n/a'}`"
                 ),
                 inline=False,

@@ -1,3 +1,4 @@
+import asyncio
 import json
 import os
 import types
@@ -308,6 +309,26 @@ class PremiumServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(ok, message)
         self.assertEqual(self.service.get_guild_snapshot(701)["plan_code"], PLAN_GUILD_PRO)
 
+    async def test_concurrent_guild_claim_race_only_allows_one_active_source(self):
+        await self._link_identity(user_id=411, plan_codes=(PLAN_GUILD_PRO,))
+        guild_one = FakeGuild(7411)
+        guild_one.add_member(FakeGuildMember(411, manage_guild=True))
+        guild_two = FakeGuild(7412)
+        guild_two.add_member(FakeGuildMember(411, manage_guild=True))
+
+        first, second = await asyncio.gather(
+            self.service.claim_guild(guild=guild_one, actor=guild_one.get_member(411)),
+            self.service.claim_guild(guild=guild_two, actor=guild_two.get_member(411)),
+        )
+
+        self.assertEqual(sum(1 for ok, _message in (first, second) if ok), 1)
+        self.assertEqual(sum(1 for ok, _message in (first, second) if not ok), 1)
+        active_claims = await self.store.list_active_claims()
+        self.assertEqual(len(active_claims), 1)
+        self.assertEqual(active_claims[0]["owner_user_id"], 411)
+        self.assertIn(active_claims[0]["guild_id"], {7411, 7412})
+        self.assertTrue(any("No unclaimed Guild Pro entitlement" in message for ok, message in (first, second) if not ok))
+
     async def test_claim_and_release_require_live_manage_guild_context(self):
         await self.service.create_manual_override(
             target_type=SCOPE_USER,
@@ -466,6 +487,58 @@ class PremiumServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.service.get_user_snapshot(62)["plan_code"], PLAN_FREE)
         self.assertEqual(self.service.get_guild_snapshot(801)["plan_code"], PLAN_FREE)
 
+    async def test_unlink_rebinds_provider_backed_claim_to_manual_guild_grant(self):
+        await self._link_identity(user_id=6200, plan_codes=(PLAN_GUILD_PRO,))
+        grant = await self.service.create_manual_override(
+            target_type=SCOPE_USER,
+            target_id=6200,
+            kind=MANUAL_KIND_GRANT,
+            plan_code=PLAN_GUILD_PRO,
+            actor_user_id=999,
+            reason="fallback guild grant",
+        )
+        guild = FakeGuild(86200)
+        guild.add_member(FakeGuildMember(6200, manage_guild=True))
+
+        ok, message = await self.service.claim_guild(guild=guild, actor=guild.get_member(6200))
+        self.assertTrue(ok, message)
+        self.assertEqual(self.service.get_guild_snapshot(86200)["claim"]["source_kind"], "entitlement")
+
+        ok, message = await self.service.unlink_user(6200)
+        self.assertTrue(ok, message)
+        claim = self.service.get_guild_snapshot(86200)["claim"]
+        self.assertEqual(self.service.get_guild_snapshot(86200)["plan_code"], PLAN_GUILD_PRO)
+        self.assertEqual(claim["source_kind"], MANUAL_KIND_GRANT)
+        self.assertEqual(claim["source_id"], grant["override_id"])
+        self.assertIn("Auto-rebound", claim["note"])
+        self.assertIsNone(self.service.get_link(6200))
+
+    async def test_manual_guild_grant_deactivation_rebinds_claim_to_provider_entitlement(self):
+        grant = await self.service.create_manual_override(
+            target_type=SCOPE_USER,
+            target_id=6201,
+            kind=MANUAL_KIND_GRANT,
+            plan_code=PLAN_GUILD_PRO,
+            actor_user_id=999,
+            reason="launch fallback",
+        )
+        guild = FakeGuild(86201)
+        guild.add_member(FakeGuildMember(6201, manage_guild=True))
+
+        ok, message = await self.service.claim_guild(guild=guild, actor=guild.get_member(6201))
+        self.assertTrue(ok, message)
+        self.assertEqual(self.service.get_guild_snapshot(86201)["claim"]["source_kind"], MANUAL_KIND_GRANT)
+
+        await self._link_identity(user_id=6201, plan_codes=(PLAN_GUILD_PRO,))
+        ok, message = await self.service.deactivate_override(grant["override_id"], actor_user_id=999)
+
+        self.assertTrue(ok, message)
+        claim = self.service.get_guild_snapshot(86201)["claim"]
+        self.assertEqual(self.service.get_guild_snapshot(86201)["plan_code"], PLAN_GUILD_PRO)
+        self.assertEqual(claim["source_kind"], "entitlement")
+        self.assertTrue(str(claim["entitlement_id"]).startswith("patreon:member-6201:guild_pro"))
+        self.assertIn("Auto-rebound", claim["note"])
+
     async def test_ambiguous_patreon_link_callback_fails_closed_without_granting_access(self):
         await self._create_state(user_id=620, state_token="ambiguous-state")
         self.provider.identity = PatreonIdentity(
@@ -582,6 +655,52 @@ class PremiumServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.service.get_guild_snapshot(780)["plan_code"], PLAN_FREE)
         self.assertIsNone(self.service.get_guild_snapshot(780)["claim"])
 
+    async def test_stale_entitlement_rebinds_to_manual_claim_source_and_survives_restart(self):
+        await self._link_identity(user_id=7801, plan_codes=(PLAN_GUILD_PRO,))
+        grant = await self.service.create_manual_override(
+            target_type=SCOPE_USER,
+            target_id=7801,
+            kind=MANUAL_KIND_GRANT,
+            plan_code=PLAN_GUILD_PRO,
+            actor_user_id=999,
+            reason="recovery fallback",
+        )
+        guild = FakeGuild(87801)
+        guild.add_member(FakeGuildMember(7801, manage_guild=True))
+        ok, message = await self.service.claim_guild(guild=guild, actor=guild.get_member(7801))
+        self.assertTrue(ok, message)
+        entitlement_id = self.service.get_guild_snapshot(87801)["claim"]["entitlement_id"]
+        now = _utcnow()
+        await self.store.upsert_entitlement(
+            {
+                **self.service.list_cached_entitlements_for_user(7801)[0],
+                "entitlement_id": entitlement_id,
+                "status": "inactive",
+                "stale_after": _serialize_datetime(now - timedelta(hours=1)),
+                "grace_until": _serialize_datetime(now - timedelta(minutes=1)),
+                "current_period_end": _serialize_datetime(now - timedelta(minutes=1)),
+                "last_verified_at": _serialize_datetime(now - timedelta(days=1)),
+            }
+        )
+
+        await self.service._reload_cache()
+
+        rebound = self.service.get_guild_snapshot(87801)["claim"]
+        self.assertEqual(rebound["source_kind"], MANUAL_KIND_GRANT)
+        self.assertEqual(rebound["source_id"], grant["override_id"])
+        self.assertEqual(self.service.get_guild_snapshot(87801)["plan_code"], PLAN_GUILD_PRO)
+
+        reloaded = PremiumService(self.bot, store=self.store, provider=self.provider)
+        started = await reloaded.start()
+        self.assertTrue(started)
+        try:
+            reloaded_claim = reloaded.get_guild_snapshot(87801)["claim"]
+            self.assertEqual(reloaded_claim["source_kind"], MANUAL_KIND_GRANT)
+            self.assertEqual(reloaded_claim["source_id"], grant["override_id"])
+            self.assertEqual(reloaded.get_guild_snapshot(87801)["plan_code"], PLAN_GUILD_PRO)
+        finally:
+            await reloaded.close()
+
     async def test_webhook_processing_is_idempotent_for_duplicate_payloads(self):
         await self._link_identity(user_id=63, plan_codes=(PLAN_PLUS,))
         body = json.dumps(
@@ -661,6 +780,38 @@ class PremiumServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.service.get_user_snapshot(642)["plan_code"], PLAN_FREE)
         self.assertEqual(self.service.get_link(642)["link_status"], LINK_STATUS_REVOKED)
 
+    async def test_refresh_provider_identity_mismatch_revokes_provider_access(self):
+        await self._link_identity(user_id=6421, plan_codes=(PLAN_GUILD_PRO,))
+        guild = FakeGuild(86421)
+        guild.add_member(FakeGuildMember(6421, manage_guild=True))
+        ok, message = await self.service.claim_guild(guild=guild, actor=guild.get_member(6421))
+        self.assertTrue(ok, message)
+        self.provider.identity = PatreonIdentity(
+            provider_user_id="patreon-user-6421-changed",
+            email="changed-6421@example.com",
+            display_name="Changed 6421",
+            member_id="member-6421-changed",
+            plan_codes=(PLAN_GUILD_PRO,),
+            patron_status="active_patron",
+            tier_ids=("tier-guild_pro",),
+            next_charge_date=_utcnow() + timedelta(days=30),
+            raw_user={"id": "patreon-user-6421-changed"},
+            raw_member={"id": "member-6421-changed"},
+            raw_tiers=(),
+        )
+
+        ok, message = await self.service.refresh_user_link(6421)
+
+        self.assertFalse(ok)
+        self.assertIn("different account", message)
+        self.assertEqual(self.service.get_user_snapshot(6421)["plan_code"], PLAN_FREE)
+        self.assertEqual(self.service.get_guild_snapshot(86421)["plan_code"], PLAN_FREE)
+        self.assertEqual(self.service.get_link(6421)["link_status"], LINK_STATUS_REVOKED)
+        self.assertEqual(
+            self.service.provider_diagnostics()["provider_state"]["payload"]["last_issue"]["issue_type"],
+            "patreon_identity_mismatch",
+        )
+
     async def test_local_token_decrypt_failure_marks_link_broken_and_withholds_runtime_access(self):
         await self._link_identity(user_id=643, plan_codes=(PLAN_GUILD_PRO,))
         guild = FakeGuild(8643)
@@ -717,6 +868,41 @@ class PremiumServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.message, "Patreon webhook stored for manual review.")
         self.assertEqual(self.service.get_guild_snapshot(8644)["plan_code"], PLAN_FREE)
         self.assertEqual(await self.store.list_active_claims(), [])
+
+    async def test_webhook_identity_mismatch_degrades_safely_without_failing_webhook(self):
+        await self._link_identity(user_id=6441, plan_codes=(PLAN_GUILD_PRO,))
+        guild = FakeGuild(86441)
+        guild.add_member(FakeGuildMember(6441, manage_guild=True))
+        ok, message = await self.service.claim_guild(guild=guild, actor=guild.get_member(6441))
+        self.assertTrue(ok, message)
+        body = json.dumps(
+            {
+                "data": {"id": "member-6441-changed", "type": "member"},
+                "included": [{"type": "user", "id": "patreon-user-6441"}],
+            }
+        ).encode("utf-8")
+        self.provider.identity = PatreonIdentity(
+            provider_user_id="patreon-user-6441-changed",
+            email="changed-6441@example.com",
+            display_name="Changed 6441",
+            member_id="member-6441-changed",
+            plan_codes=(PLAN_GUILD_PRO,),
+            patron_status="active_patron",
+            tier_ids=("tier-guild-pro",),
+            next_charge_date=_utcnow() + timedelta(days=30),
+            raw_user={"id": "patreon-user-6441-changed"},
+            raw_member={"id": "member-6441-changed"},
+            raw_tiers=(),
+        )
+
+        with patch.dict(os.environ, {"PATREON_WEBHOOK_SECRET": "secret"}, clear=False):
+            result = await self.service.handle_patreon_webhook(body=body, event_type="members:update", signature="ok")
+
+        self.assertEqual(result.outcome, "processed")
+        self.assertEqual(self.service.get_user_snapshot(6441)["plan_code"], PLAN_FREE)
+        self.assertEqual(self.service.get_guild_snapshot(86441)["plan_code"], PLAN_FREE)
+        self.assertEqual(self.service.get_link(6441)["link_status"], LINK_STATUS_REVOKED)
+        self.assertEqual(self.service.public_provider_monitor_summary()["last_webhook_status"], "processed")
 
     async def test_linked_provider_identity_cannot_be_stolen_by_another_user(self):
         await self._link_identity(user_id=65, plan_codes=(PLAN_PLUS,))
@@ -855,6 +1041,7 @@ class PremiumServiceTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await reloaded.close()
 
+        self.assertEqual(summary["status"], "ready")
         self.assertEqual(summary["last_webhook_status"], "processed")
         self.assertEqual(summary["unresolved_issue_count"], 1)
         self.assertEqual(summary["last_issue_type"], "webhook_unresolved")

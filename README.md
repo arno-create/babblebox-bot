@@ -38,7 +38,7 @@ Babblebox premium is intentionally narrow:
 - `Plus` raises personal utility caps for Watch, reminders, and recurring AFK schedules
 - `Guild Pro` raises server-side admin caps, unlocks Shield AI's enhanced `gpt-5.4-mini` and `gpt-5.4` tiers, unlocks Question Drops AI celebrations, raises bounded Shield limits, raises bump-detection scale, and raises the safe Confessions image ceiling
 - Patreon is the initial premium source of truth, but entitlements are resolved through a separate provider-agnostic premium layer
-- hard Patreon auth failures or a local unlink immediately withdraw provider-backed runtime access while still preserving saved feature state
+- hard Patreon auth failures, linked-account identity mismatches, or a local unlink immediately withdraw provider-backed runtime access while still preserving saved feature state
 - premium downgrades do not delete saved Watch keywords, reminders, AFK schedules, Shield patterns, or Confessions settings; over-limit saved state is preserved, but premium-only runtime capacity is paused until the saved state is reduced or premium returns
 
 ## Product Overview
@@ -345,6 +345,8 @@ Question Drops notes:
 | `/premium guild status` | n/a | See the current guild entitlement and claim state |
 | `/premium guild claim` | n/a | Claim a Guild Pro entitlement for the current server |
 | `/premium guild release` | n/a | Release the current guild claim |
+
+If a Guild Pro claim source expires but the same owner still has another valid Guild Pro source, Babblebox can rebind that server claim without moving it to another user or deleting saved server configuration.
 
 AFK examples:
 

@@ -136,6 +136,19 @@ class _BasePremiumStore:
     async def claim_guild(self, record: dict[str, Any]) -> dict[str, Any] | None:
         raise NotImplementedError
 
+    async def reassign_guild_claim_source(
+        self,
+        guild_id: int,
+        *,
+        owner_user_id: int,
+        source_kind: str,
+        source_id: str,
+        entitlement_id: str | None,
+        updated_at: datetime,
+        note: str | None = None,
+    ) -> dict[str, Any] | None:
+        raise NotImplementedError
+
     async def release_guild_claim(self, guild_id: int, *, released_at: datetime, note: str | None = None) -> dict[str, Any] | None:
         raise NotImplementedError
 
@@ -283,15 +296,52 @@ class _MemoryPremiumStore(_BasePremiumStore):
     async def claim_guild(self, record: dict[str, Any]) -> dict[str, Any] | None:
         guild_id = int(record["guild_id"])
         entitlement_id = record.get("entitlement_id")
+        source_token = (str(record.get("source_kind") or ""), str(record.get("source_id") or ""))
         current = self.claims_by_guild.get(guild_id)
         if current is not None and current.get("status") == "active":
             return None
-        if entitlement_id:
-            for existing in self.claims_by_guild.values():
-                if existing.get("status") == "active" and existing.get("entitlement_id") == entitlement_id:
-                    return None
+        for existing in self.claims_by_guild.values():
+            if existing.get("status") != "active":
+                continue
+            if (str(existing.get("source_kind") or ""), str(existing.get("source_id") or "")) == source_token:
+                return None
+            if entitlement_id and existing.get("entitlement_id") == entitlement_id:
+                return None
         self.claims_by_guild[guild_id] = deepcopy(record)
         return deepcopy(record)
+
+    async def reassign_guild_claim_source(
+        self,
+        guild_id: int,
+        *,
+        owner_user_id: int,
+        source_kind: str,
+        source_id: str,
+        entitlement_id: str | None,
+        updated_at: datetime,
+        note: str | None = None,
+    ) -> dict[str, Any] | None:
+        current = self.claims_by_guild.get(guild_id)
+        if current is None or current.get("status") != "active":
+            return None
+        if int(current.get("owner_user_id", 0) or 0) != owner_user_id:
+            return None
+        target_token = (str(source_kind or ""), str(source_id or ""))
+        current_token = (str(current.get("source_kind") or ""), str(current.get("source_id") or ""))
+        if target_token != current_token:
+            for other_guild_id, existing in self.claims_by_guild.items():
+                if int(other_guild_id) == guild_id or existing.get("status") != "active":
+                    continue
+                if (str(existing.get("source_kind") or ""), str(existing.get("source_id") or "")) == target_token:
+                    return None
+        updated = deepcopy(current)
+        updated["source_kind"] = str(source_kind)
+        updated["source_id"] = str(source_id)
+        updated["entitlement_id"] = entitlement_id
+        updated["updated_at"] = _serialize_datetime(updated_at)
+        updated["note"] = note
+        self.claims_by_guild[guild_id] = deepcopy(updated)
+        return updated
 
     async def release_guild_claim(self, guild_id: int, *, released_at: datetime, note: str | None = None) -> dict[str, Any] | None:
         record = self.claims_by_guild.get(guild_id)
@@ -390,6 +440,7 @@ class _PostgresPremiumStore(_BasePremiumStore):
             "CREATE TABLE IF NOT EXISTS premium_manual_overrides (override_id TEXT PRIMARY KEY, target_type TEXT NOT NULL, target_id BIGINT NOT NULL, kind TEXT NOT NULL, plan_code TEXT NULL, active BOOLEAN NOT NULL DEFAULT TRUE, created_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL, actor_user_id BIGINT NULL, reason TEXT NULL, metadata JSONB NOT NULL DEFAULT '{}'::jsonb)",
             "CREATE INDEX IF NOT EXISTS ix_premium_manual_targets ON premium_manual_overrides (target_type, target_id)",
             "CREATE TABLE IF NOT EXISTS premium_guild_claims (claim_id TEXT PRIMARY KEY, guild_id BIGINT NOT NULL UNIQUE, plan_code TEXT NOT NULL, owner_user_id BIGINT NOT NULL, source_kind TEXT NOT NULL, source_id TEXT NOT NULL, status TEXT NOT NULL, claimed_at TIMESTAMPTZ NOT NULL, updated_at TIMESTAMPTZ NOT NULL, entitlement_id TEXT NULL, released_at TIMESTAMPTZ NULL, note TEXT NULL)",
+            "CREATE UNIQUE INDEX IF NOT EXISTS ux_premium_guild_claims_source_active ON premium_guild_claims (source_kind, source_id) WHERE status = 'active'",
             "CREATE INDEX IF NOT EXISTS ix_premium_guild_claims_entitlement_active ON premium_guild_claims (entitlement_id) WHERE entitlement_id IS NOT NULL AND status = 'active'",
             "CREATE TABLE IF NOT EXISTS premium_provider_state (provider TEXT PRIMARY KEY, payload JSONB NOT NULL DEFAULT '{}'::jsonb, updated_at TIMESTAMPTZ NOT NULL)",
             "CREATE TABLE IF NOT EXISTS premium_webhook_events (event_key TEXT PRIMARY KEY, provider TEXT NOT NULL, event_type TEXT NOT NULL, payload_hash TEXT NOT NULL, status TEXT NOT NULL, error_text TEXT NULL, received_at TIMESTAMPTZ NOT NULL, processed_at TIMESTAMPTZ NULL, payload JSONB NOT NULL DEFAULT '{}'::jsonb)",
@@ -673,36 +724,78 @@ class _PostgresPremiumStore(_BasePremiumStore):
         return [record for row in rows if (record := self._manual_override_from_row(row)) is not None]
 
     async def claim_guild(self, record: dict[str, Any]) -> dict[str, Any] | None:
-        async with self._io_lock, self._pool.acquire() as conn:
-            async with conn.transaction():
-                entitlement_id = record.get("entitlement_id")
-                if entitlement_id:
-                    in_use = await conn.fetchrow(
-                        "SELECT claim_id FROM premium_guild_claims WHERE entitlement_id = $1 AND status = 'active'",
-                        entitlement_id,
+        unique_violation = getattr(getattr(self._asyncpg, "exceptions", None), "UniqueViolationError", None)
+        try:
+            async with self._io_lock, self._pool.acquire() as conn:
+                async with conn.transaction():
+                    entitlement_id = record.get("entitlement_id")
+                    if entitlement_id:
+                        in_use = await conn.fetchrow(
+                            "SELECT claim_id FROM premium_guild_claims WHERE entitlement_id = $1 AND status = 'active'",
+                            entitlement_id,
+                        )
+                        if in_use is not None:
+                            return None
+                    row = await conn.fetchrow(
+                        (
+                            "INSERT INTO premium_guild_claims (claim_id, guild_id, plan_code, owner_user_id, source_kind, source_id, status, claimed_at, updated_at, entitlement_id, released_at, note) "
+                            "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, $11) "
+                            "ON CONFLICT (guild_id) DO UPDATE SET claim_id = EXCLUDED.claim_id, plan_code = EXCLUDED.plan_code, owner_user_id = EXCLUDED.owner_user_id, source_kind = EXCLUDED.source_kind, source_id = EXCLUDED.source_id, status = EXCLUDED.status, claimed_at = EXCLUDED.claimed_at, updated_at = EXCLUDED.updated_at, entitlement_id = EXCLUDED.entitlement_id, released_at = EXCLUDED.released_at, note = EXCLUDED.note "
+                            "WHERE premium_guild_claims.status <> 'active' "
+                            "RETURNING *"
+                        ),
+                        record["claim_id"],
+                        record["guild_id"],
+                        record["plan_code"],
+                        record["owner_user_id"],
+                        record["source_kind"],
+                        record["source_id"],
+                        record["status"],
+                        _parse_datetime(record["claimed_at"]),
+                        _parse_datetime(record["updated_at"]),
+                        record.get("entitlement_id"),
+                        record.get("note"),
                     )
-                    if in_use is not None:
-                        return None
+        except Exception as exc:
+            if unique_violation is not None and isinstance(exc, unique_violation):
+                return None
+            raise
+        return self._claim_from_row(row)
+
+    async def reassign_guild_claim_source(
+        self,
+        guild_id: int,
+        *,
+        owner_user_id: int,
+        source_kind: str,
+        source_id: str,
+        entitlement_id: str | None,
+        updated_at: datetime,
+        note: str | None = None,
+    ) -> dict[str, Any] | None:
+        unique_violation = getattr(getattr(self._asyncpg, "exceptions", None), "UniqueViolationError", None)
+        try:
+            async with self._io_lock, self._pool.acquire() as conn:
                 row = await conn.fetchrow(
                     (
-                        "INSERT INTO premium_guild_claims (claim_id, guild_id, plan_code, owner_user_id, source_kind, source_id, status, claimed_at, updated_at, entitlement_id, released_at, note) "
-                        "VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, NULL, $11) "
-                        "ON CONFLICT (guild_id) DO UPDATE SET claim_id = EXCLUDED.claim_id, plan_code = EXCLUDED.plan_code, owner_user_id = EXCLUDED.owner_user_id, source_kind = EXCLUDED.source_kind, source_id = EXCLUDED.source_id, status = EXCLUDED.status, claimed_at = EXCLUDED.claimed_at, updated_at = EXCLUDED.updated_at, entitlement_id = EXCLUDED.entitlement_id, released_at = EXCLUDED.released_at, note = EXCLUDED.note "
-                        "WHERE premium_guild_claims.status <> 'active' "
+                        "UPDATE premium_guild_claims "
+                        "SET source_kind = $4, source_id = $5, entitlement_id = $6, updated_at = $7, note = $8 "
+                        "WHERE guild_id = $1 AND owner_user_id = $2 AND status = 'active' AND plan_code = $3 "
                         "RETURNING *"
                     ),
-                    record["claim_id"],
-                    record["guild_id"],
-                    record["plan_code"],
-                    record["owner_user_id"],
-                    record["source_kind"],
-                    record["source_id"],
-                    record["status"],
-                    _parse_datetime(record["claimed_at"]),
-                    _parse_datetime(record["updated_at"]),
-                    record.get("entitlement_id"),
-                    record.get("note"),
+                    guild_id,
+                    owner_user_id,
+                    "guild_pro",
+                    source_kind,
+                    source_id,
+                    entitlement_id,
+                    updated_at,
+                    note,
                 )
+        except Exception as exc:
+            if unique_violation is not None and isinstance(exc, unique_violation):
+                return None
+            raise
         return self._claim_from_row(row)
 
     async def release_guild_claim(self, guild_id: int, *, released_at: datetime, note: str | None = None) -> dict[str, Any] | None:
@@ -877,6 +970,27 @@ class PremiumStore:
 
     async def claim_guild(self, record: dict[str, Any]) -> dict[str, Any] | None:
         return await self._store.claim_guild(record)
+
+    async def reassign_guild_claim_source(
+        self,
+        guild_id: int,
+        *,
+        owner_user_id: int,
+        source_kind: str,
+        source_id: str,
+        entitlement_id: str | None,
+        updated_at: datetime,
+        note: str | None = None,
+    ) -> dict[str, Any] | None:
+        return await self._store.reassign_guild_claim_source(
+            guild_id,
+            owner_user_id=owner_user_id,
+            source_kind=source_kind,
+            source_id=source_id,
+            entitlement_id=entitlement_id,
+            updated_at=updated_at,
+            note=note,
+        )
 
     async def release_guild_claim(self, guild_id: int, *, released_at: datetime, note: str | None = None) -> dict[str, Any] | None:
         return await self._store.release_guild_claim(guild_id, released_at=released_at, note=note)
