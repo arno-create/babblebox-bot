@@ -63,8 +63,9 @@ class PremiumCog(commands.Cog):
 
     def _mixed_campaign_note(self) -> str:
         return (
-            "This Patreon campaign is mixed with Inevitable Friendship support tiers. "
-            "Choose a Babblebox-labeled tier unless a tier description explicitly says it also unlocks Babblebox premium."
+            "Patreon now has three combined tiers: Supporter, Babblebox Plus / IF Epic Patron, "
+            "and Babblebox Guild Pro / IF Legendary Patron. Every paid tier includes both "
+            "Babblebox and Inevitable Friendship benefits."
         )
 
     def _premium_actions_view(
@@ -203,13 +204,14 @@ class PremiumCog(commands.Cog):
             return "Internal operator access is already active. Use `/premium guild claim` only in servers that should consume an internal claim."
         if link is None and not snapshot.get("active_plans"):
             return (
-                "Use `/premium subscribe` to open Patreon and choose a Babblebox-labeled tier. "
+                "Use `/premium subscribe` to open Patreon and choose Supporter, Babblebox Plus, "
+                "or Babblebox Guild Pro. "
                 "Then run `/premium link` here to connect that Patreon account."
             )
         if link_status in {LINK_STATUS_REVOKED, LINK_STATUS_BROKEN}:
             return (
                 "Use `/premium link` again with the same Patreon account that owns the Babblebox tier. "
-                "If the mixed Patreon campaign shows the wrong tier, fix that first, then re-link."
+                "If your Patreon tier changed recently and still looks wrong, refresh it first, then re-link."
             )
         if snapshot.get("stale"):
             return (
@@ -218,8 +220,8 @@ class PremiumCog(commands.Cog):
             )
         if link is not None and not snapshot.get("active_plans") and claimable <= 0:
             return (
-                "Your Patreon account is connected, but Babblebox did not find a mapped Babblebox tier on it. "
-                "On the mixed Patreon campaign, choose a Babblebox-labeled tier, then run `/premium refresh`."
+                "Your Patreon account is connected, but Babblebox did not find one of the three combined tiers on it yet. "
+                "If you changed tiers recently, run `/premium refresh`, then use `/support` if it still looks wrong."
             )
         if claimable > 0:
             return (
@@ -241,7 +243,7 @@ class PremiumCog(commands.Cog):
             return "This server is already covered by a direct Guild Pro grant. Use `/support` only if that looks incorrect."
         if claim is None:
             return (
-                "If this server should use Guild Pro, buy a Babblebox-labeled Guild Pro tier, link Patreon on the owner account, "
+                "If this server should use Guild Pro, buy the Babblebox Guild Pro / IF Legendary Patron tier, link Patreon on the owner account, "
                 "then run `/premium guild claim` here."
             )
         if snapshot.get("stale"):
@@ -457,7 +459,7 @@ class PremiumCog(commands.Cog):
             name="Free Stays Useful",
             value=(
                 "Free keeps the baseline utility lane, core Shield privacy and safety behavior, and the current bounded Confessions baseline.\n"
-                "Supporter keeps the same product limits as Free.\n"
+                "Supporter keeps the same Babblebox product limits as Free, but it still includes Supporter-tier Inevitable Friendship Discord benefits.\n"
                 "Downgrade never deletes saved Watch, reminder, AFK, Shield, or Confessions state; premium-only runtime capacity simply pauses until the saved state is reduced or premium returns."
             ),
             inline=False,
@@ -465,7 +467,7 @@ class PremiumCog(commands.Cog):
         embed.add_field(
             name="How Premium Works",
             value=(
-                "1. Use `/premium subscribe` to open Patreon and choose a Babblebox-labeled tier.\n"
+                "1. Use `/premium subscribe` to open Patreon and choose Supporter, Babblebox Plus / IF Epic Patron, or Babblebox Guild Pro / IF Legendary Patron.\n"
                 "2. Run `/premium link` in Discord so Babblebox can connect that Patreon account to your Discord user.\n"
                 "3. Use `/premium status` to confirm the linked plan.\n"
                 "4. If you bought Guild Pro, use `/premium guild claim` in the server you want to upgrade, then verify it with `/premium guild status`."
@@ -473,10 +475,11 @@ class PremiumCog(commands.Cog):
             inline=False,
         )
         embed.add_field(
-            name="Mixed Patreon Note",
+            name="Patreon Tier Mapping",
             value=(
                 f"{self._mixed_campaign_note()}\n"
-                "If a linked Patreon account still shows Free, the tier probably does not map to Babblebox premium yet, or it has not refreshed into Discord."
+                "If a linked Patreon account still shows Free after a recent tier change, the membership probably has not refreshed into Discord yet. "
+                "Run `/premium refresh` or use `/support` if it still looks wrong."
             ),
             inline=False,
         )
@@ -553,7 +556,7 @@ class PremiumCog(commands.Cog):
             )
             return embed
         if "No unclaimed Guild Pro entitlement" in message:
-            detail = "Babblebox could not find a free Guild Pro source on this user. Buy the Babblebox-labeled Guild Pro tier, link Patreon, or release an existing claim first."
+            detail = "Babblebox could not find a free Guild Pro source on this user. Buy the Babblebox Guild Pro / IF Legendary Patron tier, link Patreon, or release an existing claim first."
         elif "already uses one of your Guild Pro claims" in message:
             detail = "This server is already using one of your Guild Pro claims. Use `/premium guild status` to verify the current claim."
         elif "already has an active Guild Pro claim" in message:
@@ -698,10 +701,17 @@ class PremiumCog(commands.Cog):
         embed.add_field(
             name="Choose The Right Tier",
             value=(
-                "`Supporter` backs the project without changing product limits.\n"
-                "`Plus` raises personal Watch, reminder, and recurring AFK limits.\n"
-                "`Guild Pro` is the server plan for higher caps, Shield AI's higher model tiers, Question Drops AI celebrations, and the larger safe Confessions image ceiling.\n"
-                f"{self._mixed_campaign_note()}"
+                "`Supporter` backs the project, includes the Supporter-tier Inevitable Friendship Discord benefits, and keeps Babblebox at Free limits.\n"
+                "`Babblebox Plus / IF Epic Patron` raises personal Watch, reminder, and recurring AFK limits.\n"
+                "`Babblebox Guild Pro / IF Legendary Patron` is the server plan for higher caps, Shield AI's higher model tiers, Question Drops AI celebrations, and the larger safe Confessions image ceiling."
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Before You Buy",
+            value=(
+                "Patreon purchases are generally non-refundable except where required by law or Patreon separately approves a refund. "
+                "Terms: https://arno-create.github.io/babblebox-bot/terms.html"
             ),
             inline=False,
         )
@@ -716,7 +726,7 @@ class PremiumCog(commands.Cog):
         )
         embed.add_field(
             name="Need Help?",
-            value="Use `/premium plans` to compare the plans again, or `/support` if the mixed Patreon campaign still feels unclear.",
+            value="Use `/premium plans` to compare the plans again, or `/support` if a recent Patreon tier change still feels unclear.",
             inline=False,
         )
         embed = ge.style_embed(embed, footer="Babblebox Premium | Buy first, then link in Discord")
@@ -749,8 +759,8 @@ class PremiumCog(commands.Cog):
         embed.add_field(
             name="Use The Right Patreon Account",
             value=(
-                "Use the same Patreon account that owns the Babblebox tier. "
-                "If the mixed campaign shows support-server-only tiers too, make sure you are linking the Babblebox-labeled one."
+                "Use the same Patreon account that owns Supporter, Babblebox Plus / IF Epic Patron, "
+                "or Babblebox Guild Pro / IF Legendary Patron."
             ),
             inline=False,
         )

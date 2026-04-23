@@ -147,36 +147,37 @@ HELP_PAGES: list[dict[str, str]] = [
     {
         "title": "Premium / Plans",
         "emoji": "\U0001f48e",
-        "description": "Buy on Patreon, link privately in Discord, and claim Guild Pro only where you want it.",
+        "description": "Buy on Patreon, compare the three combined tiers, link privately in Discord, and claim Guild Pro only where you want it.",
         "fields": [
             (
                 "Choose a Plan",
                 (
-                    "`Supporter` is a recognition tier for people who want to back Babblebox without changing the product lane.\n"
-                    "`Plus` is for people who lean on Watch, reminders, and recurring AFK schedules and want much higher personal limits.\n"
-                    "`Guild Pro` is for server admins who want higher bounded server caps, Shield AI's higher model tiers when owner policy enables review, Question Drops AI celebrations, and the larger safe Confessions image ceiling."
+                    "`Supporter` is the paid support tier: it includes Inevitable Friendship Discord benefits while Babblebox stays at Free limits.\n"
+                    "`Babblebox Plus` maps to IF Epic Patron and raises personal Watch, reminder, and recurring AFK limits.\n"
+                    "`Babblebox Guild Pro` maps to IF Legendary Patron and is for server admins who want higher bounded server caps, Shield AI's higher model tiers when owner policy enables review, Question Drops AI celebrations, and the larger safe Confessions image ceiling."
                 ),
             ),
             (
                 "How Premium Activates",
                 (
-                    "1. Use `/premium plans` to compare the real Babblebox plans.\n"
-                    "2. Use `/premium subscribe` to open Patreon and choose a Babblebox-labeled tier on the mixed campaign.\n"
+                    "1. Use `/premium plans` to compare the three combined Patreon tiers.\n"
+                    "2. Use `/premium subscribe` to open Patreon and buy Supporter, Babblebox Plus / IF Epic Patron, or Babblebox Guild Pro / IF Legendary Patron.\n"
                     "3. Use `/premium link` in Discord so Babblebox can connect that Patreon account to your Discord user.\n"
                     "4. If you bought Guild Pro, use `/premium guild claim` inside the server you want to upgrade, then confirm with `/premium guild status`."
                 ),
             ),
             (
-                "Mixed Patreon Note",
+                "Patreon Tier Mapping",
                 (
-                    "The Patreon campaign also supports the Inevitable Friendship server. Only Babblebox-labeled tiers unlock Babblebox premium unless a tier description explicitly says it does.\n"
-                    "If you are linked but still see Free, run `/premium status` or `/premium refresh`, then use `/support` if the mapped Babblebox tier still does not appear."
+                    "Patreon now has three combined tiers: Supporter, Babblebox Plus / IF Epic Patron, and Babblebox Guild Pro / IF Legendary Patron.\n"
+                    "Every paid tier includes both Babblebox and Inevitable Friendship benefits. If you are linked but still see Free after a tier change, run `/premium status` or `/premium refresh`, then use `/support` if the mapped tier still does not appear."
                 ),
             ),
             (
                 "Trust / Downgrade",
                 (
-                    "Free keeps core safety, privacy, and the baseline utility lane. Unlinking deletes Babblebox's local encrypted Patreon tokens only.\n"
+                    "Free keeps core safety, privacy, and the baseline utility lane. Patreon purchases are generally non-refundable except where required by law or Patreon separately approves a refund.\n"
+                    "Unlinking deletes Babblebox's local encrypted Patreon tokens only.\n"
                     "Downgrades or Guild Pro release do not delete saved Watch, reminder, AFK, Shield, or Confessions settings; premium-only runtime capacity simply pauses until the saved state is reduced or premium returns."
                 ),
             ),
@@ -391,7 +392,7 @@ def build_support_embed() -> discord.Embed:
         title="\U0001f6df\ufe0f Babblebox Support",
         description=(
             "If something breaks, feels confusing, or could be better, please report it. "
-            "This is also the quickest official route for buying Babblebox premium, checking mixed Patreon tier confusion, or getting live help when a link or claim looks wrong."
+            "This is also the quickest official route for buying Babblebox premium, checking combined Patreon tier confusion, or getting live help when a link or claim looks wrong."
         ),
         color=discord.Color.gold(),
     )
@@ -399,8 +400,8 @@ def build_support_embed() -> discord.Embed:
     embed.add_field(
         name="Premium",
         value=(
-            "`Patreon Membership` is where Babblebox premium is purchased.\n"
-            "After you buy a Babblebox-labeled tier, use `/premium link` in Discord.\n"
+            "`Patreon Membership` is where the three combined Babblebox + Inevitable Friendship tiers are purchased.\n"
+            "After you buy Supporter, Babblebox Plus / IF Epic Patron, or Babblebox Guild Pro / IF Legendary Patron, use `/premium link` in Discord.\n"
             "If you bought Guild Pro, finish with `/premium guild claim` in the server you want to upgrade.\n"
             "If your Patreon link or entitlement still looks wrong, check `/premium status` or `/premium refresh`, then use the support server for live help."
         ),
@@ -409,7 +410,7 @@ def build_support_embed() -> discord.Embed:
     embed.add_field(
         name="Best Route",
         value=(
-            "`Support Server` for live help, mixed-tier questions, and stale premium or Guild Pro claim states.\n"
+            "`Support Server` for live help, combined-tier questions, and stale premium or Guild Pro claim states.\n"
             "`Patreon Membership` to buy Babblebox premium before linking it in Discord.\n"
             "`Official Website` for the public premium guide, help page, and policies.\n"
             "`GitHub Repository` for bug reports, issues, and the open-source code."

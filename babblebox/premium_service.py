@@ -832,22 +832,24 @@ class PremiumService:
                 "plan_code": PLAN_SUPPORTER,
                 "title": "Supporter",
                 "audience": "People who want to support Babblebox without changing the product lane.",
-                "summary": "Recognition-focused support tier with no power unlocks.",
+                "summary": "Paid support tier with Inevitable Friendship Discord benefits and no Babblebox limit increase.",
                 "unlocks": (
+                    "Supporter-tier Inevitable Friendship Discord benefits.",
                     "Visible premium recognition in your Babblebox premium status.",
                 ),
                 "does_not_unlock": (
                     "Higher personal utility limits.",
                     "Guild Pro server upgrades or higher Shield AI model tiers.",
                 ),
-                "best_for": "Supporters who want to back the project and keep free behavior unchanged.",
+                "best_for": "Supporters who want to back the project, get the Supporter IF perks, and keep free behavior unchanged.",
             },
             {
                 "plan_code": PLAN_PLUS,
-                "title": "Plus",
-                "audience": "People who use Babblebox as a personal utility bot inside Discord.",
-                "summary": "Higher personal limits for Watch, reminders, and recurring AFK scheduling.",
+                "title": "Babblebox Plus",
+                "audience": "People who use Babblebox as a personal utility bot inside Discord and want the IF Epic Patron bundle too.",
+                "summary": "Higher personal limits for Watch, reminders, and recurring AFK scheduling, bundled with IF Epic Patron.",
                 "unlocks": (
+                    "Inevitable Friendship Epic Patron Discord benefits.",
                     "Up to 25 Watch keywords and 25 Watch filters.",
                     "Up to 15 active reminders and 5 active channel reminders.",
                     "Up to 20 recurring AFK schedules.",
@@ -856,14 +858,15 @@ class PremiumService:
                     "Guild Pro server upgrades.",
                     "Server-side Shield AI model upgrades or Question Drops AI celebrations.",
                 ),
-                "best_for": "Members who rely on Watch, reminders, or AFK routines and want much more room.",
+                "best_for": "Members who rely on Watch, reminders, or AFK routines and want Babblebox Plus plus the IF Epic Patron bundle.",
             },
             {
                 "plan_code": PLAN_GUILD_PRO,
-                "title": "Guild Pro",
-                "audience": "Admins who want one server to get Babblebox's higher-cap admin lane.",
-                "summary": "Server-level premium for higher bounded caps, richer admin power, and premium-only server extras.",
+                "title": "Babblebox Guild Pro",
+                "audience": "Admins who want one server to get Babblebox's higher-cap admin lane plus the IF Legendary Patron bundle.",
+                "summary": "Server-level premium for higher bounded caps, richer admin power, premium-only server extras, and IF Legendary Patron.",
                 "unlocks": (
+                    "Inevitable Friendship Legendary Patron Discord benefits.",
                     "Up to 15 bump detection channels.",
                     "Higher bounded Shield config ceilings for patterns, filters, allowlists, exemptions, and severe terms.",
                     "Shield AI's higher gpt-5.4-mini and gpt-5.4 tiers when owner policy enables review.",
@@ -874,7 +877,7 @@ class PremiumService:
                     "Automatic upgrades for every server; Guild Pro still has to be claimed explicitly.",
                     "Plus utility caps for every individual user.",
                 ),
-                "best_for": "Servers that want one explicit premium claim with clearer admin headroom.",
+                "best_for": "Servers that want one explicit premium claim with clearer admin headroom plus the IF Legendary Patron bundle.",
             },
         )
 
