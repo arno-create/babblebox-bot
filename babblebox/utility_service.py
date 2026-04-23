@@ -23,7 +23,14 @@ from babblebox.premium_limits import (
     guild_limit as premium_guild_limit,
     user_limit as premium_user_limit,
 )
-from babblebox.premium_models import PLAN_FREE, PLAN_GUILD_PRO, PLAN_PLUS, SYSTEM_PREMIUM_OWNER_USER_IDS, SYSTEM_PREMIUM_SUPPORT_GUILD_ID
+from babblebox.premium_models import (
+    PLAN_FREE,
+    PLAN_GUILD_PRO,
+    PLAN_PLUS,
+    PLAN_SUPPORTER,
+    SYSTEM_PREMIUM_OWNER_USER_IDS,
+    SYSTEM_PREMIUM_SUPPORT_GUILD_ID,
+)
 from babblebox.shield_service import (
     FEATURE_SURFACE_AFK_REASON,
     FEATURE_SURFACE_AFK_SCHEDULE_REASON,
@@ -280,13 +287,51 @@ class UtilityService:
             return premium_service
         return None
 
+    def _vote_service(self):
+        vote_service = getattr(self.bot, "vote_service", None)
+        if callable(getattr(vote_service, "resolve_user_limit", None)):
+            return vote_service
+        return None
+
+    def _resolve_user_plan_code(self, user_id: int) -> str:
+        premium_service = self._premium_service()
+        snapshot_getter = getattr(premium_service, "get_user_snapshot", None)
+        if callable(snapshot_getter):
+            with contextlib.suppress(Exception):
+                snapshot = snapshot_getter(user_id)
+                plan_code = str((snapshot or {}).get("plan_code") or "").strip().lower()
+                if plan_code in {PLAN_FREE, PLAN_SUPPORTER, PLAN_PLUS}:
+                    return plan_code
+        if int(user_id or 0) in SYSTEM_PREMIUM_OWNER_USER_IDS:
+            return PLAN_PLUS
+        return PLAN_FREE
+
     def _resolve_user_limit(self, user_id: int, limit_key: str, fallback: int) -> int:
         premium_service = self._premium_service()
+        plan_code = self._resolve_user_plan_code(user_id)
         if premium_service is None:
             if int(user_id or 0) in SYSTEM_PREMIUM_OWNER_USER_IDS:
-                return premium_user_limit(PLAN_PLUS, limit_key)
-            return fallback
-        return premium_service.resolve_user_limit(user_id, limit_key)
+                resolved_limit = premium_user_limit(PLAN_PLUS, limit_key)
+            else:
+                resolved_limit = fallback
+        else:
+            resolved_limit = premium_service.resolve_user_limit(user_id, limit_key)
+        vote_service = self._vote_service()
+        if vote_service is None:
+            return resolved_limit
+        resolver = getattr(vote_service, "resolve_user_limit", None)
+        if not callable(resolver):
+            return resolved_limit
+        with contextlib.suppress(Exception):
+            return int(
+                resolver(
+                    user_id=int(user_id),
+                    plan_code=plan_code,
+                    limit_key=limit_key,
+                    current_limit=int(resolved_limit),
+                )
+            )
+        return resolved_limit
 
     def _resolve_guild_limit(self, guild_id: int, limit_key: str, fallback: int) -> int:
         premium_service = self._premium_service()
@@ -296,7 +341,21 @@ class UtilityService:
             return fallback
         return premium_service.resolve_guild_limit(guild_id, limit_key)
 
-    def _premium_limit_error(self, *, limit_key: str, limit_value: int, default_message: str) -> str:
+    def _premium_limit_error(self, *, user_id: int | None = None, limit_key: str, limit_value: int, default_message: str) -> str:
+        if user_id is not None:
+            vote_service = self._vote_service()
+            describe_vote_error = getattr(vote_service, "describe_limit_error", None)
+            if callable(describe_vote_error):
+                with contextlib.suppress(Exception):
+                    vote_message = describe_vote_error(
+                        user_id=int(user_id),
+                        plan_code=self._resolve_user_plan_code(int(user_id)),
+                        limit_key=limit_key,
+                        limit_value=int(limit_value),
+                        default_message=default_message,
+                    )
+                    if isinstance(vote_message, str) and vote_message.strip():
+                        return vote_message
         premium_service = self._premium_service()
         if premium_service is None:
             return default_message
@@ -1221,6 +1280,7 @@ class UtilityService:
         limit_value = self.watch_filter_limit(user_id)
         if self._count_change_exceeds_limit(previous_count=previous_count, next_count=next_count, limit_value=limit_value):
             return False, self._premium_limit_error(
+                user_id=user_id,
                 limit_key=LIMIT_WATCH_FILTERS,
                 limit_value=limit_value,
                 default_message=f"You can keep up to {limit_value} watched {item_name}.",
@@ -1458,6 +1518,7 @@ class UtilityService:
             keyword_limit = self.watch_keyword_limit(user_id)
             if len(keywords) >= keyword_limit:
                 return False, self._premium_limit_error(
+                    user_id=user_id,
                     limit_key=LIMIT_WATCH_KEYWORDS,
                     limit_value=keyword_limit,
                     default_message=f"You can store up to {keyword_limit} watch keywords.",
@@ -2004,6 +2065,7 @@ class UtilityService:
         reminder_limit = self.reminder_limit(user.id)
         if len(active) >= reminder_limit:
             return False, self._premium_limit_error(
+                user_id=user.id,
                 limit_key=LIMIT_REMINDERS_ACTIVE,
                 limit_value=reminder_limit,
                 default_message=f"You can keep up to {reminder_limit} active reminders.",
@@ -2012,6 +2074,7 @@ class UtilityService:
         public_limit = self.public_reminder_limit(user.id)
         if delivery == "here" and len(public_active) >= public_limit:
             return False, self._premium_limit_error(
+                user_id=user.id,
                 limit_key=LIMIT_REMINDERS_PUBLIC_ACTIVE,
                 limit_value=public_limit,
                 default_message=f"You can keep only {public_limit} active channel reminder at a time.",
@@ -2455,6 +2518,7 @@ class UtilityService:
             schedule_limit = self.afk_schedule_limit(user.id)
             if len(user_schedules) >= schedule_limit:
                 return False, self._premium_limit_error(
+                    user_id=user.id,
                     limit_key=LIMIT_AFK_SCHEDULES,
                     limit_value=schedule_limit,
                     default_message=f"You can keep up to {schedule_limit} recurring AFK schedules.",

@@ -269,7 +269,7 @@ Slash commands and the `bb!` prefix both work.
 | `/ping` | `bb!ping` | Health check |
 | `/play` | `bb!play` | Open a game lobby |
 | `/stop` | `bb!stop` | Force stop the active lobby/game |
-| `/vote` | `bb!vote` | Trigger a Spyfall vote |
+| `/vote` | n/a | Open the private Top.gg Vote Bonus panel |
 | `/stats` | `bb!stats` | Session stats |
 | `/leaderboard` | `bb!leaderboard` | Session leaderboard |
 | `/chaoscard` | `bb!chaoscard` | Cycle or inspect the lobby Chaos Card |
@@ -295,6 +295,13 @@ Use slash for multi-family Pattern Hunt guesses. Prefix stays positional, so the
 | `/hunt` | `bb!hunt` | Open the private Pattern Hunt card |
 | `/hunt status` | `bb!hunt status` | Mirror the live Pattern Hunt state card privately |
 | `/hunt guess` | `bb!hunt guess contains_digits` | Submit a private 1-3 family rule theory |
+| `/spyfall vote` | `bb!vote` | Trigger a Spyfall vote |
+
+Top.gg Vote Bonus notes:
+
+- `/vote` is now the dedicated Top.gg Vote Bonus lane
+- Free and Supporter users can unlock temporary utility headroom there without turning voting into a fake premium tier
+- Babblebox Plus and Guild Pro stay separate, higher, and permanent while the Vote Bonus stays smaller and expires with the Top.gg vote window
 
 ### Question Drops
 
@@ -730,6 +737,8 @@ Not stored:
 |   |-- utility_helpers.py
 |   |-- utility_service.py
 |   |-- utility_store.py
+|   |-- vote_service.py
+|   |-- vote_store.py
 |   |-- web.py
 |   `-- cogs/
 |       |-- __init__.py
@@ -743,7 +752,8 @@ Not stored:
 |       |-- premium.py
 |       |-- question_drops.py
 |       |-- shield.py
-|       `-- utilities.py
+|       |-- utilities.py
+|       `-- vote.py
 |-- assets/
 |-- tests/
 |-- index.html
@@ -761,6 +771,8 @@ Not stored:
 - `babblebox/premium_provider_patreon.py`: Patreon OAuth, membership normalization, and webhook verification adapter
 - `babblebox/utility_store.py`: Postgres-first utility persistence, including Watch V2 and bump reminder state
 - `babblebox/utility_service.py`: Watch, Later, Capture, Remind, verified bump reminders, and AFK orchestration
+- `babblebox/vote_store.py`: Top.gg vote record persistence, reminder preferences, and webhook dedupe
+- `babblebox/vote_service.py`: Top.gg webhook verification, refresh recovery, reminder delivery, and temporary utility overlay
 - `babblebox/utility_helpers.py`: utility preview rendering, transcript formatting, and utility delivery helpers
 - `babblebox/daily_challenges.py`: deterministic Daily Arcade booth generation
 - `babblebox/profile_store.py`: compact profile and daily persistence
@@ -782,6 +794,7 @@ Not stored:
 - `babblebox/cogs/question_drops.py`: Question Drops grouped command surface and mastery admin flows
 - `babblebox/cogs/shield.py`: admin-facing Shield command surface
 - `babblebox/cogs/utilities.py`: Watch V2, Later, Capture, Remind, AFK, and Bump Remind commands
+- `babblebox/cogs/vote.py`: Top.gg vote panel, refresh, and reminder controls
 
 ## Hosting Notes
 
@@ -836,6 +849,10 @@ UTILITY_DATABASE_URL=postgresql://...
 # PATREON_SUPPORTER_TIER_IDS=123456,234567
 # PATREON_PLUS_TIER_IDS=345678
 # PATREON_GUILD_PRO_TIER_IDS=456789
+# TOPGG_STORAGE_BACKEND=postgres
+# TOPGG_TOKEN=your_topgg_api_token
+# TOPGG_WEBHOOK_SECRET=whs_your_topgg_v2_webhook_secret
+# TOPGG_PROJECT_ID=1480903089518022739
 OPENAI_API_KEY=sk-...
 # optional Shield AI tuning:
 # SHIELD_AI_FAST_MODEL=gpt-5.4-nano
@@ -870,6 +887,10 @@ Environment variable notes:
 - `/livez` is liveness only, `/health` is the public-safe summary, and `/readyz` is the rollout and alert gate; those public routes expose non-sensitive readiness only
 - `PATREON_CLIENT_ID`, `PATREON_CLIENT_SECRET`, `PATREON_REDIRECT_URI`, `PATREON_WEBHOOK_SECRET`, `PATREON_CAMPAIGN_ID`, `PATREON_SUPPORTER_TIER_IDS`, `PATREON_PLUS_TIER_IDS`, and `PATREON_GUILD_PRO_TIER_IDS` are required for Patreon-linked premium linking, verified webhooks, and user refresh
 - `PATREON_REDIRECT_URI` must exactly match `PUBLIC_BASE_URL` plus `/premium/patreon/callback`, and the Patreon tier ID lists must be disjoint numeric IDs; Babblebox fails the Patreon surface closed when that configuration is incomplete or inconsistent
+- `TOPGG_WEBHOOK_SECRET` is required for the Top.gg Vote Bonus lane. If your Top.gg dashboard exposes Webhooks V2, use the `whs_...` secret. If your dashboard only exposes Legacy Webhooks, use the legacy `Authorization` value instead
+- `TOPGG_TOKEN` is optional in Webhooks V2 mode and only needed for `/vote` refresh recovery, but it becomes required in legacy webhook mode because legacy payloads do not include the vote window timestamps Babblebox needs to confirm safely
+- `TOPGG_PROJECT_ID` is optional; if omitted, Babblebox falls back to the running bot user ID and the shipped Babblebox listing ID
+- `TOPGG_STORAGE_BACKEND=memory` is optional for local/test vote-bonus work
 - The embedded public web surface serves only `/`, `/help.html`, `/privacy.html`, `/terms.html`, `/sitemap.xml`, and `/assets/...`; repo files, dotfiles, Markdown, tests, and source paths are never public routes
 - `CONFESSIONS_CONTENT_KEY` and `CONFESSIONS_IDENTITY_KEY` are required for Postgres-backed Confessions and should be separate random secrets of at least 32 characters each
 - `CONFESSIONS_CONTENT_KEY_ID` and `CONFESSIONS_IDENTITY_KEY_ID` are optional but recommended active key labels; if omitted they default to `active`

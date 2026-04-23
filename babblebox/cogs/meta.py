@@ -37,13 +37,13 @@ HELP_PAGES: list[dict[str, str]] = [
     {
         "title": "Babblebox Guide",
         "emoji": "\U0001f3e0",
-        "description": "Six clear lanes: Party Games, Question Drops, Daily Arcade, Utilities, Buddy/Profile, and Shield.",
+        "description": "Seven clear lanes: Party Games, Question Drops, Daily Arcade, Utilities, Vote Bonus, Buddy/Profile, and Shield.",
         "body": (
             "Use the arrows to browse the product by lane.\n"
             "Public-friendly surfaces lean public by default so they feel native in chat.\n"
             "Personal utilities, setup, and sensitive admin work stay private."
         ),
-        "try": "`/play`, `/drops status`, `/daily`, `/profile`, `/watch`",
+        "try": "`/play`, `/drops status`, `/daily`, `/profile`, `/watch`, `/vote`",
     },
     {
         "title": "Party Games",
@@ -114,6 +114,18 @@ HELP_PAGES: list[dict[str, str]] = [
             "Babblebox Plus raises saved-vs-active headroom for Watch, reminders, and recurring AFK, while downgrades keep saved config intact and only pause extra active headroom until you trim it or Plus returns."
         ),
         "try": "`/watch settings`, `/later mark`, `/capture`, `/remind set`",
+    },
+    {
+        "title": "Vote Bonus",
+        "emoji": "\U0001f5f3\ufe0f",
+        "description": "A temporary Top.gg utility boost that stays separate from paid premium.",
+        "body": (
+            "`/vote` opens a private Top.gg status panel with a direct vote link, live refresh, and reminder toggle.\n"
+            "Free and Supporter users can unlock a temporary utility boost after a Top.gg vote: Watch keywords `10 -> 15`, Watch filters `8 -> 12`, active reminders `3 -> 5`, active public reminders `1 -> 2`, and recurring AFK schedules `6 -> 10`.\n"
+            "Babblebox Plus and Guild Pro stay above this lane already, so votes never change those paid tiers.\n"
+            "Vote reminders stay opt-in, and reminder DMs tell you how to turn them back off from `/vote`."
+        ),
+        "try": "`/vote`",
     },
     {
         "title": "Daily Arcade",

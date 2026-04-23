@@ -76,8 +76,28 @@ class GameplayCog(commands.Cog):
             await ge.cleanup_game(guild_id)
             raise
 
-    @commands.hybrid_command(name="vote", with_app_command=True, description="Trigger a Spyfall vote")
-    async def vote_command(self, ctx: commands.Context):
+    @commands.hybrid_group(name="spyfall", with_app_command=True, description="Spyfall round tools", invoke_without_command=True)
+    async def spyfall_group(self, ctx: commands.Context):
+        await send_hybrid_response(
+            ctx,
+            embed=ge.make_status_embed(
+                "Spyfall Tools",
+                "Use `/spyfall vote` during an active Spyfall round. The old slash `/vote` now opens Babblebox's Top.gg vote panel instead.",
+                tone="info",
+                footer="Babblebox Spyfall",
+            ),
+            ephemeral=getattr(ctx, "interaction", None) is not None,
+        )
+
+    @spyfall_group.command(name="vote", with_app_command=True, description="Trigger a Spyfall vote")
+    async def spyfall_vote_command(self, ctx: commands.Context):
+        await self._run_spyfall_vote_command(ctx, command_name="/spyfall vote")
+
+    @commands.command(name="vote")
+    async def vote_prefix_alias(self, ctx: commands.Context):
+        await self._run_spyfall_vote_command(ctx, command_name="bb!vote")
+
+    async def _run_spyfall_vote_command(self, ctx: commands.Context, *, command_name: str):
         if ctx.guild is None:
             await send_hybrid_response(
                 ctx,
@@ -92,7 +112,7 @@ class GameplayCog(commands.Cog):
             return
 
         await defer_hybrid_response(ctx)
-        if not await require_channel_permissions(ctx, ge.VOTE_REQUIRED_PERMS, "/vote"):
+        if not await require_channel_permissions(ctx, ge.VOTE_REQUIRED_PERMS, command_name):
             return
 
         if getattr(ctx, "interaction", None) is not None:

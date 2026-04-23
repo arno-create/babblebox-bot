@@ -24,6 +24,7 @@ from babblebox.cogs.premium import PremiumCog
 from babblebox.cogs.question_drops import QuestionDropsCog
 from babblebox.cogs.shield import ShieldCog, ShieldPanelView
 from babblebox.cogs.utilities import AfkReturnWatchDurationSelect, UtilityCog
+from babblebox.cogs.vote import VoteCog
 from babblebox.profile_service import ProfileService
 from babblebox.profile_store import ProfileStore
 
@@ -1783,6 +1784,7 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             self._link_buttons(payload["view"]),
             {
                 "Support Server": "https://discord.com/servers/inevitable-friendship-1322933864360050688",
+                "Top.gg Vote": "https://top.gg/bot/1480903089518022739/vote",
                 "GitHub Repository": "https://github.com/arno-create/babblebox-bot",
                 "Official Website": "https://arno-create.github.io/babblebox-bot/",
                 "Patreon Membership": "https://www.patreon.com/cw/InevitableFriendship",
@@ -1998,6 +2000,30 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertTrue({"watch", "later", "capture", "remind", "bremind"}.issubset(slash_roots))
                 self.assertNotIn("moment", slash_roots)
                 self.assertNotIn("moment", prefix_commands)
+            finally:
+                for loaded in list(bot.cogs.values()):
+                    service = getattr(loaded, "service", None)
+                    if service is not None:
+                        await service.close()
+                await bot.close()
+
+    async def test_vote_root_moves_to_topgg_while_spyfall_vote_stays_available(self):
+        with self._service_env_patch(), patch.dict(os.environ, {"TOPGG_STORAGE_BACKEND": "memory"}, clear=False):
+            bot = commands.Bot(command_prefix="!", intents=discord.Intents.none())
+            try:
+                gameplay_cog = GameplayCog(bot)
+                vote_cog = VoteCog(bot)
+                await bot.add_cog(gameplay_cog)
+                await bot.add_cog(vote_cog)
+
+                slash_roots = {command.name: command for command in bot.tree.get_commands()}
+                gameplay_prefix = {command.qualified_name for command in gameplay_cog.walk_commands()}
+
+                self.assertIn("vote", slash_roots)
+                self.assertIn("spyfall", slash_roots)
+                self.assertEqual({command.name for command in gameplay_cog.spyfall_group.app_command.commands}, {"vote"})
+                self.assertIn("spyfall vote", gameplay_prefix)
+                self.assertIn("vote", gameplay_prefix)
             finally:
                 for loaded in list(bot.cogs.values()):
                     service = getattr(loaded, "service", None)

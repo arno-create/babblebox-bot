@@ -40,7 +40,11 @@ class WebsiteDocsTests(unittest.TestCase):
             self.assertIn(anchor, help_html)
         for command in ("/support", "/daily", "/buddy", "/profile", "/vault", "/watch", "/later", "/capture", "/remind", "/bremind", "/bremind setup", "/bremind status", "/bremind test", "/afk", "/shield panel", "/shield links", "/shield trusted", "/lock channel", "/lock remove", "/lock settings", "/timeout remove", "/admin panel", "/admin followup", "/admin logs", "/admin exclusions", "/admin permissions", "/confess", "/confessions moderate"):
             self.assertIn(command, help_html)
+        for command in ("/vote", "/spyfall vote"):
+            self.assertIn(command, help_html)
         self.assertIn("Broken Telephone, Exquisite Corpse, Spyfall, Word Bomb, and Pattern Hunt", help_html)
+        self.assertIn("Vote Bonus", help_html)
+        self.assertIn("Top.gg", help_html)
         self.assertIn("1-10 drops per day", help_html)
         self.assertIn("/drops leaderboard", help_html)
         self.assertIn("/drops roles status", help_html)
@@ -147,6 +151,10 @@ class WebsiteDocsTests(unittest.TestCase):
             "/confess reply-to-user",
             "/confessions moderate",
             "/support",
+            "/vote",
+            "/spyfall vote",
+            "Top.gg",
+            "Vote Bonus",
             "/lock channel",
             "/lock remove",
             "/lock settings",
@@ -562,6 +570,20 @@ class WebsiteDocsTests(unittest.TestCase):
         self.assertIn("images are off by default", privacy_md)
         self.assertIn("Babblebox still enforces safety internally", privacy_html)
         self.assertIn("operator-proof", privacy_html)
+
+    def test_privacy_docs_cover_topgg_vote_bonus_storage_boundary(self):
+        privacy_md = (ROOT / "PRIVACY.md").read_text(encoding="utf-8")
+        privacy_html = (ROOT / "privacy.html").read_text(encoding="utf-8")
+
+        for text in (
+            "Top.gg",
+            "vote bonus",
+            "vote event ID",
+            "vote reminder preference",
+            "avatar_url",
+        ):
+            self.assertIn(text, privacy_md)
+            self.assertIn(text, privacy_html)
 
     def test_env_example_matches_confessions_deploy_model(self):
         env_example = (ROOT / ".env.example").read_text(encoding="utf-8")

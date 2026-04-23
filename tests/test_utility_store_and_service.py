@@ -1,3 +1,5 @@
+from __future__ import annotations
+
 import asyncio
 import os
 import json
@@ -23,7 +25,14 @@ from babblebox.premium_limits import (
     guild_limit as premium_guild_limit,
     user_limit as premium_user_limit,
 )
-from babblebox.premium_models import PLAN_FREE, PLAN_GUILD_PRO, PLAN_PLUS, SYSTEM_PREMIUM_OWNER_USER_IDS, SYSTEM_PREMIUM_SUPPORT_GUILD_ID
+from babblebox.premium_models import (
+    PLAN_FREE,
+    PLAN_GUILD_PRO,
+    PLAN_PLUS,
+    PLAN_SUPPORTER,
+    SYSTEM_PREMIUM_OWNER_USER_IDS,
+    SYSTEM_PREMIUM_SUPPORT_GUILD_ID,
+)
 from babblebox.shield_service import (
     FEATURE_SURFACE_AFK_REASON,
     FEATURE_SURFACE_AFK_SCHEDULE_REASON,
@@ -70,6 +79,38 @@ class PremiumLimitStub:
         return (
             f"You reached this plan's active limit of {limit_value}. {plan_label} allows higher active limits. "
             "Use `/premium plans` to compare tiers. Previously saved over-limit state stays preserved."
+        )
+
+
+class VoteBonusStub:
+    LIMITS = {
+        LIMIT_WATCH_KEYWORDS: 15,
+        LIMIT_WATCH_FILTERS: 12,
+        LIMIT_REMINDERS_ACTIVE: 5,
+        LIMIT_REMINDERS_PUBLIC_ACTIVE: 2,
+        LIMIT_AFK_SCHEDULES: 10,
+    }
+
+    def __init__(self, *, active_user_ids: Optional[set[int]] = None, configured: bool = True):
+        self.active_user_ids = set(active_user_ids or set())
+        self.configured = configured
+
+    def resolve_user_limit(self, *, user_id: int, plan_code: str, limit_key: str, current_limit: int) -> int:
+        if plan_code not in {PLAN_FREE, "supporter"}:
+            return current_limit
+        if user_id not in self.active_user_ids:
+            return current_limit
+        return max(current_limit, self.LIMITS.get(limit_key, current_limit))
+
+    def describe_limit_error(self, *, user_id: int, plan_code: str, limit_key: str, limit_value: int, default_message: str) -> str | None:
+        if not self.configured or plan_code not in {PLAN_FREE, "supporter"} or user_id in self.active_user_ids:
+            return None
+        bonus_limit = self.LIMITS.get(limit_key)
+        if bonus_limit is None or bonus_limit <= limit_value:
+            return None
+        return (
+            f"{default_message} Use `/vote` to unlock a temporary Vote Bonus up to {bonus_limit}. "
+            "Babblebox Plus still goes higher permanently."
         )
 
 
@@ -329,6 +370,10 @@ class UtilityStoreAndServiceTests(unittest.IsolatedAsyncioTestCase):
 
     def _attach_premium(self, *, user_plans: Optional[dict[int, str]] = None, guild_plans: Optional[dict[int, str]] = None):
         self.bot.premium_service = PremiumLimitStub(user_plans=user_plans, guild_plans=guild_plans)
+        self.service._rebuild_watch_indexes()
+
+    def _attach_vote_bonus(self, *, active_user_ids: Optional[set[int]] = None, configured: bool = True):
+        self.bot.vote_service = VoteBonusStub(active_user_ids=active_user_ids, configured=configured)
         self.service._rebuild_watch_indexes()
 
     async def _configure_bump_fixture(
@@ -1065,6 +1110,76 @@ class UtilityStoreAndServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertTrue(ok, record)
         self.assertEqual(self.service.reminder_limit(user.id), 15)
+
+    async def test_vote_bonus_limits_apply_only_to_free_and_supporter(self):
+        self._attach_vote_bonus(active_user_ids={8801, 8802})
+
+        self.assertEqual(self.service.watch_keyword_limit(8801), 15)
+        self.assertEqual(self.service.watch_filter_limit(8801), 12)
+        self.assertEqual(self.service.reminder_limit(8801), 5)
+        self.assertEqual(self.service.public_reminder_limit(8801), 2)
+        self.assertEqual(self.service.afk_schedule_limit(8801), 10)
+
+        self._attach_premium(user_plans={8802: PLAN_SUPPORTER, 8803: PLAN_PLUS})
+        self.assertEqual(self.service.watch_keyword_limit(8802), 15)
+        self.assertEqual(self.service.watch_keyword_limit(8803), 25)
+        self.assertEqual(self.service.public_reminder_limit(8803), 5)
+
+    async def test_vote_bonus_copy_surfaces_only_when_bonus_is_available_but_inactive(self):
+        user_id = 8804
+        self._attach_vote_bonus(configured=True)
+        for index in range(10):
+            ok, _ = await self.service.add_watch_keyword(
+                user_id,
+                guild_id=None,
+                channel_id=None,
+                phrase=f"topic-{index}",
+                scope="global",
+                mode="contains",
+            )
+            self.assertTrue(ok)
+
+        ok, message = await self.service.add_watch_keyword(
+            user_id,
+            guild_id=None,
+            channel_id=None,
+            phrase="topic-10",
+            scope="global",
+            mode="contains",
+        )
+        self.assertFalse(ok)
+        self.assertIn("/vote", message)
+        self.assertIn("temporary Vote Bonus", message)
+        self.assertIn("Babblebox Plus", message)
+
+    async def test_vote_bonus_allows_second_public_reminder_but_not_third(self):
+        user = DummyUser(8805)
+        self._attach_vote_bonus(active_user_ids={user.id})
+
+        for text in ("First public reminder.", "Second public reminder."):
+            ok, result = await self.service.create_reminder(
+                user=user,
+                text=text,
+                delay_seconds=20 * 60,
+                delivery="here",
+                guild=type("Guild", (), {"id": 1, "name": "Guild"})(),
+                channel=type("Channel", (), {"id": 2, "name": "general"})(),
+                origin_jump_url=None,
+            )
+            self.assertTrue(ok, result)
+            self.service._reminder_cooldowns[user.id] = 0.0
+
+        ok, message = await self.service.create_reminder(
+            user=user,
+            text="Third public reminder.",
+            delay_seconds=25 * 60,
+            delivery="here",
+            guild=type("Guild", (), {"id": 1, "name": "Guild"})(),
+            channel=type("Channel", (), {"id": 2, "name": "general"})(),
+            origin_jump_url=None,
+        )
+        self.assertFalse(ok)
+        self.assertIn("only 2 active channel reminder", message)
 
     async def test_system_owner_limit_fallback_applies_without_attached_premium_runtime(self):
         owner_user_id = next(iter(SYSTEM_PREMIUM_OWNER_USER_IDS))

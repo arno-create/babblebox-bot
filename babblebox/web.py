@@ -27,12 +27,14 @@ TERMS_PATH = ROOT_DIR / "terms.html"
 SITEMAP_PATH = ROOT_DIR / "sitemap.xml"
 PREMIUM_QUERY_VALUE_LIMIT = 1024
 PREMIUM_WEBHOOK_MAX_BYTES = 65536
+TOPGG_WEBHOOK_MAX_BYTES = 65536
 PUBLIC_FILE_CACHE_CONTROL = "public, max-age=300, must-revalidate"
 DEFAULT_HTTP_PORT = 10000
 DEFAULT_WAITRESS_THREADS = 4
 INGRESS_MODE = "embedded_waitress"
 
 _premium_runtime = None
+_vote_runtime = None
 _bot_runtime = None
 _server_thread: Thread | None = None
 _server_lock = Lock()
@@ -61,6 +63,10 @@ class PremiumRuntimeUnavailableError(RuntimeError):
     pass
 
 
+class VoteRuntimeUnavailableError(RuntimeError):
+    pass
+
+
 def create_app() -> Flask:
     flask_app = Flask(__name__)
     _register_routes(flask_app)
@@ -70,6 +76,13 @@ def create_app() -> Flask:
 def set_premium_runtime(service):
     global _premium_runtime, _bot_runtime
     _premium_runtime = service
+    if service is not None and getattr(service, "bot", None) is not None:
+        _bot_runtime = service.bot
+
+
+def set_vote_runtime(service):
+    global _vote_runtime, _bot_runtime
+    _vote_runtime = service
     if service is not None and getattr(service, "bot", None) is not None:
         _bot_runtime = service.bot
 
@@ -132,6 +145,17 @@ def _run_premium_coroutine(coro):
         raise PremiumRuntimeUnavailableError("Premium runtime is not attached.")
     if loop is None or bool(getattr(loop, "is_closed", lambda: False)()):
         raise PremiumRuntimeUnavailableError("Premium runtime loop is unavailable.")
+    future = asyncio.run_coroutine_threadsafe(coro, loop)
+    return future.result(timeout=45)
+
+
+def _run_vote_coroutine(coro):
+    service = _vote_runtime
+    loop = getattr(getattr(service, "bot", None), "loop", None)
+    if service is None:
+        raise VoteRuntimeUnavailableError("Vote runtime is not attached.")
+    if loop is None or bool(getattr(loop, "is_closed", lambda: False)()):
+        raise VoteRuntimeUnavailableError("Vote runtime loop is unavailable.")
     future = asyncio.run_coroutine_threadsafe(coro, loop)
     return future.result(timeout=45)
 
@@ -551,6 +575,10 @@ def _premium_webhook_json(*, status: str, message: str, status_code: int, invali
     return _premium_json(status=status, message=message, status_code=status_code)
 
 
+def _vote_webhook_json(*, status: str, message: str, status_code: int):
+    return _json_response({"status": status, "message": message}, status_code=status_code, no_store=True)
+
+
 def _register_routes(flask_app: Flask):
     @flask_app.get("/")
     def home():
@@ -692,6 +720,50 @@ def _register_routes(flask_app: Flask):
             status_code = 413 if "safe size limit" in result.message else 400
             return _premium_webhook_json(status="invalid", message=result.message, status_code=status_code)
         return _premium_webhook_json(status="error", message="Babblebox could not process the Patreon webhook safely.", status_code=500)
+
+    @flask_app.post("/topgg/webhook")
+    def topgg_webhook():
+        service = _vote_runtime
+        if service is None:
+            return _vote_webhook_json(status="unavailable", message="Vote runtime is not attached.", status_code=503)
+        signature = str(request.headers.get("x-topgg-signature") or request.headers.get("Authorization") or "").strip()
+        if not signature:
+            return _vote_webhook_json(status="invalid", message="Missing Top.gg webhook verification header.", status_code=400)
+        content_length = int(request.content_length or 0)
+        if content_length > TOPGG_WEBHOOK_MAX_BYTES:
+            return _vote_webhook_json(status="invalid", message="Top.gg webhook payload exceeded the safe size limit.", status_code=413)
+        body = request.get_data(cache=False)
+        if len(body) > TOPGG_WEBHOOK_MAX_BYTES:
+            return _vote_webhook_json(status="invalid", message="Top.gg webhook payload exceeded the safe size limit.", status_code=413)
+        trace_id = (
+            str(
+                request.headers.get("x-topgg-trace")
+                or request.headers.get("x-request-id")
+                or request.headers.get("cf-ray")
+                or ""
+            ).strip()
+            or None
+        )
+        try:
+            result = _run_vote_coroutine(
+                service.handle_topgg_webhook(body=body, signature=signature, trace_id=trace_id)
+            )
+        except VoteRuntimeUnavailableError:
+            return _vote_webhook_json(status="unavailable", message="Vote runtime is not attached.", status_code=503)
+        except Exception as exc:
+            if isinstance(exc, WebhookVerificationError) or exc.__class__.__name__ == "WebhookVerificationError":
+                return _vote_webhook_json(status="invalid", message="Top.gg webhook signature was invalid.", status_code=400)
+            return _vote_webhook_json(status="error", message="Babblebox could not process the Top.gg webhook safely.", status_code=500)
+        if result.outcome == "processed":
+            return _vote_webhook_json(status="processed", message=result.message, status_code=200)
+        if result.outcome == "duplicate":
+            return _vote_webhook_json(status="duplicate", message=result.message, status_code=200)
+        if result.outcome == "unavailable":
+            return _vote_webhook_json(status="unavailable", message=result.message, status_code=503)
+        if result.outcome == "invalid":
+            status_code = 413 if "safe size limit" in result.message else 400
+            return _vote_webhook_json(status="invalid", message=result.message, status_code=status_code)
+        return _vote_webhook_json(status="error", message="Babblebox could not process the Top.gg webhook safely.", status_code=500)
 
     @flask_app.get("/assets/<path:filename>")
     def assets(filename: str):
