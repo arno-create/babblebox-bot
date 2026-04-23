@@ -1363,6 +1363,113 @@ class QuestionDropsServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("State: **Blocked**", status_field)
         self.assertIn("role is not mentionable", checks_field.lower())
+        self.assertIn("Mention Everyone", checks_field)
+
+    async def test_clear_drop_ping_role_returns_off_and_future_posts_stay_unpinged(self):
+        role = DummyRole(819, name="Drops Squad")
+        self.guild._roles[role.id] = role
+        ok, message = await self.service.update_drop_ping_role(self.guild, role_id=role.id)
+        self.assertTrue(ok, message)
+
+        ok, message = await self.service.update_drop_ping_role(self.guild, role_id=None)
+        self.assertTrue(ok, message)
+        self.assertEqual(self.service.get_config(self.guild.id)["drop_ping_role_id"], None)
+
+        embed = self.service.build_drop_ping_status_embed(self.guild)
+        status_field = next(field.value for field in embed.fields if field.name == "Status")
+        checks_field = next(field.value for field in embed.fields if field.name == "Delivery Checks")
+
+        self.assertIn("State: **Off**", status_field)
+        self.assertIn("No live drop role ping is configured.", checks_field)
+
+        await self._post_one_drop()
+
+        payload = self.channel.sent[0][1]
+        self.assertNotIn("content", payload)
+        self.assertNotIn("allowed_mentions", payload)
+
+    async def test_build_drop_ping_status_embed_reports_partial_delivery_checks(self):
+        blocked_channel = DummyChannel(21, can_send=False)
+        blocked_channel.guild = self.guild
+        self.guild._channels[blocked_channel.id] = blocked_channel
+        self.bot._channels[blocked_channel.id] = blocked_channel
+        ok, message = await self.service.update_channels(self.guild.id, action="add", channel_id=blocked_channel.id)
+        self.assertTrue(ok, message)
+        role = DummyRole(820, name="Drops Squad")
+        self.guild._roles[role.id] = role
+        ok, message = await self.service.update_drop_ping_role(self.guild, role_id=role.id)
+        self.assertTrue(ok, message)
+
+        embed = self.service.build_drop_ping_status_embed(self.guild)
+        status_field = next(field.value for field in embed.fields if field.name == "Status")
+        checks_field = next(field.value for field in embed.fields if field.name == "Delivery Checks")
+
+        self.assertIn("State: **Partial**", status_field)
+        self.assertIn(f"{self.channel.mention}: role ping will post with the live drop.", checks_field)
+        self.assertIn(f"{blocked_channel.mention}: cannot send messages.", checks_field)
+
+    async def test_build_drop_ping_status_embed_reports_missing_view_channel_blocker(self):
+        blocked_channel = DummyChannel(22, can_view=False)
+        blocked_channel.guild = self.guild
+        self.guild._channels[blocked_channel.id] = blocked_channel
+        self.bot._channels[blocked_channel.id] = blocked_channel
+        ok, message = await self.service.update_channels(self.guild.id, action="clear")
+        self.assertTrue(ok, message)
+        ok, message = await self.service.update_channels(self.guild.id, action="add", channel_id=blocked_channel.id)
+        self.assertTrue(ok, message)
+        role = DummyRole(821, name="Drops Squad")
+        self.guild._roles[role.id] = role
+        ok, message = await self.service.update_drop_ping_role(self.guild, role_id=role.id)
+        self.assertTrue(ok, message)
+
+        embed = self.service.build_drop_ping_status_embed(self.guild)
+        status_field = next(field.value for field in embed.fields if field.name == "Status")
+        checks_field = next(field.value for field in embed.fields if field.name == "Delivery Checks")
+
+        self.assertIn("State: **Blocked**", status_field)
+        self.assertIn("cannot view channel", checks_field)
+
+    async def test_build_drop_ping_status_embed_reports_missing_send_messages_blocker(self):
+        blocked_channel = DummyChannel(23, can_send=False)
+        blocked_channel.guild = self.guild
+        self.guild._channels[blocked_channel.id] = blocked_channel
+        self.bot._channels[blocked_channel.id] = blocked_channel
+        ok, message = await self.service.update_channels(self.guild.id, action="clear")
+        self.assertTrue(ok, message)
+        ok, message = await self.service.update_channels(self.guild.id, action="add", channel_id=blocked_channel.id)
+        self.assertTrue(ok, message)
+        role = DummyRole(822, name="Drops Squad")
+        self.guild._roles[role.id] = role
+        ok, message = await self.service.update_drop_ping_role(self.guild, role_id=role.id)
+        self.assertTrue(ok, message)
+
+        embed = self.service.build_drop_ping_status_embed(self.guild)
+        status_field = next(field.value for field in embed.fields if field.name == "Status")
+        checks_field = next(field.value for field in embed.fields if field.name == "Delivery Checks")
+
+        self.assertIn("State: **Blocked**", status_field)
+        self.assertIn("cannot send messages", checks_field)
+
+    async def test_build_drop_ping_status_embed_reports_missing_embed_links_blocker(self):
+        blocked_channel = DummyChannel(24, can_embed=False)
+        blocked_channel.guild = self.guild
+        self.guild._channels[blocked_channel.id] = blocked_channel
+        self.bot._channels[blocked_channel.id] = blocked_channel
+        ok, message = await self.service.update_channels(self.guild.id, action="clear")
+        self.assertTrue(ok, message)
+        ok, message = await self.service.update_channels(self.guild.id, action="add", channel_id=blocked_channel.id)
+        self.assertTrue(ok, message)
+        role = DummyRole(823, name="Drops Squad")
+        self.guild._roles[role.id] = role
+        ok, message = await self.service.update_drop_ping_role(self.guild, role_id=role.id)
+        self.assertTrue(ok, message)
+
+        embed = self.service.build_drop_ping_status_embed(self.guild)
+        status_field = next(field.value for field in embed.fields if field.name == "Status")
+        checks_field = next(field.value for field in embed.fields if field.name == "Delivery Checks")
+
+        self.assertIn("State: **Blocked**", status_field)
+        self.assertIn("missing Embed Links", checks_field)
 
     async def test_post_drop_uses_safe_role_ping_when_configured_and_allowed(self):
         role = DummyRole(828, mentionable=True)

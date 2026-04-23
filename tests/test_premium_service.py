@@ -625,6 +625,40 @@ class PremiumServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(self.service.get_link(621)["link_status"], "active")
         self.assertEqual(await self.store.list_active_claims(), [])
 
+    async def test_unmapped_patreon_refresh_withdraws_old_claim_without_guessing_plan(self):
+        await self._link_identity(user_id=622, plan_codes=(PLAN_GUILD_PRO,))
+        guild = FakeGuild(8622)
+        guild.add_member(FakeGuildMember(622, manage_guild=True))
+        ok, message = await self.service.claim_guild(guild=guild, actor=guild.get_member(622))
+        self.assertTrue(ok, message)
+        self.provider.identity = PatreonIdentity(
+            provider_user_id="patreon-user-622",
+            email="user-622@example.com",
+            display_name="Patron 622",
+            member_id="member-622",
+            plan_codes=(),
+            patron_status="active_patron",
+            tier_ids=("tier-legacy-622",),
+            next_charge_date=_utcnow() + timedelta(days=30),
+            raw_user={"id": "patreon-user-622"},
+            raw_member={"id": "member-622"},
+            raw_tiers=({"id": "tier-legacy-622", "type": "tier"},),
+        )
+
+        ok, message = await self.service.refresh_user_link(622)
+
+        self.assertTrue(ok, message)
+        self.assertEqual(message, "Patreon entitlements refreshed.")
+        self.assertEqual(self.service.get_user_snapshot(622)["plan_code"], PLAN_FREE)
+        self.assertEqual(self.service.get_guild_snapshot(8622)["plan_code"], PLAN_FREE)
+        self.assertEqual(await self.store.list_active_claims(), [])
+        link = self.service.get_link(622)
+        self.assertEqual(link["link_status"], "active")
+        self.assertEqual(link["metadata"]["tier_ids"], ["tier-legacy-622"])
+        entitlements = self.service.list_cached_entitlements_for_user(622)
+        self.assertTrue(entitlements)
+        self.assertTrue(all(record["status"] == "inactive" for record in entitlements))
+
     async def test_inactive_entitlement_backed_claim_is_auto_released_on_reload(self):
         now = _utcnow()
         await self.store.upsert_entitlement(
@@ -898,6 +932,44 @@ class PremiumServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.message, "Patreon webhook stored for manual review.")
         self.assertEqual(self.service.get_guild_snapshot(8644)["plan_code"], PLAN_FREE)
         self.assertEqual(await self.store.list_active_claims(), [])
+
+    async def test_unmapped_patreon_webhook_withdraws_old_claim_without_guessing_plan(self):
+        await self._link_identity(user_id=6442, plan_codes=(PLAN_GUILD_PRO,))
+        guild = FakeGuild(86442)
+        guild.add_member(FakeGuildMember(6442, manage_guild=True))
+        ok, message = await self.service.claim_guild(guild=guild, actor=guild.get_member(6442))
+        self.assertTrue(ok, message)
+        self.provider.identity = PatreonIdentity(
+            provider_user_id="patreon-user-6442",
+            email="user-6442@example.com",
+            display_name="Patron 6442",
+            member_id="member-6442",
+            plan_codes=(),
+            patron_status="active_patron",
+            tier_ids=("tier-legacy-6442",),
+            next_charge_date=_utcnow() + timedelta(days=30),
+            raw_user={"id": "patreon-user-6442"},
+            raw_member={"id": "member-6442"},
+            raw_tiers=({"id": "tier-legacy-6442", "type": "tier"},),
+        )
+        body = json.dumps(
+            {
+                "data": {"id": "member-6442", "type": "member"},
+                "included": [{"type": "user", "id": "patreon-user-6442"}],
+            }
+        ).encode("utf-8")
+
+        with patch.dict(os.environ, {"PATREON_WEBHOOK_SECRET": "secret"}, clear=False):
+            result = await self.service.handle_patreon_webhook(body=body, event_type="members:update", signature="ok")
+
+        self.assertEqual(result.outcome, "processed")
+        self.assertEqual(result.message, "Patreon webhook processed.")
+        self.assertEqual(self.service.get_user_snapshot(6442)["plan_code"], PLAN_FREE)
+        self.assertEqual(self.service.get_guild_snapshot(86442)["plan_code"], PLAN_FREE)
+        self.assertEqual(await self.store.list_active_claims(), [])
+        link = self.service.get_link(6442)
+        self.assertEqual(link["link_status"], "active")
+        self.assertEqual(link["metadata"]["tier_ids"], ["tier-legacy-6442"])
 
     async def test_webhook_identity_mismatch_degrades_safely_without_failing_webhook(self):
         await self._link_identity(user_id=6441, plan_codes=(PLAN_GUILD_PRO,))

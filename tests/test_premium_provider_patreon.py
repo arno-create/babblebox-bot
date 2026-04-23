@@ -84,6 +84,49 @@ class PatreonPremiumProviderTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(raised.exception.provider_code, "campaign_membership_missing")
         self.assertIn("not the creator account", raised.exception.safe_message)
 
+    async def test_fetch_identity_keeps_unmapped_legacy_tier_ids_without_guessing_plan(self):
+        payload = {
+            "data": {
+                "id": "patreon-user-1",
+                "type": "user",
+                "attributes": {"email": "user@example.com", "full_name": "User"},
+            },
+            "included": [
+                {
+                    "id": "member-1234",
+                    "type": "member",
+                    "attributes": {
+                        "patron_status": "active_patron",
+                        "next_charge_date": "2026-05-01T00:00:00+00:00",
+                    },
+                    "relationships": {
+                        "campaign": {"data": {"id": "1234"}},
+                        "currently_entitled_tiers": {"data": [{"id": "5555", "type": "tier"}]},
+                    },
+                },
+                {
+                    "id": "5555",
+                    "type": "tier",
+                    "attributes": {"title": "Legacy Tier", "amount_cents": 999},
+                },
+            ],
+        }
+        with patch.dict("os.environ", self.env, clear=False):
+            provider = PatreonPremiumProvider()
+
+        async def _fake_get_session():
+            return _FakeSession(status=200, payload=payload)
+
+        provider._get_session = _fake_get_session
+
+        identity = await provider.fetch_identity(access_token="token-legacy")
+
+        self.assertEqual(identity.provider_user_id, "patreon-user-1")
+        self.assertEqual(identity.tier_ids, ("5555",))
+        self.assertEqual(identity.plan_codes, ())
+        self.assertEqual(len(identity.raw_tiers), 1)
+        self.assertEqual(identity.raw_tiers[0]["id"], "5555")
+
 
 if __name__ == "__main__":
     unittest.main()
