@@ -302,6 +302,140 @@ def _safe_premium_diagnostics(service: Any) -> dict[str, Any]:
     return {}
 
 
+def _env_flag_enabled(value: Any) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _topgg_enabled_from_env() -> bool:
+    return _env_flag_enabled(os.getenv("TOPGG_ENABLED", ""))
+
+
+def _topgg_mode_from_secret(secret: str | None) -> str | None:
+    cleaned = str(secret or "").strip()
+    if not cleaned:
+        return None
+    return "v2" if cleaned.startswith("whs_") else "legacy"
+
+
+def _topgg_default_message(*, enabled: bool, state: str, mode: str | None) -> str:
+    if not enabled or state == "disabled":
+        return "Top.gg vote bonuses are disabled until an operator explicitly sets `TOPGG_ENABLED=true` on this deployment."
+    if state == "misconfigured":
+        if not str(os.getenv("TOPGG_WEBHOOK_SECRET", "") or "").strip():
+            return "Top.gg vote bonuses are enabled here, but misconfigured. Set `TOPGG_WEBHOOK_SECRET` before turning this vote lane live."
+        if mode == "legacy" and not str(os.getenv("TOPGG_TOKEN", "") or "").strip():
+            return (
+                "Top.gg vote bonuses are misconfigured. This Top.gg dashboard is using legacy webhooks, "
+                "so `TOPGG_TOKEN` is also required to confirm vote status safely."
+            )
+        return "Top.gg vote bonuses are misconfigured. Check `TOPGG_WEBHOOK_SECRET` and `TOPGG_TOKEN`."
+    if mode == "legacy":
+        return (
+            "Top.gg vote bonuses are configured with legacy webhooks. Replay protection is weaker than Webhooks V2, "
+            "so Babblebox confirms the vote through the legacy API and estimates the standard 12-hour vote window."
+        )
+    if not str(os.getenv("TOPGG_TOKEN", "") or "").strip():
+        return "Top.gg vote bonuses are configured. API refresh is disabled until `TOPGG_TOKEN` is set."
+    return "Top.gg vote bonuses are configured."
+
+
+def _sanitize_topgg_webhook_summary(summary: Any, *, enabled: bool, state: str, mode: str | None) -> dict[str, Any]:
+    candidate = dict(summary) if isinstance(summary, dict) else {}
+    status = str(candidate.get("status") or "").strip().lower()
+    if not status:
+        status = "disabled" if not enabled else ("misconfigured" if state != "configured" else "ready")
+    safe = {
+        "status": status,
+        "total": int(candidate.get("total", 0) or 0),
+        "processed": int(candidate.get("processed", 0) or 0),
+        "duplicate": int(candidate.get("duplicate", 0) or 0),
+        "unavailable": int(candidate.get("unavailable", 0) or 0),
+        "invalid": int(candidate.get("invalid", 0) or 0),
+        "error": int(candidate.get("error", 0) or 0),
+        "invalid_signature_count": int(candidate.get("invalid_signature_count", 0) or 0),
+        "last_status": candidate.get("last_status"),
+        "last_event_at": candidate.get("last_event_at"),
+        "last_mode": candidate.get("last_mode") or mode,
+        "replay_window_seconds": candidate.get("replay_window_seconds"),
+        "replay_protection": candidate.get("replay_protection"),
+        "timing_source": candidate.get("timing_source") or ("legacy_estimated" if mode == "legacy" else "exact" if mode == "v2" else None),
+    }
+    if safe["replay_window_seconds"] is None and mode == "v2":
+        safe["replay_window_seconds"] = 300
+    if not safe["replay_protection"]:
+        safe["replay_protection"] = (
+            "signed timestamp with a 5-minute replay window"
+            if mode == "v2"
+            else "weaker legacy authorization-header replay protection"
+            if mode == "legacy"
+            else "disabled"
+        )
+    return safe
+
+
+def _safe_topgg_diagnostics(
+    service: Any,
+    *,
+    public_expected: bool,
+    loop_attached: bool,
+    loop_closed: bool,
+) -> dict[str, Any]:
+    candidate: dict[str, Any] = {}
+    getter = getattr(service, "diagnostics_snapshot", None)
+    if callable(getter):
+        with contextlib.suppress(Exception):
+            payload = getter()
+            if isinstance(payload, dict):
+                candidate = dict(payload)
+    enabled = bool(candidate.get("enabled")) if "enabled" in candidate else _topgg_enabled_from_env()
+    mode = candidate.get("webhook_mode")
+    if mode is None:
+        mode = _topgg_mode_from_secret(os.getenv("TOPGG_WEBHOOK_SECRET", ""))
+    state = str(candidate.get("configuration_state") or ("disabled" if not enabled else "configured" if mode else "misconfigured"))
+    message = str(candidate.get("configuration_message") or _topgg_default_message(enabled=enabled, state=state, mode=mode))
+    storage_ready = bool(candidate.get("storage_ready", service is not None and getattr(service, "storage_ready", False)))
+    storage_backend = str(
+        candidate.get("storage_backend")
+        or getattr(getattr(service, "store", None), "backend_name", None)
+        or getattr(service, "storage_backend_preference", None)
+        or "unknown"
+    ).strip() or "unknown"
+    bot = getattr(service, "bot", None) if service is not None else None
+    runtime_attached = bool(service is not None and bot is not None and loop_attached and not loop_closed)
+    public_routes_ready = bool(
+        candidate.get(
+            "public_routes_ready",
+            (not enabled) or (public_expected and state == "configured" and storage_ready and runtime_attached),
+        )
+    )
+    if not enabled:
+        public_routes_ready = True
+    elif public_expected:
+        public_routes_ready = bool(state == "configured" and storage_ready and runtime_attached)
+    safe_summary = _sanitize_topgg_webhook_summary(
+        candidate.get("webhook_summary"),
+        enabled=enabled,
+        state=state,
+        mode=mode,
+    )
+    return {
+        "enabled": enabled,
+        "configuration_state": state,
+        "configuration_message": message,
+        "webhook_mode": mode,
+        "storage_ready": storage_ready,
+        "storage_backend": storage_backend,
+        "runtime_attached": runtime_attached,
+        "public_routes_ready": public_routes_ready,
+        "api_refresh_available": bool(candidate.get("api_refresh_available", enabled and state == "configured" and bool(os.getenv("TOPGG_TOKEN", "").strip()))),
+        "refresh_cooldown_seconds": int(candidate.get("refresh_cooldown_seconds", 60) or 60),
+        "vote_window_seconds": int(candidate.get("vote_window_seconds", 43200) or 43200),
+        "timing_source": candidate.get("timing_source") or ("legacy_estimated" if mode == "legacy" else "exact" if mode == "v2" else None),
+        "timing_note": candidate.get("timing_note"),
+        "webhook_summary": safe_summary,
+    }
+
+
 def _safe_confessions_readiness_summary(bot: Any) -> dict[str, Any]:
     service = getattr(bot, "confessions_service", None) if bot is not None else None
     if service is None:
@@ -352,6 +486,7 @@ def _safe_confessions_readiness_summary(bot: Any) -> dict[str, Any]:
 def _runtime_readiness_snapshot() -> dict[str, Any]:
     service = _premium_runtime
     bot = _bot_runtime or getattr(service, "bot", None)
+    vote_service = _vote_runtime or (getattr(bot, "vote_service", None) if bot is not None else None)
     loop = getattr(bot, "loop", None)
     runtime_attached = bot is not None
     ready_probe = getattr(bot, "is_ready", None)
@@ -380,6 +515,12 @@ def _runtime_readiness_snapshot() -> dict[str, Any]:
     premium_startup_state = str(premium_diagnostics.get("startup_state") or ("enabled_safe" if patreon_configured else "enabled_unsafe"))
     provider_monitor = _safe_provider_monitor_summary(service)
     public_expected = _public_base_url_configured()
+    topgg = _safe_topgg_diagnostics(
+        vote_service,
+        public_expected=public_expected,
+        loop_attached=loop_attached,
+        loop_closed=loop_closed,
+    )
     public_premium_routes_ready = not public_expected or (
         premium_startup_state == "disabled"
         or (
@@ -403,6 +544,14 @@ def _runtime_readiness_snapshot() -> dict[str, Any]:
         _safe_issue_append(issues, "premium_patreon_not_configured")
     if public_expected and not public_premium_routes_ready:
         _safe_issue_append(issues, "public_premium_routes_not_ready")
+    if topgg["enabled"] and topgg["configuration_state"] != "configured":
+        _safe_issue_append(issues, "topgg_configuration_not_ready")
+    if topgg["enabled"] and not topgg["storage_ready"]:
+        _safe_issue_append(issues, "topgg_storage_unavailable")
+    if topgg["enabled"] and not topgg["runtime_attached"]:
+        _safe_issue_append(issues, "topgg_runtime_unavailable")
+    if topgg["enabled"] and not topgg["public_routes_ready"]:
+        _safe_issue_append(issues, "public_topgg_routes_not_ready")
     for name in required_service_failures:
         snapshot = services.get(name) or {}
         _safe_issue_append(issues, *tuple(snapshot.get("issue_codes") or ()))
@@ -414,6 +563,7 @@ def _runtime_readiness_snapshot() -> dict[str, Any]:
         and not loop_closed
         and not required_service_failures
         and public_premium_routes_ready
+        and ((not topgg["enabled"]) or (topgg["configuration_state"] == "configured" and topgg["public_routes_ready"]))
         and bool(confessions.get("ready", True))
     )
     return {
@@ -440,6 +590,7 @@ def _runtime_readiness_snapshot() -> dict[str, Any]:
             "startup_state": premium_startup_state,
             "provider_monitor": provider_monitor,
         },
+        "topgg": topgg,
         "confessions": confessions,
         "website": "https://arno-create.github.io/babblebox-bot/",
     }
@@ -459,6 +610,7 @@ def _public_health_payload(*, detailed: bool) -> dict[str, Any]:
         "required_service_failures": readiness["required_service_failures"],
         "required_services_ready": not readiness["required_service_failures"],
         "premium": readiness["premium"],
+        "topgg": readiness["topgg"],
         "confessions": readiness["confessions"],
         "website": readiness["website"],
         "bot_runtime_attached": readiness["runtime"]["bot_runtime_attached"],
@@ -726,6 +878,18 @@ def _register_routes(flask_app: Flask):
         service = _vote_runtime
         if service is None:
             return _vote_webhook_json(status="unavailable", message="Vote runtime is not attached.", status_code=503)
+        state_getter = getattr(service, "configuration_state", None)
+        if callable(state_getter):
+            with contextlib.suppress(Exception):
+                state = str(state_getter() or "").strip().lower()
+                if state and state != "configured":
+                    message_getter = getattr(service, "configuration_message", None)
+                    message = message_getter() if callable(message_getter) else "Top.gg vote bonuses are unavailable on this deployment right now."
+                    return _vote_webhook_json(status="unavailable", message=message, status_code=503)
+        if not bool(getattr(service, "storage_ready", True)):
+            storage_message = getattr(service, "storage_message", None)
+            message = storage_message() if callable(storage_message) else "Top.gg vote bonuses are temporarily unavailable right now."
+            return _vote_webhook_json(status="unavailable", message=message, status_code=503)
         signature = str(request.headers.get("x-topgg-signature") or request.headers.get("Authorization") or "").strip()
         if not signature:
             return _vote_webhook_json(status="invalid", message="Missing Top.gg webhook verification header.", status_code=400)

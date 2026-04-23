@@ -52,6 +52,7 @@ class PremiumWebRoutesTests(unittest.TestCase):
         startup_state: Optional[str] = None,
         provider_monitor=None,
         confessions_readiness=None,
+        vote_diagnostics=None,
     ):
         stub = types.SimpleNamespace(
             bot=bot,
@@ -87,6 +88,22 @@ class PremiumWebRoutesTests(unittest.TestCase):
             stub.public_provider_monitor_summary = lambda: dict(provider_monitor)
         if confessions_readiness is not None:
             stub.readiness_snapshot = lambda: dict(confessions_readiness)
+        vote_snapshot = {
+            "enabled": False,
+            "configuration_state": "disabled",
+            "configuration_message": "Top.gg vote bonuses are disabled until an operator explicitly sets `TOPGG_ENABLED=true` on this deployment.",
+            "webhook_mode": None,
+            "storage_ready": storage_ready,
+            "storage_backend": configured_backend,
+            "runtime_attached": bot is not None,
+            "public_routes_ready": True,
+            "api_refresh_available": False,
+            "refresh_cooldown_seconds": 60,
+            "webhook_summary": {"status": "disabled"},
+        }
+        if isinstance(vote_diagnostics, dict):
+            vote_snapshot.update(vote_diagnostics)
+        stub.diagnostics_snapshot = lambda: dict(vote_snapshot)
         return stub
 
     def _attach_runtime(
@@ -338,6 +355,20 @@ class PremiumWebRoutesTests(unittest.TestCase):
         self.assertEqual(payload["message"], "Top.gg webhook signature was invalid.")
         self.assertNotIn("detail", payload["message"])
 
+    def test_topgg_webhook_disabled_config_returns_503_without_requiring_signature_header(self):
+        disabled_vote_service = types.SimpleNamespace(
+            bot=types.SimpleNamespace(loop=_LoopStub()),
+            storage_ready=True,
+            configuration_state=lambda: "disabled",
+            configuration_message=lambda: "Top.gg vote bonuses are disabled until an operator explicitly sets `TOPGG_ENABLED=true` on this deployment.",
+        )
+        web.set_vote_runtime(disabled_vote_service)
+        response = self.client.post("/topgg/webhook", data=b"{}")
+        payload = response.get_json()
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(payload["status"], "unavailable")
+        self.assertIn("topgg_enabled=true", payload["message"].casefold())
+
     def test_topgg_webhook_accepts_legacy_authorization_header(self):
         self._attach_runtime(loop=_LoopStub())
         with patch.object(web, "_run_vote_coroutine", return_value=TopggWebhookResult("processed", "Legacy webhook ok.")):
@@ -405,6 +436,66 @@ class PremiumWebRoutesTests(unittest.TestCase):
         payload = response.get_json()
         self.assertEqual(response.status_code, 413)
         self.assertEqual(payload["message"], "Top.gg webhook payload exceeded the safe size limit.")
+
+    def test_health_stays_ready_when_topgg_is_intentionally_disabled(self):
+        with patch.dict(web.os.environ, {"PUBLIC_BASE_URL": "https://example.test"}, clear=False):
+            self._attach_runtime(
+                loop=_LoopStub(),
+                storage_ready=True,
+                patreon_configured=True,
+                service_overrides={
+                    "vote_service": self._service_stub(
+                        bot=None,
+                        configured_backend="postgres",
+                        storage_ready=True,
+                        vote_diagnostics={
+                            "enabled": False,
+                            "configuration_state": "disabled",
+                            "configuration_message": "Top.gg vote bonuses are disabled until an operator explicitly sets `TOPGG_ENABLED=true` on this deployment.",
+                            "public_routes_ready": True,
+                            "webhook_summary": {"status": "disabled"},
+                        },
+                    )
+                },
+            )
+            response = self.client.get("/health")
+        payload = response.get_json()
+        self.assertEqual(response.status_code, 200)
+        self.assertIn("topgg", payload)
+        self.assertFalse(payload["topgg"]["enabled"])
+        self.assertEqual(payload["topgg"]["configuration_state"], "disabled")
+        self.assertTrue(payload["topgg"]["public_routes_ready"])
+
+    def test_health_reports_degraded_when_topgg_enabled_public_lane_is_unready(self):
+        with patch.dict(web.os.environ, {"PUBLIC_BASE_URL": "https://example.test"}, clear=False):
+            self._attach_runtime(
+                loop=_LoopStub(),
+                storage_ready=True,
+                patreon_configured=True,
+                service_overrides={
+                    "vote_service": self._service_stub(
+                        bot=None,
+                        configured_backend="postgres",
+                        storage_ready=False,
+                        storage_error="offline",
+                        vote_diagnostics={
+                            "enabled": True,
+                            "configuration_state": "configured",
+                            "configuration_message": "Top.gg vote bonuses are configured.",
+                            "public_routes_ready": False,
+                            "storage_ready": False,
+                            "webhook_mode": "v2",
+                            "webhook_summary": {"status": "unavailable"},
+                        },
+                    )
+                },
+            )
+            response = self.client.get("/health")
+        payload = response.get_json()
+        self.assertEqual(response.status_code, 503)
+        self.assertTrue(payload["topgg"]["enabled"])
+        self.assertFalse(payload["topgg"]["public_routes_ready"])
+        self.assertFalse(payload["topgg"]["storage_ready"])
 
     def test_health_is_degraded_without_runtime_attachment(self):
         with patch.dict(web.os.environ, {}, clear=False):
@@ -596,6 +687,43 @@ class PremiumWebRoutesTests(unittest.TestCase):
         self.assertNotIn("abc123", rendered)
         self.assertNotIn("123456789012345678", rendered)
         self.assertNotIn("998877665544332211", rendered)
+
+    def test_readyz_hides_topgg_trace_and_payload_details(self):
+        with patch.dict(web.os.environ, {"PUBLIC_BASE_URL": "https://example.test"}, clear=False):
+            self._attach_runtime(
+                loop=_LoopStub(),
+                storage_ready=True,
+                patreon_configured=True,
+                service_overrides={
+                    "vote_service": self._service_stub(
+                        bot=None,
+                        configured_backend="postgres",
+                        storage_ready=True,
+                        vote_diagnostics={
+                            "enabled": True,
+                            "configuration_state": "configured",
+                            "configuration_message": "Top.gg vote bonuses are configured.",
+                            "public_routes_ready": True,
+                            "webhook_mode": "v2",
+                            "webhook_summary": {
+                                "status": "degraded",
+                                "last_webhook_status": "processed",
+                                "trace_id": "trace-secret",
+                                "payload_hash": "payload-secret",
+                                "event_id": "vote-secret",
+                            },
+                        },
+                    )
+                },
+            )
+            response = self.client.get("/readyz")
+        payload = response.get_json()
+        rendered = response.get_data(as_text=True)
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["topgg"]["configuration_state"], "configured")
+        self.assertNotIn("trace-secret", rendered)
+        self.assertNotIn("payload-secret", rendered)
+        self.assertNotIn("vote-secret", rendered)
 
     def test_run_uses_waitress_server_contract(self):
         called = {}

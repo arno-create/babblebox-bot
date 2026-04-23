@@ -1,3 +1,4 @@
+import hashlib
 import hmac
 import json
 import types
@@ -46,6 +47,7 @@ class VoteServiceTests(unittest.IsolatedAsyncioTestCase):
         self.env = patch.dict(
             "os.environ",
             {
+                "TOPGG_ENABLED": "true",
                 "TOPGG_WEBHOOK_SECRET": self.secret,
                 "TOPGG_PROJECT_ID": "1480903089518022739",
                 "TOPGG_STORAGE_BACKEND": "memory",
@@ -86,7 +88,7 @@ class VoteServiceTests(unittest.IsolatedAsyncioTestCase):
             },
         }
         body = json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
-        signature = _raw_signature(self.secret, 1713864000, body)
+        signature = _raw_signature(self.secret, int(created_at.timestamp()), body)
 
         first = await self.service.handle_topgg_webhook(body=body, signature=signature, trace_id="trace-1")
         second = await self.service.handle_topgg_webhook(body=body, signature=signature, trace_id="trace-1")
@@ -121,7 +123,7 @@ class VoteServiceTests(unittest.IsolatedAsyncioTestCase):
             },
         }
         body = json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
-        signature = _raw_signature(self.secret, 1713864010, body)
+        signature = _raw_signature(self.secret, int(_utc_now().timestamp()), body)
 
         result = await self.service.handle_topgg_webhook(body=body, signature=signature, trace_id="trace-test")
 
@@ -151,7 +153,7 @@ class VoteServiceTests(unittest.IsolatedAsyncioTestCase):
             },
         }
         body = json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
-        signature = _raw_signature(self.secret, 1713864020, body)
+        signature = _raw_signature(self.secret, int(_utc_now().timestamp()), body)
 
         wrong_project = await self.service.handle_topgg_webhook(body=body, signature=signature, trace_id="trace-2")
         self.assertEqual(wrong_project, TopggWebhookResult("invalid", "This Top.gg webhook does not target the configured Babblebox project."))
@@ -162,6 +164,136 @@ class VoteServiceTests(unittest.IsolatedAsyncioTestCase):
                 signature="t=1713864020,v1=bad",
                 trace_id="trace-3",
             )
+
+    async def test_topgg_flag_disables_vote_lane_until_explicitly_enabled(self):
+        with patch.dict(
+            "os.environ",
+            {
+                "TOPGG_ENABLED": "false",
+                "TOPGG_WEBHOOK_SECRET": self.secret,
+                "TOPGG_PROJECT_ID": "1480903089518022739",
+                "TOPGG_STORAGE_BACKEND": "memory",
+            },
+            clear=False,
+        ):
+            disabled_service = VoteService(self.bot, store=VoteStore(backend="memory"))
+            started = await disabled_service.start()
+            self.assertTrue(started)
+            try:
+                self.assertEqual(disabled_service.configuration_state(), "disabled")
+                self.assertIn("topgg_enabled=true", disabled_service.configuration_message().casefold())
+                diagnostics = disabled_service.diagnostics_snapshot()
+                self.assertFalse(diagnostics["enabled"])
+                self.assertEqual(diagnostics["configuration_state"], "disabled")
+            finally:
+                await disabled_service.close()
+
+    async def test_handle_topgg_webhook_rejects_stale_v2_signature_replay(self):
+        fixed_now = datetime(2026, 4, 24, 12, 10, tzinfo=timezone.utc)
+        created_at = fixed_now - timedelta(minutes=1)
+        expires_at = created_at + timedelta(hours=12)
+        payload = {
+            "type": "vote.create",
+            "data": {
+                "id": "vote-stale",
+                "weight": 1,
+                "created_at": created_at.isoformat(),
+                "expires_at": expires_at.isoformat(),
+                "project": {
+                    "id": "1480903089518022739",
+                    "type": "bot",
+                    "platform": "discord",
+                    "platform_id": "1480903089518022739",
+                },
+                "user": {
+                    "id": "topgg-user",
+                    "platform_id": "5521",
+                    "name": "Voter",
+                    "avatar_url": "https://cdn.example/avatar.png",
+                },
+            },
+        }
+        body = json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+        stale_timestamp = int((fixed_now - timedelta(minutes=6)).timestamp())
+        signature = _raw_signature(self.secret, stale_timestamp, body)
+
+        with patch("babblebox.vote_service._utcnow", return_value=fixed_now):
+            with self.assertRaises(WebhookVerificationError):
+                await self.service.handle_topgg_webhook(body=body, signature=signature, trace_id="trace-stale")
+
+    async def test_handle_topgg_webhook_rejects_invalid_exact_vote_window(self):
+        created_at = _utc_now()
+        expires_at = created_at - timedelta(minutes=1)
+        payload = {
+            "type": "vote.create",
+            "data": {
+                "id": "vote-bad-window",
+                "weight": 1,
+                "created_at": created_at.isoformat(),
+                "expires_at": expires_at.isoformat(),
+                "project": {
+                    "id": "1480903089518022739",
+                    "type": "bot",
+                    "platform": "discord",
+                    "platform_id": "1480903089518022739",
+                },
+                "user": {
+                    "id": "topgg-user",
+                    "platform_id": "5531",
+                    "name": "Voter",
+                    "avatar_url": "https://cdn.example/avatar.png",
+                },
+            },
+        }
+        body = json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+        signature = _raw_signature(self.secret, int(created_at.timestamp()), body)
+
+        result = await self.service.handle_topgg_webhook(body=body, signature=signature, trace_id="trace-window")
+
+        self.assertEqual(result.outcome, "invalid")
+        self.assertIn("vote window", result.message.casefold())
+
+    async def test_handle_topgg_webhook_records_receipt_metadata_for_processed_vote(self):
+        created_at = _utc_now()
+        expires_at = created_at + timedelta(hours=12)
+        payload = {
+            "type": "vote.create",
+            "data": {
+                "id": "vote-receipt",
+                "weight": 2,
+                "created_at": created_at.isoformat(),
+                "expires_at": expires_at.isoformat(),
+                "project": {
+                    "id": "1480903089518022739",
+                    "type": "bot",
+                    "platform": "discord",
+                    "platform_id": "1480903089518022739",
+                },
+                "user": {
+                    "id": "topgg-user",
+                    "platform_id": "5541",
+                    "name": "Voter",
+                    "avatar_url": "https://cdn.example/avatar.png",
+                },
+            },
+        }
+        body = json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+        signature_timestamp = int(created_at.timestamp())
+        signature = _raw_signature(self.secret, signature_timestamp, body)
+
+        result = await self.service.handle_topgg_webhook(body=body, signature=signature, trace_id="trace-receipt")
+
+        self.assertEqual(result, TopggWebhookResult("processed", "Top.gg vote recorded."))
+        event = self.service.store._store.webhook_events["vote-receipt"]
+        self.assertEqual(event["webhook_mode"], "v2")
+        self.assertEqual(event["trace_id"], "trace-receipt")
+        self.assertEqual(event["payload_hash"], hashlib.sha256(body).hexdigest())
+        self.assertEqual(event["signature_timestamp"], signature_timestamp)
+        self.assertEqual(event["vote_created_at"], created_at.isoformat())
+        self.assertEqual(event["vote_expires_at"], expires_at.isoformat())
+        self.assertEqual(event["timing_source"], "exact")
+        self.assertEqual(event["status"], "processed")
+        self.assertIsNotNone(event["processed_at"])
 
     async def test_legacy_webhook_requires_token_for_configured_mode(self):
         with patch.dict(
@@ -196,6 +328,7 @@ class VoteServiceTests(unittest.IsolatedAsyncioTestCase):
             self.assertTrue(started)
             self.assertEqual(legacy_service.configuration_state(), "configured")
             self.assertIn("legacy", legacy_service.configuration_message().casefold())
+            self.assertIn("weaker replay", legacy_service.configuration_message().casefold())
             await legacy_service.close()
 
     async def test_handle_topgg_legacy_webhook_uses_authorization_header_and_api_status(self):

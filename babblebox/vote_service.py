@@ -42,6 +42,7 @@ TOPGG_REMINDER_LOOP_SECONDS = 300
 TOPGG_LEGACY_CONFIRM_TIMEOUT_SECONDS = 3.0
 TOPGG_LEGACY_VOTE_WINDOW = timedelta(hours=12)
 TOPGG_LEGACY_DEDUPE_WINDOW_SECONDS = 1800
+TOPGG_V2_REPLAY_WINDOW_SECONDS = 300
 TOPGG_PLATFORM = "discord"
 TOPGG_WEBHOOK_MODE_V2 = "v2"
 TOPGG_WEBHOOK_MODE_LEGACY = "legacy"
@@ -85,6 +86,10 @@ def _safe_int(value: Any) -> int | None:
     return parsed if parsed > 0 else None
 
 
+def _env_flag_enabled(value: Any) -> bool:
+    return str(value or "").strip().lower() in {"1", "true", "yes", "on"}
+
+
 @dataclass(frozen=True)
 class TopggWebhookResult:
     outcome: str
@@ -120,6 +125,7 @@ class VoteService:
         self._refresh_cooldowns: dict[int, float] = {}
         self._lock = asyncio.Lock()
         self._reminder_task: asyncio.Task | None = None
+        self._webhook_summary = self._empty_webhook_summary()
 
     async def start(self) -> bool:
         if self._startup_storage_error is not None or self.store is None:
@@ -138,7 +144,6 @@ class VoteService:
         self.storage_error = None
         await self._reload_cache()
         self._register_web_runtime()
-        self._ensure_session()
         self._reminder_task = asyncio.create_task(self._reminder_loop(), name="babblebox-topgg-reminders")
         return True
 
@@ -166,12 +171,15 @@ class VoteService:
     def storage_message(self, feature_name: str = "Vote Bonus") -> str:
         return f"{feature_name} is temporarily unavailable because Babblebox could not reach its vote database."
 
+    def _topgg_enabled(self) -> bool:
+        return _env_flag_enabled(os.getenv("TOPGG_ENABLED", ""))
+
     def configuration_state(self) -> str:
+        if not self._topgg_enabled():
+            return TOPGG_CONFIGURATION_DISABLED
         token = self._topgg_token()
         mode = self.webhook_mode()
         secret = self._topgg_webhook_secret()
-        if not token and not secret:
-            return TOPGG_CONFIGURATION_DISABLED
         if not secret:
             return TOPGG_CONFIGURATION_MISCONFIGURED
         if mode == TOPGG_WEBHOOK_MODE_LEGACY and not token:
@@ -182,10 +190,10 @@ class VoteService:
         state = self.configuration_state()
         mode = self.webhook_mode()
         if state == TOPGG_CONFIGURATION_DISABLED:
-            return "Top.gg vote bonuses are disabled on this deployment."
+            return "Top.gg vote bonuses are disabled until an operator explicitly sets `TOPGG_ENABLED=true` on this deployment."
         if state == TOPGG_CONFIGURATION_MISCONFIGURED:
             if not self._topgg_webhook_secret():
-                return "Top.gg vote bonuses are misconfigured. Set `TOPGG_WEBHOOK_SECRET` to the Top.gg webhook secret."
+                return "Top.gg vote bonuses are enabled here, but misconfigured. Set `TOPGG_WEBHOOK_SECRET` before turning this vote lane live."
             if mode == TOPGG_WEBHOOK_MODE_LEGACY and not self._topgg_token():
                 return (
                     "Top.gg vote bonuses are misconfigured. This Top.gg dashboard is using legacy webhooks, "
@@ -195,14 +203,17 @@ class VoteService:
         if mode == TOPGG_WEBHOOK_MODE_LEGACY:
             return (
                 "Top.gg vote bonuses are configured with legacy webhooks. Babblebox verifies the shared "
-                "Authorization header, confirms the vote through the legacy API, and estimates the standard 12-hour "
-                "vote window because legacy Top.gg does not return exact timestamps. Webhooks V2 are still preferred."
+                "Authorization header, but weaker replay protection than Webhooks V2 because legacy Top.gg does not "
+                "sign request timestamps. Babblebox confirms the vote through the legacy API and estimates the standard "
+                "12-hour vote window because legacy Top.gg does not return exact timestamps. Webhooks V2 are still preferred."
             )
         if not self._topgg_token():
             return "Top.gg vote bonuses are configured. API refresh is disabled until `TOPGG_TOKEN` is set."
         return "Top.gg vote bonuses are configured."
 
     def webhook_mode(self) -> str | None:
+        if not self._topgg_enabled():
+            return None
         secret = self._topgg_webhook_secret()
         if not secret:
             return None
@@ -303,6 +314,7 @@ class VoteService:
             "user_id": int(user_id),
             "plan_code": plan_code,
             "plan_label": self.plan_label(plan_code),
+            "enabled": self._topgg_enabled(),
             "configuration_state": self.configuration_state(),
             "configuration_message": self.configuration_message(),
             "active": active,
@@ -313,9 +325,42 @@ class VoteService:
             "reminder_opt_in": bool(record.get("reminder_opt_in", False)),
             "vote_url": self.vote_url(),
             "bonus_limits": dict(TOPGG_VOTE_LIMITS),
-            "api_refresh_available": bool(self._topgg_token()),
+            "api_refresh_available": bool(self._topgg_token()) and self.configuration_state() == TOPGG_CONFIGURATION_CONFIGURED,
             "timing_source": timing_source,
             "timing_note": timing_note,
+        }
+
+    def diagnostics_snapshot(self) -> dict[str, Any]:
+        state = self.configuration_state()
+        mode = self.webhook_mode()
+        loop = getattr(self.bot, "loop", None)
+        runtime_attached = bool(self.bot is not None and loop is not None and not bool(getattr(loop, "is_closed", lambda: False)()))
+        storage_backend = str(
+            getattr(getattr(self.store, "backend_name", None), "strip", lambda: "")()
+            or getattr(self.store, "backend_name", "")
+            or self.storage_backend_preference
+            or "unknown"
+        ).strip() or "unknown"
+        timing_source = None
+        if mode == TOPGG_WEBHOOK_MODE_V2:
+            timing_source = TOPGG_TIMING_SOURCE_EXACT
+        elif mode == TOPGG_WEBHOOK_MODE_LEGACY:
+            timing_source = TOPGG_TIMING_SOURCE_LEGACY_ESTIMATED
+        return {
+            "enabled": self._topgg_enabled(),
+            "configuration_state": state,
+            "configuration_message": self.configuration_message(),
+            "webhook_mode": mode,
+            "storage_ready": bool(self.storage_ready),
+            "storage_backend": storage_backend,
+            "runtime_attached": runtime_attached,
+            "public_routes_ready": (not self._topgg_enabled()) or (state == TOPGG_CONFIGURATION_CONFIGURED and self.storage_ready and runtime_attached),
+            "api_refresh_available": bool(self._topgg_token()) and state == TOPGG_CONFIGURATION_CONFIGURED,
+            "refresh_cooldown_seconds": TOPGG_REFRESH_COOLDOWN_SECONDS,
+            "vote_window_seconds": int(TOPGG_LEGACY_VOTE_WINDOW.total_seconds()),
+            "timing_source": timing_source,
+            "timing_note": self._timing_note_for_source(timing_source) if timing_source else None,
+            "webhook_summary": self._public_webhook_summary(enabled=self._topgg_enabled(), state=state, mode=mode),
         }
 
     async def set_reminder_preference(self, user_id: int, *, enabled: bool) -> dict[str, Any]:
@@ -329,6 +374,8 @@ class VoteService:
         )
 
     async def refresh_user_vote_status(self, user_id: int, *, force: bool = False) -> tuple[bool, str]:
+        if self.configuration_state() != TOPGG_CONFIGURATION_CONFIGURED:
+            return False, self.configuration_message()
         if not self.storage_ready:
             return False, self.storage_message()
         if not self._topgg_token():
@@ -370,20 +417,51 @@ class VoteService:
         return True, "Top.gg vote status refreshed."
 
     async def handle_topgg_webhook(self, *, body: bytes, signature: str, trace_id: str | None = None) -> TopggWebhookResult:
+        mode = self._configured_webhook_mode()
         if not self.storage_ready:
-            return TopggWebhookResult("unavailable", self.storage_message())
+            result = TopggWebhookResult("unavailable", self.storage_message())
+            self._record_webhook_monitor_event(result.outcome, mode=mode)
+            return result
         if self.configuration_state() != TOPGG_CONFIGURATION_CONFIGURED:
-            return TopggWebhookResult("unavailable", self.configuration_message())
-        self.verify_signature(body=body, signature_header=signature)
+            result = TopggWebhookResult("unavailable", self.configuration_message())
+            self._record_webhook_monitor_event(result.outcome, mode=mode)
+            return result
         try:
+            verification = self.verify_signature(body=body, signature_header=signature)
             payload = json.loads(body.decode("utf-8"))
+            if verification["mode"] == TOPGG_WEBHOOK_MODE_LEGACY:
+                result = await self._handle_legacy_webhook(
+                    payload=payload,
+                    body=body,
+                    trace_id=trace_id,
+                    signature_timestamp=verification.get("signature_timestamp"),
+                )
+            else:
+                result = await self._handle_v2_webhook(
+                    payload=payload,
+                    body=body,
+                    trace_id=trace_id,
+                    signature_timestamp=verification.get("signature_timestamp"),
+                )
+        except WebhookVerificationError:
+            self._record_webhook_monitor_event("invalid", invalid_signature=True, mode=mode)
+            raise
         except (UnicodeDecodeError, json.JSONDecodeError):
-            return TopggWebhookResult("invalid", "Top.gg webhook payload was invalid.")
-        if self.webhook_mode() == TOPGG_WEBHOOK_MODE_LEGACY:
-            return await self._handle_legacy_webhook(payload=payload, body=body, trace_id=trace_id)
-        return await self._handle_v2_webhook(payload=payload, body=body, trace_id=trace_id)
+            result = TopggWebhookResult("invalid", "Top.gg webhook payload was invalid.")
+        except Exception:
+            self._record_webhook_monitor_event("error", mode=mode)
+            raise
+        self._record_webhook_monitor_event(result.outcome, mode=mode)
+        return result
 
-    async def _handle_v2_webhook(self, *, payload: dict[str, Any], body: bytes, trace_id: str | None) -> TopggWebhookResult:
+    async def _handle_v2_webhook(
+        self,
+        *,
+        payload: dict[str, Any],
+        body: bytes,
+        trace_id: str | None,
+        signature_timestamp: int | None,
+    ) -> TopggWebhookResult:
         event_type = str(payload.get("type") or "").strip().lower()
         data = payload.get("data") if isinstance(payload.get("data"), dict) else {}
         project = data.get("project") if isinstance(data.get("project"), dict) else {}
@@ -404,9 +482,17 @@ class VoteService:
             "event_id": vote_id,
             "discord_user_id": discord_user_id,
             "event_type": event_type,
+            "webhook_mode": TOPGG_WEBHOOK_MODE_V2,
             "received_at": _utcnow().isoformat(),
             "status": "pending",
             "error_text": None,
+            "payload_hash": hashlib.sha256(body).hexdigest(),
+            "trace_id": str(trace_id).strip() if trace_id else None,
+            "signature_timestamp": signature_timestamp,
+            "vote_created_at": _serialize_datetime(data.get("created_at")),
+            "vote_expires_at": _serialize_datetime(data.get("expires_at")),
+            "timing_source": TOPGG_TIMING_SOURCE_EXACT,
+            "processed_at": None,
         }
         inserted = await self.store.record_webhook_event(event_record)
         if not inserted:
@@ -421,16 +507,32 @@ class VoteService:
                 webhook_status="processed",
                 webhook_trace_id=trace_id,
                 webhook_received_at=event_record["received_at"],
-                webhook_payload_hash=hashlib.sha256(body).hexdigest(),
+                webhook_payload_hash=event_record["payload_hash"],
             )
             await self._upsert_vote_record(normalized)
         except ValueError as exc:
-            await self.store.finish_webhook_event(vote_id, status="invalid", error_text=str(exc))
+            await self.store.finish_webhook_event(
+                vote_id,
+                status="invalid",
+                error_text=str(exc),
+                processed_at=_utcnow().isoformat(),
+            )
             return TopggWebhookResult("invalid", str(exc))
-        await self.store.finish_webhook_event(vote_id, status="processed")
+        await self.store.finish_webhook_event(
+            vote_id,
+            status="processed",
+            processed_at=_utcnow().isoformat(),
+        )
         return TopggWebhookResult("processed", "Top.gg vote recorded.")
 
-    async def _handle_legacy_webhook(self, *, payload: dict[str, Any], body: bytes, trace_id: str | None) -> TopggWebhookResult:
+    async def _handle_legacy_webhook(
+        self,
+        *,
+        payload: dict[str, Any],
+        body: bytes,
+        trace_id: str | None,
+        signature_timestamp: int | None,
+    ) -> TopggWebhookResult:
         event_type = str(payload.get("type") or "").strip().lower()
         project_platform_id = str(payload.get("bot") or "").strip()
         if project_platform_id != self.project_id():
@@ -482,16 +584,28 @@ class VoteService:
             "event_id": event_id,
             "discord_user_id": discord_user_id,
             "event_type": event_type,
+            "webhook_mode": TOPGG_WEBHOOK_MODE_LEGACY,
             "received_at": normalized["webhook_received_at"],
             "status": "pending",
             "error_text": None,
+            "payload_hash": payload_hash,
+            "trace_id": str(trace_id).strip() if trace_id else None,
+            "signature_timestamp": signature_timestamp,
+            "vote_created_at": normalized["created_at"],
+            "vote_expires_at": normalized["expires_at"],
+            "timing_source": timing_source,
+            "processed_at": None,
         }
         inserted = await self.store.record_webhook_event(event_record)
         if not inserted:
             return TopggWebhookResult("duplicate", "That Top.gg vote event was already processed.")
         normalized["topgg_vote_id"] = event_id
         await self._upsert_vote_record(normalized)
-        await self.store.finish_webhook_event(event_id, status="processed")
+        await self.store.finish_webhook_event(
+            event_id,
+            status="processed",
+            processed_at=_utcnow().isoformat(),
+        )
         if timing_source == TOPGG_TIMING_SOURCE_LEGACY_ESTIMATED:
             return TopggWebhookResult(
                 "processed",
@@ -499,17 +613,18 @@ class VoteService:
             )
         return TopggWebhookResult("processed", "Top.gg legacy vote recorded.")
 
-    def verify_signature(self, *, body: bytes, signature_header: str):
+    def verify_signature(self, *, body: bytes, signature_header: str) -> dict[str, Any]:
         secret = self._topgg_webhook_secret()
         if not secret:
             raise WebhookVerificationError("Top.gg webhook secret is not configured.")
-        if self.webhook_mode() == TOPGG_WEBHOOK_MODE_LEGACY:
+        mode = self._configured_webhook_mode()
+        if mode == TOPGG_WEBHOOK_MODE_LEGACY:
             provided = str(signature_header or "").strip()
             if not provided:
                 raise WebhookVerificationError("Missing Top.gg authorization header.")
             if not hmac.compare_digest(secret, provided):
                 raise WebhookVerificationError("Top.gg authorization mismatch.")
-            return
+            return {"mode": TOPGG_WEBHOOK_MODE_LEGACY, "signature_timestamp": None}
         parts: dict[str, str] = {}
         for chunk in str(signature_header or "").split(","):
             key, _, value = chunk.partition("=")
@@ -519,10 +634,18 @@ class VoteService:
         provided = parts.get("v1")
         if not timestamp or not provided:
             raise WebhookVerificationError("Missing Top.gg signature fields.")
-        message = f"{timestamp}.{body.decode('utf-8')}".encode("utf-8")
+        try:
+            timestamp_value = int(timestamp)
+        except (TypeError, ValueError) as exc:
+            raise WebhookVerificationError("Malformed Top.gg signature timestamp.") from exc
+        now_seconds = int(_utcnow().timestamp())
+        if abs(now_seconds - timestamp_value) > TOPGG_V2_REPLAY_WINDOW_SECONDS:
+            raise WebhookVerificationError("Top.gg signature timestamp was outside the allowed replay window.")
+        message = str(timestamp_value).encode("utf-8") + b"." + body
         expected = hmac.new(secret.encode("utf-8"), message, "sha256").hexdigest()
         if not hmac.compare_digest(expected, provided):
             raise WebhookVerificationError("Top.gg signature mismatch.")
+        return {"mode": TOPGG_WEBHOOK_MODE_V2, "signature_timestamp": timestamp_value}
 
     async def _reload_cache(self):
         if self.store is None:
@@ -588,6 +711,8 @@ class VoteService:
         expires_dt = _parse_datetime(expires_at)
         if created_dt is None or expires_dt is None:
             raise ValueError("Top.gg vote payload was missing `created_at` or `expires_at`.")
+        if expires_dt <= created_dt:
+            raise ValueError("Top.gg vote window was invalid because `expires_at` must be after `created_at`.")
         return {
             "discord_user_id": int(discord_user_id),
             "topgg_vote_id": str(topgg_vote_id).strip() if topgg_vote_id else None,
@@ -707,6 +832,12 @@ class VoteService:
     def _topgg_webhook_secret(self) -> str:
         return str(os.getenv("TOPGG_WEBHOOK_SECRET", "") or "").strip()
 
+    def _configured_webhook_mode(self) -> str | None:
+        secret = self._topgg_webhook_secret()
+        if not secret:
+            return None
+        return TOPGG_WEBHOOK_MODE_V2 if secret.startswith("whs_") else TOPGG_WEBHOOK_MODE_LEGACY
+
     def _payload_hash(self, payload: dict[str, Any]) -> str:
         return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")).hexdigest()
 
@@ -764,6 +895,65 @@ class VoteService:
             "Legacy Top.gg mode: this vote window is estimated from the standard 12-hour voting cadence because "
             "legacy API responses do not include exact expiry timestamps."
         )
+
+    def _empty_webhook_summary(self) -> dict[str, Any]:
+        return {
+            "total": 0,
+            "processed": 0,
+            "duplicate": 0,
+            "unavailable": 0,
+            "invalid": 0,
+            "error": 0,
+            "invalid_signature_count": 0,
+            "last_status": None,
+            "last_event_at": None,
+            "last_mode": None,
+        }
+
+    def _record_webhook_monitor_event(self, status: str, *, invalid_signature: bool = False, mode: str | None = None):
+        normalized = str(status or "error").strip().lower()
+        if normalized not in {"processed", "duplicate", "unavailable", "invalid", "error"}:
+            normalized = "error"
+        self._webhook_summary["total"] = int(self._webhook_summary.get("total", 0) or 0) + 1
+        self._webhook_summary[normalized] = int(self._webhook_summary.get(normalized, 0) or 0) + 1
+        if invalid_signature:
+            self._webhook_summary["invalid_signature_count"] = int(self._webhook_summary.get("invalid_signature_count", 0) or 0) + 1
+        self._webhook_summary["last_status"] = normalized
+        self._webhook_summary["last_event_at"] = _utcnow().isoformat()
+        self._webhook_summary["last_mode"] = mode or self._configured_webhook_mode()
+
+    def _public_webhook_summary(self, *, enabled: bool, state: str, mode: str | None) -> dict[str, Any]:
+        status = str(self._webhook_summary.get("last_status") or "").strip().lower()
+        if not status:
+            status = "disabled" if not enabled else ("misconfigured" if state != TOPGG_CONFIGURATION_CONFIGURED else "ready")
+        return {
+            "status": status,
+            "total": int(self._webhook_summary.get("total", 0) or 0),
+            "processed": int(self._webhook_summary.get("processed", 0) or 0),
+            "duplicate": int(self._webhook_summary.get("duplicate", 0) or 0),
+            "unavailable": int(self._webhook_summary.get("unavailable", 0) or 0),
+            "invalid": int(self._webhook_summary.get("invalid", 0) or 0),
+            "error": int(self._webhook_summary.get("error", 0) or 0),
+            "invalid_signature_count": int(self._webhook_summary.get("invalid_signature_count", 0) or 0),
+            "last_status": self._webhook_summary.get("last_status"),
+            "last_event_at": self._webhook_summary.get("last_event_at"),
+            "last_mode": self._webhook_summary.get("last_mode") or mode,
+            "replay_window_seconds": TOPGG_V2_REPLAY_WINDOW_SECONDS if mode == TOPGG_WEBHOOK_MODE_V2 else None,
+            "replay_protection": (
+                "signed timestamp with a 5-minute replay window"
+                if mode == TOPGG_WEBHOOK_MODE_V2
+                else "weaker legacy authorization-header replay protection"
+                if mode == TOPGG_WEBHOOK_MODE_LEGACY
+                else "disabled"
+            ),
+            "timing_source": (
+                TOPGG_TIMING_SOURCE_EXACT
+                if mode == TOPGG_WEBHOOK_MODE_V2
+                else TOPGG_TIMING_SOURCE_LEGACY_ESTIMATED
+                if mode == TOPGG_WEBHOOK_MODE_LEGACY
+                else None
+            ),
+        }
 
     async def _reminder_loop(self):
         while True:

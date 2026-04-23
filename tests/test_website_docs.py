@@ -585,6 +585,18 @@ class WebsiteDocsTests(unittest.TestCase):
             self.assertIn(text, privacy_md)
             self.assertIn(text, privacy_html)
 
+    def test_topgg_docs_reflect_explicit_enablement_and_non_premium_contract(self):
+        env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        help_html = (ROOT / "help.html").read_text(encoding="utf-8")
+
+        self.assertIn("TOPGG_ENABLED=false", env_example)
+        self.assertIn("TOPGG_ENABLED=true", env_example)
+        self.assertIn("TOPGG_ENABLED", readme)
+        self.assertIn("TOPGG_ENABLED", help_html)
+        self.assertIn("not a premium tier", readme.casefold())
+        self.assertIn("not a premium tier", help_html.casefold())
+
     def test_env_example_matches_confessions_deploy_model(self):
         env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
         readme = (ROOT / "README.md").read_text(encoding="utf-8")

@@ -300,8 +300,9 @@ Use slash for multi-family Pattern Hunt guesses. Prefix stays positional, so the
 Top.gg Vote Bonus notes:
 
 - `/vote` is now the dedicated Top.gg Vote Bonus lane
-- Free and Supporter users can unlock temporary utility headroom there without turning voting into a fake premium tier
+- Free and Supporter users can unlock temporary utility headroom there, but it is not a premium tier
 - Babblebox Plus and Guild Pro stay separate, higher, and permanent while the Vote Bonus stays smaller and expires with the Top.gg vote window
+- the lane stays disabled until an operator explicitly sets `TOPGG_ENABLED=true` for that deployment
 
 ### Question Drops
 
@@ -849,6 +850,8 @@ UTILITY_DATABASE_URL=postgresql://...
 # PATREON_SUPPORTER_TIER_IDS=123456,234567
 # PATREON_PLUS_TIER_IDS=345678
 # PATREON_GUILD_PRO_TIER_IDS=456789
+# TOPGG_ENABLED=false
+# Set TOPGG_ENABLED=true only on deployments where the Top.gg webhook lane should be live.
 # TOPGG_STORAGE_BACKEND=postgres
 # TOPGG_TOKEN=your_topgg_api_token
 # TOPGG_WEBHOOK_SECRET=whs_your_topgg_v2_webhook_secret
@@ -887,9 +890,11 @@ Environment variable notes:
 - `/livez` is liveness only, `/health` is the public-safe summary, and `/readyz` is the rollout and alert gate; those public routes expose non-sensitive readiness only
 - `PATREON_CLIENT_ID`, `PATREON_CLIENT_SECRET`, `PATREON_REDIRECT_URI`, `PATREON_WEBHOOK_SECRET`, `PATREON_CAMPAIGN_ID`, `PATREON_SUPPORTER_TIER_IDS`, `PATREON_PLUS_TIER_IDS`, and `PATREON_GUILD_PRO_TIER_IDS` are required for Patreon-linked premium linking, verified webhooks, and user refresh
 - `PATREON_REDIRECT_URI` must exactly match `PUBLIC_BASE_URL` plus `/premium/patreon/callback`, and the Patreon tier ID lists must be disjoint numeric IDs; Babblebox fails the Patreon surface closed when that configuration is incomplete or inconsistent
-- `TOPGG_WEBHOOK_SECRET` is required for the Top.gg Vote Bonus lane. If your Top.gg dashboard exposes Webhooks V2, use the `whs_...` secret. If your dashboard only exposes Legacy Webhooks, use the legacy `Authorization` value instead
+- `TOPGG_ENABLED=true` is the explicit opt-in switch for the Top.gg Vote Bonus lane; without it, `/vote` stays published but the vote lane stays disabled on that deployment
+- `TOPGG_WEBHOOK_SECRET` is required after `TOPGG_ENABLED=true`. If your Top.gg dashboard exposes Webhooks V2, use the `whs_...` secret. If your dashboard only exposes Legacy Webhooks, use the legacy `Authorization` value instead
 - `TOPGG_TOKEN` is optional in Webhooks V2 mode and only needed for `/vote` refresh recovery, but it becomes required in legacy webhook mode because Babblebox must confirm the vote through Top.gg's legacy API
-- Top.gg legacy mode does not provide exact expiry timestamps, so Babblebox transparently uses the standard 12-hour vote cadence in that mode instead of pretending the timestamps are exact
+- the Vote Bonus is temporary, utility-only, and not a premium tier; paid plans stay separate and higher
+- Top.gg legacy mode does not provide exact expiry timestamps, so Babblebox transparently uses the standard 12-hour vote cadence in that mode instead of pretending the timestamps are exact, and its replay protection is weaker than Webhooks V2
 - `TOPGG_PROJECT_ID` is optional; if omitted, Babblebox falls back to the running bot user ID and the shipped Babblebox listing ID
 - `TOPGG_STORAGE_BACKEND=memory` is optional for local/test vote-bonus work
 - The embedded public web surface serves only `/`, `/help.html`, `/privacy.html`, `/terms.html`, `/sitemap.xml`, and `/assets/...`; repo files, dotfiles, Markdown, tests, and source paths are never public routes
