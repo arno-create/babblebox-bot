@@ -1594,14 +1594,32 @@ class UtilityService:
 
     def get_watch_summary(self, user_id: int, *, guild_id: int | None, channel_id: int | None = None) -> dict:
         config = self._watch_config(user_id) or _watch_default_config()
+        effective_config = self._effective_watch_config(user_id, config=config)
         mention_guild_ids = {value for value in config.get("mention_guild_ids", []) if isinstance(value, int)}
         mention_channel_ids = {value for value in config.get("mention_channel_ids", []) if isinstance(value, int)}
         reply_guild_ids = {value for value in config.get("reply_guild_ids", []) if isinstance(value, int)}
         reply_channel_ids = {value for value in config.get("reply_channel_ids", []) if isinstance(value, int)}
         excluded_channel_ids = {value for value in config.get("excluded_channel_ids", []) if isinstance(value, int)}
         ignored_user_ids = {value for value in config.get("ignored_user_ids", []) if isinstance(value, int)}
+        active_mention_channel_ids = {value for value in effective_config.get("mention_channel_ids", []) if isinstance(value, int)}
+        active_reply_channel_ids = {value for value in effective_config.get("reply_channel_ids", []) if isinstance(value, int)}
+        active_excluded_channel_ids = {value for value in effective_config.get("excluded_channel_ids", []) if isinstance(value, int)}
+        active_ignored_user_ids = {value for value in effective_config.get("ignored_user_ids", []) if isinstance(value, int)}
         keywords = list(config.get("keywords", []))
+        active_keywords = list(effective_config.get("keywords", []))
         recent_counts = dict(self._watch_alert_counts.get(user_id, {"mentions": 0, "replies": 0, "keywords": 0, "total": 0}))
+        saved_filter_counts = {
+            "mention_channels": len(mention_channel_ids),
+            "reply_channels": len(reply_channel_ids),
+            "ignored_channels": len(excluded_channel_ids),
+            "ignored_users": len(ignored_user_ids),
+        }
+        active_filter_counts = {
+            "mention_channels": len(active_mention_channel_ids),
+            "reply_channels": len(active_reply_channel_ids),
+            "ignored_channels": len(active_excluded_channel_ids),
+            "ignored_users": len(active_ignored_user_ids),
+        }
         return {
             "mention_global": bool(config.get("mention_global")),
             "mention_server_enabled": guild_id in mention_guild_ids if guild_id is not None else False,
@@ -1623,7 +1641,40 @@ class UtilityService:
             "mention_channel_ids": sorted(mention_channel_ids),
             "reply_channel_ids": sorted(reply_channel_ids),
             "total_keywords": len(keywords),
+            "active_keyword_count": len(active_keywords),
+            "saved_filter_counts": saved_filter_counts,
+            "active_filter_counts": active_filter_counts,
+            "saved_filter_total": sum(saved_filter_counts.values()),
+            "active_filter_total": sum(active_filter_counts.values()),
             "recent_counts": recent_counts,
+        }
+
+    def get_reminder_summary(self, user_id: int) -> dict[str, int]:
+        reminders = self.list_reminders(user_id)
+        active = self._effective_reminders_for_user(user_id)
+        saved_public = len([record for record in reminders if record.get("delivery") == "here"])
+        active_public = len([record for record in active if record.get("delivery") == "here"])
+        return {
+            "saved": len(reminders),
+            "active": len(active),
+            "saved_public": saved_public,
+            "active_public": active_public,
+        }
+
+    def get_afk_schedule_summary(self, user_id: int) -> dict[str, int]:
+        schedules = self.list_afk_schedules(user_id)
+        active = self._effective_afk_schedules_for_user(user_id)
+        return {
+            "saved": len(schedules),
+            "active": len(active),
+        }
+
+    def get_bump_summary(self, guild_id: int) -> dict[str, int]:
+        config = self.get_bump_config(guild_id)
+        effective = self.get_effective_bump_config(guild_id)
+        return {
+            "saved_detection_channels": len(config.get("detection_channel_ids", [])),
+            "active_detection_channels": len(effective.get("detection_channel_ids", [])),
         }
 
     def _member_can_access_message(self, member: discord.Member, message: discord.Message) -> bool:

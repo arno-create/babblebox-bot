@@ -79,7 +79,10 @@ class PremiumConfessionsStub:
         return premium_guild_limit(self.guild_plans.get(guild_id, PLAN_FREE), limit_key)
 
     def describe_limit_error(self, *, limit_key: str, limit_value: int) -> str:
-        return f"You reached the current limit of {limit_value}. Babblebox Guild Pro unlocks more."
+        return (
+            f"You reached this plan's active limit of {limit_value}. Babblebox Guild Pro unlocks more. "
+            "Use `/premium plans` to compare tiers. Previously saved over-limit state stays preserved."
+        )
 
 
 class FeatureLinkGatewaySpy:
@@ -1280,7 +1283,8 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
         self._attach_premium()
         config = self.service.get_config(self.guild.id)
         self.assertEqual(config["max_images"], 6)
-        self.assertIn("over current plan limit", self.service._image_policy_label(config))
+        self.assertIn("saved max 6", self.service._image_policy_label(config))
+        self.assertIn("active on this plan 3", self.service._image_policy_label(config))
 
         ok, message = await self.service.configure_guild(self.guild.id, max_images=6)
         self.assertTrue(ok, message)
@@ -1292,6 +1296,11 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
         )
         self.assertFalse(allowed)
         self.assertIn("up to 3 images", validation_message)
+
+        help_embed = self.service.build_member_panel_help_embed(self.guild)
+        help_text = _embed_text_blob(help_embed)
+        self.assertIn("saved higher image setting", help_text)
+        self.assertIn("currently allows only 3 active images", help_text)
 
     async def test_strike_escalation_clear_action_and_guild_scoping(self):
         await self._configure()

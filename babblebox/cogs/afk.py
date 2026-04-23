@@ -9,6 +9,7 @@ from discord.ext import commands
 
 from babblebox import game_engine as ge
 from babblebox.command_utils import defer_hybrid_response, send_hybrid_response
+from babblebox.premium_service import format_saved_state_status, preserved_over_limit_note
 from babblebox.utility_helpers import (
     AFK_QUICK_REASONS,
     build_afk_reason_text,
@@ -108,6 +109,7 @@ class AfkCog(commands.Cog):
         return local_now.strftime("%Y-%m-%d %H:%M")
 
     def _schedule_overview_embed(self, user: discord.abc.User, *, timezone_name: str | None, schedules: list[dict]) -> discord.Embed:
+        service = self._service()
         embed = discord.Embed(
             title="AFK Schedules",
             description=f"**{ge.display_name_of(user)}**",
@@ -123,6 +125,23 @@ class AfkCog(commands.Cog):
             embed.add_field(name="Saved Schedules", value=ge.join_limited_lines(lines), inline=False)
         else:
             embed.add_field(name="Saved Schedules", value="No recurring AFK schedules yet. Use `/afkschedule add` after setting `/afktimezone set`.", inline=False)
+        if service is not None:
+            summary = service.get_afk_schedule_summary(user.id)
+            note = preserved_over_limit_note(
+                saved_count=int(summary.get("saved", 0)),
+                active_count=int(summary.get("active", 0)),
+            )
+            if note:
+                embed.add_field(
+                    name="Saved Above Current Plan",
+                    value="\n".join(
+                        [
+                            f"Recurring AFK schedules: {format_saved_state_status(saved_count=int(summary.get('saved', 0)), active_count=int(summary.get('active', 0)), limit_value=service.afk_schedule_limit(user.id))}",
+                            note,
+                        ]
+                    ),
+                    inline=False,
+                )
         return ge.style_embed(embed, footer="Babblebox AFK | Remove one with /afkschedule remove <id> or clear all with /afkschedule clear.")
 
     def _overview_embed(self, user: discord.abc.User, *, timezone_name: str | None, next_schedule: dict | None) -> discord.Embed:

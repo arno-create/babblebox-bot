@@ -1,4 +1,5 @@
 import asyncio
+import asyncio
 import types
 import unittest
 from copy import deepcopy
@@ -91,6 +92,31 @@ class ShieldPanelUiTests(unittest.IsolatedAsyncioTestCase):
 
         self._assert_embed_valid(rules)
         self._assert_embed_valid(scope)
+
+    async def test_rules_and_scope_embed_report_saved_state_above_current_plan(self):
+        dense = deepcopy(self.cog.service.get_config(10))
+        dense["custom_patterns"] = [
+            {"pattern_id": f"p{i}", "label": f"Pattern {i}", "pattern": f"test-{i}", "mode": "contains", "action": "log"}
+            for i in range(11)
+        ]
+        dense["pack_exemptions"]["spam"] = {
+            "channel_ids": list(range(100, 122)),
+            "role_ids": [],
+            "user_ids": [],
+        }
+        self.cog.service.store.state["guilds"]["10"] = dense
+        self.cog.service._compiled_configs.pop(10, None)
+
+        rules = self.cog._rules_embed(10, selected_pack="spam")
+        scope = self.cog._scope_embed(10)
+        rule_fields = {field.name: field.value for field in rules.fields}
+        scope_fields = {field.name: field.value for field in scope.fields}
+
+        self.assertIn("saved **11** | active on this plan **10 / 10**", rule_fields["Global Fallbacks"])
+        self.assertIn("stays preserved", rule_fields["Global Fallbacks"])
+        self.assertIn("Spam", scope_fields["Saved Above Current Plan"])
+        self.assertIn("Anti-Spam channels: saved **22** | active on this plan **20 / 20**", scope_fields["Saved Above Current Plan"])
+        self.assertIn("stays preserved", scope_fields["Saved Above Current Plan"])
 
     async def test_rules_button_switches_panel_without_failure(self):
         view = ShieldPanelView(self.cog, guild_id=10, author_id=1, section="overview")

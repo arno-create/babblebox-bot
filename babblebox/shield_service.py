@@ -894,6 +894,7 @@ class ShieldAIAccessPolicy:
     policy_enabled: bool
     source: str
     premium_unlocked: bool
+    configured_allowed_models: tuple[str, ...]
     allowed_models: tuple[str, ...]
     plan_allowed_models: tuple[str, ...]
     ordinary_global_enabled: bool
@@ -2471,6 +2472,99 @@ class ShieldService:
             return capability in guild_capabilities(PLAN_GUILD_PRO)
         return False
 
+    def _premium_plan_title(self, plan_code: str) -> str:
+        if plan_code == PLAN_GUILD_PRO:
+            return "Babblebox Guild Pro"
+        if plan_code == PLAN_FREE:
+            return "Free"
+        cleaned = str(plan_code or "").strip().replace("_", " ")
+        return cleaned.title() if cleaned else "Unknown"
+
+    def _describe_ai_premium_summary(
+        self,
+        *,
+        guild_id: int,
+        plan_code: str,
+        source: str,
+        stale: bool,
+        in_grace: bool,
+        premium_unlocked: bool,
+        configured_models_capped: bool,
+    ) -> str:
+        if source == "blocked":
+            return "Premium is suspended on this server. Higher Shield AI tiers are unavailable right now."
+        if source == "support_guild":
+            return "Internal Babblebox operator premium access is active on this server."
+        if source == "manual_guild_grant":
+            return "Guild Pro is active here through a direct server grant."
+        if source.startswith("claim:"):
+            if stale and in_grace:
+                return "Patreon is stale, but Babblebox is still honoring the last verified Guild Pro entitlement inside its grace window."
+            if stale and not premium_unlocked:
+                return "The last verified Guild Pro entitlement is stale and its grace window has ended, so higher Shield AI tiers are inactive."
+            return "Guild Pro is active here through the current premium claim."
+        if int(guild_id or 0) == SYSTEM_PREMIUM_SUPPORT_GUILD_ID and premium_unlocked:
+            return "Internal Babblebox operator premium access is active on this server."
+        if stale and not premium_unlocked:
+            return "The last verified Guild Pro entitlement is stale and its grace window has ended, so higher Shield AI tiers are inactive."
+        if premium_unlocked:
+            return f"{self._premium_plan_title(plan_code)} is active on this server."
+        if configured_models_capped:
+            return "Guild Pro is not active on this server. Stored higher-tier Shield AI settings stay configured, but the effective lane is capped until Guild Pro returns."
+        return "Guild Pro is not active on this server."
+
+    def _resolve_ai_premium_state(self, guild_id: int, policy: ShieldAIAccessPolicy) -> dict[str, Any]:
+        premium_service = self._premium_service()
+        snapshot: dict[str, Any] = {}
+        if premium_service is not None and callable(getattr(premium_service, "get_guild_snapshot", None)):
+            resolved_snapshot = premium_service.get_guild_snapshot(guild_id)
+            if isinstance(resolved_snapshot, dict):
+                snapshot = dict(resolved_snapshot)
+        plan_code = str(snapshot.get("plan_code") or (PLAN_GUILD_PRO if policy.premium_unlocked else PLAN_FREE))
+        active_plans_raw = snapshot.get("active_plans")
+        if isinstance(active_plans_raw, (list, tuple)):
+            active_plans = [str(value) for value in active_plans_raw if str(value or "").strip()]
+        else:
+            active_plans = []
+        blocked = bool(snapshot.get("blocked"))
+        stale = bool(snapshot.get("stale"))
+        in_grace = bool(snapshot.get("in_grace"))
+        claim = snapshot.get("claim") if isinstance(snapshot.get("claim"), dict) else None
+        system_access = bool(snapshot.get("system_access"))
+        system_access_scope = str(snapshot.get("system_access_scope") or "").strip().lower()
+        configured_models_capped = tuple(policy.configured_allowed_models) != tuple(policy.allowed_models)
+
+        if blocked:
+            source = "blocked"
+        elif system_access:
+            source = system_access_scope or "support_guild"
+        elif int(guild_id or 0) == SYSTEM_PREMIUM_SUPPORT_GUILD_ID and policy.premium_unlocked:
+            source = "support_guild"
+        elif claim is not None:
+            source_kind = str(claim.get("source_kind") or "claim").strip().lower() or "claim"
+            source = f"claim:{source_kind}"
+        elif plan_code == PLAN_GUILD_PRO:
+            source = "manual_guild_grant"
+        else:
+            source = "free"
+
+        return {
+            "plan_code": plan_code,
+            "active_plans": active_plans,
+            "source": source,
+            "stale": stale,
+            "in_grace": in_grace,
+            "summary": self._describe_ai_premium_summary(
+                guild_id=guild_id,
+                plan_code=plan_code,
+                source=source,
+                stale=stale,
+                in_grace=in_grace,
+                premium_unlocked=policy.premium_unlocked,
+                configured_models_capped=configured_models_capped,
+            ),
+        }
+
     def _premium_limit_error(self, *, guild_id: int, limit_key: str, limit_value: int, default_message: str) -> str:
         premium_service = self._premium_service()
         if premium_service is None:
@@ -2565,8 +2659,9 @@ class ShieldService:
             updated_by = config.get("ai_access_updated_by")
             updated_at = config.get("ai_access_updated_at")
         policy_enabled = enabled
+        configured_allowed_models = allowed_models
         plan_allowed_models = SHIELD_AI_MODEL_ORDER if premium_enabled else (DEFAULT_SHIELD_AI_FAST_MODEL,)
-        effective_allowed_models = tuple(model for model in allowed_models if model in plan_allowed_models)
+        effective_allowed_models = tuple(model for model in configured_allowed_models if model in plan_allowed_models)
         if not effective_allowed_models:
             effective_allowed_models = (DEFAULT_SHIELD_AI_FAST_MODEL,)
 
@@ -2576,6 +2671,7 @@ class ShieldService:
             policy_enabled=policy_enabled,
             source=source,
             premium_unlocked=premium_enabled,
+            configured_allowed_models=configured_allowed_models,
             allowed_models=effective_allowed_models,
             plan_allowed_models=plan_allowed_models,
             ordinary_global_enabled=ordinary_global_enabled,
@@ -2597,8 +2693,11 @@ class ShieldService:
         diagnostics = self.ai_provider.diagnostics()
         enabled_packs = [pack for pack in config.get("ai_enabled_packs", []) if pack in AI_REVIEW_PACK_SET]
         provider_status = str(diagnostics.get("status") or "Unavailable.")
+        provider_available = bool(diagnostics.get("available"))
+        configured_models_capped = tuple(policy.configured_allowed_models) != tuple(policy.allowed_models)
+        premium_state = self._resolve_ai_premium_state(guild_id, policy)
         setup_blockers: list[str] = []
-        if policy.enabled and diagnostics["available"]:
+        if policy.enabled and provider_available:
             if not bool(config.get("module_enabled")):
                 setup_blockers.append("Shield live moderation is off.")
             if config.get("log_channel_id") is None:
@@ -2611,7 +2710,7 @@ class ShieldService:
                 status_message = "AI review is disabled for this guild by owner override."
             else:
                 status_message = "AI review is off until the owner enables it."
-        elif not diagnostics["available"]:
+        elif not provider_available:
             status_message = "AI review is enabled by policy but the provider is not configured."
         elif setup_blockers:
             status_message = setup_blockers[0] if len(setup_blockers) == 1 else "AI review is enabled by policy, but local Shield setup is incomplete."
@@ -2628,16 +2727,19 @@ class ShieldService:
             "premium_required": not policy.premium_unlocked,
             "enhanced_models_unlocked": policy.premium_unlocked,
             "enhanced_models_required": not policy.premium_unlocked,
+            "configured_allowed_models": list(policy.configured_allowed_models),
+            "configured_models_capped": configured_models_capped,
             "plan_allowed_models": list(policy.plan_allowed_models),
             "ordinary_global_enabled": policy.ordinary_global_enabled,
             "ordinary_global_allowed_models": list(policy.ordinary_global_allowed_models),
             "guild_access_mode": policy.guild_access_mode,
             "guild_allowed_models_override": list(policy.guild_allowed_models_override),
+            "effective_allowed_models": list(policy.allowed_models),
             "allowed_models": list(policy.allowed_models),
             "enabled_packs": enabled_packs,
             "min_confidence": config.get("ai_min_confidence", "high"),
             "provider": diagnostics.get("provider"),
-            "provider_available": bool(diagnostics.get("available")),
+            "provider_available": provider_available,
             "provider_status": provider_status,
             "model": diagnostics.get("model"),
             "routing_strategy": diagnostics.get("routing_strategy"),
@@ -2649,9 +2751,15 @@ class ShieldService:
             "top_tier_enabled": bool(diagnostics.get("top_tier_enabled")),
             "timeout_seconds": diagnostics.get("timeout_seconds"),
             "max_chars": diagnostics.get("max_chars"),
+            "premium_plan_code": premium_state["plan_code"],
+            "premium_active_plans": list(premium_state["active_plans"]),
+            "premium_source": premium_state["source"],
+            "premium_stale": premium_state["stale"],
+            "premium_in_grace": premium_state["in_grace"],
+            "premium_summary": premium_state["summary"],
             "status": status_message,
             "setup_blockers": setup_blockers,
-            "ready_for_review": policy.enabled and bool(diagnostics.get("available")) and not setup_blockers,
+            "ready_for_review": policy.enabled and provider_available and not setup_blockers,
             "updated_by": policy.updated_by,
             "updated_at": policy.updated_at,
         }

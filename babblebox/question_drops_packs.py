@@ -360,13 +360,14 @@ def _choice_seed(
     options: tuple[str, str, str],
     answer: str,
     templates: tuple[str, ...],
+    extra_tags: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     return _seed(
         concept_id,
         category,
         difficulty,
         family_id,
-        tags=(f"sub:{subcategory}", f"mode:{mode}", "shape:multiple_choice"),
+        tags=tuple(extra_tags) + (f"sub:{subcategory}", f"mode:{mode}", "shape:multiple_choice"),
         variants=tuple(
             _variant(
                 template.format(question=question, a=options[0], b=options[1], c=options[2]),
@@ -388,13 +389,14 @@ def _boolean_seed(
     statement: str,
     value: bool,
     templates: tuple[str, ...],
+    extra_tags: tuple[str, ...] = (),
 ) -> dict[str, Any]:
     return _seed(
         concept_id,
         category,
         difficulty,
         family_id,
-        tags=(f"sub:{subcategory}", f"mode:{mode}", "shape:boolean"),
+        tags=tuple(extra_tags) + (f"sub:{subcategory}", f"mode:{mode}", "shape:boolean"),
         variants=tuple(_variant(template.format(statement=statement), _boolean(value)) for template in _pick_templates(concept_id, templates)),
     )
 
@@ -938,6 +940,7 @@ EXPANDED_STATIC_SEEDS: tuple[dict[str, Any], ...] = (
         statement="A semicolon can join two closely related independent clauses.",
         value=True,
         templates=LANGUAGE_BOOLEAN_TEMPLATES,
+        extra_tags=("sub:punctuation-semicolon",),
     ),
     _text_seed(
         "language:scarce-antonym",
@@ -976,6 +979,7 @@ EXPANDED_STATIC_SEEDS: tuple[dict[str, Any], ...] = (
         ),
         answer="She likes hiking, painting, and singing.",
         templates=LANGUAGE_CHOICE_TEMPLATES,
+        extra_tags=("sub:parallelism",),
     ),
     _choice_seed(
         "language:formal-email",
@@ -1015,6 +1019,7 @@ EXPANDED_STATIC_SEEDS: tuple[dict[str, Any], ...] = (
         ),
         answer="using a similar-sounding wrong word",
         templates=LANGUAGE_CHOICE_TEMPLATES,
+        extra_tags=("sub:malapropism",),
     ),
     _text_seed(
         "logic:middle-seat",
@@ -1161,6 +1166,7 @@ EXPANDED_STATIC_SEEDS: tuple[dict[str, Any], ...] = (
         statement="If every comet is icy and Nova is not icy, that proves Nova is not a comet.",
         value=True,
         templates=LOGIC_BOOLEAN_TEMPLATES,
+        extra_tags=("sub:contrapositive-comet",),
     ),
     _text_seed(
         "logic:least-score-sol",

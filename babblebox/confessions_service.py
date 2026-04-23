@@ -17,6 +17,7 @@ import discord
 from discord.ext import commands
 
 from babblebox import game_engine as ge
+from babblebox.premium_service import format_saved_state_status
 from babblebox.premium_limits import (
     LIMIT_CONFESSIONS_MAX_IMAGES,
     guild_limit as premium_guild_limit,
@@ -4247,10 +4248,13 @@ class ConfessionsService:
             return "Off by default"
         guild_id = int(config.get("guild_id") or 0)
         active_limit = self.confession_image_limit(guild_id) if guild_id > 0 else premium_guild_limit(PLAN_FREE, LIMIT_CONFESSIONS_MAX_IMAGES)
-        over_limit_note = " | over current plan limit" if int(config.get("max_images", 3)) > active_limit else ""
+        saved_limit = int(config.get("max_images", 3))
+        limit_text = f"saved max {saved_limit}"
+        if saved_limit > active_limit:
+            limit_text = f"{limit_text}, active on this plan {active_limit}"
         if config.get("image_review_required"):
-            return f"Enabled (max {config['max_images']}, private review{over_limit_note})"
-        return f"Enabled (max {config['max_images']}, no forced review{over_limit_note})"
+            return f"Enabled ({limit_text}, private review)"
+        return f"Enabled ({limit_text}, no forced review)"
 
     def _reply_policy_label(self, config: dict[str, Any]) -> str:
         if not config["allow_anonymous_replies"]:
@@ -4377,6 +4381,11 @@ class ConfessionsService:
             if config["allow_images"]
             else f"Up to {MAX_CONFESSION_LENGTH} characters and one link total under the server policy. Images are off by default unless admins explicitly enable them."
         )
+        if config["allow_images"] and int(config.get("max_images", compiled["effective_max_images"])) > int(compiled["effective_max_images"]):
+            image_line += (
+                f" This server still has a saved higher image setting ({format_saved_state_status(saved_count=int(config.get('max_images', compiled['effective_max_images'])), active_count=int(compiled['effective_max_images']), limit_value=int(compiled['effective_max_images']))}), "
+                f"so the current plan currently allows only {compiled['effective_max_images']} active images until Guild Pro returns or admins lower the saved ceiling."
+            )
         reply_line = (
             "Reply anonymously is enabled with extra moderation burden, so every eligible published confession can open the same text-only anonymous reply flow. Top-level replies reuse one Babblebox discussion thread when Discord allows it, and replies inside that thread stay there without nested threads. "
             + (

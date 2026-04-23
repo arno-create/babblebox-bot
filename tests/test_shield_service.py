@@ -43,9 +43,16 @@ from babblebox.shield_store import (
 
 
 class PremiumShieldStub:
-    def __init__(self, *, guild_plans: Optional[dict[int, str]] = None, capabilities: Optional[dict[int, set[str]]] = None):
+    def __init__(
+        self,
+        *,
+        guild_plans: Optional[dict[int, str]] = None,
+        capabilities: Optional[dict[int, set[str]]] = None,
+        snapshots: Optional[dict[int, dict[str, object]]] = None,
+    ):
         self.guild_plans = dict(guild_plans or {})
         self.capabilities = {guild_id: set(values) for guild_id, values in (capabilities or {}).items()}
+        self.snapshots = {guild_id: dict(values) for guild_id, values in (snapshots or {}).items()}
 
     def resolve_guild_limit(self, guild_id: int, limit_key: str) -> int:
         return premium_guild_limit(self.guild_plans.get(guild_id, PLAN_FREE), limit_key)
@@ -56,8 +63,27 @@ class PremiumShieldStub:
             or capability in premium_guild_capabilities(self.guild_plans.get(guild_id, PLAN_FREE))
         )
 
+    def get_guild_snapshot(self, guild_id: int) -> dict[str, object]:
+        snapshot = self.snapshots.get(guild_id)
+        if snapshot is not None:
+            return dict(snapshot)
+        plan_code = self.guild_plans.get(guild_id, PLAN_FREE)
+        return {
+            "plan_code": plan_code,
+            "active_plans": () if plan_code == PLAN_FREE else (plan_code,),
+            "blocked": False,
+            "stale": False,
+            "in_grace": False,
+            "claim": None,
+            "system_access": False,
+            "system_access_scope": None,
+        }
+
     def describe_limit_error(self, *, limit_key: str, limit_value: int) -> str:
-        return f"You reached the current limit of {limit_value}. Babblebox Guild Pro unlocks more."
+        return (
+            f"You reached this plan's active limit of {limit_value}. Babblebox Guild Pro unlocks more. "
+            "Use `/premium plans` to compare tiers. Previously saved over-limit state stays preserved."
+        )
 
 
 class FakeRole:
@@ -504,8 +530,14 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         started = await self.service.start()
         self.assertTrue(started)
 
-    def _attach_premium(self, *, guild_plans: Optional[dict[int, str]] = None, capabilities: Optional[dict[int, set[str]]] = None):
-        self.bot.premium_service = PremiumShieldStub(guild_plans=guild_plans, capabilities=capabilities)
+    def _attach_premium(
+        self,
+        *,
+        guild_plans: Optional[dict[int, str]] = None,
+        capabilities: Optional[dict[int, set[str]]] = None,
+        snapshots: Optional[dict[int, dict[str, object]]] = None,
+    ):
+        self.bot.premium_service = PremiumShieldStub(guild_plans=guild_plans, capabilities=capabilities, snapshots=snapshots)
         for guild_id in list(self.service._compiled_configs):
             self.service._compiled_configs[guild_id] = self.service._compile_config(guild_id, self.service.get_config(guild_id))
 
@@ -3355,7 +3387,9 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
             action="log",
         )
         self.assertFalse(ok)
-        self.assertIn("current limit of 10", message)
+        self.assertIn("active limit of 10", message)
+        self.assertIn("/premium plans", message)
+        self.assertIn("stays preserved", message)
 
     async def test_scam_warning_message_is_not_flagged(self):
         ok, _ = await self.service.set_pack_config(10, "scam", enabled=True, action="log", sensitivity="high")
@@ -4526,6 +4560,8 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status["policy_source"], "ordinary_global")
         self.assertTrue(status["premium_unlocked"])
         self.assertEqual(status["allowed_models"], ["gpt-5.4-nano"])
+        self.assertEqual(status["configured_allowed_models"], ["gpt-5.4-nano"])
+        self.assertFalse(status["configured_models_capped"])
 
     async def test_ordinary_guild_ai_policy_defaults_to_disabled_with_nano(self):
         status = self.service.get_ai_status(10)
@@ -4534,7 +4570,83 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status["policy_source"], "ordinary_global")
         self.assertFalse(status["premium_unlocked"])
         self.assertEqual(status["allowed_models"], ["gpt-5.4-nano"])
+        self.assertEqual(status["configured_allowed_models"], ["gpt-5.4-nano"])
+        self.assertEqual(status["premium_plan_code"], PLAN_FREE)
+        self.assertEqual(status["premium_source"], "free")
         self.assertIn("owner enables it", status["status"].lower())
+
+    async def test_ai_status_reports_capped_higher_tiers_when_guild_pro_is_inactive(self):
+        self.service.ai_provider = FakeAIProvider(available=True)
+        log_channel = FakeChannel(99, name="shield-log")
+        self.bot.register_channel(log_channel)
+        ok, _ = await self.service.set_ordinary_ai_policy(enabled=True, allowed_models="nano,mini,full", actor_id=1266444952779620413)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_guild_ai_access_policy(10, mode="enabled", allowed_models="nano,mini,full", actor_id=1266444952779620413)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_module_enabled(10, True)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_log_channel(10, log_channel.id)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_ai_config(10, enabled_packs=["privacy"], min_confidence="high")
+        self.assertTrue(ok)
+
+        status = self.service.get_ai_status(10)
+
+        self.assertTrue(status["enabled"])
+        self.assertTrue(status["ready_for_review"])
+        self.assertEqual(status["status"], "Ready for second-pass review with the nano tier.")
+        self.assertEqual(status["configured_allowed_models"], ["gpt-5.4-nano", "gpt-5.4-mini", "gpt-5.4"])
+        self.assertEqual(status["allowed_models"], ["gpt-5.4-nano"])
+        self.assertTrue(status["configured_models_capped"])
+        self.assertEqual(status["premium_plan_code"], PLAN_FREE)
+        self.assertEqual(status["premium_source"], "free")
+        self.assertFalse(status["premium_stale"])
+        self.assertFalse(status["premium_in_grace"])
+        self.assertIn("Guild Pro is not active", status["premium_summary"])
+        self.assertIn("higher-tier Shield AI settings stay configured", status["premium_summary"])
+
+    async def test_ai_status_reports_stale_guild_pro_grace_window_honestly(self):
+        self.service.ai_provider = FakeAIProvider(available=True)
+        log_channel = FakeChannel(99, name="shield-log")
+        self.bot.register_channel(log_channel)
+        self._attach_premium(
+            guild_plans={10: PLAN_GUILD_PRO},
+            snapshots={
+                10: {
+                    "plan_code": PLAN_GUILD_PRO,
+                    "active_plans": (PLAN_GUILD_PRO,),
+                    "blocked": False,
+                    "stale": True,
+                    "in_grace": True,
+                    "claim": {"source_kind": "entitlement", "owner_user_id": 42},
+                    "system_access": False,
+                    "system_access_scope": None,
+                }
+            },
+        )
+        ok, _ = await self.service.set_ordinary_ai_policy(enabled=True, allowed_models="nano,mini", actor_id=1266444952779620413)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_module_enabled(10, True)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_log_channel(10, log_channel.id)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_ai_config(10, enabled_packs=["privacy"], min_confidence="high")
+        self.assertTrue(ok)
+
+        status = self.service.get_ai_status(10)
+
+        self.assertTrue(status["enabled"])
+        self.assertTrue(status["ready_for_review"])
+        self.assertTrue(status["premium_unlocked"])
+        self.assertFalse(status["configured_models_capped"])
+        self.assertEqual(status["configured_allowed_models"], ["gpt-5.4-nano", "gpt-5.4-mini"])
+        self.assertEqual(status["allowed_models"], ["gpt-5.4-nano", "gpt-5.4-mini"])
+        self.assertEqual(status["premium_plan_code"], PLAN_GUILD_PRO)
+        self.assertEqual(status["premium_source"], "claim:entitlement")
+        self.assertTrue(status["premium_stale"])
+        self.assertTrue(status["premium_in_grace"])
+        self.assertIn("last verified Guild Pro entitlement", status["premium_summary"])
+        self.assertIn("grace window", status["premium_summary"])
 
     async def test_ai_status_reports_log_channel_blocker_when_policy_and_provider_are_ready(self):
         self.service.ai_provider = FakeAIProvider(available=True)
@@ -4595,6 +4707,7 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(status["enabled"])
         self.assertTrue(status["premium_unlocked"])
         self.assertEqual(status["policy_source"], "ordinary_global")
+        self.assertEqual(status["configured_allowed_models"], ["gpt-5.4-nano", "gpt-5.4-mini"])
         self.assertEqual(status["allowed_models"], ["gpt-5.4-nano", "gpt-5.4-mini"])
 
     async def test_support_guild_gets_enhanced_models_when_owner_policy_allows_them(self):
@@ -4931,7 +5044,9 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
 
         ok, message = await self.service.replace_pack_exemptions(10, "spam", "channel", list(range(100, 122)))
         self.assertFalse(ok)
-        self.assertIn("current limit of 20", message)
+        self.assertIn("active limit of 20", message)
+        self.assertIn("/premium plans", message)
+        self.assertIn("stays preserved", message)
 
     async def test_pack_timeout_overrides_compile_with_global_fallback(self):
         ok, _ = await self.service.set_escalation(10, timeout_minutes=9)

@@ -25,7 +25,7 @@ from babblebox.premium_limits import (
 from babblebox.premium_models import LINK_STATUS_ACTIVE, LINK_STATUS_BROKEN, LINK_STATUS_REVOKED, MANUAL_KIND_BLOCK, MANUAL_KIND_GRANT, PLAN_GUILD_PRO, PROVIDER_PATREON, SCOPE_GUILD, SCOPE_USER
 from babblebox.runtime_health import bind_started_service, runtime_service_lines
 from babblebox.premium_store import PremiumStorageUnavailable
-from babblebox.premium_service import PremiumService
+from babblebox.premium_service import PremiumService, format_saved_state_status, preserved_over_limit_note
 
 
 LOGGER = logging.getLogger(__name__)
@@ -137,7 +137,7 @@ class PremiumCog(commands.Cog):
             return "Free"
         return ", ".join(self.service.plan_title(plan) for plan in active)
 
-    def _utility_counts(self, user_id: int) -> dict[str, int | None]:
+    def _utility_counts(self, user_id: int) -> dict[str, dict[str, int] | None]:
         utility_service = getattr(self.bot, "utility_service", None)
         if utility_service is None or not getattr(utility_service, "storage_ready", False):
             return {
@@ -148,43 +148,77 @@ class PremiumCog(commands.Cog):
                 "afk_schedules": None,
             }
         summary = utility_service.get_watch_summary(user_id, guild_id=None)
-        reminders = utility_service.list_reminders(user_id)
-        watch_filter_count = sum(
-            len(summary.get(key, ()))
-            for key in ("mention_channel_ids", "reply_channel_ids", "ignored_channel_ids", "ignored_user_ids")
-        )
+        reminder_summary = utility_service.get_reminder_summary(user_id)
+        afk_summary = utility_service.get_afk_schedule_summary(user_id)
         return {
-            "watch_keywords": int(summary.get("total_keywords", 0)),
-            "watch_filters": int(watch_filter_count),
-            "reminders": len(reminders),
-            "public_reminders": len([item for item in reminders if item.get("delivery") == "here"]),
-            "afk_schedules": len(utility_service.list_afk_schedules(user_id)),
+            "watch_keywords": {
+                "saved": int(summary.get("total_keywords", 0)),
+                "active": int(summary.get("active_keyword_count", 0)),
+            },
+            "watch_filters": {
+                "saved": int(summary.get("saved_filter_total", 0)),
+                "active": int(summary.get("active_filter_total", 0)),
+            },
+            "reminders": {
+                "saved": int(reminder_summary.get("saved", 0)),
+                "active": int(reminder_summary.get("active", 0)),
+            },
+            "public_reminders": {
+                "saved": int(reminder_summary.get("saved_public", 0)),
+                "active": int(reminder_summary.get("active_public", 0)),
+            },
+            "afk_schedules": {
+                "saved": int(afk_summary.get("saved", 0)),
+                "active": int(afk_summary.get("active", 0)),
+            },
         }
 
-    def _guild_feature_counts(self, guild_id: int) -> dict[str, int | None]:
+    def _guild_feature_counts(self, guild_id: int) -> dict[str, dict[str, int] | None]:
         utility_service = getattr(self.bot, "utility_service", None)
         shield_service = getattr(self.bot, "shield_service", None)
         confessions_service = getattr(self.bot, "confessions_service", None)
         bump_channels = None
         if utility_service is not None and getattr(utility_service, "storage_ready", False):
-            bump_channels = len(utility_service.get_bump_config(guild_id).get("detection_channel_ids", []))
+            bump_summary = utility_service.get_bump_summary(guild_id)
+            bump_channels = {
+                "saved": int(bump_summary.get("saved_detection_channels", 0)),
+                "active": int(bump_summary.get("active_detection_channels", 0)),
+            }
         custom_patterns = None
         if shield_service is not None and getattr(shield_service, "storage_ready", False):
-            custom_patterns = len(shield_service.get_config(guild_id).get("custom_patterns", []))
+            saved_patterns = len(shield_service.get_config(guild_id).get("custom_patterns", []))
+            custom_patterns = {
+                "saved": int(saved_patterns),
+                "active": min(int(saved_patterns), int(shield_service.custom_pattern_limit(guild_id))),
+            }
         max_images = None
         if confessions_service is not None and getattr(confessions_service, "storage_ready", False):
-            max_images = int(confessions_service.get_config(guild_id).get("max_images", 3))
+            max_images = {
+                "saved": int(confessions_service.get_config(guild_id).get("max_images", 3)),
+                "active": int(confessions_service.get_compiled_config(guild_id).get("effective_max_images", 3)),
+            }
         return {
             "bump_channels": bump_channels,
             "custom_patterns": custom_patterns,
             "max_images": max_images,
         }
 
-    def _limit_line(self, *, label: str, current_count: int | None, limit_value: int) -> str:
+    def _limit_line(
+        self,
+        *,
+        label: str,
+        current_count: dict[str, int] | None,
+        limit_value: int,
+        per_bucket: bool = False,
+    ) -> str:
         if current_count is None:
+            if per_bucket:
+                return f"{label}: up to **{limit_value}** per bucket"
             return f"{label}: up to **{limit_value}**"
-        line = f"{label}: **{current_count} / {limit_value}**"
-        over_limit = self.service.over_limit_label(current_count=current_count, limit_value=limit_value)
+        saved_count = int(current_count.get("saved", 0))
+        active_count = int(current_count.get("active", 0))
+        line = f"{label}: {format_saved_state_status(saved_count=saved_count, active_count=active_count, limit_value=limit_value, per_bucket=per_bucket)}"
+        over_limit = preserved_over_limit_note(saved_count=saved_count, active_count=active_count)
         if over_limit:
             line += f"\n{over_limit}"
         return line
@@ -327,6 +361,7 @@ class PremiumCog(commands.Cog):
                         label="Watch filters",
                         current_count=counts["watch_filters"],
                         limit_value=self.service.resolve_user_limit(user.id, LIMIT_WATCH_FILTERS),
+                        per_bucket=True,
                     ),
                     self._limit_line(
                         label="Active reminders",

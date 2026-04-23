@@ -548,6 +548,19 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Babblebox Plus / IF Epic Patron", fields["Patreon Tier Mapping"])
         self.assertIn("generally non-refundable", fields["Trust / Downgrade"])
         self.assertIn("Downgrades or Guild Pro release do not delete saved", fields["Trust / Downgrade"])
+        self.assertIn("extra runtime headroom simply pauses", fields["Trust / Downgrade"])
+
+    def test_help_pages_keep_downgrade_truth_for_utilities_shield_and_confessions(self):
+        utilities_page = next(page for page in HELP_PAGES if page["title"] == "Everyday Utilities")
+        premium_page = next(page for page in HELP_PAGES if page["title"] == "Premium / Plans")
+        shield_page = next(page for page in HELP_PAGES if page["title"] == "Shield / Admin Safety")
+
+        self.assertIn("Babblebox Plus raises saved-vs-active headroom for Watch, reminders, and recurring AFK", utilities_page["body"])
+        self.assertIn("gpt-5.4-nano", shield_page["body"])
+        self.assertIn("Guild Pro unlocks gpt-5.4-mini plus gpt-5.4", shield_page["body"])
+        self.assertIn("effective lane plus local readiness and entitlement state", shield_page["body"])
+        self.assertIn("larger safe Confessions image ceiling", premium_page["fields"][0][1])
+        self.assertIn("extra runtime headroom simply pauses", premium_page["fields"][3][1])
 
     def test_help_surfaces_do_not_reference_removed_moment_feature(self):
         for page in HELP_PAGES:
@@ -821,6 +834,51 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await cog.service.close()
 
+    async def test_premium_status_mentions_saved_state_after_personal_downgrade(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
+        cog = PremiumCog(bot)
+        try:
+            cog.service.storage_ready = True
+            cog.service.get_user_snapshot = lambda _user_id: {
+                "plan_code": "free",
+                "active_plans": (),
+                "claimable_sources": (),
+                "blocked": False,
+                "stale": False,
+                "system_access": False,
+                "system_guild_claims": 0,
+            }
+            cog.service.get_link = lambda _user_id, provider=None: None
+            cog.service.list_cached_claims_for_user = lambda _user_id: []
+            limit_values = {
+                "watch_keywords": 10,
+                "watch_filters": 8,
+                "reminders_active": 3,
+                "reminders_public_active": 1,
+                "afk_schedules": 6,
+            }
+            cog.service.resolve_user_limit = lambda _user_id, limit_key: limit_values[limit_key]
+            cog._utility_counts = lambda _user_id: {
+                "watch_keywords": {"saved": 12, "active": 10},
+                "watch_filters": {"saved": 13, "active": 11, "limit_style": "per_bucket"},
+                "reminders": {"saved": 5, "active": 3},
+                "public_reminders": {"saved": 2, "active": 1},
+                "afk_schedules": {"saved": 8, "active": 6},
+            }
+            ctx = FakeContext(interaction=FakeInteraction(), guild=FakeGuild(), channel=FakeChannel(), author=FakeAuthor())
+
+            await PremiumCog.premium_status_command.callback(cog, ctx)
+
+            fields = {field.name: field.value for field in self._sent_kwargs(ctx)["embed"].fields}
+            self.assertIn("Watch keywords: saved **12** | active on this plan **10 / 10**", fields["Resolved Personal Limits"])
+            self.assertIn("Watch filters: saved **13** | active on this plan **11** (limit **8** each bucket)", fields["Resolved Personal Limits"])
+            self.assertIn("Active reminders: saved **5** | active on this plan **3 / 3**", fields["Resolved Personal Limits"])
+            self.assertIn("Channel reminders: saved **2** | active on this plan **1 / 1**", fields["Resolved Personal Limits"])
+            self.assertIn("Recurring AFK schedules: saved **8** | active on this plan **6 / 6**", fields["Resolved Personal Limits"])
+            self.assertIn("stays preserved", fields["Resolved Personal Limits"])
+        finally:
+            await cog.service.close()
+
     async def test_premium_status_warns_when_linked_account_has_no_mapped_babblebox_tier(self):
         bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
         cog = PremiumCog(bot)
@@ -949,6 +1007,47 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Claim state: **Unclaimed**", payload["embed"].description)
             self.assertIn("No Guild Pro claim is attached", fields["Claim Summary"])
             self.assertIn("/premium guild claim", fields["Next Step"])
+        finally:
+            await cog.service.close()
+
+    async def test_guild_premium_status_mentions_saved_state_after_downgrade(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
+        cog = PremiumCog(bot)
+        try:
+            cog.service.storage_ready = True
+            cog.service.get_guild_snapshot = lambda _guild_id: {
+                "plan_code": "free",
+                "active_plans": (),
+                "blocked": False,
+                "system_access": False,
+                "stale": False,
+                "claim": None,
+            }
+            cog.service.resolve_guild_limit = lambda _guild_id, limit_key: {
+                "bump_detection_channels": 5,
+                "shield_custom_patterns": 10,
+                "confessions_max_images": 3,
+            }[limit_key]
+            cog.service.guild_has_capability = lambda _guild_id, _capability: False
+            cog._guild_feature_counts = lambda _guild_id: {
+                "bump_channels": {"saved": 6, "active": 5},
+                "custom_patterns": {"saved": 11, "active": 10},
+                "max_images": {"saved": 6, "active": 3},
+            }
+            ctx = FakeContext(
+                interaction=FakeInteraction(),
+                guild=FakeGuild(),
+                channel=FakeChannel(),
+                author=FakeAuthor(manage_guild=True),
+            )
+
+            await PremiumCog.premium_guild_status_command.callback(cog, ctx)
+
+            fields = {field.name: field.value for field in self._sent_kwargs(ctx)["embed"].fields}
+            self.assertIn("Bump detection channels: saved **6** | active on this plan **5 / 5**", fields["What Guild Pro Changes Here"])
+            self.assertIn("Shield advanced patterns: saved **11** | active on this plan **10 / 10**", fields["What Guild Pro Changes Here"])
+            self.assertIn("Confession images: saved **6** | active on this plan **3 / 3**", fields["What Guild Pro Changes Here"])
+            self.assertIn("stays preserved", fields["What Guild Pro Changes Here"])
         finally:
             await cog.service.close()
 
@@ -1953,10 +2052,127 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Provider and Routing", fields)
             self.assertIn("Runtime Policy", fields)
             self.assertIn("Policy source", fields["Access Policy"])
-            self.assertIn("Allowed models", fields["Access Policy"])
+            self.assertIn("Entitlement:", fields["Access Policy"])
+            self.assertIn("Configured models", fields["Access Policy"])
+            self.assertIn("Effective models right now", fields["Access Policy"])
             self.assertIn("Ordinary-guild default", fields["Access Policy"])
+            self.assertIn("gpt-5.4-nano", fields["Access Policy"])
+            self.assertIn("Guild Pro unlocks", fields["Access Policy"])
             self.assertIn("review scope is admin-configurable", embed.footer.text.lower())
             self.assertIn("guild pro unlocks mini/full", embed.footer.text.lower())
+        finally:
+            await cog.service.close()
+
+    async def test_shield_overview_and_ai_panel_share_calm_capped_model_truth(self):
+        premium_service = types.SimpleNamespace(
+            guild_has_capability=lambda guild_id, capability: False,
+            resolve_guild_limit=lambda guild_id, limit_key: 20,
+            describe_limit_error=lambda **kwargs: "premium",
+            get_guild_snapshot=lambda guild_id: {
+                "plan_code": "free",
+                "active_plans": (),
+                "blocked": False,
+                "stale": False,
+                "in_grace": False,
+                "claim": None,
+                "system_access": False,
+                "system_access_scope": None,
+            },
+        )
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop(), premium_service=premium_service)
+        cog = ShieldCog(bot)
+        try:
+            cog.service.storage_ready = True
+            cog.service.ai_provider = types.SimpleNamespace(
+                diagnostics=lambda: {
+                    "provider": "OpenAI",
+                    "available": True,
+                    "configured": True,
+                    "model": "gpt-5.4-nano",
+                    "routing_strategy": "routed_fast_complex",
+                    "single_model_override": False,
+                    "ignored_model_settings": [],
+                    "fast_model": "gpt-5.4-nano",
+                    "complex_model": "gpt-5.4-mini",
+                    "top_model": "gpt-5.4",
+                    "top_tier_enabled": False,
+                    "timeout_seconds": 4.0,
+                    "max_chars": 160,
+                    "status": "Ready.",
+                },
+                close=AsyncMock(return_value=None),
+            )
+            ok, _ = await cog.service.set_ordinary_ai_policy(enabled=True, allowed_models="nano,mini", actor_id=1266444952779620413)
+            self.assertTrue(ok)
+            ok, _ = await cog.service.set_guild_ai_access_policy(10, mode="enabled", allowed_models="nano,mini", actor_id=1266444952779620413)
+            self.assertTrue(ok)
+            ok, _ = await cog.service.set_module_enabled(10, True)
+            self.assertTrue(ok)
+
+            overview = cog.build_panel_embed(10, "overview")
+            ai_panel = cog.build_panel_embed(10, "ai")
+            overview_value = next(field.value for field in overview.fields if field.name == "AI Assist")
+            access_value = next(field.value for field in ai_panel.fields if field.name == "Access Policy")
+
+            for text in (
+                "Entitlement:",
+                "Configured models:",
+                "Effective models right now:",
+                "higher-tier Shield AI settings stay configured",
+            ):
+                self.assertIn(text, overview_value)
+                self.assertIn(text, access_value)
+        finally:
+            await cog.service.close()
+
+    async def test_shield_ai_command_reports_configured_vs_effective_model_truth(self):
+        premium_service = types.SimpleNamespace(
+            guild_has_capability=lambda guild_id, capability: False,
+            resolve_guild_limit=lambda guild_id, limit_key: 20,
+            describe_limit_error=lambda **kwargs: "premium",
+            get_guild_snapshot=lambda guild_id: {
+                "plan_code": "free",
+                "active_plans": (),
+                "blocked": False,
+                "stale": False,
+                "in_grace": False,
+                "claim": None,
+                "system_access": False,
+                "system_access_scope": None,
+            },
+        )
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop(), premium_service=premium_service)
+        cog = ShieldCog(bot)
+        try:
+            cog.service.storage_ready = True
+            ok, _ = await cog.service.set_ordinary_ai_policy(enabled=True, allowed_models="nano,mini", actor_id=1266444952779620413)
+            self.assertTrue(ok)
+            ok, _ = await cog.service.set_guild_ai_access_policy(10, mode="enabled", allowed_models="nano,mini", actor_id=1266444952779620413)
+            self.assertTrue(ok)
+            ctx = FakeContext(
+                interaction=FakeInteraction(),
+                guild=FakeGuild(10),
+                channel=FakeChannel(),
+                author=FakeAuthor(manage_guild=True),
+            )
+
+            await ShieldCog.shield_ai_command.callback(
+                cog,
+                ctx,
+                min_confidence="medium",
+                privacy=True,
+                promo=None,
+                scam=None,
+                adult=None,
+                severe=None,
+            )
+
+            self.assertEqual(len(ctx.send_calls), 1)
+            embed = ctx.send_calls[0]["embed"]
+            self.assertIn("Configured models:", embed.description)
+            self.assertIn("Effective models right now:", embed.description)
+            self.assertIn("higher-tier Shield AI settings stay configured", embed.description)
+            self.assertIn("Shield AI review scope now uses `medium`", embed.description)
         finally:
             await cog.service.close()
 

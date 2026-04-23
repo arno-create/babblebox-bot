@@ -10,6 +10,7 @@ from babblebox.app_command_hardening import harden_admin_root_group
 from babblebox import game_engine as ge
 from babblebox.command_utils import defer_hybrid_response, require_channel_permissions, send_hybrid_response
 from babblebox.runtime_health import bind_started_service
+from babblebox.premium_service import format_saved_state_status, preserved_over_limit_note
 from babblebox.utility_helpers import build_bump_reminder_embed, build_bump_thanks_embed, build_jump_view, deserialize_datetime
 from babblebox.utility_service import (
     BUMP_CONFIG_UNCHANGED,
@@ -373,6 +374,23 @@ class UtilityCog(commands.Cog):
             rendered.append(f"+{len(user_ids) - 5} more")
         return ", ".join(rendered)
 
+    def _append_saved_state_line(
+        self,
+        lines: list[str],
+        *,
+        label: str,
+        saved_count: int,
+        active_count: int,
+        limit_value: int,
+        per_bucket: bool = False,
+    ) -> str | None:
+        if saved_count <= active_count:
+            return None
+        lines.append(
+            f"{label}: {format_saved_state_status(saved_count=saved_count, active_count=active_count, limit_value=limit_value, per_bucket=per_bucket)}"
+        )
+        return preserved_over_limit_note(saved_count=saved_count, active_count=active_count)
+
     def _watch_settings_embed(
         self,
         user: discord.abc.User,
@@ -407,7 +425,8 @@ class UtilityCog(commands.Cog):
                 f"Global: **{len(summary['global_keywords'])}**\n"
                 f"Server: **{len(summary['server_keywords'])}**\n"
                 f"Channel: **{len(summary['channel_keywords'])}**\n"
-                f"Saved total: **{summary['total_keywords']} / {self.service.watch_keyword_limit(user.id)}**"
+                f"Saved total: **{summary['total_keywords']}**\n"
+                f"Active on this plan: **{summary.get('active_keyword_count', summary['total_keywords'])} / {self.service.watch_keyword_limit(user.id)}**"
             ),
             inline=True,
         )
@@ -448,6 +467,34 @@ class UtilityCog(commands.Cog):
             ),
             inline=False,
         )
+        note_lines: list[str] = []
+        note_text = self._append_saved_state_line(
+            note_lines,
+            label="Keywords",
+            saved_count=int(summary.get("total_keywords", 0)),
+            active_count=int(summary.get("active_keyword_count", summary.get("total_keywords", 0))),
+            limit_value=self.service.watch_keyword_limit(user.id),
+        )
+        filter_limit = self.service.watch_filter_limit(user.id)
+        saved_filter_counts = summary.get("saved_filter_counts", {})
+        active_filter_counts = summary.get("active_filter_counts", {})
+        for label, key in (
+            ("Mention channels", "mention_channels"),
+            ("Reply channels", "reply_channels"),
+            ("Ignored channels", "ignored_channels"),
+            ("Ignored users", "ignored_users"),
+        ):
+            maybe_note = self._append_saved_state_line(
+                note_lines,
+                label=label,
+                saved_count=int(saved_filter_counts.get(key, 0)),
+                active_count=int(active_filter_counts.get(key, 0)),
+                limit_value=filter_limit,
+            )
+            if maybe_note:
+                note_text = maybe_note
+        if note_lines:
+            embed.add_field(name="Saved Above Current Plan", value="\n".join([*note_lines, note_text or ""]), inline=False)
         return ge.style_embed(embed, footer="Babblebox Watch | DM-only alerts, compact filters, no message archive")
 
     def _watch_list_embed(
@@ -480,6 +527,34 @@ class UtilityCog(commands.Cog):
             inline=False,
         )
         embed.add_field(name="Note", value="Watch stays DM-only and never stores a message archive.", inline=False)
+        note_lines: list[str] = []
+        note_text = self._append_saved_state_line(
+            note_lines,
+            label="Keywords",
+            saved_count=int(summary.get("total_keywords", 0)),
+            active_count=int(summary.get("active_keyword_count", summary.get("total_keywords", 0))),
+            limit_value=self.service.watch_keyword_limit(user.id),
+        )
+        filter_limit = self.service.watch_filter_limit(user.id)
+        saved_filter_counts = summary.get("saved_filter_counts", {})
+        active_filter_counts = summary.get("active_filter_counts", {})
+        for label, key in (
+            ("Mention channels", "mention_channels"),
+            ("Reply channels", "reply_channels"),
+            ("Ignored channels", "ignored_channels"),
+            ("Ignored users", "ignored_users"),
+        ):
+            maybe_note = self._append_saved_state_line(
+                note_lines,
+                label=label,
+                saved_count=int(saved_filter_counts.get(key, 0)),
+                active_count=int(active_filter_counts.get(key, 0)),
+                limit_value=filter_limit,
+            )
+            if maybe_note:
+                note_text = maybe_note
+        if note_lines:
+            embed.add_field(name="Saved Above Current Plan", value="\n".join([*note_lines, note_text or ""]), inline=False)
         return ge.style_embed(embed, footer="Babblebox Watch | Use /watch ignore to trim noisy places or people")
 
     def _later_list_embed(self, user: discord.abc.User, markers: list[dict], *, guild: discord.Guild | None) -> discord.Embed:
@@ -509,7 +584,7 @@ class UtilityCog(commands.Cog):
     def _reminder_list_embed(self, user: discord.abc.User, reminders: list[dict]) -> discord.Embed:
         embed = discord.Embed(
             title="Babblebox Reminders",
-            description=f"Active reminders for **{ge.display_name_of(user)}**.",
+            description=f"Saved reminders for **{ge.display_name_of(user)}**.",
             color=ge.EMBED_THEME["success"],
         )
         if not reminders:
@@ -531,6 +606,28 @@ class UtilityCog(commands.Cog):
         if len(reminders) > 10:
             lines.append(f"...and {len(reminders) - 10} more")
         embed.add_field(name="Scheduled", value="\n".join(lines), inline=False)
+        service = getattr(self, "service", None)
+        if service is not None and callable(getattr(service, "get_reminder_summary", None)):
+            summary = service.get_reminder_summary(user.id)
+            note_lines: list[str] = []
+            note_text = self._append_saved_state_line(
+                note_lines,
+                label="Reminders",
+                saved_count=int(summary.get("saved", 0)),
+                active_count=int(summary.get("active", 0)),
+                limit_value=service.reminder_limit(user.id),
+            )
+            maybe_note = self._append_saved_state_line(
+                note_lines,
+                label="Channel reminders",
+                saved_count=int(summary.get("saved_public", 0)),
+                active_count=int(summary.get("active_public", 0)),
+                limit_value=service.public_reminder_limit(user.id),
+            )
+            if maybe_note:
+                note_text = maybe_note
+            if note_lines:
+                embed.add_field(name="Saved Above Current Plan", value="\n".join([*note_lines, note_text or ""]), inline=False)
         return ge.style_embed(embed, footer="Babblebox Remind | Cancel with /remind cancel <id>.")
 
     def _can_manage_bremind(self, actor: object) -> bool:
@@ -590,6 +687,7 @@ class UtilityCog(commands.Cog):
 
     def _bremind_status_embed(self, guild: discord.Guild) -> discord.Embed:
         config = self.service.get_bump_config(guild.id)
+        summary = self.service.get_bump_summary(guild.id)
         provider = config.get("provider", BUMP_PROVIDER_DISBOARD)
         provider_label = _bump_provider_label(provider)
         cycle = self.service.get_bump_cycle(guild.id, provider=provider)
@@ -670,6 +768,16 @@ class UtilityCog(commands.Cog):
             embed.add_field(name="Delivery Notes", value=ge.join_limited_lines(operability[:6], limit=1024, empty="None."), inline=False)
         else:
             embed.add_field(name="Delivery Notes", value="No blockers detected in the current channel and role setup.", inline=False)
+        note_lines: list[str] = []
+        note_text = self._append_saved_state_line(
+            note_lines,
+            label="Detection channels",
+            saved_count=int(summary.get("saved_detection_channels", 0)),
+            active_count=int(summary.get("active_detection_channels", 0)),
+            limit_value=self.service.bump_detection_channel_limit(guild.id),
+        )
+        if note_lines:
+            embed.add_field(name="Saved Above Current Plan", value="\n".join([*note_lines, note_text or ""]), inline=False)
         return ge.style_embed(embed, footer="Babblebox Bump Reminders | /bremind status")
 
     def _bremind_preview_embed(self, guild: discord.Guild, *, kind: str) -> discord.Embed:
@@ -1378,22 +1486,29 @@ class UtilityCog(commands.Cog):
         if not await self._bremind_guard(ctx):
             return
         config = self.service.get_bump_config(ctx.guild.id)
+        summary = self.service.get_bump_summary(ctx.guild.id)
         bump_limit = self.service.bump_detection_channel_limit(ctx.guild.id)
-        await self._send_private_embed(
-            ctx,
-            embed=ge.style_embed(
-                discord.Embed(
-                    title="Bump Detection Channels",
-                    description="Babblebox only starts the cycle from verified provider output in these channels.",
-                    color=ge.EMBED_THEME["info"],
-                ).add_field(
-                    name="Configured",
-                    value=self._resolve_watch_channel_mentions(ctx.guild, config.get("detection_channel_ids", [])),
-                    inline=False,
-                ),
-                footer=f"Babblebox Bump Reminders | Up to {bump_limit} channels",
-            ),
+        embed = discord.Embed(
+            title="Bump Detection Channels",
+            description="Babblebox only starts the cycle from verified provider output in these channels.",
+            color=ge.EMBED_THEME["info"],
         )
+        embed.add_field(
+            name="Configured",
+            value=self._resolve_watch_channel_mentions(ctx.guild, config.get("detection_channel_ids", [])),
+            inline=False,
+        )
+        note_lines: list[str] = []
+        note_text = self._append_saved_state_line(
+            note_lines,
+            label="Detection channels",
+            saved_count=int(summary.get("saved_detection_channels", 0)),
+            active_count=int(summary.get("active_detection_channels", 0)),
+            limit_value=bump_limit,
+        )
+        if note_lines:
+            embed.add_field(name="Saved Above Current Plan", value="\n".join([*note_lines, note_text or ""]), inline=False)
+        await self._send_private_embed(ctx, embed=ge.style_embed(embed, footer=f"Babblebox Bump Reminders | Up to {bump_limit} channels"))
 
     @bremind_detect_group.command(name="add", with_app_command=True, description="Add a text channel where provider bumps are expected")
     @app_commands.describe(channel="Leave blank to use the current text channel")
@@ -1464,6 +1579,7 @@ class UtilityCog(commands.Cog):
         if not await self._bremind_guard(ctx):
             return
         config = self.service.get_bump_config(ctx.guild.id)
+        summary = self.service.get_bump_summary(ctx.guild.id)
         bump_limit = self.service.bump_detection_channel_limit(ctx.guild.id)
         embed = discord.Embed(
             title="Bump Detection Channels",
@@ -1473,6 +1589,16 @@ class UtilityCog(commands.Cog):
         embed.add_field(name="Configured", value=self._resolve_watch_channel_mentions(ctx.guild, config.get("detection_channel_ids", [])), inline=False)
         embed.add_field(name="Limit", value=f"Up to **{bump_limit}** text channels", inline=True)
         embed.add_field(name="Provider", value=_bump_provider_label(config.get("provider")), inline=True)
+        note_lines: list[str] = []
+        note_text = self._append_saved_state_line(
+            note_lines,
+            label="Detection channels",
+            saved_count=int(summary.get("saved_detection_channels", 0)),
+            active_count=int(summary.get("active_detection_channels", 0)),
+            limit_value=bump_limit,
+        )
+        if note_lines:
+            embed.add_field(name="Saved Above Current Plan", value="\n".join([*note_lines, note_text or ""]), inline=False)
         await self._send_private_embed(ctx, embed=ge.style_embed(embed, footer="Babblebox Bump Reminders | /bremind detect"))
 
     @bremind_group.command(name="destination", with_app_command=True, description="Set the reminder channel and optional role ping")

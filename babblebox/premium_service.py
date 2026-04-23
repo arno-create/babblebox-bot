@@ -106,6 +106,24 @@ class PatreonWebhookResult:
     message: str
 
 
+def format_saved_state_status(
+    *,
+    saved_count: int,
+    active_count: int,
+    limit_value: int,
+    per_bucket: bool = False,
+) -> str:
+    if per_bucket:
+        return f"saved **{saved_count}** | active on this plan **{active_count}** (limit **{limit_value}** each bucket)"
+    return f"saved **{saved_count}** | active on this plan **{active_count} / {limit_value}**"
+
+
+def preserved_over_limit_note(*, saved_count: int, active_count: int) -> str | None:
+    if saved_count <= active_count:
+        return None
+    return "Extra saved state stays preserved but inactive until you trim it or premium returns."
+
+
 def _utcnow() -> datetime:
     return datetime.now(timezone.utc)
 
@@ -816,15 +834,15 @@ class PremiumService:
 
     def describe_limit_error(self, *, limit_key: str, limit_value: int) -> str:
         return (
-            f"You reached the current limit of {limit_value}. "
+            f"You reached this plan's active limit of {limit_value}. "
             f"{self.get_plan_upgrade_label_for_limit(limit_key)} unlocks more. "
-            "Use `/premium plans` to compare tiers."
+            "Use `/premium plans` to compare tiers. "
+            "Previously saved over-limit state stays preserved, but new expansion stays blocked until you trim it or premium returns."
         )
 
-    def over_limit_label(self, *, current_count: int, limit_value: int) -> str | None:
-        if current_count <= limit_value:
-            return None
-        return f"Over current plan limit: {current_count} saved while this plan allows {limit_value}."
+    def over_limit_label(self, *, current_count: int, limit_value: int, active_count: int | None = None) -> str | None:
+        effective_active = limit_value if active_count is None else active_count
+        return preserved_over_limit_note(saved_count=current_count, active_count=effective_active)
 
     def plan_catalog(self) -> tuple[dict[str, Any], ...]:
         return (

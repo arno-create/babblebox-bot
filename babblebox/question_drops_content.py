@@ -2001,6 +2001,7 @@ _BASE_QUESTION_DROP_SEEDS: tuple[dict[str, Any], ...] = (
         "language.grammar",
         _variant("True or false: an Oxford comma appears before the final item in a list.", _boolean_spec(True)),
         _variant("True or false: the Oxford comma is the comma placed before the last item in a list of three or more.", _boolean_spec(True)),
+        tags=("sub:list-style-grammar",),
     ),
     _static_seed(
         "language:plural-cactus",
@@ -2084,7 +2085,7 @@ _BASE_QUESTION_DROP_SEEDS: tuple[dict[str, Any], ...] = (
     _generated_seed("logic:elimination", "logic", 3, "logic_elimination", "logic.elimination"),
     _generated_seed("logic:conditional", "logic", 2, "logic_conditional", "logic.conditional"),
     _generated_seed("logic:parity-grouping", "logic", 2, "logic_parity_grouping", "logic.parity"),
-    _generated_seed("logic:true-false", "logic", 2, "logic_true_false", "logic.inference"),
+    _generated_seed("logic:true-false", "logic", 2, "logic_true_false", "logic.inference", tags=("sub:transitive-chain",)),
     _generated_seed("logic:classification", "logic", 3, "logic_classification", "logic.classification"),
     _generated_seed("logic:mini-deduction", "logic", 3, "logic_mini_deduction", "logic.mini-deduction"),
     _generated_seed("logic:rotation", "logic", 3, "logic_rotation", "logic.rotation"),

@@ -353,13 +353,13 @@ class WebsiteDocsTests(unittest.TestCase):
             "gpt-5.4-nano",
             "gpt-5.4-mini",
             "gpt-5.4",
-            "resolved routing lane plus local readiness",
+            "effective lane plus local readiness and entitlement state",
         ):
             self.assertIn(text, readme)
-        for text in ("no-link DM-lure", "gpt-5.4-nano", "gpt-5.4-mini", "gpt-5.4", "resolved routing lane plus local readiness"):
+        for text in ("no-link DM-lure", "gpt-5.4-nano", "gpt-5.4-mini", "gpt-5.4", "effective lane plus local readiness and entitlement state"):
             self.assertIn(text, help_html)
         self.assertIn("no-link DM-lure", index_html)
-        self.assertIn("resolved routing lane plus local readiness", index_html)
+        self.assertIn("effective lane plus local readiness and entitlement state", index_html)
         self.assertNotIn("gpt-4.1-mini", readme)
         self.assertNotIn("gpt-4.1-mini", help_html)
         self.assertNotIn("gpt-4.1-mini", index_html)
@@ -367,12 +367,13 @@ class WebsiteDocsTests(unittest.TestCase):
     def test_shield_ai_docs_describe_tiered_models_without_support_server_bypass(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         help_html = (ROOT / "help.html").read_text(encoding="utf-8")
+        index_html = (ROOT / "index.html").read_text(encoding="utf-8")
         privacy_md = (ROOT / "PRIVACY.md").read_text(encoding="utf-8")
         privacy_html = (ROOT / "privacy.html").read_text(encoding="utf-8")
 
         for text in (
-            "Guild Pro unlocks the higher models",
-            "Guild Pro unlocks the higher",
+            "Guild Pro unlocks gpt-5.4-mini and gpt-5.4 above the baseline gpt-5.4-nano lane",
+            "baseline `gpt-5.4-nano` lane",
             "gpt-5.4-nano` is the baseline tier",
             "owner policy controls whether review runs",
         ):
@@ -386,6 +387,7 @@ class WebsiteDocsTests(unittest.TestCase):
         ):
             self.assertNotIn(text, readme)
             self.assertNotIn(text, help_html)
+            self.assertNotIn(text, index_html)
             self.assertNotIn(text, privacy_md)
             self.assertNotIn(text, privacy_html)
 
@@ -690,6 +692,15 @@ class WebsiteDocsTests(unittest.TestCase):
             "Supporter",
             "Guild Pro",
         ):
+            self.assertIn(text, readme)
+
+        for text in (
+            "saved config stays preserved",
+            "future expansion stays blocked until you trim it or premium returns",
+            "Babblebox Plus raises Watch, reminder, and recurring AFK headroom",
+            "Guild Pro unlocks gpt-5.4-mini and gpt-5.4 above the baseline gpt-5.4-nano lane",
+        ):
+            self.assertIn(text, help_html)
             self.assertIn(text, readme)
 
         for text in (
