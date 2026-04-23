@@ -41,7 +41,7 @@ Babblebox premium is intentionally narrow:
 - `Free`: the real product lane stays intact, including party games, Daily Arcade, Question Drops, utilities, bounded Shield, and the current free Confessions baseline
 - `Supporter`: paid support tier that includes Supporter-tier Inevitable Friendship Discord benefits and keeps Babblebox at Free limits
 - `Babblebox Plus`: maps to `IF Epic Patron` and raises personal utility caps for Watch, reminders, and recurring AFK schedules
-- `Babblebox Guild Pro`: maps to `IF Legendary Patron`, raises server-side admin caps, unlocks Shield AI's enhanced `gpt-5.4-mini` and `gpt-5.4` tiers, unlocks Question Drops AI celebrations, raises bounded Shield limits, raises bump-detection scale, and raises the safe Confessions image ceiling
+- `Babblebox Guild Pro`: maps to `IF Legendary Patron`, raises server-side admin caps, unlocks Shield AI's enhanced `gpt-5.4-mini` and `gpt-5.4` tiers, unlocks Question Drops AI celebrations, raises bounded Shield limits, raises bump-detection scale, and raises the safe Confessions image ceiling. Guild Pro unlocks gpt-5.4-mini and gpt-5.4 above the baseline gpt-5.4-nano lane.
 
 ### How Premium Activates
 
@@ -61,7 +61,7 @@ Babblebox premium is intentionally narrow:
 
 - Patreon purchases are generally non-refundable except where required by law or Patreon separately approves a refund; see the [Terms of Service](https://arno-create.github.io/babblebox-bot/terms.html)
 - hard Patreon auth failures, linked-account identity mismatches, or a local unlink immediately withdraw provider-backed runtime access while still preserving saved feature state
-- premium downgrades do not delete saved Watch keywords, reminders, AFK schedules, Shield patterns, or Confessions settings; over-limit saved state is preserved, but premium-only runtime capacity is paused until the saved state is reduced or premium returns
+- premium downgrades do not delete saved Watch keywords, reminders, AFK schedules, Shield patterns, or Confessions settings; saved config stays preserved, extra runtime headroom simply pauses, and future expansion stays blocked until you trim it or premium returns
 - `/premium unlink` deletes Babblebox's local encrypted Patreon tokens only; it does not pretend to revoke Patreon-side app access for you
 
 ## Product Overview
@@ -106,6 +106,7 @@ Babblebox premium is intentionally narrow:
   - ignored users
   - DM-only delivery with cooldowns and dedupe
   - free stays at 10 keywords and 8 filters; Babblebox Plus raises those personal caps
+  - Babblebox Plus raises Watch, reminder, and recurring AFK headroom while saved config stays preserved if Plus later expires
 - Later
   - one saved reading marker per user per channel
   - media-aware previews
@@ -147,7 +148,7 @@ Babblebox premium is intentionally narrow:
 - shorteners, link-in-bio hubs, storefronts, malicious domains, and adult domains stay blocked even if admins widen the normal Confessions link mode
 - admins can role-allowlist or blacklist who may submit; blacklist wins, and a non-empty allowlist means only those roles may submit
 - images are off by default and must be explicitly enabled by admins
-- free Confessions keeps a sane image ceiling; Babblebox Guild Pro can raise `max_images` to 6 without removing private review
+- free Confessions keeps a sane image ceiling; Babblebox Guild Pro can raise `max_images` to 6 without removing private review, and downgrade keeps the saved higher ceiling while the active current-plan ceiling falls back
 - anonymous replies are off by default and must be explicitly enabled by admins
 - self-edit is off by default and only applies to still-pending submissions when enabled
 - enabled image support stays bounded and always routes through private review, which requires a separate private review channel
@@ -192,7 +193,7 @@ Babblebox premium is intentionally narrow:
 - bot and webhook scam handling stays conservative by default unless the evidence is clearly dangerous
 - optional AI-assisted second-pass review for moderator context only
 - Shield AI stays live-message-only; AFK, reminders, watch keywords, and Confessions feature checks remain local-first and AI-free
-- Shield AI can route between `gpt-5.4-nano`, `gpt-5.4-mini`, and `gpt-5.4`; `gpt-5.4-nano` is the baseline tier, Guild Pro unlocks the higher models, and diagnostics report the resolved routing lane plus local readiness
+- Shield AI can route between `gpt-5.4-nano`, `gpt-5.4-mini`, and `gpt-5.4`; `gpt-5.4-nano` is the baseline tier, and Guild Pro unlocks `gpt-5.4-mini` and `gpt-5.4` above the baseline `gpt-5.4-nano` lane while diagnostics report the effective lane plus local readiness and entitlement state
 - ordinary guild AI needs both owner policy and Babblebox Guild Pro
 - `/shield ai` only configures review scope; Guild Pro plus owner policy controls real AI access and allowed models
 - log-first defaults with global `adaptive` vs `compact` delivery, `smart` vs `never` ping policy, and bounded per-pack delivery overrides

@@ -1,3 +1,4 @@
+import asyncio
 import os
 import json
 import types
@@ -66,7 +67,10 @@ class PremiumLimitStub:
 
     def describe_limit_error(self, *, limit_key: str, limit_value: int) -> str:
         plan_label = "Babblebox Plus" if limit_key in USER_PREMIUM_LIMIT_KEYS else "Babblebox Guild Pro"
-        return f"You reached the current limit of {limit_value}. {plan_label} unlocks more."
+        return (
+            f"You reached this plan's active limit of {limit_value}. {plan_label} unlocks more. "
+            "Use `/premium plans` to compare tiers. Previously saved over-limit state stays preserved."
+        )
 
 
 class DummyUser:
@@ -1088,7 +1092,9 @@ class UtilityStoreAndServiceTests(unittest.IsolatedAsyncioTestCase):
 
         ok, message = await self.service.add_watch_ignored_user(user_id, ignored_user_id=7010)
         self.assertFalse(ok)
-        self.assertIn("current limit of 8", message)
+        self.assertIn("active limit of 8", message)
+        self.assertIn("/premium plans", message)
+        self.assertIn("stays preserved", message)
         self.assertEqual(len(self.service.get_watch_summary(user_id, guild_id=None)["ignored_user_ids"]), 10)
 
     async def test_downgraded_saved_reminders_keep_all_rows_but_only_due_subset_runs(self):
@@ -2254,6 +2260,113 @@ class UtilityStoreAndServiceTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertIn("Retrying delivery", embed.fields[0].value)
+
+    async def test_watch_settings_embed_reports_saved_state_above_current_plan(self):
+        user_id = 6601
+        self._attach_premium(user_plans={user_id: PLAN_PLUS})
+        for index in range(12):
+            ok, message = await self.service.add_watch_keyword(
+                user_id,
+                guild_id=None,
+                channel_id=None,
+                phrase=f"camera-{index}",
+                scope="global",
+                mode="contains",
+            )
+            self.assertTrue(ok, message)
+        for ignored_user_id in range(8000, 8010):
+            ok, message = await self.service.add_watch_ignored_user(user_id, ignored_user_id=ignored_user_id)
+            self.assertTrue(ok, message)
+
+        self._attach_premium()
+        self.service._rebuild_watch_indexes()
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop(), get_user=lambda _user_id: None)
+        cog = UtilityCog(bot)
+        original_service = cog.service
+        try:
+            cog.service = self.service
+            user = DummyTarget(user_id, display_name="Mira")
+
+            embed = cog._watch_settings_embed(user, guild=None, channel=None)
+
+            fields = {field.name: field.value for field in embed.fields}
+            self.assertIn("Saved total: **12**", fields["Keyword Buckets"])
+            self.assertIn("Active on this plan: **10 / 10**", fields["Keyword Buckets"])
+            self.assertIn("Saved Above Current Plan", fields)
+            self.assertIn("Keywords: saved **12** | active on this plan **10 / 10**", fields["Saved Above Current Plan"])
+            self.assertIn("Ignored users: saved **10** | active on this plan **8 / 8**", fields["Saved Above Current Plan"])
+            self.assertIn("stays preserved", fields["Saved Above Current Plan"])
+        finally:
+            await original_service.close()
+
+    async def test_reminder_list_embed_reports_saved_state_above_current_plan(self):
+        user = DummyUser(6602)
+        now = ge.now_utc()
+        self._attach_premium(user_plans={user.id: PLAN_PLUS})
+        for index in range(4):
+            self.service.store.state.setdefault("reminders", {})[f"rem-{index}"] = {
+                "id": f"rem-{index}",
+                "user_id": user.id,
+                "text": f"Reminder {index}",
+                "delivery": "here" if index < 2 else "dm",
+                "created_at": serialize_datetime(now),
+                "due_at": serialize_datetime(now + timedelta(minutes=index)),
+                "guild_id": None,
+                "guild_name": None,
+                "channel_id": None,
+                "channel_name": None,
+                "origin_jump_url": None,
+                "delivery_attempts": 0,
+                "last_attempt_at": None,
+                "retry_after": None,
+            }
+        self._attach_premium()
+
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop(), get_channel=self.bot.get_channel)
+        cog = UtilityCog(bot)
+        original_service = cog.service
+        try:
+            cog.service = self.service
+            embed = cog._reminder_list_embed(DummyTarget(user.id, display_name="Mira"), self.service.list_reminders(user.id))
+            fields = {field.name: field.value for field in embed.fields}
+
+            self.assertIn("Saved Above Current Plan", fields)
+            self.assertIn("Reminders: saved **4** | active on this plan **3 / 3**", fields["Saved Above Current Plan"])
+            self.assertIn("Channel reminders: saved **2** | active on this plan **1 / 1**", fields["Saved Above Current Plan"])
+            self.assertIn("stays preserved", fields["Saved Above Current Plan"])
+        finally:
+            await original_service.close()
+
+    async def test_bremind_status_embed_reports_saved_detection_channels_above_current_plan(self):
+        bot_member = DummyMember(9991, bot=True, display_name="Babblebox")
+        guild = DummyGuild(91, members=[bot_member])
+        guild.me = bot_member
+        for channel_id in range(201, 207):
+            channel = DummyChannel(channel_id, guild=guild, visible_user_ids={guild.me.id})
+            guild.add_channel(channel)
+            self.bot.add_channel(channel)
+
+        self._attach_premium(guild_plans={guild.id: PLAN_GUILD_PRO})
+        ok, result = await self.service.configure_bump(
+            guild.id,
+            detection_channel_ids=[201, 202, 203, 204, 205, 206],
+        )
+        self.assertTrue(ok, result)
+        self._attach_premium()
+
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop(), get_channel=self.bot.get_channel)
+        cog = UtilityCog(bot)
+        original_service = cog.service
+        try:
+            cog.service = self.service
+            embed = cog._bremind_status_embed(guild)
+            fields = {field.name: field.value for field in embed.fields}
+
+            self.assertIn("Saved Above Current Plan", fields)
+            self.assertIn("Detection channels: saved **6** | active on this plan **5 / 5**", fields["Saved Above Current Plan"])
+            self.assertIn("stays preserved", fields["Saved Above Current Plan"])
+        finally:
+            await original_service.close()
 
     def test_later_list_embed_uses_compact_marker_blocks(self):
         cog = object.__new__(UtilityCog)

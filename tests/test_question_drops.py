@@ -33,7 +33,7 @@ from babblebox.question_drops_content import (
     render_answer_summary,
     validate_content_pack,
 )
-from babblebox.question_drops_service import QUESTION_DROP_LATE_CORRECT_WINDOW_SECONDS, QuestionDropsService
+from babblebox.question_drops_service import QUESTION_DROP_LATE_CORRECT_WINDOW_SECONDS, QuestionDropsService, _slot_seed_material
 from babblebox.question_drops_store import QuestionDropsStore, _active_drop_from_row, _config_from_row
 from babblebox.premium_limits import CAPABILITY_QUESTION_DROPS_AI_CELEBRATIONS
 from babblebox.profile_service import ProfileService
@@ -886,6 +886,104 @@ class QuestionDropsServiceTests(unittest.IsolatedAsyncioTestCase):
     def _last_batch_results(self):
         return self.bot.profile_service.record_question_drop_results_batch.await_args.args[0]
 
+    def _variant_tag_value(self, variant: QuestionDropVariant, prefix: str) -> str:
+        for tag in getattr(variant, "tags", ()):
+            if isinstance(tag, str) and tag.startswith(prefix):
+                value = tag[len(prefix) :].strip().casefold()
+                if value:
+                    return value
+        return ""
+
+    def _variant_repeat_keys(self, variant: QuestionDropVariant) -> dict[str, object]:
+        answer_shape = self._variant_tag_value(variant, "shape:") or str(variant.answer_spec.get("type") or "text").strip().casefold()
+        subcategory = self._variant_tag_value(variant, "sub:")
+        reasoning_mode = self._variant_tag_value(variant, "mode:")
+        return {
+            "answer_shape": answer_shape,
+            "category_sub_shape": (variant.category, subcategory, answer_shape),
+            "category_mode_shape": (variant.category, reasoning_mode, answer_shape),
+        }
+
+    def _category_repeat_candidates_for_slot(self, slot_key: str) -> dict[str, QuestionDropVariant]:
+        config = self.service.get_config(self.guild.id)
+        return {
+            variant.concept_id: variant
+            for variant in iter_candidate_variants(
+                categories=set(self.service._enabled_categories(config)),
+                seed_material=_slot_seed_material(self.guild.id, self.channel.id, slot_key),
+                variants_per_seed=12,
+            )
+        }
+
+    async def _build_selector_state(self, *, profile: str, drops_per_day: int, until_slot: str) -> tuple[datetime, list[dict[str, object]], list[tuple[str, QuestionDropVariant]]]:
+        self.assertIn(profile, QUESTION_DROP_DIFFICULTY_PROFILES)
+        ok, message = await self.service.update_config(
+            self.guild.id,
+            drops_per_day=drops_per_day,
+            difficulty_profile=profile,
+        )
+        self.assertTrue(ok, message)
+
+        exposures: list[dict[str, object]] = []
+        picks: list[tuple[str, QuestionDropVariant]] = []
+        base = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
+
+        for day in range(30):
+            current_time = base + timedelta(days=day)
+            slot_day = current_time.date().isoformat()
+            with patch("babblebox.question_drops_service.ge.now_utc", return_value=current_time):
+                for slot in range(drops_per_day):
+                    slot_key = f"{slot_day}:{slot}"
+                    if slot_key == until_slot:
+                        return current_time, exposures, picks
+                    variant = self.service._select_variant(
+                        self.guild.id,
+                        self.channel.id,
+                        exposures=exposures,
+                        slot_key=slot_key,
+                        config=self.service.get_config(self.guild.id),
+                    )
+                    self.assertIsNotNone(variant)
+                    picks.append((slot_key, variant))
+                    exposures.insert(
+                        0,
+                        {
+                            "guild_id": self.guild.id,
+                            "channel_id": self.channel.id,
+                            "concept_id": variant.concept_id,
+                            "variant_hash": variant.variant_hash,
+                            "category": variant.category,
+                            "difficulty": variant.difficulty,
+                            "asked_at": (current_time - timedelta(minutes=(drops_per_day - slot))).isoformat(),
+                            "resolved_at": None,
+                            "winner_user_id": None,
+                            "slot_key": slot_key,
+                        },
+                    )
+
+        self.fail(f"Did not reach selector slot {until_slot}.")
+
+    def _recent_exposures(self, *, current_time: datetime, concept_ids: list[str]) -> list[dict[str, object]]:
+        exposures: list[dict[str, object]] = []
+        for index, concept_id in enumerate(concept_ids):
+            seed = question_drop_seed_for_concept(concept_id)
+            self.assertIsNotNone(seed)
+            exposures.append(
+                {
+                    "guild_id": self.guild.id,
+                    "channel_id": self.channel.id,
+                    "concept_id": concept_id,
+                    "variant_hash": f"{concept_id}:{index}",
+                    "category": seed["category"],
+                    "difficulty": seed["difficulty"],
+                    "asked_at": (current_time - timedelta(minutes=index + 1)).isoformat(),
+                    "resolved_at": None,
+                    "winner_user_id": None,
+                    "slot_key": f"recent:{index}",
+                }
+            )
+        return exposures
+
     async def _simulate_selector_mix(self, *, profile: str, drops_per_day: int, days: int = 30) -> dict[str, object]:
         self.assertIn(profile, QUESTION_DROP_DIFFICULTY_PROFILES)
         ok, message = await self.service.update_config(
@@ -897,10 +995,25 @@ class QuestionDropsServiceTests(unittest.IsolatedAsyncioTestCase):
 
         exposures: list[dict[str, object]] = []
         counts: Counter[int] = Counter()
+        category_counts: Counter[str] = Counter()
         family_repeats = 0
         max_hard_run = 0
         current_hard_run = 0
+        max_shape_run = 0
+        current_shape_run = 0
         previous_family: str | None = None
+        previous_shape: str | None = None
+        category_sub_shape_repeats: list[dict[str, object]] = []
+        category_mode_shape_repeats: list[dict[str, object]] = []
+        known_offender_repeats: list[dict[str, object]] = []
+        last_sub_shape_seen: dict[tuple[str, str, str], tuple[int, str, QuestionDropVariant]] = {}
+        last_mode_shape_seen: dict[tuple[str, str, str], tuple[int, str, QuestionDropVariant]] = {}
+        known_offender_pairs = {
+            frozenset(("logic:true-false", "logic:not-icy-not-comet")),
+            frozenset(("language:oxford-comma-boolean", "language:semicolon-clauses")),
+            frozenset(("language:parallel-structure", "language:malapropism-definition")),
+        }
+        pick_sequence: list[dict[str, object]] = []
         base = datetime(2026, 1, 1, 12, 0, tzinfo=timezone.utc)
 
         for day in range(days):
@@ -918,14 +1031,68 @@ class QuestionDropsServiceTests(unittest.IsolatedAsyncioTestCase):
                     )
                     self.assertIsNotNone(variant)
                     counts[int(variant.difficulty)] += 1
+                    category_counts[variant.category] += 1
                     if int(variant.difficulty) == 3:
                         current_hard_run += 1
                         max_hard_run = max(max_hard_run, current_hard_run)
                     else:
                         current_hard_run = 0
+                    repeat_keys = self._variant_repeat_keys(variant)
+                    answer_shape = str(repeat_keys["answer_shape"])
+                    if answer_shape == previous_shape:
+                        current_shape_run += 1
+                    else:
+                        current_shape_run = 1
+                        previous_shape = answer_shape
+                    max_shape_run = max(max_shape_run, current_shape_run)
+                    pick_index = len(pick_sequence)
+                    sub_shape_key = tuple(repeat_keys["category_sub_shape"])
+                    mode_shape_key = tuple(repeat_keys["category_mode_shape"])
+                    previous_sub_shape = last_sub_shape_seen.get(sub_shape_key)
+                    if previous_sub_shape is not None:
+                        previous_index, previous_slot_key, previous_variant = previous_sub_shape
+                        gap = pick_index - previous_index
+                        event = {
+                            "gap": gap,
+                            "key": sub_shape_key,
+                            "slot_key": slot_key,
+                            "previous_slot_key": previous_slot_key,
+                            "concept_id": variant.concept_id,
+                            "previous_concept_id": previous_variant.concept_id,
+                        }
+                        category_sub_shape_repeats.append(event)
+                        if gap <= 6 and frozenset((variant.concept_id, previous_variant.concept_id)) in known_offender_pairs:
+                            known_offender_repeats.append(event)
+                    last_sub_shape_seen[sub_shape_key] = (pick_index, slot_key, variant)
+                    previous_mode_shape = last_mode_shape_seen.get(mode_shape_key)
+                    if previous_mode_shape is not None:
+                        previous_index, previous_slot_key, previous_variant = previous_mode_shape
+                        category_mode_shape_repeats.append(
+                            {
+                                "gap": pick_index - previous_index,
+                                "key": mode_shape_key,
+                                "slot_key": slot_key,
+                                "previous_slot_key": previous_slot_key,
+                                "concept_id": variant.concept_id,
+                                "previous_concept_id": previous_variant.concept_id,
+                            }
+                        )
+                    last_mode_shape_seen[mode_shape_key] = (pick_index, slot_key, variant)
                     if previous_family == variant.family_id:
                         family_repeats += 1
                     previous_family = variant.family_id
+                    pick_sequence.append(
+                        {
+                            "slot_key": slot_key,
+                            "concept_id": variant.concept_id,
+                            "family_id": variant.family_id,
+                            "category": variant.category,
+                            "difficulty": int(variant.difficulty),
+                            "answer_shape": answer_shape,
+                            "category_sub_shape": sub_shape_key,
+                            "category_mode_shape": mode_shape_key,
+                        }
+                    )
                     exposures.insert(
                         0,
                         {
@@ -947,8 +1114,14 @@ class QuestionDropsServiceTests(unittest.IsolatedAsyncioTestCase):
         return {
             "counts": counts,
             "shares": shares,
+            "category_counts": category_counts,
             "family_repeats": family_repeats,
             "max_hard_run": max_hard_run,
+            "max_shape_run": max_shape_run,
+            "pick_sequence": pick_sequence,
+            "category_sub_shape_repeats": category_sub_shape_repeats,
+            "category_mode_shape_repeats": category_mode_shape_repeats,
+            "known_offender_repeats": known_offender_repeats,
         }
 
     async def test_selector_avoids_recent_concept_repeats(self):
@@ -1308,6 +1481,115 @@ class QuestionDropsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(next_variant)
         self.assertNotEqual(next_variant.family_id, first_variant.family_id)
 
+    async def test_selector_prefers_healthier_logic_bucket_over_recent_boolean_inference_clone(self):
+        slot_key = "2026-01-26:3"
+        ok, message = await self.service.update_config(self.guild.id, drops_per_day=10, difficulty_profile="smart")
+        self.assertTrue(ok, message)
+        current_time = datetime(2026, 1, 26, 12, 0, tzinfo=timezone.utc)
+        exposures = self._recent_exposures(
+            current_time=current_time,
+            concept_ids=[
+                "geography:landlocked-country",
+                "culture:haiku-syllables",
+                "science:adaptation-definition",
+                "logic:book-order-left-right",
+                "history:ghana-independence",
+                "logic:true-false",
+                "culture:solo-duet-quartet",
+                "geography:rain-shadow",
+            ],
+        )
+
+        candidates = self._category_repeat_candidates_for_slot(slot_key)
+        subset = [candidates["logic:not-icy-not-comet"], candidates["logic:bird-owner-paz"]]
+
+        with patch("babblebox.question_drops_service.iter_candidate_variants", return_value=subset), patch(
+            "babblebox.question_drops_service.ge.now_utc",
+            return_value=current_time,
+        ):
+            pick = self.service._select_variant(
+                self.guild.id,
+                self.channel.id,
+                exposures=exposures,
+                slot_key=slot_key,
+                config=self.service.get_config(self.guild.id),
+            )
+
+        self.assertIsNotNone(pick)
+        self.assertEqual(pick.concept_id, "logic:bird-owner-paz")
+
+    async def test_selector_prefers_healthier_language_bucket_over_recent_grammar_boolean_clone(self):
+        slot_key = "2026-01-27:2"
+        ok, message = await self.service.update_config(self.guild.id, drops_per_day=10, difficulty_profile="hard")
+        self.assertTrue(ok, message)
+        current_time = datetime(2026, 1, 27, 12, 0, tzinfo=timezone.utc)
+        exposures = self._recent_exposures(
+            current_time=current_time,
+            concept_ids=[
+                "logic:not-icy-not-comet",
+                "science:insulator-choice",
+                "math:multiplication",
+                "geography:cairo-nairobi-capetown",
+                "history:zheng-he-ming",
+                "language:oxford-comma-boolean",
+                "history:order-feudalism-renaissance-enlightenment",
+                "logic:mini-deduction",
+            ],
+        )
+
+        candidates = self._category_repeat_candidates_for_slot(slot_key)
+        subset = [candidates["language:semicolon-clauses"], candidates["language:formal-email"]]
+
+        with patch("babblebox.question_drops_service.iter_candidate_variants", return_value=subset), patch(
+            "babblebox.question_drops_service.ge.now_utc",
+            return_value=current_time,
+        ):
+            pick = self.service._select_variant(
+                self.guild.id,
+                self.channel.id,
+                exposures=exposures,
+                slot_key=slot_key,
+                config=self.service.get_config(self.guild.id),
+            )
+
+        self.assertIsNotNone(pick)
+        self.assertEqual(pick.concept_id, "language:formal-email")
+
+    async def test_selector_prefers_healthier_language_bucket_over_recent_usage_multiple_choice_clone(self):
+        slot_key = "2026-01-14:3"
+        ok, message = await self.service.update_config(self.guild.id, drops_per_day=10, difficulty_profile="hard")
+        self.assertTrue(ok, message)
+        current_time = datetime(2026, 1, 14, 12, 0, tzinfo=timezone.utc)
+        exposures = self._recent_exposures(
+            current_time=current_time,
+            concept_ids=[
+                "math:clock-angle-three",
+                "language:parallel-structure",
+                "logic:all-some-rust",
+                "culture:lp-speed",
+                "geography:monsoon-definition",
+                "science:neutral-ph",
+            ],
+        )
+
+        candidates = self._category_repeat_candidates_for_slot(slot_key)
+        subset = [candidates["language:malapropism-definition"], candidates["language:formal-email"]]
+
+        with patch("babblebox.question_drops_service.iter_candidate_variants", return_value=subset), patch(
+            "babblebox.question_drops_service.ge.now_utc",
+            return_value=current_time,
+        ):
+            pick = self.service._select_variant(
+                self.guild.id,
+                self.channel.id,
+                exposures=exposures,
+                slot_key=slot_key,
+                config=self.service.get_config(self.guild.id),
+            )
+
+        self.assertIsNotNone(pick)
+        self.assertEqual(pick.concept_id, "language:formal-email")
+
     async def test_selector_keeps_answer_shape_spread_under_repeated_scheduling(self):
         ok, message = await self.service.update_config(self.guild.id, drops_per_day=8, difficulty_profile="smart")
         self.assertTrue(ok, message)
@@ -1357,20 +1639,31 @@ class QuestionDropsServiceTests(unittest.IsolatedAsyncioTestCase):
             max_run = max(max_run, current_run)
 
         self.assertGreaterEqual(len(set(shapes)), 4)
-        self.assertLessEqual(max_run, 4)
+        self.assertLessEqual(max_run, 2)
 
     async def test_selector_profiles_shift_mix_and_avoid_family_spam_over_time(self):
         results: dict[tuple[str, int], dict[str, object]] = {}
         for profile in QUESTION_DROP_DIFFICULTY_PROFILES:
-            for drops_per_day in (2, 5, 9):
+            for drops_per_day in (2, 5, 9, 10):
                 with self.subTest(profile=profile, drops_per_day=drops_per_day):
                     result = await self._simulate_selector_mix(profile=profile, drops_per_day=drops_per_day)
                     self.assertEqual(result["family_repeats"], 0)
-                    self.assertLessEqual(result["max_hard_run"], 2)
+                    allowed_hard_run = 3 if profile == "hard" and drops_per_day == 10 else 2
+                    self.assertLessEqual(result["max_hard_run"], allowed_hard_run)
+                    self.assertLessEqual(result["max_shape_run"], 2)
                     self.assertGreater(result["shares"][2], 0.34)
+                    self.assertFalse(
+                        [event for event in result["category_sub_shape_repeats"] if int(event["gap"]) <= 4],
+                        result["category_sub_shape_repeats"],
+                    )
+                    self.assertFalse(result["known_offender_repeats"], result["known_offender_repeats"])
+                    self.assertLessEqual(
+                        max(result["category_counts"].values()) - min(result["category_counts"].values()),
+                        5,
+                    )
                     results[(profile, drops_per_day)] = result
 
-        for drops_per_day in (2, 5, 9):
+        for drops_per_day in (2, 5, 9, 10):
             standard = results[("standard", drops_per_day)]["shares"]
             smart = results[("smart", drops_per_day)]["shares"]
             hard = results[("hard", drops_per_day)]["shares"]

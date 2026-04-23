@@ -12,6 +12,7 @@ from babblebox.app_command_hardening import harden_admin_root_group
 from babblebox import game_engine as ge
 from babblebox.command_utils import defer_hybrid_response, send_hybrid_response
 from babblebox.premium_models import SYSTEM_PREMIUM_OWNER_USER_IDS
+from babblebox.premium_service import format_saved_state_status, preserved_over_limit_note
 from babblebox.runtime_health import bind_started_service
 from babblebox.shield_ai import SHIELD_AI_SUPPORT_GUILD_ID, format_shield_ai_model_list
 from babblebox.shield_service import (
@@ -1816,6 +1817,57 @@ class ShieldCog(commands.Cog):
             len(entry.get("user_ids", [])),
         )
 
+    def _shield_ai_entitlement_lines(self, ai_status: dict[str, object], *, include_plan_allowed: bool = False) -> list[str]:
+        lines = [
+            f"Entitlement: {ai_status.get('premium_summary') or 'Guild Pro status is unavailable right now.'}",
+            f"Configured models: {self._format_ai_models(ai_status.get('configured_allowed_models', []))}",
+            f"Effective models right now: {self._format_ai_models(ai_status.get('effective_allowed_models', ai_status.get('allowed_models', [])))}",
+            "Upgrade path: Guild Pro unlocks gpt-5.4-mini plus gpt-5.4.",
+        ]
+        if include_plan_allowed:
+            lines.append(f"Plan-allowed models: {self._format_ai_models(ai_status.get('plan_allowed_models', []))}")
+        if ai_status.get("configured_models_capped"):
+            lines.append("Stored higher-tier Shield AI settings stay configured, but the effective lane is capped until Guild Pro returns.")
+        return lines
+
+    def _shield_ai_entitlement_text(self, ai_status: dict[str, object], *, include_plan_allowed: bool = False) -> str:
+        return "\n".join(self._shield_ai_entitlement_lines(ai_status, include_plan_allowed=include_plan_allowed))
+
+    def _shield_ai_scope_update_text(self, ai_status: dict[str, object], *, pack_summary: str) -> str:
+        lines = [
+            f"Shield AI review scope now uses `{ai_status.get('min_confidence', 'high')}` minimum local confidence for {pack_summary}.",
+            self._shield_ai_entitlement_text(ai_status),
+            f"Provider diagnostics: {ai_status.get('provider_status') or 'Unavailable.'}",
+            f"Local blockers: {self._ai_setup_blocker_summary(list(ai_status.get('setup_blockers', [])))}",
+        ]
+        return "\n".join(lines)
+
+    def _custom_pattern_limit_text(self, guild_id: int, config: dict[str, object]) -> str:
+        limit_value = self.service.custom_pattern_limit(guild_id)
+        saved_count = len(config.get("custom_patterns", []))
+        active_count = min(saved_count, limit_value)
+        line = f"Advanced patterns: {format_saved_state_status(saved_count=saved_count, active_count=active_count, limit_value=limit_value)}"
+        note = preserved_over_limit_note(saved_count=saved_count, active_count=active_count)
+        if note:
+            line += f"\n{note}"
+        return line
+
+    def _saved_pack_exemption_lines(self, guild_id: int, config: dict[str, object]) -> list[str]:
+        limit_value = self.service.pack_exemption_limit(guild_id)
+        lines: list[str] = []
+        for pack in RULE_PANEL_PACKS:
+            channel_count, role_count, user_count = self._pack_exemption_counts(config, pack)
+            for noun, saved_count in (("channels", channel_count), ("roles", role_count), ("members", user_count)):
+                active_count = min(saved_count, limit_value)
+                if saved_count <= active_count:
+                    continue
+                lines.append(
+                    f"{PACK_LABELS[pack]} {noun}: {format_saved_state_status(saved_count=saved_count, active_count=active_count, limit_value=limit_value)}"
+                )
+        if lines:
+            lines.append(preserved_over_limit_note(saved_count=1, active_count=0) or "")
+        return lines
+
     def _pack_option_lines(self, config: dict[str, object], pack: str) -> list[str]:
         if pack == "spam":
             return [
@@ -2026,8 +2078,7 @@ class ShieldCog(commands.Cog):
                     f"Guild: {guild_label}\n"
                     f"Enabled: **{'Yes' if ai_status['enabled'] else 'No'}**\n"
                     f"Source: {self._ai_policy_source_label(ai_status['policy_source'])}\n"
-                    f"Enhanced models: {'Unlocked' if ai_status.get('premium_unlocked') else 'Guild Pro required for mini/full'}\n"
-                    f"Allowed models: {self._format_ai_models(ai_status['allowed_models'])}\n"
+                    f"{self._shield_ai_entitlement_text(ai_status)}\n"
                     f"Guild access mode: `{ai_status['guild_access_mode']}`\n"
                     f"Guild model override: {self._format_ai_models(ai_status['guild_allowed_models_override'])}"
                 ),
@@ -2187,8 +2238,7 @@ class ShieldCog(commands.Cog):
             value=(
                 f"Readiness: {ai_status['status']}\n"
                 f"Policy source: {self._ai_policy_source_label(ai_status['policy_source'])}\n"
-                f"Enhanced models: {'Unlocked' if ai_status.get('premium_unlocked') else 'Guild Pro required for mini/full'}\n"
-                f"Allowed models: {self._format_ai_models(ai_status['allowed_models'])}\n"
+                f"{self._shield_ai_entitlement_text(ai_status)}\n"
                 f"Routing: {self._ai_routing_label(ai_status['routing_strategy'])}\n"
                 f"Local-confidence threshold: `{ai_status['min_confidence']}`\n"
                 f"Packs: {self._format_ai_pack_summary(ai_status['enabled_packs'])}\n"
@@ -2244,7 +2294,7 @@ class ShieldCog(commands.Cog):
             value=(
                 f"Repeated-hit escalation: `{config['escalation_threshold']}` hits in `{config['escalation_window_minutes']}` minutes\n"
                 f"Global timeout fallback: `{config['timeout_minutes']}` minutes\n"
-                f"{len(config['custom_patterns'])}/{self.service.custom_pattern_limit(guild_id)} configured\n"
+                f"{self._custom_pattern_limit_text(guild_id, config)}\n"
                 "Advanced patterns stay safe-text only. Raw user regex is intentionally unsupported."
             ),
             inline=False,
@@ -2348,6 +2398,9 @@ class ShieldCog(commands.Cog):
             ),
             inline=False,
         )
+        saved_exemption_lines = self._saved_pack_exemption_lines(guild_id, config)
+        if saved_exemption_lines:
+            embed.add_field(name="Saved Above Current Plan", value="\n".join(saved_exemption_lines), inline=False)
         embed.add_field(
             name="Editing Model",
             value=(
@@ -2364,7 +2417,7 @@ class ShieldCog(commands.Cog):
         log_channel = self._format_mentions([int(config["log_channel_id"])], kind="channel") if config.get("log_channel_id") else "Not set"
         embed = discord.Embed(
             title="Shield AI Assist",
-            description="Second-pass review for already-flagged live messages only. Owner policy controls availability, and Guild Pro unlocks gpt-5.4-mini plus gpt-5.4.",
+            description="Second-pass review for already-flagged live messages only. Owner policy controls availability, baseline gpt-5.4-nano stays the ordinary lane, and Guild Pro unlocks gpt-5.4-mini plus gpt-5.4.",
             color=ge.EMBED_THEME["info"],
         )
         embed.add_field(
@@ -2373,10 +2426,8 @@ class ShieldCog(commands.Cog):
                 f"Enabled: **{'Yes' if ai_status['enabled'] else 'No'}**\n"
                 f"Readiness: {ai_status['status']}\n"
                 f"Policy source: {self._ai_policy_source_label(ai_status['policy_source'])}\n"
-                f"Enhanced models: {'Unlocked' if ai_status.get('premium_unlocked') else 'Guild Pro required for mini/full'}\n"
-                f"Plan-allowed models: {self._format_ai_models(ai_status['plan_allowed_models'])}\n"
+                f"{self._shield_ai_entitlement_text(ai_status, include_plan_allowed=True)}\n"
                 f"Ordinary-guild default: {'Enabled' if ai_status['ordinary_global_enabled'] else 'Disabled'}\n"
-                f"Allowed models: {self._format_ai_models(ai_status['allowed_models'])}\n"
                 f"Guild model override: {self._format_ai_models(ai_status['guild_allowed_models_override'])}\n"
                 f"Provider diagnostics: {ai_status['provider_status']}"
             ),
@@ -2425,7 +2476,7 @@ class ShieldCog(commands.Cog):
             value="`/shield ai min_confidence:high privacy:true promo:false scam:true adult:true severe:true`",
             inline=False,
         )
-        return self._finalize_shield_embed(embed, footer="Babblebox Shield AI | Review scope is admin-configurable; Guild Pro unlocks mini/full")
+        return self._finalize_shield_embed(embed, footer="Babblebox Shield AI | Review scope is admin-configurable; baseline nano stays available and Guild Pro unlocks mini/full")
 
     def _logs_embed(self, guild_id: int) -> discord.Embed:
         config = self.service.get_config(guild_id)
@@ -3123,6 +3174,12 @@ class ShieldCog(commands.Cog):
             min_confidence=min_confidence,
             enabled_packs=next_packs if any(value is not None for value in (privacy, promo, scam, adult, severe)) else None,
         )
+        if ok:
+            ai_status = self.service.get_ai_status(ctx.guild.id)
+            message = self._shield_ai_scope_update_text(
+                ai_status,
+                pack_summary=self._format_ai_pack_summary(ai_status["enabled_packs"]),
+            )
         await self._send_result(ctx, "Shield AI", message, ok=ok)
 
     @commands.command(name="shieldai", hidden=True)

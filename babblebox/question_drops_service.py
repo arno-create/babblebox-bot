@@ -4902,27 +4902,115 @@ class QuestionDropsService:
         )
 
     def _tag_values(self, tags: tuple[str, ...] | list[str], prefix: str) -> tuple[str, ...]:
-        return tuple(
-            sorted(
-                {
-                    str(tag)[len(prefix) :].strip().casefold()
-                    for tag in tags
-                    if isinstance(tag, str) and str(tag).startswith(prefix) and str(tag)[len(prefix) :].strip()
-                }
-            )
-        )
+        values: list[str] = []
+        for tag in tags:
+            if not isinstance(tag, str) or not str(tag).startswith(prefix):
+                continue
+            cleaned = str(tag)[len(prefix) :].strip().casefold()
+            if cleaned and cleaned not in values:
+                values.append(cleaned)
+        return tuple(values)
+
+    def _primary_tag_value(self, tags: tuple[str, ...] | list[str], prefix: str) -> str:
+        values = self._tag_values(tags, prefix)
+        return values[0] if values else ""
 
     def _seed_tag_values(self, seed: dict[str, Any], prefix: str) -> tuple[str, ...]:
         return self._tag_values(tuple(seed.get("tags", ())), prefix)
 
+    def _seed_primary_tag_value(self, seed: dict[str, Any], prefix: str) -> str:
+        return self._primary_tag_value(tuple(seed.get("tags", ())), prefix)
+
     def _variant_tag_values(self, variant: QuestionDropVariant, prefix: str) -> tuple[str, ...]:
         return self._tag_values(getattr(variant, "tags", ()), prefix)
 
+    def _variant_primary_tag_value(self, variant: QuestionDropVariant, prefix: str) -> str:
+        return self._primary_tag_value(getattr(variant, "tags", ()), prefix)
+
     def _variant_answer_shape(self, variant: QuestionDropVariant) -> str:
-        shape_values = self._variant_tag_values(variant, "shape:")
-        if shape_values:
-            return shape_values[0]
+        shape_value = self._variant_primary_tag_value(variant, "shape:")
+        if shape_value:
+            return shape_value
         return str(variant.answer_spec.get("type") or "text").strip().casefold()
+
+    def _repeat_bucket_key(self, *, category: str, tag_value: str, answer_shape: str) -> tuple[str, str, str] | None:
+        category_id = str(category or "").strip().casefold()
+        tag_id = str(tag_value or "").strip().casefold()
+        shape_id = str(answer_shape or "").strip().casefold()
+        if not category_id or not tag_id or not shape_id:
+            return None
+        return (category_id, tag_id, shape_id)
+
+    def _seed_repeat_metadata(self, seed: dict[str, Any], *, category_override: str = "") -> dict[str, Any]:
+        category = str(category_override or seed.get("category") or "").strip().casefold()
+        answer_shape = self._seed_primary_tag_value(seed, "shape:")
+        subcategory_values = self._seed_tag_values(seed, "sub:")
+        reasoning_mode_values = self._seed_tag_values(seed, "mode:")
+        tag_values = tuple(
+            tag
+            for tag in tuple(seed.get("tags", ()))
+            if isinstance(tag, str) and str(tag).startswith(("sub:", "mode:", "shape:"))
+        )
+        category_sub_shape_keys = tuple(
+            key
+            for key in (
+                self._repeat_bucket_key(category=category, tag_value=subcategory, answer_shape=answer_shape)
+                for subcategory in subcategory_values
+            )
+            if key is not None
+        )
+        category_mode_shape_keys = tuple(
+            key
+            for key in (
+                self._repeat_bucket_key(category=category, tag_value=reasoning_mode, answer_shape=answer_shape)
+                for reasoning_mode in reasoning_mode_values
+            )
+            if key is not None
+        )
+        return {
+            "family_id": str(seed.get("family_id") or "").strip(),
+            "subcategory": subcategory_values[0] if subcategory_values else "",
+            "reasoning_mode": reasoning_mode_values[0] if reasoning_mode_values else "",
+            "answer_shape": answer_shape,
+            "tag_values": tag_values,
+            "category_sub_shape_keys": category_sub_shape_keys,
+            "category_mode_shape_keys": category_mode_shape_keys,
+        }
+
+    def _variant_repeat_metadata(self, variant: QuestionDropVariant) -> dict[str, Any]:
+        subcategory_values = self._variant_tag_values(variant, "sub:")
+        reasoning_mode_values = self._variant_tag_values(variant, "mode:")
+        answer_shape = self._variant_answer_shape(variant)
+        tag_values = tuple(
+            tag
+            for tag in getattr(variant, "tags", ())
+            if isinstance(tag, str) and str(tag).startswith(("sub:", "mode:", "shape:"))
+        )
+        category_sub_shape_keys = tuple(
+            key
+            for key in (
+                self._repeat_bucket_key(category=variant.category, tag_value=subcategory, answer_shape=answer_shape)
+                for subcategory in subcategory_values
+            )
+            if key is not None
+        )
+        category_mode_shape_keys = tuple(
+            key
+            for key in (
+                self._repeat_bucket_key(category=variant.category, tag_value=reasoning_mode, answer_shape=answer_shape)
+                for reasoning_mode in reasoning_mode_values
+            )
+            if key is not None
+        )
+        return {
+            "family_id": variant.family_id,
+            "subcategory": subcategory_values[0] if subcategory_values else "",
+            "reasoning_mode": reasoning_mode_values[0] if reasoning_mode_values else "",
+            "answer_shape": answer_shape,
+            "tag_values": tag_values,
+            "category_sub_shape_keys": category_sub_shape_keys,
+            "category_mode_shape_keys": category_mode_shape_keys,
+        }
 
     def _select_variant(
         self,
@@ -4951,6 +5039,8 @@ class QuestionDropsService:
         short_family_counts = Counter()
         short_tag_counts = Counter()
         short_shape_counts = Counter()
+        short_sub_shape_counts = Counter()
+        short_mode_shape_counts = Counter()
         short_combo_counts = Counter()
         category_concept_counts = Counter()
         category_variant_capacity = Counter()
@@ -4983,14 +5073,11 @@ class QuestionDropsService:
             concept_id = str(record.get("concept_id") or "").strip()
             variant_hash = str(record.get("variant_hash") or "").strip()
             seed = question_drop_seed_for_concept(concept_id) or {}
-            family_id = str(seed.get("family_id") or "").strip()
-            tag_values = tuple(
-                tag
-                for tag in tuple(seed.get("tags", ()))
-                if isinstance(tag, str) and str(tag).startswith(("sub:", "mode:", "shape:"))
-            )
-            shape_values = self._seed_tag_values(seed, "shape:")
-            shape_key = shape_values[0] if shape_values else ""
+            category = str(record.get("category") or "").strip().casefold()
+            repeat_metadata = self._seed_repeat_metadata(seed, category_override=category)
+            family_id = str(repeat_metadata["family_id"] or "").strip()
+            tag_values = tuple(repeat_metadata["tag_values"])
+            shape_key = str(repeat_metadata["answer_shape"] or "").strip()
             recent_records.append(
                 (
                     asked_at,
@@ -5001,6 +5088,8 @@ class QuestionDropsService:
                         "family_id": family_id,
                         "tag_values": tag_values,
                         "shape_key": shape_key,
+                        "category_sub_shape_keys": repeat_metadata["category_sub_shape_keys"],
+                        "category_mode_shape_keys": repeat_metadata["category_mode_shape_keys"],
                     },
                 )
             )
@@ -5017,7 +5106,6 @@ class QuestionDropsService:
                     same_day_families.add(family_id)
             age_days = max(0.0, (now - asked_at).total_seconds() / 86400.0)
             if age_days <= medium_window_days:
-                category = str(record.get("category") or "").strip().casefold()
                 if category:
                     category_counts[category] += 1
                 difficulty = int(record.get("difficulty", 0) or 0)
@@ -5032,11 +5120,17 @@ class QuestionDropsService:
                     short_tag_counts[str(tag)] += 1
                 if shape_key:
                     short_shape_counts[shape_key] += 1
+                for category_sub_shape_key in repeat_metadata["category_sub_shape_keys"]:
+                    short_sub_shape_counts[category_sub_shape_key] += 1
+                for category_mode_shape_key in repeat_metadata["category_mode_shape_keys"]:
+                    short_mode_shape_counts[category_mode_shape_key] += 1
                 if family_id and shape_key:
                     short_combo_counts[(family_id, shape_key)] += 1
         recent_records.sort(key=lambda item: item[0], reverse=True)
         recent_family_window = [str(record.get("family_id") or "").strip() for _, record in recent_records[:8] if str(record.get("family_id") or "").strip()]
         recent_shape_window = [str(record.get("shape_key") or "").strip() for _, record in recent_records[:6] if str(record.get("shape_key") or "").strip()]
+        recent_sub_shape_window = [tuple(record.get("category_sub_shape_keys") or ()) for _, record in recent_records[:6] if tuple(record.get("category_sub_shape_keys") or ())]
+        recent_mode_shape_window = [tuple(record.get("category_mode_shape_keys") or ()) for _, record in recent_records[:6] if tuple(record.get("category_mode_shape_keys") or ())]
         recent_difficulty_window = [int(record.get("difficulty", 0) or 0) for _, record in recent_records[:4]]
         scored: list[tuple[float, QuestionDropVariant]] = []
         same_day_family_scored: list[tuple[float, QuestionDropVariant]] = []
@@ -5081,17 +5175,17 @@ class QuestionDropsService:
                 difficulty_balance -= 7.0
             elif int(variant.difficulty) == 3 and recent_difficulty_window[:1] == [3]:
                 difficulty_balance -= 2.5
-            family_penalty = short_family_counts[variant.family_id] * 2.8
-            family_penalty += max(0, family_counts[variant.family_id] - 1) * 0.55
-            for index, family_id in enumerate(recent_family_window):
-                if family_id and family_id == variant.family_id:
+            repeat_metadata = self._variant_repeat_metadata(variant)
+            variant_family_id = str(repeat_metadata["family_id"] or "").strip()
+            family_penalty = short_family_counts[variant_family_id] * 2.8
+            family_penalty += max(0, family_counts[variant_family_id] - 1) * 0.55
+            for index, recent_family_id in enumerate(recent_family_window):
+                if recent_family_id and recent_family_id == repeat_metadata["family_id"]:
                     family_penalty += max(1.6, 7.4 - (index * 1.15))
-            variant_tags = tuple(
-                tag
-                for tag in getattr(variant, "tags", ())
-                if isinstance(tag, str) and str(tag).startswith(("sub:", "mode:", "shape:"))
-            )
-            variant_shape = self._variant_answer_shape(variant)
+            variant_tags = tuple(repeat_metadata["tag_values"])
+            variant_shape = str(repeat_metadata["answer_shape"] or "").strip()
+            sub_shape_keys = tuple(repeat_metadata["category_sub_shape_keys"])
+            mode_shape_keys = tuple(repeat_metadata["category_mode_shape_keys"])
             tag_penalty = 0.0
             novelty_bonus = 0.0
             for tag in variant_tags:
@@ -5100,17 +5194,34 @@ class QuestionDropsService:
                     novelty_bonus += 0.35
             if variant_shape:
                 tag_penalty += short_shape_counts[variant_shape] * 0.9
-            if variant.family_id and variant_shape:
-                tag_penalty += short_combo_counts[(variant.family_id, variant_shape)] * 1.35
+            if variant_family_id and variant_shape:
+                tag_penalty += short_combo_counts[(variant_family_id, variant_shape)] * 1.35
             for index, shape_key in enumerate(recent_shape_window):
                 if shape_key == variant_shape:
                     tag_penalty += max(0.6, 2.8 - (index * 0.55))
+            near_clone_penalty = 0.0
+            sub_shape_overlap = sum(short_sub_shape_counts[key] for key in sub_shape_keys)
+            if sub_shape_keys:
+                near_clone_penalty += sub_shape_overlap * 3.4
+                if sub_shape_overlap == 0:
+                    novelty_bonus += 0.55
+            mode_shape_overlap = sum(short_mode_shape_counts[key] for key in mode_shape_keys)
+            if mode_shape_keys:
+                near_clone_penalty += mode_shape_overlap * 1.6
+                if mode_shape_overlap == 0:
+                    novelty_bonus += 0.25
+            for index, recent_keys in enumerate(recent_sub_shape_window):
+                if any(key in recent_keys for key in sub_shape_keys):
+                    near_clone_penalty += max(1.6, 9.4 - (index * 1.45))
+            for index, recent_keys in enumerate(recent_mode_shape_window):
+                if any(key in recent_keys for key in mode_shape_keys):
+                    near_clone_penalty += max(0.9, 4.8 - (index * 0.8))
             pool_depth_bonus = min(category_concept_counts[variant.category], 18) * 0.08
             jitter = (int(build_variant_hash(slot_key, variant.variant_hash), 16) % 1000) / 1000.0
-            score = freshness + variant_freshness + category_balance + difficulty_balance + novelty_bonus + pool_depth_bonus - family_penalty - tag_penalty + jitter
+            score = freshness + variant_freshness + category_balance + difficulty_balance + novelty_bonus + pool_depth_bonus - family_penalty - tag_penalty - near_clone_penalty + jitter
             if variant.concept_id in same_day_concepts:
                 same_day_concept_scored.append((score - 18.0, variant))
-            elif variant.family_id in same_day_families:
+            elif repeat_metadata["family_id"] in same_day_families:
                 same_day_family_scored.append((score - 10.0, variant))
             else:
                 scored.append((score, variant))
