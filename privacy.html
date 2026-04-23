@@ -673,6 +673,7 @@
               <li>Daily Arcade scores, attempts, streak counters, Buddy and profile state, and other compact identity or progression fields.</li>
               <li>Shield and admin configuration such as enabled modules, scope controls, allowlists, trusted roles, log destinations, and short-lived admin lifecycle state.</li>
               <li>Premium linking and entitlement state such as linked Discord and Patreon account IDs, encrypted provider tokens or secrets, resolved plans, guild claims, sync timestamps, webhook dedupe markers, manual overrides, and support-grade audit metadata.</li>
+              <li>Optional Top.gg vote bonus state such as the Discord user ID, Top.gg vote event ID, vote timestamps, expiry, vote reminder preference, webhook trace/status fields, and weekend vote weight.</li>
               <li>Anonymous confession or reply submission text, one Confessions link field under the server policy, compact review metadata, limited private appeals or reports, a bot-private author mapping, and bot-private owner reply opportunities needed to run staff-blind confession moderation when a server enables the feature.</li>
               <li>For Confessions, Babblebox protects sensitive content and identity linkage with application-level encryption and separate lookup domains before those fields reach durable Postgres storage.</li>
             </ul>
@@ -764,6 +765,14 @@
               campaign IDs, encrypted OAuth tokens, compact sanitized webhook event metadata, and guild-claim state.
               Babblebox deletes the local encrypted Patreon tokens when a user unlinks and is not designed to receive or
               store payment card data from Patreon.
+            </p>
+            <h3>Optional Top.gg vote bonus checks</h3>
+            <p>
+              If the Top.gg vote bonus lane is enabled, Babblebox may receive Top.gg webhook events and optionally query
+              Top.gg for a user's current vote window when that user explicitly refreshes <code>/vote</code>. That can
+              include the Top.gg vote event ID, created or expires timestamps, weekend vote weight, webhook trace
+              metadata, and the user's vote reminder preference. Babblebox does not need to durably store a Top.gg
+              username or <code>avatar_url</code> for the vote bonus lane.
             </p>
             <h3>Optional AI-assisted Shield review</h3>
             <p>

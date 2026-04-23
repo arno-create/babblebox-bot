@@ -20,6 +20,7 @@ COGS = (
     "babblebox.cogs.premium",
     "babblebox.cogs.afk",
     "babblebox.cogs.gameplay",
+    "babblebox.cogs.vote",
     "babblebox.cogs.party_games",
     "babblebox.cogs.utilities",
     "babblebox.cogs.question_drops",

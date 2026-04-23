@@ -28,6 +28,7 @@ Depending on the feature being used, Babblebox may process or store:
 - Discord identifiers such as user IDs, guild IDs, channel IDs, message IDs, role IDs, and timestamps
 - compact feature configuration and state, including Watch preferences, ignored channels or users, Later markers with compact attachment labels, reminders, AFK state, AFK schedules, Daily Arcade results, Buddy or profile state, and Shield or admin configuration
 - premium linking and entitlement state such as linked Discord and Patreon account IDs, encrypted provider tokens or secrets, resolved plans, guild claims, sync timestamps, webhook dedupe markers, manual overrides, and support-grade audit metadata
+- optional Top.gg vote bonus state such as the Discord user ID, Top.gg vote event ID, vote timestamps, expiry, vote reminder preference, webhook trace/status fields, and weekend vote weight
 - limited message or attachment context needed to respond to commands, deliver Watch alerts, process Capture requests, or evaluate locally flagged Shield events, including visible message text, embed text, forwarded message snapshots, and attachment labels
 - anonymous confession or reply submission text, Confessions link fields, compact review metadata, bot-private author mappings, bot-private owner reply opportunities, and limited private appeals or reports needed to run staff-blind confession moderation when a server has Confessions enabled
 - for Confessions, Babblebox now protects sensitive content and identity linkage with application-level encryption and separate lookup domains before those fields reach durable Postgres storage
@@ -95,6 +96,10 @@ Babblebox may rely on necessary service providers to operate, including:
 ### Optional premium linking and entitlement checks
 
 If premium linking is enabled, Babblebox may exchange data with Patreon to link a Discord user to a Patreon member identity, verify active tiers, refresh entitlement state, process webhook updates, and support manual recovery when provider delivery is stale or interrupted. That can include Patreon member IDs, tier IDs, campaign IDs, encrypted OAuth tokens, compact sanitized webhook event metadata, and guild-claim state. Babblebox deletes local encrypted Patreon tokens on unlink and is not designed to receive or store payment card data from Patreon.
+
+### Optional Top.gg vote bonus checks
+
+If the Top.gg vote bonus lane is enabled, Babblebox may receive Top.gg webhook events and optionally query Top.gg for a user's current vote window when that user explicitly refreshes `/vote`. That can include the Top.gg vote event ID, created or expires timestamps, weekend vote weight, webhook trace metadata, and the user's vote reminder preference. Babblebox does not need to durably store a Top.gg username or `avatar_url` for the vote bonus lane.
 
 ### Optional AI-assisted Shield review
 

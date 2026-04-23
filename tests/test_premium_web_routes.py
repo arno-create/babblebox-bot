@@ -6,6 +6,7 @@ from typing import Optional
 from babblebox import web
 from babblebox.premium_provider import PremiumProviderError, WebhookVerificationError
 from babblebox.premium_service import PatreonWebhookResult
+from babblebox.vote_service import TopggWebhookResult
 
 
 class _LoopStub:
@@ -28,12 +29,14 @@ class PremiumWebRoutesTests(unittest.TestCase):
     def setUp(self):
         self.client = web.app.test_client()
         self._original_runtime = getattr(web, "_premium_runtime", None)
+        self._original_vote_runtime = getattr(web, "_vote_runtime", None)
         self._original_bot_runtime = getattr(web, "_bot_runtime", None)
         self._original_webhook_stats = web.get_patreon_webhook_stats()
         web.reset_patreon_webhook_stats()
 
     def tearDown(self):
         web.set_premium_runtime(self._original_runtime)
+        web.set_vote_runtime(self._original_vote_runtime)
         web.set_bot_runtime(self._original_bot_runtime)
         web.reset_patreon_webhook_stats()
         web._patreon_webhook_stats.update(self._original_webhook_stats)
@@ -59,6 +62,7 @@ class PremiumWebRoutesTests(unittest.TestCase):
             patreon=_PatreonStub(configured=patreon_configured),
             complete_link_callback=lambda **kwargs: object(),
             handle_patreon_webhook=lambda **kwargs: object(),
+            handle_topgg_webhook=lambda **kwargs: object(),
         )
         resolved_startup_state = startup_state or ("enabled_safe" if patreon_configured else "disabled")
         stub.provider_diagnostics = lambda: {
@@ -103,6 +107,7 @@ class PremiumWebRoutesTests(unittest.TestCase):
             "utility_service": self._service_stub(bot=bot),
             "profile_service": self._service_stub(bot=bot),
             "question_drops_service": self._service_stub(bot=bot),
+            "vote_service": self._service_stub(bot=bot),
         }
         for attr_name, service in (service_overrides or {}).items():
             services[attr_name] = service
@@ -112,6 +117,7 @@ class PremiumWebRoutesTests(unittest.TestCase):
             setattr(bot, attr_name, service)
         web.set_bot_runtime(bot)
         web.set_premium_runtime(services["premium_service"])
+        web.set_vote_runtime(services["vote_service"])
         return bot
 
     def test_public_root_and_allowed_static_files_are_served_with_security_headers(self):
@@ -317,6 +323,88 @@ class PremiumWebRoutesTests(unittest.TestCase):
         self.assertEqual(payload["status"], "error")
         self.assertEqual(payload["message"], "Babblebox could not process the Patreon webhook safely.")
         self.assertNotIn("stack trace detail", payload["message"])
+
+    def test_topgg_webhook_invalid_signature_response_does_not_leak_details(self):
+        self._attach_runtime(loop=_LoopStub())
+        with patch.object(web, "_run_vote_coroutine", side_effect=WebhookVerificationError("signature mismatch detail")):
+            response = self.client.post(
+                "/topgg/webhook",
+                data=b"{}",
+                headers={"x-topgg-signature": "t=1,v1=bad"},
+            )
+        payload = response.get_json()
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(payload["status"], "invalid")
+        self.assertEqual(payload["message"], "Top.gg webhook signature was invalid.")
+        self.assertNotIn("detail", payload["message"])
+
+    def test_topgg_webhook_accepts_legacy_authorization_header(self):
+        self._attach_runtime(loop=_LoopStub())
+        with patch.object(web, "_run_vote_coroutine", return_value=TopggWebhookResult("processed", "Legacy webhook ok.")):
+            response = self.client.post(
+                "/topgg/webhook",
+                data=b"{}",
+                headers={"Authorization": "legacy-shared-secret"},
+            )
+        payload = response.get_json()
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(payload["status"], "processed")
+        self.assertEqual(payload["message"], "Legacy webhook ok.")
+
+    def test_topgg_webhook_processed_duplicate_and_test_outcomes_map_to_200(self):
+        self._attach_runtime(loop=_LoopStub())
+        for outcome in ("processed", "duplicate"):
+            with patch.object(web, "_run_vote_coroutine", return_value=TopggWebhookResult(outcome, f"Outcome: {outcome}")):
+                response = self.client.post(
+                    "/topgg/webhook",
+                    data=b"{}",
+                    headers={"x-topgg-signature": "t=1,v1=ok"},
+                )
+            payload = response.get_json()
+            self.assertEqual(response.status_code, 200, msg=outcome)
+            self.assertEqual(payload["status"], outcome, msg=outcome)
+            self.assertEqual(payload["message"], f"Outcome: {outcome}", msg=outcome)
+
+    def test_topgg_webhook_invalid_and_runtime_unavailable_map_cleanly(self):
+        self._attach_runtime(loop=_LoopStub())
+        with patch.object(web, "_run_vote_coroutine", return_value=TopggWebhookResult("invalid", "Bad Top.gg payload.")):
+            response = self.client.post(
+                "/topgg/webhook",
+                data=b"{}",
+                headers={"x-topgg-signature": "t=1,v1=ok"},
+            )
+        payload = response.get_json()
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(payload["status"], "invalid")
+        self.assertEqual(payload["message"], "Bad Top.gg payload.")
+
+        web.set_vote_runtime(None)
+        response = self.client.post(
+            "/topgg/webhook",
+            data=b"{}",
+            headers={"x-topgg-signature": "t=1,v1=ok"},
+        )
+        payload = response.get_json()
+        self.assertEqual(response.status_code, 503)
+        self.assertEqual(payload["status"], "unavailable")
+
+        self._attach_runtime(loop=_LoopStub())
+        response = self.client.post("/topgg/webhook", data=b"{}")
+        payload = response.get_json()
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(payload["status"], "invalid")
+        self.assertEqual(payload["message"], "Missing Top.gg webhook verification header.")
+
+    def test_topgg_webhook_rejects_oversized_payload(self):
+        self._attach_runtime(loop=_LoopStub())
+        response = self.client.post(
+            "/topgg/webhook",
+            data=(b"x" * (web.TOPGG_WEBHOOK_MAX_BYTES + 1)),
+            headers={"x-topgg-signature": "t=1,v1=ok"},
+        )
+        payload = response.get_json()
+        self.assertEqual(response.status_code, 413)
+        self.assertEqual(payload["message"], "Top.gg webhook payload exceeded the safe size limit.")
 
     def test_health_is_degraded_without_runtime_attachment(self):
         with patch.dict(web.os.environ, {}, clear=False):

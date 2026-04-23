@@ -630,7 +630,7 @@
               </article>
               <article class="info">
                 <strong>Start fast</strong>
-                <p>Invite the bot, use <code>/help</code> or <code>/support</code>, then try <code>/play</code>, <code>/drops status</code>, <code>/daily</code>, or <code>/watch</code>.</p>
+                <p>Invite the bot, use <code>/help</code> or <code>/support</code>, then try <code>/play</code>, <code>/drops status</code>, <code>/daily</code>, <code>/watch</code>, or <code>/vote</code>.</p>
               </article>
               <article class="info">
                 <strong>Shield stays bounded</strong>
@@ -746,6 +746,7 @@
             <p><code>/play</code> acts as the shared lobby for the live-party lane instead of forcing people to remember several different entry points.</p>
             <div class="command-list">
               <div class="command-row"><div><code>/play</code></div><div><p>Open the multiplayer lobby.</p><span>Start Broken Telephone, Exquisite Corpse, Spyfall, Word Bomb, or Pattern Hunt from one place. Broken Telephone runs as a DM relay, Exquisite Corpse hides every prompt until the stitched reveal, Spyfall rotates the spotlight through live interrogation and voting, Word Bomb keeps the syllable pressure high, and Pattern Hunt keeps private rule guesses in <code>/hunt guess</code>. Coders need server DMs open before the room starts.</span></div></div>
+              <div class="command-row"><div><code>/spyfall vote</code></div><div><p>Call the Spyfall vote from slash.</p><span>Spyfall now lives under <code>/spyfall vote</code> on slash while the old prefix <code>bb!vote</code> still works for a short migration window. The separate <code>/vote</code> root is now reserved for the Top.gg Vote Bonus panel.</span></div></div>
               <div class="command-row"><div><code>/hunt status</code> and <code>/hunt guess</code></div><div><p>Operate the active Pattern Hunt round.</p><span>These stay dormant unless a Pattern Hunt lobby is already live in the server. <code>/hunt status</code> mirrors the live state card privately, and <code>/hunt guess</code> is built for 1-3 clean rule families that stay private while the public chat keeps reading the clues. The <strong>Contains Digits</strong> guess family means digits <code>0-9</code> only, and slash is the cleanest way to submit multi-family theories.</span></div></div>
               <div class="command-row"><div><code>/stats</code> and <code>/leaderboard</code></div><div><p>Check light session stats.</p><span>These stay compact and playful instead of turning into a giant progression system.</span></div></div>
             </div>
@@ -795,6 +796,7 @@
               <div class="command-row"><div><code>/later mark</code></div><div><p>Save a place in a server so you can come back later.</p><span>Useful when you want to keep momentum without opening tabs or pinning messages everywhere, while Later keeps compact attachment labels instead of raw attachment URLs.</span></div></div>
               <div class="command-row"><div><code>/capture</code></div><div><p>Send yourself a private recent-message snapshot.</p><span>Good when you want a clean recap with message context and a jump-back link; private Capture transcript files may include currently available attachment URLs at send time without turning the server into a scrapbook.</span></div></div>
               <div class="command-row"><div><code>/remind</code></div><div><p>Set reminders without needing a separate productivity bot.</p><span>Reminder setup and failure states stay private so channels do not fill with housekeeping, Babblebox rechecks public reminder delivery through private Shield privacy, adult, and severe checks before posting it later, the free baseline stays useful, and Babblebox Plus raises the personal reminder caps.</span></div></div>
+              <div class="command-row"><div><code>/vote</code></div><div><p>Open the Top.gg Vote Bonus panel privately.</p><span><code>/vote</code> shows your current Top.gg status, a direct vote link, refresh controls, and the reminder toggle in one place. Free and Supporter users can unlock a temporary Vote Bonus for Watch, reminders, and recurring AFK without turning voting into a fake premium tier.</span></div></div>
               <div class="command-row"><div><code>/bremind setup</code>, <code>/bremind status</code>, <code>/bremind test</code></div><div><p>Configure admin-only verified Disboard bump reminders without fake manual timers.</p><span>Babblebox V1 only supports Disboard here, starts the cycle only from verified provider output in configured channels, shows the next due window plus blockers in <code>/bremind status</code>, supports quiet, public, or off thank-you behavior, and Babblebox Guild Pro raises the bounded bump-detection channel cap.</span></div></div>
               <div class="command-row"><div><code>/afk</code>, <code>/afktimezone</code>, <code>/afkschedule</code></div><div><p>Set temporary AFK state, timezone hints, and repeating schedules.</p><span>This helps Babblebox explain absence cleanly without forcing manual status updates every time, AFK reasons stay on a bounded private Shield lane for privacy, adult, and severe checks, the free recurring-schedule baseline stays intact, and Babblebox Plus raises that personal cap.</span></div></div>
             </div>
@@ -805,6 +807,7 @@
             <h2>Optional plans, clearer onboarding, and no fake premium mystery.</h2>
             <p>
               Babblebox does not paywall core local Shield protection, core Confessions privacy, or the current free utility baseline.
+              The separate <strong>Top.gg Vote Bonus</strong> lane is temporary, utility-only, and intentionally smaller than paid plans so it never blurs into Babblebox Plus.
               <strong>Supporter</strong> is the paid support tier with Inevitable Friendship benefits but no Babblebox limit increase,
               <strong>Babblebox Plus</strong> raises personal Watch, reminder, and AFK limits, and <strong>Babblebox Guild Pro</strong>
               raises bounded server caps, can make the higher Shield AI model tiers available when owner policy and provider/runtime readiness allow second-pass review,
