@@ -888,7 +888,8 @@ Environment variable notes:
 - `PATREON_CLIENT_ID`, `PATREON_CLIENT_SECRET`, `PATREON_REDIRECT_URI`, `PATREON_WEBHOOK_SECRET`, `PATREON_CAMPAIGN_ID`, `PATREON_SUPPORTER_TIER_IDS`, `PATREON_PLUS_TIER_IDS`, and `PATREON_GUILD_PRO_TIER_IDS` are required for Patreon-linked premium linking, verified webhooks, and user refresh
 - `PATREON_REDIRECT_URI` must exactly match `PUBLIC_BASE_URL` plus `/premium/patreon/callback`, and the Patreon tier ID lists must be disjoint numeric IDs; Babblebox fails the Patreon surface closed when that configuration is incomplete or inconsistent
 - `TOPGG_WEBHOOK_SECRET` is required for the Top.gg Vote Bonus lane. If your Top.gg dashboard exposes Webhooks V2, use the `whs_...` secret. If your dashboard only exposes Legacy Webhooks, use the legacy `Authorization` value instead
-- `TOPGG_TOKEN` is optional in Webhooks V2 mode and only needed for `/vote` refresh recovery, but it becomes required in legacy webhook mode because legacy payloads do not include the vote window timestamps Babblebox needs to confirm safely
+- `TOPGG_TOKEN` is optional in Webhooks V2 mode and only needed for `/vote` refresh recovery, but it becomes required in legacy webhook mode because Babblebox must confirm the vote through Top.gg's legacy API
+- Top.gg legacy mode does not provide exact expiry timestamps, so Babblebox transparently uses the standard 12-hour vote cadence in that mode instead of pretending the timestamps are exact
 - `TOPGG_PROJECT_ID` is optional; if omitted, Babblebox falls back to the running bot user ID and the shipped Babblebox listing ID
 - `TOPGG_STORAGE_BACKEND=memory` is optional for local/test vote-bonus work
 - The embedded public web surface serves only `/`, `/help.html`, `/privacy.html`, `/terms.html`, `/sitemap.xml`, and `/assets/...`; repo files, dotfiles, Markdown, tests, and source paths are never public routes

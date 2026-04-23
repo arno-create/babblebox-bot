@@ -220,15 +220,10 @@ class VoteServiceTests(unittest.IsolatedAsyncioTestCase):
                 "query": {},
             }
             body = json.dumps(payload, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
-            api_payload = {
-                "created_at": "2026-04-23T12:00:00+00:00",
-                "expires_at": "2026-04-24T00:00:00+00:00",
-                "weight": 2,
-            }
             with patch.object(
                 legacy_service,
-                "_fetch_vote_status_payload",
-                new=AsyncMock(return_value=(True, api_payload, None)),
+                "_check_legacy_vote_status",
+                new=AsyncMock(return_value=(True, None)),
             ) as refresh:
                 first = await legacy_service.handle_topgg_webhook(
                     body=body,
@@ -241,14 +236,23 @@ class VoteServiceTests(unittest.IsolatedAsyncioTestCase):
                     trace_id="trace-legacy",
                 )
 
-            self.assertEqual(first, TopggWebhookResult("processed", "Top.gg legacy vote recorded."))
+            self.assertEqual(
+                first,
+                TopggWebhookResult(
+                    "processed",
+                    "Top.gg legacy vote recorded using the standard 12-hour vote window.",
+                ),
+            )
             self.assertEqual(second, TopggWebhookResult("duplicate", "That Top.gg vote event was already processed."))
             refresh.assert_awaited()
             record = legacy_service.get_vote_record(5511)
             self.assertIsNotNone(record)
             self.assertEqual(record["weight"], 2)
-            self.assertEqual(record["webhook_status"], "processed_legacy")
+            self.assertEqual(record["webhook_status"], "processed_legacy_estimated")
             self.assertTrue(str(record["topgg_vote_id"]).startswith("legacy:5511:"))
+            created_at = datetime.fromisoformat(record["created_at"])
+            expires_at = datetime.fromisoformat(record["expires_at"])
+            self.assertAlmostEqual((expires_at - created_at).total_seconds(), 12 * 60 * 60, delta=2)
             await legacy_service.close()
 
     async def test_handle_topgg_legacy_webhook_test_event_and_unconfirmed_vote(self):
@@ -296,8 +300,8 @@ class VoteServiceTests(unittest.IsolatedAsyncioTestCase):
             ).encode("utf-8")
             with patch.object(
                 legacy_service,
-                "_fetch_vote_status_payload",
-                new=AsyncMock(return_value=(False, None, None)),
+                "_check_legacy_vote_status",
+                new=AsyncMock(return_value=(False, None)),
             ):
                 unconfirmed = await legacy_service.handle_topgg_webhook(
                     body=vote_body,
@@ -338,11 +342,7 @@ class VoteServiceTests(unittest.IsolatedAsyncioTestCase):
                 separators=(",", ":"),
                 ensure_ascii=True,
             ).encode("utf-8")
-            with patch.object(
-                legacy_service,
-                "_fetch_vote_status_payload",
-                new=AsyncMock(return_value=(True, {"created_at": "2026-04-23T12:00:00+00:00", "expires_at": "2026-04-24T00:00:00+00:00", "weight": 1}, None)),
-            ):
+            with patch.object(legacy_service, "_check_legacy_vote_status", new=AsyncMock(return_value=(True, None))):
                 wrong_bot = await legacy_service.handle_topgg_webhook(
                     body=body,
                     signature="legacy-shared-secret",
@@ -355,6 +355,38 @@ class VoteServiceTests(unittest.IsolatedAsyncioTestCase):
                     signature="wrong-secret",
                     trace_id="trace-auth",
                 )
+            await legacy_service.close()
+
+    async def test_refresh_user_vote_status_legacy_mode_uses_estimated_window_after_v0_confirmation(self):
+        with patch.dict(
+            "os.environ",
+            {
+                "TOPGG_WEBHOOK_SECRET": "legacy-shared-secret",
+                "TOPGG_TOKEN": "legacy-token",
+                "TOPGG_PROJECT_ID": "1480903089518022739",
+                "TOPGG_STORAGE_BACKEND": "memory",
+            },
+            clear=False,
+        ):
+            legacy_service = VoteService(self.bot, store=VoteStore(backend="memory"))
+            started = await legacy_service.start()
+            self.assertTrue(started)
+            with patch.object(
+                legacy_service,
+                "_check_legacy_vote_status",
+                new=AsyncMock(return_value=(True, None)),
+            ) as check_vote:
+                ok, message = await legacy_service.refresh_user_vote_status(9911, force=True)
+            self.assertTrue(ok)
+            self.assertIn("legacy", message.casefold())
+            self.assertIn("estimated", message.casefold())
+            check_vote.assert_awaited()
+            record = legacy_service.get_vote_record(9911)
+            self.assertIsNotNone(record)
+            self.assertEqual(record["webhook_status"], "api_refresh_legacy_estimated")
+            created_at = datetime.fromisoformat(record["created_at"])
+            expires_at = datetime.fromisoformat(record["expires_at"])
+            self.assertAlmostEqual((expires_at - created_at).total_seconds(), 12 * 60 * 60, delta=2)
             await legacy_service.close()
 
     async def test_refresh_user_vote_status_handles_active_inactive_missing_token_and_cooldown(self):
