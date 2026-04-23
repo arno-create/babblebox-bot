@@ -100,7 +100,7 @@ If premium linking is enabled, Babblebox may exchange data with Patreon to link 
 
 Babblebox does not perform always-on AI scanning by default.
 
-If optional AI-assisted Shield review is enabled where available, it only runs after local Shield logic has already flagged live-message content. Owner policy controls whether Shield AI runs at all, `gpt-5.4-nano` is the baseline tier, and Babblebox Guild Pro only unlocks the higher `gpt-5.4-mini` and `gpt-5.4` tiers. In that flow, only minimal, sanitized, and truncated flagged text intended for that review should be sent to the configured AI provider, even when the flagged signal came from scanned embed text, attachment labels, or forwarded message snapshots instead of the raw message body alone. Shield's private feature-surface checks for AFK, reminders, watch keywords, and Confessions link parity stay AI-free in this release.
+If optional AI-assisted Shield review is enabled where available, it only runs after local Shield logic has already flagged live-message content. Owner policy controls whether Shield AI runs at all, `gpt-5.4-nano` is the baseline tier, and Babblebox Guild Pro can make the higher `gpt-5.4-mini` and `gpt-5.4` tiers available when provider and runtime readiness also allow review. In that flow, only minimal, sanitized, and truncated flagged text intended for that review should be sent to the configured AI provider, even when the flagged signal came from scanned embed text, attachment labels, or forwarded message snapshots instead of the raw message body alone. Shield's private feature-surface checks for AFK, reminders, watch keywords, and Confessions link parity stay AI-free in this release.
 
 Babblebox is not designed to sell personal information.
 

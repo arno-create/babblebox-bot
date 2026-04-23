@@ -89,7 +89,7 @@ HELP_PAGES: list[dict[str, str]] = [
                 (
                     "`/dropsadmin config` also controls the difficulty profile: Standard stays welcoming, Smart leans medium/hard, and Hard makes the lane noticeably tougher without changing point values.\n"
                     "Admins can use `/dropsadmin` to run 1-10 drops a day, pick channels and categories, set `/dropsadmin ping` for one safe live role mention, and opt into rare AI celebration copy without turning the lane into spam.\n"
-                    "Question Drops AI celebrations are Guild Pro only; the offline content upgrade and smarter repeat resistance stay available on the core lane."
+                    "Optional Question Drops AI celebration copy can run on Babblebox Guild Pro when celebration policy and provider/runtime readiness allow live copy; the offline content upgrade and smarter repeat resistance stay available on the core lane."
                 ),
             ),
             (
@@ -155,31 +155,45 @@ HELP_PAGES: list[dict[str, str]] = [
                 (
                     "`Supporter` is the paid support tier: it includes Inevitable Friendship Discord benefits while Babblebox stays at Free limits.\n"
                     "`Babblebox Plus` maps to IF Epic Patron and raises personal Watch, reminder, and recurring AFK limits.\n"
-                    "`Babblebox Guild Pro` maps to IF Legendary Patron and is for server admins who want higher bounded server caps, Shield AI's higher model tiers when owner policy enables review, Question Drops AI celebrations, and the larger safe Confessions image ceiling."
+                    "`Babblebox Guild Pro` maps to IF Legendary Patron and is for server admins who want higher bounded server caps, Shield AI's higher model tiers when owner policy and provider/runtime readiness allow review, optional Question Drops AI celebrations when celebration policy and provider/runtime readiness allow live copy, and the larger safe Confessions image ceiling."
                 ),
             ),
             (
                 "How Premium Activates",
                 (
                     "1. Use `/premium plans` to compare the three combined Patreon tiers.\n"
-                    "2. Use `/premium subscribe` to open Patreon and buy Supporter, Babblebox Plus / IF Epic Patron, or Babblebox Guild Pro / IF Legendary Patron.\n"
+                    "2. Use `/premium subscribe` to open Patreon and buy Supporter, Babblebox Plus, or Babblebox Guild Pro.\n"
                     "3. Use `/premium link` in Discord so Babblebox can connect that Patreon account to your Discord user.\n"
-                    "4. If you bought Guild Pro, use `/premium guild claim` inside the server you want to upgrade, then confirm with `/premium guild status`."
+                    "4. Use `/premium status` to confirm the linked personal plan and any Guild Pro claim-ready state.\n"
+                    "5. If you bought Guild Pro, use `/premium guild claim` inside the server you want to upgrade, then confirm with `/premium guild status`."
                 ),
             ),
             (
                 "Patreon Tier Mapping",
                 (
-                    "Patreon now has three combined tiers: Supporter, Babblebox Plus / IF Epic Patron, and Babblebox Guild Pro / IF Legendary Patron.\n"
+                    "Patreon now has three combined tiers: Supporter, Babblebox Plus, and Babblebox Guild Pro.\n"
+                    "Babblebox Plus maps to IF Epic Patron and Babblebox Guild Pro maps to IF Legendary Patron.\n"
                     "Every paid tier includes both Babblebox and Inevitable Friendship benefits. If you are linked but still see Free after a tier change, run `/premium status` or `/premium refresh`, then use `/support` if the mapped tier still does not appear."
                 ),
             ),
             (
                 "Trust / Downgrade",
                 (
-                    "Free keeps core safety, privacy, and the baseline utility lane. Patreon purchases are generally non-refundable except where required by law or Patreon separately approves a refund.\n"
+                    "Free keeps core safety, privacy, and the baseline utility lane. Babblebox does not process cards or reverse Patreon or Apple charges directly.\n"
                     "Unlinking deletes Babblebox's local encrypted Patreon tokens only.\n"
                     "Downgrades or Guild Pro release do not delete saved Watch, reminder, AFK, Shield, or Confessions settings; extra runtime headroom simply pauses while saved config stays preserved, and future expansion stays blocked until you trim it or premium returns."
+                ),
+            ),
+            (
+                "Payment / Billing",
+                (
+                    "Start payment, billing, duplicate-charge, unauthorized-charge, or refund issues with Patreon, or with Apple for iOS purchases.\n"
+                    "Use `/support` for Babblebox linking, resolved-tier, stale-entitlement, or Guild Pro claim issues.\n"
+                    "Refund outcomes follow Patreon or Apple policy and applicable law, not a separate Babblebox guarantee.\n"
+                    "Patreon policy: https://support.patreon.com/hc/en-us/articles/205032045-Patreon-s-refund-policy\n"
+                    "Patreon refund help: https://support.patreon.com/hc/en-us/articles/360021113811-How-do-I-request-a-refund\n"
+                    "Apple billing help: https://reportaproblem.apple.com/\n"
+                    "Premium promises are the documented entitlement surfaces and limits, not guaranteed uptime or automatic AI activity."
                 ),
             ),
         ],
@@ -193,7 +207,9 @@ HELP_PAGES: list[dict[str, str]] = [
             "Use `/support` for the standalone support card whenever you need the official links quickly.\n"
             "If something breaks, feels confusing, or could be better, reporting it is genuinely appreciated and helps shape the next fix or polish pass.\n"
             "Use `/premium plans`, `/premium subscribe`, and `/premium status` when the question is specifically about buying, linking, or checking Babblebox premium.\n"
-            "If you want to purchase Babblebox premium, the same support card also includes the official Patreon membership page and points you to the right next step after purchase."
+            "Start payment, billing, duplicate-charge, unauthorized-charge, or refund issues with Patreon, or with Apple for iOS purchases.\n"
+            "Refund outcomes follow Patreon or Apple policy and applicable law, not a separate Babblebox guarantee.\n"
+            "Use the Babblebox support routes when the linked tier, stale entitlement state, or Guild Pro claim still looks wrong."
         ),
         "links": official_links_markdown(),
         "try": "`/support`, `/premium plans`, `/premium status`, or use the link buttons below.",
@@ -215,7 +231,7 @@ HELP_PAGES: list[dict[str, str]] = [
             "Each live pack can inherit the global timeout or keep a dedicated timeout profile, and the trusted-link lane can do the same without turning the UI into a giant matrix.\n"
             "Trusted Links Only now exposes its built-in trusted families and domains under `/shield trusted`, keeps Confessions link mode separate, and still lets malicious, impersonation, adult, or suspicious-link intel override local trust exceptions.\n"
             "Configured anti-spam stays explainable: admins set message and near-duplicate thresholds, optional emote or capitals lanes stay off until enabled, moderators are exempt from Anti-Spam by default unless you opt into delete-only or full enforcement, pack-specific exemptions stay separate from global filters, GIF incidents are grouped per offender and window, spam and GIF delete actions remove the matched burst, and bot or webhook posts stay on a more conservative scam threshold unless the evidence is genuinely strong.\n"
-            "Shield AI is second-pass only, live-message-only, and owner-managed. Owner policy controls whether review runs, `/shield ai` only configures review scope, runtime routes between gpt-5.4-nano, gpt-5.4-mini, and gpt-5.4, gpt-5.4-nano stays the baseline lane, Guild Pro unlocks gpt-5.4-mini plus gpt-5.4, diagnostics report the effective lane plus local readiness and entitlement state, and AI never punishes on its own.\n"
+            "Shield AI is second-pass only, live-message-only, and owner-managed. Owner policy controls whether review runs, `/shield ai` only configures review scope, runtime routes between gpt-5.4-nano, gpt-5.4-mini, and gpt-5.4, gpt-5.4-nano stays the baseline lane, Babblebox Guild Pro can make gpt-5.4-mini plus gpt-5.4 available when owner policy and provider/runtime readiness allow review, diagnostics report the effective lane plus local readiness and entitlement state, and AI never punishes on its own.\n"
             "Admin lifecycle helpers stay compact: no giant control-plane dashboard, no giant case archive, and no per-member task explosion."
         ),
         "try": "`/shield panel`, `/shield rules`, `/shield exemptions`, `/shield trusted`, `/shield filters`, `/admin panel`",
@@ -376,6 +392,9 @@ def build_help_embed() -> discord.Embed:
         name="Support / Links",
         value=(
             "Use `/support` for the official support card, and `/premium plans` or `/premium status` if you are buying, linking, or checking Babblebox premium.\n"
+            "Patreon or Apple handle payment and refund workflows; Babblebox support handles entitlement, linking, and Guild Pro claim issues.\n"
+            "Patreon refund help: https://support.patreon.com/hc/en-us/articles/360021113811-How-do-I-request-a-refund\n"
+            "Apple billing help: https://reportaproblem.apple.com/\n"
             f"{official_links_markdown()}"
         ),
         inline=False,
@@ -402,9 +421,11 @@ def build_support_embed() -> discord.Embed:
         name="Premium",
         value=(
             "`Patreon Membership` is where the three combined Babblebox + Inevitable Friendship tiers are purchased.\n"
-            "After you buy Supporter, Babblebox Plus / IF Epic Patron, or Babblebox Guild Pro / IF Legendary Patron, use `/premium link` in Discord.\n"
+            "After you buy Supporter, Babblebox Plus, or Babblebox Guild Pro, use `/premium link` in Discord.\n"
             "If you bought Guild Pro, finish with `/premium guild claim` in the server you want to upgrade.\n"
-            "If your Patreon link or entitlement still looks wrong, check `/premium status` or `/premium refresh`, then use the support server for live help."
+            "Start payment, billing, duplicate-charge, unauthorized-charge, or refund issues with Patreon, or with Apple for iOS purchases.\n"
+            "Refund outcomes follow Patreon or Apple policy and applicable law, not a separate Babblebox guarantee.\n"
+            "If your Patreon link, resolved tier, or Guild Pro claim still looks wrong, check `/premium status` or `/premium refresh`, then use the support server for live help."
         ),
         inline=False,
     )
@@ -412,6 +433,7 @@ def build_support_embed() -> discord.Embed:
         name="Best Route",
         value=(
             "`Support Server` for live help, combined-tier questions, and stale premium or Guild Pro claim states.\n"
+            "`Patreon or Apple` first for payment, billing, duplicate-charge, unauthorized-charge, or refund issues.\n"
             "`Patreon Membership` to buy Babblebox premium before linking it in Discord.\n"
             "`Official Website` for the public premium guide, help page, and policies.\n"
             "`GitHub Repository` for bug reports, issues, and the open-source code."

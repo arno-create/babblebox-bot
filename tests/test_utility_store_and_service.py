@@ -68,7 +68,7 @@ class PremiumLimitStub:
     def describe_limit_error(self, *, limit_key: str, limit_value: int) -> str:
         plan_label = "Babblebox Plus" if limit_key in USER_PREMIUM_LIMIT_KEYS else "Babblebox Guild Pro"
         return (
-            f"You reached this plan's active limit of {limit_value}. {plan_label} unlocks more. "
+            f"You reached this plan's active limit of {limit_value}. {plan_label} allows higher active limits. "
             "Use `/premium plans` to compare tiers. Previously saved over-limit state stays preserved."
         )
 

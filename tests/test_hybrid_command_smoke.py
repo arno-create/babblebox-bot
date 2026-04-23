@@ -545,8 +545,9 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("How Premium Activates", fields)
         self.assertIn("Patreon Tier Mapping", fields)
         self.assertIn("Trust / Downgrade", fields)
-        self.assertIn("Babblebox Plus / IF Epic Patron", fields["Patreon Tier Mapping"])
-        self.assertIn("generally non-refundable", fields["Trust / Downgrade"])
+        self.assertIn("Babblebox Plus maps to IF Epic Patron", fields["Patreon Tier Mapping"])
+        self.assertIn("Refund outcomes follow Patreon or Apple policy", fields["Payment / Billing"])
+        self.assertIn("Patreon refund help", fields["Payment / Billing"])
         self.assertIn("Downgrades or Guild Pro release do not delete saved", fields["Trust / Downgrade"])
         self.assertIn("extra runtime headroom simply pauses", fields["Trust / Downgrade"])
 
@@ -557,7 +558,7 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("Babblebox Plus raises saved-vs-active headroom for Watch, reminders, and recurring AFK", utilities_page["body"])
         self.assertIn("gpt-5.4-nano", shield_page["body"])
-        self.assertIn("Guild Pro unlocks gpt-5.4-mini plus gpt-5.4", shield_page["body"])
+        self.assertIn("Babblebox Guild Pro can make gpt-5.4-mini plus gpt-5.4 available", shield_page["body"])
         self.assertIn("effective lane plus local readiness and entitlement state", shield_page["body"])
         self.assertIn("larger safe Confessions image ceiling", premium_page["fields"][0][1])
         self.assertIn("extra runtime headroom simply pauses", premium_page["fields"][3][1])
@@ -780,7 +781,8 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("After You Buy", fields)
             self.assertIn("Need Help?", fields)
             self.assertIn("IF Epic Patron", fields["Choose The Right Tier"])
-            self.assertIn("generally non-refundable", fields["Before You Buy"])
+            self.assertIn("Refund outcomes follow Patreon or Apple policy", fields["Before You Buy"])
+            self.assertIn("reportaproblem.apple.com", fields["Before You Buy"])
             self.assertIn("terms.html", fields["Before You Buy"])
             self.assertEqual(self._link_button_labels(payload["view"]), ["View Patreon", "Compare Plans", "Support Server"])
             self.assertEqual(
@@ -826,11 +828,48 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             embed = payload["embed"]
             fields = {field.name: field.value for field in embed.fields}
             self.assertEqual(embed.title, "Premium Status")
-            self.assertIn("Current plan: **Free**", embed.description)
+            self.assertIn("Personal plan: **Free**", embed.description)
             self.assertIn("Patreon link: **Not linked**", embed.description)
             self.assertIn("/premium subscribe", fields["Next Step"])
             self.assertIn("/premium link", fields["Next Step"])
             self.assertEqual(self._link_button_labels(payload["view"]), ["View Patreon", "Compare Plans", "Support Server"])
+        finally:
+            await cog.service.close()
+
+    async def test_premium_status_separates_free_personal_lane_from_claim_ready_guild_pro(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
+        cog = PremiumCog(bot)
+        try:
+            cog.service.storage_ready = True
+            cog.service.get_user_snapshot = lambda _user_id: {
+                "plan_code": "free",
+                "active_plans": (),
+                "claimable_sources": ({"source_kind": "entitlement", "source_id": "ent-1", "entitlement_id": "ent-1"},),
+                "blocked": False,
+                "stale": False,
+                "system_access": False,
+                "system_guild_claims": 0,
+            }
+            cog.service.get_link = lambda _user_id, provider=None: {
+                "link_status": "active",
+                "display_name": "Guild Pro Patron",
+                "email": "guildpro@example.com",
+                "metadata": {},
+            }
+            cog.service.list_cached_claims_for_user = lambda _user_id: []
+            cog.service.resolve_user_limit = lambda _user_id, _limit_key: 10
+            ctx = FakeContext(interaction=FakeInteraction(), guild=FakeGuild(), channel=FakeChannel(), author=FakeAuthor())
+
+            await PremiumCog.premium_status_command.callback(cog, ctx)
+
+            payload = self._sent_kwargs(ctx)
+            embed = payload["embed"]
+            fields = {field.name: field.value for field in embed.fields}
+            self.assertIn("Personal plan: **Free**", embed.description)
+            self.assertIn("Paid personal tier: **None**", fields["Current Access"])
+            self.assertIn("Resolved Babblebox Guild Pro access: **Available to claim in a server**", fields["Current Access"])
+            self.assertIn("server claim", fields["Status Notes"].lower())
+            self.assertIn("/premium guild claim", fields["Next Step"])
         finally:
             await cog.service.close()
 
@@ -1068,7 +1107,7 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
 
             payload = self._sent_kwargs(ctx)
             self.assertEqual(payload["embed"].title, "Guild Pro Claim")
-            self.assertIn("Buy the Babblebox Guild Pro / IF Legendary Patron tier", payload["embed"].description)
+            self.assertIn("Buy Babblebox Guild Pro on Patreon", payload["embed"].description)
         finally:
             await cog.service.close()
 
@@ -2057,9 +2096,9 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Effective models right now", fields["Access Policy"])
             self.assertIn("Ordinary-guild default", fields["Access Policy"])
             self.assertIn("gpt-5.4-nano", fields["Access Policy"])
-            self.assertIn("Guild Pro unlocks", fields["Access Policy"])
+            self.assertIn("Babblebox Guild Pro can make", fields["Access Policy"])
             self.assertIn("review scope is admin-configurable", embed.footer.text.lower())
-            self.assertIn("guild pro unlocks mini/full", embed.footer.text.lower())
+            self.assertIn("guild pro can make mini/full available", embed.footer.text.lower())
         finally:
             await cog.service.close()
 

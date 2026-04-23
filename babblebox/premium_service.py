@@ -835,7 +835,7 @@ class PremiumService:
     def describe_limit_error(self, *, limit_key: str, limit_value: int) -> str:
         return (
             f"You reached this plan's active limit of {limit_value}. "
-            f"{self.get_plan_upgrade_label_for_limit(limit_key)} unlocks more. "
+            f"{self.get_plan_upgrade_label_for_limit(limit_key)} allows higher active limits. "
             "Use `/premium plans` to compare tiers. "
             "Previously saved over-limit state stays preserved, but new expansion stays blocked until you trim it or premium returns."
         )
@@ -857,7 +857,7 @@ class PremiumService:
                 ),
                 "does_not_unlock": (
                     "Higher personal utility limits.",
-                    "Guild Pro server upgrades or higher Shield AI model tiers.",
+                    "Babblebox Guild Pro server upgrades or higher Shield AI model tiers.",
                 ),
                 "best_for": "Supporters who want to back the project, get the Supporter IF perks, and keep free behavior unchanged.",
             },
@@ -873,8 +873,8 @@ class PremiumService:
                     "Up to 20 recurring AFK schedules.",
                 ),
                 "does_not_unlock": (
-                    "Guild Pro server upgrades.",
-                    "Server-side Shield AI model upgrades or Question Drops AI celebrations.",
+                    "Babblebox Guild Pro server upgrades.",
+                    "Automatic server-side Shield AI model upgrades or Question Drops AI celebrations.",
                 ),
                 "best_for": "Members who rely on Watch, reminders, or AFK routines and want Babblebox Plus plus the IF Epic Patron bundle.",
             },
@@ -882,18 +882,19 @@ class PremiumService:
                 "plan_code": PLAN_GUILD_PRO,
                 "title": "Babblebox Guild Pro",
                 "audience": "Admins who want one server to get Babblebox's higher-cap admin lane plus the IF Legendary Patron bundle.",
-                "summary": "Server-level premium for higher bounded caps, richer admin power, premium-only server extras, and IF Legendary Patron.",
+                "summary": "Server-level premium for higher bounded caps, one explicit guild claim, optional premium-only server extras, and IF Legendary Patron.",
                 "unlocks": (
                     "Inevitable Friendship Legendary Patron Discord benefits.",
                     "Up to 15 bump detection channels.",
                     "Higher bounded Shield config ceilings for patterns, filters, allowlists, exemptions, and severe terms.",
-                    "Shield AI's higher gpt-5.4-mini and gpt-5.4 tiers when owner policy enables review.",
-                    "Question Drops AI celebrations.",
+                    "Shield AI's higher gpt-5.4-mini and gpt-5.4 tiers when owner policy and provider/runtime readiness allow review.",
+                    "Optional Question Drops AI celebrations when celebration policy and provider/runtime readiness allow live copy.",
                     "Confessions max_images up to 6.",
                 ),
                 "does_not_unlock": (
                     "Automatic upgrades for every server; Guild Pro still has to be claimed explicitly.",
                     "Plus utility caps for every individual user.",
+                    "Guaranteed AI availability, uptime, or moderation outcomes.",
                 ),
                 "best_for": "Servers that want one explicit premium claim with clearer admin headroom plus the IF Legendary Patron bundle.",
             },
@@ -903,8 +904,8 @@ class PremiumService:
         return {
             PLAN_FREE: "Free",
             PLAN_SUPPORTER: "Supporter",
-            PLAN_PLUS: "Plus",
-            PLAN_GUILD_PRO: "Guild Pro",
+            PLAN_PLUS: "Babblebox Plus",
+            PLAN_GUILD_PRO: "Babblebox Guild Pro",
         }.get(str(plan_code or PLAN_FREE), "Free")
 
     def _require_storage_ready(self):
