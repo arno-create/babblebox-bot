@@ -619,6 +619,10 @@ class WebsiteDocsTests(unittest.TestCase):
         self.assertIn("returned account mismatch require relinking", help_html)
         self.assertIn("same owner still has another valid Guild Pro source", help_html)
         self.assertIn("linked-account identity mismatches", readme)
+        self.assertIn("generally non-refundable", readme)
+        self.assertIn("generally non-refundable", help_html)
+        self.assertIn("generally non-refundable", terms_html)
+        self.assertIn("generally non-refundable", terms_md)
         self.assertIn("compact sanitized webhook event metadata", privacy_html)
         self.assertIn("compact sanitized webhook event metadata", privacy_md)
         self.assertIn("hard provider-auth failure", terms_html)
@@ -658,7 +662,9 @@ class WebsiteDocsTests(unittest.TestCase):
             "Subscribe on Patreon",
             "Free stays useful. Premium raises the ceiling cleanly.",
             "Buy, link, then claim only if you need Guild Pro.",
-            "Only Babblebox-labeled tiers",
+            "Babblebox Plus / IF Epic Patron",
+            "Every paid tier includes both Babblebox and Inevitable Friendship benefits",
+            "Terms of Service",
             "help.html#premium",
         ):
             self.assertIn(text, index_html)
@@ -668,21 +674,32 @@ class WebsiteDocsTests(unittest.TestCase):
             "Compare Premium",
             "Best first premium command",
             "How do I actually buy and activate premium?",
-            "Only Babblebox-labeled tiers unlock Babblebox premium",
-            "Buy on Patreon, link in Discord, then claim Guild Pro",
+            "Patreon tier mapping",
+            "Babblebox Plus / IF Epic Patron",
+            "Terms of Service",
         ):
             self.assertIn(text, help_html)
 
         for text in (
             "### Plan Comparison",
             "### How Premium Activates",
-            "### Mixed Patreon Note",
+            "### Patreon Tier Mapping",
             "### Trust and Downgrade Behavior",
-            "choose a Babblebox-labeled tier",
+            "Babblebox Plus / IF Epic Patron",
+            "generally non-refundable",
             "Supporter",
             "Guild Pro",
         ):
             self.assertIn(text, readme)
+
+        for text in (
+            "recognition-only",
+            "Only Babblebox-labeled tiers",
+            "choose a Babblebox-labeled tier",
+        ):
+            self.assertNotIn(text, index_html)
+            self.assertNotIn(text, help_html)
+            self.assertNotIn(text, readme)
 
     def test_help_and_readme_do_not_reintroduce_duplicate_drops_panel_copy(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")

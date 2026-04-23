@@ -1,6 +1,6 @@
 # Babblebox Terms of Service
 
-Last updated: April 22, 2026
+Last updated: April 23, 2026
 
 This document is the repository copy of the Babblebox Terms of Service. It describes the rules, responsibilities, and service limits that apply when using the Babblebox website or Discord bot.
 
@@ -100,6 +100,14 @@ Babblebox depends on:
 - optional third-party providers for enabled features such as Patreon-linked premium entitlement checks or second-pass Shield AI review of already-flagged live messages
 
 Premium entitlements can depend on provider availability, webhook delivery, OAuth linking, and current verification state. If those checks fail, are delayed, go stale, hit a hard provider-auth failure, or a user unlinks Patreon locally, Babblebox may immediately withhold provider-backed premium-only expansion or premium-only runtime behavior until the entitlement is verified again or relinked. Babblebox is designed to preserve saved state on downgrade rather than intentionally deleting it just because a plan changed.
+
+### Refunds for Premium Purchases
+
+Patreon-backed Babblebox premium purchases are generally non-refundable.
+
+Exceptions may apply where a refund is required by law or where Patreon separately processes or approves a refund under its own policies.
+
+Review the tier details before purchase, because unlinking, downgrading, or waiting for a tier change to refresh are entitlement-state issues rather than automatic refund events.
 
 Babblebox may expose public liveness/readiness pages for hosting and rollout monitoring, but those pages are intentionally limited to non-sensitive readiness state and sanitized provider aggregates rather than authenticated operator detail.
 

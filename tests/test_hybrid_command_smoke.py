@@ -535,7 +535,7 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("Buy on Patreon", premium_page["description"])
         self.assertIn("How Premium Activates", "\n".join(name for name, _value in premium_page["fields"]))
-        self.assertIn("Mixed Patreon Note", "\n".join(name for name, _value in premium_page["fields"]))
+        self.assertIn("Patreon Tier Mapping", "\n".join(name for name, _value in premium_page["fields"]))
         self.assertIn("/premium subscribe", premium_page["try"])
         self.assertIn("/premium guild status", premium_page["try"])
 
@@ -543,9 +543,10 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         fields = {field.name: field.value for field in embed.fields}
         self.assertIn("Choose a Plan", fields)
         self.assertIn("How Premium Activates", fields)
-        self.assertIn("Mixed Patreon Note", fields)
+        self.assertIn("Patreon Tier Mapping", fields)
         self.assertIn("Trust / Downgrade", fields)
-        self.assertIn("Babblebox-labeled tiers", fields["Mixed Patreon Note"])
+        self.assertIn("Babblebox Plus / IF Epic Patron", fields["Patreon Tier Mapping"])
+        self.assertIn("generally non-refundable", fields["Trust / Downgrade"])
         self.assertIn("Downgrades or Guild Pro release do not delete saved", fields["Trust / Downgrade"])
 
     def test_help_surfaces_do_not_reference_removed_moment_feature(self):
@@ -622,11 +623,11 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Babblebox Support", embed.title)
         self.assertIn("buying Babblebox premium", embed.description)
         self.assertEqual(tuple(fields.keys()), ("Official Links", "Premium", "Best Route"))
-        self.assertIn("`Patreon Membership` is where Babblebox premium is purchased.", fields["Premium"])
+        self.assertIn("three combined Babblebox + Inevitable Friendship tiers", fields["Premium"])
         self.assertIn("/premium link", fields["Premium"])
         self.assertIn("/premium guild claim", fields["Premium"])
         self.assertIn("/premium refresh", fields["Premium"])
-        self.assertIn("`Support Server` for live help", fields["Best Route"])
+        self.assertIn("`Support Server` for live help, combined-tier questions", fields["Best Route"])
         self.assertIn("`Official Website` for the public premium guide", fields["Best Route"])
 
     def test_question_drops_help_page_is_split_across_multiple_fields(self):
@@ -762,8 +763,12 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Discord linking is the second step", payload["embed"].description)
             fields = {field.name: field.value for field in payload["embed"].fields}
             self.assertIn("Choose The Right Tier", fields)
+            self.assertIn("Before You Buy", fields)
             self.assertIn("After You Buy", fields)
             self.assertIn("Need Help?", fields)
+            self.assertIn("IF Epic Patron", fields["Choose The Right Tier"])
+            self.assertIn("generally non-refundable", fields["Before You Buy"])
+            self.assertIn("terms.html", fields["Before You Buy"])
             self.assertEqual(self._link_button_labels(payload["view"]), ["View Patreon", "Compare Plans", "Support Server"])
             self.assertEqual(
                 self._link_buttons(payload["view"]),
@@ -844,8 +849,8 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
 
             fields = {field.name: field.value for field in self._sent_kwargs(ctx)["embed"].fields}
             self.assertIn("No mapped Babblebox tier detected yet", fields["Current Access"])
-            self.assertIn("Inevitable Friendship support tiers", fields["Status Notes"])
-            self.assertIn("Babblebox-labeled tier", fields["Next Step"])
+            self.assertIn("three combined tiers", fields["Status Notes"])
+            self.assertIn("three combined tiers", fields["Next Step"])
         finally:
             await cog.service.close()
 
@@ -964,7 +969,7 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
 
             payload = self._sent_kwargs(ctx)
             self.assertEqual(payload["embed"].title, "Guild Pro Claim")
-            self.assertIn("Buy the Babblebox-labeled Guild Pro tier", payload["embed"].description)
+            self.assertIn("Buy the Babblebox Guild Pro / IF Legendary Patron tier", payload["embed"].description)
         finally:
             await cog.service.close()
 
