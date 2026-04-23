@@ -120,6 +120,8 @@ class VoteCog(commands.Cog):
         elif active and expires_at:
             tone = "success"
             description = f"Your Vote Bonus is active until **{expires_at}**."
+            if snapshot.get("timing_source") == "legacy_estimated":
+                description += " This legacy Top.gg window is estimated from the standard 12-hour vote cadence."
 
         embed = ge.make_status_embed(
             "Vote Bonus",
@@ -139,6 +141,8 @@ class VoteCog(commands.Cog):
             embed.add_field(name="Refresh", value="Live Top.gg refresh is available.", inline=True)
         else:
             embed.add_field(name="Refresh", value="Live refresh stays off until `TOPGG_TOKEN` is configured.", inline=True)
+        if snapshot.get("timing_note"):
+            embed.add_field(name="Legacy Timing", value=str(snapshot.get("timing_note")), inline=False)
 
         if eligible:
             base_plan = PLAN_SUPPORTER if plan_code == PLAN_SUPPORTER else PLAN_FREE

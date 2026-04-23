@@ -9,7 +9,7 @@ import logging
 import os
 from copy import deepcopy
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import aiohttp
@@ -36,12 +36,17 @@ TOPGG_CONFIGURATION_MISCONFIGURED = "misconfigured"
 TOPGG_PROJECT_ID_DEFAULT = "1480903089518022739"
 TOPGG_VOTE_URL_TEMPLATE = "https://top.gg/bot/{project_id}/vote"
 TOPGG_VOTE_STATUS_URL_TEMPLATE = "https://top.gg/api/v1/projects/@me/votes/{user_id}"
+TOPGG_LEGACY_VOTE_CHECK_URL_TEMPLATE = "https://top.gg/api/bots/{project_id}/check"
 TOPGG_REFRESH_COOLDOWN_SECONDS = 60
 TOPGG_REMINDER_LOOP_SECONDS = 300
 TOPGG_LEGACY_CONFIRM_TIMEOUT_SECONDS = 3.0
+TOPGG_LEGACY_VOTE_WINDOW = timedelta(hours=12)
+TOPGG_LEGACY_DEDUPE_WINDOW_SECONDS = 1800
 TOPGG_PLATFORM = "discord"
 TOPGG_WEBHOOK_MODE_V2 = "v2"
 TOPGG_WEBHOOK_MODE_LEGACY = "legacy"
+TOPGG_TIMING_SOURCE_EXACT = "exact"
+TOPGG_TIMING_SOURCE_LEGACY_ESTIMATED = "legacy_estimated"
 TOPGG_VOTE_LIMITS = {
     LIMIT_WATCH_KEYWORDS: 15,
     LIMIT_WATCH_FILTERS: 12,
@@ -184,13 +189,14 @@ class VoteService:
             if mode == TOPGG_WEBHOOK_MODE_LEGACY and not self._topgg_token():
                 return (
                     "Top.gg vote bonuses are misconfigured. This Top.gg dashboard is using legacy webhooks, "
-                    "so `TOPGG_TOKEN` is also required to confirm vote windows safely."
+                    "so `TOPGG_TOKEN` is also required to confirm vote status safely."
                 )
             return "Top.gg vote bonuses are misconfigured. Check `TOPGG_WEBHOOK_SECRET` and `TOPGG_TOKEN`."
         if mode == TOPGG_WEBHOOK_MODE_LEGACY:
             return (
                 "Top.gg vote bonuses are configured with legacy webhooks. Babblebox verifies the shared "
-                "Authorization header and confirms each vote window through the Top.gg API. Webhooks V2 are still preferred."
+                "Authorization header, confirms the vote through the legacy API, and estimates the standard 12-hour "
+                "vote window because legacy Top.gg does not return exact timestamps. Webhooks V2 are still preferred."
             )
         if not self._topgg_token():
             return "Top.gg vote bonuses are configured. API refresh is disabled until `TOPGG_TOKEN` is set."
@@ -291,6 +297,8 @@ class VoteService:
         record = self.get_vote_record(user_id) or {}
         active = self.has_active_vote_bonus(user_id, plan_code=plan_code)
         weight = int(record.get("weight", 1) or 1)
+        timing_source = self._timing_source_from_record(record)
+        timing_note = self._timing_note_for_source(timing_source)
         return {
             "user_id": int(user_id),
             "plan_code": plan_code,
@@ -306,6 +314,8 @@ class VoteService:
             "vote_url": self.vote_url(),
             "bonus_limits": dict(TOPGG_VOTE_LIMITS),
             "api_refresh_available": bool(self._topgg_token()),
+            "timing_source": timing_source,
+            "timing_note": timing_note,
         }
 
     async def set_reminder_preference(self, user_id: int, *, enabled: bool) -> dict[str, Any]:
@@ -339,18 +349,24 @@ class VoteService:
         if not active:
             await self._mark_vote_inactive(user_id, status="api_inactive")
             return True, "Top.gg vote bonus is not active right now."
+        timing_source = str((payload or {}).get("_timing_source") or TOPGG_TIMING_SOURCE_EXACT)
         normalized = self._normalize_vote_record(
             discord_user_id=user_id,
             topgg_vote_id=(self._votes_by_user.get(user_id) or {}).get("topgg_vote_id"),
             created_at=payload.get("created_at"),
             expires_at=payload.get("expires_at"),
             weight=payload.get("weight"),
-            webhook_status="api_refresh",
+            webhook_status="api_refresh_legacy_estimated" if timing_source == TOPGG_TIMING_SOURCE_LEGACY_ESTIMATED else "api_refresh",
             webhook_trace_id="api_refresh",
             webhook_received_at=_utcnow().isoformat(),
             webhook_payload_hash=self._payload_hash(payload),
         )
         await self._upsert_vote_record(normalized)
+        if timing_source == TOPGG_TIMING_SOURCE_LEGACY_ESTIMATED:
+            return (
+                True,
+                "Top.gg legacy vote confirmed. Babblebox estimated the standard 12-hour vote window because legacy Top.gg does not return exact timestamps.",
+            )
         return True, "Top.gg vote status refreshed."
 
     async def handle_topgg_webhook(self, *, body: bytes, signature: str, trace_id: str | None = None) -> TopggWebhookResult:
@@ -431,6 +447,7 @@ class VoteService:
         active, status_payload, error = await self._fetch_vote_status_payload(
             discord_user_id,
             timeout_seconds=TOPGG_LEGACY_CONFIRM_TIMEOUT_SECONDS,
+            weekend_hint=bool(payload.get("isWeekend", False)),
         )
         if error or not active or not isinstance(status_payload, dict):
             return TopggWebhookResult(
@@ -439,6 +456,7 @@ class VoteService:
             )
 
         payload_hash = hashlib.sha256(body).hexdigest()
+        timing_source = str(status_payload.get("_timing_source") or TOPGG_TIMING_SOURCE_LEGACY_ESTIMATED)
         try:
             normalized = self._normalize_vote_record(
                 discord_user_id=discord_user_id,
@@ -446,7 +464,7 @@ class VoteService:
                 created_at=status_payload.get("created_at"),
                 expires_at=status_payload.get("expires_at"),
                 weight=status_payload.get("weight"),
-                webhook_status="processed_legacy",
+                webhook_status="processed_legacy_estimated" if timing_source == TOPGG_TIMING_SOURCE_LEGACY_ESTIMATED else "processed_legacy",
                 webhook_trace_id=trace_id,
                 webhook_received_at=_utcnow().isoformat(),
                 webhook_payload_hash=payload_hash,
@@ -456,8 +474,9 @@ class VoteService:
 
         event_id = self._legacy_event_id(
             discord_user_id=discord_user_id,
+            payload_hash=payload_hash,
             created_at=normalized["created_at"],
-            expires_at=normalized["expires_at"],
+            estimated=(timing_source == TOPGG_TIMING_SOURCE_LEGACY_ESTIMATED),
         )
         event_record = {
             "event_id": event_id,
@@ -473,6 +492,11 @@ class VoteService:
         normalized["topgg_vote_id"] = event_id
         await self._upsert_vote_record(normalized)
         await self.store.finish_webhook_event(event_id, status="processed")
+        if timing_source == TOPGG_TIMING_SOURCE_LEGACY_ESTIMATED:
+            return TopggWebhookResult(
+                "processed",
+                "Top.gg legacy vote recorded using the standard 12-hour vote window.",
+            )
         return TopggWebhookResult("processed", "Top.gg legacy vote recorded.")
 
     def verify_signature(self, *, body: bytes, signature_header: str):
@@ -582,7 +606,22 @@ class VoteService:
         user_id: int,
         *,
         timeout_seconds: float | None = None,
+        weekend_hint: bool | None = None,
     ) -> tuple[bool, dict[str, Any] | None, str | None]:
+        if self.webhook_mode() == TOPGG_WEBHOOK_MODE_LEGACY:
+            active, error = await self._check_legacy_vote_status(user_id, timeout_seconds=timeout_seconds)
+            if error:
+                return False, None, error
+            if not active:
+                return False, None, None
+            cached_payload = self._active_vote_payload_from_record(user_id)
+            if cached_payload is not None:
+                return True, cached_payload, None
+            estimated_payload = self._estimate_legacy_vote_payload(
+                user_id=user_id,
+                weekend_hint=weekend_hint,
+            )
+            return True, estimated_payload, None
         token = self._topgg_token()
         if not token:
             return False, None, "Top.gg refresh is unavailable because `TOPGG_TOKEN` is not configured on this deployment."
@@ -616,7 +655,45 @@ class VoteService:
         expires_at = payload.get("expires_at")
         if not created_at or not expires_at:
             return False, None, None
+        payload = dict(payload)
+        payload["_timing_source"] = TOPGG_TIMING_SOURCE_EXACT
         return True, payload, None
+
+    async def _check_legacy_vote_status(
+        self,
+        user_id: int,
+        *,
+        timeout_seconds: float | None = None,
+    ) -> tuple[bool, str | None]:
+        token = self._topgg_token()
+        if not token:
+            return False, "Top.gg refresh is unavailable because `TOPGG_TOKEN` is not configured on this deployment."
+        session = self._ensure_session()
+        request_kwargs: dict[str, Any] = {}
+        if timeout_seconds is not None:
+            request_kwargs["timeout"] = aiohttp.ClientTimeout(total=max(float(timeout_seconds), 1.0))
+        try:
+            async with session.get(
+                TOPGG_LEGACY_VOTE_CHECK_URL_TEMPLATE.format(project_id=self.project_id()),
+                params={"userId": str(int(user_id))},
+                headers={"Authorization": token},
+                **request_kwargs,
+            ) as response:
+                if response.status in {401, 403}:
+                    return False, "Top.gg refresh is unavailable because `TOPGG_TOKEN` was rejected."
+                if response.status == 429:
+                    return False, "Top.gg refresh is temporarily unavailable right now."
+                if response.status >= 500:
+                    return False, "Top.gg refresh is temporarily unavailable right now."
+                if response.status >= 400:
+                    return False, "Babblebox could not refresh Top.gg vote status right now."
+                payload = await response.json()
+        except aiohttp.ClientError:
+            return False, "Top.gg refresh is temporarily unavailable right now."
+        if not isinstance(payload, dict):
+            return False, "Babblebox could not refresh Top.gg vote status right now."
+        voted = payload.get("voted")
+        return bool(voted in {True, 1, "1", "true", "True"}), None
 
     def _ensure_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -633,8 +710,60 @@ class VoteService:
     def _payload_hash(self, payload: dict[str, Any]) -> str:
         return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")).hexdigest()
 
-    def _legacy_event_id(self, *, discord_user_id: int, created_at: str, expires_at: str) -> str:
-        return f"legacy:{int(discord_user_id)}:{created_at}:{expires_at}"
+    def _legacy_event_id(self, *, discord_user_id: int, payload_hash: str, created_at: str, estimated: bool) -> str:
+        if not estimated:
+            return f"legacy:{int(discord_user_id)}:{created_at}"
+        created_dt = _parse_datetime(created_at) or _utcnow()
+        bucket = int(created_dt.timestamp()) // TOPGG_LEGACY_DEDUPE_WINDOW_SECONDS
+        return f"legacy:{int(discord_user_id)}:{payload_hash[:16]}:{bucket}"
+
+    def _estimate_legacy_vote_payload(
+        self,
+        *,
+        user_id: int,
+        weekend_hint: bool | None,
+        now: datetime | None = None,
+    ) -> dict[str, Any]:
+        created_at = now or _utcnow()
+        expires_at = created_at + TOPGG_LEGACY_VOTE_WINDOW
+        estimated_weight = 2 if weekend_hint is True else 1
+        current = self._votes_by_user.get(int(user_id)) or {}
+        weight = max(int(current.get("weight", estimated_weight) or estimated_weight), estimated_weight)
+        return {
+            "created_at": created_at.isoformat(),
+            "expires_at": expires_at.isoformat(),
+            "weight": weight,
+            "_timing_source": TOPGG_TIMING_SOURCE_LEGACY_ESTIMATED,
+        }
+
+    def _active_vote_payload_from_record(self, user_id: int) -> dict[str, Any] | None:
+        record = self._votes_by_user.get(int(user_id))
+        if record is None:
+            return None
+        expires_at = _parse_datetime(record.get("expires_at"))
+        created_at = _parse_datetime(record.get("created_at"))
+        if expires_at is None or created_at is None or expires_at <= _utcnow():
+            return None
+        return {
+            "created_at": created_at.isoformat(),
+            "expires_at": expires_at.isoformat(),
+            "weight": int(record.get("weight", 1) or 1),
+            "_timing_source": self._timing_source_from_record(record),
+        }
+
+    def _timing_source_from_record(self, record: dict[str, Any]) -> str:
+        webhook_status = str((record or {}).get("webhook_status") or "").strip().lower()
+        if "legacy_estimated" in webhook_status:
+            return TOPGG_TIMING_SOURCE_LEGACY_ESTIMATED
+        return TOPGG_TIMING_SOURCE_EXACT
+
+    def _timing_note_for_source(self, timing_source: str) -> str | None:
+        if timing_source != TOPGG_TIMING_SOURCE_LEGACY_ESTIMATED:
+            return None
+        return (
+            "Legacy Top.gg mode: this vote window is estimated from the standard 12-hour voting cadence because "
+            "legacy API responses do not include exact expiry timestamps."
+        )
 
     async def _reminder_loop(self):
         while True:
