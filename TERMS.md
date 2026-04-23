@@ -101,13 +101,22 @@ Babblebox depends on:
 
 Premium entitlements can depend on provider availability, webhook delivery, OAuth linking, and current verification state. If those checks fail, are delayed, go stale, hit a hard provider-auth failure, or a user unlinks Patreon locally, Babblebox may immediately withhold provider-backed premium-only expansion or premium-only runtime behavior until the entitlement is verified again or relinked. Babblebox is designed to preserve saved state on downgrade rather than intentionally deleting it just because a plan changed.
 
-### Refunds for Premium Purchases
+### Premium Payments, Billing, and Refunds
 
-Patreon-backed Babblebox premium purchases are generally non-refundable.
+Babblebox does not process payment cards or directly reverse Patreon or Apple charges.
 
-Exceptions may apply where a refund is required by law or where Patreon separately processes or approves a refund under its own policies.
+Payment, billing, duplicate-charge, unauthorized-charge, and refund issues should start with Patreon, or with Apple where an iOS in-app purchase or Apple-managed checkout was used.
 
-Review the tier details before purchase, because unlinking, downgrading, or waiting for a tier change to refresh are entitlement-state issues rather than automatic refund events.
+Refund and billing outcomes follow Patreon or Apple policy and applicable law, not a separate Babblebox refund guarantee. Official references:
+- Patreon refund policy: https://support.patreon.com/hc/en-us/articles/205032045-Patreon-s-refund-policy
+- Patreon refund help: https://support.patreon.com/hc/en-us/articles/360021113811-How-do-I-request-a-refund
+- Apple billing help: https://reportaproblem.apple.com/
+
+Babblebox support can help with entitlement resolution, Patreon linking, stale refresh state, or Guild Pro claim assignment, but it cannot directly reverse Patreon or Apple charges for you.
+
+Premium benefits are limited to the documented entitlement surfaces and current limits, such as resolved plan state, claim rights, current limit increases, and optional premium-only features when the real runtime prerequisites are met. Premium is not a guarantee of uninterrupted service, guaranteed AI availability, guaranteed moderation outcomes, or a promise that every optional provider-backed feature will be active at every moment.
+
+Review the tier details before purchase, because unlinking, downgrading, losing verified entitlement state, or waiting for a tier change to refresh are entitlement-state issues rather than automatic refund events.
 
 Babblebox may expose public liveness/readiness pages for hosting and rollout monitoring, but those pages are intentionally limited to non-sensitive readiness state and sanitized provider aggregates rather than authenticated operator detail.
 

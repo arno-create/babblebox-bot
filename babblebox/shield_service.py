@@ -3007,7 +3007,7 @@ class ShieldService:
 
         message = f"Shield live-message moderation is now {'enabled' if enabled else 'disabled'} for this server."
         if enabled:
-            message += " Shield AI stays second-pass only, owner policy controls whether review runs, and Guild Pro unlocks gpt-5.4-mini plus gpt-5.4."
+            message += " Shield AI stays second-pass only, owner policy controls whether review runs, and Babblebox Guild Pro can make gpt-5.4-mini plus gpt-5.4 available when provider/runtime readiness also allows review."
             if first_enable:
                 message += (
                     " On first enable, Babblebox applies its recommended non-AI baseline anywhere you had not already customized it. "
@@ -3903,7 +3903,7 @@ class ShieldService:
         if enabled is not None:
             return (
                 False,
-                "Shield AI availability is resolved by owner policy outside `/shield ai`. This command only changes review threshold and eligible packs, and Guild Pro only unlocks gpt-5.4-mini and gpt-5.4.",
+                "Shield AI availability is resolved by owner policy outside `/shield ai`. This command only changes review threshold and eligible packs, and Babblebox Guild Pro only makes gpt-5.4-mini and gpt-5.4 available when owner policy and provider/runtime readiness also allow review.",
             )
         cleaned_min_confidence = str(min_confidence).strip().lower() if isinstance(min_confidence, str) else None
         if cleaned_min_confidence is not None and cleaned_min_confidence not in SHIELD_AI_MIN_CONFIDENCE_CHOICES:

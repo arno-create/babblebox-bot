@@ -372,7 +372,7 @@ class WebsiteDocsTests(unittest.TestCase):
         privacy_html = (ROOT / "privacy.html").read_text(encoding="utf-8")
 
         for text in (
-            "Guild Pro unlocks gpt-5.4-mini and gpt-5.4 above the baseline gpt-5.4-nano lane",
+            "can make `gpt-5.4-mini` and `gpt-5.4` available above the baseline `gpt-5.4-nano` lane",
             "baseline `gpt-5.4-nano` lane",
             "gpt-5.4-nano` is the baseline tier",
             "owner policy controls whether review runs",
@@ -621,10 +621,23 @@ class WebsiteDocsTests(unittest.TestCase):
         self.assertIn("returned account mismatch require relinking", help_html)
         self.assertIn("same owner still has another valid Guild Pro source", help_html)
         self.assertIn("linked-account identity mismatches", readme)
-        self.assertIn("generally non-refundable", readme)
-        self.assertIn("generally non-refundable", help_html)
-        self.assertIn("generally non-refundable", terms_html)
-        self.assertIn("generally non-refundable", terms_md)
+        self.assertIn("refund and billing outcomes follow patreon or apple policy", readme.casefold())
+        self.assertIn("Refund outcomes follow Patreon or Apple policy", help_html)
+        self.assertIn("Refund and billing outcomes follow Patreon or Apple policy", terms_html)
+        self.assertIn("Refund and billing outcomes follow Patreon or Apple policy", terms_md)
+        for text in (
+            "https://support.patreon.com/hc/en-us/articles/205032045-Patreon-s-refund-policy",
+            "https://support.patreon.com/hc/en-us/articles/360021113811-How-do-I-request-a-refund",
+            "https://reportaproblem.apple.com/",
+        ):
+            self.assertIn(text, readme)
+            self.assertIn(text, help_html)
+            self.assertIn(text, terms_html)
+            self.assertIn(text, terms_md)
+        self.assertNotIn("generally non-refundable", readme)
+        self.assertNotIn("generally non-refundable", help_html)
+        self.assertNotIn("generally non-refundable", terms_html)
+        self.assertNotIn("generally non-refundable", terms_md)
         self.assertIn("compact sanitized webhook event metadata", privacy_html)
         self.assertIn("compact sanitized webhook event metadata", privacy_md)
         self.assertIn("hard provider-auth failure", terms_html)
@@ -664,8 +677,8 @@ class WebsiteDocsTests(unittest.TestCase):
             "Subscribe on Patreon",
             "Free stays useful. Premium raises the ceiling cleanly.",
             "Buy, link, then claim only if you need Guild Pro.",
-            "Babblebox Plus / IF Epic Patron",
-            "Every paid tier includes both Babblebox and Inevitable Friendship benefits",
+            "maps to IF Epic Patron",
+            "includes both Babblebox and Inevitable Friendship benefits",
             "Terms of Service",
             "help.html#premium",
         ):
@@ -677,7 +690,7 @@ class WebsiteDocsTests(unittest.TestCase):
             "Best first premium command",
             "How do I actually buy and activate premium?",
             "Patreon tier mapping",
-            "Babblebox Plus / IF Epic Patron",
+            "maps to IF Epic Patron",
             "Terms of Service",
         ):
             self.assertIn(text, help_html)
@@ -687,8 +700,8 @@ class WebsiteDocsTests(unittest.TestCase):
             "### How Premium Activates",
             "### Patreon Tier Mapping",
             "### Trust and Downgrade Behavior",
-            "Babblebox Plus / IF Epic Patron",
-            "generally non-refundable",
+            "Babblebox Plus` maps to `IF Epic Patron`",
+            "refund and billing outcomes follow Patreon or Apple policy",
             "Supporter",
             "Guild Pro",
         ):
@@ -698,10 +711,17 @@ class WebsiteDocsTests(unittest.TestCase):
             "saved config stays preserved",
             "future expansion stays blocked until you trim it or premium returns",
             "Babblebox Plus raises Watch, reminder, and recurring AFK headroom",
-            "Guild Pro unlocks gpt-5.4-mini and gpt-5.4 above the baseline gpt-5.4-nano lane",
         ):
             self.assertIn(text, help_html)
             self.assertIn(text, readme)
+        self.assertIn(
+            "can make `gpt-5.4-mini` and `gpt-5.4` available above the baseline `gpt-5.4-nano` lane",
+            readme,
+        )
+        self.assertIn(
+            "can make <code>gpt-5.4-mini</code> plus <code>gpt-5.4</code> available above the baseline <code>gpt-5.4-nano</code> lane",
+            help_html,
+        )
 
         for text in (
             "recognition-only",

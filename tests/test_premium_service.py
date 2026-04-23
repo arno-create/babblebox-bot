@@ -17,6 +17,7 @@ from babblebox.premium_models import (
     PLAN_FREE,
     PLAN_GUILD_PRO,
     PLAN_PLUS,
+    PLAN_SUPPORTER,
     PROVIDER_PATREON,
     PatreonIdentity,
     SCOPE_GUILD,
@@ -221,6 +222,35 @@ class PremiumServiceTests(unittest.IsolatedAsyncioTestCase):
         ok, message = await self.service.deactivate_override(grant["override_id"], actor_user_id=999)
         self.assertTrue(ok, message)
         self.assertEqual(self.service.get_user_snapshot(10)["plan_code"], PLAN_FREE)
+
+    async def test_supporter_keeps_free_limits_while_resolving_as_paid_support_tier(self):
+        await self._link_identity(user_id=11, plan_codes=(PLAN_SUPPORTER,))
+
+        snapshot = self.service.get_user_snapshot(11)
+
+        self.assertEqual(snapshot["plan_code"], PLAN_SUPPORTER)
+        self.assertEqual(snapshot["active_plans"], (PLAN_SUPPORTER,))
+        self.assertEqual(snapshot["claimable_sources"], ())
+        self.assertEqual(self.service.resolve_user_limit(11, LIMIT_WATCH_KEYWORDS), 10)
+
+    async def test_manual_plus_can_stack_with_provider_guild_pro_without_merging_personal_and_claim_lanes(self):
+        await self._link_identity(user_id=12, plan_codes=(PLAN_GUILD_PRO,))
+        await self.service.create_manual_override(
+            target_type=SCOPE_USER,
+            target_id=12,
+            kind=MANUAL_KIND_GRANT,
+            plan_code=PLAN_PLUS,
+            actor_user_id=999,
+            reason="personal utility grant",
+        )
+
+        snapshot = self.service.get_user_snapshot(12)
+
+        self.assertEqual(snapshot["plan_code"], PLAN_PLUS)
+        self.assertEqual(snapshot["active_plans"], (PLAN_PLUS,))
+        self.assertEqual(len(snapshot["claimable_sources"]), 1)
+        self.assertEqual(snapshot["claimable_sources"][0]["source_kind"], "entitlement")
+        self.assertEqual(self.service.resolve_user_limit(12, LIMIT_WATCH_KEYWORDS), 25)
 
     async def test_system_owner_keeps_full_access_and_can_claim_multiple_guilds_without_manual_grants(self):
         owner_user_id = next(iter(SYSTEM_PREMIUM_OWNER_USER_IDS))

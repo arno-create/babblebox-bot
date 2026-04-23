@@ -80,7 +80,7 @@ class PremiumConfessionsStub:
 
     def describe_limit_error(self, *, limit_key: str, limit_value: int) -> str:
         return (
-            f"You reached this plan's active limit of {limit_value}. Babblebox Guild Pro unlocks more. "
+            f"You reached this plan's active limit of {limit_value}. Babblebox Guild Pro allows higher active limits. "
             "Use `/premium plans` to compare tiers. Previously saved over-limit state stays preserved."
         )
 

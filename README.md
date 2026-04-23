@@ -41,27 +41,35 @@ Babblebox premium is intentionally narrow:
 - `Free`: the real product lane stays intact, including party games, Daily Arcade, Question Drops, utilities, bounded Shield, and the current free Confessions baseline
 - `Supporter`: paid support tier that includes Supporter-tier Inevitable Friendship Discord benefits and keeps Babblebox at Free limits
 - `Babblebox Plus`: maps to `IF Epic Patron` and raises personal utility caps for Watch, reminders, and recurring AFK schedules
-- `Babblebox Guild Pro`: maps to `IF Legendary Patron`, raises server-side admin caps, unlocks Shield AI's enhanced `gpt-5.4-mini` and `gpt-5.4` tiers, unlocks Question Drops AI celebrations, raises bounded Shield limits, raises bump-detection scale, and raises the safe Confessions image ceiling. Guild Pro unlocks gpt-5.4-mini and gpt-5.4 above the baseline gpt-5.4-nano lane.
+- `Babblebox Guild Pro`: maps to `IF Legendary Patron`, raises server-side admin caps, can make Shield AI's enhanced `gpt-5.4-mini` and `gpt-5.4` tiers available when owner policy and provider/runtime readiness allow review, can make optional Question Drops AI celebrations available when celebration policy and provider/runtime readiness allow live copy, raises bounded Shield limits, raises bump-detection scale, and raises the safe Confessions image ceiling
 
 ### How Premium Activates
 
 1. Use `/premium plans` to compare the real Babblebox tiers first.
-2. Use `/premium subscribe` to open Patreon and buy `Supporter`, `Babblebox Plus / IF Epic Patron`, or `Babblebox Guild Pro / IF Legendary Patron`.
+2. Use `/premium subscribe` to open Patreon and buy `Supporter`, `Babblebox Plus`, or `Babblebox Guild Pro`.
 3. Buy the tier on Patreon first, then run `/premium link` in Discord to attach that Patreon account to Babblebox.
-4. Run `/premium status` to confirm the linked plan and resolved premium state.
+4. Run `/premium status` to confirm the linked personal plan, resolved premium state, and any Guild Pro claim-ready access.
 5. If you bought Guild Pro, finish with `/premium guild claim` in the server you want to upgrade, then verify it with `/premium guild status`.
 
 ### Patreon Tier Mapping
 
-- Patreon now has three combined tiers: `Supporter`, `Babblebox Plus / IF Epic Patron`, and `Babblebox Guild Pro / IF Legendary Patron`
+- Patreon now has three combined tiers: `Supporter`, `Babblebox Plus`, and `Babblebox Guild Pro`
+- `Babblebox Plus` maps to `IF Epic Patron`, and `Babblebox Guild Pro` maps to `IF Legendary Patron`
 - every paid tier includes both Babblebox and Inevitable Friendship benefits
 - if a linked Patreon account still looks free after a recent tier change, run `/premium refresh` or check `/support` before assuming the purchase failed
 
 ### Trust and Downgrade Behavior
 
-- Patreon purchases are generally non-refundable except where required by law or Patreon separately approves a refund; see the [Terms of Service](https://arno-create.github.io/babblebox-bot/terms.html)
+- Babblebox does not process cards or reverse Patreon or Apple charges directly
+- payment, billing, duplicate-charge, unauthorized-charge, and refund issues should start with Patreon, or with Apple for iOS purchases
+- refund and billing outcomes follow Patreon or Apple policy and applicable law, not a separate Babblebox guarantee
+- Patreon policy: [refund policy](https://support.patreon.com/hc/en-us/articles/205032045-Patreon-s-refund-policy), [request a refund](https://support.patreon.com/hc/en-us/articles/360021113811-How-do-I-request-a-refund)
+- Apple billing help: [reportaproblem.apple.com](https://reportaproblem.apple.com/)
+- Babblebox support is for entitlement resolution, Patreon linking, stale premium refresh state, and Guild Pro claim issues
 - hard Patreon auth failures, linked-account identity mismatches, or a local unlink immediately withdraw provider-backed runtime access while still preserving saved feature state
 - premium downgrades do not delete saved Watch keywords, reminders, AFK schedules, Shield patterns, or Confessions settings; saved config stays preserved, extra runtime headroom simply pauses, and future expansion stays blocked until you trim it or premium returns
+- premium promises are the documented entitlement surfaces and current limits, not guaranteed uptime, automatic AI activity, or guaranteed moderation outcomes
+- unlinking, downgrading, losing verified entitlement state, or waiting for a tier change to refresh are entitlement-state issues rather than automatic refund events
 - `/premium unlink` deletes Babblebox's local encrypted Patreon tokens only; it does not pretend to revoke Patreon-side app access for you
 
 ## Product Overview
@@ -173,7 +181,7 @@ Babblebox premium is intentionally narrow:
   - Babblebox's bounded cross-feature immunity layer
   - admin-only configuration for administrators or Manage Server users
   - live-message moderation remains optional and admin-configurable
-  - first enable applies a recommended non-AI baseline once, while Shield AI stays second-pass only, owner policy controls availability, and Guild Pro only unlocks the higher model tiers
+  - first enable applies a recommended non-AI baseline once, while Shield AI stays second-pass only, owner policy controls availability, and Babblebox Guild Pro only makes the higher model tiers available when provider/runtime readiness also allows review
   - always-on private feature-surface checks for Confessions unsafe-link parity, AFK reasons, reminder text plus public reminder delivery, and watch keyword setup
   - AFK reasons and reminders use privacy, adult, and severe checks; watch keyword setup stays privacy-only
   - privacy leak pack
@@ -193,7 +201,7 @@ Babblebox premium is intentionally narrow:
 - bot and webhook scam handling stays conservative by default unless the evidence is clearly dangerous
 - optional AI-assisted second-pass review for moderator context only
 - Shield AI stays live-message-only; AFK, reminders, watch keywords, and Confessions feature checks remain local-first and AI-free
-- Shield AI can route between `gpt-5.4-nano`, `gpt-5.4-mini`, and `gpt-5.4`; `gpt-5.4-nano` is the baseline tier, and Guild Pro unlocks `gpt-5.4-mini` and `gpt-5.4` above the baseline `gpt-5.4-nano` lane while diagnostics report the effective lane plus local readiness and entitlement state
+- Shield AI can route between `gpt-5.4-nano`, `gpt-5.4-mini`, and `gpt-5.4`; `gpt-5.4-nano` is the baseline tier, and Babblebox Guild Pro can make `gpt-5.4-mini` and `gpt-5.4` available above the baseline `gpt-5.4-nano` lane when owner policy and provider/runtime readiness allow review while diagnostics report the effective lane plus local readiness and entitlement state
 - ordinary guild AI needs both owner policy and Babblebox Guild Pro
 - `/shield ai` only configures review scope; Guild Pro plus owner policy controls real AI access and allowed models
 - log-first defaults with global `adaptive` vs `compact` delivery, `smart` vs `never` ping policy, and bounded per-pack delivery overrides
@@ -316,7 +324,7 @@ Question Drops notes:
 - `/dropsadmin ping` configures one optional role mention for live drops; Babblebox skips the ping automatically when the role is missing, unmentionable, or unsafe in that channel
 - numeric answers accept clean digits, and simple number words only for whole-number prompts
 - smarter concept, family, tag, and answer-shape rotation now keep higher-volume lanes from turning into a trivial farm
-- Question Drops AI celebrations require Guild Pro, while the offline content expansion and smarter rotation stay part of the core lane
+- Optional Question Drops AI celebrations can run on Babblebox Guild Pro when celebration policy and provider/runtime readiness allow live copy, while the offline content expansion and smarter rotation stay part of the core lane
 - removing current Babblebox roles does not erase earned mastery history, and opt-out is the durable "do not re-grant" switch
 - mastery announcements can use Babblebox's default copy, a scope default template, or a tier override with fallback order: tier override -> scope default -> Babblebox default
 - category template tokens: `{user.mention}` `{user.name}` `{user.display_name}` `{role.name}` `{tier.label}` `{threshold}` `{category.name}`
@@ -361,7 +369,7 @@ Question Drops notes:
 
 | Slash | Prefix | Purpose |
 | --- | --- | --- |
-| `/premium status` | n/a | See linked Patreon state, active plans, resolved limits, claim availability, and the next step |
+| `/premium status` | n/a | See linked Patreon state, personal plan, resolved limits, Guild Pro claim availability, and the next step |
 | `/premium plans` | n/a | Compare `Supporter`, `Babblebox Plus`, and `Babblebox Guild Pro`, plus the honest Free baseline |
 | `/premium subscribe` | n/a | Open the official Patreon page and follow the buy-then-link onboarding path |
 | `/premium link` | n/a | Start Patreon account linking privately with the same account that owns the Babblebox tier |
@@ -371,7 +379,7 @@ Question Drops notes:
 | `/premium guild claim` | n/a | Claim a Guild Pro entitlement for the current server explicitly |
 | `/premium guild release` | n/a | Release the current guild claim without deleting saved server configuration |
 
-Buy the tier on Patreon first, then run `/premium link` in Discord to attach that Patreon account to Babblebox. Patreon now uses three combined tiers: `Supporter`, `Babblebox Plus / IF Epic Patron`, and `Babblebox Guild Pro / IF Legendary Patron`.
+Buy the tier on Patreon first, then run `/premium link` in Discord to attach that Patreon account to Babblebox. Patreon now uses three combined tiers: `Supporter`, `Babblebox Plus`, and `Babblebox Guild Pro`, with `Babblebox Plus` mapping to `IF Epic Patron` and `Babblebox Guild Pro` mapping to `IF Legendary Patron`.
 
 If a Guild Pro claim source expires but the same owner still has another valid Guild Pro source, Babblebox can rebind that server claim without moving it to another user or deleting saved server configuration.
 
@@ -420,7 +428,7 @@ Slash is the best fit for multi-option admin setup here. Prefix stays positional
 | `/shield advanced list` | `bb!shield advanced list` | Review advanced patterns |
 | `/shield test` | `bb!shield test free nitro claim now https://bit.ly/x` | Dry-run a message through Shield |
 
-Shield's live-message link policy is intentionally separate from Confessions link mode. Confessions keeps `Disabled`, `Trusted Only`, and `Allow All Safe`, while Shield keeps `Default` plus the bounded `Trusted Links Only` mode. That stricter Shield mode allows the built-in trusted pack plus admin allowlisted domains and invite codes as policy exceptions, and `/shield trusted` now exposes the built-in families, direct domains, and any local built-in disables that affect trusted-only mode. Malicious, trusted-brand impersonation, adult-domain, and strong suspicious-link intel still wins over those trust exceptions. Shield phrase allowlists stay narrower: they suppress only targeted promo or adult-solicitation text matches. The live Shield packs are `Privacy Leak`, `Promo / Invite`, `Anti-Spam`, `GIF Flood / Media Pressure`, `Scam / Malicious Links`, `Adult Links + Solicitation`, and `Severe Harm / Hate`; no-link DM-lure bait lives under the scam pack and now covers money, wins, picks, and similar private-route payout lures, Anti-Spam stays grounded in explicit rate and duplicate rules with bounded corroboration, the GIF lane now splits one-user floods from collective channel pressure so collective cleanup can remove the exact live GIF streak for streak floods or only the newest contributing GIF posts from the active pressure slice for channel-pressure matches while personal abuse can still enforce one member, never text, the channel lane can trigger on either a true consecutive GIF streak or effective GIF pressure after lightweight meaningful-text weighting, collective pressure never adds strikes or timeouts on its own, tighter low-end GIF options exist for stricter rooms, optional emote and capitals lanes stay off until an admin enables them, moderators are exempt from Anti-Spam by default unless admins choose a stricter policy, `/shield panel` now keeps pack-local `Actions`, `Options`, and `Exemptions` together without mixing unrelated controls, `/shield module` owns the live on/off switch, `/shield escalation` owns repeated-hit escalation plus the global timeout fallback, `/shield logs` now carries global compact/no-ping defaults plus bounded per-pack overrides, each pack can inherit the global timeout or keep a dedicated timeout override, the trusted-link lane can do the same, live moderation stays opt-in, the first enable applies a recommended non-AI baseline, and Shield AI remains second-pass review only while Guild Pro unlocks `gpt-5.4-mini` plus `gpt-5.4`.
+Shield's live-message link policy is intentionally separate from Confessions link mode. Confessions keeps `Disabled`, `Trusted Only`, and `Allow All Safe`, while Shield keeps `Default` plus the bounded `Trusted Links Only` mode. That stricter Shield mode allows the built-in trusted pack plus admin allowlisted domains and invite codes as policy exceptions, and `/shield trusted` now exposes the built-in families, direct domains, and any local built-in disables that affect trusted-only mode. Malicious, trusted-brand impersonation, adult-domain, and strong suspicious-link intel still wins over those trust exceptions. Shield phrase allowlists stay narrower: they suppress only targeted promo or adult-solicitation text matches. The live Shield packs are `Privacy Leak`, `Promo / Invite`, `Anti-Spam`, `GIF Flood / Media Pressure`, `Scam / Malicious Links`, `Adult Links + Solicitation`, and `Severe Harm / Hate`; no-link DM-lure bait lives under the scam pack and now covers money, wins, picks, and similar private-route payout lures, Anti-Spam stays grounded in explicit rate and duplicate rules with bounded corroboration, the GIF lane now splits one-user floods from collective channel pressure so collective cleanup can remove the exact live GIF streak for streak floods or only the newest contributing GIF posts from the active pressure slice for channel-pressure matches while personal abuse can still enforce one member, never text, the channel lane can trigger on either a true consecutive GIF streak or effective GIF pressure after lightweight meaningful-text weighting, collective pressure never adds strikes or timeouts on its own, tighter low-end GIF options exist for stricter rooms, optional emote and capitals lanes stay off until an admin enables them, moderators are exempt from Anti-Spam by default unless admins choose a stricter policy, `/shield panel` now keeps pack-local `Actions`, `Options`, and `Exemptions` together without mixing unrelated controls, `/shield module` owns the live on/off switch, `/shield escalation` owns repeated-hit escalation plus the global timeout fallback, `/shield logs` now carries global compact/no-ping defaults plus bounded per-pack overrides, each pack can inherit the global timeout or keep a dedicated timeout override, the trusted-link lane can do the same, live moderation stays opt-in, the first enable applies a recommended non-AI baseline, and Shield AI remains second-pass review only while Babblebox Guild Pro can make `gpt-5.4-mini` plus `gpt-5.4` available when owner policy and provider/runtime readiness line up.
 
 Shield also now governs eligible non-chat surfaces in a bounded way. Confessions keeps its own privacy, review, and workflow logic, but shares Shield link intelligence. AFK reasons plus reminder text and public reminder delivery use fixed private privacy, adult, and severe feature-surface policies. Watch keyword setup stays privacy-only. None of those private feature checks create mod-log spam or call Shield AI.
 
@@ -573,7 +581,7 @@ Babblebox Shield is intentionally compact and conservative:
 - local scam decisions combine host/path/query risk with brand bait, official-looking framing, CTA wording, urgency, newcomer first-link context, fresh-campaign reuse, and explicit warning/education suppressors
 - optional AI review never becomes the primary moderation engine
 - AI review only runs after local Shield already flagged a message
-- Shield AI defaults to the routed `gpt-5.4-nano` tier when owner policy enables it; Guild Pro unlocks `gpt-5.4-mini` and `gpt-5.4`
+- Shield AI defaults to the routed `gpt-5.4-nano` tier when owner policy enables it; Babblebox Guild Pro can make `gpt-5.4-mini` and `gpt-5.4` available when provider/runtime readiness also allows review
 - AI review is admin-visible, tiered by model rather than support-server carveout, and never punishes by itself
 - AI review can cover privacy, promo, scam, adult, and severe once admins opt those packs in
 - only minimal, sanitized, truncated flagged text from the scanned surfaces is sent to the AI provider

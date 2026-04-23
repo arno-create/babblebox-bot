@@ -1822,7 +1822,7 @@ class ShieldCog(commands.Cog):
             f"Entitlement: {ai_status.get('premium_summary') or 'Guild Pro status is unavailable right now.'}",
             f"Configured models: {self._format_ai_models(ai_status.get('configured_allowed_models', []))}",
             f"Effective models right now: {self._format_ai_models(ai_status.get('effective_allowed_models', ai_status.get('allowed_models', [])))}",
-            "Upgrade path: Guild Pro unlocks gpt-5.4-mini plus gpt-5.4.",
+            "Upgrade path: Babblebox Guild Pro can make gpt-5.4-mini plus gpt-5.4 available when owner policy and provider/runtime readiness allow review.",
         ]
         if include_plan_allowed:
             lines.append(f"Plan-allowed models: {self._format_ai_models(ai_status.get('plan_allowed_models', []))}")
@@ -2417,7 +2417,7 @@ class ShieldCog(commands.Cog):
         log_channel = self._format_mentions([int(config["log_channel_id"])], kind="channel") if config.get("log_channel_id") else "Not set"
         embed = discord.Embed(
             title="Shield AI Assist",
-            description="Second-pass review for already-flagged live messages only. Owner policy controls availability, baseline gpt-5.4-nano stays the ordinary lane, and Guild Pro unlocks gpt-5.4-mini plus gpt-5.4.",
+            description="Second-pass review for already-flagged live messages only. Owner policy controls availability, baseline gpt-5.4-nano stays the ordinary lane, and Babblebox Guild Pro can make gpt-5.4-mini plus gpt-5.4 available when provider/runtime readiness also allows review.",
             color=ge.EMBED_THEME["info"],
         )
         embed.add_field(
@@ -2476,7 +2476,7 @@ class ShieldCog(commands.Cog):
             value="`/shield ai min_confidence:high privacy:true promo:false scam:true adult:true severe:true`",
             inline=False,
         )
-        return self._finalize_shield_embed(embed, footer="Babblebox Shield AI | Review scope is admin-configurable; baseline nano stays available and Guild Pro unlocks mini/full")
+        return self._finalize_shield_embed(embed, footer="Babblebox Shield AI | Review scope is admin-configurable; baseline nano stays available and Guild Pro can make mini/full available when policy and provider/runtime readiness allow review")
 
     def _logs_embed(self, guild_id: int) -> discord.Embed:
         config = self.service.get_config(guild_id)

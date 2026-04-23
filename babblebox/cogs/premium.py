@@ -30,6 +30,10 @@ from babblebox.premium_service import PremiumService, format_saved_state_status,
 
 LOGGER = logging.getLogger(__name__)
 
+PATREON_REFUND_POLICY_URL = "https://support.patreon.com/hc/en-us/articles/205032045-Patreon-s-refund-policy"
+PATREON_REFUND_REQUEST_URL = "https://support.patreon.com/hc/en-us/articles/360021113811-How-do-I-request-a-refund"
+APPLE_REFUND_URL = "https://reportaproblem.apple.com/"
+
 
 class PremiumCog(commands.Cog):
     def __init__(self, bot: commands.Bot):
@@ -63,9 +67,9 @@ class PremiumCog(commands.Cog):
 
     def _mixed_campaign_note(self) -> str:
         return (
-            "Patreon now has three combined tiers: Supporter, Babblebox Plus / IF Epic Patron, "
-            "and Babblebox Guild Pro / IF Legendary Patron. Every paid tier includes both "
-            "Babblebox and Inevitable Friendship benefits."
+            "Patreon now has three combined tiers: Supporter, Babblebox Plus, and Babblebox Guild Pro. "
+            "Babblebox Plus maps to IF Epic Patron, Babblebox Guild Pro maps to IF Legendary Patron, "
+            "and every paid tier includes both Babblebox and Inevitable Friendship benefits."
         )
 
     def _premium_actions_view(
@@ -135,6 +139,12 @@ class PremiumCog(commands.Cog):
         active = tuple(snapshot.get("active_plans", ()))
         if not active:
             return "Free"
+        return ", ".join(self.service.plan_title(plan) for plan in active)
+
+    def _personal_plan_text(self, snapshot: dict[str, Any]) -> str:
+        active = tuple(plan for plan in snapshot.get("active_plans", ()) if plan != PLAN_GUILD_PRO)
+        if not active:
+            return "None"
         return ", ".join(self.service.plan_title(plan) for plan in active)
 
     def _utility_counts(self, user_id: int) -> dict[str, dict[str, int] | None]:
@@ -239,8 +249,8 @@ class PremiumCog(commands.Cog):
         if link is None and not snapshot.get("active_plans"):
             return (
                 "Use `/premium subscribe` to open Patreon and choose Supporter, Babblebox Plus, "
-                "or Babblebox Guild Pro. "
-                "Then run `/premium link` here to connect that Patreon account."
+                "or Babblebox Guild Pro. Then run `/premium link` here to connect that Patreon account. "
+                "If the payment, billing, or refund itself looks wrong, start with Patreon or Apple first."
             )
         if link_status in {LINK_STATUS_REVOKED, LINK_STATUS_BROKEN}:
             return (
@@ -255,12 +265,13 @@ class PremiumCog(commands.Cog):
         if link is not None and not snapshot.get("active_plans") and claimable <= 0:
             return (
                 "Your Patreon account is connected, but Babblebox did not find one of the three combined tiers on it yet. "
-                "If you changed tiers recently, run `/premium refresh`, then use `/support` if it still looks wrong."
+                "If you changed tiers recently, run `/premium refresh`, then use `/support` if it still looks wrong. "
+                "If the charge, refund, or billing record looks wrong, start with Patreon or Apple first."
             )
         if claimable > 0:
             return (
-                "If this was a Guild Pro purchase, use `/premium guild claim` in the server you want to upgrade, "
-                "then verify it with `/premium guild status` there."
+                "If this was a Babblebox Guild Pro purchase, your personal lane can still read Free because Guild Pro is a server claim. "
+                "Use `/premium guild claim` in the server you want to upgrade, then verify it with `/premium guild status` there."
             )
         if claim_count > 0:
             suffix = "" if claim_count == 1 else "s"
@@ -277,7 +288,7 @@ class PremiumCog(commands.Cog):
             return "This server is already covered by a direct Guild Pro grant. Use `/support` only if that looks incorrect."
         if claim is None:
             return (
-                "If this server should use Guild Pro, buy the Babblebox Guild Pro / IF Legendary Patron tier, link Patreon on the owner account, "
+                "If this server should use Guild Pro, buy Babblebox Guild Pro on Patreon, link Patreon on the owner account, "
                 "then run `/premium guild claim` here."
             )
         if snapshot.get("stale"):
@@ -315,22 +326,24 @@ class PremiumCog(commands.Cog):
         embed = discord.Embed(
             title="Premium Status",
             description=(
-                f"Current plan: **{self.service.plan_title(snapshot['plan_code'])}**\n"
+                f"Personal plan: **{self.service.plan_title(snapshot['plan_code'])}**\n"
                 f"Patreon link: **{link_label}**"
             ),
             color=ge.EMBED_THEME["accent"],
         )
         claimable = len(snapshot.get("claimable_sources", ()))
-        access_lines = [f"Active plans: **{self._active_plan_text(snapshot)}**"]
+        access_lines = [f"Paid personal tier: **{self._personal_plan_text(snapshot)}**"]
         if snapshot.get("system_guild_claims") == "unlimited":
-            access_lines.append("Guild Pro claims ready: **Unlimited internal operator claims**")
+            access_lines.append("Guild Pro claim access: **Unlimited internal operator claims**")
         else:
-            access_lines.append(f"Guild Pro claims ready: **{claimable}**")
+            access_lines.append(f"Guild Pro claim sources ready: **{claimable}**")
         if active_claims:
             suffix = "" if len(active_claims) == 1 else "s"
             access_lines.append(f"Guild Pro already assigned: **{len(active_claims)} server{suffix}**")
         if link is not None and not snapshot.get("active_plans") and not snapshot.get("system_access") and claimable <= 0:
-            access_lines.append("Babblebox tier match: **No mapped Babblebox tier detected yet**")
+            access_lines.append("Resolved Babblebox tier: **No mapped Babblebox tier detected yet**")
+        elif claimable > 0 and not snapshot.get("active_plans") and not snapshot.get("system_access"):
+            access_lines.append("Resolved Babblebox Guild Pro access: **Available to claim in a server**")
         embed.add_field(name="Current Access", value="\n".join(access_lines), inline=False)
         notes: list[str] = []
         if snapshot.get("stale"):
@@ -339,8 +352,11 @@ class PremiumCog(commands.Cog):
             notes.append("A manual premium suspension is active on this user.")
         if snapshot.get("system_access"):
             notes.append("This Discord user has permanent Babblebox operator premium access, including internal Guild Pro claim power.")
+        if claimable > 0 and not snapshot.get("active_plans") and not snapshot.get("system_access"):
+            notes.append("Babblebox Guild Pro is a server claim, so your personal Babblebox limits stay at Free until that claim is attached to a server.")
         if link is not None and not snapshot.get("active_plans") and not snapshot.get("system_access") and claimable <= 0:
             notes.append(self._mixed_campaign_note())
+            notes.append("If the payment, refund, or billing record looks wrong, start with Patreon or Apple first. Use `/support` if the Babblebox tier still looks wrong after `/premium refresh`.")
         if link_status in {LINK_STATUS_REVOKED, LINK_STATUS_BROKEN}:
             if link_reason == "identity_provider_user_mismatch":
                 notes.append("Patreon returned a different account than the one Babblebox previously linked. Re-link Patreon before provider-backed premium access can be trusted again.")
@@ -464,8 +480,16 @@ class PremiumCog(commands.Cog):
                         limit_value=self.service.resolve_guild_limit(guild.id, LIMIT_CONFESSIONS_MAX_IMAGES),
                     ),
                     "Shield filters, allowlists, exemptions, and severe-term ceilings also rise on Guild Pro.",
-                    f"Shield AI review: {'Unlocked' if self.service.guild_has_capability(guild.id, CAPABILITY_SHIELD_AI_REVIEW) else 'Requires Guild Pro'}",
-                    f"Question Drops AI celebrations: {'Unlocked' if self.service.guild_has_capability(guild.id, CAPABILITY_QUESTION_DROPS_AI_CELEBRATIONS) else 'Requires Guild Pro'}",
+                    (
+                        "Higher Shield AI tiers: Available on this server when owner policy and provider/runtime readiness allow review"
+                        if self.service.guild_has_capability(guild.id, CAPABILITY_SHIELD_AI_REVIEW)
+                        else "Higher Shield AI tiers: Require Babblebox Guild Pro"
+                    ),
+                    (
+                        "Question Drops AI celebrations: Available on this server when celebration policy and provider/runtime readiness allow live copy"
+                        if self.service.guild_has_capability(guild.id, CAPABILITY_QUESTION_DROPS_AI_CELEBRATIONS)
+                        else "Question Drops AI celebrations: Require Babblebox Guild Pro"
+                    ),
                 )
             ),
             inline=False,
@@ -502,9 +526,9 @@ class PremiumCog(commands.Cog):
         embed.add_field(
             name="How Premium Works",
             value=(
-                "1. Use `/premium subscribe` to open Patreon and choose Supporter, Babblebox Plus / IF Epic Patron, or Babblebox Guild Pro / IF Legendary Patron.\n"
+                "1. Use `/premium subscribe` to open Patreon and choose Supporter, Babblebox Plus, or Babblebox Guild Pro.\n"
                 "2. Run `/premium link` in Discord so Babblebox can connect that Patreon account to your Discord user.\n"
-                "3. Use `/premium status` to confirm the linked plan.\n"
+                "3. Use `/premium status` to confirm the linked personal plan and any Guild Pro claim-ready state.\n"
                 "4. If you bought Guild Pro, use `/premium guild claim` in the server you want to upgrade, then verify it with `/premium guild status`."
             ),
             inline=False,
@@ -515,6 +539,16 @@ class PremiumCog(commands.Cog):
                 f"{self._mixed_campaign_note()}\n"
                 "If a linked Patreon account still shows Free after a recent tier change, the membership probably has not refreshed into Discord yet. "
                 "Run `/premium refresh` or use `/support` if it still looks wrong."
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Payment / Refund Routing",
+            value=(
+                "Babblebox does not process cards or reverse Patreon or Apple charges directly. "
+                "Start payment, billing, duplicate-charge, unauthorized-charge, or refund issues with Patreon, or with Apple for iOS purchases. "
+                "Refund outcomes follow Patreon or Apple policy and applicable law, not a separate Babblebox guarantee. "
+                f"Use `/support` for Babblebox entitlement, linking, or Guild Pro claim issues. Patreon: {PATREON_REFUND_POLICY_URL} Apple: {APPLE_REFUND_URL}"
             ),
             inline=False,
         )
@@ -547,7 +581,10 @@ class PremiumCog(commands.Cog):
             )
         return ge.make_status_embed(
             "Premium Refresh Review",
-            f"{message} If the linked account still looks wrong after refresh, use `/support` for live help.",
+            (
+                f"{message} Use `/support` for Babblebox entitlement help if the linked account still looks wrong after refresh. "
+                "If the payment, billing, or refund itself looks wrong, start with Patreon or Apple first."
+            ),
             tone="warning",
             footer="Babblebox Premium",
         )
@@ -559,7 +596,7 @@ class PremiumCog(commands.Cog):
                 (
                     "Babblebox deleted the local encrypted Patreon tokens for this Discord user and withdrew provider-backed premium access. "
                     "Saved Watch, reminder, AFK, Shield, and Confessions configuration stays preserved. "
-                    "If this was accidental, the Patreon subscription is still on Patreon and you can use `/premium link` again."
+                    "The Patreon or Apple billing relationship, if any, still lives with that provider, and you can use `/premium link` again if needed."
                 ),
                 tone="success",
                 footer="Babblebox Premium",
@@ -591,7 +628,7 @@ class PremiumCog(commands.Cog):
             )
             return embed
         if "No unclaimed Guild Pro entitlement" in message:
-            detail = "Babblebox could not find a free Guild Pro source on this user. Buy the Babblebox Guild Pro / IF Legendary Patron tier, link Patreon, or release an existing claim first."
+            detail = "Babblebox could not find a free Guild Pro source on this user. Buy Babblebox Guild Pro on Patreon, link Patreon, or release an existing claim first."
         elif "already uses one of your Guild Pro claims" in message:
             detail = "This server is already using one of your Guild Pro claims. Use `/premium guild status` to verify the current claim."
         elif "already has an active Guild Pro claim" in message:
@@ -737,15 +774,18 @@ class PremiumCog(commands.Cog):
             name="Choose The Right Tier",
             value=(
                 "`Supporter` backs the project, includes the Supporter-tier Inevitable Friendship Discord benefits, and keeps Babblebox at Free limits.\n"
-                "`Babblebox Plus / IF Epic Patron` raises personal Watch, reminder, and recurring AFK limits.\n"
-                "`Babblebox Guild Pro / IF Legendary Patron` is the server plan for higher caps, Shield AI's higher model tiers, Question Drops AI celebrations, and the larger safe Confessions image ceiling."
+                "`Babblebox Plus` maps to IF Epic Patron and raises personal Watch, reminder, and recurring AFK limits.\n"
+                "`Babblebox Guild Pro` maps to IF Legendary Patron and is the server plan for higher caps, higher Shield AI tiers when owner policy and provider/runtime readiness allow review, optional Question Drops AI celebrations when celebration policy and provider/runtime readiness allow live copy, and the larger safe Confessions image ceiling."
             ),
             inline=False,
         )
         embed.add_field(
             name="Before You Buy",
             value=(
-                "Patreon purchases are generally non-refundable except where required by law or Patreon separately approves a refund. "
+                "Babblebox does not process cards and cannot reverse Patreon or Apple charges directly. "
+                "Start payment, billing, duplicate-charge, unauthorized-charge, or refund issues with Patreon, or with Apple for iOS purchases. "
+                "Refund outcomes follow Patreon or Apple policy and applicable law, not a separate Babblebox guarantee. "
+                f"Patreon policy: {PATREON_REFUND_POLICY_URL} Patreon refund help: {PATREON_REFUND_REQUEST_URL} Apple: {APPLE_REFUND_URL} "
                 "Terms: https://arno-create.github.io/babblebox-bot/terms.html"
             ),
             inline=False,
@@ -754,14 +794,17 @@ class PremiumCog(commands.Cog):
             name="After You Buy",
             value=(
                 "1. Run `/premium link` in Discord with the same Patreon account that owns the Babblebox tier.\n"
-                "2. Run `/premium status` to confirm the linked plan.\n"
+                "2. Run `/premium status` to confirm the linked personal plan and any Guild Pro claim-ready state.\n"
                 "3. If you bought Guild Pro, run `/premium guild claim` inside the server you want to upgrade."
             ),
             inline=False,
         )
         embed.add_field(
             name="Need Help?",
-            value="Use `/premium plans` to compare the plans again, or `/support` if a recent Patreon tier change still feels unclear.",
+            value=(
+                "Use `/premium plans` to compare the plans again. Use `/support` if the Babblebox link, resolved tier, or Guild Pro claim still feels wrong after purchase. "
+                f"For payment or refund issues, start with Patreon or Apple first. Patreon: {PATREON_REFUND_REQUEST_URL} Apple: {APPLE_REFUND_URL}"
+            ),
             inline=False,
         )
         embed = ge.style_embed(embed, footer="Babblebox Premium | Buy first, then link in Discord")
@@ -792,17 +835,26 @@ class PremiumCog(commands.Cog):
             inline=False,
         )
         embed.add_field(
+            name="Payment Boundary",
+            value=(
+                "Linking does not buy the tier, cancel the subscription, or reverse charges. "
+                "Payment, billing, and refund issues start with Patreon, or with Apple for iOS purchases. "
+                "Refund outcomes follow Patreon or Apple policy and applicable law, not a separate Babblebox guarantee. "
+                "Babblebox support helps with entitlement, linking, and Guild Pro claim questions."
+            ),
+            inline=False,
+        )
+        embed.add_field(
             name="Use The Right Patreon Account",
             value=(
-                "Use the same Patreon account that owns Supporter, Babblebox Plus / IF Epic Patron, "
-                "or Babblebox Guild Pro / IF Legendary Patron."
+                "Use the same Patreon account that owns Supporter, Babblebox Plus, or Babblebox Guild Pro."
             ),
             inline=False,
         )
         embed.add_field(
             name="After Success",
             value=(
-                "Run `/premium status` to confirm the linked plan. If you bought Guild Pro, continue in the target server with `/premium guild claim`."
+                "Run `/premium status` to confirm the linked personal plan and any Guild Pro claim-ready state. If you bought Guild Pro, continue in the target server with `/premium guild claim`."
             ),
             inline=False,
         )
