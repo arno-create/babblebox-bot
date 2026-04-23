@@ -90,7 +90,14 @@ class _BaseVoteStore:
     async def record_webhook_event(self, record: dict[str, Any]) -> bool:
         raise NotImplementedError
 
-    async def finish_webhook_event(self, event_id: str, *, status: str, error_text: str | None = None):
+    async def finish_webhook_event(
+        self,
+        event_id: str,
+        *,
+        status: str,
+        error_text: str | None = None,
+        processed_at: Any | None = None,
+    ):
         raise NotImplementedError
 
 
@@ -123,12 +130,20 @@ class _MemoryVoteStore(_BaseVoteStore):
         self.webhook_events[event_id] = deepcopy(record)
         return True
 
-    async def finish_webhook_event(self, event_id: str, *, status: str, error_text: str | None = None):
+    async def finish_webhook_event(
+        self,
+        event_id: str,
+        *,
+        status: str,
+        error_text: str | None = None,
+        processed_at: Any | None = None,
+    ):
         current = deepcopy(self.webhook_events.get(str(event_id)) or {})
         if not current:
             return
         current["status"] = str(status or "").strip() or "failed"
         current["error_text"] = str(error_text).strip() if error_text else None
+        current["processed_at"] = _serialize_datetime(processed_at) or datetime.now(timezone.utc).isoformat()
         self.webhook_events[str(event_id)] = current
 
 
@@ -230,32 +245,64 @@ class _PostgresVoteStore(_BaseVoteStore):
         async with self._pool.acquire() as connection:
             row = await connection.fetchrow(
                 """
-                INSERT INTO topgg_webhook_events (event_id, discord_user_id, event_type, received_at, status, error_text)
-                VALUES ($1, $2, $3, $4, $5, $6)
+                INSERT INTO topgg_webhook_events (
+                    event_id,
+                    discord_user_id,
+                    event_type,
+                    webhook_mode,
+                    received_at,
+                    status,
+                    error_text,
+                    payload_hash,
+                    trace_id,
+                    signature_timestamp,
+                    vote_created_at,
+                    vote_expires_at,
+                    timing_source,
+                    processed_at
+                )
+                VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)
                 ON CONFLICT (event_id) DO NOTHING
                 RETURNING event_id
                 """,
                 str(record["event_id"]),
                 int(record["discord_user_id"]) if record.get("discord_user_id") is not None else None,
                 str(record.get("event_type") or "").strip() or "unknown",
+                str(record.get("webhook_mode") or "").strip() or None,
                 _parse_datetime(record.get("received_at")) or datetime.now(timezone.utc),
                 str(record.get("status") or "").strip() or "pending",
                 record.get("error_text"),
+                record.get("payload_hash"),
+                record.get("trace_id"),
+                int(record["signature_timestamp"]) if record.get("signature_timestamp") is not None else None,
+                _parse_datetime(record.get("vote_created_at")),
+                _parse_datetime(record.get("vote_expires_at")),
+                str(record.get("timing_source") or "").strip() or None,
+                _parse_datetime(record.get("processed_at")),
             )
         return row is not None
 
-    async def finish_webhook_event(self, event_id: str, *, status: str, error_text: str | None = None):
+    async def finish_webhook_event(
+        self,
+        event_id: str,
+        *,
+        status: str,
+        error_text: str | None = None,
+        processed_at: Any | None = None,
+    ):
         async with self._pool.acquire() as connection:
             await connection.execute(
                 """
                 UPDATE topgg_webhook_events
                 SET status = $2,
-                    error_text = $3
+                    error_text = $3,
+                    processed_at = $4
                 WHERE event_id = $1
                 """,
                 str(event_id),
                 str(status or "").strip() or "failed",
                 str(error_text).strip() if error_text else None,
+                _parse_datetime(processed_at) or datetime.now(timezone.utc),
             )
 
     async def _ensure_pool(self):
@@ -301,12 +348,28 @@ class _PostgresVoteStore(_BaseVoteStore):
                     event_id TEXT PRIMARY KEY,
                     discord_user_id BIGINT,
                     event_type TEXT NOT NULL,
+                    webhook_mode TEXT,
                     received_at TIMESTAMPTZ NOT NULL,
                     status TEXT NOT NULL,
-                    error_text TEXT
+                    error_text TEXT,
+                    payload_hash TEXT,
+                    trace_id TEXT,
+                    signature_timestamp BIGINT,
+                    vote_created_at TIMESTAMPTZ,
+                    vote_expires_at TIMESTAMPTZ,
+                    timing_source TEXT,
+                    processed_at TIMESTAMPTZ
                 )
                 """
             )
+            await connection.execute("ALTER TABLE topgg_webhook_events ADD COLUMN IF NOT EXISTS webhook_mode TEXT")
+            await connection.execute("ALTER TABLE topgg_webhook_events ADD COLUMN IF NOT EXISTS payload_hash TEXT")
+            await connection.execute("ALTER TABLE topgg_webhook_events ADD COLUMN IF NOT EXISTS trace_id TEXT")
+            await connection.execute("ALTER TABLE topgg_webhook_events ADD COLUMN IF NOT EXISTS signature_timestamp BIGINT")
+            await connection.execute("ALTER TABLE topgg_webhook_events ADD COLUMN IF NOT EXISTS vote_created_at TIMESTAMPTZ")
+            await connection.execute("ALTER TABLE topgg_webhook_events ADD COLUMN IF NOT EXISTS vote_expires_at TIMESTAMPTZ")
+            await connection.execute("ALTER TABLE topgg_webhook_events ADD COLUMN IF NOT EXISTS timing_source TEXT")
+            await connection.execute("ALTER TABLE topgg_webhook_events ADD COLUMN IF NOT EXISTS processed_at TIMESTAMPTZ")
 
     def _row_to_vote(self, row: Any) -> dict[str, Any]:
         return {
@@ -369,8 +432,20 @@ class VoteStore:
     async def record_webhook_event(self, record: dict[str, Any]) -> bool:
         return await self._store.record_webhook_event(record)
 
-    async def finish_webhook_event(self, event_id: str, *, status: str, error_text: str | None = None):
-        await self._store.finish_webhook_event(event_id, status=status, error_text=error_text)
+    async def finish_webhook_event(
+        self,
+        event_id: str,
+        *,
+        status: str,
+        error_text: str | None = None,
+        processed_at: Any | None = None,
+    ):
+        await self._store.finish_webhook_event(
+            event_id,
+            status=status,
+            error_text=error_text,
+            processed_at=processed_at,
+        )
 
     def _build_store(self) -> _BaseVoteStore:
         if self.backend_preference in {"memory", "test", "dev"}:

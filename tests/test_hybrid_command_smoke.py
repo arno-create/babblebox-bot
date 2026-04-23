@@ -2031,6 +2031,128 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
                         await service.close()
                 await bot.close()
 
+    async def test_vote_embed_reports_disabled_state_without_sounding_like_premium(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
+        cog = VoteCog(bot)
+        try:
+            snapshot = {
+                "user_id": 1,
+                "plan_code": "free",
+                "plan_label": "Free",
+                "configuration_state": "disabled",
+                "configuration_message": "Top.gg vote bonuses are disabled until an operator explicitly sets `TOPGG_ENABLED=true` on this deployment.",
+                "active": False,
+                "eligible": True,
+                "created_at": None,
+                "expires_at": None,
+                "weight": 1,
+                "reminder_opt_in": False,
+                "vote_url": "https://top.gg/bot/1480903089518022739/vote",
+                "bonus_limits": {},
+                "api_refresh_available": False,
+                "timing_source": "exact",
+                "timing_note": None,
+            }
+
+            embed = cog.build_vote_embed(snapshot)
+            fields = {field.name: field.value for field in embed.fields}
+
+            self.assertIn("topgg_enabled=true", embed.description.casefold())
+            self.assertNotIn("premium", embed.description.casefold())
+            self.assertIn("explicitly enabled", fields["Refresh"].casefold())
+        finally:
+            await cog.service.close()
+
+    async def test_hidden_topgg_vote_admin_command_rejects_guild_invocation(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
+        cog = VoteCog(bot)
+        try:
+            cog.service.storage_ready = True
+            ctx = FakeContext(
+                interaction=None,
+                guild=FakeGuild(10),
+                channel=FakeChannel(),
+                author=FakeAuthor(user_id=1266444952779620413, manage_guild=True),
+            )
+
+            await VoteCog.topggvote_admin_command.callback(cog, ctx, "status")
+
+            self.assertEqual(len(ctx.send_calls), 1)
+            self.assertEqual(ctx.send_calls[0]["content"], "That command is only available in DM.")
+        finally:
+            await cog.service.close()
+
+    async def test_hidden_topgg_vote_admin_command_rejects_unauthorized_dm(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
+        cog = VoteCog(bot)
+        try:
+            cog.service.storage_ready = True
+            ctx = FakeContext(
+                interaction=None,
+                guild=None,
+                channel=FakeChannel(),
+                author=FakeAuthor(user_id=777),
+            )
+
+            await VoteCog.topggvote_admin_command.callback(cog, ctx, "status")
+
+            self.assertEqual(len(ctx.send_calls), 1)
+            self.assertEqual(ctx.send_calls[0]["content"], "That command is unavailable.")
+        finally:
+            await cog.service.close()
+
+    async def test_hidden_topgg_vote_admin_command_reports_global_and_user_status(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
+        cog = VoteCog(bot)
+        try:
+            owner = FakeAuthor(user_id=1266444952779620413)
+            ctx = FakeContext(interaction=None, guild=None, channel=FakeChannel(), author=owner)
+            cog.service.storage_ready = True
+            cog.service.diagnostics_snapshot = lambda: {
+                "enabled": True,
+                "configuration_state": "configured",
+                "configuration_message": "Top.gg vote bonuses are configured.",
+                "webhook_mode": "v2",
+                "storage_ready": True,
+                "storage_backend": "memory",
+                "runtime_attached": True,
+                "public_routes_ready": True,
+                "api_refresh_available": True,
+                "refresh_cooldown_seconds": 60,
+                "webhook_summary": {"status": "ready"},
+            }
+            cog.service.get_vote_record = lambda user_id: {
+                "discord_user_id": int(user_id),
+                "topgg_vote_id": "vote-5511",
+                "created_at": "2026-04-24T10:00:00+00:00",
+                "expires_at": "2026-04-24T22:00:00+00:00",
+                "weight": 1,
+                "reminder_opt_in": True,
+                "webhook_status": "processed",
+                "webhook_trace_id": "trace-5511",
+            }
+            cog.service.status_snapshot = lambda user_id: {
+                "user_id": int(user_id),
+                "plan_label": "Free",
+                "configuration_state": "configured",
+                "active": True,
+                "eligible": True,
+                "expires_at": "2026-04-24T22:00:00+00:00",
+                "timing_source": "exact",
+                "reminder_opt_in": True,
+            }
+
+            await VoteCog.topggvote_admin_command.callback(cog, ctx, "status")
+            await VoteCog.topggvote_admin_command.callback(cog, ctx, "status", "user", "5511")
+
+            self.assertEqual(len(ctx.send_calls), 2)
+            self.assertEqual(ctx.send_calls[0]["embed"].title, "Top.gg Vote Owner Status")
+            self.assertIn("Private maintainer status", ctx.send_calls[0]["embed"].description)
+            self.assertIn("5511", ctx.send_calls[1]["embed"].fields[1].value)
+            self.assertIn("2026-04-24T22:00:00+00:00", ctx.send_calls[1]["embed"].fields[1].value)
+        finally:
+            await cog.service.close()
+
     async def test_bremind_root_keeps_expected_admin_children(self):
         with self._service_env_patch():
             bot = commands.Bot(command_prefix="!", intents=discord.Intents.none())
@@ -3175,3 +3297,4 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertNotIn("shieldai", serialized_help)
         self.assertNotIn("dropscelebaiglobal", serialized_help)
+        self.assertNotIn("topggvoteadmin", serialized_help)
