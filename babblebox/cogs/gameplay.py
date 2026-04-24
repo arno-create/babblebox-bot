@@ -4,6 +4,7 @@ import asyncio
 import contextlib
 
 import discord
+from discord import app_commands
 from discord.ext import commands
 
 from babblebox import game_engine as ge
@@ -82,7 +83,7 @@ class GameplayCog(commands.Cog):
             ctx,
             embed=ge.make_status_embed(
                 "Spyfall Tools",
-                "Use `/spyfall vote` during an active Spyfall round. The old slash `/vote` now opens Babblebox's Top.gg vote panel instead.",
+                "Use `/spyfall target @player` to pass the spotlight, or `/spyfall vote` when the room is ready. The old slash `/vote` now opens Babblebox's Top.gg vote panel instead.",
                 tone="info",
                 footer="Babblebox Spyfall",
             ),
@@ -92,6 +93,11 @@ class GameplayCog(commands.Cog):
     @spyfall_group.command(name="vote", with_app_command=True, description="Trigger a Spyfall vote")
     async def spyfall_vote_command(self, ctx: commands.Context):
         await self._run_spyfall_vote_command(ctx, command_name="/spyfall vote")
+
+    @spyfall_group.command(name="target", with_app_command=True, description="Pass the Spyfall spotlight to another player")
+    @app_commands.describe(member="Player who should answer next")
+    async def spyfall_target_command(self, ctx: commands.Context, member: discord.Member):
+        await self._run_spyfall_target_command(ctx, member, command_name="/spyfall target")
 
     @commands.command(name="vote")
     async def vote_prefix_alias(self, ctx: commands.Context):
@@ -120,6 +126,67 @@ class GameplayCog(commands.Cog):
             return
 
         await self._trigger_spyfall_vote_prefix(ctx)
+
+    async def _run_spyfall_target_command(self, ctx: commands.Context, member: discord.Member, *, command_name: str):
+        if ctx.guild is None or ctx.channel is None:
+            await send_hybrid_response(
+                ctx,
+                embed=ge.make_status_embed(
+                    "Server Only",
+                    "This command only works inside a server.",
+                    tone="warning",
+                    footer="Babblebox Spyfall",
+                ),
+                ephemeral=True,
+            )
+            return
+
+        await defer_hybrid_response(ctx, ephemeral=getattr(ctx, "interaction", None) is not None)
+        if not await require_channel_permissions(ctx, ge.VOTE_REQUIRED_PERMS, command_name):
+            return
+
+        guild_id = ctx.guild.id
+        game = ge.games.get(guild_id)
+        if not game or game.get("closing"):
+            await send_hybrid_response(
+                ctx,
+                embed=ge.make_status_embed(
+                    "No Active Spyfall",
+                    "No active Spyfall game is available to target in this server.",
+                    tone="info",
+                    footer="Babblebox Spyfall",
+                ),
+                ephemeral=True,
+            )
+            return
+
+        async with game["lock"]:
+            game = ge.games.get(guild_id)
+            if not game or game.get("closing"):
+                ok, message = False, "No active Spyfall game is available to target in this server."
+            else:
+                ok, message = await ge.advance_spyfall_target_locked(
+                    guild_id,
+                    game,
+                    ctx.author,
+                    member,
+                    channel=ctx.channel,
+                )
+
+        if not ok:
+            await send_hybrid_response(
+                ctx,
+                embed=ge.make_status_embed("Target Not Moved", message, tone="warning", footer="Babblebox Spyfall"),
+                ephemeral=True,
+            )
+            return
+
+        if getattr(ctx, "interaction", None) is not None:
+            await send_hybrid_response(
+                ctx,
+                embed=ge.make_status_embed("Spotlight Moved", message, tone="success", footer="Babblebox Spyfall"),
+                ephemeral=True,
+            )
 
     @commands.hybrid_command(name="stop", with_app_command=True, description="Host/Admin Only: Force stop the current game and clear the lobby")
     async def stop_command(self, ctx: commands.Context):

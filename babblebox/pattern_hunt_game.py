@@ -330,6 +330,81 @@ def parse_guess_atom(family: str | None, value: str | None) -> tuple[bool, RuleA
     return False, "Unsupported rule family."
 
 
+def _parse_pattern_theory_piece(piece: str) -> RuleAtom | None:
+    text = _normalize_text(piece)
+    if not text:
+        return None
+    direct = text.replace("-", "_").replace(" ", "_")
+    if direct in PATTERN_HUNT_RULE_FAMILIES:
+        ok, atom_or_message = parse_guess_atom(direct, None)
+        return atom_or_message if ok else None
+    if direct in {"contains_number", "contains_numbers", "contains_digit", "contains_digits", "number", "digits"}:
+        return RuleAtom("contains_digits")
+    if direct in {"contains_emoji", "emoji", "has_emoji"}:
+        return RuleAtom("contains_emoji")
+    if direct in {"question", "question_form", "is_question", "is_a_question"}:
+        return RuleAtom("question_form")
+    if direct in {"same_initial", "same_initial_letter", "all_words_same_letter", "all_words_start_same_letter"}:
+        return RuleAtom("same_initial_letter")
+
+    match = re.search(r"\bstarts?\s+with(?:\s+letter)?\s+([a-z])\b", text)
+    if match:
+        return RuleAtom("starts_with_letter", match.group(1))
+    match = re.search(r"\b(?:does\s+not|doesn't|without|forbid(?:s|ding)?|no)\s+(?:contain\s+)?(?:the\s+)?(?:letter\s+)?([a-z])\b", text)
+    if match:
+        return RuleAtom("forbid_letter", match.group(1))
+    match = re.search(r"\bends?\s+with\s+(\?|!|\.)", text)
+    if match:
+        return RuleAtom("ends_with_punctuation", match.group(1))
+    if "question mark" in text:
+        return RuleAtom("ends_with_punctuation", "?")
+    if "exclamation" in text:
+        return RuleAtom("ends_with_punctuation", "!")
+    if "period" in text or "full stop" in text:
+        return RuleAtom("ends_with_punctuation", ".")
+    if re.search(r"\b\d+\s*-\s*\d+\s+words?\b", text):
+        left, right = re.search(r"\b(\d+)\s*-\s*(\d+)\s+words?\b", text).groups()
+        minimum = int(left)
+        maximum = int(right)
+        if minimum <= maximum:
+            return RuleAtom("word_count_range", (minimum, maximum))
+        return None
+    match = re.search(r"\b(?:has|have|exactly|is)\s+(?:exactly\s+)?(\d+)\s+words?\b", text)
+    if match:
+        return RuleAtom("exact_word_count", int(match.group(1)))
+    if re.search(r"\b(?:contains?|has|includes?)\s+(?:a\s+)?(?:number|digit)s?\b", text):
+        return RuleAtom("contains_digits")
+    if re.search(r"\b(?:contains?|has|includes?)\s+(?:an?\s+)?emoji\b", text):
+        return RuleAtom("contains_emoji")
+    for category in _CATEGORY_WORDS:
+        if re.search(rf"\b(?:contains?|has|includes?)\s+(?:an?\s+)?{category}\s+word\b", text):
+            return RuleAtom("contains_category_word", category)
+        if text in {f"{category} word", f"contains {category}", f"has {category}", f"includes {category}"}:
+            return RuleAtom("contains_category_word", category)
+    if re.search(r"\b(?:is|must\s+be|phrased\s+as)\s+(?:a\s+)?question\b", text) or text == "a question":
+        return RuleAtom("question_form")
+    if "all words start with the same letter" in text or "same first letter" in text:
+        return RuleAtom("same_initial_letter")
+    return None
+
+
+def parse_pattern_theory(theory: str | None) -> tuple[bool, list[RuleAtom] | str]:
+    text = _normalize_text(theory)
+    if not text:
+        return False, "Try a natural theory like `contains a number`, `starts with b`, or `has 3-5 words`."
+    pieces = [piece.strip() for piece in re.split(r"\s+(?:and|plus)\s+|\s*,\s*", text) if piece.strip()]
+    atoms = []
+    for piece in pieces:
+        atom = _parse_pattern_theory_piece(piece)
+        if atom is None:
+            return False, "Try a natural theory like `contains a number`, `starts with b`, or `has 3-5 words`."
+        atoms.append(atom)
+    valid, message = validate_pattern_guess_atoms(atoms)
+    if not valid:
+        return False, message or "Try a cleaner natural theory."
+    return True, atoms
+
+
 def validate_pattern_prompt(text: str | None) -> tuple[bool, str | None]:
     prompt = _normalize_pattern_prompt(text)
     if not prompt:
@@ -531,7 +606,7 @@ def _pattern_hunt_now_copy(game: dict[str, Any]) -> str:
     if str(state.get("phase", "setup")).casefold() == "answer":
         return (
             f"{coder_name}, post one clue in chat that fits the hidden rule.\n"
-            f"{guesser_name} can keep asking in chat or lock in a private theory with `/hunt guess`."
+            f"{guesser_name} reads the clues and can lock in a private theory with `/hunt guess` using natural text."
         )
     return (
         f"{guesser_name}, ask {coder_name} for one clue in chat.\n"
@@ -549,9 +624,9 @@ def _finish_pattern_hunt_tutorial_cycle(state: dict[str, Any]):
 
 def _pattern_hunt_first_round_copy() -> str:
     return (
-        "1. The guesser asks for one clue in chat.\n"
-        "2. The current coder answers in chat with one clue.\n"
-        "3. The guesser asks again or uses `/hunt guess` privately."
+        "1. The current coder posts one clue that fits the hidden rule.\n"
+        "2. Babblebox accepts it, rotates coders, and keeps the public anchor small.\n"
+        "3. The guesser uses `/hunt guess` privately when a natural theory is ready."
     )
 
 
@@ -618,7 +693,7 @@ async def start_pattern_hunt_game_locked(guild_id: int, game: dict[str, Any]):
     turn_limit = max(5, (2 * len(coders)) + 1)
     state.update(
         {
-            "phase": "prompt",
+            "phase": "answer",
             "guesser_id": guesser.id,
             "coder_order": [player.id for player in coders],
             "current_coder_index": 0,
@@ -651,13 +726,13 @@ def build_pattern_hunt_status_embed(game: dict[str, Any], *, public: bool) -> di
     state = ensure_pattern_hunt_state(game)
     guesser = ge.get_snapshot_player(game, state.get("guesser_id"))
     coder = ge.get_snapshot_player(game, current_pattern_hunt_coder_id(game))
-    description = "One public clue loop. One hidden rule. Private guesses stay in `/hunt guess`."
+    description = "Coder-led public clues. One hidden rule. Private natural theories stay in `/hunt guess`."
     if state.get("tutorial_cycle_active"):
         description += "\nFirst round is intentionally slower and more forgiving so the room can catch the rhythm."
     if public and state.get("hint_text"):
         description += f"\nShared hint: {state['hint_text']}"
     if not public:
-        description += "\nUse `/hunt guess` for a clean 1-3 family theory. `Contains Digits` means digits `0-9` only."
+        description += "\nUse `/hunt guess` with a natural theory like `contains a number`. `Contains Digits` means digits `0-9` only."
 
     embed = discord.Embed(title="🧩 Pattern Hunt", description=description, color=discord.Color.dark_teal())
     embed.add_field(
@@ -684,8 +759,8 @@ def build_pattern_hunt_status_embed(game: dict[str, Any], *, public: bool) -> di
         embed.add_field(
             name="Private Guess",
             value=(
-                "Use 1-3 rule families in `/hunt guess`.\n"
-                "Families that need a value take simple inputs like `a`, `?`, `food`, `3`, or `3-5`.\n"
+                "Use one natural theory in `/hunt guess`, like `starts with b` or `has 3-5 words`.\n"
+                "You can still combine clear families with `and`, like `contains a number and is a question`.\n"
                 "`Contains Digits` means digits `0-9` only."
             ),
             inline=False,
@@ -791,6 +866,18 @@ async def submit_pattern_guess_locked(
     return False, f"Not the rule yet. You have **{remaining}** guess(es) left."
 
 
+async def submit_pattern_theory_locked(
+    guild_id: int,
+    game: dict[str, Any],
+    actor: discord.abc.User,
+    theory: str,
+) -> tuple[bool, str]:
+    ok, atoms_or_message = parse_pattern_theory(theory)
+    if not ok:
+        return False, str(atoms_or_message)
+    return await submit_pattern_guess_locked(guild_id, game, actor, atoms_or_message)
+
+
 async def _start_pattern_answer_locked(guild_id: int, game: dict[str, Any]):
     state = ensure_pattern_hunt_state(game)
     state["phase"] = "answer"
@@ -809,17 +896,17 @@ async def _start_pattern_answer_locked(guild_id: int, game: dict[str, Any]):
 
 async def _begin_pattern_turn_locked(guild_id: int, game: dict[str, Any]):
     state = ensure_pattern_hunt_state(game)
-    state["phase"] = "prompt"
+    state["phase"] = "answer"
     state["current_prompt"] = None
     state["retry_used"] = False
-    timeout_seconds = _pattern_hunt_prompt_timeout_seconds(state)
+    timeout_seconds = _pattern_hunt_answer_timeout_seconds(state)
     state["deadline_at"] = ge.now_utc() + timedelta(seconds=timeout_seconds)
     token = ge.bump_token(game, "turn_token")
     await ge.cancel_task(game.get("turn_task"))
     await _refresh_pattern_hunt_anchor(game)
     game["turn_task"] = asyncio.create_task(
-        _pattern_hunt_prompt_timeout(guild_id, token, timeout_seconds),
-        name=f"babblebox-pattern-prompt-{guild_id}",
+        _pattern_hunt_answer_timeout(guild_id, token, timeout_seconds),
+        name=f"babblebox-pattern-answer-{guild_id}",
     )
     ge.reset_idle_timer(guild_id)
 

@@ -81,8 +81,8 @@ Babblebox premium is intentionally narrow:
 - Spyfall
 - Word Bomb
 - Pattern Hunt
-  - one public clue loop with private rule guesses
-  - hidden-rule coder DMs and machine-checkable rule families
+  - coder-led public clue loop with private natural rule theories
+  - hidden-rule coder DMs and deterministic theory parsing
   - first-round grace, clue budget, and cleaner reveal flow
 - Chaos Cards and bomb mode variants
 - hybrid slash + `bb!` prefix support
@@ -278,23 +278,24 @@ Slash commands and the `bb!` prefix both work.
 
 Party game flow still starts from `/play`.
 
-- Broken Telephone: 3+ players
-- Exquisite Corpse: 3+ players
-- Spyfall: 3+ players
-- Word Bomb: 2+ players
-- Pattern Hunt: 3+ players, public clue loop, private rule guesses, and coder role DMs that stay hidden from the room
+- Broken Telephone: 3-25 players
+- Exquisite Corpse: 3-6 players for the current six-prompt format
+- Spyfall: 3-25 players
+- Word Bomb: 2-25 players
+- Pattern Hunt: 3-10 players, coder-led public clue loop, private natural rule theories, and coder role DMs that stay hidden from the room
 
 Babblebox now nudges solo users toward Daily Arcade, Buddy, Profile, and utilities instead of leaving them at dead ends.
 
 Related party-game commands:
 
-Use slash for multi-family Pattern Hunt guesses. Prefix stays positional, so the example below keeps it to one clean family.
+Pattern Hunt guesses accept natural theories. Prefix uses the same text shape as slash.
 
 | Slash | Prefix | Purpose |
 | --- | --- | --- |
 | `/hunt` | `bb!hunt` | Open the private Pattern Hunt card |
 | `/hunt status` | `bb!hunt status` | Mirror the live Pattern Hunt state card privately |
-| `/hunt guess` | `bb!hunt guess contains_digits` | Submit a private 1-3 family rule theory |
+| `/hunt guess` | `bb!hunt guess contains a number` | Submit a private natural rule theory |
+| `/spyfall target` | `bb!spyfall target @member` | Pass the Spyfall spotlight without scrolling back to the panel |
 | `/spyfall vote` | `bb!vote` | Trigger a Spyfall vote |
 
 Top.gg Vote Bonus notes:
@@ -766,7 +767,7 @@ Not stored:
 
 - `babblebox/bot.py`: bot bootstrap, extension loading, dictionary setup, sync
 - `babblebox/game_engine.py`: lobby state, gameplay flow, recaps, help/manual, session stats
-- `babblebox/pattern_hunt_game.py`: Pattern Hunt hidden-rule engine, DM onboarding, and anchor flow
+- `babblebox/pattern_hunt_game.py`: Pattern Hunt hidden-rule engine, DM onboarding, natural-theory parsing, and anchor flow
 - `babblebox/premium_store.py`: separate premium entitlement persistence, claim state, OAuth sessions, webhook dedupe, and audit records
 - `babblebox/premium_service.py`: plan resolution, entitlement snapshots, Patreon linking, guild claims, and downgrade-safe enforcement helpers
 - `babblebox/premium_provider_patreon.py`: Patreon OAuth, membership normalization, and webhook verification adapter
