@@ -70,11 +70,11 @@ BOMB_MODE_CONFIGS = {
     },
 }
 CHAOS_MODIFIERS = [
-    {"type": "none", "label": "Standard Turn", "description": "No extra modifier this round."},
-    {"type": "min_length", "value": 6, "label": "Long Word", "description": "Your word must be at least 6 letters long."},
-    {"type": "fresh_start", "label": "Fresh Start", "description": "The used-word history is wiped for this turn."},
-    {"type": "short_fuse", "value": 2.0, "label": "Short Fuse", "description": "This turn loses 2 seconds."},
-    {"type": "bonus_breath", "value": 1.0, "label": "Bonus Breath", "description": "This turn gains 1 bonus second."},
+    {"type": "none", "label": "Standard Turn", "short": "normal", "description": "No extra modifier this round."},
+    {"type": "min_length", "value": 6, "label": "Long Word", "short": "6+ letters", "description": "Your word must be at least 6 letters long."},
+    {"type": "fresh_start", "label": "Fresh Start", "short": "history cleared", "description": "The used-word history is wiped for this turn."},
+    {"type": "short_fuse", "value": 2.0, "label": "Short Fuse", "short": "-2s", "description": "This turn loses 2 seconds."},
+    {"type": "bonus_breath", "value": 1.0, "label": "Bonus Breath", "short": "+1s", "description": "This turn gains 1 bonus second."},
 ]
 CHAOS_CARD_ORDER = ["none", "reverse_order", "lightning_round", "encore_reveal"]
 CHAOS_CARDS = {
@@ -123,7 +123,20 @@ SPYFALL_LOCATIONS = [
 BOMB_SYLLABLES = [
     "TH", "ER", "IN", "ON", "AT", "CH", "ST", "RE",
     "QU", "BL", "CK", "ING", "OU", "SH", "TR", "PL",
+    "BR", "CR", "DR", "FR", "GR", "PR", "SL", "SM",
+    "SN", "SP", "SW", "TW", "CL", "FL", "GL", "SK",
+    "SC", "SCR", "SPR", "STR", "ALL", "AND", "ANT", "ATE",
+    "COM", "CON", "ENT", "EST", "IVE", "LLY", "MENT", "NESS",
+    "PRE", "PRO", "TER", "TION", "VER", "ACH", "ECK", "OCK",
 ]
+RECENT_BOMB_SYLLABLE_LIMIT = 6
+GAME_PLAYER_LIMITS = {
+    "telephone": (3, MAX_PLAYERS),
+    "corpse": (3, 6),
+    "spyfall": (3, MAX_PLAYERS),
+    "bomb": (2, MAX_PLAYERS),
+    "pattern_hunt": (3, 10),
+}
 PERMISSION_LABELS = {
     "view_channel": "View Channels",
     "send_messages": "Send Messages",
@@ -361,6 +374,22 @@ def get_next_chaos_card(current_card):
     return CHAOS_CARD_ORDER[(idx + 1) % len(CHAOS_CARD_ORDER)]
 
 
+def get_game_player_limits(game_type):
+    return GAME_PLAYER_LIMITS.get(game_type, (1, MAX_PLAYERS))
+
+
+def choose_bomb_syllable(game, *, rng=None):
+    rng = rng or random
+    recent = list(game.get("recent_bomb_syllables", []))[-RECENT_BOMB_SYLLABLE_LIMIT:]
+    candidates = [syllable for syllable in BOMB_SYLLABLES if syllable not in recent]
+    if not candidates:
+        candidates = list(BOMB_SYLLABLES)
+    syllable = rng.choice(candidates)
+    recent.append(syllable)
+    game["recent_bomb_syllables"] = recent[-RECENT_BOMB_SYLLABLE_LIMIT:]
+    return syllable
+
+
 def build_chaos_card_line(game):
     card = get_chaos_card_config(game.get("chaos_card", "none"))
     return f"**{card['label']}** - {card['description']}"
@@ -450,6 +479,7 @@ def create_game_state(host, channel):
         "bomb_speed_every": 5,
         "bomb_minimum_time": 3.0,
         "bomb_turn_started_at": None,
+        "recent_bomb_syllables": [],
         "chaos_card": "none",
         "state_anchors": {},
         "dm_turn_timeout": TURN_TIMEOUT_SECONDS,
@@ -790,8 +820,10 @@ def prepare_bomb_turn(game):
         game["used_words"].clear()
         if cleared:
             modifier["description"] = f"The used-word history was wiped ({cleared} words cleared)."
+            modifier["short"] = f"{cleared} cleared"
         else:
             modifier["description"] = "The used-word history was already empty, but the slate is still clean."
+            modifier["short"] = "history clean"
     elif modifier["type"] == "short_fuse":
         game["bomb_current_turn_time_limit"] = max(
             game["bomb_minimum_time"],
@@ -816,14 +848,10 @@ def prepare_bomb_turn(game):
 
 
 def build_bomb_turn_message(game, player):
-    base = (
-        f"💣 Passed to {player.mention}! "
-        f"(Syllable: **{game['syllable']}**, Time: **{game['bomb_current_turn_time_limit']:.1f}s**)"
-    )
-
+    base = f"💣 {player.mention} | **{game['syllable']}** | **{game['bomb_current_turn_time_limit']:.1f}s** | one real word"
     modifier = game.get("bomb_current_rule")
     if modifier and modifier.get("type") != "none":
-        base += f"\n⚡ **{modifier['label']}** — {modifier['description']}"
+        base += f" | ⚡ {modifier.get('short') or modifier['label']}"
     return base
 
 
@@ -1212,11 +1240,11 @@ def get_lobby_embed(guild_id):
 
     titles = {
         "none": ("🎮 Babblebox Lobby", "Pick a party game from the menu below.", discord.Color.dark_theme()),
-        "telephone": ("🎙️ Broken Telephone", "Voice mimicry relay for 3+ players.", discord.Color.blue()),
-        "corpse": ("📝 Exquisite Corpse", "Blind collaborative nonsense for 3+ players.", discord.Color.purple()),
-        "spyfall": ("🕵️ Spyfall", "Find the spy before the room turns on itself. 3+ players.", discord.Color.dark_gray()),
-        "bomb": ("💣 Word Bomb", "Fast typing survival for 2+ players.", discord.Color.red()),
-        "pattern_hunt": ("Pattern Hunt", "One public clue loop, private rule guesses. 3+ players.", discord.Color.dark_teal()),
+        "telephone": ("🎙️ Broken Telephone", "Voice mimicry relay for 3-25 players.", discord.Color.blue()),
+        "corpse": ("📝 Exquisite Corpse", "Six hidden prompts for 3-6 players.", discord.Color.purple()),
+        "spyfall": ("🕵️ Spyfall", "Find the spy before the room turns on itself. 3-25 players.", discord.Color.dark_gray()),
+        "bomb": ("💣 Word Bomb", "Fast typing survival for 2-25 players.", discord.Color.red()),
+        "pattern_hunt": ("Pattern Hunt", "Coder-led hidden-rule hunt for 3-10 players.", discord.Color.dark_teal()),
     }
 
     title, desc, color = titles.get(gt, titles["none"])
@@ -1236,8 +1264,8 @@ def get_lobby_embed(guild_id):
         embed.add_field(
             name="Corpse Setup",
             value=(
-                "Each player gets one hidden DM prompt in sequence.\n"
-                "Babblebox stitches the six answers into one polished disaster at the end."
+                "Each player gets one of six hidden prompts in sequence.\n"
+                "This format supports 3-6 players so every counted player gets a turn."
             ),
             inline=False,
         )
@@ -1246,7 +1274,7 @@ def get_lobby_embed(guild_id):
             name="Spyfall Setup",
             value=(
                 "Everyone gets a secret DM role before the round opens.\n"
-                "The active player picks who answers next, and anyone in the room can call the vote when suspicion peaks."
+                "The active player picks who answers next with the panel or `/spyfall target @player`; anyone can call the vote when suspicion peaks."
             ),
             inline=False,
         )
@@ -1264,7 +1292,7 @@ def get_lobby_embed(guild_id):
             name="Pattern Hunt Setup",
             value=(
                 "Coders need server DMs open before the room starts.\n"
-                "The guesser asks for one real clue in chat, and private rule theories stay in `/hunt guess`."
+                "Each coder posts one public clue that fits the hidden rule; private rule theories stay in `/hunt guess` and accept natural text."
             ),
             inline=False,
         )
@@ -1278,7 +1306,7 @@ def get_lobby_embed(guild_id):
         )
 
     if gt != "none":
-        min_players = 2 if gt == "bomb" else 3
+        min_players, max_players = get_game_player_limits(gt)
         if not players:
             lobby_value = (
                 "No players yet. Tap **Join** to open the room.\n"
@@ -1287,16 +1315,19 @@ def get_lobby_embed(guild_id):
         else:
             roster = "\n".join(f"**{i + 1}.** 🎮 {p.display_name}" for i, p in enumerate(players))
             needed = max(0, min_players - len(players))
+            excess = max(0, len(players) - max_players)
             lobby_value = roster
-            if needed > 0:
+            if excess > 0:
+                lobby_value += f"\n\nToo many players for this format. Remove **{excess}** before starting."
+            elif needed > 0:
                 lobby_value += f"\n\nNeed **{needed}** more to start."
             else:
                 lobby_value += "\n\nThe host can start whenever the room feels ready."
-        embed.add_field(name=f"Players ({len(players)}/{MAX_PLAYERS})", value=lobby_value, inline=False)
+        embed.add_field(name=f"Players ({len(players)}/{max_players})", value=lobby_value, inline=False)
         embed.add_field(
             name="Start Guide",
             value=(
-                f"Minimum players: **{min_players}**\n"
+                f"Players needed: **{min_players}-{max_players}**\n"
                 "Host picks the game, everyone joins, then the host starts.\n"
                 "Solo fallback: `/daily`, `/profile`, `/buddy`, or `/watch settings`."
             ),
@@ -1495,8 +1526,9 @@ class LobbyView(TrackedView):
 
             if is_player_in_game(game, interaction.user.id):
                 return await safe_send_interaction(interaction, "You are already in!", ephemeral=True)
-            if len(game["players"]) >= MAX_PLAYERS:
-                return await safe_send_interaction(interaction, f"❌ This lobby is full ({MAX_PLAYERS} players max).", ephemeral=True)
+            _min_players, max_players = get_game_player_limits(game.get("game_type", "none"))
+            if len(game["players"]) >= max_players:
+                return await safe_send_interaction(interaction, f"❌ This lobby is full ({max_players} players max for this game).", ephemeral=True)
 
             game["players"].append(interaction.user)
             ok = await safe_edit_interaction_message(interaction, embed=get_lobby_embed(self.guild_id), view=self)
@@ -1539,13 +1571,22 @@ class LobbyView(TrackedView):
             if game["game_type"] == "bomb" and (runtime_bot is None or not getattr(runtime_bot, "dictionary_ready", False)):
                 return await safe_send_interaction(interaction, "Word Bomb is unavailable right now because the dictionary did not finish loading.", ephemeral=True)
 
-            min_players = 2 if game["game_type"] == "bomb" else 3
+            min_players, max_players = get_game_player_limits(game["game_type"])
             if len(game["players"]) < min_players:
                 return await safe_send_interaction(
                     interaction,
                     (
                         f"You need at least {min_players} players for this game. "
                         "Use **Join** to gather a crew, or pivot to `/daily`, `/profile`, `/buddy`, or `/later` while you wait."
+                    ),
+                    ephemeral=True,
+                )
+            if len(game["players"]) > max_players:
+                return await safe_send_interaction(
+                    interaction,
+                    (
+                        f"This game supports up to {max_players} players. "
+                        "Ask extra players to leave before starting so every counted player has a real turn."
                     ),
                     ephemeral=True,
                 )
@@ -1578,6 +1619,7 @@ class LobbyView(TrackedView):
             game["bomb_current_rule"] = None
             game["bomb_current_turn_time_limit"] = None
             game["bomb_turn_started_at"] = None
+            game["recent_bomb_syllables"] = []
             game["result_recorded"] = False
 
             gt = game["game_type"]
@@ -1623,6 +1665,11 @@ class LobbyView(TrackedView):
                 embed.add_field(
                     name="How to Win",
                     value="Villagers catch the spy by vote. The spy survives by dodging suspicion or forcing a bad execution.",
+                    inline=False,
+                )
+                embed.add_field(
+                    name="Target Shortcut",
+                    value="The spotlight holder can use `/spyfall target @player` if the original panel has scrolled away.",
                     inline=False,
                 )
                 dashboard = SpyfallDashboard(self.guild_id)
@@ -1691,6 +1738,78 @@ class LobbyView(TrackedView):
                     mark_game_started(game)
 
 
+async def advance_spyfall_target_locked(guild_id, game, actor, target_player, *, interaction=None, channel=None):
+    if not game or game.get("closing") or game.get("game_type") != "spyfall" or not game.get("active"):
+        return False, "No active Spyfall game."
+    if game.get("voting_active"):
+        return False, "A Spyfall vote is already in progress."
+
+    current_player = get_current_player(game)
+    if not current_player or actor.id != current_player.id:
+        return False, "It is not your turn to pass the spotlight."
+    if target_player is None or get_player_by_id(game, target_player.id) is None:
+        return False, "That target is not playing in this Spyfall round."
+    if target_player.id == actor.id:
+        return False, "Choose someone else for the next answer."
+
+    previous_player = current_player
+    game["interrogation_log"].append({"from_id": previous_player.id, "to_id": target_player.id})
+    game["current_player_index"] = game["players"].index(get_player_by_id(game, target_player.id))
+    reset_idle_timer(guild_id)
+
+    dashboard = SpyfallDashboard(guild_id)
+    embed = discord.Embed(
+        title="🕵️ Spyfall: Interrogation Phase",
+        description=f"**{previous_player.display_name}** passed the spotlight to **{target_player.display_name}**.",
+        color=discord.Color.dark_gray(),
+    )
+    embed.add_field(
+        name="Do This Now",
+        value=f"**{target_player.mention}** answers in chat, then passes the spotlight.",
+        inline=False,
+    )
+    embed.add_field(
+        name="Vote Option",
+        value="Anyone playing can hit **Call Vote** or use `/spyfall vote` when the room wants to lock in a suspect.",
+        inline=False,
+    )
+    embed.add_field(
+        name="Target Shortcut",
+        value="Current spotlight holder can use `/spyfall target @player` instead of scrolling back to the panel.",
+        inline=False,
+    )
+
+    sent_message = None
+    if interaction is not None:
+        old_view = getattr(interaction, "message", None)
+        previous_view = getattr(old_view, "view", None)
+        ok = await safe_edit_interaction_message(interaction, embed=embed, view=dashboard)
+        if not ok:
+            await cleanup_game(guild_id)
+            return False, "Could not refresh the Spyfall panel."
+        sent_message = getattr(interaction, "message", None)
+        if previous_view is not None and previous_view is not dashboard:
+            previous_view.message = None
+            unregister_view(guild_id, previous_view)
+            previous_view.stop()
+    else:
+        target_channel = channel or game.get("channel")
+        if target_channel is None:
+            return False, "No channel is available for the Spyfall panel."
+        sent_message = await target_channel.send(embed=embed, view=dashboard)
+
+    if sent_message is not None:
+        register_view(guild_id, dashboard, sent_message)
+
+    target_channel = channel or getattr(interaction, "channel", None) or game.get("channel")
+    if target_channel is not None:
+        with contextlib.suppress(discord.HTTPException):
+            await target_channel.send(
+                f"🗣️ **{target_player.mention}**, answer **{previous_player.mention}**, then use the panel or `/spyfall target @player`."
+            )
+    return True, "Spotlight moved."
+
+
 class SpyfallTargetSelect(discord.ui.Select):
     def __init__(self, players, current_player, guild_id):
         options = [
@@ -1724,44 +1843,20 @@ class SpyfallTargetSelect(discord.ui.Select):
             if target_player is None:
                 return await safe_send_interaction(interaction, "❌ That player is no longer available.", ephemeral=True)
 
-            previous_player = current_player
-            game["interrogation_log"].append({"from_id": previous_player.id, "to_id": target_player.id})
-            game["current_player_index"] = game["players"].index(target_player)
-            reset_idle_timer(self.guild_id)
-
-            new_dashboard = SpyfallDashboard(self.guild_id)
             old_view = self.view if isinstance(self.view, SpyfallDashboard) else None
-
-            embed = discord.Embed(
-                title="🕵️ Spyfall: Interrogation Phase",
-                description=f"**{previous_player.display_name}** passed the spotlight to **{target_player.display_name}**.",
-                color=discord.Color.dark_gray(),
+            ok, message = await advance_spyfall_target_locked(
+                self.guild_id,
+                game,
+                interaction.user,
+                target_player,
+                interaction=interaction,
             )
-            embed.add_field(
-                name="Do This Now",
-                value=f"**{target_player.mention}** answers in chat, then uses the panel to pick the next target.",
-                inline=False,
-            )
-            embed.add_field(
-                name="Vote Option",
-                value="Anyone playing can hit **Call Vote** when the room wants to lock in a suspect.",
-                inline=False,
-            )
-            ok = await safe_edit_interaction_message(interaction, embed=embed, view=new_dashboard)
             if not ok:
-                await cleanup_game(self.guild_id)
-                return
-
-            register_view(self.guild_id, new_dashboard, interaction.message)
-            if old_view is not None and old_view is not new_dashboard:
+                return await safe_send_interaction(interaction, f"❌ {message}", ephemeral=True)
+            if old_view is not None:
                 old_view.message = None
                 unregister_view(self.guild_id, old_view)
                 old_view.stop()
-
-            with contextlib.suppress(discord.HTTPException):
-                await interaction.channel.send(
-                    f"🗣️ **{target_player.mention}**, answer **{previous_player.mention}** and then pick who goes next in the panel above."
-                )
 
 class SpyfallVoteButton(discord.ui.Button):
     def __init__(self):
@@ -2190,7 +2285,7 @@ async def _start_bomb_turn_locked(guild_id, game):
 
     game["current_player_index"] %= len(game["players"])
     next_player = game["players"][game["current_player_index"]]
-    game["syllable"] = random.choice(BOMB_SYLLABLES)
+    game["syllable"] = choose_bomb_syllable(game)
     prepare_bomb_turn(game)
     game["bomb_turn_started_at"] = asyncio.get_running_loop().time()
 
@@ -2198,7 +2293,7 @@ async def _start_bomb_turn_locked(guild_id, game):
     turn_token = bump_token(game, "turn_token")
 
     with contextlib.suppress(discord.HTTPException):
-        await game["channel"].send(embed=build_bomb_turn_embed(game, next_player))
+        await game["channel"].send(build_bomb_turn_message(game, next_player))
 
     game["turn_task"] = asyncio.create_task(bomb_timeout(guild_id, next_player.id, turn_token, game))
 

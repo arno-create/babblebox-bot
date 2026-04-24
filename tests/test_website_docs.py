@@ -41,7 +41,7 @@ class WebsiteDocsTests(unittest.TestCase):
             self.assertIn(anchor, help_html)
         for command in ("/support", "/daily", "/buddy", "/profile", "/vault", "/watch", "/later", "/capture", "/remind", "/bremind", "/bremind setup", "/bremind status", "/bremind test", "/afk", "/shield panel", "/shield links", "/shield trusted", "/lock channel", "/lock remove", "/lock settings", "/timeout remove", "/admin panel", "/admin followup", "/admin logs", "/admin exclusions", "/admin permissions", "/confess", "/confessions moderate"):
             self.assertIn(command, help_html)
-        for command in ("/vote", "/spyfall vote"):
+        for command in ("/vote", "/spyfall vote", "/spyfall target"):
             self.assertIn(command, help_html)
         self.assertIn("Broken Telephone, Exquisite Corpse, Spyfall, Word Bomb, and Pattern Hunt", help_html)
         self.assertIn("Vote Bonus", help_html)
@@ -156,6 +156,7 @@ class WebsiteDocsTests(unittest.TestCase):
             "{category.name}",
             "one-shot ordered-sequence",
             "/hunt guess",
+            "/spyfall target",
             "Pattern Hunt coder role DMs",
             "Anonymous Confessions",
             "/confess",
@@ -822,11 +823,11 @@ class WebsiteDocsTests(unittest.TestCase):
             self.assertNotIn(bad_example, readme)
 
         for expected_text in (
-            "Use slash for multi-family Pattern Hunt guesses.",
+            "Pattern Hunt guesses accept natural theories.",
             "Slash is recommended for multi-option setup here.",
             "Slash is the best fit for multi-option admin setup here.",
             "Slash is recommended for the heavier config flows here.",
-            "bb!hunt guess contains_digits",
+            "bb!hunt guess contains a number",
             "bb!drops config true 4",
             "bb!shield module true",
             "bb!shield escalation 3 10 15",

@@ -3640,7 +3640,7 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
         result_view = self.cog.build_member_result_view(result=published, guild_id=self.guild.id)
         public_view = self.cog.build_public_confession_view(guild_id=self.guild.id)
 
-        self.assertEqual(reply_modal.body_input.label, "Anonymous reply")
+        self.assertEqual(reply_modal.body_input._underlying.label, "Anonymous reply")
         self.assertIn("stays anonymous", reply_modal.body_input.placeholder)
         self.assertIn("private approval", reply_modal.body_input.placeholder)
         self.assertNotIn("reviewed", reply_modal.body_input.placeholder.casefold())

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import random
 import types
 import unittest
 from datetime import timedelta
@@ -9,6 +10,7 @@ from unittest.mock import AsyncMock, Mock, patch
 import discord
 
 from babblebox import game_engine as ge
+from babblebox import pattern_hunt_game as ph
 from babblebox.pattern_hunt_game import (
     RuleAtom,
     _pattern_hunt_answer_timeout,
@@ -96,6 +98,93 @@ class PartyGameLogicTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(channel.sent), 2)
         self.assertIs(second_anchor, game["state_anchors"]["test"])
 
+    def test_word_bomb_syllable_pool_is_rich_enough_for_long_rounds(self):
+        self.assertGreaterEqual(len(ge.BOMB_SYLLABLES), 48)
+        self.assertEqual(len(ge.BOMB_SYLLABLES), len(set(ge.BOMB_SYLLABLES)))
+
+    def test_word_bomb_syllable_picker_avoids_recent_repeats_when_possible(self):
+        game = {"recent_bomb_syllables": list(ge.BOMB_SYLLABLES[:6])}
+        picked = [ge.choose_bomb_syllable(game, rng=random.Random(seed)) for seed in range(20)]
+
+        self.assertTrue(all(syllable not in ge.BOMB_SYLLABLES[:6] for syllable in picked[:8]))
+        self.assertLessEqual(len(game["recent_bomb_syllables"]), 6)
+
+    def test_word_bomb_turn_message_is_compact_and_focuses_on_action(self):
+        player = DummyUser(10)
+        game = {
+            "syllable": "TR",
+            "bomb_current_turn_time_limit": 9.0,
+            "bomb_mode": "chaos",
+            "bomb_current_rule": {"type": "min_length", "label": "Long Word", "short": "6+ letters", "description": "Your word must be at least 6 letters long."},
+        }
+
+        message = ge.build_bomb_turn_message(game, player)
+
+        self.assertLessEqual(len(message), 160)
+        self.assertIn(player.mention, message)
+        self.assertIn("TR", message)
+        self.assertIn("9.0s", message)
+        self.assertIn("6+ letters", message)
+        self.assertNotIn("Rules", message)
+        self.assertNotIn("Tempo", message)
+
+    async def test_spyfall_target_helper_moves_spotlight_and_posts_fresh_panel(self):
+        actor = DummyUser(10)
+        target = DummyUser(11)
+        channel = DummyChannel()
+        game = {
+            "players": [actor, target],
+            "starting_players": [actor, target],
+            "channel": channel,
+            "current_player_index": 0,
+            "interrogation_log": [],
+            "views": [],
+            "active": True,
+            "closing": False,
+            "game_type": "spyfall",
+            "voting_active": False,
+        }
+
+        ok, message = await ge.advance_spyfall_target_locked(99, game, actor, target, channel=channel)
+
+        self.assertTrue(ok, message)
+        self.assertEqual(game["current_player_index"], 1)
+        self.assertEqual(game["interrogation_log"], [{"from_id": actor.id, "to_id": target.id}])
+        self.assertEqual(len(channel.sent), 2)
+        self.assertIsInstance(channel.sent[0][1]["view"], ge.SpyfallDashboard)
+        self.assertIn("/spyfall target", channel.sent[0][1]["embed"].fields[-1].value)
+
+    async def test_spyfall_target_helper_blocks_invalid_turns_and_targets(self):
+        current = DummyUser(10)
+        target = DummyUser(11)
+        outsider = DummyUser(12)
+        channel = DummyChannel()
+        game = {
+            "players": [current, target],
+            "starting_players": [current, target],
+            "channel": channel,
+            "current_player_index": 0,
+            "interrogation_log": [],
+            "views": [],
+            "active": True,
+            "closing": False,
+            "game_type": "spyfall",
+            "voting_active": False,
+        }
+
+        ok, message = await ge.advance_spyfall_target_locked(99, game, outsider, target, channel=channel)
+        self.assertFalse(ok)
+        self.assertIn("not your turn", message.casefold())
+
+        ok, message = await ge.advance_spyfall_target_locked(99, game, current, current, channel=channel)
+        self.assertFalse(ok)
+        self.assertIn("someone else", message.casefold())
+
+        game["voting_active"] = True
+        ok, message = await ge.advance_spyfall_target_locked(99, game, current, target, channel=channel)
+        self.assertFalse(ok)
+        self.assertIn("vote", message.casefold())
+
     def test_pattern_rule_matchers_are_machine_checkable(self):
         rule = [
             RuleAtom("contains_digits"),
@@ -118,6 +207,27 @@ class PartyGameLogicTests(unittest.IsolatedAsyncioTestCase):
         ok, error = parse_guess_atom("word_count_range", "wide")
         self.assertFalse(ok)
         self.assertIn("range", str(error).lower())
+
+    def test_pattern_natural_theory_parser_accepts_human_phrases_and_aliases(self):
+        cases = {
+            "contains a number": [RuleAtom("contains_digits")],
+            "starts with b": [RuleAtom("starts_with_letter", "b")],
+            "has 3-5 words": [RuleAtom("word_count_range", (3, 5))],
+            "contains a food word": [RuleAtom("contains_category_word", "food")],
+            "all words start with the same letter": [RuleAtom("same_initial_letter")],
+            "contains_digits and question_form": [RuleAtom("contains_digits"), RuleAtom("question_form")],
+        }
+        for theory, expected in cases.items():
+            with self.subTest(theory=theory):
+                ok, atoms_or_message = ph.parse_pattern_theory(theory)
+                self.assertTrue(ok, atoms_or_message)
+                self.assertEqual(atoms_or_message, expected)
+
+    def test_pattern_natural_theory_parser_rejects_unclear_theories(self):
+        ok, message = ph.parse_pattern_theory("it feels kind of suspicious")
+
+        self.assertFalse(ok)
+        self.assertIn("Try", str(message))
 
     def test_pattern_rule_generation_always_has_examples_and_respects_recent_signatures(self):
         atoms, valid_examples, invalid_example = select_rule_bundle(42)
@@ -480,10 +590,59 @@ class PartyGameLogicTests(unittest.IsolatedAsyncioTestCase):
             await start_pattern_hunt_game_locked(99, game)
 
         self.assertEqual(game["pattern_hunt"]["clue_limit"], 7)
+        self.assertEqual(game["pattern_hunt"]["phase"], "answer")
+        self.assertIsNone(game["pattern_hunt"]["current_prompt"])
         dm_embed = coder_one.send.await_args.kwargs["embed"]
         self.assertIn("Pattern Hunt Role", dm_embed.title)
         self.assertIn("Keep the logic offstage.", next(field.value for field in dm_embed.fields if field.name == "Guardrails"))
         begin.assert_awaited_once()
+
+    async def test_pattern_hunt_starts_with_coder_clue_phase_not_guesser_prompt(self):
+        guesser = DummyUser(10)
+        coder_one = DummyDmUser(11)
+        coder_two = DummyDmUser(12)
+        channel = DummyChannel()
+        game = {
+            "host": guesser,
+            "players": [guesser, coder_one, coder_two],
+            "starting_players": [guesser, coder_one, coder_two],
+            "channel": channel,
+            "turn_task": None,
+            "game_type": "pattern_hunt",
+            "active": True,
+            "closing": False,
+            "lock": asyncio.Lock(),
+            "stats_recorded": False,
+        }
+        fake_rng = types.SimpleNamespace(choice=lambda players: players[0], randrange=lambda *_args, **_kwargs: 42)
+
+        with patch("babblebox.pattern_hunt_game.random.SystemRandom", return_value=fake_rng), patch(
+            "babblebox.pattern_hunt_game.select_rule_bundle",
+            return_value=([RuleAtom("contains_digits")], ["7 foxes sprint!", "12 bold owls watch."], "Blue bears bake bread!"),
+        ), patch("babblebox.pattern_hunt_game._begin_pattern_turn_locked", new=AsyncMock()) as begin:
+            await start_pattern_hunt_game_locked(99, game)
+
+        self.assertEqual(game["pattern_hunt"]["phase"], "answer")
+        self.assertIsNone(game["pattern_hunt"]["current_prompt"])
+        begin.assert_awaited_once()
+
+    async def test_pattern_theory_parse_failure_does_not_spend_guess_budget(self):
+        guesser = DummyUser(10)
+        game = {
+            "channel": DummyChannel(),
+            "pattern_hunt": {
+                "guesser_id": guesser.id,
+                "rule_atoms": [RuleAtom("contains_digits")],
+                "guesses_used": 0,
+                "guess_limit": 3,
+            },
+        }
+
+        ok, message = await ph.submit_pattern_theory_locked(99, game, guesser, "probably vibes")
+
+        self.assertFalse(ok)
+        self.assertIn("Try", message)
+        self.assertEqual(game["pattern_hunt"]["guesses_used"], 0)
 
     async def test_pattern_hunt_tutorial_grace_absorbs_first_penalty(self):
         guesser = DummyUser(10)
@@ -657,6 +816,29 @@ class PartyGameLogicTests(unittest.IsolatedAsyncioTestCase):
                 guesser,
                 [RuleAtom("question_form"), RuleAtom("contains_digits")],
             )
+        self.assertTrue(ok)
+        self.assertEqual(message, "You cracked it.")
+        finish.assert_awaited_once()
+
+    async def test_pattern_natural_theory_can_crack_rule(self):
+        guesser = DummyUser(10)
+        game = {
+            "channel": DummyChannel(),
+            "pattern_hunt": {
+                "guesser_id": guesser.id,
+                "rule_atoms": [RuleAtom("contains_digits"), RuleAtom("question_form")],
+                "guesses_used": 0,
+                "guess_limit": 3,
+            },
+        }
+        with patch("babblebox.pattern_hunt_game._finish_pattern_hunt_locked", new=AsyncMock()) as finish:
+            ok, message = await ph.submit_pattern_theory_locked(
+                99,
+                game,
+                guesser,
+                "contains a number and is a question",
+            )
+
         self.assertTrue(ok)
         self.assertEqual(message, "You cracked it.")
         finish.assert_awaited_once()

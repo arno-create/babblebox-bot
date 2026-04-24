@@ -20,6 +20,7 @@ from babblebox.cogs.confessions import ConfessionsCog
 from babblebox.cogs.gameplay import GameplayCog
 from babblebox.cogs.identity import IdentityCog
 from babblebox.cogs.meta import HELP_PAGES, MetaCog, build_help_embed, build_help_page_embed, build_support_embed
+from babblebox.cogs.party_games import PartyGamesCog
 from babblebox.cogs.premium import PremiumCog
 from babblebox.cogs.question_drops import QuestionDropsCog
 from babblebox.cogs.shield import ShieldCog, ShieldPanelView
@@ -1208,6 +1209,34 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("fuse keeps shrinking", setup_field)
         self.assertIn("Classic", mode_field)
 
+    def test_party_game_player_limits_are_game_specific(self):
+        self.assertEqual(ge.get_game_player_limits("telephone"), (3, 25))
+        self.assertEqual(ge.get_game_player_limits("spyfall"), (3, 25))
+        self.assertEqual(ge.get_game_player_limits("bomb"), (2, 25))
+        self.assertEqual(ge.get_game_player_limits("corpse"), (3, 6))
+        self.assertEqual(ge.get_game_player_limits("pattern_hunt"), (3, 10))
+
+    def test_exquisite_corpse_lobby_copy_surfaces_six_player_cap(self):
+        saved_games = ge.games
+        host = FakeAuthor(1)
+        ge.games = {
+            57: {
+                "host": host,
+                "players": [FakeAuthor(i) for i in range(1, 8)],
+                "game_type": "corpse",
+            }
+        }
+        try:
+            embed = ge.get_lobby_embed(57)
+        finally:
+            ge.games = saved_games
+
+        setup_field = next(field.value for field in embed.fields if field.name == "Corpse Setup")
+        players_field = next(field for field in embed.fields if field.name.startswith("Players"))
+        self.assertIn("six hidden prompts", setup_field.casefold())
+        self.assertIn("/6", players_field.name)
+        self.assertIn("too many", players_field.value.casefold())
+
     def test_pattern_hunt_lobby_copy_surfaces_dm_requirement_and_private_guess_flow(self):
         saved_games = ge.games
         host = FakeAuthor(1)
@@ -2021,8 +2050,9 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
 
                 self.assertIn("vote", slash_roots)
                 self.assertIn("spyfall", slash_roots)
-                self.assertEqual({command.name for command in gameplay_cog.spyfall_group.app_command.commands}, {"vote"})
+                self.assertEqual({command.name for command in gameplay_cog.spyfall_group.app_command.commands}, {"vote", "target"})
                 self.assertIn("spyfall vote", gameplay_prefix)
+                self.assertIn("spyfall target", gameplay_prefix)
                 self.assertIn("vote", gameplay_prefix)
             finally:
                 for loaded in list(bot.cogs.values()):
@@ -2030,6 +2060,22 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
                     if service is not None:
                         await service.close()
                 await bot.close()
+
+    async def test_hunt_guess_uses_single_natural_theory_argument(self):
+        bot = commands.Bot(command_prefix="!", intents=discord.Intents.none())
+        try:
+            party_cog = PartyGamesCog(bot)
+            await bot.add_cog(party_cog)
+
+            slash_roots = {command.name: command for command in bot.tree.get_commands()}
+            hunt_root = slash_roots["hunt"]
+            hunt_guess = next(command for command in hunt_root.commands if command.name == "guess")
+            gameplay_prefix = {command.qualified_name for command in party_cog.walk_commands()}
+
+            self.assertEqual([param.name for param in hunt_guess.parameters], ["theory"])
+            self.assertIn("hunt guess", gameplay_prefix)
+        finally:
+            await bot.close()
 
     async def test_vote_embed_reports_disabled_state_without_sounding_like_premium(self):
         bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
