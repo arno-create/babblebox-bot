@@ -524,9 +524,10 @@ class VoteServiceTests(unittest.IsolatedAsyncioTestCase):
 
     async def test_refresh_user_vote_status_handles_active_inactive_missing_token_and_cooldown(self):
         user_id = 7821
+        now = _utc_now()
         active_payload = {
-            "created_at": "2026-04-23T12:00:00+00:00",
-            "expires_at": "2026-04-24T00:00:00+00:00",
+            "created_at": (now - timedelta(hours=1)).isoformat(),
+            "expires_at": (now + timedelta(hours=11)).isoformat(),
             "weight": 1,
         }
         with patch.dict("os.environ", {"TOPGG_TOKEN": "token"}, clear=False):

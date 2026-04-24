@@ -267,18 +267,52 @@ class QuestionDropsContentTests(unittest.TestCase):
             return ", ".join(str(token) for token in answer_spec.get("tokens", []))
         raise AssertionError(f"Unsupported answer spec for test helper: {answer_spec}")
 
+    def _correct_choice_letter(self, answer_spec: dict[str, object]) -> str:
+        answer = normalize_answer_text(answer_spec.get("answer"))
+        choices = [normalize_answer_text(choice) for choice in answer_spec.get("choices", [])]
+        self.assertIn(answer, choices)
+        return chr(ord("A") + choices.index(answer))
+
+    def _prompt_stem(self, prompt: str) -> str:
+        marker = " A) "
+        if marker not in prompt:
+            return prompt
+        return prompt.split(marker, 1)[0]
+
+    def _multiple_choice_stem_reveals_answer(self, prompt: str, answer_spec: dict[str, object]) -> bool:
+        stem = normalize_answer_text(self._prompt_stem(prompt))
+        answer = normalize_answer_text(answer_spec.get("answer"))
+        if not answer or answer not in stem:
+            return False
+        choices = [normalize_answer_text(choice) for choice in answer_spec.get("choices", [])]
+        present_choices = {choice for choice in choices if choice and choice in stem}
+        return present_choices == {answer}
+
+    def _ordered_prompt_leaks_solution(self, prompt: str, tokens: tuple[str, ...]) -> bool:
+        prompt_norm = normalize_answer_text(prompt)
+        cursor = 0
+        for token in tokens:
+            token_norm = normalize_answer_text(token)
+            position = prompt_norm.find(token_norm, cursor)
+            if position < 0:
+                return False
+            cursor = position + len(token_norm)
+        return True
+
     def test_content_pack_validates(self):
         ok, message = validate_content_pack()
         self.assertTrue(ok)
         self.assertIsNone(message)
 
     def test_content_pack_has_family_depth_and_real_hard_inventory(self):
-        self.assertGreaterEqual(len(QUESTION_DROP_SEEDS), 150)
+        self.assertGreaterEqual(len(QUESTION_DROP_SEEDS), 182)
         hard_seeds = [seed for seed in QUESTION_DROP_SEEDS if int(seed["difficulty"]) == 3]
         self.assertGreaterEqual(len(hard_seeds), 35)
         self.assertTrue(all(str(seed.get("family_id") or "").strip() for seed in QUESTION_DROP_SEEDS))
         for category in QUESTION_DROP_CATEGORIES:
             with self.subTest(category=category):
+                category_seeds = [seed for seed in QUESTION_DROP_SEEDS if seed["category"] == category]
+                self.assertGreaterEqual(len(category_seeds), 26)
                 family_ids = {seed["family_id"] for seed in QUESTION_DROP_SEEDS if seed["category"] == category}
                 self.assertGreaterEqual(len(family_ids), 18)
                 self.assertGreaterEqual(
@@ -372,6 +406,84 @@ class QuestionDropsContentTests(unittest.TestCase):
                     for index in range(12)
                 ]
                 self.assertEqual(len(prompts), len(set(prompts)))
+
+    def test_multiple_choice_concepts_rotate_answer_slots_across_a_b_c(self):
+        multiple_choice_seeds = [
+            seed
+            for seed in QUESTION_DROP_SEEDS
+            if any(str(tag) == "shape:multiple_choice" for tag in seed.get("tags", ()))
+        ]
+
+        for seed in multiple_choice_seeds:
+            letters = set()
+            variant_count = len(seed.get("variants", ())) if seed.get("generator_type") == "static_pack" else 12
+            for sample_index in range(18):
+                variant = build_variant(
+                    seed,
+                    seed_material=f"slot-audit:{seed['concept_id']}:{sample_index}",
+                    variant_index=sample_index % max(1, variant_count),
+                )
+                letters.add(self._correct_choice_letter(variant.answer_spec))
+            with self.subTest(concept_id=seed["concept_id"]):
+                self.assertEqual(letters, {"A", "B", "C"})
+
+    def test_multiple_choice_distribution_stays_balanced_in_rotation_audit(self):
+        letter_counts = Counter()
+
+        for seed in QUESTION_DROP_SEEDS:
+            if not any(str(tag) == "shape:multiple_choice" for tag in seed.get("tags", ())):
+                continue
+            variant_count = len(seed.get("variants", ())) if seed.get("generator_type") == "static_pack" else 12
+            for sample_index in range(9):
+                variant = build_variant(
+                    seed,
+                    seed_material=f"distribution-audit:{sample_index}",
+                    variant_index=sample_index % max(1, variant_count),
+                )
+                letter_counts[self._correct_choice_letter(variant.answer_spec)] += 1
+
+        total = sum(letter_counts.values())
+        self.assertGreater(total, 0)
+        for letter in ("A", "B", "C"):
+            share = letter_counts[letter] / total
+            with self.subTest(letter=letter, share=share):
+                self.assertGreaterEqual(share, 0.25)
+                self.assertLessEqual(share, 0.40)
+
+    def test_curated_multiple_choice_prompts_do_not_leak_answers_in_the_stem(self):
+        for seed in QUESTION_DROP_SEEDS:
+            if seed.get("source_type") != "curated":
+                continue
+            if not any(str(tag) == "shape:multiple_choice" for tag in seed.get("tags", ())):
+                continue
+            variant_count = len(seed.get("variants", ()))
+            for variant_index in range(variant_count):
+                variant = build_variant(seed, seed_material=f"curated-stem-audit:{seed['concept_id']}", variant_index=variant_index)
+                with self.subTest(concept_id=seed["concept_id"], prompt=variant.prompt):
+                    self.assertFalse(self._multiple_choice_stem_reveals_answer(variant.prompt, variant.answer_spec))
+
+    def test_curated_ordered_prompts_do_not_expose_the_solution_order(self):
+        for seed in QUESTION_DROP_SEEDS:
+            if seed.get("source_type") != "curated":
+                continue
+            if not any(str(tag) == "shape:ordered_tokens" for tag in seed.get("tags", ())):
+                continue
+            variant_count = len(seed.get("variants", ()))
+            for variant_index in range(variant_count):
+                variant = build_variant(seed, seed_material=f"curated-order-audit:{seed['concept_id']}", variant_index=variant_index)
+                tokens = tuple(str(token) for token in variant.answer_spec.get("tokens", ()))
+                with self.subTest(concept_id=seed["concept_id"], prompt=variant.prompt):
+                    self.assertFalse(self._ordered_prompt_leaks_solution(variant.prompt, tokens))
+
+    def test_brunch_portmanteau_prompt_no_longer_reveals_breakfast_then_lunch(self):
+        seed = self._seed_for("language:brunch-portmanteau")
+
+        for variant_index in range(len(seed["variants"])):
+            variant = build_variant(seed, seed_material="brunch-regression", variant_index=variant_index)
+            prompt_norm = normalize_answer_text(variant.prompt)
+            with self.subTest(prompt=variant.prompt):
+                self.assertNotIn("breakfast lunch", prompt_norm)
+                self.assertFalse(self._ordered_prompt_leaks_solution(variant.prompt, ("breakfast", "lunch")))
 
     def test_candidate_iteration_preserves_family_ids_for_generated_depth(self):
         variants = iter_candidate_variants(categories=set(QUESTION_DROP_CATEGORIES), seed_material="coverage", variants_per_seed=12)
