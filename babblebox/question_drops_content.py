@@ -70,6 +70,7 @@ _NUMBER_WORD_RE = re.compile(r"[a-z]+", re.IGNORECASE)
 _ORDERED_ARROW_SPLIT_RE = re.compile(r"\s*(?:->|=>|→)\s*")
 _ORDERED_ITEM_PREFIX_RE = re.compile(r"^\s*\(?\d{1,2}\)?[.):-]?\s*")
 _ORDERED_INLINE_NUMBERED_ITEM_RE = re.compile(r"(?:^|\s)\(?\d{1,2}\)?[.)]\s*")
+_TRAILING_INT_RE = re.compile(r"(\d+)(?!.*\d)")
 _DIVISIBILITY_PROMPT_RE = re.compile(r"^Which number is divisible by (\d+)\? A\) (\d+) B\) (\d+) C\) (\d+)$")
 _AVERAGE_PROMPT_RE = re.compile(r"^Find the average: ([\d,\s]+)$")
 _MEDIAN_PROMPT_RE = re.compile(r"^Find the median: ([\d,\s]+)$")
@@ -797,6 +798,69 @@ def _make_rng(seed_material: str) -> random.Random:
     return random.Random(int(digest[:16], 16))
 
 
+def _shuffle_choice_values(choices: list[str], *, seed_material: str) -> list[str]:
+    ordered = [str(choice) for choice in choices]
+    if len(ordered) <= 1:
+        return ordered
+    indices = list(range(len(ordered)))
+    rng = _make_rng(seed_material)
+    rng.shuffle(indices)
+    shuffled = [ordered[index] for index in indices]
+    if shuffled == ordered:
+        shuffled = ordered[1:] + ordered[:1]
+    return shuffled
+
+
+def _choice_slot_index(seed_material: str, *, count: int, offset: int = 0) -> int:
+    if count <= 1:
+        return 0
+    match = _TRAILING_INT_RE.search(seed_material)
+    if match is not None:
+        return (int(match.group(1)) + offset) % count
+    digest = int(hashlib.sha256(seed_material.encode("utf-8")).hexdigest()[:8], 16)
+    return (digest + offset) % count
+
+
+def _arrange_choice_values(
+    choices: list[str],
+    *,
+    answer: str,
+    seed_material: str,
+    offset: int = 0,
+) -> list[str]:
+    ordered = [str(choice) for choice in choices]
+    if len(ordered) <= 1:
+        return ordered
+    normalized_answer = normalize_answer_text(answer)
+    correct_choice: str | None = None
+    distractors: list[str] = []
+    for choice in ordered:
+        if correct_choice is None and normalize_answer_text(choice) == normalized_answer:
+            correct_choice = choice
+        else:
+            distractors.append(choice)
+    if correct_choice is None:
+        return _shuffle_choice_values(ordered, seed_material=seed_material)
+    shuffled_distractors = _shuffle_choice_values(distractors, seed_material=f"{seed_material}:distractors")
+    slot_index = _choice_slot_index(seed_material, count=len(ordered), offset=offset)
+    arranged = list(shuffled_distractors)
+    arranged.insert(slot_index, correct_choice)
+    return arranged
+
+
+def _shuffle_ordered_display_tokens(tokens: list[str], *, seed_material: str) -> list[str]:
+    ordered = [str(token) for token in tokens]
+    if len(ordered) <= 1:
+        return ordered
+    indices = list(range(len(ordered)))
+    rng = _make_rng(seed_material)
+    rng.shuffle(indices)
+    shuffled = [ordered[index] for index in indices]
+    if shuffled == ordered:
+        shuffled = ordered[1:] + ordered[:1]
+    return shuffled
+
+
 def _text_spec(*accepted: str) -> dict[str, Any]:
     return {"type": "text", "accepted": list(accepted)}
 
@@ -819,6 +883,38 @@ def _ordered_spec(*tokens: str) -> dict[str, Any]:
 
 def _variant(prompt: str, answer_spec: dict[str, Any]) -> dict[str, Any]:
     return {"prompt": prompt, "answer_spec": answer_spec}
+
+
+def _templated_choice_variant(
+    question: str,
+    answer_spec: dict[str, Any],
+    *,
+    template: str = "{question} A) {a} B) {b} C) {c}",
+    template_fields: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "variant_kind": "choice_template",
+        "question": question,
+        "template": template,
+        "template_fields": dict(template_fields or {}),
+        "answer_spec": answer_spec,
+    }
+
+
+def _templated_ordered_variant(
+    question: str,
+    answer_spec: dict[str, Any],
+    *,
+    template: str = "{question}: {items}",
+    template_fields: dict[str, Any] | None = None,
+) -> dict[str, Any]:
+    return {
+        "variant_kind": "ordered_template",
+        "question": question,
+        "template": template,
+        "template_fields": dict(template_fields or {}),
+        "answer_spec": answer_spec,
+    }
 
 
 def _static_seed(
@@ -874,6 +970,54 @@ def _seed_family_id(seed: dict[str, Any]) -> str:
     return str(seed.get("concept_id") or "question-drop")
 
 
+def _render_static_payload(
+    seed: dict[str, Any],
+    payload: dict[str, Any],
+    *,
+    seed_material: str,
+    payload_index: int,
+) -> tuple[str, dict[str, Any]]:
+    answer_spec = dict(payload.get("answer_spec", {}))
+    variant_kind = str(payload.get("variant_kind") or "").strip().casefold()
+    template = str(payload.get("template") or "").strip()
+    template_fields = dict(payload.get("template_fields") or {})
+
+    if variant_kind == "choice_template":
+        choices = [str(choice) for choice in answer_spec.get("choices", []) if isinstance(choice, str)]
+        shuffled_choices = _arrange_choice_values(
+            choices,
+            answer=str(answer_spec.get("answer") or ""),
+            seed_material=f"{seed_material}:choice-slot",
+            offset=payload_index,
+        )
+        choice_slots = {chr(ord("a") + index): "" for index in range(6)}
+        for index, choice in enumerate(shuffled_choices):
+            if index >= 6:
+                break
+            choice_slots[chr(ord("a") + index)] = choice
+        prompt = (template or "{question} A) {a} B) {b} C) {c}").format(
+            question=str(payload.get("question") or "").strip(),
+            **choice_slots,
+            **template_fields,
+        )
+        return prompt, {"type": "multiple_choice", "choices": shuffled_choices, "answer": answer_spec.get("answer")}
+
+    if variant_kind == "ordered_template":
+        tokens = [str(token) for token in answer_spec.get("tokens", []) if isinstance(token, str)]
+        display_tokens = _shuffle_ordered_display_tokens(
+            tokens,
+            seed_material=f"{seed_material}:{seed['concept_id']}:{payload_index}:ordered",
+        )
+        prompt = (template or "{question}: {items}").format(
+            question=str(payload.get("question") or "").strip(),
+            items=", ".join(display_tokens),
+            **template_fields,
+        )
+        return prompt, {"type": "ordered_tokens", "tokens": tokens}
+
+    return str(payload.get("prompt") or ""), answer_spec
+
+
 def _static_variant(seed: dict[str, Any], *, seed_material: str, variant_index: int) -> QuestionDropVariant:
     variants = list(seed["variants"])
     rotation_rng = _make_rng(f"{seed_material}:{seed['concept_id']}:rotation")
@@ -881,7 +1025,13 @@ def _static_variant(seed: dict[str, Any], *, seed_material: str, variant_index: 
     payload_index = (rotation + variant_index) % len(variants)
     payload = variants[payload_index]
     family_id = _seed_family_id(seed)
-    variant_hash = build_variant_hash(seed["concept_id"], family_id, payload["prompt"], str(payload_index))
+    prompt, answer_spec = _render_static_payload(
+        seed,
+        payload,
+        seed_material=seed_material,
+        payload_index=payload_index,
+    )
+    variant_hash = build_variant_hash(seed["concept_id"], family_id, prompt, render_answer_summary(answer_spec), str(payload_index))
     return QuestionDropVariant(
         concept_id=seed["concept_id"],
         family_id=family_id,
@@ -889,8 +1039,8 @@ def _static_variant(seed: dict[str, Any], *, seed_material: str, variant_index: 
         difficulty=seed["difficulty"],
         source_type=seed["source_type"],
         generator_type=seed["generator_type"],
-        prompt=payload["prompt"],
-        answer_spec=payload["answer_spec"],
+        prompt=prompt,
+        answer_spec=answer_spec,
         variant_hash=variant_hash,
         tags=tuple(seed.get("tags", ())),
         attribution=seed.get("attribution"),
@@ -959,6 +1109,25 @@ def _build_choice_variant(seed: dict[str, Any], *, prompt: str, choices: list[st
         variant_hash=build_variant_hash(seed["concept_id"], family_id, prompt, answer),
         tags=tuple(seed.get("tags", ())),
     )
+
+
+def _build_choice_variant_from_template(
+    seed: dict[str, Any],
+    *,
+    template: str,
+    choices: list[str],
+    answer: str,
+    shuffle_seed: str,
+    **template_fields: Any,
+) -> QuestionDropVariant:
+    shuffled_choices = _arrange_choice_values(choices, answer=answer, seed_material=shuffle_seed)
+    choice_slots = {chr(ord("a") + index): "" for index in range(6)}
+    for index, choice in enumerate(shuffled_choices):
+        if index >= 6:
+            break
+        choice_slots[chr(ord("a") + index)] = choice
+    prompt = template.format(**template_fields, **choice_slots)
+    return _build_choice_variant(seed, prompt=prompt, choices=shuffled_choices, answer=answer)
 
 
 def _build_ordered_variant(seed: dict[str, Any], *, prompt: str, tokens: list[str]) -> QuestionDropVariant:
@@ -1090,11 +1259,18 @@ def _math_compare_expressions(seed: dict[str, Any], *, seed_material: str, varia
         right_prompt = f"({right_a} + {right_b}) * {right_mul}"
     relation = "equal"
     if left > right:
-        relation = "left"
+        relation = "left expression"
     elif right > left:
-        relation = "right"
-    prompt = f"Which is larger? A) {left_prompt} B) {right_prompt} C) equal"
-    return _build_choice_variant(seed, prompt=prompt, choices=["left", "right", "equal"], answer=relation)
+        relation = "right expression"
+    return _build_choice_variant_from_template(
+        seed,
+        template="Compare {left_prompt} and {right_prompt}. Which option is correct? A) {a} B) {b} C) {c}",
+        choices=["left expression", "right expression", "equal"],
+        answer=relation,
+        shuffle_seed=f"{seed_material}:{seed['concept_id']}:{variant_index}:choices",
+        left_prompt=left_prompt,
+        right_prompt=right_prompt,
+    )
 
 
 def _math_multi_step(seed: dict[str, Any], *, seed_material: str, variant_index: int) -> QuestionDropVariant:
@@ -1141,9 +1317,14 @@ def _math_divisibility(seed: dict[str, Any], *, seed_material: str, variant_inde
     existing.add(wrong_a)
     wrong_b = pick_wrong(existing)
     options = [str(correct), str(wrong_a), str(wrong_b)]
-    rng.shuffle(options)
-    prompt = f"Which number is divisible by {divisor}? A) {options[0]} B) {options[1]} C) {options[2]}"
-    return _build_choice_variant(seed, prompt=prompt, choices=options, answer=str(correct))
+    return _build_choice_variant_from_template(
+        seed,
+        template="Which number is divisible by {divisor}? A) {a} B) {b} C) {c}",
+        choices=options,
+        answer=str(correct),
+        shuffle_seed=f"{seed_material}:{seed['concept_id']}:{variant_index}:choices",
+        divisor=divisor,
+    )
 
 
 def _math_remainder(seed: dict[str, Any], *, seed_material: str, variant_index: int) -> QuestionDropVariant:
@@ -1311,13 +1492,14 @@ def _logic_odd_one_out(seed: dict[str, Any], *, seed_material: str, variant_inde
         "Lock in the odd one out. {lead} A) {a} B) {b} C) {c}",
     )
     choices, answer, lead = sets[(rotation + variant_index) % len(sets)]
-    prompt = templates[(rotation + (variant_index // len(sets))) % len(templates)].format(
+    return _build_choice_variant_from_template(
+        seed,
+        template=templates[(rotation + (variant_index // len(sets))) % len(templates)],
+        choices=choices,
+        answer=answer,
+        shuffle_seed=f"{seed_material}:{seed['concept_id']}:{variant_index}:choices",
         lead=lead,
-        a=choices[0],
-        b=choices[1],
-        c=choices[2],
     )
-    return _build_choice_variant(seed, prompt=prompt, choices=choices, answer=answer)
 
 
 def _logic_elimination(seed: dict[str, Any], *, seed_material: str, variant_index: int) -> QuestionDropVariant:
@@ -1415,19 +1597,28 @@ def _logic_parity_grouping(seed: dict[str, Any], *, seed_material: str, variant_
         "Choose the set that fits the rule. {lead} A) {a0}, {a1}, {a2} B) {b0}, {b1}, {b2} C) {c0}, {c1}, {c2}",
         "Logic grouping: {lead} A) {a0}, {a1}, {a2} B) {b0}, {b1}, {b2} C) {c0}, {c1}, {c2}",
     )
+    canonical_sets = [set_a, set_b, set_c]
+    display_order = [0, 1, 2]
+    order_rng = _make_rng(f"{seed_material}:{seed['concept_id']}:{variant_index}:set-order")
+    order_rng.shuffle(display_order)
+    if display_order == [0, 1, 2]:
+        display_order = display_order[1:] + display_order[:1]
+    shown_sets = [canonical_sets[index] for index in display_order]
+    canonical_answer_index = {"set a": 0, "set b": 1, "set c": 2}[answer]
+    displayed_answer = ["option a", "option b", "option c"][display_order.index(canonical_answer_index)]
     prompt = templates[(rotation + (variant_index // 3)) % len(templates)].format(
         lead=lead,
-        a0=set_a[0],
-        a1=set_a[1],
-        a2=set_a[2],
-        b0=set_b[0],
-        b1=set_b[1],
-        b2=set_b[2],
-        c0=set_c[0],
-        c1=set_c[1],
-        c2=set_c[2],
+        a0=shown_sets[0][0],
+        a1=shown_sets[0][1],
+        a2=shown_sets[0][2],
+        b0=shown_sets[1][0],
+        b1=shown_sets[1][1],
+        b2=shown_sets[1][2],
+        c0=shown_sets[2][0],
+        c1=shown_sets[2][1],
+        c2=shown_sets[2][2],
     )
-    return _build_choice_variant(seed, prompt=prompt, choices=["set a", "set b", "set c"], answer=answer)
+    return _build_choice_variant(seed, prompt=prompt, choices=["option a", "option b", "option c"], answer=displayed_answer)
 
 
 def _logic_true_false(seed: dict[str, Any], *, seed_material: str, variant_index: int) -> QuestionDropVariant:
@@ -1486,13 +1677,14 @@ def _logic_classification(seed: dict[str, Any], *, seed_material: str, variant_i
         "Logic lane classification: {question} A) {a} B) {b} C) {c}",
     )
     question, choices, answer = sets[(rotation + variant_index) % len(sets)]
-    prompt = templates[(rotation + (variant_index // len(sets))) % len(templates)].format(
+    return _build_choice_variant_from_template(
+        seed,
+        template=templates[(rotation + (variant_index // len(sets))) % len(templates)],
+        choices=choices,
+        answer=answer,
+        shuffle_seed=f"{seed_material}:{seed['concept_id']}:{variant_index}:choices",
         question=question,
-        a=choices[0],
-        b=choices[1],
-        c=choices[2],
     )
-    return _build_choice_variant(seed, prompt=prompt, choices=choices, answer=answer)
 
 
 def _logic_mini_deduction(seed: dict[str, Any], *, seed_material: str, variant_index: int) -> QuestionDropVariant:
@@ -1556,13 +1748,14 @@ def _logic_mini_deduction(seed: dict[str, Any], *, seed_material: str, variant_i
         "Mini deduction: {core} A) {a} B) {b} C) {c}",
     )
     core, choices, answer = sets[(rotation + variant_index) % len(sets)]
-    prompt = templates[(rotation + (variant_index // len(sets))) % len(templates)].format(
+    return _build_choice_variant_from_template(
+        seed,
+        template=templates[(rotation + (variant_index // len(sets))) % len(templates)],
+        choices=choices,
+        answer=answer,
+        shuffle_seed=f"{seed_material}:{seed['concept_id']}:{variant_index}:choices",
         core=core,
-        a=choices[0],
-        b=choices[1],
-        c=choices[2],
     )
-    return _build_choice_variant(seed, prompt=prompt, choices=choices, answer=answer)
 
 
 def _logic_rotation(seed: dict[str, Any], *, seed_material: str, variant_index: int) -> QuestionDropVariant:
@@ -1580,20 +1773,21 @@ def _logic_rotation(seed: dict[str, Any], *, seed_material: str, variant_index: 
     values = [tokens[(start_index + (step * index)) % len(tokens)] for index in range(length)]
     answer = tokens[(start_index + (step * length)) % len(tokens)]
     distractors = [token for token in tokens if token != answer]
-    unique_choices = [answer, distractors[0], distractors[1]]
+    unique_choices = [f"next is {answer}", f"next is {distractors[0]}", f"next is {distractors[1]}"]
     templates = (
         "Which direction comes next in this turning pattern? Sequence: {sequence}. A) {a} B) {b} C) {c}",
         "Rotation round: Sequence: {sequence}. Which direction comes next? A) {a} B) {b} C) {c}",
         "Keep the turn pattern going. Sequence: {sequence}. A) {a} B) {b} C) {c}",
         "Logic lane rotation: Sequence: {sequence}. Which option is next? A) {a} B) {b} C) {c}",
     )
-    prompt = templates[(rotation + (variant_index // len(token_sets))) % len(templates)].format(
+    return _build_choice_variant_from_template(
+        seed,
+        template=templates[(rotation + (variant_index // len(token_sets))) % len(templates)],
+        choices=unique_choices,
+        answer=f"next is {answer}",
+        shuffle_seed=f"{seed_material}:{seed['concept_id']}:{variant_index}:choices",
         sequence=", ".join(values),
-        a=unique_choices[0],
-        b=unique_choices[1],
-        c=unique_choices[2],
     )
-    return _build_choice_variant(seed, prompt=prompt, choices=unique_choices, answer=answer)
 
 
 def _language_anagram(seed: dict[str, Any], *, seed_material: str, variant_index: int) -> QuestionDropVariant:
@@ -1747,12 +1941,12 @@ _BASE_QUESTION_DROP_SEEDS: tuple[dict[str, Any], ...] = (
         "science",
         2,
         "science.changes-of-matter",
-        _variant(
-            "Which is a chemical change? A) melting ice B) rusting iron C) cutting paper",
+        _templated_choice_variant(
+            "Which process creates a new substance?",
             _multiple_choice_spec("melting ice", "rusting iron", "cutting paper", answer="rusting iron"),
         ),
-        _variant(
-            "Pick the chemical change. A) freezing water B) rusting iron C) breaking glass",
+        _templated_choice_variant(
+            "Which change is chemical rather than physical?",
             _multiple_choice_spec("freezing water", "rusting iron", "breaking glass", answer="rusting iron"),
         ),
     ),
@@ -1769,14 +1963,12 @@ _BASE_QUESTION_DROP_SEEDS: tuple[dict[str, Any], ...] = (
         "science",
         3,
         "science.experimental-design",
-        _variant(
-            "You are testing which paper towel absorbs the most water. What should stay the same in every trial? "
-            "A) the amount of water B) which towel wins C) the final score",
+        _templated_choice_variant(
+            "In a fair paper-towel absorbency test, which detail should stay constant in every trial?",
             _multiple_choice_spec("the amount of water", "which towel wins", "the final score", answer="the amount of water"),
         ),
-        _variant(
-            "To compare seed growth in sun versus shade fairly, what should stay the same? "
-            "A) soil and water B) the result you want C) the plant height after the test",
+        _templated_choice_variant(
+            "If you compare plant growth in sun versus shade, which condition should stay matched to keep the test fair?",
             _multiple_choice_spec("soil and water", "the result you want", "the plant height after the test", answer="soil and water"),
         ),
     ),
@@ -1793,12 +1985,12 @@ _BASE_QUESTION_DROP_SEEDS: tuple[dict[str, Any], ...] = (
         "science",
         3,
         "science.materials",
-        _variant(
-            "Which material is the best electrical insulator? A) copper B) rubber C) aluminum",
+        _templated_choice_variant(
+            "Which material would you choose to wrap a wire handle so electricity does not pass through easily?",
             _multiple_choice_spec("copper", "rubber", "aluminum", answer="rubber"),
         ),
-        _variant(
-            "Pick the best insulator. A) steel B) rubber C) silver",
+        _templated_choice_variant(
+            "Which material best blocks electrical current in common devices?",
             _multiple_choice_spec("steel", "rubber", "silver", answer="rubber"),
         ),
     ),
@@ -1839,12 +2031,12 @@ _BASE_QUESTION_DROP_SEEDS: tuple[dict[str, Any], ...] = (
         "history",
         2,
         "history.chronology-order",
-        _variant(
-            "Order these from earliest to latest: printing press, telephone, internet",
+        _templated_ordered_variant(
+            "Arrange these inventions from earliest to latest",
             _ordered_spec("printing press", "telephone", "internet"),
         ),
-        _variant(
-            "Put these in time order: printing press, internet, telephone",
+        _templated_ordered_variant(
+            "Place these inventions in historical order",
             _ordered_spec("printing press", "telephone", "internet"),
         ),
     ),
@@ -1861,12 +2053,12 @@ _BASE_QUESTION_DROP_SEEDS: tuple[dict[str, Any], ...] = (
         "history",
         3,
         "history.big-timeline",
-        _variant(
-            "Order these from earliest to latest: Magna Carta, French Revolution, Moon landing",
+        _templated_ordered_variant(
+            "Arrange these milestones from earliest to latest",
             _ordered_spec("magna carta", "french revolution", "moon landing"),
         ),
-        _variant(
-            "Put these in time order: Moon landing, Magna Carta, French Revolution",
+        _templated_ordered_variant(
+            "Place these events in historical order",
             _ordered_spec("magna carta", "french revolution", "moon landing"),
         ),
     ),
@@ -1875,12 +2067,12 @@ _BASE_QUESTION_DROP_SEEDS: tuple[dict[str, Any], ...] = (
         "history",
         3,
         "history.big-timeline",
-        _variant(
-            "Order these from earliest to latest: fall of Constantinople, Columbus reaches the Caribbean, Martin Luther posts the 95 Theses",
+        _templated_ordered_variant(
+            "Arrange these events from earliest to latest",
             _ordered_spec("fall of constantinople", "columbus reaches the caribbean", "martin luther posts the 95 theses"),
         ),
-        _variant(
-            "Put these in time order: Martin Luther posts the 95 Theses, fall of Constantinople, Columbus reaches the Caribbean",
+        _templated_ordered_variant(
+            "Place these turning points in historical order",
             _ordered_spec("fall of constantinople", "columbus reaches the caribbean", "martin luther posts the 95 theses"),
         ),
     ),
@@ -1889,12 +2081,12 @@ _BASE_QUESTION_DROP_SEEDS: tuple[dict[str, Any], ...] = (
         "history",
         3,
         "history.movements",
-        _variant(
-            "Which came last? A) Renaissance B) Enlightenment C) Industrial Revolution",
+        _templated_choice_variant(
+            "Which movement came latest on the timeline?",
             _multiple_choice_spec("renaissance", "enlightenment", "industrial revolution", answer="industrial revolution"),
         ),
-        _variant(
-            "Pick the latest movement here. A) Industrial Revolution B) Renaissance C) Enlightenment",
+        _templated_choice_variant(
+            "Which movement arrived last historically?",
             _multiple_choice_spec("industrial revolution", "renaissance", "enlightenment", answer="industrial revolution"),
         ),
     ),
@@ -1943,12 +2135,12 @@ _BASE_QUESTION_DROP_SEEDS: tuple[dict[str, Any], ...] = (
         "geography",
         2,
         "geography.country-traits",
-        _variant(
-            "Which country here has no coastline? A) Nepal B) Portugal C) Japan",
+        _templated_choice_variant(
+            "Which country on this list lacks a coastline?",
             _multiple_choice_spec("nepal", "portugal", "japan", answer="nepal"),
         ),
-        _variant(
-            "Pick the landlocked country. A) Chile B) Nepal C) Iceland",
+        _templated_choice_variant(
+            "Which country here is landlocked?",
             _multiple_choice_spec("chile", "nepal", "iceland", answer="nepal"),
         ),
     ),
@@ -1957,12 +2149,12 @@ _BASE_QUESTION_DROP_SEEDS: tuple[dict[str, Any], ...] = (
         "geography",
         3,
         "geography.relative-position",
-        _variant(
-            "Which city sits farther north? A) Rome B) Paris C) Madrid",
+        _templated_choice_variant(
+            "Which city here lies farthest north?",
             _multiple_choice_spec("rome", "paris", "madrid", answer="paris"),
         ),
-        _variant(
-            "Pick the northernmost city. A) Paris B) Rome C) Athens",
+        _templated_choice_variant(
+            "Which listed city is the northernmost?",
             _multiple_choice_spec("paris", "rome", "athens", answer="paris"),
         ),
     ),
@@ -1971,12 +2163,12 @@ _BASE_QUESTION_DROP_SEEDS: tuple[dict[str, Any], ...] = (
         "geography",
         3,
         "geography.country-traits",
-        _variant(
-            "Which country spans both Europe and Asia in common geographic usage? A) Turkey B) Peru C) Kenya",
+        _templated_choice_variant(
+            "Which listed country spans Europe and Asia in common geographic usage?",
             _multiple_choice_spec("turkey", "peru", "kenya", answer="turkey"),
         ),
-        _variant(
-            "Pick the transcontinental country here. A) Morocco B) Turkey C) Vietnam",
+        _templated_choice_variant(
+            "Which country here is commonly described as transcontinental across Europe and Asia?",
             _multiple_choice_spec("morocco", "turkey", "vietnam", answer="turkey"),
         ),
     ),
@@ -1985,12 +2177,12 @@ _BASE_QUESTION_DROP_SEEDS: tuple[dict[str, Any], ...] = (
         "geography",
         3,
         "geography.relative-position",
-        _variant(
-            "Order these from north to south: Cairo, Nairobi, Cape Town",
+        _templated_ordered_variant(
+            "Arrange these cities from north to south",
             _ordered_spec("cairo", "nairobi", "cape town"),
         ),
-        _variant(
-            "Put these in north-to-south order: Cape Town, Cairo, Nairobi",
+        _templated_ordered_variant(
+            "Place these African cities from north to south",
             _ordered_spec("cairo", "nairobi", "cape town"),
         ),
     ),
@@ -2017,22 +2209,27 @@ _BASE_QUESTION_DROP_SEEDS: tuple[dict[str, Any], ...] = (
         "language",
         1,
         "language.word-parts",
-        _variant("Which prefix means 'before'? A) pre B) post C) anti", _multiple_choice_spec("pre", "post", "anti", answer="pre")),
-        _variant("Pick the prefix that means 'before'. A) re B) pre C) mis", _multiple_choice_spec("re", "pre", "mis", answer="pre")),
+        _templated_choice_variant(
+            "Which starting word-part would turn 'historic' into a word meaning 'before recorded history'?",
+            _multiple_choice_spec("pre", "post", "anti", answer="pre"),
+        ),
+        _templated_choice_variant(
+            "Which starting word-part most often adds the idea 'before' to a base word?",
+            _multiple_choice_spec("re", "pre", "mis", answer="pre"),
+        ),
     ),
     _static_seed(
         "language:homophone-their",
         "language",
         2,
         "language.usage",
-        _variant(
-            "Which word correctly completes this sentence? 'The players carried ___ jerseys into the tunnel.' "
-            "A) there B) their C) theyre",
-            _multiple_choice_spec("there", "their", "theyre", answer="their"),
+        _templated_choice_variant(
+            "Choose the word that correctly completes: 'The players carried ___ jerseys into the tunnel.'",
+            _multiple_choice_spec("there", "their", "they're", answer="their"),
         ),
-        _variant(
-            "Pick the correct word: 'I left the books over ___. A) their B) there C) theyre'",
-            _multiple_choice_spec("their", "there", "theyre", answer="there"),
+        _templated_choice_variant(
+            "Choose the word that correctly completes: 'I left the books over ___.'",
+            _multiple_choice_spec("their", "there", "they're", answer="there"),
         ),
     ),
     _static_seed(
@@ -2048,21 +2245,31 @@ _BASE_QUESTION_DROP_SEEDS: tuple[dict[str, Any], ...] = (
         "language",
         3,
         "language.ordering",
-        _variant("Put these in alphabetical order: cedar, birch, maple", _ordered_spec("birch", "cedar", "maple")),
-        _variant("Alphabetize these: maple, cedar, birch", _ordered_spec("birch", "cedar", "maple")),
+        _templated_ordered_variant("Arrange these tree names in alphabetical order", _ordered_spec("birch", "cedar", "maple")),
+        _templated_ordered_variant("Alphabetize these tree names", _ordered_spec("birch", "cedar", "maple")),
     ),
     _static_seed(
         "language:its-its-usage",
         "language",
         3,
         "language.usage",
-        _variant(
-            "Which sentence is correct? A) The robot lost its balance. B) The robot lost its balances. C) The robot lost itss balance.",
-            _multiple_choice_spec("the robot lost its balance", "the robot lost its balances", "the robot lost itss balance", answer="the robot lost its balance"),
+        _templated_choice_variant(
+            "Which sentence uses its correctly?",
+            _multiple_choice_spec(
+                "The robot lost its balance.",
+                "The robot lost its balances.",
+                "The robot lost itss balance.",
+                answer="The robot lost its balance.",
+            ),
         ),
-        _variant(
-            "Pick the correct sentence. A) Its going to rain. B) Its a bright day. C) The team forgot its plan.",
-            _multiple_choice_spec("its going to rain", "its a bright day", "the team forgot its plan", answer="the team forgot its plan"),
+        _templated_choice_variant(
+            "Which sentence correctly uses the possessive its?",
+            _multiple_choice_spec(
+                "It's going to rain.",
+                "Its a bright day.",
+                "The team forgot its plan.",
+                answer="The team forgot its plan.",
+            ),
         ),
     ),
     _static_seed(
@@ -2070,12 +2277,12 @@ _BASE_QUESTION_DROP_SEEDS: tuple[dict[str, Any], ...] = (
         "language",
         3,
         "language.patterns",
-        _variant(
-            "Which word belongs with level, civic, and radar? A) river B) rotor C) lantern",
+        _templated_choice_variant(
+            "Which word belongs with level, civic, and radar?",
             _multiple_choice_spec("river", "rotor", "lantern", answer="rotor"),
         ),
-        _variant(
-            "Pick the palindrome. A) garden B) mirror C) refer",
+        _templated_choice_variant(
+            "Which option is a palindrome?",
             _multiple_choice_spec("garden", "mirror", "refer", answer="refer"),
         ),
     ),
@@ -2114,8 +2321,14 @@ _BASE_QUESTION_DROP_SEEDS: tuple[dict[str, Any], ...] = (
         "culture",
         2,
         "culture.art-basics",
-        _variant("Put these additive primary colors in order from shortest answer length to longest: blue, red, green", _ordered_spec("red", "blue", "green")),
-        _variant("Order these additive primary colors from shortest word to longest: blue, red, green", _ordered_spec("red", "blue", "green")),
+        _templated_ordered_variant(
+            "Arrange these additive primary colors from shortest spelling to longest",
+            _ordered_spec("red", "blue", "green"),
+        ),
+        _templated_ordered_variant(
+            "Place these color names from shortest word to longest",
+            _ordered_spec("red", "blue", "green"),
+        ),
     ),
     _static_seed(
         "culture:piano-keys",
@@ -2138,16 +2351,28 @@ _BASE_QUESTION_DROP_SEEDS: tuple[dict[str, Any], ...] = (
         "culture",
         2,
         "culture.sports",
-        _variant("Which sport is played in innings? A) baseball B) soccer C) tennis", _multiple_choice_spec("baseball", "soccer", "tennis", answer="baseball")),
-        _variant("Pick the sport with innings. A) hockey B) baseball C) rugby", _multiple_choice_spec("hockey", "baseball", "rugby", answer="baseball")),
+        _templated_choice_variant(
+            "Which sport uses innings instead of halves, periods, or sets?",
+            _multiple_choice_spec("baseball", "soccer", "tennis", answer="baseball"),
+        ),
+        _templated_choice_variant(
+            "Which sport on this list is organized into innings?",
+            _multiple_choice_spec("hockey", "baseball", "rugby", answer="baseball"),
+        ),
     ),
     _static_seed(
         "culture:percussion-choice",
         "culture",
         2,
         "culture.music-basics",
-        _variant("Which instrument is percussion? A) cello B) tambourine C) oboe", _multiple_choice_spec("cello", "tambourine", "oboe", answer="tambourine")),
-        _variant("Pick the percussion instrument. A) tambourine B) trumpet C) violin", _multiple_choice_spec("tambourine", "trumpet", "violin", answer="tambourine")),
+        _templated_choice_variant(
+            "Which instrument belongs to the percussion family?",
+            _multiple_choice_spec("cello", "tambourine", "oboe", answer="tambourine"),
+        ),
+        _templated_choice_variant(
+            "Which listed instrument is percussion?",
+            _multiple_choice_spec("tambourine", "trumpet", "violin", answer="tambourine"),
+        ),
     ),
     _static_seed(
         "culture:impressionism-cubism",
@@ -2170,8 +2395,14 @@ _BASE_QUESTION_DROP_SEEDS: tuple[dict[str, Any], ...] = (
         "culture",
         3,
         "culture.music-terms",
-        _variant("Order these from slowest to fastest: largo, andante, presto", _ordered_spec("largo", "andante", "presto")),
-        _variant("Put these tempos in order from slowest to fastest: presto, largo, andante", _ordered_spec("largo", "andante", "presto")),
+        _templated_ordered_variant(
+            "Arrange these Italian tempo markings from slowest to fastest",
+            _ordered_spec("largo", "andante", "presto"),
+        ),
+        _templated_ordered_variant(
+            "Place these tempo terms from slowest to fastest",
+            _ordered_spec("largo", "andante", "presto"),
+        ),
     ),
 )
 
@@ -2266,13 +2497,55 @@ def _normalize_prompt_for_audit(prompt: str) -> str:
     return normalize_answer_text(prompt)
 
 
-def _audit_generated_variant(seed: dict[str, Any], variant: QuestionDropVariant) -> str | None:
-    generator_type = str(seed.get("generator_type") or "")
+def _multiple_choice_prompt_stem(prompt: str) -> str:
+    marker = " A) "
+    if marker not in prompt:
+        return prompt
+    return prompt.split(marker, 1)[0]
+
+
+def _multiple_choice_stem_reveals_answer(prompt: str, answer_spec: dict[str, Any]) -> bool:
+    stem = normalize_answer_text(_multiple_choice_prompt_stem(prompt))
+    answer = normalize_answer_text(answer_spec.get("answer"))
+    if not answer or answer not in stem:
+        return False
+    choices = [normalize_answer_text(choice) for choice in answer_spec.get("choices", [])]
+    present_choices = {choice for choice in choices if choice and choice in stem}
+    return present_choices == {answer}
+
+
+def _ordered_prompt_leaks_solution(prompt: str, tokens: list[str] | tuple[str, ...]) -> bool:
+    prompt_norm = normalize_answer_text(prompt)
+    cursor = 0
+    for token in tokens:
+        token_norm = normalize_answer_text(token)
+        position = prompt_norm.find(token_norm, cursor)
+        if position < 0:
+            return False
+        cursor = position + len(token_norm)
+    return True
+
+
+def _audit_rendered_variant(seed: dict[str, Any], variant: QuestionDropVariant) -> str | None:
     answer_type = str(variant.answer_spec.get("type") or "").strip().casefold()
     if answer_type == "multiple_choice":
         choices = [str(choice).strip().casefold() for choice in variant.answer_spec.get("choices", []) if str(choice).strip()]
         if len(choices) != len(set(choices)):
             return "Multiple-choice options must be distinct."
+        if _multiple_choice_stem_reveals_answer(variant.prompt, variant.answer_spec):
+            return "Multiple-choice prompt stem reveals the correct answer."
+    if answer_type == "ordered_tokens":
+        tokens = tuple(str(token) for token in variant.answer_spec.get("tokens", ()))
+        if _ordered_prompt_leaks_solution(variant.prompt, tokens):
+            return "Ordered prompt exposes the solution order."
+    return None
+
+
+def _audit_generated_variant(seed: dict[str, Any], variant: QuestionDropVariant) -> str | None:
+    generator_type = str(seed.get("generator_type") or "")
+    rendered_message = _audit_rendered_variant(seed, variant)
+    if rendered_message is not None:
+        return rendered_message
     if variant.category == "math" and _BLAND_MATH_PROMPT_RE.fullmatch(variant.prompt):
         return "Math prompt slipped back into a bland worksheet shell."
     if variant.category == "logic" and _BLAND_LOGIC_PROMPT_RE.fullmatch(variant.prompt):
@@ -2373,17 +2646,29 @@ def validate_content_pack(seeds: tuple[dict[str, Any], ...] | None = None) -> tu
             variants = seed.get("variants")
             if not isinstance(variants, (list, tuple)) or not variants:
                 return False, f"Seed '{concept_id}' needs at least one static variant."
-            prompt_audit: set[str] = set()
             for payload in variants:
-                if not isinstance(payload, dict) or not isinstance(payload.get("prompt"), str) or not payload["prompt"].strip():
-                    return False, f"Seed '{concept_id}' has an invalid prompt."
-                prompt_key = _normalize_prompt_for_audit(payload["prompt"])
-                if prompt_key in prompt_audit:
-                    return False, f"Seed '{concept_id}' repeats a static prompt too closely."
-                prompt_audit.add(prompt_key)
+                if not isinstance(payload, dict):
+                    return False, f"Seed '{concept_id}' has an invalid static payload."
                 valid, message = validate_answer_spec(payload.get("answer_spec", {}))
                 if not valid:
                     return False, f"Seed '{concept_id}' has an invalid answer spec: {message}"
+            prompt_audit: set[str] = set()
+            for variant_index in range(len(variants)):
+                try:
+                    variant = build_variant(
+                        seed,
+                        seed_material=f"validation:{concept_id}",
+                        variant_index=variant_index,
+                    )
+                except Exception as exc:
+                    return False, f"Seed '{concept_id}' failed to build static validation variant {variant_index}: {exc}"
+                prompt_key = _normalize_prompt_for_audit(variant.prompt)
+                if prompt_key in prompt_audit:
+                    return False, f"Seed '{concept_id}' repeats a static prompt too closely."
+                prompt_audit.add(prompt_key)
+                message = _audit_rendered_variant(seed, variant)
+                if message is not None:
+                    return False, f"Seed '{concept_id}' failed static audit at variant {variant_index}: {message}"
         else:
             prompt_audit: list[str] = []
             live_rotation_prompts: set[str] = set()

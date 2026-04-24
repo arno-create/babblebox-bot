@@ -2,6 +2,7 @@ from pathlib import Path
 import unittest
 
 from babblebox import web
+from babblebox.official_links import TOPGG_VOTE_URL
 from babblebox.web import app
 
 
@@ -102,6 +103,16 @@ class WebsiteDocsTests(unittest.TestCase):
         self.assertIn('href="help.html"', index_html)
         self.assertIn('href="help.html"', privacy_html)
         self.assertIn('href="help.html"', terms_html)
+
+    def test_homepage_and_help_surface_topgg_vote_link_as_a_support_action(self):
+        index_html = (ROOT / "index.html").read_text(encoding="utf-8")
+        help_html = (ROOT / "help.html").read_text(encoding="utf-8")
+
+        self.assertIn(f'href="{TOPGG_VOTE_URL}"', index_html)
+        self.assertIn(f'href="{TOPGG_VOTE_URL}"', help_html)
+        self.assertIn("Top.gg Vote", index_html)
+        self.assertIn("Top.gg Vote", help_html)
+        self.assertIn("not a premium tier", help_html.casefold())
 
     def test_bday_project_link_target_stays_intentional(self):
         target = 'href="https://arno-create.github.io/Bdayblaze/"'
