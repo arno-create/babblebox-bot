@@ -799,7 +799,7 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertTrue(ok)
-        self.assertIn("True channel streak rule: 3+ consecutive GIF-heavy messages.", message)
+        self.assertIn("True channel streak lane: on at 3+ consecutive GIF-heavy messages.", message)
         self.assertEqual(self.service.store.state["guilds"]["10"]["gif_consecutive_threshold"], 3)
         self.assertEqual(self.service.store.state["guilds"]["10"]["gif_message_threshold"], 3)
         self.assertEqual(self.service.store.state["guilds"]["10"]["gif_window_seconds"], 3)
@@ -809,6 +809,43 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(config["gif_message_threshold"], 3)
         self.assertEqual(config["gif_window_seconds"], 3)
         self.assertEqual(self.service._compiled_configs[10].gif_rules.consecutive_threshold, 3)
+
+    async def test_spam_and_gif_lane_enablement_flags_persist_and_compile(self):
+        ok, _ = await self.service.set_pack_config(
+            10,
+            "spam",
+            message_enabled=False,
+            burst_enabled=False,
+            near_duplicate_enabled=True,
+        )
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_pack_config(
+            10,
+            "gif",
+            message_enabled=False,
+            consecutive_enabled=False,
+            repeat_enabled=True,
+            same_asset_enabled=False,
+        )
+        self.assertTrue(ok)
+
+        config = self.service.get_config(10)
+        compiled = self.service._compiled_configs[10]
+
+        self.assertFalse(config["spam_message_enabled"])
+        self.assertFalse(config["spam_burst_enabled"])
+        self.assertTrue(config["spam_near_duplicate_enabled"])
+        self.assertFalse(config["gif_message_enabled"])
+        self.assertFalse(config["gif_consecutive_enabled"])
+        self.assertTrue(config["gif_repeat_enabled"])
+        self.assertFalse(config["gif_same_asset_enabled"])
+        self.assertFalse(compiled.spam_rules.message_enabled)
+        self.assertFalse(compiled.spam_rules.burst_enabled)
+        self.assertTrue(compiled.spam_rules.near_duplicate_enabled)
+        self.assertFalse(compiled.gif_rules.message_enabled)
+        self.assertFalse(compiled.gif_rules.consecutive_enabled)
+        self.assertTrue(compiled.gif_rules.repeat_enabled)
+        self.assertFalse(compiled.gif_rules.same_asset_enabled)
 
     async def test_allowlisted_invite_does_not_bypass_promo_match(self):
         ok, _ = await self.service.set_pack_config(10, "promo", enabled=True, action="log", sensitivity="normal")
@@ -2180,6 +2217,29 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(actionable[0].pack, "gif")
         self.assertEqual(decisions[3:], [None, None])
 
+    async def test_disabling_all_gif_lanes_skips_gif_flood_detection(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        author = self._make_member(guild, 432)
+
+        await self._enable_gif_pack(
+            guild.id,
+            message_enabled=False,
+            consecutive_enabled=False,
+            repeat_enabled=False,
+            same_asset_enabled=False,
+        )
+
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            decisions = [
+                await self.service.handle_message(
+                    FakeMessage(guild=guild, channel=channel, author=author, content="https://tenor.com/view/cat-dance-gif-12345")
+                )
+                for _ in range(5)
+            ]
+
+        self.assertEqual(decisions, [None, None, None, None, None])
+
     async def test_mixed_text_and_occasional_gifs_stay_safe(self):
         guild = FakeGuild(10)
         channel = FakeChannel(20)
@@ -3177,6 +3237,22 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(spam_decisions[-1].pack, "spam")
         self.assertIn("spam_message_rate", {reason.match_class for reason in spam_decisions[-1].reasons})
         self.assertTrue(all(item is None for item in normal_decisions))
+
+    async def test_disabling_spam_rate_and_burst_lanes_skips_generic_fast_chat_hits(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        author = self._make_member(guild, 1030)
+
+        await self._enable_spam_pack(guild.id, message_enabled=False, burst_enabled=False)
+        low_value_posts = ("lol", "lmao", "haha", "yo", "ok", "???", "bruh")
+
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            decisions = [
+                await self.service.handle_message(FakeMessage(guild=guild, channel=channel, author=author, content=text))
+                for text in low_value_posts
+            ]
+
+        self.assertEqual(decisions, [None, None, None, None, None, None, None])
 
     async def test_custom_spam_threshold_profile_triggers_and_explains_itself(self):
         guild = FakeGuild(10)
@@ -4356,6 +4432,133 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(len(log_channel.sent), 2)
 
+    async def test_spam_alerts_group_same_member_incident_into_one_log_message(self):
+        guild = FakeGuild(10)
+        public_channel = FakeChannel(20)
+        log_channel = FakeChannel(99, name="shield-log")
+        self.bot.register_channel(log_channel)
+        author = FakeAuthor(42, roles=[FakeRole(11, position=1)])
+        first = FakeMessage(guild=guild, channel=public_channel, author=author, content="starter pack now")
+        second = FakeMessage(guild=guild, channel=public_channel, author=author, content="starter pack now now")
+
+        ok, _ = await self.service.set_log_channel(guild.id, log_channel.id)
+        self.assertTrue(ok)
+        compiled = self.service._compiled_configs[guild.id]
+        first_reason = ShieldMatch(
+            pack="spam",
+            label="Fast burst posting",
+            reason="5 messages landed inside 10 seconds (threshold 5).",
+            action="delete_log",
+            confidence="medium",
+            heuristic=True,
+            match_class="spam_burst",
+        )
+        second_reason = ShieldMatch(
+            pack="spam",
+            label="Message-rate spam",
+            reason="7 messages landed inside 12 seconds (threshold 7).",
+            action="delete_timeout_log",
+            confidence="high",
+            heuristic=True,
+            match_class="spam_message_rate",
+        )
+        first_decision = ShieldDecision(
+            matched=True,
+            action="delete_log",
+            pack="spam",
+            reasons=(first_reason,),
+            deleted=True,
+            deleted_count=5,
+            delete_attempt_count=5,
+            alert_evidence_signature="spam-family-one",
+            alert_evidence_summary=first_reason.reason,
+        )
+        second_decision = ShieldDecision(
+            matched=True,
+            action="delete_timeout_log",
+            pack="spam",
+            reasons=(second_reason,),
+            deleted=True,
+            deleted_count=7,
+            delete_attempt_count=7,
+            timed_out=True,
+            alert_evidence_signature="spam-family-two",
+            alert_evidence_summary=second_reason.reason,
+        )
+        clock = {"now": 100.0}
+        fake_loop = types.SimpleNamespace(time=lambda: clock["now"])
+
+        with patch("babblebox.shield_service.asyncio.get_running_loop", return_value=fake_loop):
+            await self.service._send_alert(first, compiled, first_decision, content_fingerprint="spam-1")
+            clock["now"] = 120.0
+            await self.service._send_alert(second, compiled, second_decision, content_fingerprint="spam-2")
+
+        self.assertEqual(len(log_channel.sent), 1)
+        self.assertEqual(len(log_channel.edits), 1)
+        edited_embed = log_channel.edits[0]["embed"]
+        incident_field = next(field for field in edited_embed.fields if field.name == "Incident")
+        self.assertIn("Grouped with", incident_field.value)
+        self.assertIn("2", incident_field.value)
+
+    async def test_spam_alert_grouping_keeps_distinct_reason_families_separate(self):
+        guild = FakeGuild(10)
+        public_channel = FakeChannel(20)
+        log_channel = FakeChannel(99, name="shield-log")
+        self.bot.register_channel(log_channel)
+        author = FakeAuthor(42, roles=[FakeRole(11, position=1)])
+        first = FakeMessage(guild=guild, channel=public_channel, author=author, content="starter pack now")
+        second = FakeMessage(guild=guild, channel=public_channel, author=author, content="@everyone ping ping ping")
+
+        ok, _ = await self.service.set_log_channel(guild.id, log_channel.id)
+        self.assertTrue(ok)
+        compiled = self.service._compiled_configs[guild.id]
+        burst_decision = ShieldDecision(
+            matched=True,
+            action="delete_log",
+            pack="spam",
+            reasons=(
+                ShieldMatch(
+                    pack="spam",
+                    label="Fast burst posting",
+                    reason="5 messages landed inside 10 seconds (threshold 5).",
+                    action="delete_log",
+                    confidence="medium",
+                    heuristic=True,
+                    match_class="spam_burst",
+                ),
+            ),
+            deleted=True,
+            alert_evidence_signature="burst-family",
+        )
+        mention_decision = ShieldDecision(
+            matched=True,
+            action="delete_log",
+            pack="spam",
+            reasons=(
+                ShieldMatch(
+                    pack="spam",
+                    label="Mention flood",
+                    reason="12 mentions were stacked across 3 quick messages.",
+                    action="delete_log",
+                    confidence="high",
+                    heuristic=True,
+                    match_class="spam_mention_flood",
+                ),
+            ),
+            deleted=True,
+            alert_evidence_signature="mention-family",
+        )
+        clock = {"now": 100.0}
+        fake_loop = types.SimpleNamespace(time=lambda: clock["now"])
+
+        with patch("babblebox.shield_service.asyncio.get_running_loop", return_value=fake_loop):
+            await self.service._send_alert(first, compiled, burst_decision, content_fingerprint="spam-burst")
+            clock["now"] = 120.0
+            await self.service._send_alert(second, compiled, mention_decision, content_fingerprint="spam-mention")
+
+        self.assertEqual(len(log_channel.sent), 2)
+        self.assertEqual(len(log_channel.edits), 0)
+
     async def test_low_confidence_repetition_alert_is_compact_and_does_not_ping(self):
         guild = FakeGuild(10)
         public_channel = FakeChannel(20)
@@ -5271,3 +5474,16 @@ class ShieldStoreNormalizationTests(unittest.TestCase):
         self.assertEqual(normalized["gif_message_threshold"], 12)
         self.assertEqual(normalized["gif_window_seconds"], 3)
         self.assertEqual(normalized["spam_message_window_seconds"], 3)
+
+    def test_normalize_guild_shield_config_defaults_new_lane_flags_to_existing_behavior(self):
+        normalized = normalize_guild_shield_config(10, {})
+
+        self.assertTrue(normalized["spam_message_enabled"])
+        self.assertTrue(normalized["spam_burst_enabled"])
+        self.assertTrue(normalized["spam_near_duplicate_enabled"])
+        self.assertFalse(normalized["spam_emote_enabled"])
+        self.assertFalse(normalized["spam_caps_enabled"])
+        self.assertTrue(normalized["gif_message_enabled"])
+        self.assertTrue(normalized["gif_consecutive_enabled"])
+        self.assertTrue(normalized["gif_repeat_enabled"])
+        self.assertTrue(normalized["gif_same_asset_enabled"])

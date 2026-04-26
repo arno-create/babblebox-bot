@@ -180,6 +180,8 @@ class WebsiteDocsTests(unittest.TestCase):
             "recommended non-AI baseline",
             "Anti-Spam",
             "GIF Flood / Media Pressure",
+            "grouped same-member spam incidents",
+            "lane selector",
             "Reply anonymously",
             "Create a confession",
             "private approval happens first",
@@ -226,6 +228,8 @@ class WebsiteDocsTests(unittest.TestCase):
             "images stay off by default unless admins explicitly turn them on",
             "explicit anti-spam thresholds",
             "grouped incident dedupe",
+            "grouped same-member spam incidents",
+            "turn the main Anti-Spam and GIF rules on or off individually",
         ):
             self.assertIn(text, index_html)
 

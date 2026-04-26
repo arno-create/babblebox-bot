@@ -158,41 +158,138 @@ TIMEOUT_PRESET_CHOICES = (
     ("30", "30 minutes"),
     ("60", "60 minutes"),
 )
-SPAM_RATE_PRESETS = {
-    "strict": (6, 5, "Strict: 6 messages in 5s"),
-    "balanced": (7, 5, "Balanced: 7 messages in 5s"),
-    "relaxed": (9, 6, "Relaxed: 9 messages in 6s"),
-}
-SPAM_BURST_PRESETS = {
-    "tight": (4, 8, "Tight: 4 messages in 8s"),
-    "balanced": (5, 10, "Balanced: 5 messages in 10s"),
-    "wide": (6, 12, "Wide: 6 messages in 12s"),
-}
-SPAM_DUPLICATE_PRESETS = {
-    "extra_tight": (3, 8, "Extra-tight: 3 near-duplicates in 8s"),
-    "tight": (4, 8, "Tight: 4 near-duplicates in 8s"),
-    "balanced": (5, 10, "Balanced: 5 near-duplicates in 10s"),
-    "wide": (6, 12, "Wide: 6 near-duplicates in 12s"),
-}
-GIF_RATE_PRESETS = {
-    "tight": (3, 15, "Tight: 3 GIF-heavy posts in 15s"),
-    "balanced": (4, 20, "Balanced: 4 GIF-heavy posts in 20s"),
-    "wide": (5, 25, "Wide: 5 GIF-heavy posts in 25s"),
-}
-
-
 def _threshold_values(field: str, *, include_max: bool = False) -> tuple[int, ...]:
     minimum, maximum, _default = SHIELD_NUMERIC_CONFIG_SPECS[field]
     stop = maximum + 1 if include_max else maximum
     return tuple(range(minimum, stop))
 
 
-SPAM_EMOTE_THRESHOLDS = (8, 12, 18, 24, 30)
-SPAM_CAPS_THRESHOLDS = (12, 20, 28, 40, 60)
-GIF_REPEAT_THRESHOLDS = _threshold_values("gif_repeat_threshold")
-GIF_SAME_ASSET_THRESHOLDS = _threshold_values("gif_same_asset_threshold")
-GIF_RATIO_THRESHOLDS = (50, 60, 70, 80, 90)
+SPAM_RATE_THRESHOLDS = _threshold_values("spam_message_threshold", include_max=True)
+SPAM_RATE_WINDOWS = (3, 4, 5, 6, 8, 10, 12, 15, 20, 30)
+SPAM_BURST_THRESHOLDS = _threshold_values("spam_burst_threshold", include_max=True)
+SPAM_BURST_WINDOWS = (5, 6, 8, 10, 12, 15, 20, 25, 30)
+SPAM_DUPLICATE_THRESHOLDS = _threshold_values("spam_near_duplicate_threshold", include_max=True)
+SPAM_DUPLICATE_WINDOWS = (5, 6, 8, 10, 12, 15, 20, 25, 30, 45)
+SPAM_EMOTE_THRESHOLDS = (8, 10, 12, 15, 18, 24, 30, 36, 40)
+SPAM_CAPS_THRESHOLDS = (12, 16, 20, 24, 28, 36, 48, 60, 80)
+GIF_RATE_THRESHOLDS = _threshold_values("gif_message_threshold", include_max=True)
+GIF_RATE_WINDOWS = (3, 5, 8, 10, 12, 15, 20, 25, 30, 45)
+GIF_REPEAT_THRESHOLDS = _threshold_values("gif_repeat_threshold", include_max=True)
+GIF_SAME_ASSET_THRESHOLDS = _threshold_values("gif_same_asset_threshold", include_max=True)
+GIF_RATIO_THRESHOLDS = (50, 55, 60, 65, 70, 75, 80, 85, 90, 95)
 GIF_CONSECUTIVE_THRESHOLDS = _threshold_values("gif_consecutive_threshold", include_max=True)
+
+SPAM_OPTION_LANES = (
+    {
+        "key": "rate",
+        "label": "Rate",
+        "enabled_field": "spam_message_enabled",
+        "enabled_arg": "message_enabled",
+        "threshold_field": "spam_message_threshold",
+        "threshold_arg": "message_threshold",
+        "threshold_values": SPAM_RATE_THRESHOLDS,
+        "threshold_placeholder": "Rate message count",
+        "secondary_field": "spam_message_window_seconds",
+        "secondary_arg": "window_seconds",
+        "secondary_values": SPAM_RATE_WINDOWS,
+        "secondary_placeholder": "Rate window",
+    },
+    {
+        "key": "burst",
+        "label": "Burst",
+        "enabled_field": "spam_burst_enabled",
+        "enabled_arg": "burst_enabled",
+        "threshold_field": "spam_burst_threshold",
+        "threshold_arg": "burst_threshold",
+        "threshold_values": SPAM_BURST_THRESHOLDS,
+        "threshold_placeholder": "Burst message count",
+        "secondary_field": "spam_burst_window_seconds",
+        "secondary_arg": "burst_window_seconds",
+        "secondary_values": SPAM_BURST_WINDOWS,
+        "secondary_placeholder": "Burst window",
+    },
+    {
+        "key": "near_duplicate",
+        "label": "Near-duplicate",
+        "enabled_field": "spam_near_duplicate_enabled",
+        "enabled_arg": "near_duplicate_enabled",
+        "threshold_field": "spam_near_duplicate_threshold",
+        "threshold_arg": "duplicate_threshold",
+        "threshold_values": SPAM_DUPLICATE_THRESHOLDS,
+        "threshold_placeholder": "Near-duplicate count",
+        "secondary_field": "spam_near_duplicate_window_seconds",
+        "secondary_arg": "duplicate_window_seconds",
+        "secondary_values": SPAM_DUPLICATE_WINDOWS,
+        "secondary_placeholder": "Near-duplicate window",
+    },
+    {
+        "key": "emote",
+        "label": "Emoji / emote",
+        "enabled_field": "spam_emote_enabled",
+        "enabled_arg": "emote_enabled",
+        "threshold_field": "spam_emote_threshold",
+        "threshold_arg": "emote_threshold",
+        "threshold_values": SPAM_EMOTE_THRESHOLDS,
+        "threshold_placeholder": "Emoji / emote threshold",
+    },
+    {
+        "key": "caps",
+        "label": "Capitals",
+        "enabled_field": "spam_caps_enabled",
+        "enabled_arg": "caps_enabled",
+        "threshold_field": "spam_caps_threshold",
+        "threshold_arg": "caps_threshold",
+        "threshold_values": SPAM_CAPS_THRESHOLDS,
+        "threshold_placeholder": "Capitals threshold",
+    },
+)
+
+GIF_OPTION_LANES = (
+    {
+        "key": "rate",
+        "label": "GIF-heavy rate",
+        "enabled_field": "gif_message_enabled",
+        "enabled_arg": "message_enabled",
+        "threshold_field": "gif_message_threshold",
+        "threshold_arg": "message_threshold",
+        "threshold_values": GIF_RATE_THRESHOLDS,
+        "threshold_placeholder": "GIF-heavy rate count",
+        "secondary_field": "gif_window_seconds",
+        "secondary_arg": "window_seconds",
+        "secondary_values": GIF_RATE_WINDOWS,
+        "secondary_placeholder": "GIF-heavy rate window",
+    },
+    {
+        "key": "consecutive",
+        "label": "True channel streak",
+        "enabled_field": "gif_consecutive_enabled",
+        "enabled_arg": "consecutive_enabled",
+        "threshold_field": "gif_consecutive_threshold",
+        "threshold_arg": "consecutive_threshold",
+        "threshold_values": GIF_CONSECUTIVE_THRESHOLDS,
+        "threshold_placeholder": "Consecutive GIF streak threshold",
+    },
+    {
+        "key": "repeat",
+        "label": "Low-text repeat",
+        "enabled_field": "gif_repeat_enabled",
+        "enabled_arg": "repeat_enabled",
+        "threshold_field": "gif_repeat_threshold",
+        "threshold_arg": "repeat_threshold",
+        "threshold_values": GIF_REPEAT_THRESHOLDS,
+        "threshold_placeholder": "Low-text repeat threshold",
+    },
+    {
+        "key": "same_asset",
+        "label": "Same asset",
+        "enabled_field": "gif_same_asset_enabled",
+        "enabled_arg": "same_asset_enabled",
+        "threshold_field": "gif_same_asset_threshold",
+        "threshold_arg": "same_asset_threshold",
+        "threshold_values": GIF_SAME_ASSET_THRESHOLDS,
+        "threshold_placeholder": "Same-asset threshold",
+    },
+)
 
 
 class ShieldManagedView(discord.ui.View):
@@ -685,10 +782,24 @@ class ShieldPackOptionsEditorView(ShieldManagedView):
         super().__init__(cog, guild_id=guild_id, author_id=author_id)
         self.pack = pack
         self.panel_view = panel_view
+        self.selected_lane = "rate" if pack in {"spam", "gif"} else None
         self._refresh_items()
 
     def current_embed(self) -> discord.Embed:
-        return self.cog._pack_options_editor_embed(self.guild_id, self.pack)
+        return self.cog._pack_options_editor_embed(self.guild_id, self.pack, selected_lane=self.selected_lane)
+
+    def _lane_definitions(self) -> tuple[dict[str, object], ...]:
+        if self.pack == "spam":
+            return SPAM_OPTION_LANES
+        if self.pack == "gif":
+            return GIF_OPTION_LANES
+        return ()
+
+    def _current_lane(self) -> dict[str, object] | None:
+        lane_map = {str(item["key"]): item for item in self._lane_definitions()}
+        if self.selected_lane not in lane_map:
+            self.selected_lane = next(iter(lane_map), None)
+        return lane_map.get(self.selected_lane)
 
     async def _sync_parent_panel(self):
         if self.panel_view is not None:
@@ -715,168 +826,207 @@ class ShieldPackOptionsEditorView(ShieldManagedView):
         config = self.cog.service.get_config(self.guild_id)
         pack_label = PACK_LABELS.get(self.pack, self.pack.replace("_", " ").title())
 
-        if self.pack == "spam":
-            for row, name, presets, args in (
-                (0, "rate", SPAM_RATE_PRESETS, ("message_threshold", "window_seconds")),
-                (1, "burst", SPAM_BURST_PRESETS, ("burst_threshold", "burst_window_seconds")),
-                (2, "duplicate", SPAM_DUPLICATE_PRESETS, ("duplicate_threshold", "duplicate_window_seconds")),
-            ):
-                current = tuple(int(config.get(f"spam_{suffix}", 0)) for suffix in args)
-                selected_key = next((key for key, value in presets.items() if value[:2] == current), "balanced")
-                select = discord.ui.Select(
-                    placeholder=f"Anti-Spam {name} preset",
-                    row=row,
-                    options=[
-                        discord.SelectOption(label=value[2], value=key, default=key == selected_key)
-                        for key, value in presets.items()
-                    ],
-                )
-
-                async def preset_callback(
-                    interaction: discord.Interaction,
-                    *,
-                    component: discord.ui.Select = select,
-                    preset_map: dict[str, tuple[int, int, str]] = presets,
-                    suffixes: tuple[str, str] = args,
-                    stage_name: str = name,
-                ):
-                    async def action():
-                        first, second, _label = preset_map[component.values[0]]
-                        ok, message = await self.cog.service.set_pack_config(
-                            self.guild_id,
-                            "spam",
-                            **{suffixes[0]: first, suffixes[1]: second},
-                        )
-                        await self._rerender(interaction, note=message, note_ok=ok)
-
-                    await self._safe_action(
-                        interaction,
-                        stage=f"shield_spam_{stage_name}_preset",
-                        failure_message="Babblebox could not update that anti-spam preset right now.",
-                        action=action,
-                    )
-
-                select.callback = preset_callback
-                self.add_item(select)
-
-            for row, enabled_field, threshold_field, values, placeholder in (
-                (3, "spam_emote_enabled", "spam_emote_threshold", SPAM_EMOTE_THRESHOLDS, "Emoji / emote lane + threshold"),
-                (4, "spam_caps_enabled", "spam_caps_threshold", SPAM_CAPS_THRESHOLDS, "Capitals lane + threshold"),
-            ):
-                current_enabled = bool(config.get(enabled_field))
-                current_threshold = int(config.get(threshold_field, values[0]))
-                select = discord.ui.Select(
-                    placeholder=placeholder,
-                    row=row,
-                    options=[
-                        discord.SelectOption(label="Off", value="off", default=not current_enabled),
-                        *[
-                            discord.SelectOption(
-                                label=f"On at {value}+",
-                                value=str(value),
-                                default=current_enabled and value == current_threshold,
-                            )
-                            for value in values
-                        ],
-                    ],
-                )
-
-                async def lane_callback(
-                    interaction: discord.Interaction,
-                    *,
-                    component: discord.ui.Select = select,
-                    enabled_key: str = enabled_field,
-                    threshold_key: str = threshold_field,
-                    default_threshold: int = values[0],
-                ):
-                    async def action():
-                        selected = component.values[0]
-                        ok, message = await self.cog.service.set_pack_config(
-                            self.guild_id,
-                            "spam",
-                            **{
-                                enabled_key.replace("spam_", ""): selected != "off",
-                                threshold_key.replace("spam_", ""): int(selected) if selected != "off" else int(config.get(threshold_key, default_threshold)),
-                            },
-                        )
-                        await self._rerender(interaction, note=message, note_ok=ok)
-
-                    await self._safe_action(
-                        interaction,
-                        stage=f"shield_{enabled_key}",
-                        failure_message="Babblebox could not update that anti-spam lane right now.",
-                        action=action,
-                    )
-
-                select.callback = lane_callback
-                self.add_item(select)
-            return
-
-        if self.pack == "gif":
-            current_rate = (int(config.get("gif_message_threshold", 4)), int(config.get("gif_window_seconds", 20)))
-            selected_rate = next((key for key, value in GIF_RATE_PRESETS.items() if value[:2] == current_rate), "balanced")
-            rate_select = discord.ui.Select(
-                placeholder="GIF pressure preset",
+        if self.pack in {"spam", "gif"}:
+            lane = self._current_lane()
+            if lane is None:
+                return
+            lane_definitions = self._lane_definitions()
+            lane_select = discord.ui.Select(
+                placeholder="Anti-Spam lane" if self.pack == "spam" else "GIF lane",
                 row=0,
                 options=[
-                    discord.SelectOption(label=value[2], value=key, default=key == selected_rate)
-                    for key, value in GIF_RATE_PRESETS.items()
+                    discord.SelectOption(
+                        label=str(item["label"]),
+                        value=str(item["key"]),
+                        default=str(item["key"]) == self.selected_lane,
+                    )
+                    for item in lane_definitions
                 ],
             )
 
-            async def rate_callback(interaction: discord.Interaction):
+            async def lane_select_callback(interaction: discord.Interaction):
                 async def action():
-                    threshold, window_seconds, _label = GIF_RATE_PRESETS[rate_select.values[0]]
+                    self.selected_lane = lane_select.values[0]
+                    await self._rerender(interaction)
+
+                await self._safe_action(
+                    interaction,
+                    stage=f"shield_{self.pack}_lane_select",
+                    failure_message=f"Babblebox could not switch the {pack_label} lane editor right now.",
+                    action=action,
+                )
+
+            lane_select.callback = lane_select_callback
+            self.add_item(lane_select)
+
+            current_enabled = bool(config.get(str(lane["enabled_field"])))
+            state_select = discord.ui.Select(
+                placeholder=f"{lane['label']} lane state",
+                row=1,
+                options=[
+                    discord.SelectOption(label="On", value="on", default=current_enabled),
+                    discord.SelectOption(label="Off", value="off", default=not current_enabled),
+                ],
+            )
+
+            async def state_callback(
+                interaction: discord.Interaction,
+                *,
+                component: discord.ui.Select = state_select,
+                enabled_arg: str = str(lane["enabled_arg"]),
+            ):
+                async def action():
                     ok, message = await self.cog.service.set_pack_config(
                         self.guild_id,
-                        "gif",
-                        message_threshold=threshold,
-                        window_seconds=window_seconds,
+                        self.pack,
+                        **{enabled_arg: component.values[0] == "on"},
                     )
                     await self._rerender(interaction, note=message, note_ok=ok)
 
                 await self._safe_action(
                     interaction,
-                    stage="shield_gif_rate",
-                    failure_message=f"Babblebox could not update {pack_label} rate settings right now.",
+                    stage=f"shield_{self.pack}_{self.selected_lane}_state",
+                    failure_message=f"Babblebox could not update that {pack_label} lane right now.",
                     action=action,
                 )
 
-            rate_select.callback = rate_callback
-            self.add_item(rate_select)
+            state_select.callback = state_callback
+            self.add_item(state_select)
 
-            for row, field, values, placeholder in (
-                (1, "consecutive_threshold", GIF_CONSECUTIVE_THRESHOLDS, "Consecutive GIF streak threshold"),
-                (2, "repeat_threshold", GIF_REPEAT_THRESHOLDS, "Low-text repeat threshold"),
-                (3, "same_asset_threshold", GIF_SAME_ASSET_THRESHOLDS, "Same-asset threshold"),
-                (4, "ratio_percent", GIF_RATIO_THRESHOLDS, "Minimum GIF ratio"),
+            threshold_values = tuple(int(value) for value in lane["threshold_values"])
+            current_threshold = int(config.get(str(lane["threshold_field"]), threshold_values[0]))
+            threshold_select = discord.ui.Select(
+                placeholder=str(lane["threshold_placeholder"]),
+                row=2,
+                options=[
+                    discord.SelectOption(label=str(value), value=str(value), default=value == current_threshold)
+                    for value in threshold_values
+                ],
+            )
+
+            async def threshold_callback(
+                interaction: discord.Interaction,
+                *,
+                component: discord.ui.Select = threshold_select,
+                threshold_arg: str = str(lane["threshold_arg"]),
             ):
-                current = int(config.get(f"gif_{'min_' if field == 'ratio_percent' else ''}{field}", 70 if field == "ratio_percent" else values[0]))
-                select = discord.ui.Select(
-                    placeholder=placeholder,
-                    row=row,
-                    options=[discord.SelectOption(label=str(value), value=str(value), default=value == current) for value in values],
+                async def action():
+                    ok, message = await self.cog.service.set_pack_config(
+                        self.guild_id,
+                        self.pack,
+                        **{threshold_arg: int(component.values[0])},
+                    )
+                    await self._rerender(interaction, note=message, note_ok=ok)
+
+                await self._safe_action(
+                    interaction,
+                    stage=f"shield_{self.pack}_{self.selected_lane}_threshold",
+                    failure_message=f"Babblebox could not update that {pack_label} threshold right now.",
+                    action=action,
                 )
 
-                async def gif_option_callback(
+            threshold_select.callback = threshold_callback
+            self.add_item(threshold_select)
+
+            secondary_field = lane.get("secondary_field")
+            secondary_values = lane.get("secondary_values")
+            if isinstance(secondary_field, str) and isinstance(secondary_values, tuple):
+                current_secondary = int(config.get(secondary_field, secondary_values[0]))
+                secondary_select = discord.ui.Select(
+                    placeholder=str(lane["secondary_placeholder"]),
+                    row=3,
+                    options=[
+                        discord.SelectOption(label=str(value), value=str(value), default=value == current_secondary)
+                        for value in secondary_values
+                    ],
+                )
+
+                async def secondary_callback(
                     interaction: discord.Interaction,
                     *,
-                    component: discord.ui.Select = select,
-                    key: str = field,
+                    component: discord.ui.Select = secondary_select,
+                    secondary_arg: str = str(lane["secondary_arg"]),
                 ):
                     async def action():
-                        ok, message = await self.cog.service.set_pack_config(self.guild_id, "gif", **{key: int(component.values[0])})
+                        ok, message = await self.cog.service.set_pack_config(
+                            self.guild_id,
+                            self.pack,
+                            **{secondary_arg: int(component.values[0])},
+                        )
                         await self._rerender(interaction, note=message, note_ok=ok)
 
                     await self._safe_action(
                         interaction,
-                        stage=f"shield_gif_{key}",
-                        failure_message=f"Babblebox could not update {pack_label} pressure settings right now.",
+                        stage=f"shield_{self.pack}_{self.selected_lane}_secondary",
+                        failure_message=f"Babblebox could not update that {pack_label} window right now.",
                         action=action,
                     )
 
-                select.callback = gif_option_callback
-                self.add_item(select)
+                secondary_select.callback = secondary_callback
+                self.add_item(secondary_select)
+
+            if self.pack == "spam":
+                moderator_policy = str(config.get("spam_moderator_policy", "exempt"))
+                moderator_select = discord.ui.Select(
+                    placeholder="Moderator anti-spam policy",
+                    row=4,
+                    options=[
+                        discord.SelectOption(
+                            label=self.cog._moderator_policy_label(policy),
+                            value=policy,
+                            default=policy == moderator_policy,
+                        )
+                        for policy in ("exempt", "delete_only", "full")
+                    ],
+                )
+
+                async def moderator_callback(interaction: discord.Interaction):
+                    async def action():
+                        ok, message = await self.cog.service.set_pack_config(
+                            self.guild_id,
+                            "spam",
+                            moderator_policy=moderator_select.values[0],
+                        )
+                        await self._rerender(interaction, note=message, note_ok=ok)
+
+                    await self._safe_action(
+                        interaction,
+                        stage="shield_spam_moderator_policy",
+                        failure_message="Babblebox could not update moderator anti-spam handling right now.",
+                        action=action,
+                    )
+
+                moderator_select.callback = moderator_callback
+                self.add_item(moderator_select)
+            else:
+                current_ratio = int(config.get("gif_min_ratio_percent", GIF_RATIO_THRESHOLDS[0]))
+                ratio_select = discord.ui.Select(
+                    placeholder="Minimum GIF ratio",
+                    row=4,
+                    options=[
+                        discord.SelectOption(label=str(value), value=str(value), default=value == current_ratio)
+                        for value in GIF_RATIO_THRESHOLDS
+                    ],
+                )
+
+                async def ratio_callback(interaction: discord.Interaction):
+                    async def action():
+                        ok, message = await self.cog.service.set_pack_config(
+                            self.guild_id,
+                            "gif",
+                            ratio_percent=int(ratio_select.values[0]),
+                        )
+                        await self._rerender(interaction, note=message, note_ok=ok)
+
+                    await self._safe_action(
+                        interaction,
+                        stage="shield_gif_ratio",
+                        failure_message=f"Babblebox could not update {pack_label} ratio settings right now.",
+                        action=action,
+                    )
+
+                ratio_select.callback = ratio_callback
+                self.add_item(ratio_select)
             return
 
         if self.pack == "adult":
@@ -1597,9 +1747,27 @@ class ShieldCog(commands.Cog):
     def _pack_rule_summary(self, config: dict[str, object], pack: str) -> str:
         if pack == "spam":
             return (
-                f"Recommended rate rule: {config.get('spam_message_threshold', 7)} messages in {config.get('spam_message_window_seconds', 5)}s\n"
-                f"Fast burst rule: {config.get('spam_burst_threshold', 5)} messages in {config.get('spam_burst_window_seconds', 10)}s\n"
-                f"Near-duplicates: {config.get('spam_near_duplicate_threshold', 5)} in {config.get('spam_near_duplicate_window_seconds', 10)}s\n"
+                "Rate lane: "
+                + (
+                    f"On at {config.get('spam_message_threshold', 7)} messages in {config.get('spam_message_window_seconds', 5)}s"
+                    if config.get("spam_message_enabled", True)
+                    else "Off"
+                )
+                + "\n"
+                + "Burst lane: "
+                + (
+                    f"On at {config.get('spam_burst_threshold', 5)} messages in {config.get('spam_burst_window_seconds', 10)}s"
+                    if config.get("spam_burst_enabled", True)
+                    else "Off"
+                )
+                + "\n"
+                + "Near-duplicate lane: "
+                + (
+                    f"On at {config.get('spam_near_duplicate_threshold', 5)} in {config.get('spam_near_duplicate_window_seconds', 10)}s"
+                    if config.get("spam_near_duplicate_enabled", True)
+                    else "Off"
+                )
+                + "\n"
                 f"Emote spam: {'On' if config.get('spam_emote_enabled') else 'Off'}"
                 + (f" at {config.get('spam_emote_threshold', 18)}+" if config.get('spam_emote_enabled') else "")
                 + "\n"
@@ -1610,10 +1778,34 @@ class ShieldCog(commands.Cog):
             )
         if pack == "gif":
             return (
-                f"One-member GIF-heavy rate: {config.get('gif_message_threshold', 4)} posts in {config.get('gif_window_seconds', 20)}s\n"
-                f"True channel streak: {config.get('gif_consecutive_threshold', 5)} consecutive GIF-heavy messages across members\n"
-                f"Low-text repeat gate: {config.get('gif_repeat_threshold', 3)}+ repeats at {config.get('gif_min_ratio_percent', 70)}% effective GIF pressure after lightweight meaningful-text weighting\n"
-                f"Same asset: {config.get('gif_same_asset_threshold', 3)}+ repeats\n"
+                "GIF-heavy rate lane: "
+                + (
+                    f"On at {config.get('gif_message_threshold', 4)} posts in {config.get('gif_window_seconds', 20)}s"
+                    if config.get("gif_message_enabled", True)
+                    else "Off"
+                )
+                + "\n"
+                + "True channel streak lane: "
+                + (
+                    f"On at {config.get('gif_consecutive_threshold', 5)} consecutive GIF-heavy messages across members"
+                    if config.get("gif_consecutive_enabled", True)
+                    else "Off"
+                )
+                + "\n"
+                + "Low-text repeat lane: "
+                + (
+                    f"On at {config.get('gif_repeat_threshold', 3)}+ repeats with {config.get('gif_min_ratio_percent', 70)}% effective GIF pressure"
+                    if config.get("gif_repeat_enabled", True)
+                    else "Off"
+                )
+                + "\n"
+                + "Same asset lane: "
+                + (
+                    f"On at {config.get('gif_same_asset_threshold', 3)}+ repeats"
+                    if config.get("gif_same_asset_enabled", True)
+                    else "Off"
+                )
+                + "\n"
                 "Delete actions remove bounded GIF bursts, not just the last message. Collective cleanup removes the exact streak or trims only the newest contributing GIFs from the active pressure slice, personal abuse can still enforce one member, and healthy text stays untouched. Tight low-end settings are stricter and can be noisy in meme-heavy rooms."
             )
         return ""
@@ -1626,9 +1818,24 @@ class ShieldCog(commands.Cog):
         ]
         if pack == "spam":
             lines.append(
-                f"Rate {config.get('spam_message_threshold', 7)} in {config.get('spam_message_window_seconds', 5)}s | "
-                f"Burst {config.get('spam_burst_threshold', 5)} in {config.get('spam_burst_window_seconds', 10)}s | "
-                f"Duplicates {config.get('spam_near_duplicate_threshold', 5)} in {config.get('spam_near_duplicate_window_seconds', 10)}s"
+                "Rate "
+                + (
+                    f"On at {config.get('spam_message_threshold', 7)} in {config.get('spam_message_window_seconds', 5)}s"
+                    if config.get("spam_message_enabled", True)
+                    else "Off"
+                )
+                + " | Burst "
+                + (
+                    f"On at {config.get('spam_burst_threshold', 5)} in {config.get('spam_burst_window_seconds', 10)}s"
+                    if config.get("spam_burst_enabled", True)
+                    else "Off"
+                )
+                + " | Duplicates "
+                + (
+                    f"On at {config.get('spam_near_duplicate_threshold', 5)} in {config.get('spam_near_duplicate_window_seconds', 10)}s"
+                    if config.get("spam_near_duplicate_enabled", True)
+                    else "Off"
+                )
             )
             lines.append(
                 "Emotes: "
@@ -1638,10 +1845,30 @@ class ShieldCog(commands.Cog):
             )
         elif pack == "gif":
             lines.append(
-                f"One-member rate {config.get('gif_message_threshold', 4)} in {config.get('gif_window_seconds', 20)}s | "
-                f"True streak {config.get('gif_consecutive_threshold', 5)} | "
-                f"Low-text repeat {config.get('gif_repeat_threshold', 3)} at {config.get('gif_min_ratio_percent', 70)}% effective pressure | "
-                f"Same asset {config.get('gif_same_asset_threshold', 3)}"
+                "One-member rate "
+                + (
+                    f"On at {config.get('gif_message_threshold', 4)} in {config.get('gif_window_seconds', 20)}s"
+                    if config.get("gif_message_enabled", True)
+                    else "Off"
+                )
+                + " | True streak "
+                + (
+                    f"On at {config.get('gif_consecutive_threshold', 5)}"
+                    if config.get("gif_consecutive_enabled", True)
+                    else "Off"
+                )
+                + " | Low-text repeat "
+                + (
+                    f"On at {config.get('gif_repeat_threshold', 3)} with {config.get('gif_min_ratio_percent', 70)}% effective pressure"
+                    if config.get("gif_repeat_enabled", True)
+                    else "Off"
+                )
+                + " | Same asset "
+                + (
+                    f"On at {config.get('gif_same_asset_threshold', 3)}"
+                    if config.get("gif_same_asset_enabled", True)
+                    else "Off"
+                )
             )
             lines.append(
                 "Delete lane removes bounded GIF bursts; collective cleanup uses the exact streak or trims the newest contributing GIFs inside the active pressure slice while personal abuse still targets one member."
@@ -1871,9 +2098,24 @@ class ShieldCog(commands.Cog):
     def _pack_option_lines(self, config: dict[str, object], pack: str) -> list[str]:
         if pack == "spam":
             return [
-                f"Rate rule: {config.get('spam_message_threshold', 7)} messages in {config.get('spam_message_window_seconds', 5)}s",
-                f"Burst rule: {config.get('spam_burst_threshold', 5)} messages in {config.get('spam_burst_window_seconds', 10)}s",
-                f"Near-duplicates: {config.get('spam_near_duplicate_threshold', 5)} in {config.get('spam_near_duplicate_window_seconds', 10)}s",
+                "Rate lane: "
+                + (
+                    f"On at {config.get('spam_message_threshold', 7)} messages in {config.get('spam_message_window_seconds', 5)}s"
+                    if config.get("spam_message_enabled", True)
+                    else "Off"
+                ),
+                "Burst lane: "
+                + (
+                    f"On at {config.get('spam_burst_threshold', 5)} messages in {config.get('spam_burst_window_seconds', 10)}s"
+                    if config.get("spam_burst_enabled", True)
+                    else "Off"
+                ),
+                "Near-duplicate lane: "
+                + (
+                    f"On at {config.get('spam_near_duplicate_threshold', 5)} in {config.get('spam_near_duplicate_window_seconds', 10)}s"
+                    if config.get("spam_near_duplicate_enabled", True)
+                    else "Off"
+                ),
                 f"Emoji / emote lane: {'On' if config.get('spam_emote_enabled') else 'Off'}"
                 + (f" at {config.get('spam_emote_threshold', 18)}+" if config.get('spam_emote_enabled') else ""),
                 f"Capitals lane: {'On' if config.get('spam_caps_enabled') else 'Off'}"
@@ -1882,10 +2124,30 @@ class ShieldCog(commands.Cog):
             ]
         if pack == "gif":
             return [
-                f"One-member GIF-heavy rate: {config.get('gif_message_threshold', 4)} posts in {config.get('gif_window_seconds', 20)}s",
-                f"True channel streak: {config.get('gif_consecutive_threshold', 5)} consecutive GIF-heavy messages",
-                f"Low-text repeat gate: {config.get('gif_repeat_threshold', 3)}+ repeats at {config.get('gif_min_ratio_percent', 70)}% effective GIF pressure",
-                f"Same asset: {config.get('gif_same_asset_threshold', 3)}+ repeats",
+                "GIF-heavy rate lane: "
+                + (
+                    f"On at {config.get('gif_message_threshold', 4)} posts in {config.get('gif_window_seconds', 20)}s"
+                    if config.get("gif_message_enabled", True)
+                    else "Off"
+                ),
+                "True channel streak lane: "
+                + (
+                    f"On at {config.get('gif_consecutive_threshold', 5)} consecutive GIF-heavy messages"
+                    if config.get("gif_consecutive_enabled", True)
+                    else "Off"
+                ),
+                "Low-text repeat lane: "
+                + (
+                    f"On at {config.get('gif_repeat_threshold', 3)}+ repeats with {config.get('gif_min_ratio_percent', 70)}% effective GIF pressure"
+                    if config.get("gif_repeat_enabled", True)
+                    else "Off"
+                ),
+                "Same asset lane: "
+                + (
+                    f"On at {config.get('gif_same_asset_threshold', 3)}+ repeats"
+                    if config.get("gif_same_asset_enabled", True)
+                    else "Off"
+                ),
                 "Tighter low-end values are stricter and best for rooms that want faster GIF cleanup.",
             ]
         if pack == "adult":
@@ -1946,14 +2208,20 @@ class ShieldCog(commands.Cog):
         )
         return self._finalize_shield_embed(embed, footer="Babblebox Shield | Pack-local action editor")
 
-    def _pack_options_editor_embed(self, guild_id: int, pack: str) -> discord.Embed:
+    def _pack_options_editor_embed(self, guild_id: int, pack: str, *, selected_lane: str | None = None) -> discord.Embed:
         config = self.service.get_config(guild_id)
         embed = discord.Embed(
             title=f"{PACK_LABELS.get(pack, pack.title())} Options",
-            description="Only the controls relevant to this pack are shown here.",
+            description="Only the controls relevant to this pack are shown here. Use the lane selector first, then adjust that lane's state and thresholds.",
             color=ge.EMBED_THEME["info"],
         )
         embed.add_field(name="Current Options", value="\n".join(self._pack_option_lines(config, pack)), inline=False)
+        if pack in {"spam", "gif"} and selected_lane:
+            lane_label = {
+                **{str(item["key"]): str(item["label"]) for item in SPAM_OPTION_LANES},
+                **{str(item["key"]): str(item["label"]) for item in GIF_OPTION_LANES},
+            }.get(selected_lane, selected_lane.replace("_", " ").title())
+            embed.add_field(name="Editing Lane", value=lane_label, inline=False)
         if pack == "severe":
             embed.add_field(
                 name="Term Editing",
