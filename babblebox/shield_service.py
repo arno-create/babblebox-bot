@@ -171,6 +171,7 @@ CAMPAIGN_SIGNATURE_LIMIT = 256
 CAMPAIGN_USERS_PER_SIGNATURE_LIMIT = 12
 NEWCOMER_STATE_LIMIT = 512
 GIF_INCIDENT_WINDOW_SECONDS = 90.0
+SPAM_INCIDENT_WINDOW_SECONDS = 90.0
 SHIELD_BASELINE_VERSION = 4
 TRUSTED_ONLY_BUILTIN_FAMILIES = frozenset(TRUSTED_LINK_SAFE_FAMILIES)
 TRUSTED_ONLY_BUILTIN_DOMAINS = frozenset(TRUSTED_MAINSTREAM_DOMAINS)
@@ -741,10 +742,13 @@ class PackExemptionScope:
 
 @dataclass(frozen=True)
 class SpamRuleSettings:
+    message_enabled: bool
     message_threshold: int
     message_window_seconds: int
+    burst_enabled: bool
     burst_threshold: int
     burst_window_seconds: int
+    near_duplicate_enabled: bool
     near_duplicate_threshold: int
     near_duplicate_window_seconds: int
     emote_enabled: bool
@@ -756,10 +760,14 @@ class SpamRuleSettings:
 
 @dataclass(frozen=True)
 class GifRuleSettings:
+    message_enabled: bool
     message_threshold: int
     window_seconds: int
+    consecutive_enabled: bool
     consecutive_threshold: int
+    repeat_enabled: bool
     repeat_threshold: int
+    same_asset_enabled: bool
     same_asset_threshold: int
     min_ratio_percent: int
 
@@ -2289,10 +2297,13 @@ def _build_feature_compiled_config(
         scam=disabled,
         spam=disabled,
         spam_rules=SpamRuleSettings(
+            message_enabled=True,
             message_threshold=7,
             message_window_seconds=5,
+            burst_enabled=True,
             burst_threshold=5,
             burst_window_seconds=10,
+            near_duplicate_enabled=True,
             near_duplicate_threshold=5,
             near_duplicate_window_seconds=10,
             emote_enabled=False,
@@ -2303,10 +2314,14 @@ def _build_feature_compiled_config(
         ),
         gif=disabled,
         gif_rules=GifRuleSettings(
+            message_enabled=True,
             message_threshold=4,
             window_seconds=20,
+            consecutive_enabled=True,
             consecutive_threshold=5,
+            repeat_enabled=True,
             repeat_threshold=3,
+            same_asset_enabled=True,
             same_asset_threshold=3,
             min_ratio_percent=70,
         ),
@@ -2419,6 +2434,7 @@ class ShieldService:
         self._recent_channel_activity: dict[tuple[int, int], list[ShieldChannelActivityEvent]] = {}
         self._channel_gif_streaks: dict[tuple[int, int], ShieldChannelGifStreakState] = {}
         self._gif_incident_alerts: dict[tuple[int, int, int], dict[str, Any]] = {}
+        self._spam_incident_alerts: dict[tuple[int, int, int, str], dict[str, Any]] = {}
         self._recent_newcomer_activity: dict[tuple[int, int], ShieldNewcomerActivityState] = {}
         self._last_runtime_prune = 0.0
 
@@ -3151,10 +3167,13 @@ class ShieldService:
         high_action: str | None = None,
         sensitivity: str | None = None,
         adult_solicitation: bool | None = None,
+        message_enabled: bool | None = None,
         message_threshold: int | None = None,
         window_seconds: int | None = None,
+        burst_enabled: bool | None = None,
         burst_threshold: int | None = None,
         burst_window_seconds: int | None = None,
+        near_duplicate_enabled: bool | None = None,
         duplicate_threshold: int | None = None,
         duplicate_window_seconds: int | None = None,
         emote_enabled: bool | None = None,
@@ -3162,8 +3181,11 @@ class ShieldService:
         caps_enabled: bool | None = None,
         caps_threshold: int | None = None,
         moderator_policy: str | None = None,
+        consecutive_enabled: bool | None = None,
         consecutive_threshold: int | None = None,
+        repeat_enabled: bool | None = None,
         repeat_threshold: int | None = None,
+        same_asset_enabled: bool | None = None,
         same_asset_threshold: int | None = None,
         ratio_percent: int | None = None,
     ) -> tuple[bool, str]:
@@ -3174,10 +3196,13 @@ class ShieldService:
         if pack not in {"spam", "gif"} and any(
             value is not None
             for value in (
+                message_enabled,
                 message_threshold,
                 window_seconds,
+                burst_enabled,
                 burst_threshold,
                 burst_window_seconds,
+                near_duplicate_enabled,
                 duplicate_threshold,
                 duplicate_window_seconds,
                 emote_enabled,
@@ -3185,8 +3210,11 @@ class ShieldService:
                 caps_enabled,
                 caps_threshold,
                 moderator_policy,
+                consecutive_enabled,
                 consecutive_threshold,
+                repeat_enabled,
                 repeat_threshold,
+                same_asset_enabled,
                 same_asset_threshold,
                 ratio_percent,
             )
@@ -3195,8 +3223,10 @@ class ShieldService:
         if pack != "spam" and any(
             value is not None
             for value in (
+                burst_enabled,
                 burst_threshold,
                 burst_window_seconds,
+                near_duplicate_enabled,
                 duplicate_threshold,
                 duplicate_window_seconds,
                 emote_enabled,
@@ -3207,7 +3237,10 @@ class ShieldService:
             )
         ):
             return False, "Burst thresholds, duplicate thresholds, emote or capitals toggles, and moderator policy only apply to the spam pack."
-        if pack != "gif" and any(value is not None for value in (consecutive_threshold, repeat_threshold, same_asset_threshold, ratio_percent)):
+        if pack != "gif" and any(
+            value is not None
+            for value in (consecutive_enabled, consecutive_threshold, repeat_enabled, repeat_threshold, same_asset_enabled, same_asset_threshold, ratio_percent)
+        ):
             return False, "GIF streak, repeat, same-asset, and ratio thresholds can only be configured on the GIF pack."
         cleaned_action = action.strip().lower() if isinstance(action, str) else None
         cleaned_low_action = low_action.strip().lower() if isinstance(low_action, str) else None
@@ -3302,14 +3335,20 @@ class ShieldService:
             if pack == "adult" and adult_solicitation is not None:
                 config["adult_solicitation_enabled"] = bool(adult_solicitation)
             if pack == "spam":
+                if message_enabled is not None:
+                    config["spam_message_enabled"] = bool(message_enabled)
                 if message_threshold is not None:
                     config["spam_message_threshold"] = message_threshold
                 if window_seconds is not None:
                     config["spam_message_window_seconds"] = window_seconds
+                if burst_enabled is not None:
+                    config["spam_burst_enabled"] = bool(burst_enabled)
                 if burst_threshold is not None:
                     config["spam_burst_threshold"] = burst_threshold
                 if burst_window_seconds is not None:
                     config["spam_burst_window_seconds"] = burst_window_seconds
+                if near_duplicate_enabled is not None:
+                    config["spam_near_duplicate_enabled"] = bool(near_duplicate_enabled)
                 if duplicate_threshold is not None:
                     config["spam_near_duplicate_threshold"] = duplicate_threshold
                 if duplicate_window_seconds is not None:
@@ -3325,14 +3364,22 @@ class ShieldService:
                 if cleaned_moderator_policy is not None:
                     config["spam_moderator_policy"] = cleaned_moderator_policy
             if pack == "gif":
+                if message_enabled is not None:
+                    config["gif_message_enabled"] = bool(message_enabled)
                 if message_threshold is not None:
                     config["gif_message_threshold"] = message_threshold
                 if window_seconds is not None:
                     config["gif_window_seconds"] = window_seconds
+                if consecutive_enabled is not None:
+                    config["gif_consecutive_enabled"] = bool(consecutive_enabled)
                 if consecutive_threshold is not None:
                     config["gif_consecutive_threshold"] = consecutive_threshold
+                if repeat_enabled is not None:
+                    config["gif_repeat_enabled"] = bool(repeat_enabled)
                 if repeat_threshold is not None:
                     config["gif_repeat_threshold"] = repeat_threshold
+                if same_asset_enabled is not None:
+                    config["gif_same_asset_enabled"] = bool(same_asset_enabled)
                 if same_asset_threshold is not None:
                     config["gif_same_asset_threshold"] = same_asset_threshold
                 if ratio_percent is not None:
@@ -3346,10 +3393,15 @@ class ShieldService:
             solicitation_note = f" Optional solicitation text detection is {'on' if solicitation_state else 'off'}."
         policy_note = ""
         if pack == "spam":
+            final_message_enabled = current["spam_message_enabled"] if message_enabled is None else bool(message_enabled)
             final_threshold = current["spam_message_threshold"] if message_threshold is None else message_threshold
             final_window = current["spam_message_window_seconds"] if window_seconds is None else window_seconds
+            final_burst_enabled = current["spam_burst_enabled"] if burst_enabled is None else bool(burst_enabled)
             final_burst_threshold = current["spam_burst_threshold"] if burst_threshold is None else burst_threshold
             final_burst_window = current["spam_burst_window_seconds"] if burst_window_seconds is None else burst_window_seconds
+            final_near_duplicate_enabled = (
+                current["spam_near_duplicate_enabled"] if near_duplicate_enabled is None else bool(near_duplicate_enabled)
+            )
             final_duplicate_threshold = current["spam_near_duplicate_threshold"] if duplicate_threshold is None else duplicate_threshold
             final_duplicate_window = current["spam_near_duplicate_window_seconds"] if duplicate_window_seconds is None else duplicate_window_seconds
             final_emote_enabled = current["spam_emote_enabled"] if emote_enabled is None else bool(emote_enabled)
@@ -3358,9 +3410,17 @@ class ShieldService:
             final_caps_threshold = current["spam_caps_threshold"] if caps_threshold is None else caps_threshold
             final_moderator_policy = current["spam_moderator_policy"] if cleaned_moderator_policy is None else cleaned_moderator_policy
             policy_note = (
-                f" Core rule: {final_threshold} messages in {final_window}s. "
-                f"Burst rule: {final_burst_threshold} messages in {final_burst_window}s. "
-                f"Near-duplicate rule: {final_duplicate_threshold} variants in {final_duplicate_window}s. "
+                f" Rate lane: {'on' if final_message_enabled else 'off'}"
+                + (f" at {final_threshold} messages in {final_window}s. " if final_message_enabled else ". ")
+                + f"Burst lane: {'on' if final_burst_enabled else 'off'}"
+                + (f" at {final_burst_threshold} messages in {final_burst_window}s. " if final_burst_enabled else ". ")
+                + f"Near-duplicate lane: {'on' if final_near_duplicate_enabled else 'off'}"
+                + (
+                    f" at {final_duplicate_threshold} variants in {final_duplicate_window}s. "
+                    if final_near_duplicate_enabled
+                    else ". "
+                )
+                +
                 f"Emote spam: {'on' if final_emote_enabled else 'off'}"
                 + (f" at {final_emote_threshold}+ tokens." if final_emote_enabled else ". ")
                 + f" Capitals spam: {'on' if final_caps_enabled else 'off'}"
@@ -3368,17 +3428,25 @@ class ShieldService:
                 + f" Moderator anti-spam policy: {self._spam_moderator_policy_label(final_moderator_policy)}."
             )
         if pack == "gif":
+            final_message_enabled = current["gif_message_enabled"] if message_enabled is None else bool(message_enabled)
             final_threshold = current["gif_message_threshold"] if message_threshold is None else message_threshold
             final_window = current["gif_window_seconds"] if window_seconds is None else window_seconds
+            final_consecutive_enabled = current["gif_consecutive_enabled"] if consecutive_enabled is None else bool(consecutive_enabled)
             final_consecutive = current["gif_consecutive_threshold"] if consecutive_threshold is None else consecutive_threshold
+            final_repeat_enabled = current["gif_repeat_enabled"] if repeat_enabled is None else bool(repeat_enabled)
             final_repeat = current["gif_repeat_threshold"] if repeat_threshold is None else repeat_threshold
+            final_same_asset_enabled = current["gif_same_asset_enabled"] if same_asset_enabled is None else bool(same_asset_enabled)
             final_same_asset = current["gif_same_asset_threshold"] if same_asset_threshold is None else same_asset_threshold
             final_ratio = current["gif_min_ratio_percent"] if ratio_percent is None else ratio_percent
             policy_note = (
-                f" One-member GIF-heavy rate: {final_threshold} posts in {final_window}s. "
-                f"True channel streak rule: {final_consecutive}+ consecutive GIF-heavy messages. "
-                f"Low-text repeat gate: {final_repeat}+ repeats with {final_ratio}%+ GIF pressure in the recent window. "
-                f"Same-GIF rule: {final_same_asset}+ uses of the same asset."
+                f" GIF-heavy rate lane: {'on' if final_message_enabled else 'off'}"
+                + (f" at {final_threshold} posts in {final_window}s. " if final_message_enabled else ". ")
+                + f"True channel streak lane: {'on' if final_consecutive_enabled else 'off'}"
+                + (f" at {final_consecutive}+ consecutive GIF-heavy messages. " if final_consecutive_enabled else ". ")
+                + f"Low-text repeat lane: {'on' if final_repeat_enabled else 'off'}"
+                + (f" at {final_repeat}+ repeats with {final_ratio}%+ GIF pressure in the recent window. " if final_repeat_enabled else ". ")
+                + f"Same-GIF lane: {'on' if final_same_asset_enabled else 'off'}"
+                + (f" at {final_same_asset}+ uses of the same asset." if final_same_asset_enabled else ".")
             )
         return await self._update_config(
             guild_id,
@@ -4335,6 +4403,8 @@ class ShieldService:
         minimum_authors: int,
     ) -> bool:
         gif_count = int(metrics.get("gif_count", 0))
+        if not compiled.gif_rules.message_enabled and not compiled.gif_rules.repeat_enabled:
+            return False
         if gif_count < max(1, compiled.gif_rules.message_threshold):
             return False
         if len(metrics.get("distinct_gif_authors", ())) < minimum_authors:
@@ -4342,8 +4412,14 @@ class ShieldService:
         if int(metrics.get("ratio_percent", 0)) < compiled.gif_rules.min_ratio_percent:
             return False
         return (
-            int(metrics.get("low_text_gif_count", 0)) >= compiled.gif_rules.repeat_threshold
-            or gif_count >= compiled.gif_rules.message_threshold + 1
+            (
+                compiled.gif_rules.repeat_enabled
+                and int(metrics.get("low_text_gif_count", 0)) >= compiled.gif_rules.repeat_threshold
+            )
+            or (
+                compiled.gif_rules.message_enabled
+                and gif_count >= compiled.gif_rules.message_threshold + 1
+            )
         )
 
     def _collect_personal_gif_streak_rows(
@@ -4435,7 +4511,7 @@ class ShieldService:
         ]
         same_asset_messages: tuple[discord.Message, ...] = ()
         same_asset_count = 0
-        if snapshot.gif_signature is not None:
+        if snapshot.gif_signature is not None and compiled.gif_rules.same_asset_enabled:
             same_asset_events = [event for event in same_channel_gif_events if event.gif_signature == snapshot.gif_signature]
             same_asset_count = len(same_asset_events)
             if same_asset_count >= compiled.gif_rules.same_asset_threshold:
@@ -4457,7 +4533,7 @@ class ShieldService:
             user_id=author_id,
         )
         metrics = self._gif_pressure_metrics(pressure_rows)
-        streak_trigger = len(streak_rows) >= compiled.gif_rules.consecutive_threshold
+        streak_trigger = compiled.gif_rules.consecutive_enabled and len(streak_rows) >= compiled.gif_rules.consecutive_threshold
         pressure_trigger = self._gif_pressure_triggered(metrics, compiled, minimum_authors=1)
         if not same_asset_messages and not streak_trigger and not pressure_trigger:
             return None
@@ -4550,7 +4626,8 @@ class ShieldService:
         if not metrics["gif_rows"]:
             return None
         streak_trigger = (
-            consecutive_gif_count >= compiled.gif_rules.consecutive_threshold
+            compiled.gif_rules.consecutive_enabled
+            and consecutive_gif_count >= compiled.gif_rules.consecutive_threshold
             and len(consecutive_authors) >= 2
         )
         pressure_trigger = self._gif_pressure_triggered(metrics, compiled, minimum_authors=2)
@@ -4696,7 +4773,12 @@ class ShieldService:
             if snapshot.exact_fingerprint is not None and event.exact_fingerprint == snapshot.exact_fingerprint
         ]
         exact_threshold = max(3, spam_rules.near_duplicate_threshold - 1)
-        if spam_settings.enabled and len(exact_window) >= exact_threshold and not benign_turn_taking:
+        if (
+            spam_settings.enabled
+            and spam_rules.near_duplicate_enabled
+            and len(exact_window) >= exact_threshold
+            and not benign_turn_taking
+        ):
             facts.append(
                 {
                     "match_class": "spam_duplicate",
@@ -4741,6 +4823,7 @@ class ShieldService:
                     near_hits += 1
         if (
             spam_settings.enabled
+            and spam_rules.near_duplicate_enabled
             and near_hits >= spam_rules.near_duplicate_threshold
             and near_duplicate_context
             and not benign_turn_taking
@@ -4761,6 +4844,7 @@ class ShieldService:
 
         if (
             spam_settings.enabled
+            and spam_rules.burst_enabled
             and len(burst_window) >= spam_rules.burst_threshold
             and dominant_channel_presence
             and not benign_turn_taking
@@ -4802,6 +4886,7 @@ class ShieldService:
 
         if (
             spam_settings.enabled
+            and spam_rules.message_enabled
             and len(message_window) >= spam_rules.message_threshold
             and dominant_channel_presence
             and not benign_turn_taking
@@ -4993,6 +5078,7 @@ class ShieldService:
         low_value_events = [event for event in recent_events if event.low_value_text and now - event.timestamp <= SPAM_LOW_VALUE_WINDOW_SECONDS]
         if (
             spam_settings.enabled
+            and (spam_rules.message_enabled or spam_rules.burst_enabled)
             and len(low_value_events) >= 5
             and dominant_channel_presence
             and not benign_turn_taking
@@ -5010,6 +5096,7 @@ class ShieldService:
             )
         if (
             spam_settings.enabled
+            and (spam_rules.message_enabled or spam_rules.burst_enabled or spam_rules.near_duplicate_enabled)
             and snapshot.repeated_char_run >= 12
             and not benign_turn_taking
             and (len(message_window) >= max(3, spam_rules.message_threshold - 2) or len(exact_window) >= 2 or near_hits >= 3)
@@ -7813,6 +7900,11 @@ class ShieldService:
             for key, value in self._gif_incident_alerts.items()
             if now - float(value.get("last_seen", 0.0)) <= GIF_INCIDENT_WINDOW_SECONDS
         }
+        self._spam_incident_alerts = {
+            key: value
+            for key, value in self._spam_incident_alerts.items()
+            if now - float(value.get("last_seen", 0.0)) <= SPAM_INCIDENT_WINDOW_SECONDS
+        }
         self._compact_alert_cohorts = {
             key: value for key, value in self._compact_alert_cohorts.items() if now - value <= LOW_CONFIDENCE_ALERT_COHORT_SECONDS
         }
@@ -8095,6 +8187,58 @@ class ShieldService:
             return None
         return ("member", message.guild.id, channel_id, author_id)
 
+    def _spam_incident_family(self, top_reason: ShieldMatch | None) -> str | None:
+        if top_reason is None:
+            return None
+        if top_reason.match_class == "spam_duplicate":
+            return "duplicate"
+        if top_reason.match_class == "spam_near_duplicate":
+            return "near_duplicate"
+        if top_reason.match_class in {"spam_message_rate", "spam_burst"}:
+            return "rate_burst"
+        if top_reason.match_class in {"spam_link_flood", "spam_invite_flood"}:
+            return "links_invites"
+        if top_reason.match_class == "spam_mention_flood":
+            return "mentions"
+        if top_reason.match_class in {"spam_emoji_flood", "spam_caps_flood"}:
+            return "emoji_caps"
+        if top_reason.match_class in {"spam_low_value_noise", "spam_padding_noise"}:
+            return "low_value"
+        return None
+
+    def _spam_incident_key(
+        self,
+        message: discord.Message,
+        decision: ShieldDecision,
+    ) -> tuple[Any, ...] | None:
+        if decision.pack != "spam" or getattr(message, "guild", None) is None:
+            return None
+        channel_id = getattr(getattr(message, "channel", None), "id", None)
+        author_id = getattr(getattr(message, "author", None), "id", None)
+        if not isinstance(channel_id, int) or not isinstance(author_id, int) or author_id <= 0:
+            return None
+        family = self._spam_incident_family(self._primary_alert_reason(decision))
+        if family is None:
+            return None
+        return (message.guild.id, channel_id, author_id, family)
+
+    def _spam_incident_note(self, hits: int) -> str:
+        return (
+            f"Grouped with **{hits}** anti-spam alerts from this member inside the current "
+            f"{int(SPAM_INCIDENT_WINDOW_SECONDS)}s incident window. Babblebox kept this to one evolving incident log."
+        )
+
+    def _spam_incident_rank(self, decision: ShieldDecision, top_reason: ShieldMatch | None) -> int:
+        if decision.timed_out:
+            return 4
+        if decision.deleted:
+            return 3
+        if top_reason is not None and top_reason.confidence == "high":
+            return 2
+        if top_reason is not None and top_reason.confidence == "medium":
+            return 1
+        return 0
+
     def _gif_incident_note(self, incident_key: tuple[Any, ...], hits: int) -> str:
         if incident_key and incident_key[0] == "channel":
             return (
@@ -8173,6 +8317,7 @@ class ShieldService:
         self._alert_dedup[dedupe_key] = (now, content_fingerprint)
         self._alert_signature_dedup[signature_key] = now
         gif_incident_key = self._gif_incident_key(message, decision)
+        spam_incident_key = self._spam_incident_key(message, decision)
 
         channel = self.bot.get_channel(compiled.log_channel_id)
         if channel is None and hasattr(self.bot, "fetch_channel"):
@@ -8273,6 +8418,42 @@ class ShieldService:
                 embed.add_field(name="Operational Note", value=decision.action_note, inline=False)
             ge.style_embed(embed, footer="Babblebox Shield | No message archive is stored")
 
+        if spam_incident_key is not None:
+            incident_state = self._spam_incident_alerts.get(spam_incident_key)
+            if incident_state is not None and now - float(incident_state.get("last_seen", 0.0)) <= SPAM_INCIDENT_WINDOW_SECONDS:
+                hits = int(incident_state.get("hits", 1)) + 1
+                stronger = (
+                    self._spam_incident_rank(decision, top_reason) > int(incident_state.get("severity_rank", -1))
+                    or bool(decision.deleted) != bool(incident_state.get("deleted"))
+                    or bool(decision.timed_out) != bool(incident_state.get("timed_out"))
+                    or decision.alert_evidence_signature != incident_state.get("signature")
+                )
+                incident_state["last_seen"] = now
+                incident_state["hits"] = hits
+                incident_state["signature"] = decision.alert_evidence_signature
+                incident_state["deleted"] = bool(decision.deleted)
+                incident_state["timed_out"] = bool(decision.timed_out)
+                incident_state["severity_rank"] = self._spam_incident_rank(decision, top_reason)
+                if not stronger:
+                    self._spam_incident_alerts[spam_incident_key] = incident_state
+                    decision.logged = True
+                    return
+                embed.add_field(name="Incident", value=self._spam_incident_note(hits), inline=False)
+                existing_message_id = incident_state.get("log_message_id")
+                if isinstance(existing_message_id, int):
+                    with contextlib.suppress(discord.Forbidden, discord.NotFound, discord.HTTPException):
+                        existing_message = await channel.fetch_message(existing_message_id)
+                        await existing_message.edit(
+                            content=None,
+                            embed=embed,
+                            allowed_mentions=discord.AllowedMentions(users=False, roles=False, everyone=False),
+                        )
+                        self._spam_incident_alerts[spam_incident_key] = incident_state
+                        decision.logged = True
+                        return
+            elif incident_state is not None:
+                self._spam_incident_alerts.pop(spam_incident_key, None)
+
         if gif_incident_key is not None:
             incident_state = self._gif_incident_alerts.get(gif_incident_key)
             if incident_state is not None and now - float(incident_state.get("last_seen", 0.0)) <= GIF_INCIDENT_WINDOW_SECONDS:
@@ -8325,6 +8506,16 @@ class ShieldService:
         if sent_message is None:
             return
         decision.logged = True
+        if spam_incident_key is not None:
+            self._spam_incident_alerts[spam_incident_key] = {
+                "last_seen": now,
+                "hits": 1,
+                "log_message_id": int(getattr(sent_message, "id", 0) or 0),
+                "severity_rank": self._spam_incident_rank(decision, top_reason),
+                "signature": decision.alert_evidence_signature,
+                "deleted": bool(decision.deleted),
+                "timed_out": bool(decision.timed_out),
+            }
         if gif_incident_key is not None:
             self._gif_incident_alerts[gif_incident_key] = {
                 "last_seen": now,
@@ -8489,14 +8680,17 @@ class ShieldService:
                 sensitivity=str(raw.get("spam_sensitivity", "normal")).strip().lower(),
             ),
             spam_rules=SpamRuleSettings(
+                message_enabled=bool(raw.get("spam_message_enabled", True)),
                 message_threshold=int(raw.get("spam_message_threshold", shield_numeric_config_default("spam_message_threshold"))),
                 message_window_seconds=int(
                     raw.get("spam_message_window_seconds", shield_numeric_config_default("spam_message_window_seconds"))
                 ),
+                burst_enabled=bool(raw.get("spam_burst_enabled", True)),
                 burst_threshold=int(raw.get("spam_burst_threshold", shield_numeric_config_default("spam_burst_threshold"))),
                 burst_window_seconds=int(
                     raw.get("spam_burst_window_seconds", shield_numeric_config_default("spam_burst_window_seconds"))
                 ),
+                near_duplicate_enabled=bool(raw.get("spam_near_duplicate_enabled", True)),
                 near_duplicate_threshold=int(
                     raw.get("spam_near_duplicate_threshold", shield_numeric_config_default("spam_near_duplicate_threshold"))
                 ),
@@ -8524,12 +8718,16 @@ class ShieldService:
                 sensitivity=str(raw.get("gif_sensitivity", "normal")).strip().lower(),
             ),
             gif_rules=GifRuleSettings(
+                message_enabled=bool(raw.get("gif_message_enabled", True)),
                 message_threshold=int(raw.get("gif_message_threshold", shield_numeric_config_default("gif_message_threshold"))),
                 window_seconds=int(raw.get("gif_window_seconds", shield_numeric_config_default("gif_window_seconds"))),
+                consecutive_enabled=bool(raw.get("gif_consecutive_enabled", True)),
                 consecutive_threshold=int(
                     raw.get("gif_consecutive_threshold", shield_numeric_config_default("gif_consecutive_threshold"))
                 ),
+                repeat_enabled=bool(raw.get("gif_repeat_enabled", True)),
                 repeat_threshold=int(raw.get("gif_repeat_threshold", shield_numeric_config_default("gif_repeat_threshold"))),
+                same_asset_enabled=bool(raw.get("gif_same_asset_enabled", True)),
                 same_asset_threshold=int(
                     raw.get("gif_same_asset_threshold", shield_numeric_config_default("gif_same_asset_threshold"))
                 ),

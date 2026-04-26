@@ -197,60 +197,105 @@ class ShieldPanelUiTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("True channel streak", options.value)
         self.assertNotIn("Emoji / emote", options.value)
 
-    async def test_gif_options_editor_surfaces_tighter_low_end_values(self):
+    async def test_gif_options_editor_uses_lane_selector_and_broad_values(self):
         view = ShieldPackOptionsEditorView(self.cog, guild_id=10, author_id=1, pack="gif")
-        streak_select = next(child for child in view.children if getattr(child, "placeholder", "") == "Consecutive GIF streak threshold")
+        lane_select = next(child for child in view.children if getattr(child, "placeholder", "") == "GIF lane")
+        count_select = next(child for child in view.children if getattr(child, "placeholder", "") == "GIF-heavy rate count")
+        window_select = next(child for child in view.children if getattr(child, "placeholder", "") == "GIF-heavy rate window")
         ratio_select = next(child for child in view.children if getattr(child, "placeholder", "") == "Minimum GIF ratio")
 
-        self.assertIn("3", [option.value for option in streak_select.options])
+        self.assertIn("rate", [option.value for option in lane_select.options])
+        self.assertIn("same_asset", [option.value for option in lane_select.options])
+        self.assertIn("3", [option.value for option in count_select.options])
+        self.assertIn("12", [option.value for option in count_select.options])
+        self.assertIn("3", [option.value for option in window_select.options])
+        self.assertIn("45", [option.value for option in window_select.options])
         self.assertIn("50", [option.value for option in ratio_select.options])
+        self.assertIn("95", [option.value for option in ratio_select.options])
 
-    async def test_gif_streak_threshold_selection_persists_three_and_rerenders_cleanly(self):
+    async def test_gif_rate_selection_persists_custom_values_and_rerenders_cleanly(self):
         view = ShieldPackOptionsEditorView(self.cog, guild_id=10, author_id=1, pack="gif")
-        streak_select = next(child for child in view.children if getattr(child, "placeholder", "") == "Consecutive GIF streak threshold")
-        streak_select._values = ["3"]
         interaction = self._interaction(message=FakeMessage(channel=FakeChannel()))
+        count_select = next(child for child in view.children if getattr(child, "placeholder", "") == "GIF-heavy rate count")
+        window_select = next(child for child in view.children if getattr(child, "placeholder", "") == "GIF-heavy rate window")
 
-        await streak_select.callback(interaction)
+        count_select._values = ["3"]
+        await count_select.callback(interaction)
 
-        config = self.cog.service.get_config(10)
-        self.assertEqual(config["gif_consecutive_threshold"], 3)
-
-        refreshed = ShieldPackOptionsEditorView(self.cog, guild_id=10, author_id=1, pack="gif")
-        refreshed_select = next(
-            child for child in refreshed.children if getattr(child, "placeholder", "") == "Consecutive GIF streak threshold"
-        )
-        default_option = next(option for option in refreshed_select.options if option.default)
-        self.assertEqual(default_option.value, "3")
-
-    async def test_gif_tight_rate_preset_applies_successfully(self):
-        view = ShieldPackOptionsEditorView(self.cog, guild_id=10, author_id=1, pack="gif")
-        rate_select = next(child for child in view.children if getattr(child, "placeholder", "") == "GIF pressure preset")
-        rate_select._values = ["tight"]
-        interaction = self._interaction(message=FakeMessage(channel=FakeChannel()))
-
-        await rate_select.callback(interaction)
+        window_select = next(child for child in view.children if getattr(child, "placeholder", "") == "GIF-heavy rate window")
+        window_select._values = ["15"]
+        await window_select.callback(interaction)
 
         config = self.cog.service.get_config(10)
         self.assertEqual(config["gif_message_threshold"], 3)
         self.assertEqual(config["gif_window_seconds"], 15)
 
-    async def test_spam_options_editor_exposes_emoji_and_caps_controls(self):
+        refreshed = ShieldPackOptionsEditorView(self.cog, guild_id=10, author_id=1, pack="gif")
+        refreshed_count = next(child for child in refreshed.children if getattr(child, "placeholder", "") == "GIF-heavy rate count")
+        refreshed_window = next(child for child in refreshed.children if getattr(child, "placeholder", "") == "GIF-heavy rate window")
+        default_count = next(option for option in refreshed_count.options if option.default)
+        default_window = next(option for option in refreshed_window.options if option.default)
+        self.assertEqual(default_count.value, "3")
+        self.assertEqual(default_window.value, "15")
+
+    async def test_spam_options_editor_uses_lane_selector_and_broad_values(self):
         view = ShieldPackOptionsEditorView(self.cog, guild_id=10, author_id=1, pack="spam")
         placeholders = [getattr(child, "placeholder", "") for child in view.children if hasattr(child, "placeholder")]
 
-        self.assertIn("Emoji / emote lane + threshold", placeholders)
-        self.assertIn("Capitals lane + threshold", placeholders)
+        self.assertIn("Anti-Spam lane", placeholders)
+        self.assertIn("Rate lane state", placeholders)
+        self.assertIn("Rate message count", placeholders)
+        self.assertIn("Rate window", placeholders)
+        self.assertIn("Moderator anti-spam policy", placeholders)
 
-    async def test_spam_options_editor_surfaces_tighter_duplicate_emote_and_caps_values(self):
+        count_select = next(child for child in view.children if getattr(child, "placeholder", "") == "Rate message count")
+        window_select = next(child for child in view.children if getattr(child, "placeholder", "") == "Rate window")
+        self.assertIn("4", [option.value for option in count_select.options])
+        self.assertIn("12", [option.value for option in count_select.options])
+        self.assertIn("3", [option.value for option in window_select.options])
+        self.assertIn("30", [option.value for option in window_select.options])
+
+    async def test_spam_near_duplicate_selection_persists_and_rerenders_cleanly(self):
         view = ShieldPackOptionsEditorView(self.cog, guild_id=10, author_id=1, pack="spam")
-        duplicate_select = next(child for child in view.children if getattr(child, "placeholder", "") == "Anti-Spam duplicate preset")
-        emote_select = next(child for child in view.children if getattr(child, "placeholder", "") == "Emoji / emote lane + threshold")
-        caps_select = next(child for child in view.children if getattr(child, "placeholder", "") == "Capitals lane + threshold")
+        interaction = self._interaction(message=FakeMessage(channel=FakeChannel()))
+        lane_select = next(child for child in view.children if getattr(child, "placeholder", "") == "Anti-Spam lane")
+        lane_select._values = ["near_duplicate"]
+        await lane_select.callback(interaction)
 
-        self.assertIn("Extra-tight: 3 near-duplicates in 8s", [option.label for option in duplicate_select.options])
-        self.assertIn("8", [option.value for option in emote_select.options])
-        self.assertIn("12", [option.value for option in caps_select.options])
+        count_select = next(child for child in view.children if getattr(child, "placeholder", "") == "Near-duplicate count")
+        count_select._values = ["3"]
+        await count_select.callback(interaction)
+
+        window_select = next(child for child in view.children if getattr(child, "placeholder", "") == "Near-duplicate window")
+        window_select._values = ["8"]
+        await window_select.callback(interaction)
+
+        config = self.cog.service.get_config(10)
+        self.assertEqual(config["spam_near_duplicate_threshold"], 3)
+        self.assertEqual(config["spam_near_duplicate_window_seconds"], 8)
+
+        current_count = next(child for child in view.children if getattr(child, "placeholder", "") == "Near-duplicate count")
+        current_window = next(child for child in view.children if getattr(child, "placeholder", "") == "Near-duplicate window")
+        self.assertEqual(next(option for option in current_count.options if option.default).value, "3")
+        self.assertEqual(next(option for option in current_window.options if option.default).value, "8")
+
+    async def test_spam_pack_summary_reports_disabled_lanes_truthfully(self):
+        current = deepcopy(self.cog.service.get_config(10))
+        current["spam_message_enabled"] = False
+        current["spam_burst_enabled"] = False
+        current["spam_near_duplicate_enabled"] = True
+        current["spam_emote_enabled"] = True
+        current["spam_emote_threshold"] = 24
+        self.cog.service.store.state["guilds"]["10"] = current
+        self.cog.service._compiled_configs.pop(10, None)
+
+        embed = ShieldPackOptionsEditorView(self.cog, guild_id=10, author_id=1, pack="spam").current_embed()
+        options = next(field for field in embed.fields if field.name == "Current Options")
+
+        self.assertIn("Rate lane: Off", options.value)
+        self.assertIn("Burst lane: Off", options.value)
+        self.assertIn("Near-duplicate lane: On", options.value)
+        self.assertIn("Emoji / emote lane: On at 24+", options.value)
 
     async def test_action_editor_shows_dedicated_pack_timeout(self):
         current = deepcopy(self.cog.service.get_config(10))
