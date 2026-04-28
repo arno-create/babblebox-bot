@@ -387,6 +387,9 @@ class FakeLobbyView:
 
 
 class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
+    def _patch_meta_global(self, name: str, value):
+        return patch.dict(MetaCog.help_command.callback.__globals__, {name: value})
+
     def _service_env_patch(self):
         return patch.dict(
             os.environ,
@@ -1698,7 +1701,7 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         interaction = FakeInteraction()
         ctx = FakeContext(interaction=interaction, guild=FakeGuild(), channel=FakeChannel(), author=FakeAuthor())
 
-        with patch("babblebox.cogs.meta.require_channel_permissions", new=AsyncMock(return_value=True)):
+        with self._patch_meta_global("require_channel_permissions", AsyncMock(return_value=True)):
             await MetaCog.help_command.callback(cog, ctx, visibility="public")
 
         payload = self._sent_kwargs(ctx)
@@ -1714,7 +1717,7 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         interaction = FakeInteraction()
         ctx = FakeContext(interaction=interaction, guild=FakeGuild(), channel=FakeChannel(), author=FakeAuthor())
 
-        with patch("babblebox.cogs.meta.require_channel_permissions", new=AsyncMock(return_value=True)):
+        with self._patch_meta_global("require_channel_permissions", AsyncMock(return_value=True)):
             await MetaCog.help_command.callback(cog, ctx, visibility="private")
 
         payload = self._sent_kwargs(ctx)
@@ -1728,7 +1731,7 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         cog = MetaCog(types.SimpleNamespace(loop=asyncio.get_running_loop()))
         ctx = FakeContext(interaction=None, guild=FakeGuild(), channel=FakeChannel(), author=FakeAuthor())
 
-        with patch("babblebox.cogs.meta.require_channel_permissions", new=AsyncMock(return_value=True)):
+        with self._patch_meta_global("require_channel_permissions", AsyncMock(return_value=True)):
             await MetaCog.help_command.callback(cog, ctx, visibility="public")
 
         self.assertEqual(len(ctx.send_calls), 1)
@@ -1742,7 +1745,7 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         ctx = FakeContext(interaction=interaction, guild=FakeGuild(), channel=FakeChannel(), author=FakeAuthor())
         permission_check = AsyncMock(return_value=False)
 
-        with patch("babblebox.cogs.meta.require_channel_permissions", new=permission_check):
+        with self._patch_meta_global("require_channel_permissions", permission_check):
             await MetaCog.help_command.callback(cog, ctx, visibility="private")
 
         permission_check.assert_not_awaited()
@@ -1758,13 +1761,13 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             author=first_ctx.author,
         )
 
-        with patch("babblebox.cogs.meta.require_channel_permissions", new=AsyncMock(return_value=True)), patch(
-            "babblebox.cogs.meta.send_hybrid_panel_response",
-            new=AsyncMock(return_value=HybridPanelSendResult(delivered=True, path="context_send", message=None, handle_status="missing")),
+        with self._patch_meta_global("require_channel_permissions", AsyncMock(return_value=True)), self._patch_meta_global(
+            "send_hybrid_panel_response",
+            AsyncMock(return_value=HybridPanelSendResult(delivered=True, path="context_send", message=None, handle_status="missing")),
         ):
             await MetaCog.help_command.callback(cog, first_ctx, visibility="public")
 
-        with patch("babblebox.cogs.meta.require_channel_permissions", new=AsyncMock(return_value=True)):
+        with self._patch_meta_global("require_channel_permissions", AsyncMock(return_value=True)):
             await MetaCog.help_command.callback(cog, second_ctx, visibility="public")
 
         cooldown_payload = self._sent_kwargs(second_ctx)
@@ -1781,16 +1784,16 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             author=first_ctx.author,
         )
 
-        with patch("babblebox.cogs.meta.require_channel_permissions", new=AsyncMock(return_value=True)), patch(
-            "babblebox.cogs.meta.send_hybrid_panel_response",
-            new=AsyncMock(return_value=HybridPanelSendResult(delivered=False, path="context_send", error=TypeError("broken"))),
+        with self._patch_meta_global("require_channel_permissions", AsyncMock(return_value=True)), self._patch_meta_global(
+            "send_hybrid_panel_response",
+            AsyncMock(return_value=HybridPanelSendResult(delivered=False, path="context_send", error=TypeError("broken"))),
         ):
             await MetaCog.help_command.callback(cog, first_ctx, visibility="public")
 
         self.assertEqual(self._sent_kwargs(first_ctx)["embed"].title, "Help Unavailable")
         self.assertTrue(self._sent_kwargs(first_ctx)["ephemeral"])
 
-        with patch("babblebox.cogs.meta.require_channel_permissions", new=AsyncMock(return_value=True)):
+        with self._patch_meta_global("require_channel_permissions", AsyncMock(return_value=True)):
             await MetaCog.help_command.callback(cog, second_ctx, visibility="public")
 
         self.assertFalse(self._sent_kwargs(second_ctx)["ephemeral"])
@@ -1801,7 +1804,7 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         interaction = FakeInteraction()
         ctx = FakeContext(interaction=interaction, guild=FakeGuild(), channel=FakeChannel(), author=FakeAuthor())
 
-        with patch("babblebox.cogs.meta.require_channel_permissions", new=AsyncMock(return_value=True)):
+        with self._patch_meta_global("require_channel_permissions", AsyncMock(return_value=True)):
             await MetaCog.support_command.callback(cog, ctx, visibility="public")
 
         payload = self._sent_kwargs(ctx)
@@ -1825,7 +1828,7 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         interaction = FakeInteraction()
         ctx = FakeContext(interaction=interaction, guild=FakeGuild(), channel=FakeChannel(), author=FakeAuthor())
 
-        with patch("babblebox.cogs.meta.require_channel_permissions", new=AsyncMock(return_value=True)):
+        with self._patch_meta_global("require_channel_permissions", AsyncMock(return_value=True)):
             await MetaCog.support_command.callback(cog, ctx, visibility="private")
 
         payload = self._sent_kwargs(ctx)
@@ -1837,7 +1840,7 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         cog = MetaCog(types.SimpleNamespace(loop=asyncio.get_running_loop()))
         ctx = FakeContext(interaction=None, guild=FakeGuild(), channel=FakeChannel(), author=FakeAuthor())
 
-        with patch("babblebox.cogs.meta.require_channel_permissions", new=AsyncMock(return_value=True)):
+        with self._patch_meta_global("require_channel_permissions", AsyncMock(return_value=True)):
             await MetaCog.support_command.callback(cog, ctx, visibility="public")
 
         self.assertEqual(len(ctx.send_calls), 1)
@@ -1849,7 +1852,7 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         ctx = FakeContext(interaction=interaction, guild=FakeGuild(), channel=FakeChannel(), author=FakeAuthor())
         permission_check = AsyncMock(return_value=False)
 
-        with patch("babblebox.cogs.meta.require_channel_permissions", new=permission_check):
+        with self._patch_meta_global("require_channel_permissions", permission_check):
             await MetaCog.support_command.callback(cog, ctx, visibility="private")
 
         permission_check.assert_not_awaited()
@@ -1871,7 +1874,7 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             author=first_ctx.author,
         )
 
-        with patch("babblebox.cogs.meta.require_channel_permissions", new=AsyncMock(return_value=True)):
+        with self._patch_meta_global("require_channel_permissions", AsyncMock(return_value=True)):
             await MetaCog.support_command.callback(cog, first_ctx, visibility="public")
             await MetaCog.support_command.callback(cog, second_ctx, visibility="public")
 
@@ -1891,13 +1894,13 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             author=first_ctx.author,
         )
 
-        with patch("babblebox.cogs.meta.require_channel_permissions", new=AsyncMock(return_value=True)), patch(
-            "babblebox.cogs.meta.send_hybrid_panel_response",
-            new=AsyncMock(return_value=HybridPanelSendResult(delivered=True, path="context_send", message=None, handle_status="missing")),
+        with self._patch_meta_global("require_channel_permissions", AsyncMock(return_value=True)), self._patch_meta_global(
+            "send_hybrid_panel_response",
+            AsyncMock(return_value=HybridPanelSendResult(delivered=True, path="context_send", message=None, handle_status="missing")),
         ):
             await MetaCog.support_command.callback(cog, first_ctx, visibility="public")
 
-        with patch("babblebox.cogs.meta.require_channel_permissions", new=AsyncMock(return_value=True)):
+        with self._patch_meta_global("require_channel_permissions", AsyncMock(return_value=True)):
             await MetaCog.support_command.callback(cog, second_ctx, visibility="public")
 
         self.assertEqual(self._sent_kwargs(second_ctx)["embed"].title, "Support Cooldown")
@@ -1912,16 +1915,16 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             author=first_ctx.author,
         )
 
-        with patch("babblebox.cogs.meta.require_channel_permissions", new=AsyncMock(return_value=True)), patch(
-            "babblebox.cogs.meta.send_hybrid_panel_response",
-            new=AsyncMock(return_value=HybridPanelSendResult(delivered=False, path="context_send", error=TypeError("broken"))),
+        with self._patch_meta_global("require_channel_permissions", AsyncMock(return_value=True)), self._patch_meta_global(
+            "send_hybrid_panel_response",
+            AsyncMock(return_value=HybridPanelSendResult(delivered=False, path="context_send", error=TypeError("broken"))),
         ):
             await MetaCog.support_command.callback(cog, first_ctx, visibility="public")
 
         self.assertEqual(self._sent_kwargs(first_ctx)["embed"].title, "Support Panel Unavailable")
         self.assertTrue(self._sent_kwargs(first_ctx)["ephemeral"])
 
-        with patch("babblebox.cogs.meta.require_channel_permissions", new=AsyncMock(return_value=True)):
+        with self._patch_meta_global("require_channel_permissions", AsyncMock(return_value=True)):
             await MetaCog.support_command.callback(cog, second_ctx, visibility="public")
 
         self.assertFalse(self._sent_kwargs(second_ctx)["ephemeral"])
@@ -1932,7 +1935,7 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         help_ctx = FakeContext(interaction=FakeInteraction(), guild=FakeGuild(), channel=FakeChannel(), author=FakeAuthor())
         support_ctx = FakeContext(interaction=FakeInteraction(), guild=help_ctx.guild, channel=help_ctx.channel, author=help_ctx.author)
 
-        with patch("babblebox.cogs.meta.require_channel_permissions", new=AsyncMock(return_value=True)):
+        with self._patch_meta_global("require_channel_permissions", AsyncMock(return_value=True)):
             await MetaCog.help_command.callback(cog, help_ctx, visibility="public")
             await MetaCog.support_command.callback(cog, support_ctx, visibility="public")
 
