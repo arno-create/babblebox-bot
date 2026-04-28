@@ -1244,7 +1244,7 @@ def get_lobby_embed(guild_id):
         "corpse": ("📝 Exquisite Corpse", "Six hidden prompts for 3-6 players.", discord.Color.purple()),
         "spyfall": ("🕵️ Spyfall", "Find the spy before the room turns on itself. 3-25 players.", discord.Color.dark_gray()),
         "bomb": ("💣 Word Bomb", "Fast typing survival for 2-25 players.", discord.Color.red()),
-        "pattern_hunt": ("Pattern Hunt", "Coder-led hidden-rule hunt for 3-10 players.", discord.Color.dark_teal()),
+        "pattern_hunt": ("Pattern Hunt", "Guesser-led hidden-pattern table talk for 3-10 players.", discord.Color.dark_teal()),
     }
 
     title, desc, color = titles.get(gt, titles["none"])
@@ -1291,8 +1291,8 @@ def get_lobby_embed(guild_id):
         embed.add_field(
             name="Pattern Hunt Setup",
             value=(
-                "Coders need server DMs open before the room starts.\n"
-                "Each coder posts one public clue that fits the hidden rule; private rule theories stay in `/hunt guess` and accept natural text."
+                "Pattern holders need server DMs open before the room starts.\n"
+                "One guesser asks the named holder a normal question, the holder answers while following the hidden pattern, and private theories stay in `/hunt guess`."
             ),
             inline=False,
         )

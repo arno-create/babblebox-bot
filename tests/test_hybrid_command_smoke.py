@@ -488,7 +488,7 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Spyfall", party_page["body"])
         self.assertIn("Word Bomb stays fast", party_page["body"])
         self.assertIn("private guesses with `/hunt guess`", party_page["body"])
-        self.assertIn("Coders need server DMs open before start", party_page["body"])
+        self.assertIn("Pattern holders need server DMs open before start", party_page["body"])
         self.assertIn("digits `0-9` only", party_page["body"])
         self.assertNotIn("Only 16", party_page["body"])
 
@@ -1256,8 +1256,9 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             ge.games = saved_games
 
         setup_field = next(field.value for field in embed.fields if field.name == "Pattern Hunt Setup")
-        self.assertIn("Coders need server DMs open before the room starts.", setup_field)
-        self.assertIn("private rule theories stay in `/hunt guess`", setup_field)
+        self.assertIn("Pattern holders need server DMs open before the room starts.", setup_field)
+        self.assertIn("guesser asks the named holder", setup_field)
+        self.assertIn("private theories stay in `/hunt guess`", setup_field)
 
     async def test_ping_command_responds_through_context_send(self):
         cog = MetaCog(object())

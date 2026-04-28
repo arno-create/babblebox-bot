@@ -33,7 +33,7 @@ class PartyGamesCog(commands.Cog):
                 ephemeral=True,
             )
             return
-        await send_hybrid_response(ctx, embed=build_pattern_hunt_status_embed(game, public=False), ephemeral=True)
+        await send_hybrid_response(ctx, embed=build_pattern_hunt_status_embed(game, public=False, viewer=ctx.author), ephemeral=True)
 
     @hunt_group.command(name="status", with_app_command=True, description="Show the live Pattern Hunt card just for you")
     async def hunt_status_command(self, ctx: commands.Context):

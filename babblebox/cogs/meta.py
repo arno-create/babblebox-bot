@@ -55,7 +55,7 @@ HELP_PAGES: list[dict[str, str]] = [
             "Exquisite Corpse keeps six hidden prompts for 3-6 players so every counted player gets a turn.\n"
             "Spyfall gives everyone a secret DM role, rotates the spotlight through the room, supports `/spyfall target @member`, and lets any player call the vote.\n"
             "Word Bomb stays fast: one compact turn line, live syllable, no repeats, and the fuse keeps shrinking.\n"
-            "Pattern Hunt: coders post public clues, one hidden rule stays private, and natural private guesses with `/hunt guess` keep the theory offstage. Coders need server DMs open before start. `Contains Digits` means digits `0-9` only.\n"
+            "Pattern Hunt: one guesser asks named pattern holders normal questions, holders answer while following a hidden rule, and natural private guesses with `/hunt guess` keep the theory offstage. Pattern holders need server DMs open before start. `Contains Digits` means digits `0-9` only.\n"
             "`/hunt status` mirrors the live state card privately, and `/hunt guess contains a number` is the prefix shape for natural theories."
         ),
         "try": "`/play`, `/hunt status`",

@@ -85,6 +85,11 @@ class DummyMessage:
         self.add_reaction = AsyncMock()
 
 
+def close_scheduled_coroutine(coro, *, name=None):
+    coro.close()
+    return None
+
+
 class PartyGameLogicTests(unittest.IsolatedAsyncioTestCase):
     async def test_shared_game_anchor_recreates_after_missing_message(self):
         channel = DummyChannel()
@@ -252,7 +257,7 @@ class PartyGameLogicTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse(_bundle_quality_ok(atoms, valid_examples, invalid_examples))
 
-    def test_pattern_hunt_status_embed_clarifies_contains_digits_and_guess_flow(self):
+    def test_pattern_hunt_status_embed_clarifies_contains_digits_and_question_flow(self):
         guesser = DummyUser(10)
         coder = DummyUser(11)
         game = {
@@ -286,11 +291,45 @@ class PartyGameLogicTests(unittest.IsolatedAsyncioTestCase):
         values = "\n".join(field.value for field in embed.fields)
         self.assertIn("digits `0-9` only", values)
         self.assertIn("/hunt guess", values)
-        self.assertIn("ask User 11 for one clue in chat", values)
-        self.assertIn("Clues: **2/6**", values)
+        self.assertIn("ask User 11 a normal question in chat", values)
+        self.assertIn("Q&A: **2/6**", values)
         self.assertIn("Misses left: **2**", values)
 
-    def test_pattern_hunt_public_answer_embed_shows_current_ask_and_private_guess_note(self):
+    def test_pattern_hunt_private_status_is_role_aware_for_guesser_and_holder(self):
+        guesser = DummyUser(10)
+        coder = DummyUser(11)
+        game = {
+            "players": [guesser, coder],
+            "starting_players": [guesser, coder],
+            "channel": DummyChannel(),
+            "pattern_hunt": {
+                "guesser_id": guesser.id,
+                "coder_order": [coder.id],
+                "current_coder_index": 0,
+                "phase": "prompt",
+                "guess_limit": 3,
+                "guesses_used": 0,
+                "strike_limit": 3,
+                "strikes": 0,
+                "clue_limit": 5,
+                "clues_used": 1,
+                "accepted_answers": [],
+                "deadline_at": ge.now_utc() + timedelta(seconds=30),
+                "tutorial_cycle_active": False,
+            },
+        }
+
+        guesser_embed = build_pattern_hunt_status_embed(game, public=False, viewer=guesser)
+        holder_embed = build_pattern_hunt_status_embed(game, public=False, viewer=coder)
+
+        guesser_role = next(field.value for field in guesser_embed.fields if field.name == "Your Role")
+        holder_role = next(field.value for field in holder_embed.fields if field.name == "Your Role")
+        self.assertIn("You are hunting", guesser_role)
+        self.assertIn("ask User 11", guesser_role)
+        self.assertIn("You know the hidden rule", holder_role)
+        self.assertIn("answer naturally when the question lands", holder_role)
+
+    def test_pattern_hunt_public_answer_embed_shows_current_question_and_private_guess_note(self):
         guesser = DummyUser(10)
         coder = DummyUser(11)
         game = {
@@ -317,10 +356,10 @@ class PartyGameLogicTests(unittest.IsolatedAsyncioTestCase):
 
         embed = build_pattern_hunt_status_embed(game, public=True)
         fields = {field.name: field.value for field in embed.fields}
-        self.assertIn("Current Ask", fields)
+        self.assertIn("Current Question", fields)
         self.assertIn("lock in a private theory with `/hunt guess`", fields["Do This Now"])
-        self.assertIn("animal clue", fields["Current Ask"])
-        self.assertIn("Once the clue lands, the next coder takes the room", fields["What Happens Next"])
+        self.assertIn("animal clue", fields["Current Question"])
+        self.assertIn("After the answer lands, the next pattern holder takes the table", fields["What Happens Next"])
 
     async def test_pattern_hunt_valid_clue_advances_without_extra_acceptance_chatter(self):
         guesser = DummyUser(10)
@@ -383,7 +422,7 @@ class PartyGameLogicTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(handled)
         self.assertEqual(game["pattern_hunt"]["phase"], "prompt")
         self.assertIsNone(game["pattern_hunt"]["current_prompt"])
-        self.assertEqual(channel.sent[-1][0][0], "Pattern Hunt: ask for one real clue request or theme so the coder has a clear lane.")
+        self.assertEqual(channel.sent[-1][0][0], "Pattern Hunt: ask the named pattern holder one real question or theme.")
         self.assertEqual(channel.sent[-1][1]["delete_after"], 4.0)
         start_answer.assert_not_awaited()
 
@@ -503,10 +542,10 @@ class PartyGameLogicTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(handled)
         retry_copy = channel.sent[-1][1]["embed"].description
-        self.assertIn("Send one fresh clue", retry_copy)
+        self.assertIn("Send one fresh answer", retry_copy)
         self.assertNotIn("rule", retry_copy.casefold())
 
-    async def test_pattern_hunt_reveal_recap_uses_prompt_to_answer_wording(self):
+    async def test_pattern_hunt_reveal_recap_uses_question_to_answer_wording(self):
         guesser = DummyUser(10)
         coder = DummyUser(11)
         channel = DummyChannel()
@@ -528,7 +567,7 @@ class PartyGameLogicTests(unittest.IsolatedAsyncioTestCase):
             await _finish_pattern_hunt_locked(99, game, guesser_won=False, reason="Coders held the pattern.")
 
         embed = channel.sent[-1][1]["embed"]
-        recap = next(field.value for field in embed.fields if field.name == "Recent Clues")
+        recap = next(field.value for field in embed.fields if field.name == "Recent Q&A")
         self.assertIn("`fox clue` ->", recap)
         self.assertIn("7 foxes sprint!", recap)
         self.assertNotIn("Prompt:", recap)
@@ -563,7 +602,7 @@ class PartyGameLogicTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("start the room again", channel.sent[-1][1]["embed"].description)
         cleanup.assert_awaited_once_with(99)
 
-    async def test_pattern_hunt_clue_budget_scales_with_coder_count(self):
+    async def test_pattern_hunt_question_budget_scales_with_holder_count(self):
         guesser = DummyUser(10)
         coder_one = DummyDmUser(11)
         coder_two = DummyDmUser(12)
@@ -590,14 +629,14 @@ class PartyGameLogicTests(unittest.IsolatedAsyncioTestCase):
             await start_pattern_hunt_game_locked(99, game)
 
         self.assertEqual(game["pattern_hunt"]["clue_limit"], 7)
-        self.assertEqual(game["pattern_hunt"]["phase"], "answer")
+        self.assertEqual(game["pattern_hunt"]["phase"], "prompt")
         self.assertIsNone(game["pattern_hunt"]["current_prompt"])
         dm_embed = coder_one.send.await_args.kwargs["embed"]
-        self.assertIn("Pattern Hunt Role", dm_embed.title)
-        self.assertIn("Keep the logic offstage.", next(field.value for field in dm_embed.fields if field.name == "Guardrails"))
+        self.assertIn("Pattern Holder", dm_embed.title)
+        self.assertIn("answer naturally", next(field.value for field in dm_embed.fields if field.name == "At the Table"))
         begin.assert_awaited_once()
 
-    async def test_pattern_hunt_starts_with_coder_clue_phase_not_guesser_prompt(self):
+    async def test_pattern_hunt_starts_with_guesser_question_phase(self):
         guesser = DummyUser(10)
         coder_one = DummyDmUser(11)
         coder_two = DummyDmUser(12)
@@ -622,9 +661,56 @@ class PartyGameLogicTests(unittest.IsolatedAsyncioTestCase):
         ), patch("babblebox.pattern_hunt_game._begin_pattern_turn_locked", new=AsyncMock()) as begin:
             await start_pattern_hunt_game_locked(99, game)
 
-        self.assertEqual(game["pattern_hunt"]["phase"], "answer")
+        self.assertEqual(game["pattern_hunt"]["phase"], "prompt")
         self.assertIsNone(game["pattern_hunt"]["current_prompt"])
         begin.assert_awaited_once()
+
+    async def test_pattern_hunt_valid_answer_records_question_and_rotates_to_next_holder_prompt(self):
+        guesser = DummyUser(10)
+        coder_one = DummyUser(11)
+        coder_two = DummyUser(12)
+        channel = DummyChannel()
+        game = {
+            "players": [guesser, coder_one, coder_two],
+            "starting_players": [guesser, coder_one, coder_two],
+            "channel": channel,
+            "turn_task": None,
+            "turn_token": 0,
+            "pattern_hunt": {
+                "guesser_id": guesser.id,
+                "coder_order": [coder_one.id, coder_two.id],
+                "current_coder_index": 0,
+                "phase": "answer",
+                "rule_atoms": [RuleAtom("contains_digits")],
+                "current_prompt": "what did you bring?",
+                "accepted_answers": [],
+                "clue_limit": 5,
+                "clues_used": 0,
+                "guess_limit": 3,
+                "guesses_used": 0,
+                "strike_limit": 3,
+                "strikes": 0,
+                "tutorial_cycle_active": False,
+            },
+        }
+
+        with patch("babblebox.pattern_hunt_game.asyncio.create_task", new=close_scheduled_coroutine):
+            handled = await handle_pattern_hunt_message_locked(
+                DummyMessage(channel=channel, author=coder_one, content="7 foxes sprint!"),
+                99,
+                game,
+            )
+
+        self.assertTrue(handled)
+        state = game["pattern_hunt"]
+        self.assertEqual(state["accepted_answers"][0]["prompt"], "what did you bring?")
+        self.assertEqual(state["clues_used"], 1)
+        self.assertEqual(state["current_coder_index"], 1)
+        self.assertEqual(state["phase"], "prompt")
+        self.assertIsNone(state["current_prompt"])
+        anchor_embed = channel.sent[-1][1]["embed"]
+        anchor_values = "\n".join(field.value for field in anchor_embed.fields)
+        self.assertIn("ask User 12 a normal question in chat", anchor_values)
 
     async def test_pattern_theory_parse_failure_does_not_spend_guess_budget(self):
         guesser = DummyUser(10)
@@ -671,7 +757,7 @@ class PartyGameLogicTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(game["pattern_hunt"]["tutorial_grace_used"])
         self.assertEqual(game["pattern_hunt"].get("strikes", 0), 0)
         self.assertIn("Opening Grace", channel.sent[-1][1]["embed"].title)
-        self.assertIn("Same guesser, fresh prompt timer.", channel.sent[-1][1]["embed"].description)
+        self.assertIn("Same guesser, fresh question timer.", channel.sent[-1][1]["embed"].description)
         begin.assert_awaited_once()
 
     def test_pattern_turn_deadlines_use_tutorial_then_standard_windows(self):
@@ -756,7 +842,7 @@ class PartyGameLogicTests(unittest.IsolatedAsyncioTestCase):
             ge.games = saved_games
 
         penalty.assert_awaited_once()
-        self.assertEqual(penalty.await_args.kwargs["reason"], "The guesser ran out of time to ask for a clue.")
+        self.assertEqual(penalty.await_args.kwargs["reason"], "The guesser ran out of time to ask the named holder a question.")
 
     async def test_pattern_hunt_answer_timeout_applies_a_strike(self):
         guesser = DummyUser(10)
@@ -796,7 +882,7 @@ class PartyGameLogicTests(unittest.IsolatedAsyncioTestCase):
         reason = penalty.await_args.kwargs["reason"]
         self.assertIn(coder.mention, reason)
         self.assertIn("ran out of time", reason)
-        self.assertIn("send a clue", reason)
+        self.assertIn("answer the question", reason)
 
     async def test_pattern_guess_compares_structured_atoms(self):
         guesser = DummyUser(10)
