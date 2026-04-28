@@ -272,6 +272,15 @@ class FakeEmbed:
         self.thumbnail = types.SimpleNamespace(url=None)
 
 
+def _youtube_preview_embed(*, shortener_url: str = "https://bit.ly/youtube-preview") -> FakeEmbed:
+    embed = FakeEmbed(
+        title="YouTube",
+        description=f"Open {shortener_url} for the generated preview details.",
+    )
+    embed.thumbnail.url = "https://i.ytimg.com/vi/ehZTy_e91oA/hqdefault.jpg"
+    return embed
+
+
 class FakeMessageSnapshot:
     def __init__(self, *, content: str = "", embeds=None, attachments=None):
         self.content = content
@@ -909,6 +918,60 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.link_assessments[0].normalized_domain, "youtube.com")
         self.assertEqual(result.link_assessments[0].category, "safe")
         self.assertIn("safe_family:social", result.link_assessments[0].matched_signals)
+
+    async def test_human_youtube_preview_shortener_metadata_does_not_trigger_scam_on_edit(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        author = FakeAuthor(42)
+        content = "https://youtu.be/ehZTy_e91oA?si=dD-VEbtYt3j2Yeog"
+        before = FakeMessage(guild=guild, channel=channel, author=author, content=content, message_id=9101)
+        after = FakeMessage(
+            guild=guild,
+            channel=channel,
+            author=author,
+            content=content,
+            embeds=[_youtube_preview_embed()],
+            message_id=9101,
+        )
+
+        ok, _ = await self.service.set_module_enabled(guild.id, True)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_pack_config(guild.id, "scam", enabled=True, action="delete_timeout_log", sensitivity="normal")
+        self.assertTrue(ok)
+
+        with patch.object(self.service, "_send_alert", new=AsyncMock()) as alert_mock:
+            decision = await self.service.handle_message_edit(before, after)
+
+        self.assertIsNone(decision)
+        self.assertFalse(after.deleted)
+        alert_mock.assert_not_awaited()
+
+    async def test_human_youtube_preview_shortener_metadata_does_not_move_to_trusted_only_policy(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        author = FakeAuthor(42)
+        content = "https://youtu.be/ehZTy_e91oA?si=dD-VEbtYt3j2Yeog"
+        before = FakeMessage(guild=guild, channel=channel, author=author, content=content, message_id=9102)
+        after = FakeMessage(
+            guild=guild,
+            channel=channel,
+            author=author,
+            content=content,
+            embeds=[_youtube_preview_embed()],
+            message_id=9102,
+        )
+
+        ok, _ = await self.service.set_module_enabled(guild.id, True)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_link_policy_config(guild.id, mode="trusted_only", action="delete_log")
+        self.assertTrue(ok)
+
+        with patch.object(self.service, "_send_alert", new=AsyncMock()) as alert_mock:
+            decision = await self.service.handle_message_edit(before, after)
+
+        self.assertIsNone(decision)
+        self.assertFalse(after.deleted)
+        alert_mock.assert_not_awaited()
 
     async def test_safe_family_includes_discord_status_and_google_docs(self):
         result = self.service.test_message_details(
@@ -2000,6 +2063,34 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(result.link_assessments[0].category, "unknown")
         self.assertFalse(result.link_assessments[0].provider_lookup_warranted)
+
+    async def test_visible_shortener_with_generic_open_language_is_not_destructive(self):
+        ok, _ = await self.service.set_pack_config(10, "scam", enabled=True, action="delete_timeout_log", sensitivity="normal")
+        self.assertTrue(ok)
+
+        normal_result = self.service.test_message_details(10, "Open https://bit.ly/example for more details.")
+
+        self.assertFalse([match for match in normal_result.matches if match.pack == "scam"])
+
+        ok, _ = await self.service.set_pack_config(11, "scam", enabled=True, action="delete_timeout_log", sensitivity="high")
+        self.assertTrue(ok)
+
+        high_result = self.service.test_message_details(11, "Open https://bit.ly/example for more details.")
+        scam_matches = [match for match in high_result.matches if match.pack == "scam"]
+
+        self.assertTrue(all(match.confidence == "low" for match in scam_matches))
+        self.assertTrue(all(match.action == "log" for match in scam_matches))
+
+    async def test_visible_shortener_with_reward_bait_still_enforces(self):
+        ok, _ = await self.service.set_pack_config(10, "scam", enabled=True, action="delete_timeout_log", sensitivity="normal")
+        self.assertTrue(ok)
+
+        result = self.service.test_message_details(10, "Claim reward now https://bit.ly/reward-drop")
+
+        scam_matches = [match for match in result.matches if match.pack == "scam"]
+        self.assertTrue(scam_matches)
+        self.assertTrue(any(match.confidence == "high" for match in scam_matches))
+        self.assertTrue(any(match.action == "delete_timeout_log" for match in scam_matches))
 
     async def test_malformed_host_is_ignored_in_link_assessment(self):
         result = self.service.test_message_details(10, "Broken link https://www..example.com/login")

@@ -10,7 +10,7 @@ import os
 import re
 import time
 import uuid
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import timedelta
 from typing import Any, Iterable, Sequence
 from urllib.parse import urlsplit
@@ -176,6 +176,28 @@ SHIELD_BASELINE_VERSION = 4
 TRUSTED_ONLY_BUILTIN_FAMILIES = frozenset(TRUSTED_LINK_SAFE_FAMILIES)
 TRUSTED_ONLY_BUILTIN_DOMAINS = frozenset(TRUSTED_MAINSTREAM_DOMAINS)
 AUTOMATED_AUTHOR_KINDS = frozenset({"bot", "webhook"})
+PREVIEW_ONLY_LINK_SIGNAL = "preview_only"
+SOURCE_SIGNAL_PREFIX = "source:"
+PREVIEW_ONLY_LINK_SOURCES = frozenset({"embeds"})
+SAFE_VISIBLE_PREVIEW_ANCHOR_DOMAINS = frozenset(
+    set(TRUSTED_MAINSTREAM_DOMAINS)
+    | {
+        "cdn.discordapp.com",
+        "discord.com",
+        "discord.gg",
+        "docs.github.com",
+        "docs.google.com",
+        "giphy.com",
+        "i.imgur.com",
+        "i.ytimg.com",
+        "imgur.com",
+        "media.discordapp.net",
+        "media.giphy.com",
+        "media.tenor.com",
+        "tenor.com",
+        "ytimg.com",
+    }
+)
 
 PACK_LABELS = {
     "privacy": "Privacy Leak",
@@ -922,6 +944,8 @@ class ShieldLink:
     query: str
     category: str
     invite_code: str | None = None
+    source: str = "message"
+    preview_only: bool = False
 
 
 @dataclass(frozen=True)
@@ -1380,7 +1404,7 @@ def _classify_link(domain: str, *, invite_code: str | None) -> str:
     return "generic_external"
 
 
-def _build_link(raw_url: str) -> ShieldLink | None:
+def _build_link(raw_url: str, *, source: str = "message", preview_only: bool = False) -> ShieldLink | None:
     candidate = _clean_url_candidate(raw_url)
     if candidate is None:
         return None
@@ -1401,7 +1425,43 @@ def _build_link(raw_url: str) -> ShieldLink | None:
         query=(parsed.query or "").casefold(),
         category=_classify_link(domain, invite_code=invite_code),
         invite_code=invite_code,
+        source=source,
+        preview_only=bool(preview_only),
     )
+
+
+def _iter_link_segments(
+    text: str | None,
+    *,
+    extra_texts: Sequence[str] | None,
+    link_texts: Sequence[str] | None,
+    link_segments: Sequence[tuple[str, str, bool]] | None,
+) -> tuple[tuple[str, str, bool], ...]:
+    if link_segments is not None:
+        return tuple(
+            (normalize_plain_text(label).casefold() or "extra", segment_text, bool(preview_only))
+            for label, segment_text, preview_only in link_segments
+            if normalize_plain_text(segment_text)
+        )
+    segments: list[tuple[str, str, bool]] = []
+    if normalize_plain_text(text or ""):
+        segments.append(("message", text or "", False))
+    for part in (link_texts if link_texts is not None else extra_texts) or ():
+        if normalize_plain_text(part):
+            segments.append(("extra", part, False))
+    return tuple(segments)
+
+
+def _extract_links_from_segments(segments: Sequence[tuple[str, str, bool]]) -> tuple[tuple[str, str, bool], ...]:
+    links: list[tuple[str, str, bool]] = []
+    for source, segment_text, preview_only in segments:
+        for url in _extract_urls(normalize_plain_text(segment_text).casefold()):
+            links.append((url, source, bool(preview_only)))
+    return tuple(links)
+
+
+def _link_is_safe_visible_preview_anchor(link: ShieldLink) -> bool:
+    return link.invite_code is not None or _domain_in_set(link.domain, SAFE_VISIBLE_PREVIEW_ANCHOR_DOMAINS)
 
 
 def _canonical_repetition_fingerprint(snapshot: ShieldSnapshot) -> str | None:
@@ -1481,6 +1541,8 @@ def _link_assessment_summary(assessment: ShieldLinkAssessment) -> str:
         return "matched local trusted-brand impersonation intel"
     if assessment.category == ADULT_LINK_CATEGORY:
         return "matched local adult intel"
+    if _assessment_is_preview_only_advisory(assessment):
+        return "preview-only advisory; no action"
     if assessment.category == UNKNOWN_SUSPICIOUS_LINK_CATEGORY:
         return "lookup candidate; link-only caution" if assessment.provider_lookup_warranted else "local caution; link-only"
     if assessment.category == UNKNOWN_LINK_CATEGORY:
@@ -1492,6 +1554,8 @@ def _link_assessment_summary(assessment: ShieldLinkAssessment) -> str:
 
 def _link_assessment_basis(assessment: ShieldLinkAssessment) -> str:
     allowlist_note = " Admin allowlists do not override risky-link intel." if "guild_allow_domain" in assessment.matched_signals else ""
+    if _assessment_is_preview_only_advisory(assessment):
+        return "Preview-only metadata behind a trusted visible link; treated as advisory instead of enforcement-grade."
     if assessment.category == MALICIOUS_LINK_CATEGORY:
         if any(signal.startswith("external_malicious_domain_") for signal in assessment.matched_signals):
             return f"Hard intel from the external malicious-domain feed.{allowlist_note}"
@@ -1521,11 +1585,45 @@ def _author_kind_for_message(message: discord.Message, *, scan_source: str) -> s
     return "human"
 
 
+def _assessment_is_preview_only_advisory(assessment: ShieldLinkAssessment | None) -> bool:
+    if assessment is None:
+        return False
+    return (
+        PREVIEW_ONLY_LINK_SIGNAL in assessment.matched_signals
+        and assessment.category in {UNKNOWN_LINK_CATEGORY, UNKNOWN_SUSPICIOUS_LINK_CATEGORY}
+    )
+
+
+def _assessment_with_source_signals(assessment: ShieldLinkAssessment, *, source: str, preview_only: bool) -> ShieldLinkAssessment:
+    signals = list(assessment.matched_signals)
+    source_signal = f"{SOURCE_SIGNAL_PREFIX}{source}"
+    if preview_only and source_signal not in signals:
+        signals.append(source_signal)
+    if preview_only and PREVIEW_ONLY_LINK_SIGNAL not in signals:
+        signals.append(PREVIEW_ONLY_LINK_SIGNAL)
+    if tuple(signals) == assessment.matched_signals:
+        return assessment
+    return replace(assessment, matched_signals=tuple(signals))
+
+
+def _assessment_is_weak_shortener_context(assessment: ShieldLinkAssessment) -> bool:
+    signals = {
+        signal
+        for signal in assessment.matched_signals
+        if not signal.startswith(SOURCE_SIGNAL_PREFIX) and signal not in {PREVIEW_ONLY_LINK_SIGNAL, "guild_allow_domain"}
+    }
+    return bool(signals) and signals.issubset({"shortener_domain", "message_social_engineering"})
+
+
 def _score_link_assessment_for_scam(assessment: ShieldLinkAssessment) -> int:
     if assessment.category in {MALICIOUS_LINK_CATEGORY, IMPERSONATION_LINK_CATEGORY}:
         return 5
+    if _assessment_is_preview_only_advisory(assessment):
+        return 0
     if assessment.category != UNKNOWN_SUSPICIOUS_LINK_CATEGORY:
         return 0
+    if _assessment_is_weak_shortener_context(assessment):
+        return 2
     score = 3
     signals = assessment.matched_signals
     if any(signal in {"punycode_host", "hyphen_heavy_host", "shortener_domain", "deep_subdomain_stack"} for signal in signals):
@@ -1551,7 +1649,7 @@ def _strongest_link_risk_signals(link_assessments: Sequence[ShieldLinkAssessment
     ranked = sorted(link_assessments, key=_score_link_assessment_for_scam, reverse=True)
     for assessment in ranked:
         for signal in assessment.matched_signals:
-            if signal.startswith("safe_family:") or signal == "guild_allow_domain":
+            if signal.startswith("safe_family:") or signal.startswith(SOURCE_SIGNAL_PREFIX) or signal in {"guild_allow_domain", PREVIEW_ONLY_LINK_SIGNAL}:
                 continue
             if signal not in signals:
                 signals.append(signal)
@@ -1962,22 +2060,29 @@ def _collect_embed_surface_texts(embeds: Sequence[Any] | None) -> tuple[str, ...
     return tuple(parts)
 
 
-def _collect_message_surface_texts(message: Any) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...]]:
+def _collect_message_surface_texts(
+    message: Any,
+) -> tuple[tuple[str, ...], tuple[str, ...], tuple[str, ...], tuple[tuple[str, str, bool], ...]]:
     extra_texts: list[str] = []
     link_texts: list[str] = []
+    link_segments: list[tuple[str, str, bool]] = []
     surface_labels: list[str] = []
     normalized_content = normalize_plain_text(getattr(message, "content", ""))
+    if normalized_content:
+        link_segments.append(("message", getattr(message, "content", ""), False))
 
     system_content = _surface_text_or_none(getattr(message, "system_content", ""))
     if system_content is not None and system_content.casefold() != normalized_content.casefold():
         extra_texts.append(system_content)
         link_texts.append(system_content)
+        link_segments.append(("system", system_content, False))
         surface_labels.append("system")
 
     embed_texts = _collect_embed_surface_texts(getattr(message, "embeds", ()))
     if embed_texts:
         extra_texts.extend(embed_texts)
         link_texts.extend(embed_texts)
+        link_segments.extend(("embeds", text, False) for text in embed_texts)
         surface_labels.append("embeds")
 
     attachment_texts, attachment_link_texts = _collect_attachment_surface_texts(getattr(message, "attachments", ()))
@@ -1986,6 +2091,7 @@ def _collect_message_surface_texts(message: Any) -> tuple[tuple[str, ...], tuple
         surface_labels.append("attachment_meta")
     if attachment_link_texts:
         link_texts.extend(attachment_link_texts)
+        link_segments.extend(("attachment_meta", text, False) for text in attachment_link_texts)
 
     snapshot_texts: list[str] = []
     snapshot_link_texts: list[str] = []
@@ -1994,18 +2100,21 @@ def _collect_message_surface_texts(message: Any) -> tuple[tuple[str, ...], tuple
         if forwarded_content is not None:
             snapshot_texts.append(forwarded_content)
             snapshot_link_texts.append(forwarded_content)
+            link_segments.append(("forwarded_snapshot", forwarded_content, False))
         forwarded_embed_texts = _collect_embed_surface_texts(getattr(forwarded, "embeds", ()))
         snapshot_texts.extend(forwarded_embed_texts)
         snapshot_link_texts.extend(forwarded_embed_texts)
+        link_segments.extend(("forwarded_snapshot", text, False) for text in forwarded_embed_texts)
         forwarded_attachment_texts, forwarded_attachment_link_texts = _collect_attachment_surface_texts(getattr(forwarded, "attachments", ()))
         snapshot_texts.extend(forwarded_attachment_texts)
         snapshot_link_texts.extend(forwarded_attachment_link_texts)
+        link_segments.extend(("forwarded_snapshot", text, False) for text in forwarded_attachment_link_texts)
     if snapshot_texts:
         extra_texts.extend(snapshot_texts)
         link_texts.extend(snapshot_link_texts)
         surface_labels.append("forwarded_snapshot")
 
-    return tuple(extra_texts), tuple(link_texts), tuple(dict.fromkeys(surface_labels))
+    return tuple(extra_texts), tuple(link_texts), tuple(dict.fromkeys(surface_labels)), tuple(link_segments)
 
 
 def _build_snapshot(
@@ -2014,16 +2123,21 @@ def _build_snapshot(
     *,
     extra_texts: Sequence[str] | None = None,
     link_texts: Sequence[str] | None = None,
+    link_segments: Sequence[tuple[str, str, bool]] | None = None,
     surface_labels: Sequence[str] | None = None,
 ) -> ShieldSnapshot:
     scan_text = normalize_plain_text(" ".join(part for part in (text or "", *(extra_texts or ())) if part))
     normalized = scan_text
     squashed = squash_for_evasion_checks(normalized.casefold())
     lowered = normalized.casefold()
-    link_scan_text = normalize_plain_text(
-        " ".join(part for part in (text or "", *((link_texts if link_texts is not None else extra_texts) or ())) if part)
+    resolved_link_segments = _iter_link_segments(
+        text,
+        extra_texts=extra_texts,
+        link_texts=link_texts,
+        link_segments=link_segments,
     )
-    urls = _extract_urls(link_scan_text.casefold())
+    extracted_link_items = _extract_links_from_segments(resolved_link_segments)
+    urls = tuple(url for url, _source, _preview_only in extracted_link_items)
     context_source_text = _strip_urls_from_text(normalized, urls)
     context_text = _strip_urls_from_text(lowered, urls)
     context_squashed = squash_for_evasion_checks(context_text)
@@ -2045,7 +2159,14 @@ def _build_snapshot(
         if len(near_duplicate_text) >= 6
         else None
     )
-    links = tuple(link for link in (_build_link(url) for url in urls) if link is not None)
+    links = tuple(
+        link
+        for link in (
+            _build_link(url, source=source, preview_only=preview_only)
+            for url, source, preview_only in extracted_link_items
+        )
+        if link is not None
+    )
     domains = frozenset(link.domain for link in links)
     invite_codes = frozenset(link.invite_code for link in links if link.invite_code)
     attachment_names = tuple(
@@ -2092,13 +2213,31 @@ def _build_snapshot(
     )
 
 
-def _build_message_snapshot(message: discord.Message) -> ShieldSnapshot:
-    extra_texts, link_texts, surface_labels = _collect_message_surface_texts(message)
+def _build_message_snapshot(message: discord.Message, *, author_kind: str = "human") -> ShieldSnapshot:
+    extra_texts, link_texts, surface_labels, link_segments = _collect_message_surface_texts(message)
+    visible_segments = tuple(segment for segment in link_segments if segment[0] == "message")
+    visible_links = tuple(
+        link
+        for link in (
+            _build_link(url, source=source, preview_only=False)
+            for url, source, _preview_only in _extract_links_from_segments(visible_segments)
+        )
+        if link is not None
+    )
+    has_safe_visible_anchor = author_kind == "human" and any(
+        _link_is_safe_visible_preview_anchor(link) for link in visible_links
+    )
+    if has_safe_visible_anchor:
+        link_segments = tuple(
+            (source, segment_text, source in PREVIEW_ONLY_LINK_SOURCES)
+            for source, segment_text, preview_only in link_segments
+        )
     return _build_snapshot(
         getattr(message, "content", None),
         getattr(message, "attachments", None),
         extra_texts=extra_texts,
         link_texts=link_texts,
+        link_segments=link_segments,
         surface_labels=surface_labels,
     )
 
@@ -4092,7 +4231,8 @@ class ShieldService:
 
         now = asyncio.get_running_loop().time()
         self._prune_runtime_state(now)
-        snapshot = _build_message_snapshot(message)
+        author_kind = _author_kind_for_message(message, scan_source=resolved_scan_source)
+        snapshot = _build_message_snapshot(message, author_kind=author_kind)
         return await self._scan_message(
             message,
             compiled,
@@ -4117,8 +4257,9 @@ class ShieldService:
 
         now = asyncio.get_running_loop().time()
         self._prune_runtime_state(now)
-        before_snapshot = _build_message_snapshot(before)
-        after_snapshot = _build_message_snapshot(after)
+        author_kind = _author_kind_for_message(after, scan_source="message_edit")
+        before_snapshot = _build_message_snapshot(before, author_kind=author_kind)
+        after_snapshot = _build_message_snapshot(after, author_kind=author_kind)
         if before_snapshot == after_snapshot:
             return None
         return await self._scan_message(
@@ -5501,7 +5642,9 @@ class ShieldService:
         if not snapshot.links:
             return ()
         by_domain: dict[str, ShieldLinkAssessment] = {}
+        domain_has_visible_link: dict[str, bool] = {}
         for link in snapshot.links:
+            domain_has_visible_link[link.domain] = domain_has_visible_link.get(link.domain, False) or not link.preview_only
             allowlisted = False
             if link.invite_code is None:
                 allowlisted = self._domain_is_allowlisted(link.domain, compiled.allow_domains)
@@ -5515,14 +5658,26 @@ class ShieldService:
                 allowlisted=allowlisted,
                 now=now,
             )
+            assessment = _assessment_with_source_signals(assessment, source=link.source, preview_only=link.preview_only)
             by_domain[link.domain] = merge_link_assessments(by_domain.get(link.domain), assessment)
-        return tuple(sorted(by_domain.values(), key=lambda item: item.normalized_domain))
+        cleaned: dict[str, ShieldLinkAssessment] = {}
+        for domain, assessment in by_domain.items():
+            if domain_has_visible_link.get(domain, False) and PREVIEW_ONLY_LINK_SIGNAL in assessment.matched_signals:
+                signals = tuple(
+                    signal
+                    for signal in assessment.matched_signals
+                    if signal != PREVIEW_ONLY_LINK_SIGNAL and not signal.startswith(SOURCE_SIGNAL_PREFIX)
+                )
+                assessment = replace(assessment, matched_signals=signals)
+            cleaned[domain] = assessment
+        return tuple(sorted(cleaned.values(), key=lambda item: item.normalized_domain))
 
     def _primary_risky_assessment(self, link_assessments: Sequence[ShieldLinkAssessment]) -> ShieldLinkAssessment | None:
         risky = [
             assessment
             for assessment in link_assessments
             if assessment.category in {MALICIOUS_LINK_CATEGORY, IMPERSONATION_LINK_CATEGORY, UNKNOWN_SUSPICIOUS_LINK_CATEGORY}
+            and not _assessment_is_preview_only_advisory(assessment)
         ]
         if not risky:
             return None
@@ -6765,6 +6920,8 @@ class ShieldService:
         seen_classes: set[str] = set()
         for link in snapshot.links:
             assessment = assessments_by_domain.get(link.domain)
+            if link.preview_only and _assessment_is_preview_only_advisory(assessment):
+                continue
             if self._link_is_trusted_under_policy(compiled, link, assessment):
                 continue
             automated_author = scam_context.author_kind in AUTOMATED_AUTHOR_KINDS
@@ -7247,12 +7404,15 @@ class ShieldService:
     ) -> ShieldScamFeatures:
         folded_context_text = fold_confusable_text(snapshot.context_text)
         folded_context_squashed = squash_for_evasion_checks(folded_context_text)
+        active_link_assessments = tuple(
+            assessment for assessment in link_assessments if not _assessment_is_preview_only_advisory(assessment)
+        )
         risky_domains = [
             assessment.normalized_domain
-            for assessment in link_assessments
+            for assessment in active_link_assessments
             if assessment.category in {MALICIOUS_LINK_CATEGORY, IMPERSONATION_LINK_CATEGORY, UNKNOWN_SUSPICIOUS_LINK_CATEGORY}
         ]
-        link_risk_score = max((_score_link_assessment_for_scam(item) for item in link_assessments), default=0)
+        link_risk_score = max((_score_link_assessment_for_scam(item) for item in active_link_assessments), default=0)
         shortener_or_punycode = any(
             _domain_in_set(domain, SHORTENER_DOMAINS) or "xn--" in domain
             for domain in risky_domains
@@ -7508,6 +7668,16 @@ class ShieldService:
             scan_source=scan_source,
             scam_context=scam_context,
         )
+        active_link_assessments = tuple(
+            assessment for assessment in link_assessments if not _assessment_is_preview_only_advisory(assessment)
+        )
+        shortener_signal_present = any("shortener_domain" in assessment.matched_signals for assessment in active_link_assessments)
+        punycode_signal_present = any(
+            "xn--" in assessment.normalized_domain
+            or "punycode_host" in assessment.matched_signals
+            or "punycode_brand" in assessment.matched_signals
+            for assessment in active_link_assessments
+        )
         if features.bait and ((snapshot.has_links and features.risky_link_present) or features.dangerous_link_target):
             matches.append(
                 ShieldMatch(
@@ -7532,14 +7702,52 @@ class ShieldService:
                     match_class="scam_bait_attachment",
                 )
             )
-        if features.shortener_or_punycode and (features.social_engineering or features.cta or features.login_or_auth_flow):
+        shortener_has_strong_lure = bool(
+            features.bait
+            or features.brand_bait
+            or features.support_framing
+            or features.security_notice
+            or features.fake_authority
+            or features.qr_setup_lure
+            or features.wallet_or_mint
+            or features.login_or_auth_flow
+            or features.suspicious_attachment_combo
+            or features.dangerous_link_target
+            or (not features.automated_author and features.fresh_campaign_cluster_20m >= 2)
+        )
+        generic_shortener_cta = shortener_signal_present and (features.social_engineering or features.cta)
+        if punycode_signal_present and (features.social_engineering or features.cta or features.login_or_auth_flow):
             matches.append(
                 ShieldMatch(
                     pack="scam",
                     label="Shortened or punycode lure",
-                    reason="A shortened or punycode-style link appeared with instructions to open, claim, or verify something.",
+                    reason="A punycode-style link appeared with instructions to open, claim, or verify something.",
                     action=settings.action_for_confidence("high"),
                     confidence="high",
+                    heuristic=True,
+                    match_class="scam_shortener",
+                )
+            )
+        elif generic_shortener_cta and shortener_has_strong_lure:
+            matches.append(
+                ShieldMatch(
+                    pack="scam",
+                    label="Shortened-link lure",
+                    reason="A shortened link appeared with concrete scam bait, account-flow, or impersonation context.",
+                    action=settings.action_for_confidence("high"),
+                    confidence="high",
+                    heuristic=True,
+                    match_class="scam_shortener",
+                )
+            )
+        elif generic_shortener_cta and settings.sensitivity == "high":
+            matches.append(
+                ShieldMatch(
+                    pack="scam",
+                    label="Shortened-link caution",
+                    reason="A shortened link appeared with generic open or visit wording, but no stronger scam bait.",
+                    action=settings.action_for_confidence("low"),
+                    confidence="low",
                     heuristic=True,
                     match_class="scam_shortener",
                 )
