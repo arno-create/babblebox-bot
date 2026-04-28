@@ -188,6 +188,15 @@ class PremiumServiceTests(unittest.IsolatedAsyncioTestCase):
             token_expires_at=_utcnow() + timedelta(hours=1),
         )
 
+    async def test_provider_diagnostics_redacts_storage_error_credentials(self):
+        self.service.storage_ready = False
+        self.service.storage_error = "could not connect to postgresql://user:secret@db.example/babblebox"
+
+        diagnostics = self.service.provider_diagnostics()
+
+        self.assertNotIn("user:secret", str(diagnostics["storage_error"]))
+        self.assertIn("postgresql://[redacted]@db.example/babblebox", str(diagnostics["storage_error"]))
+
     async def test_manual_grant_block_and_clear_follow_precedence_rules(self):
         self.assertEqual(self.service.get_user_snapshot(10)["plan_code"], PLAN_FREE)
         self.assertEqual(self.service.resolve_user_limit(10, LIMIT_WATCH_KEYWORDS), 10)

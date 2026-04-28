@@ -1,9 +1,16 @@
 from __future__ import annotations
 
+import re
 from typing import Any
+from urllib.parse import urlsplit, urlunsplit
 
 
 PERMISSIVE_STORAGE_BACKENDS = frozenset({"memory", "test", "dev"})
+CONNECTION_URL_RE = re.compile(r"\b(?:postgres(?:ql)?|redis(?:s)?|mysql|mariadb)://[^\s<>'\")]+", re.IGNORECASE)
+SECRET_ASSIGNMENT_RE = re.compile(
+    r"\b([A-Z0-9_]*(?:TOKEN|SECRET|PASSWORD|API_KEY|PRIVATE_KEY)[A-Z0-9_]*)=([^\s,;]+)",
+    re.IGNORECASE,
+)
 SERVICE_SPECS: tuple[tuple[str, str], ...] = (
     ("premium", "premium_service"),
     ("confessions", "confessions_service"),
@@ -18,6 +25,36 @@ SERVICE_SPECS: tuple[tuple[str, str], ...] = (
 def _normalize_backend_name(value: Any) -> str | None:
     cleaned = str(value or "").strip().lower()
     return cleaned or None
+
+
+def _redact_connection_url(match: re.Match[str]) -> str:
+    raw = match.group(0)
+    trimmed = raw.rstrip(".,;")
+    suffix = raw[len(trimmed) :]
+    try:
+        parsed = urlsplit(trimmed)
+    except ValueError:
+        return "[redacted connection URL]" + suffix
+    if "@" not in parsed.netloc:
+        return trimmed + suffix
+    hostname = parsed.hostname or "host"
+    port = ""
+    try:
+        if parsed.port is not None:
+            port = f":{parsed.port}"
+    except ValueError:
+        port = ""
+    netloc = f"[redacted]@{hostname}{port}"
+    return urlunsplit((parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment)) + suffix
+
+
+def redact_operational_error(value: Any) -> str | None:
+    cleaned = str(value or "").strip()
+    if not cleaned:
+        return None
+    redacted = CONNECTION_URL_RE.sub(_redact_connection_url, cleaned)
+    redacted = SECRET_ASSIGNMENT_RE.sub(lambda match: f"{match.group(1)}=[redacted]", redacted)
+    return redacted
 
 
 def _service_store(service: Any) -> Any:
@@ -44,8 +81,7 @@ def service_storage_error(service: Any) -> str | None:
     raw = getattr(service, "storage_error", None)
     if not raw:
         raw = getattr(service, "_startup_storage_error", None)
-    cleaned = str(raw or "").strip()
-    return cleaned or None
+    return redact_operational_error(raw)
 
 
 def is_permissive_storage_backend(backend_name: str | None) -> bool:

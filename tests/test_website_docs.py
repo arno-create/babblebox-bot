@@ -132,6 +132,19 @@ class WebsiteDocsTests(unittest.TestCase):
 
         self.assertIn("help.html", sitemap)
 
+    def test_operator_docs_cover_embedded_web_security_controls(self):
+        readme = (ROOT / "README.md").read_text(encoding="utf-8")
+        env_example = (ROOT / ".env.example").read_text(encoding="utf-8")
+
+        for text in (
+            "BABBLEBOX_TRUSTED_HOSTS",
+            "64 KiB",
+            "Content Security Policy",
+            "untrusted proxy headers",
+        ):
+            self.assertIn(text, readme)
+            self.assertIn(text, env_example)
+
     def test_readme_and_homepage_reflect_recent_feature_set(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
         index_html = (ROOT / "index.html").read_text(encoding="utf-8")

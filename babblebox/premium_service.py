@@ -63,6 +63,7 @@ from babblebox.premium_provider import PremiumProviderError, WebhookVerification
 from babblebox.premium_crypto import PremiumCryptoError
 from babblebox.premium_provider_patreon import PatreonPremiumProvider
 from babblebox.premium_store import PremiumStorageUnavailable, PremiumStore, PremiumStoreConflict
+from babblebox.runtime_health import redact_operational_error
 
 
 PREMIUM_STALE_WARNING_HOURS = 24
@@ -756,7 +757,7 @@ class PremiumService:
         patreon_state = self._patreon_configuration_state()
         return {
             "storage_ready": self.storage_ready,
-            "storage_error": self.storage_error,
+            "storage_error": redact_operational_error(self.storage_error),
             "storage_backend": getattr(self.store, "backend_name", "unavailable") if self.store is not None else "unavailable",
             "database_url": self.store.redacted_database_url() if self.store is not None and hasattr(self.store, "redacted_database_url") else "unknown",
             "crypto_source": getattr(crypto_meta, "source", "unknown"),

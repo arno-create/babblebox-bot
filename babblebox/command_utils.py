@@ -188,7 +188,11 @@ def is_slash_invocation(ctx: commands.Context) -> bool:
 
 
 async def is_command_message(bot: commands.Bot, message: discord.Message) -> bool:
-    prefixes = await bot.get_prefix(message)
+    get_prefix = getattr(bot, "get_prefix", None)
+    if not callable(get_prefix):
+        return False
+    prefixes = await get_prefix(message)
     if isinstance(prefixes, str):
         prefixes = [prefixes]
-    return any(message.content.startswith(prefix) for prefix in prefixes)
+    content = getattr(message, "content", "") or ""
+    return any(content.startswith(prefix) for prefix in prefixes)

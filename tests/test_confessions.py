@@ -3282,6 +3282,9 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
         await self.cog.service.close()
         await self._original_service.close()
 
+    def _patch_confessions_global(self, name: str, value):
+        return mock.patch.dict(ConfessionsCog.confess_create_command.callback.__globals__, {name: value})
+
     def _member(self, user_id: int, *, roles: list[FakeRole] | None = None, manage_guild: bool = False) -> FakeUser:
         member = FakeUser(user_id, roles=roles, manage_guild=manage_guild)
         self.guild.add_member(member)
@@ -3564,7 +3567,7 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
         await self.cog.service.configure_guild(self.guild.id, enabled=True, confession_channel_id=20, review_mode=False)
         ctx = FakeContext(guild=self.guild, author=self._member(119))
 
-        with mock.patch("babblebox.cogs.confessions.ConfessionComposerModal", side_effect=RuntimeError("construct boom")):
+        with self._patch_confessions_global("ConfessionComposerModal", mock.Mock(side_effect=RuntimeError("construct boom"))):
             await ConfessionsCog.confess_create_command.callback(self.cog, ctx)
 
         self.assertEqual(len(ctx.interaction.response.modal_calls), 0)
@@ -4011,7 +4014,7 @@ class ConfessionsCogTests(unittest.IsolatedAsyncioTestCase):
         prompt_message = owner.sent[0]
         interaction = FakeInteraction(guild=None, user=owner, message=prompt_message, client=self.bot)
 
-        with mock.patch("babblebox.cogs.confessions.OwnerReplyComposerModal", side_effect=RuntimeError("modal boom")):
+        with self._patch_confessions_global("OwnerReplyComposerModal", mock.Mock(side_effect=RuntimeError("modal boom"))):
             await self.cog._handle_owner_reply_prompt_open(interaction)
 
         self.assertEqual(len(interaction.response.modal_calls), 0)

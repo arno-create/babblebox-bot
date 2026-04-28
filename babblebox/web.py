@@ -10,6 +10,7 @@ from datetime import datetime, timezone
 from pathlib import Path, PurePosixPath
 from threading import Lock, Thread
 from typing import Any
+from urllib.parse import urlsplit
 
 from flask import Flask, abort, jsonify, request, send_file, send_from_directory
 
@@ -28,10 +29,25 @@ SITEMAP_PATH = ROOT_DIR / "sitemap.xml"
 PREMIUM_QUERY_VALUE_LIMIT = 1024
 PREMIUM_WEBHOOK_MAX_BYTES = 65536
 TOPGG_WEBHOOK_MAX_BYTES = 65536
+PUBLIC_REQUEST_MAX_BYTES = max(PREMIUM_WEBHOOK_MAX_BYTES, TOPGG_WEBHOOK_MAX_BYTES)
 PUBLIC_FILE_CACHE_CONTROL = "public, max-age=300, must-revalidate"
+PUBLIC_HTML_CSP = (
+    "default-src 'self'; "
+    "script-src 'self'; "
+    "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; "
+    "font-src 'self' https://fonts.gstatic.com; "
+    "img-src 'self' https://arno-create.github.io data:; "
+    "connect-src 'none'; "
+    "object-src 'none'; "
+    "base-uri 'self'; "
+    "form-action 'none'; "
+    "frame-ancestors 'none'; "
+    "upgrade-insecure-requests"
+)
 DEFAULT_HTTP_PORT = 10000
 DEFAULT_WAITRESS_THREADS = 4
 INGRESS_MODE = "embedded_waitress"
+LOCAL_TRUSTED_HOSTNAMES = frozenset({"localhost", "127.0.0.1", "::1"})
 
 _premium_runtime = None
 _vote_runtime = None
@@ -69,8 +85,14 @@ class VoteRuntimeUnavailableError(RuntimeError):
 
 def create_app() -> Flask:
     flask_app = Flask(__name__)
+    _configure_app_security(flask_app)
     _register_routes(flask_app)
     return flask_app
+
+
+def _configure_app_security(flask_app: Flask):
+    flask_app.config["MAX_CONTENT_LENGTH"] = PUBLIC_REQUEST_MAX_BYTES
+    flask_app.config["MAX_FORM_MEMORY_SIZE"] = PUBLIC_REQUEST_MAX_BYTES
 
 
 def set_premium_runtime(service):
@@ -160,10 +182,18 @@ def _run_vote_coroutine(coro):
     return future.result(timeout=45)
 
 
-def _apply_security_headers(response, *, cache_control: str | None = None, no_store: bool = False):
+def _apply_security_headers(
+    response,
+    *,
+    cache_control: str | None = None,
+    no_store: bool = False,
+    content_security_policy: str | None = None,
+):
     response.headers["X-Content-Type-Options"] = "nosniff"
     response.headers["Referrer-Policy"] = "no-referrer"
     response.headers["X-Frame-Options"] = "DENY"
+    if content_security_policy:
+        response.headers["Content-Security-Policy"] = content_security_policy
     if no_store:
         response.headers["Cache-Control"] = "no-store, max-age=0"
         response.headers["Pragma"] = "no-cache"
@@ -184,6 +214,52 @@ def _public_base_url() -> str:
 
 def _public_base_url_configured() -> bool:
     return bool(_public_base_url())
+
+
+def _normalize_hostname(value: Any) -> str | None:
+    host = str(value or "").strip().lower()
+    if not host or any(separator in host for separator in ("/", "\\", "@")):
+        return None
+    if host.startswith("["):
+        end = host.find("]")
+        if end <= 1:
+            return None
+        return host[1:end]
+    if host.count(":") == 1:
+        host = host.split(":", 1)[0]
+    return host.rstrip(".") or None
+
+
+def _public_base_hostname() -> str | None:
+    try:
+        parsed = urlsplit(_public_base_url())
+    except ValueError:
+        return None
+    return _normalize_hostname(parsed.hostname)
+
+
+def _trusted_hostnames() -> frozenset[str]:
+    configured: set[str] = set()
+    public_host = _public_base_hostname()
+    if public_host:
+        configured.add(public_host)
+    for raw_host in str(os.getenv("BABBLEBOX_TRUSTED_HOSTS", "") or "").split(","):
+        host = _normalize_hostname(raw_host)
+        if host and host not in {"0.0.0.0", "::"}:
+            configured.add(host)
+    explicit_bind_host = _normalize_hostname(os.getenv("BABBLEBOX_WEB_HOST", ""))
+    if explicit_bind_host and explicit_bind_host not in {"0.0.0.0", "::"}:
+        configured.add(explicit_bind_host)
+    if configured:
+        configured.update(LOCAL_TRUSTED_HOSTNAMES)
+    return frozenset(configured)
+
+
+def _request_host_allowed() -> bool:
+    trusted = _trusted_hostnames()
+    if not trusted:
+        return True
+    return _normalize_hostname(request.host) in trusted
 
 
 def _resolve_bind_host() -> str:
@@ -228,7 +304,8 @@ def _send_public_file(path: Path):
     if not path.exists() or not path.is_file():
         abort(404)
     response = send_file(path)
-    return _apply_security_headers(response, cache_control=PUBLIC_FILE_CACHE_CONTROL)
+    csp = PUBLIC_HTML_CSP if path.suffix.casefold() == ".html" else None
+    return _apply_security_headers(response, cache_control=PUBLIC_FILE_CACHE_CONTROL, content_security_policy=csp)
 
 
 def _serve_public_root_file(path: Path):
@@ -732,6 +809,15 @@ def _vote_webhook_json(*, status: str, message: str, status_code: int):
 
 
 def _register_routes(flask_app: Flask):
+    @flask_app.before_request
+    def reject_untrusted_hosts():
+        if not _request_host_allowed():
+            return _json_response(
+                {"status": "invalid", "message": "Request host is not trusted."},
+                status_code=400,
+                no_store=True,
+            )
+
     @flask_app.get("/")
     def home():
         if INDEX_PATH.exists():
@@ -955,6 +1041,7 @@ def _register_routes(flask_app: Flask):
 
 
 def run(*, host: str | None = None, port: int | None = None):
+    _configure_app_security(app)
     serve = _load_waitress_server()
     resolved_host = host or _resolve_bind_host()
     resolved_port = int(port or _resolve_port())
@@ -971,6 +1058,8 @@ def run(*, host: str | None = None, port: int | None = None):
         port=resolved_port,
         threads=threads,
         ident="Babblebox",
+        max_request_body_size=PUBLIC_REQUEST_MAX_BYTES,
+        clear_untrusted_proxy_headers=True,
     )
 
 
@@ -979,6 +1068,7 @@ def start_http_server() -> Thread:
     with _server_lock:
         if _server_thread is not None and _server_thread.is_alive():
             return _server_thread
+        _load_waitress_server()
         thread = Thread(target=run, daemon=True, name="babblebox-http")
         _server_thread = thread
         thread.start()

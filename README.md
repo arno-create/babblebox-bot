@@ -841,6 +841,8 @@ UTILITY_DATABASE_URL=postgresql://...
 # PUBLIC_BASE_URL=https://your-public-babblebox-domain.example
 # Optional embedded web bind override. Defaults to 127.0.0.1 and only auto-binds 0.0.0.0 when PUBLIC_BASE_URL is set.
 # BABBLEBOX_WEB_HOST=127.0.0.1
+# Optional comma-separated public hostnames accepted by the embedded web surface in addition to PUBLIC_BASE_URL and loopback.
+# BABBLEBOX_TRUSTED_HOSTS=your-public-babblebox-domain.example,your-render-service.onrender.com
 # PATREON_CLIENT_ID=your_patreon_client_id
 # PATREON_CLIENT_SECRET=your_patreon_client_secret
 # PATREON_REDIRECT_URI must exactly match PUBLIC_BASE_URL + /premium/patreon/callback
@@ -887,7 +889,9 @@ Environment variable notes:
 - `PREMIUM_SECRET_LEGACY_KEYS` is an optional comma-separated `key_id=secret` list used only during premium key rotation or compatibility windows
 - `PUBLIC_BASE_URL` is required for Patreon OAuth callback and webhook routes
 - `BABBLEBOX_WEB_HOST` optionally overrides the embedded web bind host. Without it, Babblebox stays on `127.0.0.1` by default and only auto-binds `0.0.0.0` when `PUBLIC_BASE_URL` is configured
+- `BABBLEBOX_TRUSTED_HOSTS` optionally adds accepted public hostnames beyond `PUBLIC_BASE_URL`; loopback hosts remain accepted for local health checks
 - The embedded HTTP surface now runs through in-process `Waitress`; keep it behind external TLS and reverse proxying in production instead of exposing the raw process directly
+- The embedded HTTP surface caps request bodies at 64 KiB, clears untrusted proxy headers, and serves hosted HTML with a Content Security Policy
 - `/livez` is liveness only, `/health` is the public-safe summary, and `/readyz` is the rollout and alert gate; those public routes expose non-sensitive readiness only
 - `PATREON_CLIENT_ID`, `PATREON_CLIENT_SECRET`, `PATREON_REDIRECT_URI`, `PATREON_WEBHOOK_SECRET`, `PATREON_CAMPAIGN_ID`, `PATREON_SUPPORTER_TIER_IDS`, `PATREON_PLUS_TIER_IDS`, and `PATREON_GUILD_PRO_TIER_IDS` are required for Patreon-linked premium linking, verified webhooks, and user refresh
 - `PATREON_REDIRECT_URI` must exactly match `PUBLIC_BASE_URL` plus `/premium/patreon/callback`, and the Patreon tier ID lists must be disjoint numeric IDs; Babblebox fails the Patreon surface closed when that configuration is incomplete or inconsistent
@@ -960,6 +964,7 @@ python main.py
 
 - `babblebox.web:create_app` is the WSGI app factory if you want to front Babblebox with a separate ingress layer
 - the default same-process HTTP path uses embedded `Waitress`, not Flask's development server
+- public HTML responses include a Content Security Policy; webhook bodies are capped at 64 KiB before application processing; untrusted proxy headers are cleared at the Waitress boundary
 - `/livez` is liveness only and should not gate rollouts
 - `/health` is the compact public-safe summary
 - `/readyz` is the deployment and monitoring gate because it includes whole-bot readiness, Confessions readiness, and sanitized premium provider aggregates

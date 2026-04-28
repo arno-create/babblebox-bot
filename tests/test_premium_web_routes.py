@@ -3,7 +3,7 @@ import unittest
 from unittest.mock import patch
 from typing import Optional
 
-from babblebox import web
+from babblebox import runtime_health, web
 from babblebox.premium_provider import PremiumProviderError, WebhookVerificationError
 from babblebox.premium_service import PatreonWebhookResult
 from babblebox.vote_service import TopggWebhookResult
@@ -143,6 +143,8 @@ class PremiumWebRoutesTests(unittest.TestCase):
         self.assertEqual(response.headers.get("X-Content-Type-Options"), "nosniff")
         self.assertEqual(response.headers.get("Referrer-Policy"), "no-referrer")
         self.assertEqual(response.headers.get("X-Frame-Options"), "DENY")
+        self.assertIn("default-src 'self'", response.headers.get("Content-Security-Policy", ""))
+        self.assertIn("frame-ancestors 'none'", response.headers.get("Content-Security-Policy", ""))
         response.get_data()
         response.close()
 
@@ -150,8 +152,32 @@ class PremiumWebRoutesTests(unittest.TestCase):
             allowed = self.client.get(path)
             self.assertEqual(allowed.status_code, 200, msg=path)
             self.assertEqual(allowed.headers.get("X-Content-Type-Options"), "nosniff", msg=path)
+            if path.endswith(".html"):
+                self.assertIn("default-src 'self'", allowed.headers.get("Content-Security-Policy", ""), msg=path)
+            else:
+                self.assertNotIn("Content-Security-Policy", allowed.headers, msg=path)
             allowed.get_data()
             allowed.close()
+
+    def test_public_host_validation_rejects_untrusted_hosts_when_public_url_is_configured(self):
+        with patch.dict(web.os.environ, {"PUBLIC_BASE_URL": "https://example.test"}, clear=False):
+            response = self.client.get("/", headers={"Host": "evil.test"})
+            allowed = self.client.get("/", headers={"Host": "example.test"})
+            local = self.client.get("/", headers={"Host": "localhost"})
+
+        self.assertEqual(response.status_code, 400)
+        self.assertEqual(response.get_json()["message"], "Request host is not trusted.")
+        self.assertEqual(allowed.status_code, 200)
+        self.assertEqual(local.status_code, 200)
+        response.close()
+        allowed.get_data()
+        allowed.close()
+        local.get_data()
+        local.close()
+
+    def test_request_body_limits_are_configured_before_webhook_routes_read_payloads(self):
+        self.assertEqual(web.app.config.get("MAX_CONTENT_LENGTH"), web.PUBLIC_REQUEST_MAX_BYTES)
+        self.assertEqual(web.app.config.get("MAX_FORM_MEMORY_SIZE"), web.PUBLIC_REQUEST_MAX_BYTES)
 
     def test_livez_is_always_ok_and_no_store(self):
         response = self.client.get("/livez")
@@ -725,6 +751,23 @@ class PremiumWebRoutesTests(unittest.TestCase):
         self.assertNotIn("payload-secret", rendered)
         self.assertNotIn("vote-secret", rendered)
 
+    def test_runtime_service_lines_redact_storage_error_credentials(self):
+        bot = types.SimpleNamespace(
+            premium_service=self._service_stub(
+                configured_backend="postgres",
+                storage_ready=False,
+                storage_error="could not connect to postgresql://user:secret@db.example/babblebox",
+            )
+        )
+
+        rendered = "\n".join(runtime_health.runtime_service_lines(bot))
+        failure = runtime_health.format_service_startup_failure("Premium", bot.premium_service)
+
+        self.assertNotIn("user:secret", rendered)
+        self.assertNotIn("user:secret", failure)
+        self.assertIn("postgresql://[redacted]@db.example/babblebox", rendered)
+        self.assertIn("postgresql://[redacted]@db.example/babblebox", failure)
+
     def test_run_uses_waitress_server_contract(self):
         called = {}
 
@@ -742,6 +785,19 @@ class PremiumWebRoutesTests(unittest.TestCase):
         self.assertEqual(called["kwargs"]["port"], 12345)
         self.assertEqual(called["kwargs"]["threads"], 6)
         self.assertEqual(called["kwargs"]["ident"], "Babblebox")
+        self.assertEqual(called["kwargs"]["max_request_body_size"], web.PUBLIC_REQUEST_MAX_BYTES)
+        self.assertTrue(called["kwargs"]["clear_untrusted_proxy_headers"])
+
+    def test_start_http_server_fails_synchronously_when_waitress_is_unavailable(self):
+        original_thread = web._server_thread
+        try:
+            web._server_thread = None
+            with patch.object(web, "_load_waitress_server", side_effect=RuntimeError("missing waitress")):
+                with self.assertRaisesRegex(RuntimeError, "missing waitress"):
+                    web.start_http_server()
+            self.assertIsNone(web._server_thread)
+        finally:
+            web._server_thread = original_thread
 
     def test_bind_host_defaults_to_local_only_without_public_base_url(self):
         with patch.dict(web.os.environ, {}, clear=True):

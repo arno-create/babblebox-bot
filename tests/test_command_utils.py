@@ -1,10 +1,19 @@
 import unittest
 
-from babblebox.command_utils import defer_hybrid_response, send_hybrid_response
+from babblebox.command_utils import defer_hybrid_response, is_command_message, send_hybrid_response
 
 
 class FakeMessage:
-    pass
+    def __init__(self, content: str = ""):
+        self.content = content
+
+
+class FakeBot:
+    def __init__(self, prefixes):
+        self.prefixes = prefixes
+
+    async def get_prefix(self, message):
+        return self.prefixes
 
 
 class FakeResponse:
@@ -83,3 +92,12 @@ class CommandUtilsTests(unittest.IsolatedAsyncioTestCase):
         ctx = FakeContext(interaction=interaction)
         self.assertFalse(await defer_hybrid_response(ctx, ephemeral=True))
         self.assertEqual(ctx.defer_calls, [])
+
+    async def test_is_command_message_treats_missing_prefix_resolver_as_not_command(self):
+        bot_without_get_prefix = object()
+
+        self.assertFalse(await is_command_message(bot_without_get_prefix, FakeMessage("!help")))
+
+    async def test_is_command_message_uses_configured_prefixes(self):
+        self.assertTrue(await is_command_message(FakeBot(["!", "?"]), FakeMessage("?help")))
+        self.assertFalse(await is_command_message(FakeBot("!"), FakeMessage("hello")))

@@ -56,6 +56,9 @@ class FakeMessage:
 
 
 class EventsCogTests(unittest.IsolatedAsyncioTestCase):
+    def _patch_event_global(self, name: str, value):
+        return patch.dict(EventsCog.on_message.__globals__, {name: value})
+
     async def test_shield_match_short_circuits_watch_and_game_paths(self):
         utility_service = types.SimpleNamespace(
             clear_afk_on_activity=AsyncMock(return_value=None),
@@ -76,7 +79,7 @@ class EventsCogTests(unittest.IsolatedAsyncioTestCase):
         cog = EventsCog(bot)
         message = FakeMessage()
 
-        with patch("babblebox.cogs.events.is_command_message", new=AsyncMock(return_value=False)):
+        with self._patch_event_global("is_command_message", AsyncMock(return_value=False)):
             await cog.on_message(message)
 
         utility_service.handle_watch_message.assert_not_awaited()
@@ -108,7 +111,7 @@ class EventsCogTests(unittest.IsolatedAsyncioTestCase):
         message = FakeMessage()
         message.mentions = [target]
 
-        with patch("babblebox.cogs.events.is_command_message", new=AsyncMock(return_value=False)):
+        with self._patch_event_global("is_command_message", AsyncMock(return_value=False)):
             await cog.on_message(message)
 
         self.assertEqual(len(message.channel.sent), 1)
@@ -139,7 +142,7 @@ class EventsCogTests(unittest.IsolatedAsyncioTestCase):
         message = FakeMessage()
         message.mentions = [first, second]
 
-        with patch("babblebox.cogs.events.is_command_message", new=AsyncMock(return_value=False)):
+        with self._patch_event_global("is_command_message", AsyncMock(return_value=False)):
             await cog.on_message(message)
 
         self.assertEqual(len(message.channel.sent), 1)
@@ -177,7 +180,7 @@ class EventsCogTests(unittest.IsolatedAsyncioTestCase):
         }
         try:
             with (
-                patch("babblebox.cogs.events.is_command_message", new=AsyncMock(return_value=False)),
+                self._patch_event_global("is_command_message", AsyncMock(return_value=False)),
                 patch("babblebox.pattern_hunt_game.handle_pattern_hunt_message_locked", new=AsyncMock(return_value=True)) as handle_hunt,
             ):
                 await cog.on_message(message)
@@ -220,7 +223,7 @@ class EventsCogTests(unittest.IsolatedAsyncioTestCase):
         cog = EventsCog(bot)
         message = FakeMessage()
 
-        with patch("babblebox.cogs.events.is_command_message", new=AsyncMock(return_value=False)):
+        with self._patch_event_global("is_command_message", AsyncMock(return_value=False)):
             await cog.on_message(message)
 
         confessions_service.handle_member_response_message.assert_awaited_once_with(message)
