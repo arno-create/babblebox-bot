@@ -2290,6 +2290,11 @@ class ShieldCog(commands.Cog):
             return "trusted-brand impersonation | hard local block"
         if assessment.category == "adult":
             return "adult | matched local intel"
+        if (
+            "preview_only" in getattr(assessment, "matched_signals", ())
+            and assessment.category in {"unknown", "unknown_suspicious"}
+        ):
+            return "preview-only advisory | no action"
         if assessment.category == "unknown_suspicious":
             if "guild_allow_domain" in getattr(assessment, "matched_signals", ()):
                 return "unknown suspicious | allowlisted but still risky"
