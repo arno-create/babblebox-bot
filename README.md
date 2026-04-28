@@ -81,9 +81,9 @@ Babblebox premium is intentionally narrow:
 - Spyfall
 - Word Bomb
 - Pattern Hunt
-  - coder-led public clue loop with private natural rule theories
-  - hidden-rule coder DMs and deterministic theory parsing
-  - first-round grace, clue budget, and cleaner reveal flow
+  - guesser-led public question loop with private natural rule theories
+  - hidden-rule pattern-holder DMs and deterministic theory parsing
+  - first-round grace, question budget, and cleaner reveal flow
 - Chaos Cards and bomb mode variants
 - hybrid slash + `bb!` prefix support
 - session stats and session leaderboard commands
@@ -282,7 +282,7 @@ Party game flow still starts from `/play`.
 - Exquisite Corpse: 3-6 players for the current six-prompt format
 - Spyfall: 3-25 players
 - Word Bomb: 2-25 players
-- Pattern Hunt: 3-10 players, coder-led public clue loop, private natural rule theories, and coder role DMs that stay hidden from the room
+- Pattern Hunt: 3-10 players, guesser-led public questions, pattern-holder answers that follow a hidden rule, private natural theories, and pattern-holder DMs that stay hidden from the room
 
 Babblebox now nudges solo users toward Daily Arcade, Buddy, Profile, and utilities instead of leaving them at dead ends.
 
@@ -990,7 +990,7 @@ These features rely on DMs being open:
 
 - Broken Telephone
 - Exquisite Corpse
-- Pattern Hunt coder role DMs
+- Pattern Hunt pattern-holder DMs
 - Spyfall role messages
 - Watch alerts
 - Later markers

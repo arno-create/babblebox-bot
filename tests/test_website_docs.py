@@ -62,7 +62,7 @@ class WebsiteDocsTests(unittest.TestCase):
         self.assertNotIn("/drops mastery scholar-template", help_html)
         self.assertIn("scholar ladder", help_html)
         self.assertIn("Pattern Hunt", help_html)
-        self.assertIn("Coders need server DMs open before the room starts.", help_html)
+        self.assertIn("Pattern holders need server DMs open before the room starts.", help_html)
         self.assertNotIn("Only 16", help_html)
         self.assertNotIn("shieldaiglobal", help_html.casefold())
         self.assertNotIn("dropscelebaiglobal", help_html.casefold())
@@ -170,7 +170,7 @@ class WebsiteDocsTests(unittest.TestCase):
             "one-shot ordered-sequence",
             "/hunt guess",
             "/spyfall target",
-            "Pattern Hunt coder role DMs",
+            "Pattern Hunt pattern-holder DMs",
             "Anonymous Confessions",
             "/confess",
             "/confess reply-to-user",
@@ -235,7 +235,7 @@ class WebsiteDocsTests(unittest.TestCase):
             "/bremind",
             "{user.mention}",
             "{category.name}",
-            "Pattern Hunt coders need server DMs open before the round starts.",
+            "Pattern Hunt pattern holders need server DMs open before the round starts.",
             "anonymous confessions",
             "admin-enabled anonymous confessions",
             "images stay off by default unless admins explicitly turn them on",

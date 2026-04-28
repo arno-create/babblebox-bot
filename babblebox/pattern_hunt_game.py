@@ -585,7 +585,7 @@ def _pattern_hunt_progress_lines(state: dict[str, Any]) -> str:
     guesses_left = max(0, int(state.get("guess_limit", 3)) - int(state.get("guesses_used", 0)))
     misses_left = max(0, int(state.get("strike_limit", 3)) - int(state.get("strikes", 0)))
     return (
-        f"Clues: **{int(state.get('clues_used', 0))}/{int(state.get('clue_limit', 0))}**\n"
+        f"Q&A: **{int(state.get('clues_used', 0))}/{int(state.get('clue_limit', 0))}**\n"
         f"Guesses left: **{guesses_left}**\n"
         f"Misses left: **{misses_left}**"
     )
@@ -593,8 +593,8 @@ def _pattern_hunt_progress_lines(state: dict[str, Any]) -> str:
 
 def _pattern_hunt_next_step_copy(state: dict[str, Any]) -> str:
     if str(state.get("phase", "setup")).casefold() == "answer":
-        return "Once the clue lands, the next coder takes the room and the guesser can keep reading the pattern."
-    return "Once the guesser asks, the current coder answers with one clue in public chat."
+        return "After the answer lands, the next pattern holder takes the table."
+    return "When the question lands, the named pattern holder answers publicly while keeping the pattern hidden."
 
 
 def _pattern_hunt_now_copy(game: dict[str, Any]) -> str:
@@ -602,15 +602,15 @@ def _pattern_hunt_now_copy(game: dict[str, Any]) -> str:
     guesser = ge.get_snapshot_player(game, state.get("guesser_id"))
     coder = ge.get_snapshot_player(game, current_pattern_hunt_coder_id(game))
     guesser_name = ge.display_name_of(guesser) if guesser is not None else "The guesser"
-    coder_name = ge.display_name_of(coder) if coder is not None else "the coder"
+    coder_name = ge.display_name_of(coder) if coder is not None else "the pattern holder"
     if str(state.get("phase", "setup")).casefold() == "answer":
         return (
-            f"{coder_name}, post one clue in chat that fits the hidden rule.\n"
-            f"{guesser_name} reads the clues and can lock in a private theory with `/hunt guess` using natural text."
+            f"{coder_name}, answer the question in chat while following the hidden pattern.\n"
+            f"{guesser_name} reads the answers and can lock in a private theory with `/hunt guess` using natural text."
         )
     return (
-        f"{guesser_name}, ask {coder_name} for one clue in chat.\n"
-        "If you think you have it, use `/hunt guess` privately."
+        f"{guesser_name}, ask {coder_name} a normal question in chat.\n"
+        f"{coder_name}, answer naturally when the question lands."
     )
 
 
@@ -624,9 +624,9 @@ def _finish_pattern_hunt_tutorial_cycle(state: dict[str, Any]):
 
 def _pattern_hunt_first_round_copy() -> str:
     return (
-        "1. The current coder posts one clue that fits the hidden rule.\n"
-        "2. Babblebox accepts it, rotates coders, and keeps the public anchor small.\n"
-        "3. The guesser uses `/hunt guess` privately when a natural theory is ready."
+        "1. The guesser asks the named pattern holder a normal question.\n"
+        "2. The holder answers in chat while secretly following the pattern.\n"
+        "3. Babblebox rotates the table; `/hunt guess` stays private when a theory is ready."
     )
 
 
@@ -637,7 +637,7 @@ async def start_pattern_hunt_game_locked(guild_id: int, game: dict[str, Any]):
         await game["channel"].send(
             embed=ge.make_status_embed(
                 "Not Enough Players",
-                "Pattern Hunt needs at least 3 players so one person can guess while the coders hide the rule.",
+                "Pattern Hunt needs at least 3 players so one person can guess while the pattern holders hide the rule.",
                 tone="warning",
                 footer="Babblebox Pattern Hunt",
             )
@@ -656,11 +656,11 @@ async def start_pattern_hunt_game_locked(guild_id: int, game: dict[str, Any]):
             await coder.send(
                 embed=ge.style_embed(
                     discord.Embed(
-                        title="🔐 Pattern Hunt Role",
-                        description="Keep this private. Give one public clue that fits the rule, keep the logic offstage, and never explain the pattern aloud.",
+                        title="Pattern Hunt: Pattern Holder",
+                        description="Keep this private. You know the hidden pattern; answer the guesser's question naturally when the table reaches you.",
                         color=ge.EMBED_THEME["accent"],
                     ).add_field(name="Secret Rule", value=render_rule(rule_atoms), inline=False).add_field(
-                        name="Good Clue Examples",
+                        name="Good Answer Examples",
                         value=f"- {valid_examples[0]}\n- {valid_examples[1]}",
                         inline=False,
                     ).add_field(
@@ -668,8 +668,8 @@ async def start_pattern_hunt_game_locked(guild_id: int, game: dict[str, Any]):
                         value=f"- {invalid_example}",
                         inline=False,
                     ).add_field(
-                        name="Guardrails",
-                        value="One clue per turn. Keep the logic offstage. If Babblebox rejects a clue, send one fresh replacement and move on.",
+                        name="At the Table",
+                        value="Wait until the public card names you, then answer naturally in chat. Keep the logic offstage. If Babblebox rejects an answer, send one fresh answer and move on.",
                         inline=False,
                     ),
                     footer="Babblebox Pattern Hunt | The guesser never sees this DM",
@@ -681,7 +681,7 @@ async def start_pattern_hunt_game_locked(guild_id: int, game: dict[str, Any]):
                     "DM Failure",
                     (
                         f"I could not DM {coder.mention}, so Pattern Hunt stopped before the hidden rule got uneven. "
-                        "Ask every coder to open server DMs, then start the room again."
+                        "Ask every pattern holder to open server DMs, then start the room again."
                     ),
                     tone="danger",
                     footer="Babblebox Pattern Hunt",
@@ -690,10 +690,29 @@ async def start_pattern_hunt_game_locked(guild_id: int, game: dict[str, Any]):
             )
             await ge.cleanup_game(guild_id)
             return
+    with contextlib.suppress(Exception):
+        await guesser.send(
+            embed=ge.style_embed(
+                discord.Embed(
+                    title="Pattern Hunt: You Are Hunting",
+                    description="Everyone else knows the hidden pattern. Ask the named pattern holder normal questions in chat and read their answers.",
+                    color=discord.Color.dark_teal(),
+                ).add_field(
+                    name="How to Play",
+                    value="Ask the person on the public card one casual question. When a theory clicks, use `/hunt guess` privately.",
+                    inline=False,
+                ).add_field(
+                    name="Good Questions",
+                    value="Try everyday prompts like `what did you bring?`, `what are you ordering?`, or `how is your day going?`.",
+                    inline=False,
+                ),
+                footer="Babblebox Pattern Hunt | Your guesses stay private",
+            )
+        )
     turn_limit = max(5, (2 * len(coders)) + 1)
     state.update(
         {
-            "phase": "answer",
+            "phase": "prompt",
             "guesser_id": guesser.id,
             "coder_order": [player.id for player in coders],
             "current_coder_index": 0,
@@ -722,11 +741,40 @@ async def start_pattern_hunt_game_locked(guild_id: int, game: dict[str, Any]):
     await _begin_pattern_turn_locked(guild_id, game)
 
 
-def build_pattern_hunt_status_embed(game: dict[str, Any], *, public: bool) -> discord.Embed:
+def _pattern_hunt_private_role_copy(game: dict[str, Any], viewer: Any | None) -> tuple[str, str] | None:
+    if viewer is None:
+        return None
+    state = ensure_pattern_hunt_state(game)
+    viewer_id = getattr(viewer, "id", None)
+    guesser = ge.get_snapshot_player(game, state.get("guesser_id"))
+    coder = ge.get_snapshot_player(game, current_pattern_hunt_coder_id(game))
+    coder_name = ge.display_name_of(coder) if coder is not None else "the named pattern holder"
+    if viewer_id == state.get("guesser_id"):
+        return (
+            "Your Role",
+            (
+                f"You are hunting: ask {coder_name} a normal question in chat, read the public answers, "
+                "and use `/hunt guess` privately when your theory is ready."
+            ),
+        )
+    if viewer_id in {int(user_id) for user_id in state.get("coder_order", [])}:
+        if viewer_id == current_pattern_hunt_coder_id(game):
+            lead = "You know the hidden rule and are the named pattern holder right now."
+        else:
+            lead = "You know the hidden rule; wait until the table reaches you."
+        return (
+            "Your Role",
+            f"{lead} When the guesser asks, answer naturally when the question lands and keep the logic offstage.",
+        )
+    guesser_name = ge.display_name_of(guesser) if guesser is not None else "the guesser"
+    return ("Your Role", f"Watching only. Let {guesser_name} and the named pattern holder drive the live question.")
+
+
+def build_pattern_hunt_status_embed(game: dict[str, Any], *, public: bool, viewer: Any | None = None) -> discord.Embed:
     state = ensure_pattern_hunt_state(game)
     guesser = ge.get_snapshot_player(game, state.get("guesser_id"))
     coder = ge.get_snapshot_player(game, current_pattern_hunt_coder_id(game))
-    description = "Coder-led public clues. One hidden rule. Private natural theories stay in `/hunt guess`."
+    description = "Guesser-led table talk. One hidden pattern. Private natural theories stay in `/hunt guess`."
     if state.get("tutorial_cycle_active"):
         description += "\nFirst round is intentionally slower and more forgiving so the room can catch the rhythm."
     if public and state.get("hint_text"):
@@ -739,16 +787,22 @@ def build_pattern_hunt_status_embed(game: dict[str, Any], *, public: bool) -> di
         name="Who's Up",
         value=(
             f"Guesser: **{ge.display_name_of(guesser) if guesser else 'Unknown'}**\n"
-            f"Coder: **{ge.display_name_of(coder) if coder else 'Unknown'}**"
+            f"Pattern holder: **{ge.display_name_of(coder) if coder else 'Unknown'}**"
         ),
         inline=True,
     )
     embed.add_field(name="Time Left", value=_pattern_hunt_deadline_copy(state.get("deadline_at")), inline=True)
     embed.add_field(name="Do This Now", value=_pattern_hunt_now_copy(game), inline=False)
     if state.get("current_prompt"):
-        embed.add_field(name="Current Ask", value=ge.safe_field_text(state.get("current_prompt"), limit=240), inline=False)
+        embed.add_field(name="Current Question", value=ge.safe_field_text(state.get("current_prompt"), limit=240), inline=False)
     embed.add_field(name="What Happens Next", value=_pattern_hunt_next_step_copy(state), inline=False)
     embed.add_field(name="Progress", value=_pattern_hunt_progress_lines(state), inline=False)
+    role_field = None if public else _pattern_hunt_private_role_copy(game, viewer)
+    if role_field is not None:
+        embed.add_field(name=role_field[0], value=role_field[1], inline=False)
+        viewer_id = getattr(viewer, "id", None)
+        if viewer_id in {int(user_id) for user_id in state.get("coder_order", [])} and state.get("rule_atoms"):
+            embed.add_field(name="Secret Pattern", value=render_rule(state.get("rule_atoms", [])), inline=False)
     if state.get("tutorial_cycle_active"):
         embed.add_field(
             name="First Round",
@@ -772,7 +826,7 @@ def build_pattern_hunt_status_embed(game: dict[str, Any], *, public: bool) -> di
             prompt_limit=36,
             clue_limit=64,
         )
-        embed.add_field(name="Recent Clues", value="\n".join(lines), inline=False)
+        embed.add_field(name="Recent Q&A", value="\n".join(lines), inline=False)
     return ge.style_embed(embed, footer="Babblebox Pattern Hunt | Hidden rule stays private")
 
 
@@ -797,7 +851,7 @@ async def handle_pattern_hunt_message_locked(message: discord.Message, guild_id:
             if ge.can_emit_notice(game, "last_pattern_prompt_notice_at", interval=4.0):
                 with contextlib.suppress(discord.HTTPException):
                     await message.channel.send(
-                        "Pattern Hunt: ask for one real clue request or theme so the coder has a clear lane.",
+                        "Pattern Hunt: ask the named pattern holder one real question or theme.",
                         delete_after=4.0,
                     )
             return True
@@ -820,8 +874,8 @@ async def handle_pattern_hunt_message_locked(message: discord.Message, guild_id:
         state["retry_used"] = True
         await game["channel"].send(
             embed=ge.make_status_embed(
-                "🔁 Fresh Clue",
-                f"{message.author.mention}, that clue does not fit. Send one fresh clue without explaining the pattern.",
+                "Fresh Answer",
+                f"{message.author.mention}, that answer does not fit. Send one fresh answer without explaining why.",
                 tone="warning",
                 footer="Babblebox Pattern Hunt",
             ),
@@ -831,7 +885,7 @@ async def handle_pattern_hunt_message_locked(message: discord.Message, guild_id:
     await _handle_pattern_penalty_locked(
         guild_id,
         game,
-        reason=f"{message.author.mention} missed the rule twice in the same turn.",
+        reason=f"{message.author.mention} sent two answers that did not fit in the same turn.",
         reset_phase="answer",
     )
     return True
@@ -859,7 +913,7 @@ async def submit_pattern_guess_locked(
             guild_id,
             game,
             guesser_won=False,
-            reason=f"{actor.mention} ran out of guesses. The coders held the pattern.",
+            reason=f"{actor.mention} ran out of guesses. The pattern holders held the pattern.",
         )
         return True, "Out of guesses."
     await _refresh_pattern_hunt_anchor(game)
@@ -896,17 +950,17 @@ async def _start_pattern_answer_locked(guild_id: int, game: dict[str, Any]):
 
 async def _begin_pattern_turn_locked(guild_id: int, game: dict[str, Any]):
     state = ensure_pattern_hunt_state(game)
-    state["phase"] = "answer"
+    state["phase"] = "prompt"
     state["current_prompt"] = None
     state["retry_used"] = False
-    timeout_seconds = _pattern_hunt_answer_timeout_seconds(state)
+    timeout_seconds = _pattern_hunt_prompt_timeout_seconds(state)
     state["deadline_at"] = ge.now_utc() + timedelta(seconds=timeout_seconds)
     token = ge.bump_token(game, "turn_token")
     await ge.cancel_task(game.get("turn_task"))
     await _refresh_pattern_hunt_anchor(game)
     game["turn_task"] = asyncio.create_task(
-        _pattern_hunt_answer_timeout(guild_id, token, timeout_seconds),
-        name=f"babblebox-pattern-answer-{guild_id}",
+        _pattern_hunt_prompt_timeout(guild_id, token, timeout_seconds),
+        name=f"babblebox-pattern-question-{guild_id}",
     )
     ge.reset_idle_timer(guild_id)
 
@@ -918,7 +972,7 @@ async def _advance_pattern_turn_locked(guild_id: int, game: dict[str, Any], *, c
         state["turns_used"] = state["clues_used"]
         if int(state.get("clues_used", 0)) >= int(state.get("clue_limit", 0)):
             _finish_pattern_hunt_tutorial_cycle(state)
-            await _finish_pattern_hunt_locked(guild_id, game, guesser_won=False, reason="The coders survived the full clue budget.")
+            await _finish_pattern_hunt_locked(guild_id, game, guesser_won=False, reason="The pattern holders survived the full question budget.")
             return
     else:
         state["turns_used"] = int(state.get("clues_used", 0) or 0)
@@ -934,9 +988,9 @@ async def _handle_pattern_penalty_locked(guild_id: int, game: dict[str, Any], *,
     if not state.get("tutorial_grace_used"):
         state["tutorial_grace_used"] = True
         if reset_phase == "answer":
-            body = "Opening round stays forgiving. Same coder, fresh clue timer."
+            body = "Opening round stays forgiving. Same holder, fresh answer timer."
         else:
-            body = "Opening round stays forgiving. Same guesser, fresh prompt timer."
+            body = "Opening round stays forgiving. Same guesser, fresh question timer."
         await game["channel"].send(
             embed=ge.make_status_embed("🕊️ Opening Grace", body, tone="info", footer="Babblebox Pattern Hunt"),
             allowed_mentions=discord.AllowedMentions(users=True, roles=False, everyone=False),
@@ -962,7 +1016,7 @@ async def _apply_pattern_strike_locked(guild_id: int, game: dict[str, Any], *, r
     body = f"{reason}\nMisses left: **{misses_left}**."
     if int(state.get("strikes", 0)) == 1 and state.get("hint_text"):
         body += f"\nHint: {state['hint_text']}"
-    body += "\nThe room moves to the next clue."
+    body += "\nThe table moves to the next question."
     await game["channel"].send(
         embed=ge.make_status_embed(
             "⚠️ Missed Beat",
@@ -974,7 +1028,7 @@ async def _apply_pattern_strike_locked(guild_id: int, game: dict[str, Any], *, r
     )
     if int(state.get("strikes", 0)) >= int(state.get("strike_limit", 3)):
         _finish_pattern_hunt_tutorial_cycle(state)
-        await _finish_pattern_hunt_locked(guild_id, game, guesser_won=True, reason="The coders ran out of misses, so the guesser takes it.")
+        await _finish_pattern_hunt_locked(guild_id, game, guesser_won=True, reason="The pattern holders ran out of misses, so the guesser takes it.")
         return
     await _advance_pattern_turn_locked(guild_id, game, count_clue=False)
 
@@ -998,7 +1052,7 @@ async def _finish_pattern_hunt_locked(guild_id: int, game: dict[str, Any], *, gu
         value=(
             f"{ge.display_name_of(guesser)} cracked the pattern."
             if guesser_won and guesser is not None
-            else "The coders protected the pattern."
+            else "The pattern holders protected the pattern."
         ),
         inline=False,
     )
@@ -1010,7 +1064,7 @@ async def _finish_pattern_hunt_locked(guild_id: int, game: dict[str, Any], *, gu
             prompt_limit=30,
             clue_limit=54,
         )
-        embed.add_field(name="Recent Clues", value="\n".join(lines), inline=False)
+        embed.add_field(name="Recent Q&A", value="\n".join(lines), inline=False)
     await game["channel"].send(embed=ge.style_embed(embed, footer="Babblebox Pattern Hunt | Hidden rule revealed"))
     await ge.cleanup_game(guild_id)
 
@@ -1029,7 +1083,7 @@ async def _pattern_hunt_prompt_timeout(guild_id: int, token: int, timeout_second
         await _handle_pattern_penalty_locked(
             guild_id,
             game,
-            reason="The guesser ran out of time to ask for a clue.",
+            reason="The guesser ran out of time to ask the named holder a question.",
             reset_phase="prompt",
         )
 
@@ -1049,6 +1103,6 @@ async def _pattern_hunt_answer_timeout(guild_id: int, token: int, timeout_second
         await _handle_pattern_penalty_locked(
             guild_id,
             game,
-            reason=f"{coder.mention if coder else 'The current coder'} ran out of time to send a clue.",
+            reason=f"{coder.mention if coder else 'The current holder'} ran out of time to answer the question.",
             reset_phase="answer",
         )
