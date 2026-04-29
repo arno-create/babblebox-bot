@@ -392,10 +392,16 @@ class WebsiteDocsTests(unittest.TestCase):
             "gpt-5.4-nano",
             "gpt-5.4-mini",
             "gpt-5.4",
-            "effective lane plus local readiness and entitlement state",
+            "effective lane plus local readiness, entitlement state, and provider gates",
         ):
             self.assertIn(text, readme)
-        for text in ("no-link DM-lure", "gpt-5.4-nano", "gpt-5.4-mini", "gpt-5.4", "effective lane plus local readiness and entitlement state"):
+        for text in (
+            "no-link DM-lure",
+            "gpt-5.4-nano",
+            "gpt-5.4-mini",
+            "gpt-5.4",
+            "effective lane plus local readiness and entitlement state",
+        ):
             self.assertIn(text, help_html)
         self.assertIn("no-link DM-lure", index_html)
         self.assertIn("effective lane plus local readiness and entitlement state", index_html)
@@ -411,9 +417,9 @@ class WebsiteDocsTests(unittest.TestCase):
         privacy_html = (ROOT / "privacy.html").read_text(encoding="utf-8")
 
         for text in (
-            "can make `gpt-5.4-mini` and `gpt-5.4` available above the baseline `gpt-5.4-nano` lane",
-            "baseline `gpt-5.4-nano` lane",
-            "gpt-5.4-nano` is the baseline tier",
+            "owner policy can keep all three models configured by default",
+            "provider/runtime readiness still gates frontier routing",
+            "effective higher-tier use still depends on Guild Pro entitlement and provider/runtime readiness",
             "owner policy controls whether review runs",
         ):
             self.assertTrue(any(text in content for content in (readme, help_html, privacy_md, privacy_html)))
@@ -780,11 +786,11 @@ class WebsiteDocsTests(unittest.TestCase):
             self.assertIn(text, help_html)
             self.assertIn(text, readme)
         self.assertIn(
-            "can make `gpt-5.4-mini` and `gpt-5.4` available above the baseline `gpt-5.4-nano` lane",
+            "ordinary guilds still need Babblebox Guild Pro for effective `gpt-5.4-mini` / `gpt-5.4` access",
             readme,
         )
         self.assertIn(
-            "can make <code>gpt-5.4-mini</code> plus <code>gpt-5.4</code> available above the baseline <code>gpt-5.4-nano</code> lane",
+            "can make <code>gpt-5.4-mini</code> plus <code>gpt-5.4</code> effective for Shield AI",
             help_html,
         )
 

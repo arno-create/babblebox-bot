@@ -19,7 +19,7 @@ from babblebox.premium_limits import (
     guild_limit as premium_guild_limit,
 )
 from babblebox.premium_models import PLAN_FREE, PLAN_GUILD_PRO
-from babblebox.shield_ai import SHIELD_AI_ALLOWED_GUILD_ID, ShieldAIReviewResult
+from babblebox.shield_ai import SHIELD_AI_ALLOWED_GUILD_ID, SHIELD_AI_MODEL_ORDER, ShieldAIReviewResult
 from babblebox.shield_service import (
     FEATURE_SURFACE_AFK_REASON,
     FEATURE_SURFACE_AFK_SCHEDULE_REASON,
@@ -922,6 +922,57 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(compiled.gif_rules.consecutive_enabled)
         self.assertTrue(compiled.gif_rules.repeat_enabled)
         self.assertFalse(compiled.gif_rules.same_asset_enabled)
+
+    async def test_custom_spam_lane_toggles_survive_service_reload(self):
+        ok, message = await self.service.set_pack_config(
+            10,
+            "spam",
+            enabled=True,
+            message_enabled=False,
+            message_threshold=4,
+            window_seconds=8,
+            burst_enabled=False,
+            burst_threshold=6,
+            burst_window_seconds=12,
+            near_duplicate_enabled=False,
+            duplicate_threshold=3,
+            duplicate_window_seconds=15,
+            emote_enabled=True,
+            emote_threshold=24,
+            caps_enabled=True,
+            caps_threshold=36,
+            low_value_enabled=True,
+            low_value_threshold=4,
+            low_value_window_seconds=120,
+            moderator_policy="delete_only",
+        )
+        self.assertTrue(ok, message)
+
+        normalized = _MemoryShieldStore().normalize_state(deepcopy(self.service.store.state))
+        config = normalized["guilds"]["10"]
+        compiled = self.service._compile_config(10, config)
+
+        self.assertFalse(config["spam_message_enabled"])
+        self.assertEqual(config["spam_message_threshold"], 4)
+        self.assertEqual(config["spam_message_window_seconds"], 8)
+        self.assertFalse(config["spam_burst_enabled"])
+        self.assertEqual(config["spam_burst_threshold"], 6)
+        self.assertEqual(config["spam_burst_window_seconds"], 12)
+        self.assertFalse(config["spam_near_duplicate_enabled"])
+        self.assertEqual(config["spam_near_duplicate_threshold"], 3)
+        self.assertEqual(config["spam_near_duplicate_window_seconds"], 15)
+        self.assertTrue(config["spam_emote_enabled"])
+        self.assertEqual(config["spam_emote_threshold"], 24)
+        self.assertTrue(config["spam_caps_enabled"])
+        self.assertEqual(config["spam_caps_threshold"], 36)
+        self.assertTrue(config["spam_low_value_enabled"])
+        self.assertEqual(config["spam_low_value_threshold"], 4)
+        self.assertEqual(config["spam_low_value_window_seconds"], 120)
+        self.assertEqual(config["spam_moderator_policy"], "delete_only")
+        self.assertFalse(compiled.spam_rules.message_enabled)
+        self.assertFalse(compiled.spam_rules.burst_enabled)
+        self.assertFalse(compiled.spam_rules.near_duplicate_enabled)
+        self.assertTrue(compiled.spam_rules.low_value_enabled)
 
     async def test_allowlisted_invite_does_not_bypass_promo_match(self):
         ok, _ = await self.service.set_pack_config(10, "promo", enabled=True, action="log", sensitivity="normal")
@@ -2168,12 +2219,44 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(categories["github.com"], "safe")
         self.assertEqual(categories["dlscord-gift.com"], "malicious")
         self.assertTrue([match for match in result.matches if match.pack == "scam"])
+        dispositions = {item.domain: item.disposition for item in result.link_explanations}
+        self.assertEqual(dispositions["github.com"], "Allowed")
+        self.assertEqual(dispositions["dlscord-gift.com"], "Flagged")
 
     async def test_shortener_without_other_signals_stays_conservative(self):
         result = self.service.test_message_details(10, "Useful article https://bit.ly/example")
 
         self.assertEqual(result.link_assessments[0].category, "unknown")
         self.assertFalse(result.link_assessments[0].provider_lookup_warranted)
+        self.assertNotIn(result.link_explanations[0].disposition, {"Flagged", "Blocked"})
+
+    async def test_attachment_only_shortener_metadata_stays_non_enforcement_grade(self):
+        ok, _ = await self.service.set_pack_config(10, "scam", enabled=True, action="delete_timeout_log", sensitivity="normal")
+        self.assertTrue(ok)
+
+        result = self.service.test_message_details(
+            10,
+            "",
+            attachments=[FakeAttachment("profile-preview.png", description="Cached preview source https://bit.ly/about-me")],
+        )
+
+        self.assertFalse([match for match in result.matches if match.pack == "scam"])
+        self.assertTrue(result.link_explanations)
+        self.assertTrue(all(item.disposition not in {"Flagged", "Blocked"} for item in result.link_explanations))
+
+    async def test_attachment_only_hard_malicious_link_still_enforces(self):
+        ok, _ = await self.service.set_pack_config(10, "scam", enabled=True, action="delete_log", sensitivity="normal")
+        self.assertTrue(ok)
+
+        result = self.service.test_message_details(
+            10,
+            "",
+            attachments=[FakeAttachment("offer.txt", description="Claim the free Nitro here https://dlscord-gift.com/claim")],
+        )
+
+        scam_matches = [match for match in result.matches if match.pack == "scam"]
+        self.assertTrue(scam_matches)
+        self.assertEqual(result.link_explanations[0].disposition, "Flagged")
 
     async def test_visible_shortener_with_generic_open_language_is_not_destructive(self):
         ok, _ = await self.service.set_pack_config(10, "scam", enabled=True, action="delete_timeout_log", sensitivity="normal")
@@ -4941,6 +5024,13 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         incident_field = next(field for field in edited_embed.fields if field.name == "Incident")
         self.assertIn("Grouped with", incident_field.value)
         self.assertIn("2", incident_field.value)
+        records = self.service.active_alert_action_records()
+        self.assertEqual(len(records), 1)
+        self.assertEqual(records[0]["target_message_id"], second.id)
+        self.assertEqual(records[0]["target_user_id"], author.id)
+        self.assertEqual(records[0]["action"], "delete_timeout_log")
+        self.assertEqual(records[0]["match_class"], "spam_message_rate")
+        self.assertTrue(records[0]["timed_out_by_shield"])
 
     async def test_spam_alert_grouping_keeps_distinct_reason_families_separate(self):
         guild = FakeGuild(10)
@@ -5204,8 +5294,8 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(status["enabled"])
         self.assertEqual(status["policy_source"], "ordinary_global")
         self.assertTrue(status["premium_unlocked"])
-        self.assertEqual(status["allowed_models"], ["gpt-5.4-nano"])
-        self.assertEqual(status["configured_allowed_models"], ["gpt-5.4-nano"])
+        self.assertEqual(status["allowed_models"], list(SHIELD_AI_MODEL_ORDER))
+        self.assertEqual(status["configured_allowed_models"], list(SHIELD_AI_MODEL_ORDER))
         self.assertFalse(status["configured_models_capped"])
 
     async def test_ordinary_guild_ai_policy_defaults_to_disabled_with_nano(self):
@@ -5214,11 +5304,32 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(status["enabled"])
         self.assertEqual(status["policy_source"], "ordinary_global")
         self.assertFalse(status["premium_unlocked"])
+        self.assertEqual(status["configured_allowed_models"], list(SHIELD_AI_MODEL_ORDER))
         self.assertEqual(status["allowed_models"], ["gpt-5.4-nano"])
-        self.assertEqual(status["configured_allowed_models"], ["gpt-5.4-nano"])
+        self.assertTrue(status["configured_models_capped"])
         self.assertEqual(status["premium_plan_code"], PLAN_FREE)
         self.assertEqual(status["premium_source"], "free")
         self.assertIn("owner enables it", status["status"].lower())
+
+    async def test_ai_default_policy_is_full_but_provider_gated(self):
+        self.service.ai_provider = FakeAIProvider(available=True)
+        self._attach_premium(guild_plans={10: PLAN_GUILD_PRO})
+        log_channel = FakeChannel(99, name="shield-log")
+        self.bot.register_channel(log_channel)
+        ok, _ = await self.service.set_ordinary_ai_policy(enabled=True, actor_id=1266444952779620413)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_module_enabled(10, True)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_log_channel(10, log_channel.id)
+        self.assertTrue(ok)
+
+        status = self.service.get_ai_status(10)
+
+        self.assertTrue(status["ready_for_review"])
+        self.assertEqual(status["configured_allowed_models"], list(SHIELD_AI_MODEL_ORDER))
+        self.assertEqual(status["allowed_models"], list(SHIELD_AI_MODEL_ORDER))
+        self.assertEqual(status["provider_capped_models"], ["gpt-5.4"])
+        self.assertIn("gpt-5.4 remains provider-gated", status["status"])
 
     async def test_ai_status_reports_capped_higher_tiers_when_guild_pro_is_inactive(self):
         self.service.ai_provider = FakeAIProvider(available=True)
@@ -5427,7 +5538,7 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         status = self.service.get_ai_status(SHIELD_AI_ALLOWED_GUILD_ID)
         self.assertFalse(status["enabled"])
         self.assertEqual(status["policy_source"], "ordinary_global")
-        self.assertEqual(status["allowed_models"], ["gpt-5.4-nano"])
+        self.assertEqual(status["allowed_models"], list(SHIELD_AI_MODEL_ORDER))
 
     async def test_support_guild_flagged_message_can_enrich_alert_with_ai_review(self):
         guild = FakeGuild(SHIELD_AI_ALLOWED_GUILD_ID)
@@ -5801,7 +5912,7 @@ class ShieldStoreNormalizationTests(unittest.TestCase):
         normalized = store.normalize_state(deepcopy(snapshot))
 
         self.assertTrue(normalized["meta"]["ordinary_ai_enabled"])
-        self.assertEqual(normalized["meta"]["ordinary_ai_allowed_models"], ["gpt-5.4-nano"])
+        self.assertEqual(normalized["meta"]["ordinary_ai_allowed_models"], list(SHIELD_AI_MODEL_ORDER))
         self.assertEqual(normalized["meta"]["ordinary_ai_updated_by"], 1266444952779620413)
         self.assertEqual(normalized["meta"]["ordinary_ai_updated_at"], "2026-03-27T10:00:00+00:00")
 
@@ -5916,6 +6027,23 @@ class ShieldStoreNormalizationTests(unittest.TestCase):
         self.assertEqual(normalized["gif_message_threshold"], 12)
         self.assertEqual(normalized["gif_window_seconds"], 3)
         self.assertEqual(normalized["spam_message_window_seconds"], 3)
+
+    def test_normalize_guild_shield_config_migrates_legacy_duplicate_lane_aliases(self):
+        normalized = normalize_guild_shield_config(
+            10,
+            {
+                "spam_duplicate_enabled": False,
+                "spam_duplicate_threshold": 3,
+                "spam_duplicate_window_seconds": 12,
+            },
+        )
+
+        self.assertFalse(normalized["spam_near_duplicate_enabled"])
+        self.assertEqual(normalized["spam_near_duplicate_threshold"], 3)
+        self.assertEqual(normalized["spam_near_duplicate_window_seconds"], 12)
+        self.assertNotIn("spam_duplicate_enabled", normalized)
+        self.assertNotIn("spam_duplicate_threshold", normalized)
+        self.assertNotIn("spam_duplicate_window_seconds", normalized)
 
     def test_normalize_guild_shield_config_defaults_new_lane_flags_to_existing_behavior(self):
         normalized = normalize_guild_shield_config(10, {})

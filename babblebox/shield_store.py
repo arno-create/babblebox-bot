@@ -17,8 +17,8 @@ from babblebox.premium_limits import (
     storage_ceiling as premium_storage_ceiling,
 )
 from babblebox.shield_ai import (
-    DEFAULT_SHIELD_AI_FAST_MODEL,
     SHIELD_AI_MIN_CONFIDENCE_CHOICES,
+    SHIELD_AI_MODEL_ORDER,
     SHIELD_AI_REVIEW_PACKS,
     parse_shield_ai_model_list,
 )
@@ -92,7 +92,7 @@ class ShieldStorageUnavailable(RuntimeError):
 def default_shield_meta() -> dict[str, Any]:
     return {
         "ordinary_ai_enabled": False,
-        "ordinary_ai_allowed_models": [DEFAULT_SHIELD_AI_FAST_MODEL],
+        "ordinary_ai_allowed_models": list(SHIELD_AI_MODEL_ORDER),
         "ordinary_ai_updated_by": None,
         "ordinary_ai_updated_at": None,
     }
@@ -526,8 +526,14 @@ def normalize_guild_shield_config(guild_id: int, config: Any) -> dict[str, Any]:
     else:
         cleaned["ai_enabled_packs"] = list(SHIELD_AI_REVIEW_PACKS)
 
+    legacy_numeric_aliases = {
+        "spam_near_duplicate_threshold": "spam_duplicate_threshold",
+        "spam_near_duplicate_window_seconds": "spam_duplicate_window_seconds",
+    }
     for field, (minimum, maximum, default) in SHIELD_NUMERIC_CONFIG_SPECS.items():
         value = config.get(field)
+        if value is None and field in legacy_numeric_aliases:
+            value = config.get(legacy_numeric_aliases[field])
         cleaned[field] = value if isinstance(value, int) and minimum <= value <= maximum else default
     for field in (
         "spam_message_enabled",
@@ -538,7 +544,12 @@ def normalize_guild_shield_config(guild_id: int, config: Any) -> dict[str, Any]:
         "gif_repeat_enabled",
         "gif_same_asset_enabled",
     ):
-        cleaned[field] = bool(config.get(field)) if field in config else bool(cleaned[field])
+        if field in config:
+            cleaned[field] = bool(config.get(field))
+        elif field == "spam_near_duplicate_enabled" and "spam_duplicate_enabled" in config:
+            cleaned[field] = bool(config.get("spam_duplicate_enabled"))
+        else:
+            cleaned[field] = bool(cleaned[field])
     cleaned["spam_emote_enabled"] = bool(config.get("spam_emote_enabled"))
     cleaned["spam_caps_enabled"] = bool(config.get("spam_caps_enabled"))
     cleaned["spam_low_value_enabled"] = bool(config.get("spam_low_value_enabled"))
@@ -635,8 +646,8 @@ class _BaseShieldStore:
             cleaned_meta["ordinary_ai_enabled"] = bool(ordinary_enabled)
             allowed_models = meta.get("ordinary_ai_allowed_models")
             if allowed_models is None and bool(meta.get("global_ai_override_enabled")):
-                allowed_models = [DEFAULT_SHIELD_AI_FAST_MODEL]
-            cleaned_meta["ordinary_ai_allowed_models"] = _clean_model_list(allowed_models) or [DEFAULT_SHIELD_AI_FAST_MODEL]
+                allowed_models = list(SHIELD_AI_MODEL_ORDER)
+            cleaned_meta["ordinary_ai_allowed_models"] = _clean_model_list(allowed_models) or list(SHIELD_AI_MODEL_ORDER)
             updated_by = meta.get("ordinary_ai_updated_by")
             if updated_by is None:
                 updated_by = meta.get("global_ai_override_updated_by")
@@ -1110,12 +1121,22 @@ class _PostgresShieldStore(_BaseShieldStore):
                 "spam_burst_window_seconds": int(row["spam_burst_window_seconds"])
                 if "spam_burst_window_seconds" in row
                 else shield_numeric_config_default("spam_burst_window_seconds"),
-                "spam_near_duplicate_enabled": bool(row["spam_near_duplicate_enabled"]) if "spam_near_duplicate_enabled" in row else True,
+                "spam_near_duplicate_enabled": (
+                    bool(row["spam_near_duplicate_enabled"])
+                    if "spam_near_duplicate_enabled" in row
+                    else bool(row["spam_duplicate_enabled"])
+                    if "spam_duplicate_enabled" in row
+                    else True
+                ),
                 "spam_near_duplicate_threshold": int(row["spam_near_duplicate_threshold"])
                 if "spam_near_duplicate_threshold" in row
+                else int(row["spam_duplicate_threshold"])
+                if "spam_duplicate_threshold" in row
                 else shield_numeric_config_default("spam_near_duplicate_threshold"),
                 "spam_near_duplicate_window_seconds": int(row["spam_near_duplicate_window_seconds"])
                 if "spam_near_duplicate_window_seconds" in row
+                else int(row["spam_duplicate_window_seconds"])
+                if "spam_duplicate_window_seconds" in row
                 else shield_numeric_config_default("spam_near_duplicate_window_seconds"),
                 "spam_emote_enabled": bool(row["spam_emote_enabled"]) if "spam_emote_enabled" in row else False,
                 "spam_emote_threshold": int(row["spam_emote_threshold"])
@@ -1253,7 +1274,7 @@ class _PostgresShieldStore(_BaseShieldStore):
             if row["key"] == SHIELD_META_GLOBAL_AI_OVERRIDE_KEY:
                 loaded["meta"] = {
                     "ordinary_ai_enabled": bool(value.get("enabled")),
-                    "ordinary_ai_allowed_models": [DEFAULT_SHIELD_AI_FAST_MODEL] if bool(value.get("enabled")) else [DEFAULT_SHIELD_AI_FAST_MODEL],
+                    "ordinary_ai_allowed_models": list(SHIELD_AI_MODEL_ORDER),
                     "ordinary_ai_updated_by": value.get("updated_by") if isinstance(value.get("updated_by"), int) and value.get("updated_by") > 0 else None,
                     "ordinary_ai_updated_at": value.get("updated_at") if isinstance(value.get("updated_at"), str) and value.get("updated_at").strip() else None,
                 }

@@ -201,7 +201,7 @@ Babblebox premium is intentionally narrow:
 - bot and webhook scam handling stays conservative by default unless the evidence is clearly dangerous
 - optional AI-assisted second-pass review for moderator context only
 - Shield AI stays live-message-only; AFK, reminders, watch keywords, and Confessions feature checks remain local-first and AI-free
-- Shield AI can route between `gpt-5.4-nano`, `gpt-5.4-mini`, and `gpt-5.4`; `gpt-5.4-nano` is the baseline tier, and Babblebox Guild Pro can make `gpt-5.4-mini` and `gpt-5.4` available above the baseline `gpt-5.4-nano` lane when owner policy and provider/runtime readiness allow review while diagnostics report the effective lane plus local readiness and entitlement state
+- Shield AI can route between `gpt-5.4-nano`, `gpt-5.4-mini`, and `gpt-5.4`; owner policy can keep all three models configured by default, while ordinary guilds still need Babblebox Guild Pro for effective `gpt-5.4-mini` / `gpt-5.4` access and provider/runtime readiness still gates frontier routing. Diagnostics report the effective lane plus local readiness, entitlement state, and provider gates.
 - ordinary guild AI needs both owner policy and Babblebox Guild Pro
 - `/shield ai` only configures review scope; Guild Pro plus owner policy controls real AI access and allowed models
 - log-first defaults with global `adaptive` vs `compact` delivery, `smart` vs `never` ping policy, and bounded per-pack delivery overrides
@@ -593,7 +593,7 @@ Babblebox Shield is intentionally compact and conservative:
 - `/shield test` and Shield logs show concise local link-decision explanations for flagged, blocked, suppressed, ignored, review-only, and allowed links without exposing raw scoring internals
 - optional AI review never becomes the primary moderation engine
 - AI review only runs after local Shield already flagged a message
-- Shield AI defaults to the routed `gpt-5.4-nano` tier when owner policy enables it; Babblebox Guild Pro can make `gpt-5.4-mini` and `gpt-5.4` available when provider/runtime readiness also allows review
+- Shield AI's default owner-managed model policy can list `gpt-5.4-nano`, `gpt-5.4-mini`, and `gpt-5.4`, but review stays off until owner policy enables it. Non-Guild-Pro servers cap effective routing to `gpt-5.4-nano`, and `gpt-5.4` remains provider-gated unless top-tier routing is explicitly ready.
 - AI review is admin-visible, tiered by model rather than support-server carveout, and never punishes by itself
 - AI review can cover privacy, promo, scam, adult, and severe once admins opt those packs in
 - only minimal, sanitized, truncated flagged text from the scanned surfaces is sent to the AI provider
