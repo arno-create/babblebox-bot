@@ -963,6 +963,7 @@ class ShieldSnapshot:
     context_squashed: str
     urls: tuple[str, ...]
     links: tuple[ShieldLink, ...]
+    ignored_link_candidates: tuple[str, ...]
     canonical_links: tuple[str, ...]
     domains: frozenset[str]
     link_categories: frozenset[str]
@@ -999,6 +1000,13 @@ class ShieldMatch:
     match_class: str = ""
 
 
+@dataclass(frozen=True)
+class ShieldLinkDecisionExplanation:
+    domain: str
+    disposition: str
+    reason: str
+
+
 @dataclass
 class ShieldDecision:
     matched: bool
@@ -1014,6 +1022,7 @@ class ShieldDecision:
     action_note: str | None = None
     ai_review: ShieldAIReviewResult | None = None
     link_assessments: tuple[ShieldLinkAssessment, ...] = ()
+    link_explanations: tuple[ShieldLinkDecisionExplanation, ...] = ()
     scan_source: str = "new_message"
     scan_surface_labels: tuple[str, ...] = ()
     alert_evidence_signature: str | None = None
@@ -1270,6 +1279,7 @@ class ShieldScamFeatures:
 class ShieldTestResult:
     matches: tuple[ShieldMatch, ...]
     link_assessments: tuple[ShieldLinkAssessment, ...]
+    link_explanations: tuple[ShieldLinkDecisionExplanation, ...] = ()
     bypass_reason: str | None = None
 
 
@@ -1367,11 +1377,35 @@ def _looks_like_bare_url_candidate(raw_token: str) -> str | None:
         return None
     tld = labels[-1]
     has_pathish_suffix = any(char in candidate for char in "/?#")
+    if not has_pathish_suffix and any(label.startswith("xn--") for label in labels):
+        return None
     if not has_pathish_suffix and tld in BARE_URL_AMBIGUOUS_FILE_TLDS:
         return None
     if not has_pathish_suffix and (tld in BARE_URL_FILENAME_TLDS or BARE_URL_TLD_RE.fullmatch(tld) is None):
         return None
     return candidate
+
+
+def _looks_like_ignored_bare_idna_candidate(raw_token: str) -> str | None:
+    candidate = (raw_token or "").strip().strip("()[]{}<>,.!?\"'")
+    if not candidate or len(candidate) > BARE_URL_MAX_LENGTH:
+        return None
+    lowered = candidate.casefold()
+    if "://" in lowered or lowered.startswith("www.") or "@" in lowered or lowered.count(".") < 1:
+        return None
+    if any(char in candidate for char in "/?#"):
+        return None
+    if BARE_URL_NUMERIC_RE.fullmatch(lowered):
+        return None
+    domain = _extract_domain(candidate)
+    if domain is None:
+        return None
+    labels = [label for label in domain.split(".") if label]
+    if len(labels) < 2:
+        return None
+    if any(label.startswith("xn--") for label in labels):
+        return candidate
+    return None
 
 
 def _extract_urls(text: str) -> tuple[str, ...]:
@@ -1381,6 +1415,8 @@ def _extract_urls(text: str) -> tuple[str, ...]:
     seen: set[str] = set()
 
     def add_candidate(raw_value: str | None):
+        if raw_value and _looks_like_ignored_bare_idna_candidate(raw_value):
+            return
         if raw_value and raw_value not in seen:
             seen.add(raw_value)
             extracted.append(raw_value)
@@ -1390,6 +1426,19 @@ def _extract_urls(text: str) -> tuple[str, ...]:
     for token in text.split()[:BARE_URL_MAX_TOKENS]:
         add_candidate(_looks_like_bare_url_candidate(token))
     return tuple(extracted)
+
+
+def _extract_ignored_link_candidates(text: str) -> tuple[str, ...]:
+    if not text:
+        return ()
+    ignored: list[str] = []
+    seen: set[str] = set()
+    for token in text.split()[:BARE_URL_MAX_TOKENS]:
+        candidate = _looks_like_ignored_bare_idna_candidate(token)
+        if candidate and candidate not in seen:
+            seen.add(candidate)
+            ignored.append(candidate)
+    return tuple(ignored)
 
 
 def _strip_urls_from_text(text: str, urls: Sequence[str]) -> str:
@@ -1627,28 +1676,6 @@ def _match_class_label(match_class: str) -> str:
     return MATCH_CLASS_LABELS.get(match_class, match_class.replace("_", " ").title())
 
 
-def _link_assessment_summary(assessment: ShieldLinkAssessment) -> str:
-    if assessment.category == MALICIOUS_LINK_CATEGORY:
-        if any(signal.startswith("external_malicious_domain_") for signal in assessment.matched_signals):
-            return "matched external malicious intel"
-        if any(signal.startswith("bundled_malicious_domain_") for signal in assessment.matched_signals):
-            return "matched bundled malicious intel"
-        return "matched local malicious intel"
-    if assessment.category == IMPERSONATION_LINK_CATEGORY:
-        return "matched local trusted-brand impersonation intel"
-    if assessment.category == ADULT_LINK_CATEGORY:
-        return "matched local adult intel"
-    if _assessment_is_preview_only_advisory(assessment):
-        return "preview-only advisory; no action"
-    if assessment.category == UNKNOWN_SUSPICIOUS_LINK_CATEGORY:
-        return "lookup candidate; link-only caution" if assessment.provider_lookup_warranted else "local caution; link-only"
-    if assessment.category == UNKNOWN_LINK_CATEGORY:
-        return "unknown, no action"
-    if "guild_allow_domain" in assessment.matched_signals:
-        return "safe family; admin allowlisted"
-    return "safe family"
-
-
 def _link_assessment_basis(assessment: ShieldLinkAssessment) -> str:
     allowlist_note = " Admin allowlists do not override risky-link intel." if "guild_allow_domain" in assessment.matched_signals else ""
     if _assessment_is_preview_only_advisory(assessment):
@@ -1666,6 +1693,22 @@ def _link_assessment_basis(assessment: ShieldLinkAssessment) -> str:
     if assessment.category == ADULT_LINK_CATEGORY:
         return f"Hard intel from the adult-domain list.{allowlist_note}"
     return "No risky-link intel matched."
+
+
+def _format_link_decision_lines(
+    explanations: Sequence[ShieldLinkDecisionExplanation],
+    *,
+    limit: int = 5,
+) -> str:
+    if not explanations:
+        return "No link decisions."
+    lines = [
+        f"`{item.domain}` | {item.disposition}: {item.reason}"
+        for item in explanations[: max(1, limit)]
+    ]
+    if len(explanations) > limit:
+        lines.append(f"+{len(explanations) - limit} more link decisions")
+    return "\n".join(lines)
 
 
 def _scan_source_for_message(message: discord.Message, *, default: str = "new_message") -> str:
@@ -2235,6 +2278,7 @@ def _build_snapshot(
     )
     extracted_link_items = _extract_links_from_segments(resolved_link_segments)
     urls = tuple(url for url, _source, _preview_only in extracted_link_items)
+    ignored_link_candidates = _extract_ignored_link_candidates(normalized)
     context_source_text = _strip_urls_from_text(normalized, urls)
     context_text = _strip_urls_from_text(lowered, urls)
     context_squashed = squash_for_evasion_checks(context_text)
@@ -2284,6 +2328,7 @@ def _build_snapshot(
         context_squashed=context_squashed,
         urls=urls,
         links=links,
+        ignored_link_candidates=ignored_link_candidates,
         canonical_links=tuple(link.canonical_url for link in links),
         domains=domains,
         link_categories=frozenset(link.category for link in links),
@@ -2677,6 +2722,14 @@ class ShieldService:
         self._alert_action_message_refs: dict[str, discord.Message] = {}
         self._recent_newcomer_activity: dict[tuple[int, int], ShieldNewcomerActivityState] = {}
         self._last_runtime_prune = 0.0
+
+    def format_link_decision_lines(
+        self,
+        explanations: Sequence[ShieldLinkDecisionExplanation],
+        *,
+        limit: int = 5,
+    ) -> str:
+        return _format_link_decision_lines(explanations, limit=limit)
 
     async def start(self) -> bool:
         if self._startup_storage_error is not None:
@@ -3247,7 +3300,13 @@ class ShieldService:
                 bypass_reason = (
                     "This channel relaxes only the optional adult-solicitation detector, so that specific text match would be skipped here."
                 )
-        return ShieldTestResult(matches=tuple(matches), link_assessments=link_assessments, bypass_reason=bypass_reason)
+        link_explanations = self._build_link_decision_explanations(compiled, snapshot, link_assessments, matches)
+        return ShieldTestResult(
+            matches=tuple(matches),
+            link_assessments=link_assessments,
+            link_explanations=link_explanations,
+            bypass_reason=bypass_reason,
+        )
 
     async def set_module_enabled(self, guild_id: int, enabled: bool) -> tuple[bool, str]:
         baseline_applied = False
@@ -5566,6 +5625,7 @@ class ShieldService:
             pack=best.pack,
             reasons=tuple(matches[:3]),
             link_assessments=link_assessments,
+            link_explanations=self._build_link_decision_explanations(compiled, snapshot, link_assessments, matches),
             scan_source=scan_source,
             scan_surface_labels=snapshot.surface_labels,
         )
@@ -5819,6 +5879,150 @@ class ShieldService:
                 assessment = replace(assessment, matched_signals=signals)
             cleaned[domain] = assessment
         return tuple(sorted(cleaned.values(), key=lambda item: item.normalized_domain))
+
+    def _build_link_decision_explanations(
+        self,
+        compiled: CompiledShieldConfig,
+        snapshot: ShieldSnapshot,
+        link_assessments: Sequence[ShieldLinkAssessment],
+        matches: Sequence[ShieldMatch],
+    ) -> tuple[ShieldLinkDecisionExplanation, ...]:
+        links_by_domain: dict[str, ShieldLink] = {}
+        for link in snapshot.links:
+            links_by_domain.setdefault(link.domain, link)
+
+        explanations: list[ShieldLinkDecisionExplanation] = []
+        for assessment in sorted(link_assessments, key=lambda item: item.normalized_domain):
+            explanations.append(
+                self._explain_link_decision(
+                    compiled,
+                    snapshot,
+                    assessment,
+                    link=links_by_domain.get(assessment.normalized_domain),
+                    matches=matches,
+                )
+            )
+        for candidate in snapshot.ignored_link_candidates:
+            explanations.append(
+                ShieldLinkDecisionExplanation(
+                    domain=candidate,
+                    disposition="Ignored",
+                    reason="Bare IDNA-looking text needs an explicit URL shape before Shield treats it as a link.",
+                )
+            )
+        return tuple(explanations)
+
+    def _explain_link_decision(
+        self,
+        compiled: CompiledShieldConfig,
+        snapshot: ShieldSnapshot,
+        assessment: ShieldLinkAssessment,
+        *,
+        link: ShieldLink | None,
+        matches: Sequence[ShieldMatch],
+    ) -> ShieldLinkDecisionExplanation:
+        domain = assessment.normalized_domain
+        match_packs = {match.pack for match in matches}
+        warning_context = _looks_like_scam_warning(snapshot.context_text)
+        policy_blocked = (
+            link is not None
+            and compiled.link_policy.enabled
+            and compiled.link_policy_mode != DEFAULT_SHIELD_LINK_POLICY_MODE
+            and "link_policy" in match_packs
+            and not bool({"scam", "adult"}.intersection(match_packs))
+            and not link.preview_only
+            and not self._link_is_trusted_under_policy(compiled, link, assessment)
+        )
+        if policy_blocked:
+            return ShieldLinkDecisionExplanation(
+                domain=domain,
+                disposition="Blocked",
+                reason="Trusted Links Only blocked this untrusted destination unless admins explicitly allow it.",
+            )
+        if _assessment_is_preview_only_advisory(assessment):
+            return ShieldLinkDecisionExplanation(
+                domain=domain,
+                disposition="Suppressed",
+                reason="Preview metadata stayed advisory behind the visible message context.",
+            )
+        if assessment.category == MALICIOUS_LINK_CATEGORY:
+            if warning_context:
+                return ShieldLinkDecisionExplanation(
+                    domain=domain,
+                    disposition="Suppressed",
+                    reason="warning or moderation context kept local malicious-link intel from enforcing.",
+                )
+            if "scam" in match_packs:
+                return ShieldLinkDecisionExplanation(
+                    domain=domain,
+                    disposition="Flagged",
+                    reason="Local malicious-domain intel matched the Scam / Malicious Links pack.",
+                )
+            return ShieldLinkDecisionExplanation(
+                domain=domain,
+                disposition="Review-only",
+                reason="Local malicious-domain intel matched, but the scam pack did not enforce in this dry run.",
+            )
+        if assessment.category == IMPERSONATION_LINK_CATEGORY:
+            if warning_context:
+                return ShieldLinkDecisionExplanation(
+                    domain=domain,
+                    disposition="Suppressed",
+                    reason="warning or moderation context kept trusted-brand lookalike intel from enforcing.",
+                )
+            if "scam" in match_packs:
+                return ShieldLinkDecisionExplanation(
+                    domain=domain,
+                    disposition="Flagged",
+                    reason="Hard local trusted-brand lookalike intel matched the scam pack.",
+                )
+            return ShieldLinkDecisionExplanation(
+                domain=domain,
+                disposition="Review-only",
+                reason="Trusted-brand lookalike intel matched, but the scam pack did not enforce in this dry run.",
+            )
+        if assessment.category == ADULT_LINK_CATEGORY:
+            if "adult" in match_packs:
+                return ShieldLinkDecisionExplanation(
+                    domain=domain,
+                    disposition="Flagged",
+                    reason="Local adult-domain intel matched the Adult Links + Solicitation pack.",
+                )
+            return ShieldLinkDecisionExplanation(
+                domain=domain,
+                disposition="Review-only",
+                reason="Local adult-domain intel matched, but the adult pack did not enforce in this dry run.",
+            )
+        if assessment.category == UNKNOWN_SUSPICIOUS_LINK_CATEGORY:
+            if "scam" in match_packs:
+                return ShieldLinkDecisionExplanation(
+                    domain=domain,
+                    disposition="Flagged",
+                    reason="Suspicious link shape combined with scam intent or corroborating context.",
+                )
+            return ShieldLinkDecisionExplanation(
+                domain=domain,
+                disposition="Review-only",
+                reason="Suspicious link shape stayed review-only because there was no scam intent, hard local intel, or fresh-campaign corroboration.",
+            )
+        if "guild_allow_domain" in assessment.matched_signals:
+            return ShieldLinkDecisionExplanation(
+                domain=domain,
+                disposition="Allowed",
+                reason="admin allowlist applies here; hard-risk intel would still override it.",
+            )
+        if assessment.category == SAFE_LINK_CATEGORY:
+            family = f" `{assessment.safe_family}`" if assessment.safe_family else ""
+            return ShieldLinkDecisionExplanation(
+                domain=domain,
+                disposition="Allowed",
+                reason=f"Built-in trusted/safe family{family} matched.",
+            )
+        return ShieldLinkDecisionExplanation(
+            domain=domain,
+            disposition="Allowed",
+            reason="No risky link intel matched.",
+        )
 
     def _primary_risky_assessment(self, link_assessments: Sequence[ShieldLinkAssessment]) -> ShieldLinkAssessment | None:
         risky = [
@@ -9096,18 +9300,10 @@ class ShieldService:
             embed.add_field(name="Preview", value=preview or "[no text content]", inline=False)
             if attachment_summary:
                 embed.add_field(name="Attachments", value="\n".join(attachment_summary[:4]), inline=False)
-            if decision.link_assessments and top_reason is not None and top_reason.pack in {"scam", "adult"}:
+            if decision.link_explanations and top_reason is not None and top_reason.pack in {"scam", "adult", "link_policy"}:
                 embed.add_field(
-                    name="Link Safety",
-                    value="\n".join(
-                        f"`{item.normalized_domain}` | {_link_assessment_summary(item)}"
-                        + (
-                            f" | signals: {', '.join(signal for signal in item.matched_signals[:3])}"
-                            if item.matched_signals
-                            else ""
-                        )
-                        for item in decision.link_assessments[:3]
-                    ),
+                    name="Link Decisions",
+                    value=_format_link_decision_lines(decision.link_explanations, limit=3),
                     inline=False,
                 )
             if decision.ai_review is not None:

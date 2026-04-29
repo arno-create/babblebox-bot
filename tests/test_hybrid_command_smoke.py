@@ -2790,7 +2790,7 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await cog.service.close()
 
-    async def test_shield_test_command_includes_link_safety_assessments(self):
+    async def test_shield_test_command_includes_link_decision_explanations(self):
         bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
         cog = ShieldCog(bot)
         try:
@@ -2806,10 +2806,12 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertEqual(len(ctx.send_calls), 1)
             field_names = [field.name for field in ctx.send_calls[0]["embed"].fields]
-            self.assertIn("Link Safety", field_names)
-            link_safety_field = next(field for field in ctx.send_calls[0]["embed"].fields if field.name == "Link Safety")
-            self.assertIn("dlscord-gift.com", link_safety_field.value)
-            self.assertIn("matched local intel", link_safety_field.value)
+            self.assertIn("Link Decisions", field_names)
+            link_decisions_field = next(field for field in ctx.send_calls[0]["embed"].fields if field.name == "Link Decisions")
+            self.assertIn("dlscord-gift.com", link_decisions_field.value)
+            self.assertIn("Review-only", link_decisions_field.value)
+            self.assertNotIn("signals:", link_decisions_field.value)
+            self.assertNotIn("bundled_malicious_domain", link_decisions_field.value)
         finally:
             await cog.service.close()
 
@@ -2843,7 +2845,7 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await cog.service.close()
 
-    async def test_shield_test_command_marks_lookup_candidates_as_no_action(self):
+    async def test_shield_test_command_marks_lookup_candidates_as_review_only(self):
         bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
         cog = ShieldCog(bot)
         try:
@@ -2861,8 +2863,35 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
                 text="Visit https://wallet-bonus-drop.click/account?redirect=%2Flogin%2Fauth%2Ftoken%2Fseed to claim access.",
             )
 
-            link_safety_field = next(field for field in ctx.send_calls[0]["embed"].fields if field.name == "Link Safety")
-            self.assertIn("lookup candidate, link-only caution", link_safety_field.value)
+            link_decisions_field = next(field for field in ctx.send_calls[0]["embed"].fields if field.name == "Link Decisions")
+            self.assertIn("Review-only", link_decisions_field.value)
+            self.assertIn("no scam intent", link_decisions_field.value)
+            self.assertNotIn("query_token", link_decisions_field.value)
+            self.assertNotIn("provider_lookup", link_decisions_field.value)
+        finally:
+            await cog.service.close()
+
+    async def test_shield_test_command_shows_ignored_bare_idna_candidate(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
+        cog = ShieldCog(bot)
+        try:
+            cog.service.storage_ready = True
+            ctx = FakeContext(
+                interaction=FakeInteraction(),
+                guild=FakeGuild(10),
+                channel=FakeChannel(),
+                author=FakeAuthor(manage_guild=True),
+            )
+
+            await ShieldCog.shield_test_command.callback(
+                cog,
+                ctx,
+                text="About me! Name apple, pronouns she/her. xn--jwh.xn--jj8c",
+            )
+
+            link_decisions_field = next(field for field in ctx.send_calls[0]["embed"].fields if field.name == "Link Decisions")
+            self.assertIn("Ignored", link_decisions_field.value)
+            self.assertIn("explicit URL", link_decisions_field.value)
         finally:
             await cog.service.close()
 

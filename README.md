@@ -590,6 +590,7 @@ Babblebox Shield is intentionally compact and conservative:
 - solicitation carve-out channels only relax the optional solicitation / DM-ad text detector; adult-domain, scam, and malicious-link protections still run there
 - local scam decisions combine host/path/query risk with brand bait, official-looking framing, CTA wording, urgency, newcomer first-link context, fresh-campaign reuse, and explicit warning/education suppressors
 - unknown punycode or suspicious-link signals stay review-first unless real scam intent, hard local intel, dangerous file targets, or fresh-campaign corroboration is present
+- `/shield test` and Shield logs show concise local link-decision explanations for flagged, blocked, suppressed, ignored, review-only, and allowed links without exposing raw scoring internals
 - optional AI review never becomes the primary moderation engine
 - AI review only runs after local Shield already flagged a message
 - Shield AI defaults to the routed `gpt-5.4-nano` tier when owner policy enables it; Babblebox Guild Pro can make `gpt-5.4-mini` and `gpt-5.4` available when provider/runtime readiness also allows review
