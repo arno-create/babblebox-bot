@@ -2901,20 +2901,21 @@ class ShieldService:
     def get_meta(self) -> dict[str, Any]:
         meta = self.store.state.get("meta")
         if isinstance(meta, dict):
+            default_models = SHIELD_AI_MODEL_ORDER
             return {
                 "ordinary_ai_enabled": bool(meta.get("ordinary_ai_enabled")),
                 "ordinary_ai_allowed_models": tuple(
                     model
-                    for model in (meta.get("ordinary_ai_allowed_models") or (DEFAULT_SHIELD_AI_FAST_MODEL,))
+                    for model in (meta.get("ordinary_ai_allowed_models") or default_models)
                     if model in SHIELD_AI_MODEL_ORDER
                 )
-                or (DEFAULT_SHIELD_AI_FAST_MODEL,),
+                or default_models,
                 "ordinary_ai_updated_by": meta.get("ordinary_ai_updated_by"),
                 "ordinary_ai_updated_at": meta.get("ordinary_ai_updated_at"),
             }
         return {
             "ordinary_ai_enabled": False,
-            "ordinary_ai_allowed_models": (DEFAULT_SHIELD_AI_FAST_MODEL,),
+            "ordinary_ai_allowed_models": SHIELD_AI_MODEL_ORDER,
             "ordinary_ai_updated_by": None,
             "ordinary_ai_updated_at": None,
         }
@@ -2939,7 +2940,7 @@ class ShieldService:
         meta = self.get_meta()
         premium_enabled = self._guild_has_capability(guild_id, CAPABILITY_SHIELD_AI_REVIEW)
         ordinary_global_enabled = bool(meta["ordinary_ai_enabled"])
-        ordinary_global_allowed_models = tuple(meta["ordinary_ai_allowed_models"]) or (DEFAULT_SHIELD_AI_FAST_MODEL,)
+        ordinary_global_allowed_models = tuple(meta["ordinary_ai_allowed_models"]) or SHIELD_AI_MODEL_ORDER
         enabled = ordinary_global_enabled
         allowed_models = ordinary_global_allowed_models
         source = "ordinary_global"
@@ -3004,6 +3005,18 @@ class ShieldService:
         provider_status = str(diagnostics.get("status") or "Unavailable.")
         provider_available = bool(diagnostics.get("available"))
         configured_models_capped = tuple(policy.configured_allowed_models) != tuple(policy.allowed_models)
+        single_model_override = bool(diagnostics.get("single_model_override"))
+        top_tier_enabled = bool(diagnostics.get("top_tier_enabled"))
+        provider_capped_models = (
+            ("gpt-5.4",)
+            if "gpt-5.4" in policy.allowed_models and not top_tier_enabled and not single_model_override
+            else ()
+        )
+        provider_model_note = (
+            "gpt-5.4 remains provider-gated until top-tier routing is enabled."
+            if provider_capped_models
+            else None
+        )
         premium_state = self._resolve_ai_premium_state(guild_id, policy)
         setup_blockers: list[str] = []
         if policy.enabled and provider_available:
@@ -3027,6 +3040,8 @@ class ShieldService:
             status_message = "Ready for second-pass review."
         else:
             status_message = "Ready for second-pass review with the nano tier."
+        if provider_model_note and policy.enabled and provider_available and not setup_blockers:
+            status_message = f"{status_message} {provider_model_note}"
         return {
             "supported": True,
             "enabled": policy.enabled,
@@ -3051,13 +3066,15 @@ class ShieldService:
             "provider_available": provider_available,
             "provider_status": provider_status,
             "model": diagnostics.get("model"),
+            "provider_capped_models": list(provider_capped_models),
+            "provider_model_note": provider_model_note,
             "routing_strategy": diagnostics.get("routing_strategy"),
-            "single_model_override": bool(diagnostics.get("single_model_override")),
+            "single_model_override": single_model_override,
             "ignored_model_settings": list(diagnostics.get("ignored_model_settings") or []),
             "fast_model": diagnostics.get("fast_model"),
             "complex_model": diagnostics.get("complex_model"),
             "top_model": diagnostics.get("top_model"),
-            "top_tier_enabled": bool(diagnostics.get("top_tier_enabled")),
+            "top_tier_enabled": top_tier_enabled,
             "timeout_seconds": diagnostics.get("timeout_seconds"),
             "max_chars": diagnostics.get("max_chars"),
             "premium_plan_code": premium_state["plan_code"],
@@ -3278,7 +3295,20 @@ class ShieldService:
             type("Attachment", (), {"filename": value})() if isinstance(value, str) else value
             for value in (attachments or [])
         ]
-        snapshot = _build_snapshot(text, fake_attachments)
+        attachment_texts, attachment_link_texts = _collect_attachment_surface_texts(fake_attachments)
+        surface_labels = ("attachment_meta",) if attachment_texts else ()
+        link_segments = []
+        if normalize_plain_text(text):
+            link_segments.append(("message", text, False))
+        link_segments.extend(("attachment_meta", item, False) for item in attachment_link_texts)
+        snapshot = _build_snapshot(
+            text,
+            fake_attachments,
+            extra_texts=attachment_texts,
+            link_texts=attachment_link_texts,
+            link_segments=tuple(link_segments),
+            surface_labels=surface_labels,
+        )
         now = time.monotonic()
         link_assessments = self._collect_link_assessments(compiled, snapshot, now=now)
         allow_phrase = self._matching_allow_phrase(compiled, snapshot)
@@ -8940,6 +8970,49 @@ class ShieldService:
         self._alert_action_records()[token] = record
         await self.store.flush()
 
+    def _alert_action_record_for_log_message(self, alert_message_id: int | None) -> dict[str, Any] | None:
+        if not isinstance(alert_message_id, int) or alert_message_id <= 0:
+            return None
+        for record in self._alert_action_records().values():
+            if isinstance(record, dict) and int(record.get("alert_message_id") or 0) == alert_message_id:
+                return record
+        return None
+
+    async def _refresh_incident_alert_action_record(
+        self,
+        incident_state: dict[str, Any],
+        message: discord.Message,
+        decision: ShieldDecision,
+        *,
+        top_reason: ShieldMatch | None,
+    ):
+        token = str(incident_state.get("action_token") or "")
+        record = self._get_alert_action_record(token) if token else None
+        if record is None:
+            record = self._alert_action_record_for_log_message(incident_state.get("log_message_id"))
+        if record is None:
+            return
+        destructive = bool(decision.deleted or decision.timed_out)
+        record.update(
+            {
+                "target_channel_id": int(getattr(getattr(message, "channel", None), "id", 0) or 0) or None,
+                "target_message_id": int(getattr(message, "id", 0) or 0) or None,
+                "target_user_id": int(getattr(getattr(message, "author", None), "id", 0) or 0) or None,
+                "pack": decision.pack,
+                "action": decision.action,
+                "match_class": top_reason.match_class if top_reason is not None else None,
+                "jump_url": getattr(message, "jump_url", None),
+                "deleted_by_shield": bool(decision.deleted),
+                "timed_out_by_shield": bool(decision.timed_out),
+                "recovery_content": (str(getattr(message, "content", "") or "")[:8000] if destructive else None),
+            }
+        )
+        token = str(record.get("token") or "")
+        if token:
+            self._alert_action_message_refs[token] = message
+            incident_state["action_token"] = token
+        await self._save_alert_action_record(record)
+
     def _get_alert_action_record(self, token: str) -> dict[str, Any] | None:
         record = self._alert_action_records().get(str(token or ""))
         if not isinstance(record, dict) or self._alert_record_expired(record):
@@ -9362,6 +9435,12 @@ class ShieldService:
                             embed=embed,
                             allowed_mentions=discord.AllowedMentions(users=False, roles=False, everyone=False),
                         )
+                        await self._refresh_incident_alert_action_record(
+                            incident_state,
+                            message,
+                            decision,
+                            top_reason=top_reason,
+                        )
                         self._spam_incident_alerts[spam_incident_key] = incident_state
                         decision.logged = True
                         return
@@ -9406,6 +9485,12 @@ class ShieldService:
                             embed=embed,
                             allowed_mentions=discord.AllowedMentions(users=False, roles=False, everyone=False),
                         )
+                        await self._refresh_incident_alert_action_record(
+                            incident_state,
+                            message,
+                            decision,
+                            top_reason=top_reason,
+                        )
                         self._gif_incident_alerts[gif_incident_key] = incident_state
                         decision.logged = True
                         return
@@ -9435,6 +9520,7 @@ class ShieldService:
                 "signature": decision.alert_evidence_signature,
                 "deleted": bool(decision.deleted),
                 "timed_out": bool(decision.timed_out),
+                "action_token": str(action_record["token"]),
             }
         if gif_incident_key is not None:
             self._gif_incident_alerts[gif_incident_key] = {
@@ -9445,6 +9531,7 @@ class ShieldService:
                 "signature": decision.alert_evidence_signature,
                 "deleted": bool(decision.deleted),
                 "timed_out": bool(decision.timed_out),
+                "action_token": str(action_record["token"]),
             }
 
     def _format_action_summary(self, decision: ShieldDecision) -> str:

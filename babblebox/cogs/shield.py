@@ -2342,7 +2342,8 @@ class ShieldCog(commands.Cog):
             value=(
                 f"Baseline tier: {self._format_ai_models(['gpt-5.4-nano'])}\n"
                 f"Guild Pro tiers: {self._format_ai_models(['gpt-5.4-mini', 'gpt-5.4'])}\n"
-                "AI stays second-pass only and owner policy still controls whether review runs at all."
+                "Owner policy can list all three models by default, but provider/runtime readiness still gates frontier routing. "
+                "AI stays second-pass only and owner policy controls whether review runs at all."
             ),
             inline=False,
         )
@@ -2705,7 +2706,7 @@ class ShieldCog(commands.Cog):
         log_channel = self._format_mentions([int(config["log_channel_id"])], kind="channel") if config.get("log_channel_id") else "Not set"
         embed = discord.Embed(
             title="Shield AI Assist",
-            description="Second-pass review for already-flagged live messages only. Owner policy controls availability, baseline gpt-5.4-nano stays the ordinary lane, and Babblebox Guild Pro can make gpt-5.4-mini plus gpt-5.4 available when provider/runtime readiness also allows review.",
+            description="Second-pass review for already-flagged live messages only. Owner policy controls availability, the default model policy can list nano, mini, and full, and effective routing still depends on Guild Pro plus provider/runtime readiness.",
             color=ge.EMBED_THEME["info"],
         )
         embed.add_field(
@@ -2731,6 +2732,7 @@ class ShieldCog(commands.Cog):
                 f"Complex tier: `{ai_status['complex_model'] or 'Not configured'}`\n"
                 f"Frontier tier: `{ai_status['top_model'] or 'Not configured'}`\n"
                 f"Frontier enabled: {'Yes' if ai_status['top_tier_enabled'] else 'No'}\n"
+                f"Provider model gate: {ai_status.get('provider_model_note') or 'None'}\n"
                 f"Ignored invalid model settings: {self._format_text_list(ai_status['ignored_model_settings'], limit=4)}"
             ),
             inline=False,

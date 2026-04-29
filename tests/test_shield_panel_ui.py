@@ -300,6 +300,35 @@ class ShieldPanelUiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(next(option for option in current_count.options if option.default).value, "3")
         self.assertEqual(next(option for option in current_window.options if option.default).value, "8")
 
+    async def test_spam_per_lane_toggle_state_persists_without_mode_snapback(self):
+        view = ShieldPackOptionsEditorView(self.cog, guild_id=10, author_id=1, pack="spam")
+        interaction = self._interaction(message=FakeMessage(channel=FakeChannel()))
+        lane_select = next(child for child in view.children if getattr(child, "placeholder", "") == "Anti-Spam lane")
+        lane_select._values = ["near_duplicate"]
+        await lane_select.callback(interaction)
+
+        state_select = next(child for child in view.children if getattr(child, "placeholder", "") == "Near-duplicate lane state")
+        state_select._values = ["off"]
+        await state_select.callback(interaction)
+
+        lane_select = next(child for child in view.children if getattr(child, "placeholder", "") == "Anti-Spam lane")
+        lane_select._values = ["low_value"]
+        await lane_select.callback(interaction)
+        low_value_state = next(child for child in view.children if getattr(child, "placeholder", "") == "Low-value chatter lane state")
+        low_value_state._values = ["on"]
+        await low_value_state.callback(interaction)
+
+        refreshed = ShieldPackOptionsEditorView(self.cog, guild_id=10, author_id=1, pack="spam")
+        refreshed_lane = next(child for child in refreshed.children if getattr(child, "placeholder", "") == "Anti-Spam lane")
+        refreshed_lane._values = ["near_duplicate"]
+        await refreshed_lane.callback(interaction)
+        refreshed_near_state = next(child for child in refreshed.children if getattr(child, "placeholder", "") == "Near-duplicate lane state")
+
+        self.assertEqual(next(option for option in refreshed_near_state.options if option.default).value, "off")
+        config = self.cog.service.get_config(10)
+        self.assertFalse(config["spam_near_duplicate_enabled"])
+        self.assertTrue(config["spam_low_value_enabled"])
+
     async def test_spam_pack_summary_reports_disabled_lanes_truthfully(self):
         current = deepcopy(self.cog.service.get_config(10))
         current["spam_message_enabled"] = False

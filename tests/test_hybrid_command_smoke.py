@@ -26,6 +26,7 @@ from babblebox.cogs.question_drops import QuestionDropsCog
 from babblebox.cogs.shield import ShieldCog, ShieldPanelView
 from babblebox.cogs.utilities import AfkReturnWatchDurationSelect, UtilityCog
 from babblebox.cogs.vote import VoteCog
+from babblebox.premium_models import SYSTEM_PREMIUM_OWNER_USER_IDS
 from babblebox.profile_service import ProfileService
 from babblebox.profile_store import ProfileStore
 
@@ -563,8 +564,8 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertIn("Babblebox Plus raises saved-vs-active headroom for Watch, reminders, and recurring AFK", utilities_page["body"])
         self.assertIn("gpt-5.4-nano", shield_page["body"])
-        self.assertIn("Babblebox Guild Pro can make gpt-5.4-mini plus gpt-5.4 available", shield_page["body"])
-        self.assertIn("effective lane plus local readiness and entitlement state", shield_page["body"])
+        self.assertIn("effective higher-tier use still needs Guild Pro plus provider/runtime readiness", shield_page["body"])
+        self.assertIn("effective lane plus local readiness, entitlement state, and provider gates", shield_page["body"])
         self.assertIn("larger safe Confessions image ceiling", premium_page["fields"][0][1])
         self.assertIn("extra runtime headroom simply pauses", premium_page["fields"][3][1])
 
@@ -2988,6 +2989,30 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(ctx.send_calls[0]["content"], "That command is unavailable.")
         finally:
             await cog.service.close()
+
+    async def test_hidden_shield_ai_owner_command_accepts_both_system_owner_ids(self):
+        for owner_id in sorted(SYSTEM_PREMIUM_OWNER_USER_IDS):
+            bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
+            cog = ShieldCog(bot)
+            try:
+                cog.service.storage_ready = True
+                ctx = FakeContext(
+                    interaction=None,
+                    guild=None,
+                    channel=FakeChannel(),
+                    author=FakeAuthor(user_id=owner_id),
+                )
+
+                await ShieldCog.shield_ai_owner_command.callback(cog, ctx, "status")
+
+                self.assertEqual(len(ctx.send_calls), 1)
+                self.assertEqual(ctx.send_calls[0]["embed"].title, "Shield AI Owner Policy")
+                status_field = next(field for field in ctx.send_calls[0]["embed"].fields if field.name == "Default Owner Policy")
+                self.assertIn("gpt-5.4-nano", status_field.value)
+                self.assertIn("gpt-5.4-mini", status_field.value)
+                self.assertIn("gpt-5.4", status_field.value)
+            finally:
+                await cog.service.close()
 
     async def test_hidden_shield_ai_owner_command_updates_global_and_guild_policy(self):
         bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
