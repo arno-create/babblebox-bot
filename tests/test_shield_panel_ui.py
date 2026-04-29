@@ -255,6 +255,27 @@ class ShieldPanelUiTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("3", [option.value for option in window_select.options])
         self.assertIn("30", [option.value for option in window_select.options])
 
+    async def test_spam_options_editor_exposes_low_value_lane_off_by_default(self):
+        view = ShieldPackOptionsEditorView(self.cog, guild_id=10, author_id=1, pack="spam")
+        lane_select = next(child for child in view.children if getattr(child, "placeholder", "") == "Anti-Spam lane")
+
+        self.assertIn("low_value", [option.value for option in lane_select.options])
+        self.assertFalse(self.cog.service.get_config(10)["spam_low_value_enabled"])
+
+        lane_select._values = ["low_value"]
+        await lane_select.callback(self._interaction(message=FakeMessage(channel=FakeChannel())))
+
+        placeholders = [getattr(child, "placeholder", "") for child in view.children if hasattr(child, "placeholder")]
+        self.assertIn("Low-value chatter lane state", placeholders)
+        self.assertIn("Low-value message count", placeholders)
+        self.assertIn("Low-value window", placeholders)
+        count_select = next(child for child in view.children if getattr(child, "placeholder", "") == "Low-value message count")
+        window_select = next(child for child in view.children if getattr(child, "placeholder", "") == "Low-value window")
+        self.assertIn("4", [option.value for option in count_select.options])
+        self.assertIn("12", [option.value for option in count_select.options])
+        self.assertIn("60", [option.value for option in window_select.options])
+        self.assertIn("120", [option.value for option in window_select.options])
+
     async def test_spam_near_duplicate_selection_persists_and_rerenders_cleanly(self):
         view = ShieldPackOptionsEditorView(self.cog, guild_id=10, author_id=1, pack="spam")
         interaction = self._interaction(message=FakeMessage(channel=FakeChannel()))

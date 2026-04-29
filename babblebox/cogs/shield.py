@@ -144,7 +144,7 @@ PACK_PANEL_DESCRIPTIONS = {
     "privacy": "Catches phone numbers, email drops, payment handles, and similar private-info leaks.",
     "promo": "Handles invite spam, promo blasts, and repetitive self-promotion without overfiring on normal info links.",
     "scam": "Catches malicious domains, impersonation hosts, and suspicious lure patterns, including no-link money, wins, and picks bait routed into private follow-up.",
-    "spam": "Handles rate spam, duplicate floods, emoji clutter, capitals spam, and moderator handling for live-message raids.",
+    "spam": "Handles rate spam, duplicate floods, optional emoji clutter, capitals spam, low-value chatter, and moderator handling for live-message raids.",
     "gif": "Controls one-user GIF floods, channel-wide streaks, pressure slices, and lightweight meaningful-text balance without polluting unrelated packs.",
     "adult": "Blocks adult domains and can optionally catch DM-gated adult solicitation text with a bounded carve-out lane.",
     "severe": "Targets explicit severe harm, self-harm encouragement, eliminationist or dehumanizing hate, and server-specific severe phrase tuning with reference-aware suppressors.",
@@ -172,6 +172,8 @@ SPAM_DUPLICATE_THRESHOLDS = _threshold_values("spam_near_duplicate_threshold", i
 SPAM_DUPLICATE_WINDOWS = (5, 6, 8, 10, 12, 15, 20, 25, 30, 45)
 SPAM_EMOTE_THRESHOLDS = (8, 10, 12, 15, 18, 24, 30, 36, 40)
 SPAM_CAPS_THRESHOLDS = (12, 16, 20, 24, 28, 36, 48, 60, 80)
+SPAM_LOW_VALUE_THRESHOLDS = _threshold_values("spam_low_value_threshold", include_max=True)
+SPAM_LOW_VALUE_WINDOWS = (20, 30, 45, 60, 90, 120)
 GIF_RATE_THRESHOLDS = _threshold_values("gif_message_threshold", include_max=True)
 GIF_RATE_WINDOWS = (3, 5, 8, 10, 12, 15, 20, 25, 30, 45)
 GIF_REPEAT_THRESHOLDS = _threshold_values("gif_repeat_threshold", include_max=True)
@@ -241,6 +243,20 @@ SPAM_OPTION_LANES = (
         "threshold_arg": "caps_threshold",
         "threshold_values": SPAM_CAPS_THRESHOLDS,
         "threshold_placeholder": "Capitals threshold",
+    },
+    {
+        "key": "low_value",
+        "label": "Low-value chatter",
+        "enabled_field": "spam_low_value_enabled",
+        "enabled_arg": "low_value_enabled",
+        "threshold_field": "spam_low_value_threshold",
+        "threshold_arg": "low_value_threshold",
+        "threshold_values": SPAM_LOW_VALUE_THRESHOLDS,
+        "threshold_placeholder": "Low-value message count",
+        "secondary_field": "spam_low_value_window_seconds",
+        "secondary_arg": "low_value_window_seconds",
+        "secondary_values": SPAM_LOW_VALUE_WINDOWS,
+        "secondary_placeholder": "Low-value window",
     },
 )
 
@@ -1533,6 +1549,12 @@ class ShieldCog(commands.Cog):
 
     async def cog_load(self):
         await bind_started_service(self.bot, attr_name="shield_service", service=self.service, label="Shield")
+        add_view = getattr(self.bot, "add_view", None)
+        if callable(add_view):
+            for record in self.service.active_alert_action_records():
+                message_id = record.get("alert_message_id")
+                if isinstance(message_id, int) and message_id > 0:
+                    add_view(self.service.build_alert_action_view(record), message_id=message_id)
 
     def cog_unload(self):
         if hasattr(self.bot, "shield_service"):
@@ -1774,6 +1796,13 @@ class ShieldCog(commands.Cog):
                 + f"Capitals spam: {'On' if config.get('spam_caps_enabled') else 'Off'}"
                 + (f" at {config.get('spam_caps_threshold', 28)}+ uppercase letters" if config.get('spam_caps_enabled') else "")
                 + "\n"
+                + f"Low-value chatter: {'On' if config.get('spam_low_value_enabled') else 'Off'}"
+                + (
+                    f" at {config.get('spam_low_value_threshold', 5)} messages in {config.get('spam_low_value_window_seconds', 60)}s"
+                    if config.get("spam_low_value_enabled")
+                    else ""
+                )
+                + "\n"
                 + f"Moderator anti-spam: {self._moderator_policy_label(str(config.get('spam_moderator_policy', 'exempt')))}"
             )
         if pack == "gif":
@@ -1842,6 +1871,12 @@ class ShieldCog(commands.Cog):
                 + (f"On at {config.get('spam_emote_threshold', 18)}+" if config.get("spam_emote_enabled") else "Off")
                 + " | Caps: "
                 + (f"On at {config.get('spam_caps_threshold', 28)}+" if config.get("spam_caps_enabled") else "Off")
+                + " | Low-value: "
+                + (
+                    f"On at {config.get('spam_low_value_threshold', 5)} in {config.get('spam_low_value_window_seconds', 60)}s"
+                    if config.get("spam_low_value_enabled")
+                    else "Off"
+                )
             )
         elif pack == "gif":
             lines.append(
@@ -2120,6 +2155,12 @@ class ShieldCog(commands.Cog):
                 + (f" at {config.get('spam_emote_threshold', 18)}+" if config.get('spam_emote_enabled') else ""),
                 f"Capitals lane: {'On' if config.get('spam_caps_enabled') else 'Off'}"
                 + (f" at {config.get('spam_caps_threshold', 28)}+" if config.get('spam_caps_enabled') else ""),
+                "Low-value chatter lane: "
+                + (
+                    f"On at {config.get('spam_low_value_threshold', 5)} messages in {config.get('spam_low_value_window_seconds', 60)}s"
+                    if config.get("spam_low_value_enabled")
+                    else "Off"
+                ),
                 f"Moderator handling: {self._moderator_policy_label(str(config.get('spam_moderator_policy', 'exempt')))}",
             ]
         if pack == "gif":
@@ -2982,6 +3023,7 @@ class ShieldCog(commands.Cog):
         emote_threshold="Emoji or emote token threshold for the spam pack",
         caps_enabled="Enable or disable the spam pack's optional excessive-capitals lane",
         caps_threshold="Uppercase-letter threshold for the spam pack",
+        low_value_enabled="Enable or disable the spam pack's optional low-value chatter lane",
         moderator_policy="How the spam pack should treat moderators by default",
         consecutive_threshold="Channel-level consecutive GIF threshold for the GIF pack",
         repeat_threshold="Low-text GIF repeat threshold for the GIF pack",
@@ -3019,6 +3061,7 @@ class ShieldCog(commands.Cog):
         emote_threshold: Optional[int] = None,
         caps_enabled: Optional[bool] = None,
         caps_threshold: Optional[int] = None,
+        low_value_enabled: Optional[bool] = None,
         moderator_policy: Optional[str] = None,
         consecutive_threshold: Optional[int] = None,
         repeat_threshold: Optional[int] = None,
@@ -3050,6 +3093,7 @@ class ShieldCog(commands.Cog):
                 emote_threshold,
                 caps_enabled,
                 caps_threshold,
+                low_value_enabled,
                 moderator_policy,
                 consecutive_threshold,
                 repeat_threshold,
@@ -3081,6 +3125,7 @@ class ShieldCog(commands.Cog):
                 emote_threshold=emote_threshold,
                 caps_enabled=caps_enabled,
                 caps_threshold=caps_threshold,
+                low_value_enabled=low_value_enabled,
                 moderator_policy=moderator_policy,
                 consecutive_threshold=consecutive_threshold,
                 repeat_threshold=repeat_threshold,

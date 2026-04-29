@@ -8,6 +8,7 @@ import ipaddress
 import logging
 import os
 import re
+import secrets
 import time
 import uuid
 from dataclasses import dataclass, replace
@@ -31,6 +32,7 @@ from babblebox.premium_limits import (
     storage_ceiling,
 )
 from babblebox.premium_models import PLAN_FREE, PLAN_GUILD_PRO, SYSTEM_PREMIUM_SUPPORT_GUILD_ID
+from babblebox.official_links import SUPPORT_SERVER_URL
 from babblebox.shield_ai import (
     DEFAULT_SHIELD_AI_FAST_MODEL,
     SHIELD_AI_MIN_CONFIDENCE_CHOICES,
@@ -147,6 +149,7 @@ SPAM_LINK_WINDOW_SECONDS = 45.0
 SPAM_INVITE_WINDOW_SECONDS = 60.0
 SPAM_MENTION_WINDOW_SECONDS = 20.0
 SPAM_LOW_VALUE_WINDOW_SECONDS = 60.0
+SHIELD_ALERT_ACTION_TTL_SECONDS = 24 * 60 * 60
 SPAM_GIF_WINDOW_SECONDS = 45.0
 SPAM_GIF_REPEAT_WINDOW_SECONDS = 30.0
 HEALTHY_CHAT_WINDOW_SECONDS = 20.0
@@ -777,6 +780,9 @@ class SpamRuleSettings:
     emote_threshold: int
     caps_enabled: bool
     caps_threshold: int
+    low_value_enabled: bool
+    low_value_threshold: int
+    low_value_window_seconds: int
     moderator_policy: str
 
 
@@ -1012,6 +1018,95 @@ class ShieldDecision:
     scan_surface_labels: tuple[str, ...] = ()
     alert_evidence_signature: str | None = None
     alert_evidence_summary: str | None = None
+
+
+class ShieldAlertActionView(discord.ui.View):
+    def __init__(self, service: "ShieldService", record: dict[str, Any]):
+        super().__init__(timeout=None)
+        self.service = service
+        self.token = str(record.get("token") or "")
+        jump_url = str(record.get("jump_url") or "")
+        target_message_id = record.get("target_message_id")
+        target_channel_id = record.get("target_channel_id")
+        if bool(record.get("used")):
+            self.add_item(discord.ui.Button(label="Support Server", style=discord.ButtonStyle.link, url=SUPPORT_SERVER_URL, row=0))
+            return
+        deleted_by_shield = bool(record.get("deleted_by_shield") or record.get("deleted_by_moderator"))
+        timed_out_by_shield = bool(record.get("timed_out_by_shield"))
+        if jump_url and not deleted_by_shield:
+            self.add_item(discord.ui.Button(label="Open Message", style=discord.ButtonStyle.link, url=jump_url, row=0))
+        if target_message_id and target_channel_id and not deleted_by_shield:
+            delete_button = discord.ui.Button(
+                label="Delete Message",
+                style=discord.ButtonStyle.danger,
+                custom_id=f"bb:shield_alert:delete:{self.token}",
+                row=0,
+            )
+
+            async def delete_callback(interaction: discord.Interaction):
+                await self.service.handle_alert_delete_interaction(interaction, self.token)
+
+            delete_button.callback = delete_callback
+            self.add_item(delete_button)
+        if timed_out_by_shield:
+            untimeout_button = discord.ui.Button(
+                label="Remove Timeout",
+                style=discord.ButtonStyle.secondary,
+                custom_id=f"bb:shield_alert:untimeout:{self.token}",
+                row=0,
+            )
+
+            async def untimeout_callback(interaction: discord.Interaction):
+                await self.service.handle_alert_remove_timeout_interaction(interaction, self.token)
+
+            untimeout_button.callback = untimeout_callback
+            self.add_item(untimeout_button)
+        false_positive_button = discord.ui.Button(
+            label="Mark False Positive",
+            style=discord.ButtonStyle.success,
+            custom_id=f"bb:shield_alert:false_positive:{self.token}",
+            row=1,
+        )
+
+        async def false_positive_callback(interaction: discord.Interaction):
+            await self.service.handle_alert_false_positive_interaction(interaction, self.token)
+
+        false_positive_button.callback = false_positive_callback
+        self.add_item(false_positive_button)
+        self.add_item(discord.ui.Button(label="Support Server", style=discord.ButtonStyle.link, url=SUPPORT_SERVER_URL, row=1))
+
+
+class ShieldAlertDeleteConfirmView(discord.ui.View):
+    def __init__(self, service: "ShieldService", token: str):
+        super().__init__(timeout=60)
+        self.service = service
+        self.token = token
+        confirm = discord.ui.Button(label="Confirm Delete", style=discord.ButtonStyle.danger)
+
+        async def confirm_callback(interaction: discord.Interaction):
+            result = await self.service.handle_alert_delete_message(self.token, moderator=interaction.user, guild=interaction.guild)
+            await self.service._send_alert_action_interaction_result(interaction, result, title="Shield Alert Action")
+
+        confirm.callback = confirm_callback
+        self.add_item(confirm)
+        self.add_item(discord.ui.Button(label="Support Server", style=discord.ButtonStyle.link, url=SUPPORT_SERVER_URL))
+
+
+class _StaticShieldAlertActionView:
+    def __init__(self, record: dict[str, Any]):
+        labels = []
+        if bool(record.get("used")):
+            self.children = [type("StaticShieldButton", (), {"label": "Support Server"})()]
+            return
+        deleted = bool(record.get("deleted_by_shield") or record.get("deleted_by_moderator"))
+        if record.get("jump_url") and not deleted:
+            labels.append("Open Message")
+        if record.get("target_message_id") and record.get("target_channel_id") and not deleted:
+            labels.append("Delete Message")
+        if bool(record.get("timed_out_by_shield")):
+            labels.append("Remove Timeout")
+        labels.extend(("Mark False Positive", "Support Server"))
+        self.children = [type("StaticShieldButton", (), {"label": label})() for label in labels]
 
 
 @dataclass(frozen=True)
@@ -1256,6 +1351,8 @@ def _extract_domain(raw_url: str) -> str | None:
 def _looks_like_bare_url_candidate(raw_token: str) -> str | None:
     candidate = (raw_token or "").strip().strip("()[]{}<>,.!?\"'")
     if not candidate or len(candidate) > BARE_URL_MAX_LENGTH:
+        return None
+    if any(ord(char) > 127 for char in candidate):
         return None
     lowered = candidate.casefold()
     if "://" in lowered or lowered.startswith("www.") or "@" in lowered or lowered.count(".") < 1:
@@ -2449,6 +2546,9 @@ def _build_feature_compiled_config(
             emote_threshold=18,
             caps_enabled=False,
             caps_threshold=28,
+            low_value_enabled=False,
+            low_value_threshold=5,
+            low_value_window_seconds=60,
             moderator_policy="exempt",
         ),
         gif=disabled,
@@ -2574,6 +2674,7 @@ class ShieldService:
         self._channel_gif_streaks: dict[tuple[int, int], ShieldChannelGifStreakState] = {}
         self._gif_incident_alerts: dict[tuple[int, int, int], dict[str, Any]] = {}
         self._spam_incident_alerts: dict[tuple[int, int, int, str], dict[str, Any]] = {}
+        self._alert_action_message_refs: dict[str, discord.Message] = {}
         self._recent_newcomer_activity: dict[tuple[int, int], ShieldNewcomerActivityState] = {}
         self._last_runtime_prune = 0.0
 
@@ -3319,6 +3420,9 @@ class ShieldService:
         emote_threshold: int | None = None,
         caps_enabled: bool | None = None,
         caps_threshold: int | None = None,
+        low_value_enabled: bool | None = None,
+        low_value_threshold: int | None = None,
+        low_value_window_seconds: int | None = None,
         moderator_policy: str | None = None,
         consecutive_enabled: bool | None = None,
         consecutive_threshold: int | None = None,
@@ -3348,6 +3452,9 @@ class ShieldService:
                 emote_threshold,
                 caps_enabled,
                 caps_threshold,
+                low_value_enabled,
+                low_value_threshold,
+                low_value_window_seconds,
                 moderator_policy,
                 consecutive_enabled,
                 consecutive_threshold,
@@ -3372,10 +3479,13 @@ class ShieldService:
                 emote_threshold,
                 caps_enabled,
                 caps_threshold,
+                low_value_enabled,
+                low_value_threshold,
+                low_value_window_seconds,
                 moderator_policy,
             )
         ):
-            return False, "Burst thresholds, duplicate thresholds, emote or capitals toggles, and moderator policy only apply to the spam pack."
+            return False, "Burst thresholds, duplicate thresholds, emote, capitals, low-value chatter, and moderator policy only apply to the spam pack."
         if pack != "gif" and any(
             value is not None
             for value in (consecutive_enabled, consecutive_threshold, repeat_enabled, repeat_threshold, same_asset_enabled, same_asset_threshold, ratio_percent)
@@ -3425,6 +3535,14 @@ class ShieldService:
             return False, "Emote threshold must be between 8 and 40."
         if caps_threshold is not None and not (12 <= caps_threshold <= 80):
             return False, "Capitals threshold must be between 12 and 80."
+        if low_value_threshold is not None:
+            minimum, maximum, _default = SHIELD_NUMERIC_CONFIG_SPECS["spam_low_value_threshold"]
+            if not (minimum <= low_value_threshold <= maximum):
+                return False, f"Low-value chatter threshold must be between {minimum} and {maximum}."
+        if low_value_window_seconds is not None:
+            minimum, maximum, _default = SHIELD_NUMERIC_CONFIG_SPECS["spam_low_value_window_seconds"]
+            if not (minimum <= low_value_window_seconds <= maximum):
+                return False, f"Low-value chatter window must be between {minimum} and {maximum} seconds."
         if repeat_threshold is not None:
             minimum, maximum, _default = SHIELD_NUMERIC_CONFIG_SPECS["gif_repeat_threshold"]
             if not (minimum <= repeat_threshold <= maximum):
@@ -3500,6 +3618,12 @@ class ShieldService:
                     config["spam_caps_enabled"] = bool(caps_enabled)
                 if caps_threshold is not None:
                     config["spam_caps_threshold"] = caps_threshold
+                if low_value_enabled is not None:
+                    config["spam_low_value_enabled"] = bool(low_value_enabled)
+                if low_value_threshold is not None:
+                    config["spam_low_value_threshold"] = low_value_threshold
+                if low_value_window_seconds is not None:
+                    config["spam_low_value_window_seconds"] = low_value_window_seconds
                 if cleaned_moderator_policy is not None:
                     config["spam_moderator_policy"] = cleaned_moderator_policy
             if pack == "gif":
@@ -3547,6 +3671,11 @@ class ShieldService:
             final_emote_threshold = current["spam_emote_threshold"] if emote_threshold is None else emote_threshold
             final_caps_enabled = current["spam_caps_enabled"] if caps_enabled is None else bool(caps_enabled)
             final_caps_threshold = current["spam_caps_threshold"] if caps_threshold is None else caps_threshold
+            final_low_value_enabled = current["spam_low_value_enabled"] if low_value_enabled is None else bool(low_value_enabled)
+            final_low_value_threshold = current["spam_low_value_threshold"] if low_value_threshold is None else low_value_threshold
+            final_low_value_window = (
+                current["spam_low_value_window_seconds"] if low_value_window_seconds is None else low_value_window_seconds
+            )
             final_moderator_policy = current["spam_moderator_policy"] if cleaned_moderator_policy is None else cleaned_moderator_policy
             policy_note = (
                 f" Rate lane: {'on' if final_message_enabled else 'off'}"
@@ -3564,6 +3693,12 @@ class ShieldService:
                 + (f" at {final_emote_threshold}+ tokens." if final_emote_enabled else ". ")
                 + f" Capitals spam: {'on' if final_caps_enabled else 'off'}"
                 + (f" at {final_caps_threshold}+ uppercase letters. " if final_caps_enabled else ". ")
+                + f"Low-value chatter: {'on' if final_low_value_enabled else 'off'}"
+                + (
+                    f" at {final_low_value_threshold} messages in {final_low_value_window}s. "
+                    if final_low_value_enabled
+                    else ". "
+                )
                 + f" Moderator anti-spam policy: {self._spam_moderator_policy_label(final_moderator_policy)}."
             )
         if pack == "gif":
@@ -5138,26 +5273,34 @@ class ShieldService:
             spam_settings.enabled
             and spam_rules.emote_enabled
             and snapshot.emoji_count >= spam_rules.emote_threshold
-            and (snapshot.plain_word_count <= 6 or snapshot.emoji_count >= spam_rules.emote_threshold + 8)
         ):
             repeated_emote_events = sum(
                 1
                 for event in burst_window
                 if event.emoji_count >= max(8, spam_rules.emote_threshold - 4)
             )
-            facts.append(
-                {
-                    "match_class": "spam_emoji_flood",
-                    "label": "Emote spam",
-                    "reason": (
-                        f"The message packed {snapshot.emoji_count} emoji or emote tokens "
-                        f"(threshold {spam_rules.emote_threshold}) with very little plain text."
-                    ),
-                    "base_confidence": "medium" if repeated_emote_events >= 2 or snapshot.emoji_count >= spam_rules.emote_threshold + 8 else "low",
-                    "strong": repeated_emote_events >= 2 or snapshot.emoji_count >= spam_rules.emote_threshold + 8,
-                    "signature": snapshot.near_duplicate_fingerprint or snapshot.exact_fingerprint,
-                }
-            )
+            sparse_emote_message = snapshot.plain_word_count <= 6 or snapshot.low_value_text
+            repeated_emote_pressure = repeated_emote_events >= 2
+            extreme_low_substance_emote = snapshot.plain_word_count <= 12 and snapshot.emoji_count >= spam_rules.emote_threshold + 16
+            if sparse_emote_message or repeated_emote_pressure or extreme_low_substance_emote:
+                reason_suffix = (
+                    "with repeated emote-heavy pressure."
+                    if repeated_emote_pressure and not sparse_emote_message
+                    else "with very little plain text."
+                )
+                facts.append(
+                    {
+                        "match_class": "spam_emoji_flood",
+                        "label": "Emote spam",
+                        "reason": (
+                            f"The message packed {snapshot.emoji_count} emoji or emote tokens "
+                            f"(threshold {spam_rules.emote_threshold}) {reason_suffix}"
+                        ),
+                        "base_confidence": "medium" if repeated_emote_pressure or extreme_low_substance_emote else "low",
+                        "strong": repeated_emote_pressure or extreme_low_substance_emote,
+                        "signature": snapshot.near_duplicate_fingerprint or snapshot.exact_fingerprint,
+                    }
+                )
 
         caps_ratio = snapshot.uppercase_count / max(1, snapshot.alpha_count)
         if (
@@ -5216,11 +5359,13 @@ class ShieldService:
                 }
             )
 
-        low_value_events = [event for event in recent_events if event.low_value_text and now - event.timestamp <= SPAM_LOW_VALUE_WINDOW_SECONDS]
+        low_value_events = [
+            event for event in recent_events if event.low_value_text and now - event.timestamp <= float(spam_rules.low_value_window_seconds)
+        ]
         if (
             spam_settings.enabled
-            and (spam_rules.message_enabled or spam_rules.burst_enabled)
-            and len(low_value_events) >= 5
+            and spam_rules.low_value_enabled
+            and len(low_value_events) >= spam_rules.low_value_threshold
             and dominant_channel_presence
             and not benign_turn_taking
             and not any(fact["match_class"] in {"spam_message_rate", "spam_duplicate", "spam_near_duplicate"} for fact in facts)
@@ -5229,7 +5374,10 @@ class ShieldService:
                 {
                     "match_class": "spam_low_value_noise",
                     "label": "Repeated low-value noise",
-                    "reason": f"{len(low_value_events)} short low-value messages landed inside 60 seconds.",
+                    "reason": (
+                        f"{len(low_value_events)} short low-value messages landed inside "
+                        f"{spam_rules.low_value_window_seconds} seconds."
+                    ),
                     "base_confidence": "low",
                     "strong": False,
                     "signature": snapshot.near_duplicate_fingerprint or snapshot.exact_fingerprint,
@@ -6437,7 +6585,9 @@ class ShieldService:
             ]
         elif match.match_class == "spam_low_value_noise":
             selected_events = [
-                event for event in same_channel_events if event.low_value_text and now - event.timestamp <= SPAM_LOW_VALUE_WINDOW_SECONDS
+                event
+                for event in same_channel_events
+                if event.low_value_text and now - event.timestamp <= float(compiled.spam_rules.low_value_window_seconds)
             ]
         elif match.match_class == "spam_padding_noise":
             selected_events = [
@@ -8011,7 +8161,46 @@ class ShieldService:
                 reason_bits.append("download-style link target")
 
             confidence: str | None = None
-            if features.automated_author and weighted_score >= 7:
+            hard_link_evidence = (
+                any(assessment.category in {MALICIOUS_LINK_CATEGORY, IMPERSONATION_LINK_CATEGORY} for assessment in link_assessments)
+                or snapshot.has_suspicious_attachment
+                or features.dangerous_link_target
+            )
+            scam_intent_present = bool(
+                features.bait
+                or features.commodity_bait
+                or features.too_good_offer
+                or features.direct_offer
+                or features.social_engineering
+                or features.cta
+                or features.login_or_auth_flow
+                or features.brand_bait
+                or features.support_framing
+                or features.security_notice
+                or features.fake_authority
+                or features.qr_setup_lure
+                or features.announcement_framing
+                or features.partnership_framing
+                or features.community_post_framing
+                or features.official_framing
+                or features.urgency
+                or features.wallet_or_mint
+                or features.suspicious_attachment_combo
+            )
+            fresh_campaign_corroborated = bool(
+                features.fresh_campaign_cluster_30m >= 3
+                or (features.fresh_campaign_cluster_20m >= 2 and (scam_intent_present or features.risky_link_present))
+            )
+            ambiguous_unknown_link_context = (
+                features.suspicious_link_present
+                and not hard_link_evidence
+                and not scam_intent_present
+                and not fresh_campaign_corroborated
+            )
+            if ambiguous_unknown_link_context:
+                if weighted_score >= 4 and (settings.sensitivity == "high" or self._should_emit_middle_lane_low(features)):
+                    confidence = "low"
+            elif features.automated_author and weighted_score >= 7:
                 confidence = "high"
             elif features.automated_author and weighted_score >= 6:
                 confidence = "medium"
@@ -8470,6 +8659,327 @@ class ShieldService:
             return 1
         return 0
 
+    def _alert_action_records(self) -> dict[str, dict[str, Any]]:
+        records = self.store.state.setdefault("alert_actions", {})
+        if not isinstance(records, dict):
+            records = {}
+            self.store.state["alert_actions"] = records
+        return records
+
+    def _alert_record_expired(self, record: dict[str, Any]) -> bool:
+        expires_at = deserialize_datetime(record.get("expires_at"))
+        return expires_at is not None and expires_at <= ge.now_utc()
+
+    def _purge_expired_alert_action_records(self) -> bool:
+        records = self._alert_action_records()
+        expired = [token for token, record in records.items() if self._alert_record_expired(record)]
+        for token in expired:
+            records.pop(token, None)
+            self._alert_action_message_refs.pop(token, None)
+        return bool(expired)
+
+    async def purge_expired_alert_action_records(self):
+        if self._purge_expired_alert_action_records():
+            await self.store.flush()
+
+    def active_alert_action_records(self) -> list[dict[str, Any]]:
+        self._purge_expired_alert_action_records()
+        return sorted(
+            (dict(record) for record in self._alert_action_records().values() if not self._alert_record_expired(record)),
+            key=lambda item: str(item.get("created_at") or ""),
+        )
+
+    def build_alert_action_view(self, record: dict[str, Any]) -> Any:
+        with contextlib.suppress(RuntimeError):
+            loop = asyncio.get_running_loop()
+            if not hasattr(loop, "create_future"):
+                return _StaticShieldAlertActionView(record)
+        return ShieldAlertActionView(self, record)
+
+    def _new_alert_action_record(
+        self,
+        message: discord.Message,
+        decision: ShieldDecision,
+        *,
+        top_reason: ShieldMatch | None,
+    ) -> dict[str, Any]:
+        token = secrets.token_urlsafe(16)
+        now = ge.now_utc()
+        destructive = bool(decision.deleted or decision.timed_out)
+        return {
+            "token": token,
+            "guild_id": int(getattr(message.guild, "id", 0) or 0),
+            "log_channel_id": None,
+            "alert_message_id": None,
+            "target_channel_id": int(getattr(getattr(message, "channel", None), "id", 0) or 0) or None,
+            "target_message_id": int(getattr(message, "id", 0) or 0) or None,
+            "target_user_id": int(getattr(getattr(message, "author", None), "id", 0) or 0) or None,
+            "pack": decision.pack,
+            "action": decision.action,
+            "match_class": top_reason.match_class if top_reason is not None else None,
+            "jump_url": getattr(message, "jump_url", None),
+            "deleted_by_shield": bool(decision.deleted),
+            "timed_out_by_shield": bool(decision.timed_out),
+            "recovery_content": (str(getattr(message, "content", "") or "")[:8000] if destructive else None),
+            "created_at": now.isoformat(),
+            "expires_at": (now + timedelta(seconds=SHIELD_ALERT_ACTION_TTL_SECONDS)).isoformat(),
+            "used": False,
+            "used_at": None,
+            "status": None,
+        }
+
+    async def _save_alert_action_record(self, record: dict[str, Any]):
+        self._purge_expired_alert_action_records()
+        token = str(record.get("token") or "")
+        if not token:
+            return
+        self._alert_action_records()[token] = record
+        await self.store.flush()
+
+    def _get_alert_action_record(self, token: str) -> dict[str, Any] | None:
+        record = self._alert_action_records().get(str(token or ""))
+        if not isinstance(record, dict) or self._alert_record_expired(record):
+            return None
+        return record
+
+    def _alert_actor_has_permission(self, actor: object, *permission_names: str) -> bool:
+        permissions = getattr(actor, "guild_permissions", None)
+        if bool(getattr(permissions, "administrator", False) or getattr(permissions, "manage_guild", False)):
+            return True
+        return any(bool(getattr(permissions, name, False)) for name in permission_names)
+
+    async def _resolve_alert_member(self, guild: discord.Guild | None, user_id: int | None):
+        if guild is None or not isinstance(user_id, int) or user_id <= 0:
+            return None
+        member = guild.get_member(user_id) if hasattr(guild, "get_member") else None
+        if member is not None:
+            return member
+        if hasattr(guild, "fetch_member"):
+            with contextlib.suppress(discord.Forbidden, discord.NotFound, discord.HTTPException):
+                return await guild.fetch_member(user_id)
+        return None
+
+    def _can_clear_alert_timeout(self, guild: discord.Guild | None, moderator: object, member: object | None) -> bool:
+        if member is None or not self._alert_actor_has_permission(moderator, "moderate_members"):
+            return False
+        me = self._guild_member(guild, getattr(self.bot, "user", None)) if guild is not None else None
+        if me is None:
+            return False
+        member_top = getattr(member, "top_role", None)
+        me_top = getattr(me, "top_role", None)
+        if member_top is not None and me_top is not None and member_top >= me_top:
+            return False
+        return True
+
+    async def _resolve_alert_message(self, record: dict[str, Any]):
+        token = str(record.get("token") or "")
+        if token in self._alert_action_message_refs:
+            return self._alert_action_message_refs[token]
+        channel_id = record.get("target_channel_id")
+        message_id = record.get("target_message_id")
+        if not isinstance(channel_id, int) or not isinstance(message_id, int):
+            return None
+        channel = self.bot.get_channel(channel_id) if hasattr(self.bot, "get_channel") else None
+        if channel is None and hasattr(self.bot, "fetch_channel"):
+            with contextlib.suppress(discord.Forbidden, discord.NotFound, discord.HTTPException):
+                channel = await self.bot.fetch_channel(channel_id)
+        if channel is None or not hasattr(channel, "fetch_message"):
+            return None
+        with contextlib.suppress(discord.Forbidden, discord.NotFound, discord.HTTPException, KeyError):
+            return await channel.fetch_message(message_id)
+        return None
+
+    def _message_recovery_codeblock(self, content: str) -> str:
+        safe = (content or "[no text content]").replace("```", "`\u200b``")
+        return f"```\n{safe}\n```"
+
+    async def _dm_false_positive_recovery(self, member: object, guild: discord.Guild | None, content: str):
+        embed = discord.Embed(
+            title="Shield False Positive",
+            description=(
+                "A server moderator marked a Babblebox Shield action as a false positive. "
+                "Sorry about that. Your message text is below so you can repost it if needed."
+            ),
+            color=ge.EMBED_THEME["success"],
+        )
+        first_chunk = content[:950] if content else "[no text content]"
+        embed.add_field(name="Your message", value=self._message_recovery_codeblock(first_chunk), inline=False)
+        guild_name = getattr(guild, "name", None)
+        ge.style_embed(embed, footer=f"Babblebox Shield | {guild_name}" if guild_name else "Babblebox Shield")
+        await member.send(embed=embed)
+        remaining = content[950:]
+        while remaining:
+            chunk = remaining[:1800]
+            remaining = remaining[1800:]
+            await member.send(content=self._message_recovery_codeblock(chunk))
+
+    def _false_positive_fallback_text(self, member: object | None, content: str) -> str:
+        mention = getattr(member, "mention", "the member")
+        return (
+            "DMs were closed or unavailable. With moderator discretion, you can send this apology manually:\n\n"
+            f"Hi {mention}, Babblebox Shield removed or acted on your message by mistake. Sorry about that. "
+            "Here is the message text so you can repost it if needed:\n"
+            f"{self._message_recovery_codeblock(content)}"
+        )
+
+    async def handle_false_positive_recovery(self, token: str, *, moderator: object, guild: discord.Guild | None) -> dict[str, Any]:
+        record = self._get_alert_action_record(token)
+        if record is None:
+            return {"ok": False, "reason": "That Shield alert action has expired or no longer exists."}
+        if not self._alert_actor_has_permission(moderator, "manage_messages", "moderate_members"):
+            return {"ok": False, "reason": "You need Manage Messages, Timeout Members, Manage Server, or administrator access."}
+        member = await self._resolve_alert_member(guild, record.get("target_user_id"))
+        destructive_record = bool(record.get("deleted_by_shield") or record.get("timed_out_by_shield") or record.get("deleted_by_moderator"))
+        content = str(record.get("recovery_content") or "")
+        if destructive_record and not content:
+            message = await self._resolve_alert_message(record)
+            content = str(getattr(message, "content", "") or "")
+        timeout_removed = False
+        if bool(record.get("timed_out_by_shield")) and member is not None and self._can_clear_alert_timeout(guild, moderator, member):
+            with contextlib.suppress(discord.Forbidden, discord.HTTPException):
+                await member.timeout(None, reason="Babblebox Shield false-positive recovery.")
+                timeout_removed = True
+        dm_sent = False
+        moderator_fallback = None
+        if member is not None and content:
+            try:
+                await self._dm_false_positive_recovery(member, guild, content)
+                dm_sent = True
+            except Exception:
+                moderator_fallback = self._false_positive_fallback_text(member, content)
+        elif content:
+            moderator_fallback = self._false_positive_fallback_text(member, content)
+        record["used"] = True
+        record["used_at"] = ge.now_utc().isoformat()
+        record["moderator_user_id"] = int(getattr(moderator, "id", 0) or 0) or None
+        record["status"] = "false_positive_dm_sent" if dm_sent else "false_positive_dm_fallback"
+        if destructive_record and content:
+            record["recovery_content"] = content[:8000]
+        await self._save_alert_action_record(record)
+        note_bits = [
+            "False positive recorded.",
+            "Timeout removed." if timeout_removed else "No active timeout was removed.",
+            "The member was DMed with their message copy." if dm_sent else "Use the private fallback copy if the member should be notified.",
+            f"Reporting this in the support server is appreciated and important for improving Shield: {SUPPORT_SERVER_URL}",
+        ]
+        return {
+            "ok": True,
+            "timeout_removed": timeout_removed,
+            "dm_sent": dm_sent,
+            "moderator_note": " ".join(note_bits),
+            "moderator_fallback": moderator_fallback,
+            "record": dict(record),
+        }
+
+    async def handle_alert_delete_message(self, token: str, *, moderator: object, guild: discord.Guild | None) -> dict[str, Any]:
+        record = self._get_alert_action_record(token)
+        if record is None:
+            return {"ok": False, "reason": "That Shield alert action has expired or no longer exists."}
+        if not self._alert_actor_has_permission(moderator, "manage_messages"):
+            return {"ok": False, "reason": "You need Manage Messages, Manage Server, or administrator access to delete the message."}
+        message = await self._resolve_alert_message(record)
+        if message is None:
+            return {"ok": False, "reason": "Babblebox could not find the original message. It may already be deleted."}
+        content = str(getattr(message, "content", "") or "")
+        try:
+            await message.delete()
+        except (discord.Forbidden, discord.NotFound, discord.HTTPException):
+            return {"ok": False, "reason": "Babblebox could not delete that message. Check bot channel permissions."}
+        record["recovery_content"] = content[:8000]
+        record["deleted_by_moderator"] = True
+        record["status"] = "moderator_deleted"
+        await self._save_alert_action_record(record)
+        return {"ok": True, "reason": "Message deleted. A short-lived recovery copy is available for false-positive repair.", "record": dict(record)}
+
+    async def handle_alert_remove_timeout(self, token: str, *, moderator: object, guild: discord.Guild | None) -> dict[str, Any]:
+        record = self._get_alert_action_record(token)
+        if record is None:
+            return {"ok": False, "reason": "That Shield alert action has expired or no longer exists."}
+        member = await self._resolve_alert_member(guild, record.get("target_user_id"))
+        if not self._can_clear_alert_timeout(guild, moderator, member):
+            return {"ok": False, "reason": "You need Timeout Members, Manage Server, or administrator access, and role hierarchy must allow it."}
+        try:
+            await member.timeout(None, reason="Babblebox Shield timeout removed by moderator alert action.")
+        except (discord.Forbidden, discord.HTTPException):
+            return {"ok": False, "reason": "Babblebox could not remove that timeout. Check bot hierarchy and Timeout Members permission."}
+        record["status"] = "timeout_removed"
+        await self._save_alert_action_record(record)
+        return {"ok": True, "reason": "Timeout removed.", "record": dict(record)}
+
+    async def _send_alert_action_interaction_result(self, interaction: discord.Interaction, result: dict[str, Any], *, title: str):
+        ok = bool(result.get("ok"))
+        embed = ge.make_status_embed(
+            title,
+            str(result.get("moderator_note") or result.get("reason") or "Done."),
+            tone="success" if ok else "warning",
+            footer="Babblebox Shield",
+        )
+        fallback = result.get("moderator_fallback")
+        fallback_chunks: list[str] = []
+        if isinstance(fallback, str) and fallback:
+            embed.add_field(
+                name="Moderator Fallback",
+                value=(fallback[:1000] + "\n[continued privately]" if len(fallback) > 1000 else fallback),
+                inline=False,
+            )
+            if len(fallback) > 1000:
+                fallback_chunks = [fallback[index : index + 1900] for index in range(0, len(fallback), 1900)]
+        view = discord.ui.View()
+        view.add_item(discord.ui.Button(label="Support Server", style=discord.ButtonStyle.link, url=SUPPORT_SERVER_URL))
+        kwargs = {"embed": embed, "ephemeral": True}
+        if ok:
+            kwargs["view"] = view
+        if interaction.response.is_done():
+            await interaction.followup.send(**kwargs)
+        else:
+            await interaction.response.send_message(**kwargs)
+        for chunk in fallback_chunks:
+            with contextlib.suppress(discord.HTTPException, discord.NotFound):
+                await interaction.followup.send(content=chunk, ephemeral=True)
+
+    async def _update_alert_log_interaction_message(self, interaction: discord.Interaction, result: dict[str, Any], *, title: str):
+        message = getattr(interaction, "message", None)
+        if message is None:
+            return
+        embed = getattr(message, "embed", None)
+        if embed is None:
+            return
+        status = str(result.get("moderator_note") or result.get("reason") or title)
+        if len(embed.fields) < 25:
+            embed.add_field(name=title, value=status[:1024], inline=False)
+        record = result.get("record")
+        view = self.build_alert_action_view(record) if isinstance(record, dict) else None
+        with contextlib.suppress(discord.Forbidden, discord.NotFound, discord.HTTPException):
+            await message.edit(embed=embed, view=view)
+
+    async def handle_alert_false_positive_interaction(self, interaction: discord.Interaction, token: str):
+        result = await self.handle_false_positive_recovery(token, moderator=interaction.user, guild=interaction.guild)
+        await self._update_alert_log_interaction_message(interaction, result, title="False Positive Recovery")
+        await self._send_alert_action_interaction_result(interaction, result, title="False Positive Recovery")
+
+    async def handle_alert_delete_interaction(self, interaction: discord.Interaction, token: str):
+        record = self._get_alert_action_record(token)
+        if record is None or not self._alert_actor_has_permission(interaction.user, "manage_messages"):
+            result = await self.handle_alert_delete_message(token, moderator=interaction.user, guild=interaction.guild)
+            await self._send_alert_action_interaction_result(interaction, result, title="Shield Alert Action")
+            return
+        embed = ge.make_status_embed(
+            "Confirm Delete",
+            "This deletes the original message if it still exists and keeps a short-lived recovery copy for false-positive repair.",
+            tone="warning",
+            footer="Babblebox Shield",
+        )
+        view = ShieldAlertDeleteConfirmView(self, token)
+        if interaction.response.is_done():
+            await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+        else:
+            await interaction.response.send_message(embed=embed, view=view, ephemeral=True)
+
+    async def handle_alert_remove_timeout_interaction(self, interaction: discord.Interaction, token: str):
+        result = await self.handle_alert_remove_timeout(token, moderator=interaction.user, guild=interaction.guild)
+        await self._update_alert_log_interaction_message(interaction, result, title="Timeout Removed")
+        await self._send_alert_action_interaction_result(interaction, result, title="Shield Alert Action")
+
     async def _send_alert(
         self,
         message: discord.Message,
@@ -8624,7 +9134,7 @@ class ShieldService:
                 embed.add_field(name="Note", value="Scam detection can still be wrong; recheck the context before taking action.", inline=True)
             if decision.action_note:
                 embed.add_field(name="Operational Note", value=decision.action_note, inline=False)
-            ge.style_embed(embed, footer="Babblebox Shield | No message archive is stored")
+            ge.style_embed(embed, footer="Babblebox Shield | No long-term archive; destructive actions keep a short recovery copy")
 
         if spam_incident_key is not None:
             incident_state = self._spam_incident_alerts.get(spam_incident_key)
@@ -8709,11 +9219,17 @@ class ShieldService:
         content = f"<@&{compiled.alert_role_id}>" if compiled.alert_role_id is not None and ping_alert_role else None
         allowed_mentions = discord.AllowedMentions(users=False, roles=True, everyone=False)
         sent_message = None
+        action_record = self._new_alert_action_record(message, decision, top_reason=top_reason)
+        action_record["log_channel_id"] = int(getattr(channel, "id", 0) or compiled.log_channel_id)
+        action_view = self.build_alert_action_view(action_record)
         with contextlib.suppress(discord.Forbidden, discord.HTTPException):
-            sent_message = await channel.send(content=content, embed=embed, allowed_mentions=allowed_mentions)
+            sent_message = await channel.send(content=content, embed=embed, allowed_mentions=allowed_mentions, view=action_view)
         if sent_message is None:
             return
         decision.logged = True
+        action_record["alert_message_id"] = int(getattr(sent_message, "id", 0) or 0) or None
+        self._alert_action_message_refs[str(action_record["token"])] = message
+        await self._save_alert_action_record(action_record)
         if spam_incident_key is not None:
             self._spam_incident_alerts[spam_incident_key] = {
                 "last_seen": now,
@@ -8912,6 +9428,11 @@ class ShieldService:
                 emote_threshold=int(raw.get("spam_emote_threshold", shield_numeric_config_default("spam_emote_threshold"))),
                 caps_enabled=bool(raw.get("spam_caps_enabled")),
                 caps_threshold=int(raw.get("spam_caps_threshold", shield_numeric_config_default("spam_caps_threshold"))),
+                low_value_enabled=bool(raw.get("spam_low_value_enabled")),
+                low_value_threshold=int(raw.get("spam_low_value_threshold", shield_numeric_config_default("spam_low_value_threshold"))),
+                low_value_window_seconds=int(
+                    raw.get("spam_low_value_window_seconds", shield_numeric_config_default("spam_low_value_window_seconds"))
+                ),
                 moderator_policy=(
                     str(raw.get("spam_moderator_policy", "exempt")).strip().lower()
                     if str(raw.get("spam_moderator_policy", "exempt")).strip().lower() in VALID_SPAM_MODERATOR_POLICIES

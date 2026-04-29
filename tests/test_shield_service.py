@@ -6,6 +6,8 @@ from copy import deepcopy
 from typing import Optional
 from unittest.mock import AsyncMock, patch
 
+import discord
+
 from babblebox import game_engine as ge
 
 from babblebox.premium_limits import (
@@ -150,6 +152,21 @@ class FakeAuthor:
         self.joined_at = joined_at or ge.now_utc()
         self.avatar = avatar
         self.default_avatar = object()
+        self.top_role = self.roles[0] if self.roles else FakeRole(0, position=0)
+        self.communication_disabled_until = None
+        self.sent_dms = []
+        self.dm_error = None
+        self.timeout_calls = []
+
+    async def send(self, *args, **kwargs):
+        if self.dm_error is not None:
+            raise self.dm_error
+        self.sent_dms.append((args, kwargs))
+        return types.SimpleNamespace(id=len(self.sent_dms))
+
+    async def timeout(self, until, *, reason=None):
+        self.communication_disabled_until = until
+        self.timeout_calls.append((until, reason))
 
 
 class FakeBotMember(FakeAuthor):
@@ -181,6 +198,7 @@ class FakeSentLogMessage:
         self.id = message_id
         self.content = payload.get("content")
         self.embed = payload.get("embed")
+        self.view = payload.get("view")
         self.allowed_mentions = payload.get("allowed_mentions")
 
     async def edit(self, **kwargs):
@@ -188,6 +206,8 @@ class FakeSentLogMessage:
             self.content = kwargs["content"]
         if "embed" in kwargs:
             self.embed = kwargs["embed"]
+        if "view" in kwargs:
+            self.view = kwargs["view"]
         if "allowed_mentions" in kwargs:
             self.allowed_mentions = kwargs["allowed_mentions"]
         self.channel.edits.append(kwargs)
@@ -215,6 +235,9 @@ class FakeChannel:
         self._next_sent_id += 1
         return message
 
+    def register_message(self, message):
+        self._sent_messages[message.id] = message
+
     async def fetch_message(self, message_id: int):
         return self._sent_messages[message_id]
 
@@ -224,11 +247,23 @@ class FakeGuild:
         self.id = guild_id
         self.name = name or f"Guild {guild_id}"
         self.me = FakeBotMember()
+        self._members = {}
 
     def get_member(self, user_id: int):
         if user_id == self.me.id:
             return self.me
-        return None
+        return self._members.get(user_id)
+
+    def add_member(self, member):
+        self._members[member.id] = member
+        member.guild = self
+        return member
+
+    async def fetch_member(self, user_id: int):
+        member = self.get_member(user_id)
+        if member is None:
+            raise discord.NotFound(response=None, message="member not found")
+        return member
 
 
 class FakeAttachment:
@@ -322,6 +357,8 @@ class FakeMessage:
         self.deleted = False
         self.delete_error = delete_error
         self.delete_attempts = 0
+        if hasattr(channel, "register_message"):
+            channel.register_message(self)
 
     async def delete(self):
         self.delete_attempts += 1
@@ -334,9 +371,16 @@ class FakeBot:
     def __init__(self):
         self.user = types.SimpleNamespace(id=999)
         self._channels = {}
+        self._guilds = {}
 
     def register_channel(self, channel):
         self._channels[channel.id] = channel
+
+    def register_guild(self, guild):
+        self._guilds[guild.id] = guild
+
+    def get_guild(self, guild_id: int):
+        return self._guilds.get(guild_id)
 
     def get_channel(self, channel_id: int):
         return self._channels.get(channel_id)
@@ -393,10 +437,11 @@ class _FakeShieldPool:
 
 
 class _FakeShieldReloadConnection:
-    def __init__(self, *, config_rows=None, pattern_rows=None, meta_rows=None):
+    def __init__(self, *, config_rows=None, pattern_rows=None, meta_rows=None, alert_rows=None):
         self._config_rows = config_rows or []
         self._pattern_rows = pattern_rows or []
         self._meta_rows = meta_rows or []
+        self._alert_rows = alert_rows or []
 
     async def fetch(self, query):
         if "FROM shield_guild_configs" in query:
@@ -405,10 +450,33 @@ class _FakeShieldReloadConnection:
             return self._pattern_rows
         if "FROM shield_meta" in query:
             return self._meta_rows
+        if "FROM shield_alert_action_records" in query:
+            return self._alert_rows
         raise AssertionError(f"Unexpected fetch query: {query}")
 
 
+class _FakeShieldSchemaConnection:
+    def __init__(self):
+        self.statements = []
+
+    async def execute(self, statement, *args):
+        self.statements.append(str(statement))
+
+
 class ShieldPostgresReloadTests(unittest.IsolatedAsyncioTestCase):
+    async def test_schema_includes_low_value_lane_and_alert_action_records(self):
+        connection = _FakeShieldSchemaConnection()
+        store = _PostgresShieldStore("postgresql://shield-user:secret@db.example.com:5432/app")
+        store._pool = _FakeShieldPool(connection)
+
+        await store._ensure_schema()
+
+        schema_sql = "\n".join(connection.statements)
+        self.assertIn("spam_low_value_enabled", schema_sql)
+        self.assertIn("spam_low_value_threshold", schema_sql)
+        self.assertIn("spam_low_value_window_seconds", schema_sql)
+        self.assertIn("shield_alert_action_records", schema_sql)
+
     async def test_reload_decodes_json_string_config_lists_and_meta(self):
         connection = _FakeShieldReloadConnection(
             config_rows=[
@@ -630,8 +698,7 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
             created_at=ge.now_utc() - created_delta,
             joined_at=ge.now_utc() - joined_delta,
         )
-        member.guild = guild
-        return member
+        return guild.add_member(member)
 
     def test_campaign_kind_labels_stay_operator_friendly(self):
         self.assertEqual(_campaign_kind_label("path_shape"), "shared risky link shape")
@@ -3272,6 +3339,64 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("spam_emoji_flood", {reason.match_class for reason in flood.reasons})
         self.assertIsNone(normal)
 
+    async def test_decorative_about_me_profile_does_not_escalate_punycode_or_emote_noise(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        log_channel = FakeChannel(99, name="shield-log")
+        self.bot.register_channel(log_channel)
+        author = self._make_member(guild, 210, created_delta=timedelta(hours=4), joined_delta=timedelta(minutes=8))
+        content = (
+            "⧣₊˚﹒✦₊ ⧣₊˚ 𓂃★ ⸝⸝ ⧣₊˚﹒✦₊ ⧣₊˚\n"
+            "/) /)\n"
+            "(｡•ㅅ•｡)〝₎₎ About me! ✦₊ ˊ˗\n"
+            ". .╭∪─∪────────── ✦ ⁺.\n"
+            ". .┊ ◟﹫ Name : You can just call me apple!\n"
+            ". .┊﹒𐐪 Age : 17\n"
+            ". .┊ꜝꜝ﹒Pronouns : she/her\n"
+            ". .┊ ⨳゛Gender : female\n"
+            ". .┊ Hobbies : art, music, games, and hanging out with friends\n"
+            ". .┊ Favorite color : green\n"
+            ". .┊ Please be kind and ask before DMs\n"
+        )
+        message = FakeMessage(guild=guild, channel=channel, author=author, content=content)
+
+        ok, _ = await self.service.set_log_channel(guild.id, log_channel.id)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_module_enabled(guild.id, True)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_pack_config(guild.id, "scam", enabled=True, medium_action="delete_log", sensitivity="normal")
+        self.assertTrue(ok)
+        await self._enable_spam_pack(guild.id, emote_enabled=True, emote_threshold=18)
+
+        decision = await self.service.handle_message(message)
+
+        self.assertIsNone(decision)
+        self.assertFalse(message.deleted)
+        self.assertEqual(log_channel.sent, [])
+
+    async def test_explicit_punycode_claim_lure_still_detects(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        author = self._make_member(guild, 211, created_delta=timedelta(hours=3), joined_delta=timedelta(minutes=4))
+        message = FakeMessage(
+            guild=guild,
+            channel=channel,
+            author=author,
+            content="Claim your reward and verify your account now: https://xn--jwh.xn--jj8c/login",
+        )
+
+        ok, _ = await self.service.set_module_enabled(guild.id, True)
+        self.assertTrue(ok)
+        ok, _ = await self.service.set_pack_config(guild.id, "scam", enabled=True, medium_action="delete_log", sensitivity="normal")
+        self.assertTrue(ok)
+
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            decision = await self.service.handle_message(message)
+
+        self.assertIsNotNone(decision)
+        self.assertEqual(decision.pack, "scam")
+        self.assertIn(decision.action, {"delete_log", "delete_escalate", "delete_timeout_log"})
+
     async def test_capitals_spam_toggle_defaults_off_then_detects_when_enabled(self):
         guild = FakeGuild(10)
         channel = FakeChannel(20)
@@ -3344,6 +3469,52 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
             ]
 
         self.assertEqual(decisions, [None, None, None, None, None, None, None])
+
+    async def test_low_value_chatter_lane_is_off_by_default_and_uses_custom_values_when_enabled(self):
+        guild = FakeGuild(10)
+        channel = FakeChannel(20)
+        default_author = self._make_member(guild, 1031)
+        enabled_author = self._make_member(guild, 1032)
+        low_value_posts = ("lol", "lmao", "haha", "yo")
+
+        await self._enable_spam_pack(
+            guild.id,
+            message_enabled=False,
+            burst_enabled=False,
+            near_duplicate_enabled=False,
+            low_value_enabled=False,
+        )
+        self.assertFalse(self.service.get_config(guild.id)["spam_low_value_enabled"])
+
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            default_decisions = [
+                await self.service.handle_message(FakeMessage(guild=guild, channel=channel, author=default_author, content=text))
+                for text in low_value_posts
+            ]
+
+        self.assertEqual(default_decisions, [None, None, None, None])
+
+        ok, _ = await self.service.set_pack_config(
+            guild.id,
+            "spam",
+            low_value_enabled=True,
+            low_value_threshold=4,
+            low_value_window_seconds=120,
+        )
+        self.assertTrue(ok)
+
+        with patch.object(self.service, "_send_alert", new=AsyncMock()):
+            enabled_decisions = [
+                await self.service.handle_message(FakeMessage(guild=guild, channel=channel, author=enabled_author, content=text))
+                for text in low_value_posts
+            ]
+
+        final = enabled_decisions[-1]
+        self.assertEqual(enabled_decisions[:3], [None, None, None])
+        self.assertIsNotNone(final)
+        self.assertEqual(final.pack, "spam")
+        self.assertIn("spam_low_value_noise", {reason.match_class for reason in final.reasons})
+        self.assertIn("4 short low-value messages landed inside 120 seconds", final.reasons[0].reason)
 
     async def test_custom_spam_threshold_profile_triggers_and_explains_itself(self):
         guild = FakeGuild(10)
@@ -4403,6 +4574,137 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIn("Confidence: High confidence", detection_field.value)
         self.assertIn("Resolved action: Delete + Timeout + log", detection_field.value)
         self.assertIn("Deleted 5/5 messages", action_field.value)
+
+    async def test_shield_alert_logs_include_reversible_action_buttons_without_punishment_buttons(self):
+        guild = FakeGuild(10)
+        public_channel = FakeChannel(20)
+        log_channel = FakeChannel(99, name="shield-log")
+        self.bot.register_channel(log_channel)
+        author = self._make_member(guild, 44)
+        message = FakeMessage(guild=guild, channel=public_channel, author=author, content="Email me at friend@example.com")
+
+        ok, _ = await self.service.set_log_channel(guild.id, log_channel.id)
+        self.assertTrue(ok)
+        compiled = self.service._compiled_configs[guild.id]
+        decision = ShieldDecision(
+            matched=True,
+            action="log",
+            pack="privacy",
+            reasons=(
+                ShieldMatch(
+                    pack="privacy",
+                    label="Possible email address",
+                    reason="Looks like an email address was posted in chat.",
+                    action="log",
+                    confidence="high",
+                    heuristic=False,
+                    match_class="privacy_email",
+                ),
+            ),
+        )
+
+        await self.service._send_alert(message, compiled, decision, content_fingerprint=self._content_fingerprint(message.content))
+
+        view = log_channel.sent[0].get("view")
+        self.assertIsNotNone(view)
+        labels = {getattr(child, "label", "") for child in view.children}
+        self.assertIn("Open Message", labels)
+        self.assertIn("Delete Message", labels)
+        self.assertIn("Mark False Positive", labels)
+        self.assertIn("Support Server", labels)
+        self.assertNotIn("Kick", labels)
+        self.assertNotIn("Ban", labels)
+        self.assertNotIn("Timeout Member", labels)
+
+    async def test_false_positive_recovery_removes_timeout_and_dms_recoverable_message(self):
+        guild = FakeGuild(10)
+        self.bot.register_guild(guild)
+        public_channel = FakeChannel(20)
+        log_channel = FakeChannel(99, name="shield-log")
+        self.bot.register_channel(log_channel)
+        author = self._make_member(guild, 45)
+        moderator = self._make_member(guild, 46, manage_messages=True, moderate_members=True)
+        author.communication_disabled_until = ge.now_utc() + timedelta(minutes=8)
+        message = FakeMessage(guild=guild, channel=public_channel, author=author, content="I was trying to post a normal introduction.")
+
+        ok, _ = await self.service.set_log_channel(guild.id, log_channel.id)
+        self.assertTrue(ok)
+        compiled = self.service._compiled_configs[guild.id]
+        decision = ShieldDecision(
+            matched=True,
+            action="delete_timeout_log",
+            pack="spam",
+            reasons=(
+                ShieldMatch(
+                    pack="spam",
+                    label="Fast burst posting",
+                    reason="5 messages landed inside 10 seconds.",
+                    action="delete_timeout_log",
+                    confidence="high",
+                    heuristic=True,
+                    match_class="spam_burst",
+                ),
+            ),
+            deleted=True,
+            timed_out=True,
+        )
+
+        await self.service._send_alert(message, compiled, decision, content_fingerprint=self._content_fingerprint(message.content))
+        record = self.service.active_alert_action_records()[0]
+
+        result = await self.service.handle_false_positive_recovery(record["token"], moderator=moderator, guild=guild)
+
+        self.assertTrue(result["ok"])
+        self.assertTrue(result["timeout_removed"])
+        self.assertTrue(result["dm_sent"])
+        self.assertIsNone(author.communication_disabled_until)
+        self.assertEqual(author.timeout_calls[-1][0], None)
+        dm_embed = author.sent_dms[-1][1]["embed"]
+        self.assertIn("false positive", dm_embed.description.lower())
+        self.assertIn("I was trying to post a normal introduction.", dm_embed.fields[0].value)
+        self.assertIn("support", result["moderator_note"].lower())
+
+    async def test_false_positive_recovery_returns_moderator_fallback_when_dm_fails(self):
+        guild = FakeGuild(10)
+        self.bot.register_guild(guild)
+        public_channel = FakeChannel(20)
+        log_channel = FakeChannel(99, name="shield-log")
+        self.bot.register_channel(log_channel)
+        author = self._make_member(guild, 47)
+        moderator = self._make_member(guild, 48, manage_messages=True, moderate_members=True)
+        author.dm_error = RuntimeError("DMs closed")
+        message = FakeMessage(guild=guild, channel=public_channel, author=author, content="My full message should be recoverable.")
+
+        ok, _ = await self.service.set_log_channel(guild.id, log_channel.id)
+        self.assertTrue(ok)
+        compiled = self.service._compiled_configs[guild.id]
+        decision = ShieldDecision(
+            matched=True,
+            action="delete_log",
+            pack="scam",
+            reasons=(
+                ShieldMatch(
+                    pack="scam",
+                    label="Scam social-engineering pattern",
+                    reason="Multiple scam signals combined.",
+                    action="delete_log",
+                    confidence="medium",
+                    heuristic=True,
+                    match_class="scam_campaign_lure",
+                ),
+            ),
+            deleted=True,
+        )
+
+        await self.service._send_alert(message, compiled, decision, content_fingerprint=self._content_fingerprint(message.content))
+        record = self.service.active_alert_action_records()[0]
+
+        result = await self.service.handle_false_positive_recovery(record["token"], moderator=moderator, guild=guild)
+
+        self.assertTrue(result["ok"])
+        self.assertFalse(result["dm_sent"])
+        self.assertIn("DMs were closed", result["moderator_fallback"])
+        self.assertIn("My full message should be recoverable.", result["moderator_fallback"])
 
     async def test_alert_signature_dedupes_near_identical_different_messages(self):
         guild = FakeGuild(10)
@@ -5574,6 +5876,9 @@ class ShieldStoreNormalizationTests(unittest.TestCase):
         self.assertTrue(normalized["spam_near_duplicate_enabled"])
         self.assertFalse(normalized["spam_emote_enabled"])
         self.assertFalse(normalized["spam_caps_enabled"])
+        self.assertFalse(normalized["spam_low_value_enabled"])
+        self.assertEqual(normalized["spam_low_value_threshold"], 5)
+        self.assertEqual(normalized["spam_low_value_window_seconds"], 60)
         self.assertTrue(normalized["gif_message_enabled"])
         self.assertTrue(normalized["gif_consecutive_enabled"])
         self.assertTrue(normalized["gif_repeat_enabled"])

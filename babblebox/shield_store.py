@@ -28,7 +28,7 @@ LOGGER = logging.getLogger(__name__)
 
 DEFAULT_DATABASE_URL_ENV_ORDER = ("UTILITY_DATABASE_URL", "SUPABASE_DB_URL", "DATABASE_URL")
 DEFAULT_BACKEND = "postgres"
-DEFAULT_VERSION = 11
+DEFAULT_VERSION = 12
 VALID_SCAN_MODES = {"all", "only_included"}
 VALID_SHIELD_ACTIONS = {"disabled", "detect", "log", "delete_log", "delete_escalate", "timeout_log", "delete_timeout_log"}
 VALID_SHIELD_SENSITIVITIES = {"low", "normal", "high"}
@@ -70,6 +70,8 @@ SHIELD_NUMERIC_CONFIG_SPECS: dict[str, tuple[int, int, int]] = {
     "spam_near_duplicate_window_seconds": (5, 45, 10),
     "spam_emote_threshold": (8, 40, 18),
     "spam_caps_threshold": (12, 80, 28),
+    "spam_low_value_threshold": (4, 12, 5),
+    "spam_low_value_window_seconds": (20, 120, 60),
     "gif_message_threshold": (3, 12, 4),
     "gif_window_seconds": (3, 45, 20),
     "gif_consecutive_threshold": (3, 10, 5),
@@ -205,6 +207,9 @@ def default_guild_shield_config(guild_id: int | None = None) -> dict[str, Any]:
         "spam_emote_threshold": shield_numeric_config_default("spam_emote_threshold"),
         "spam_caps_enabled": False,
         "spam_caps_threshold": shield_numeric_config_default("spam_caps_threshold"),
+        "spam_low_value_enabled": False,
+        "spam_low_value_threshold": shield_numeric_config_default("spam_low_value_threshold"),
+        "spam_low_value_window_seconds": shield_numeric_config_default("spam_low_value_window_seconds"),
         "spam_moderator_policy": "exempt",
         "gif_enabled": False,
         "gif_action": "log",
@@ -259,7 +264,7 @@ def default_guild_shield_config(guild_id: int | None = None) -> dict[str, Any]:
 
 
 def default_shield_state() -> dict[str, Any]:
-    return {"version": DEFAULT_VERSION, "meta": default_shield_meta(), "guilds": {}}
+    return {"version": DEFAULT_VERSION, "meta": default_shield_meta(), "guilds": {}, "alert_actions": {}}
 
 
 def _clean_int_list(values: Any) -> list[int]:
@@ -331,6 +336,48 @@ def _clean_pack_log_overrides(values: Any) -> dict[str, dict[str, str]]:
         return cleaned
     for pack in PACK_EXEMPTION_PACKS:
         cleaned[pack] = _clean_pack_log_override_entry(values.get(pack))
+    return cleaned
+
+
+def _clean_alert_action_records(values: Any) -> dict[str, dict[str, Any]]:
+    if not isinstance(values, dict):
+        return {}
+    cleaned: dict[str, dict[str, Any]] = {}
+    for raw_token, raw_record in values.items():
+        token = str(raw_token or "").strip()
+        if not token or len(token) > 96 or not isinstance(raw_record, dict):
+            continue
+        record = dict(raw_record)
+        record["token"] = token
+        for field in (
+            "guild_id",
+            "log_channel_id",
+            "alert_message_id",
+            "target_channel_id",
+            "target_message_id",
+            "target_user_id",
+            "moderator_user_id",
+        ):
+            value = record.get(field)
+            record[field] = value if isinstance(value, int) and value > 0 else None
+        for field in ("deleted_by_shield", "deleted_by_moderator", "timed_out_by_shield", "used"):
+            record[field] = bool(record.get(field))
+        for field in (
+            "pack",
+            "action",
+            "match_class",
+            "jump_url",
+            "recovery_content",
+            "created_at",
+            "expires_at",
+            "used_at",
+            "status",
+        ):
+            value = record.get(field)
+            record[field] = str(value)[:8000] if isinstance(value, str) else None
+        if record["guild_id"] is None or record["log_channel_id"] is None or record["target_user_id"] is None:
+            continue
+        cleaned[token] = record
     return cleaned
 
 
@@ -494,6 +541,7 @@ def normalize_guild_shield_config(guild_id: int, config: Any) -> dict[str, Any]:
         cleaned[field] = bool(config.get(field)) if field in config else bool(cleaned[field])
     cleaned["spam_emote_enabled"] = bool(config.get("spam_emote_enabled"))
     cleaned["spam_caps_enabled"] = bool(config.get("spam_caps_enabled"))
+    cleaned["spam_low_value_enabled"] = bool(config.get("spam_low_value_enabled"))
     moderator_policy = str(config.get("spam_moderator_policy", "exempt")).strip().lower()
     cleaned["spam_moderator_policy"] = (
         moderator_policy if moderator_policy in VALID_SPAM_MODERATOR_POLICIES else "exempt"
@@ -599,18 +647,18 @@ class _BaseShieldStore:
             cleaned_meta["ordinary_ai_updated_at"] = updated_at if isinstance(updated_at, str) and updated_at.strip() else None
             normalized["meta"] = cleaned_meta
         guilds = payload.get("guilds")
-        if not isinstance(guilds, dict):
-            return normalized
-        cleaned_guilds: dict[str, Any] = {}
-        for guild_id_text, config in guilds.items():
-            try:
-                guild_id = int(guild_id_text)
-            except (TypeError, ValueError):
-                continue
-            cleaned = self.normalize_config(guild_id, config)
-            if cleaned is not None:
-                cleaned_guilds[str(guild_id)] = cleaned
-        normalized["guilds"] = cleaned_guilds
+        if isinstance(guilds, dict):
+            cleaned_guilds: dict[str, Any] = {}
+            for guild_id_text, config in guilds.items():
+                try:
+                    guild_id = int(guild_id_text)
+                except (TypeError, ValueError):
+                    continue
+                cleaned = self.normalize_config(guild_id, config)
+                if cleaned is not None:
+                    cleaned_guilds[str(guild_id)] = cleaned
+            normalized["guilds"] = cleaned_guilds
+        normalized["alert_actions"] = _clean_alert_action_records(payload.get("alert_actions"))
         return normalized
 
     def normalize_config(self, guild_id: int, config: Any) -> dict[str, Any] | None:
@@ -755,6 +803,9 @@ class _PostgresShieldStore(_BaseShieldStore):
                 f"spam_emote_threshold SMALLINT NOT NULL DEFAULT {shield_numeric_config_default('spam_emote_threshold')}, "
                 "spam_caps_enabled BOOLEAN NOT NULL DEFAULT FALSE, "
                 f"spam_caps_threshold SMALLINT NOT NULL DEFAULT {shield_numeric_config_default('spam_caps_threshold')}, "
+                "spam_low_value_enabled BOOLEAN NOT NULL DEFAULT FALSE, "
+                f"spam_low_value_threshold SMALLINT NOT NULL DEFAULT {shield_numeric_config_default('spam_low_value_threshold')}, "
+                f"spam_low_value_window_seconds SMALLINT NOT NULL DEFAULT {shield_numeric_config_default('spam_low_value_window_seconds')}, "
                 "spam_moderator_policy TEXT NOT NULL DEFAULT 'exempt', "
                 "gif_enabled BOOLEAN NOT NULL DEFAULT FALSE, "
                 "gif_action TEXT NOT NULL DEFAULT 'log', "
@@ -814,6 +865,16 @@ class _PostgresShieldStore(_BaseShieldStore):
                 "updated_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc', now())"
                 ")"
             ),
+            (
+                "CREATE TABLE IF NOT EXISTS shield_alert_action_records ("
+                "token TEXT PRIMARY KEY, "
+                "payload JSONB NOT NULL, "
+                "expires_at TIMESTAMPTZ NOT NULL, "
+                "alert_message_id BIGINT NULL, "
+                "created_at TIMESTAMPTZ NOT NULL DEFAULT timezone('utc', now())"
+                ")"
+            ),
+            "CREATE INDEX IF NOT EXISTS ix_shield_alert_action_records_expires ON shield_alert_action_records (expires_at)",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS baseline_version SMALLINT NOT NULL DEFAULT 0",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS log_style TEXT NOT NULL DEFAULT 'adaptive'",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS log_ping_mode TEXT NOT NULL DEFAULT 'smart'",
@@ -884,6 +945,9 @@ class _PostgresShieldStore(_BaseShieldStore):
             f"ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS spam_emote_threshold SMALLINT NOT NULL DEFAULT {shield_numeric_config_default('spam_emote_threshold')}",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS spam_caps_enabled BOOLEAN NOT NULL DEFAULT FALSE",
             f"ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS spam_caps_threshold SMALLINT NOT NULL DEFAULT {shield_numeric_config_default('spam_caps_threshold')}",
+            "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS spam_low_value_enabled BOOLEAN NOT NULL DEFAULT FALSE",
+            f"ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS spam_low_value_threshold SMALLINT NOT NULL DEFAULT {shield_numeric_config_default('spam_low_value_threshold')}",
+            f"ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS spam_low_value_window_seconds SMALLINT NOT NULL DEFAULT {shield_numeric_config_default('spam_low_value_window_seconds')}",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS spam_moderator_policy TEXT NOT NULL DEFAULT 'exempt'",
             "ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS gif_message_enabled BOOLEAN NOT NULL DEFAULT TRUE",
             f"ALTER TABLE shield_guild_configs ADD COLUMN IF NOT EXISTS gif_message_threshold SMALLINT NOT NULL DEFAULT {shield_numeric_config_default('gif_message_threshold')}",
@@ -926,6 +990,7 @@ class _PostgresShieldStore(_BaseShieldStore):
             config_rows = await conn.fetch("SELECT * FROM shield_guild_configs")
             pattern_rows = await conn.fetch("SELECT pattern_id, guild_id, label, pattern, mode, action, enabled FROM shield_custom_patterns ORDER BY created_at ASC")
             meta_rows = await conn.fetch("SELECT key, value FROM shield_meta")
+            alert_rows = await conn.fetch("SELECT token, payload FROM shield_alert_action_records WHERE expires_at > timezone('utc', now())")
         for row in config_rows:
             guild_id = int(row["guild_id"])
             loaded["guilds"][str(guild_id)] = {
@@ -1060,6 +1125,13 @@ class _PostgresShieldStore(_BaseShieldStore):
                 "spam_caps_threshold": int(row["spam_caps_threshold"])
                 if "spam_caps_threshold" in row
                 else shield_numeric_config_default("spam_caps_threshold"),
+                "spam_low_value_enabled": bool(row["spam_low_value_enabled"]) if "spam_low_value_enabled" in row else False,
+                "spam_low_value_threshold": int(row["spam_low_value_threshold"])
+                if "spam_low_value_threshold" in row
+                else shield_numeric_config_default("spam_low_value_threshold"),
+                "spam_low_value_window_seconds": int(row["spam_low_value_window_seconds"])
+                if "spam_low_value_window_seconds" in row
+                else shield_numeric_config_default("spam_low_value_window_seconds"),
                 "spam_moderator_policy": row["spam_moderator_policy"] if "spam_moderator_policy" in row else "exempt",
                 "gif_enabled": bool(row["gif_enabled"]) if "gif_enabled" in row else False,
                 "gif_action": row["gif_action"] if "gif_action" in row else "log",
@@ -1185,6 +1257,14 @@ class _PostgresShieldStore(_BaseShieldStore):
                     "ordinary_ai_updated_by": value.get("updated_by") if isinstance(value.get("updated_by"), int) and value.get("updated_by") > 0 else None,
                     "ordinary_ai_updated_at": value.get("updated_at") if isinstance(value.get("updated_at"), str) and value.get("updated_at").strip() else None,
                 }
+        for row in alert_rows:
+            token = str(row["token"])
+            payload = decode_postgres_json_object(
+                row["payload"],
+                label="shield_alert_action_records.payload",
+            )
+            if isinstance(payload, dict):
+                loaded["alert_actions"][token] = payload
         self.state = self.normalize_state(loaded)
 
     async def _flush_snapshot(self, snapshot: dict[str, Any]):
@@ -1202,7 +1282,8 @@ class _PostgresShieldStore(_BaseShieldStore):
             if previous_guilds.get(guild_id_text) != config
         ]
         meta_changed = snapshot.get("meta") != previous.get("meta")
-        if not removed_guild_ids and not changed_configs and not meta_changed:
+        alert_actions_changed = snapshot.get("alert_actions") != previous.get("alert_actions")
+        if not removed_guild_ids and not changed_configs and not meta_changed and not alert_actions_changed:
             return
         async with self._pool.acquire() as conn:
             async with conn.transaction():
@@ -1228,6 +1309,8 @@ class _PostgresShieldStore(_BaseShieldStore):
                 for config in changed_configs:
                     await self._upsert_guild_config(conn, config)
                     await self._replace_custom_patterns_for_guild(conn, config["guild_id"], config.get("custom_patterns", []))
+                if alert_actions_changed:
+                    await self._replace_alert_action_records(conn, snapshot.get("alert_actions", {}))
 
     async def _upsert_guild_config(self, conn, config: dict[str, Any]):
         columns: list[tuple[str, Any, str]] = [
@@ -1291,6 +1374,9 @@ class _PostgresShieldStore(_BaseShieldStore):
             ("spam_emote_threshold", config["spam_emote_threshold"], ""),
             ("spam_caps_enabled", config["spam_caps_enabled"], ""),
             ("spam_caps_threshold", config["spam_caps_threshold"], ""),
+            ("spam_low_value_enabled", config["spam_low_value_enabled"], ""),
+            ("spam_low_value_threshold", config["spam_low_value_threshold"], ""),
+            ("spam_low_value_window_seconds", config["spam_low_value_window_seconds"], ""),
             ("spam_moderator_policy", config["spam_moderator_policy"], ""),
             ("gif_enabled", config["gif_enabled"], ""),
             ("gif_action", config["gif_action"], ""),
@@ -1370,6 +1456,27 @@ class _PostgresShieldStore(_BaseShieldStore):
         if rows:
             await conn.executemany(
                 "INSERT INTO shield_custom_patterns (pattern_id, guild_id, label, pattern, mode, action, enabled) VALUES ($1, $2, $3, $4, $5, $6, $7)",
+                rows,
+            )
+
+    async def _replace_alert_action_records(self, conn, records: dict[str, dict[str, Any]]):
+        await conn.execute("DELETE FROM shield_alert_action_records")
+        rows = [
+            (
+                token,
+                json.dumps(record),
+                record.get("expires_at"),
+                record.get("alert_message_id"),
+            )
+            for token, record in sorted(records.items())
+            if isinstance(record, dict) and isinstance(record.get("expires_at"), str)
+        ]
+        if rows:
+            await conn.executemany(
+                (
+                    "INSERT INTO shield_alert_action_records (token, payload, expires_at, alert_message_id) "
+                    "VALUES ($1, $2::jsonb, $3::timestamptz, $4)"
+                ),
                 rows,
             )
 
