@@ -2324,32 +2324,6 @@ class ShieldCog(commands.Cog):
             lines.append(f"+{len(domains) - limit} more domains")
         return "\n".join(lines)
 
-    def _link_assessment_label(self, assessment) -> str:
-        if assessment.category == "malicious":
-            return "malicious | matched local intel"
-        if assessment.category == "impersonation":
-            return "trusted-brand impersonation | hard local block"
-        if assessment.category == "adult":
-            return "adult | matched local intel"
-        if (
-            "preview_only" in getattr(assessment, "matched_signals", ())
-            and assessment.category in {"unknown", "unknown_suspicious"}
-        ):
-            return "preview-only advisory | no action"
-        if assessment.category == "unknown_suspicious":
-            if "guild_allow_domain" in getattr(assessment, "matched_signals", ()):
-                return "unknown suspicious | allowlisted but still risky"
-            if assessment.provider_lookup_warranted:
-                return "unknown suspicious | lookup candidate, link-only caution"
-            return "unknown suspicious | local caution, link-only"
-        if assessment.category == "unknown":
-            if "guild_allow_domain" in getattr(assessment, "matched_signals", ()):
-                return "unknown | admin allowlisted policy exception"
-            return "unknown | no action"
-        if "guild_allow_domain" in getattr(assessment, "matched_signals", ()):
-            return "safe family | admin allowlisted"
-        return "safe family"
-
     def _is_override_owner(self, user_id: int) -> bool:
         return user_id in SYSTEM_PREMIUM_OWNER_USER_IDS
 
@@ -3656,14 +3630,10 @@ class ShieldCog(commands.Cog):
                 ),
                 inline=False,
             )
-        if result.link_assessments:
+        if result.link_explanations:
             embed.add_field(
-                name="Link Safety",
-                value="\n".join(
-                    f"`{item.normalized_domain}` | {self._link_assessment_label(item)} | "
-                    f"signals: {', '.join(item.matched_signals[:4]) if item.matched_signals else 'none'}"
-                    for item in result.link_assessments[:5]
-                ),
+                name="Link Decisions",
+                value=self.service.format_link_decision_lines(result.link_explanations, limit=5),
                 inline=False,
             )
         self._add_operability_field(embed, ctx.guild.id, channel_id=channel_id)

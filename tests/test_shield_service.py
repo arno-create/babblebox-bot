@@ -1599,6 +1599,8 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(policy_matches)
         self.assertEqual(policy_matches[0].match_class, "untrusted_external_link")
         self.assertEqual(policy_matches[0].confidence, "low")
+        self.assertEqual(result.link_explanations[0].disposition, "Blocked")
+        self.assertIn("Trusted Links Only", result.link_explanations[0].reason)
 
     async def test_trusted_only_link_policy_blocks_unallowlisted_invites_even_without_promo_pack(self):
         ok, _ = await self.service.set_link_policy_config(10, mode="trusted_only")
@@ -1808,6 +1810,8 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.link_assessments[0].category, "unknown")
         self.assertIn("guild_allow_domain", result.link_assessments[0].matched_signals)
         self.assertFalse(result.link_assessments[0].provider_lookup_warranted)
+        self.assertEqual(result.link_explanations[0].disposition, "Allowed")
+        self.assertIn("admin allowlist", result.link_explanations[0].reason)
 
     async def test_allow_phrase_does_not_bypass_known_malicious_domain(self):
         guild = FakeGuild(10)
@@ -1974,6 +1978,28 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(result.link_assessments[0].category, "unknown")
         self.assertFalse(result.link_assessments[0].provider_lookup_warranted)
 
+    async def test_bare_idna_candidate_is_ignored_and_explained_without_link_assessment(self):
+        result = self.service.test_message_details(
+            10,
+            "About me! Name apple, pronouns she/her, hobbies art and games. xn--jwh.xn--jj8c",
+        )
+
+        self.assertFalse(result.matches)
+        self.assertEqual(result.link_assessments, ())
+        self.assertEqual(len(result.link_explanations), 1)
+        explanation = result.link_explanations[0]
+        self.assertEqual(explanation.domain, "xn--jwh.xn--jj8c")
+        self.assertEqual(explanation.disposition, "Ignored")
+        self.assertIn("explicit URL", explanation.reason)
+
+    async def test_bare_punycode_label_with_common_tld_is_still_ignored(self):
+        result = self.service.test_message_details(10, "Profile decoration xn--gift.com")
+
+        self.assertFalse(result.matches)
+        self.assertEqual(result.link_assessments, ())
+        self.assertEqual(result.link_explanations[0].domain, "xn--gift.com")
+        self.assertEqual(result.link_explanations[0].disposition, "Ignored")
+
     async def test_unknown_login_and_docs_urls_stay_non_actionable_without_host_risk(self):
         cases = (
             "Normal page https://accounts.example.com/login",
@@ -2001,6 +2027,11 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue([match for match in result.matches if match.pack == "scam"])
         self.assertEqual(result.link_assessments[0].category, "unknown_suspicious")
         self.assertTrue(result.link_assessments[0].provider_lookup_warranted)
+        self.assertEqual(result.link_explanations[0].disposition, "Flagged")
+        self.assertIn("scam intent", result.link_explanations[0].reason)
+        rendered = self.service.format_link_decision_lines(result.link_explanations)
+        self.assertNotIn("query_token", rendered)
+        self.assertNotIn("encoded_or_long_query", rendered)
 
     async def test_unknown_suspicious_domain_in_report_context_stays_non_lookup(self):
         result = self.service.test_message_details(
@@ -2011,6 +2042,12 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse([match for match in result.matches if match.pack == "scam"])
         self.assertEqual(result.link_assessments[0].category, "unknown_suspicious")
         self.assertFalse(result.link_assessments[0].provider_lookup_warranted)
+        self.assertEqual(result.link_explanations[0].disposition, "Review-only")
+        self.assertIn("no scam intent", result.link_explanations[0].reason)
+        rendered = self.service.format_link_decision_lines(result.link_explanations)
+        self.assertIn("Review-only", rendered)
+        self.assertNotIn("host_token", rendered)
+        self.assertNotIn("provider_lookup", rendered)
 
     async def test_provider_disabled_status_is_exposed_through_link_safety_runtime(self):
         status = self.service.get_link_safety_status()
@@ -2031,6 +2068,8 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
 
         self.assertFalse([match for match in result.matches if match.pack == "scam"])
         self.assertEqual(result.link_assessments[0].category, "malicious")
+        self.assertEqual(result.link_explanations[0].disposition, "Suppressed")
+        self.assertIn("warning", result.link_explanations[0].reason)
 
     async def test_bare_malicious_domain_discussion_context_is_not_punished(self):
         ok, _ = await self.service.set_pack_config(10, "scam", enabled=True, action="delete_log", sensitivity="normal")
@@ -2066,6 +2105,11 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertTrue([match for match in result.matches if match.pack == "scam"])
         self.assertEqual(result.link_assessments[0].category, "unknown_suspicious")
         self.assertTrue(result.link_assessments[0].provider_lookup_warranted)
+        self.assertEqual(result.link_explanations[0].disposition, "Flagged")
+        rendered = self.service.format_link_decision_lines(result.link_explanations)
+        self.assertIn("Flagged", rendered)
+        self.assertNotIn("punycode_host", rendered)
+        self.assertNotIn("hyphen_heavy_host", rendered)
 
     async def test_obvious_safe_domain_impersonation_is_a_first_class_local_block(self):
         ok, _ = await self.service.set_pack_config(10, "scam", enabled=True, action="delete_log", sensitivity="normal")
@@ -4459,9 +4503,14 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(decision)
         embed = log_channel.sent[0]["embed"]
         evidence_field = next(field for field in embed.fields if field.name == "Evidence Basis")
+        link_decisions_field = next(field for field in embed.fields if field.name == "Link Decisions")
         note_field = next(field for field in embed.fields if field.name == "Note")
         self.assertIn("Combined suspicion around an unknown risky link.", evidence_field.value)
         self.assertIn("Primary risky domain: `secure-auth-session.click`", evidence_field.value)
+        self.assertIn("secure-auth-session.click", link_decisions_field.value)
+        self.assertIn("Flagged", link_decisions_field.value)
+        self.assertNotIn("signals:", link_decisions_field.value)
+        self.assertNotIn("host_token", link_decisions_field.value)
         self.assertEqual(note_field.value, "Scam detection can still be wrong; recheck the context before taking action.")
 
     async def test_delete_escalate_triggers_timeout_after_threshold(self):

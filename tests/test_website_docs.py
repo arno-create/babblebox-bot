@@ -287,6 +287,8 @@ class WebsiteDocsTests(unittest.TestCase):
         self.assertIn("no-link DM-lure", help_html)
         self.assertIn("no-link DM-lure", index_html)
         self.assertIn("combined local scam evidence", help_html)
+        self.assertIn("concise local link-decision explanations", readme)
+        self.assertIn("concise local link-decision explanations", help_html)
 
     def test_shield_docs_cover_compact_antispam_and_gif_grouping(self):
         readme = (ROOT / "README.md").read_text(encoding="utf-8")
