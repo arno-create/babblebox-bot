@@ -186,7 +186,7 @@ Babblebox premium is intentionally narrow:
   - AFK reasons and reminders use privacy, adult, and severe checks; watch keyword setup stays privacy-only
   - privacy leak pack
   - promo / invite pack
-- first-class `Anti-Spam` pack for explicit message-rate and near-duplicate rules, mention, emoji, invite, and link pressure, bounded corroboration that suppresses healthy fast chat, grouped same-member spam incidents, and configured delete or timeout actions that actually execute
+- first-class `Anti-Spam` pack for explicit message-rate and near-duplicate rules, mention, emoji, invite, and link pressure, optional off-by-default emote, capitals, and low-value chatter lanes, bounded corroboration that suppresses healthy fast chat, grouped same-member spam incidents, and configured delete or timeout actions that actually execute
 - first-class `GIF Flood / Media Pressure` pack for one-user GIF floods, collective channel GIF pressure, lightweight meaningful-text weighting, repeated GIF reuse, per-lane toggles, grouped incident dedupe, and safer mixed chat
 - scam / malicious-link pack with local weighted scam-language scoring plus no-link DM-lure detection for money, wins, picks, and related payout bait routed into DMs or private follow-up
 - hard local trusted-brand impersonation blocking for spoofed or lookalike safe domains
@@ -437,7 +437,7 @@ Slash is the best fit for multi-option admin setup here. Prefix stays positional
 | `/shield advanced list` | `bb!shield advanced list` | Review advanced patterns |
 | `/shield test` | `bb!shield test free nitro claim now https://bit.ly/x` | Dry-run a message through Shield |
 
-Shield's live-message link policy is intentionally separate from Confessions link mode. Confessions keeps `Disabled`, `Trusted Only`, and `Allow All Safe`, while Shield keeps `Default` plus the bounded `Trusted Links Only` mode. That stricter Shield mode allows the built-in trusted pack plus admin allowlisted domains and invite codes as policy exceptions, and `/shield trusted` now exposes the built-in families, direct domains, and any local built-in disables that affect trusted-only mode. Malicious, trusted-brand impersonation, adult-domain, and strong suspicious-link intel still wins over those trust exceptions. Shield phrase allowlists stay narrower: they suppress only targeted promo or adult-solicitation text matches. The live Shield packs are `Privacy Leak`, `Promo / Invite`, `Anti-Spam`, `GIF Flood / Media Pressure`, `Scam / Malicious Links`, `Adult Links + Solicitation`, and `Severe Harm / Hate`; no-link DM-lure bait lives under the scam pack and now covers money, wins, picks, and similar private-route payout lures, Anti-Spam stays grounded in explicit rate and duplicate rules with bounded corroboration, the main Anti-Spam and GIF lanes can now be turned off individually, repeated same-member spam alerts group into one evolving incident log instead of spamming the log channel, the GIF lane now splits one-user floods from collective channel pressure so collective cleanup can remove the exact live GIF streak for streak floods or only the newest contributing GIF posts from the active pressure slice for channel-pressure matches while personal abuse can still enforce one member, never text, the channel lane can trigger on either a true consecutive GIF streak or effective GIF pressure after lightweight meaningful-text weighting, collective pressure never adds strikes or timeouts on its own, tighter low-end GIF options exist for stricter rooms, optional emote and capitals lanes stay off until an admin enables them, moderators are exempt from Anti-Spam by default unless admins choose a stricter policy, `/shield panel` now keeps pack-local `Actions`, `Options`, and `Exemptions` together without mixing unrelated controls, `/shield module` owns the live on/off switch, `/shield escalation` owns repeated-hit escalation plus the global timeout fallback, `/shield logs` now carries global compact/no-ping defaults plus bounded per-pack overrides, each pack can inherit the global timeout or keep a dedicated timeout override, the trusted-link lane can do the same, live moderation stays opt-in, the first enable applies a recommended non-AI baseline, and Shield AI remains second-pass review only while Babblebox Guild Pro can make `gpt-5.4-mini` plus `gpt-5.4` available when owner policy and provider/runtime readiness line up.
+Shield's live-message link policy is intentionally separate from Confessions link mode. Confessions keeps `Disabled`, `Trusted Only`, and `Allow All Safe`, while Shield keeps `Default` plus the bounded `Trusted Links Only` mode. That stricter Shield mode allows the built-in trusted pack plus admin allowlisted domains and invite codes as policy exceptions, and `/shield trusted` now exposes the built-in families, direct domains, and any local built-in disables that affect trusted-only mode. Malicious, trusted-brand impersonation, adult-domain, and strong suspicious-link intel still wins over those trust exceptions. Shield phrase allowlists stay narrower: they suppress only targeted promo or adult-solicitation text matches. The live Shield packs are `Privacy Leak`, `Promo / Invite`, `Anti-Spam`, `GIF Flood / Media Pressure`, `Scam / Malicious Links`, `Adult Links + Solicitation`, and `Severe Harm / Hate`; no-link DM-lure bait lives under the scam pack and now covers money, wins, picks, and similar private-route payout lures, Anti-Spam stays grounded in explicit rate and duplicate rules with bounded corroboration, the main Anti-Spam and GIF lanes can now be turned off individually, repeated same-member spam alerts group into one evolving incident log instead of spamming the log channel, the GIF lane now splits one-user floods from collective channel pressure so collective cleanup can remove the exact live GIF streak for streak floods or only the newest contributing GIF posts from the active pressure slice for channel-pressure matches while personal abuse can still enforce one member, never text, the channel lane can trigger on either a true consecutive GIF streak or effective GIF pressure after lightweight meaningful-text weighting, collective pressure never adds strikes or timeouts on its own, tighter low-end GIF options exist for stricter rooms, optional emote, capitals, and low-value chatter lanes stay off until an admin enables them, moderators are exempt from Anti-Spam by default unless admins choose a stricter policy, Shield logs include reversible moderator controls plus false-positive repair for destructive actions without adding kick, ban, or timeout-punishment buttons, `/shield panel` now keeps pack-local `Actions`, `Options`, and `Exemptions` together without mixing unrelated controls, `/shield module` owns the live on/off switch, `/shield escalation` owns repeated-hit escalation plus the global timeout fallback, `/shield logs` now carries global compact/no-ping defaults plus bounded per-pack overrides, each pack can inherit the global timeout or keep a dedicated timeout override, the trusted-link lane can do the same, live moderation stays opt-in, the first enable applies a recommended non-AI baseline, and Shield AI remains second-pass review only while Babblebox Guild Pro can make `gpt-5.4-mini` plus `gpt-5.4` available when owner policy and provider/runtime readiness line up.
 
 Shield also now governs eligible non-chat surfaces in a bounded way. Confessions keeps its own privacy, review, and workflow logic, but shares Shield link intelligence. AFK reasons plus reminder text and public reminder delivery use fixed private privacy, adult, and severe feature-surface policies. Watch keyword setup stays privacy-only. None of those private feature checks create mod-log spam or call Shield AI.
 
@@ -576,8 +576,9 @@ Babblebox now treats visibility more intentionally:
 Babblebox Shield is intentionally compact and conservative:
 
 - off until an admin enables it
-- no deleted-message archive table
-- no full message-body retention in Postgres
+- no long-term deleted-message archive table
+- destructive Shield actions and moderator delete-button actions can keep a short-lived recovery copy so moderators can repair false positives
+- no full long-term message-body retention in Postgres
 - moderator context goes to a configured log channel instead of a heavy database log
 - low-confidence repeated-link notes stay compact, no-ping, and cohort-deduped instead of repeatedly blasting the mod log
 - compact anti-spam uses short-lived per-user windows for duplicate spam, message-rate bursts, and link or invite floods, while the GIF lane keeps short-lived per-user grouping, a true live channel streak, a bounded recent pressure slice with lightweight meaningful-text weighting, and soft channel-only suppression instead of a moderation archive
@@ -588,6 +589,7 @@ Babblebox Shield is intentionally compact and conservative:
 - attachment filenames stay metadata-only for link repetition; real link evidence must come from actual extracted links, not repeated media filenames
 - solicitation carve-out channels only relax the optional solicitation / DM-ad text detector; adult-domain, scam, and malicious-link protections still run there
 - local scam decisions combine host/path/query risk with brand bait, official-looking framing, CTA wording, urgency, newcomer first-link context, fresh-campaign reuse, and explicit warning/education suppressors
+- unknown punycode or suspicious-link signals stay review-first unless real scam intent, hard local intel, dangerous file targets, or fresh-campaign corroboration is present
 - optional AI review never becomes the primary moderation engine
 - AI review only runs after local Shield already flagged a message
 - Shield AI defaults to the routed `gpt-5.4-nano` tier when owner policy enables it; Babblebox Guild Pro can make `gpt-5.4-mini` and `gpt-5.4` available when provider/runtime readiness also allows review
@@ -663,6 +665,7 @@ Shield stays config-only and compact:
 
 - `shield_guild_configs`
 - `shield_custom_patterns`
+- `shield_alert_action_records` for short-lived alert buttons and false-positive recovery
 
 Stored data is intentionally small:
 
@@ -674,11 +677,12 @@ Stored data is intentionally small:
 - escalation thresholds
 - safe advanced pattern metadata
 - the `Anti-Spam` and `GIF Flood / Media Pressure` pack config only; short-lived spam and GIF windows stay in memory
+- short-lived false-positive recovery copies only when Shield or a moderator destructive alert action needs a repair path
 
 Not stored:
 
 - full moderation event logs
-- deleted-message bodies
+- long-term deleted-message bodies
 - raw AI-submitted message bodies in Shield persistence
 - attachment blobs
 - large strike archives
