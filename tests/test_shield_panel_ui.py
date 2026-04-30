@@ -25,6 +25,14 @@ def _embed_total_chars(embed: discord.Embed) -> int:
     return total
 
 
+def _embed_text(embed: discord.Embed) -> str:
+    parts = [embed.title or "", embed.description or "", getattr(embed.footer, "text", "") or ""]
+    for field in embed.fields:
+        parts.append(field.name or "")
+        parts.append(field.value or "")
+    return "\n".join(parts)
+
+
 class ShieldPanelUiTests(unittest.IsolatedAsyncioTestCase):
     async def asyncSetUp(self):
         self.bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
@@ -57,16 +65,56 @@ class ShieldPanelUiTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(embed.title, "Shield Rules")
         self.assertTrue(any(field.name == "Anti-Spam Details" for field in embed.fields))
 
-    async def test_overview_protection_packs_keep_full_gif_summary_without_truncation(self):
+    async def test_overview_is_compact_status_dashboard_without_explainer_copy(self):
         embed = self.cog._overview_embed(10)
-        protection = next(field for field in embed.fields if field.name == "Protection Packs")
+        fields = {field.name: field.value for field in embed.fields}
+        all_text = _embed_text(embed)
+
+        self._assert_embed_valid(embed)
+        self.assertLessEqual(_embed_total_chars(embed), 2200)
+        self.assertEqual(embed.title, "Shield Control Panel")
+        self.assertEqual(set(fields), {"Live Status", "Pack Status", "Link Policy", "AI Assist"})
+        self.assertIn("Enabled: **No**", fields["Live Status"])
+        self.assertIn("Scan mode: `all`", fields["Live Status"])
+        self.assertIn("Log channel: Not set", fields["Live Status"])
+        self.assertIn("Alert role: None", fields["Live Status"])
+        for pack in ("Privacy Leak", "Promo / Invite", "Anti-Spam", "GIF Flood / Media Pressure", "Scam / Malicious Links", "Adult Links + Solicitation", "Severe Harm / Hate"):
+            self.assertIn(pack, fields["Pack Status"])
+        self.assertIn("Mode: **Default**", fields["Link Policy"])
+        self.assertIn("Strongest action: Log only", fields["Link Policy"])
+        self.assertIn("Readiness:", fields["AI Assist"])
+        self.assertIn("Effective models right now:", fields["AI Assist"])
+        self.assertNotIn("Configured models:", fields["AI Assist"])
+        for verbose_phrase in (
+            "Storage Discipline",
+            "Delete lane removes bounded GIF bursts",
+            "Feature checks:",
+            "First enable:",
+            "Provider diagnostics:",
+        ):
+            self.assertNotIn(verbose_phrase, all_text)
+
+    async def test_rules_gif_details_keep_cleanup_semantics_off_overview(self):
+        embed = self.cog._rules_embed(10, selected_pack="gif")
+        detail = next(field for field in embed.fields if field.name == "GIF Flood / Media Pressure Details")
 
         self._assert_embed_valid(embed)
         self.assertIn(
-            "Delete lane removes bounded GIF bursts; collective cleanup uses the exact streak or trims the newest contributing GIFs inside the active pressure slice while personal abuse still targets one member.",
-            protection.value,
+            "Delete actions remove bounded GIF bursts",
+            detail.value,
         )
-        self.assertFalse(protection.value.endswith("..."))
+        self.assertFalse(detail.value.endswith("..."))
+
+    async def test_scope_embed_contains_feature_surface_checks(self):
+        embed = self.cog._scope_embed(10)
+        fields = {field.name: field.value for field in embed.fields}
+
+        self._assert_embed_valid(embed)
+        self.assertIn("Feature Surface Checks", fields)
+        self.assertIn("AFK and reminders use privacy, adult, and severe checks", fields["Feature Surface Checks"])
+        self.assertIn("Watch stays privacy-only", fields["Feature Surface Checks"])
+        self.assertIn("Confessions shares link checks", fields["Feature Surface Checks"])
+        self.assertIn("Spam and GIF moderation stay live-message only", fields["Feature Surface Checks"])
 
     async def test_rules_and_scope_embeds_stay_within_limits_for_dense_config(self):
         dense = deepcopy(self.cog.service.get_config(10))
