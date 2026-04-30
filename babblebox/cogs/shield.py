@@ -1910,6 +1910,12 @@ class ShieldCog(commands.Cog):
             )
         return "\n".join(lines)
 
+    def _pack_status_line(self, config: dict[str, object], pack: str) -> str:
+        _, _, high_action = self._pack_policy_actions(config, pack)
+        status = "On" if config.get(f"{pack}_enabled") else "Off"
+        sensitivity = SENSITIVITY_LABELS[config.get(f"{pack}_sensitivity", "normal")]
+        return f"**{PACK_LABELS[pack]}**: {status} | {sensitivity} | high {self._action_label(high_action)}"
+
     def _pack_policy_compact(self, config: dict[str, object], pack: str) -> str:
         low_action, medium_action, high_action = self._pack_policy_actions(config, pack)
         rule_summary = self._pack_rule_summary(config, pack)
@@ -2189,6 +2195,7 @@ class ShieldCog(commands.Cog):
                     if config.get("gif_same_asset_enabled", True)
                     else "Off"
                 ),
+                "Delete actions remove bounded GIF bursts, not healthy text. Collective cleanup uses the exact streak or newest contributing GIFs; personal abuse can still target one member.",
                 "Tighter low-end values are stricter and best for rooms that want faster GIF cleanup.",
             ]
         if pack == "adult":
@@ -2485,63 +2492,42 @@ class ShieldCog(commands.Cog):
         ai_status = self.service.get_ai_status(guild_id)
         embed = discord.Embed(
             title="Shield Control Panel",
-            description="Shield is Babblebox's compact live-message moderation layer. It combines explicit spam rules, first-class anti-GIF moderation, stronger local scam detection, and bounded safety checks with clear evidence and compact moderator UX.",
+            description="Essential Shield state. Use the tabs for rules, scope, links, AI, and logs.",
             color=ge.EMBED_THEME["warning"] if config["module_enabled"] else ge.EMBED_THEME["info"],
         )
         log_channel = f"<#{config['log_channel_id']}>" if config.get("log_channel_id") else "Not set"
         alert_role = f"<@&{config['alert_role_id']}>" if config.get("alert_role_id") else "None"
         embed.add_field(
-            name="Live Moderation",
+            name="Live Status",
             value=(
                 f"Enabled: **{'Yes' if config['module_enabled'] else 'No'}**\n"
                 f"Scan mode: `{config['scan_mode']}`\n"
                 f"Log channel: {log_channel}\n"
-                f"Alert role: {alert_role}\n"
-                "First enable: Babblebox applies its recommended non-AI baseline once, then leaves your edits alone.\n"
-                "Feature checks: AFK + reminders use privacy/adult/severe, Watch stays privacy-only, Confessions shares link checks, and spam plus GIF moderation stay live-message only.\n"
-                "Delete actions remove bounded bursts for one-user spam or GIF floods, while collective GIF pressure only removes the exact live GIF streak or the newest contributing GIF posts from the active pressure slice after lightweight meaningful-text weighting. Mixed incidents can combine shared cleanup with one member's personal enforcement, and healthy text stays untouched."
+                f"Alert role: {alert_role}"
             ),
             inline=False,
         )
-        protection_lines = []
-        for pack in ("privacy", "promo", "spam", "gif"):
-            protection_lines.append(
-                f"**{PACK_LABELS[pack]}**\n"
-                f"{self._pack_policy_overview(config, pack)}"
-            )
-        embed.add_field(name="Protection Packs", value="\n\n".join(protection_lines), inline=False)
-        high_risk_lines = []
-        for pack in ("scam", "adult", "severe"):
-            high_risk_lines.append(
-                f"**{PACK_LABELS[pack]}**\n"
-                f"{self._pack_policy_overview(config, pack)}"
-            )
-        embed.add_field(name="High-Risk Packs", value="\n\n".join(high_risk_lines), inline=False)
+        embed.add_field(
+            name="Pack Status",
+            value="\n".join(self._pack_status_line(config, pack) for pack in RULE_PANEL_PACKS),
+            inline=False,
+        )
+        _, _, link_high_action = self._link_policy_actions(config)
         embed.add_field(
             name="Link Policy",
-            value=self._link_policy_detail(config),
+            value=(
+                f"Mode: **{self._link_policy_label(config)}**\n"
+                f"Strongest action: {self._action_label(link_high_action)}\n"
+                f"Timeout: {self._pack_timeout_badge(config, 'link_policy')}"
+            ),
             inline=False,
         )
         embed.add_field(
             name="AI Assist",
             value=(
                 f"Readiness: {ai_status['status']}\n"
-                f"Policy source: {self._ai_policy_source_label(ai_status['policy_source'])}\n"
-                f"{self._shield_ai_entitlement_text(ai_status)}\n"
-                f"Routing: {self._ai_routing_label(ai_status['routing_strategy'])}\n"
-                f"Local-confidence threshold: `{ai_status['min_confidence']}`\n"
-                f"Packs: {self._format_ai_pack_summary(ai_status['enabled_packs'])}\n"
-                f"Local blockers: {self._ai_setup_blocker_summary(ai_status['setup_blockers'])}\n"
-                "Scope: Live-message moderation only\n"
-                "AI stays second-pass only and only enriches moderator context."
-            ),
-            inline=False,
-        )
-        embed.add_field(
-            name="Storage Discipline",
-            value=(
-                "Shield stores config and compact pattern metadata only.\n"
-                "Private feature-surface blocks stay private, grouped GIF pressure stays in memory only, and moderator context is delivered to the log channel instead of a heavy moderation archive."
+                f"Effective models right now: {self._format_ai_models(ai_status.get('effective_allowed_models', ai_status.get('allowed_models', [])))}\n"
+                f"Policy source: {self._ai_policy_source_label(ai_status['policy_source'])}"
             ),
             inline=False,
         )
@@ -2673,6 +2659,16 @@ class ShieldCog(commands.Cog):
                 f"Trusted-link mode: **{self._link_policy_label(config)}**\n"
                 "Built-in trusted families or domains are managed under `/shield trusted`.\n"
                 "Malicious, impersonation, suspicious-link, adult-domain, and scam protections still run."
+            ),
+            inline=False,
+        )
+        embed.add_field(
+            name="Feature Surface Checks",
+            value=(
+                "AFK and reminders use privacy, adult, and severe checks.\n"
+                "Watch stays privacy-only.\n"
+                "Confessions shares link checks.\n"
+                "Spam and GIF moderation stay live-message only."
             ),
             inline=False,
         )

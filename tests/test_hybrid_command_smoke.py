@@ -2239,26 +2239,18 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             }
 
             embed = cog.build_panel_embed(guild_id, "overview")
-            protection_field = next(field for field in embed.fields if field.name == "Protection Packs")
-            link_safety_field = next(field for field in embed.fields if field.name == "High-Risk Packs")
+            pack_status_field = next(field for field in embed.fields if field.name == "Pack Status")
             link_policy_field = next(field for field in embed.fields if field.name == "Link Policy")
 
-            self.assertIn("**Privacy Leak**", protection_field.value)
-            self.assertIn("Enabled: Yes | Sensitivity: High", protection_field.value)
-            self.assertIn("Actions: Log only / Delete + log / Delete + log", protection_field.value)
-            self.assertIn("**Promo / Invite**", protection_field.value)
-            self.assertIn("**Anti-Spam**", protection_field.value)
-            self.assertIn("**GIF Flood / Media Pressure**", protection_field.value)
-            self.assertIn("Enabled: Yes | Sensitivity: Normal", protection_field.value)
-            self.assertIn("Emotes: Off | Caps: Off", protection_field.value)
-            self.assertIn(
-                "Delete lane removes bounded GIF bursts; collective cleanup uses the exact streak or trims the newest contributing GIFs inside the active pressure slice while personal abuse still targets one member.",
-                protection_field.value,
-            )
-            self.assertIn("**Scam / Malicious Links**", link_safety_field.value)
-            self.assertIn("**Adult Links + Solicitation**", link_safety_field.value)
-            self.assertIn("**Severe Harm / Hate**", link_safety_field.value)
+            self.assertIn("**Privacy Leak**: On | High | high Delete + log", pack_status_field.value)
+            self.assertIn("**Promo / Invite**: On | Normal | high Log only", pack_status_field.value)
+            self.assertIn("**Anti-Spam**: Off | Normal | high Log only", pack_status_field.value)
+            self.assertIn("**GIF Flood / Media Pressure**: Off | Normal | high Log only", pack_status_field.value)
+            self.assertIn("**Scam / Malicious Links**: On | Normal | high Log only", pack_status_field.value)
+            self.assertIn("**Adult Links + Solicitation**: Off | Normal | high Log only", pack_status_field.value)
+            self.assertIn("**Severe Harm / Hate**: Off | Normal | high Log only", pack_status_field.value)
             self.assertIn("Mode: **Default**", link_policy_field.value)
+            self.assertIn("Strongest action: Log only", link_policy_field.value)
         finally:
             await cog.service.close()
 
@@ -2352,13 +2344,18 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             overview_value = next(field.value for field in overview.fields if field.name == "AI Assist")
             access_value = next(field.value for field in ai_panel.fields if field.name == "Access Policy")
 
+            self.assertIn("Effective models right now:", overview_value)
+            self.assertIn("nano (gpt-5.4-nano)", overview_value)
+            self.assertIn("Policy source: Per-guild owner override", overview_value)
+            self.assertNotIn("Configured models:", overview_value)
+            self.assertNotIn("Entitlement:", overview_value)
+
             for text in (
                 "Entitlement:",
                 "Configured models:",
                 "Effective models right now:",
                 "higher-tier Shield AI settings stay configured",
             ):
-                self.assertIn(text, overview_value)
                 self.assertIn(text, access_value)
         finally:
             await cog.service.close()
