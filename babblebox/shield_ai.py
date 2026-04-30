@@ -325,6 +325,12 @@ class ShieldAIProvider:
             "model": None,
             "routing_strategy": "disabled",
             "single_model_override": False,
+            "provider_readiness": "AI review is unavailable because no provider is configured.",
+            "model_override_state": "blank",
+            "model_override_note": "No single-model override configured.",
+            "routed_default_model": None,
+            "invalid_model_settings_note": None,
+            "ignored_model_settings": [],
             "fast_model": None,
             "complex_model": None,
             "top_model": None,
@@ -397,9 +403,22 @@ class OpenAIShieldAIProvider(ShieldAIProvider):
     def diagnostics(self) -> dict[str, Any]:
         available = bool(self.api_key)
         status = "Ready." if available else "OpenAI API key is not configured."
-        if self.ignored_model_settings:
-            status += f" Ignored invalid model settings: {', '.join(self.ignored_model_settings)}."
         routing_strategy = "single_model_override" if self.single_model_override else ("routed_fast_complex_frontier" if self.top_tier_enabled else "routed_fast_complex")
+        if self.single_model_override:
+            model_override_state = "valid"
+            model_override_note = f"Single-model override active: {format_shield_ai_model(self.single_model_override)}."
+        elif self.single_model_override_raw:
+            model_override_state = "invalid"
+            model_override_note = "Invalid override ignored: SHIELD_AI_MODEL. Shield is using routed defaults instead."
+        else:
+            model_override_state = "blank"
+            model_override_note = "No single-model override configured. Shield is using routed defaults."
+        tier_invalid_settings = [name for name in self.ignored_model_settings if name != "SHIELD_AI_MODEL"]
+        invalid_model_settings_note = (
+            f"Invalid tier model settings ignored: {', '.join(tier_invalid_settings)}. Shield is using safe defaults for those tiers."
+            if tier_invalid_settings
+            else None
+        )
         return {
             "provider": OPENAI_PROVIDER_NAME,
             "available": available,
@@ -408,6 +427,11 @@ class OpenAIShieldAIProvider(ShieldAIProvider):
             "routing_strategy": routing_strategy,
             "single_model_override": bool(self.single_model_override),
             "ignored_model_settings": list(self.ignored_model_settings),
+            "provider_readiness": status,
+            "model_override_state": model_override_state,
+            "model_override_note": model_override_note,
+            "routed_default_model": self.fast_model,
+            "invalid_model_settings_note": invalid_model_settings_note,
             "fast_model": self.fast_model,
             "complex_model": self.complex_model,
             "top_model": self.top_model,

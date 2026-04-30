@@ -2395,6 +2395,47 @@ class ShieldCog(commands.Cog):
         embed.set_footer(text="Babblebox Shield AI | DM-only maintainer control")
         return embed
 
+    def _build_ai_provider_probe_embed(self, probe: dict[str, object]) -> discord.Embed:
+        ok = bool(probe.get("ok"))
+        embed = discord.Embed(
+            title="Shield AI Provider Probe",
+            description=str(probe.get("message") or "Provider probe finished."),
+            color=ge.EMBED_THEME["success"] if ok else ge.EMBED_THEME["warning"],
+        )
+        live_blockers = list(probe.get("live_blockers") or [])
+        result_lines = [
+            f"Provider: {probe.get('provider') or 'Not configured'}",
+            f"Provider readiness: {probe.get('provider_readiness') or probe.get('provider_status') or 'Unavailable.'}",
+            f"Model override: {probe.get('model_override_note') or 'No single-model override configured.'}",
+            f"Routed default: `{probe.get('routed_default_model') or 'Not configured'}`",
+        ]
+        if ok:
+            result_lines.extend(
+                [
+                    f"Model: `{probe.get('model') or 'unknown'}`",
+                    f"Tier: `{probe.get('tier') or 'unknown'}` (target `{probe.get('target_tier') or 'unknown'}`)",
+                    f"Classification: {probe.get('classification_label') or probe.get('classification') or 'unknown'}",
+                ]
+            )
+            if probe.get("fallback_used") and probe.get("attempted_models"):
+                result_lines.append(f"Fallback: {' -> '.join(str(item) for item in probe.get('attempted_models') or [])}")
+            if probe.get("policy_capped"):
+                result_lines.append("Policy cap: Stronger tier was blocked by this guild's effective allowed models.")
+        else:
+            result_lines.append(f"Failure reason: `{probe.get('failure_reason') or 'unknown'}`")
+        embed.add_field(name="Result", value="\n".join(result_lines), inline=False)
+        embed.add_field(
+            name="Live Readiness",
+            value=(
+                f"Policy enabled: {'Yes' if probe.get('policy_enabled') else 'No'}\n"
+                f"Ready for live second pass: {'Yes' if probe.get('ready_for_review') else 'No'}\n"
+                f"Local blockers: {self._ai_setup_blocker_summary([str(item) for item in live_blockers])}"
+            ),
+            inline=False,
+        )
+        embed.set_footer(text="Babblebox Shield AI | Synthetic provider probe only; no server config was changed")
+        return embed
+
     def _guild_from_bot(self, guild_id: int) -> discord.Guild | None:
         get_guild = getattr(self.bot, "get_guild", None)
         if callable(get_guild):
@@ -2718,21 +2759,23 @@ class ShieldCog(commands.Cog):
             ),
             inline=False,
         )
-        embed.add_field(
-            name="Provider and Routing",
-            value=(
-                f"Provider: {ai_status['provider'] or 'Not configured'}\n"
-                f"Provider ready: {'Yes' if ai_status['provider_available'] else 'No'}\n"
-                f"Routing mode: {self._ai_routing_label(ai_status['routing_strategy'])}\n"
-                f"Fast tier: `{ai_status['fast_model'] or 'Not configured'}`\n"
-                f"Complex tier: `{ai_status['complex_model'] or 'Not configured'}`\n"
-                f"Frontier tier: `{ai_status['top_model'] or 'Not configured'}`\n"
-                f"Frontier enabled: {'Yes' if ai_status['top_tier_enabled'] else 'No'}\n"
-                f"Provider model gate: {ai_status.get('provider_model_note') or 'None'}\n"
-                f"Ignored invalid model settings: {self._format_text_list(ai_status['ignored_model_settings'], limit=4)}"
-            ),
-            inline=False,
-        )
+        provider_lines = [
+            f"Provider: {ai_status['provider'] or 'Not configured'}",
+            f"Provider ready: {'Yes' if ai_status['provider_available'] else 'No'}",
+            f"Provider readiness: {ai_status.get('provider_readiness') or ai_status['provider_status']}",
+            f"Routing mode: {self._ai_routing_label(ai_status['routing_strategy'])}",
+            f"Model override: {ai_status.get('model_override_note') or 'No single-model override configured.'}",
+            f"Routed default: `{ai_status.get('routed_default_model') or 'Not configured'}`",
+            f"Fast tier: `{ai_status['fast_model'] or 'Not configured'}`",
+            f"Complex tier: `{ai_status['complex_model'] or 'Not configured'}`",
+            f"Frontier tier: `{ai_status['top_model'] or 'Not configured'}`",
+            f"Frontier enabled: {'Yes' if ai_status['top_tier_enabled'] else 'No'}",
+        ]
+        if ai_status.get("provider_model_note"):
+            provider_lines.append(f"Frontier gate: {ai_status['provider_model_note']}")
+        if ai_status.get("invalid_model_settings_note"):
+            provider_lines.append(f"Tier settings: {ai_status['invalid_model_settings_note']}")
+        embed.add_field(name="Provider and Routing", value="\n".join(provider_lines), inline=False)
         embed.add_field(
             name="Runtime Policy",
             value=(
@@ -3493,7 +3536,8 @@ class ShieldCog(commands.Cog):
         root = tokens[0].casefold()
         usage = (
             "Use `status`, `global status|enable [models]|disable|models <csv>`, "
-            "`guild <id> status|enable [models]|disable|models <csv>|inherit`, or `support status|defaults`."
+            "`guild <id> status|enable [models]|disable|models <csv>|inherit`, "
+            "`provider test <guild_id>`, or `support status|defaults`."
         )
 
         if root == "status":
@@ -3581,6 +3625,19 @@ class ShieldCog(commands.Cog):
                     guild_id=guild_id,
                 )
             )
+            return
+
+        if root == "provider":
+            if len(tokens) < 3 or tokens[1].casefold() != "test":
+                await ctx.send(embed=self._build_ai_override_embed(title="Shield AI Provider Probe", note=usage))
+                return
+            try:
+                guild_id = int(tokens[2])
+            except ValueError:
+                await ctx.send(embed=self._build_ai_override_embed(title="Shield AI Provider Probe", note="Guild IDs must be numeric."))
+                return
+            probe = await self.service.probe_ai_provider(guild_id)
+            await ctx.send(embed=self._build_ai_provider_probe_embed(probe))
             return
 
         if root == "support":

@@ -2,6 +2,7 @@ import asyncio
 import os
 import types
 import unittest
+from copy import deepcopy
 from datetime import datetime, timezone
 from typing import Optional
 from unittest.mock import AsyncMock, patch
@@ -29,6 +30,7 @@ from babblebox.cogs.vote import VoteCog
 from babblebox.premium_models import SYSTEM_PREMIUM_OWNER_USER_IDS
 from babblebox.profile_service import ProfileService
 from babblebox.profile_store import ProfileStore
+from babblebox.shield_ai import ShieldAIReviewResult
 
 
 class FakeMessage:
@@ -2293,6 +2295,48 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         finally:
             await cog.service.close()
 
+    async def test_shield_ai_panel_renders_invalid_override_as_actionable_fallback(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
+        cog = ShieldCog(bot)
+        try:
+            cog.service.storage_ready = True
+            cog.service.ai_provider = types.SimpleNamespace(
+                diagnostics=lambda: {
+                    "provider": "OpenAI",
+                    "available": True,
+                    "configured": True,
+                    "model": "gpt-5.4-nano",
+                    "routing_strategy": "routed_fast_complex",
+                    "single_model_override": False,
+                    "ignored_model_settings": ["SHIELD_AI_MODEL"],
+                    "provider_readiness": "Ready.",
+                    "model_override_state": "invalid",
+                    "model_override_note": "Invalid override ignored: SHIELD_AI_MODEL. Shield is using routed defaults instead.",
+                    "routed_default_model": "gpt-5.4-nano",
+                    "fast_model": "gpt-5.4-nano",
+                    "complex_model": "gpt-5.4-mini",
+                    "top_model": "gpt-5.4",
+                    "top_tier_enabled": False,
+                    "timeout_seconds": 4.0,
+                    "max_chars": 160,
+                    "status": "Ready.",
+                },
+                close=AsyncMock(return_value=None),
+            )
+
+            embed = cog.build_panel_embed(10, "ai")
+            fields = {field.name: field.value for field in embed.fields}
+            provider_value = fields["Provider and Routing"]
+
+            self.assertIn("Provider readiness: Ready.", provider_value)
+            self.assertIn("Model override: Invalid override ignored: SHIELD_AI_MODEL", provider_value)
+            self.assertIn("Routed default: `gpt-5.4-nano`", provider_value)
+            self.assertNotIn("Provider model gate", provider_value)
+            self.assertNotIn("Ignored invalid model settings", provider_value)
+            self.assertNotIn(": None", provider_value)
+        finally:
+            await cog.service.close()
+
     async def test_shield_overview_and_ai_panel_share_calm_capped_model_truth(self):
         premium_service = types.SimpleNamespace(
             guild_has_capability=lambda guild_id, capability: False,
@@ -3033,6 +3077,67 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("inherits", ctx.send_calls[3]["embed"].description.lower())
             self.assertIn("inherits", ctx.send_calls[4]["embed"].description.lower())
             self.assertTrue(cog.service.get_meta()["ordinary_ai_enabled"])
+        finally:
+            await cog.service.close()
+
+    async def test_hidden_shield_ai_owner_command_can_probe_provider_without_config_mutation(self):
+        bot = types.SimpleNamespace(loop=asyncio.get_running_loop())
+        cog = ShieldCog(bot)
+        try:
+            cog.service.storage_ready = True
+            cog.service.ai_provider = types.SimpleNamespace(
+                diagnostics=lambda: {
+                    "provider": "OpenAI",
+                    "available": True,
+                    "configured": True,
+                    "model": "gpt-5.4-nano",
+                    "routing_strategy": "routed_fast_complex",
+                    "single_model_override": False,
+                    "ignored_model_settings": [],
+                    "provider_readiness": "Ready.",
+                    "model_override_state": "blank",
+                    "model_override_note": "No single-model override configured. Shield is using routed defaults.",
+                    "routed_default_model": "gpt-5.4-nano",
+                    "fast_model": "gpt-5.4-nano",
+                    "complex_model": "gpt-5.4-mini",
+                    "top_model": "gpt-5.4",
+                    "top_tier_enabled": False,
+                    "timeout_seconds": 4.0,
+                    "max_chars": 160,
+                    "status": "Ready.",
+                },
+                review=AsyncMock(
+                    return_value=ShieldAIReviewResult(
+                        classification="privacy_leak",
+                        confidence="high",
+                        priority="normal",
+                        false_positive=False,
+                        explanation="Synthetic provider probe succeeded.",
+                        model="gpt-5.4-nano",
+                        tier="fast",
+                        target_tier="fast",
+                        attempted_models=("gpt-5.4-nano",),
+                    )
+                ),
+                close=AsyncMock(return_value=None),
+            )
+            owner = FakeAuthor(user_id=1266444952779620413)
+            ctx = FakeContext(interaction=None, guild=None, channel=FakeChannel(), author=owner)
+            before = deepcopy(cog.service.store.state)
+
+            await ShieldCog.shield_ai_owner_command.callback(cog, ctx, "provider", "test", "10")
+
+            self.assertEqual(cog.service.store.state, before)
+            self.assertEqual(len(ctx.send_calls), 1)
+            embed = ctx.send_calls[0]["embed"]
+            self.assertEqual(embed.title, "Shield AI Provider Probe")
+            self.assertIn("Provider probe succeeded", embed.description)
+            result_field = next(field for field in embed.fields if field.name == "Result")
+            self.assertIn("Model: `gpt-5.4-nano`", result_field.value)
+            self.assertIn("Tier: `fast`", result_field.value)
+            self.assertNotIn("Provider model gate", result_field.value)
+            self.assertNotIn("Ignored invalid model settings", result_field.value)
+            cog.service.ai_provider.review.assert_awaited_once()
         finally:
             await cog.service.close()
 

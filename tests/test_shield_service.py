@@ -1,4 +1,5 @@
 import json
+import os
 import types
 import unittest
 from datetime import timedelta
@@ -9,6 +10,7 @@ from unittest.mock import AsyncMock, patch
 import discord
 
 from babblebox import game_engine as ge
+from babblebox import shield_ai
 
 from babblebox.premium_limits import (
     CAPABILITY_SHIELD_AI_REVIEW,
@@ -19,7 +21,7 @@ from babblebox.premium_limits import (
     guild_limit as premium_guild_limit,
 )
 from babblebox.premium_models import PLAN_FREE, PLAN_GUILD_PRO
-from babblebox.shield_ai import SHIELD_AI_ALLOWED_GUILD_ID, SHIELD_AI_MODEL_ORDER, ShieldAIReviewResult
+from babblebox.shield_ai import OpenAIShieldAIProvider, SHIELD_AI_ALLOWED_GUILD_ID, SHIELD_AI_MODEL_ORDER, ShieldAIReviewResult
 from babblebox.shield_service import (
     FEATURE_SURFACE_AFK_REASON,
     FEATURE_SURFACE_AFK_SCHEDULE_REASON,
@@ -404,6 +406,10 @@ class FakeAIProvider:
             "routing_strategy": "routed_fast_complex",
             "single_model_override": False,
             "ignored_model_settings": [],
+            "provider_readiness": "Ready." if self._available else "OpenAI API key is not configured.",
+            "model_override_state": "blank",
+            "model_override_note": "No single-model override configured. Shield is using routed defaults.",
+            "routed_default_model": "gpt-5.4-nano" if self._available else None,
             "fast_model": "gpt-5.4-nano" if self._available else None,
             "complex_model": "gpt-5.4-mini" if self._available else None,
             "top_model": "gpt-5.4" if self._available else None,
@@ -5539,6 +5545,87 @@ class ShieldServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(status["enabled"])
         self.assertEqual(status["policy_source"], "ordinary_global")
         self.assertEqual(status["allowed_models"], list(SHIELD_AI_MODEL_ORDER))
+
+    async def test_ai_provider_probe_sends_synthetic_review_without_mutating_config(self):
+        self.service.ai_provider = FakeAIProvider(
+            result=ShieldAIReviewResult(
+                classification="privacy_leak",
+                confidence="high",
+                priority="normal",
+                false_positive=False,
+                explanation="Synthetic provider probe succeeded.",
+                model="gpt-5.4-nano",
+                tier="fast",
+                target_tier="fast",
+                attempted_models=("gpt-5.4-nano",),
+            )
+        )
+        before = deepcopy(self.store.state)
+
+        probe = await self.service.probe_ai_provider(10)
+
+        self.assertEqual(self.store.state, before)
+        self.assertTrue(probe["ok"])
+        self.assertEqual(probe["model"], "gpt-5.4-nano")
+        self.assertEqual(probe["tier"], "fast")
+        self.assertEqual(probe["provider"], "OpenAI")
+        self.assertIn("succeeded", probe["message"].lower())
+        self.service.ai_provider.review.assert_awaited_once()
+        request = self.service.ai_provider.review.await_args.args[0]
+        self.assertEqual(request.guild_id, 10)
+        self.assertEqual(request.pack, "privacy")
+        self.assertIn("[EMAIL]", request.sanitized_content)
+
+    async def test_ai_provider_probe_reports_missing_provider_without_calling_review(self):
+        self.service.ai_provider = FakeAIProvider(available=False)
+
+        probe = await self.service.probe_ai_provider(10)
+
+        self.assertFalse(probe["ok"])
+        self.assertEqual(probe["failure_reason"], "provider_unavailable")
+        self.assertIn("OpenAI API key is not configured", probe["message"])
+        self.service.ai_provider.review.assert_not_awaited()
+
+    async def test_ai_provider_probe_keeps_invalid_model_override_on_routed_default(self):
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "test", "SHIELD_AI_MODEL": "gpt-4.1-mini"}, clear=False):
+            provider = OpenAIShieldAIProvider()
+        provider._request_completion = AsyncMock(
+            return_value={
+                "choices": [
+                    {
+                        "message": {
+                            "content": (
+                                '{"classification":"privacy_leak","confidence":"high","priority":"normal",'
+                                '"false_positive":false,"explanation":"Synthetic provider probe succeeded."}'
+                            )
+                        }
+                    }
+                ]
+            }
+        )
+        self.service.ai_provider = provider
+
+        probe = await self.service.probe_ai_provider(10)
+
+        self.assertTrue(probe["ok"], probe)
+        self.assertEqual(probe["model"], "gpt-5.4-nano")
+        self.assertIn("Invalid override ignored: SHIELD_AI_MODEL", probe["model_override_note"])
+        self.assertEqual(probe["ignored_model_settings"], ["SHIELD_AI_MODEL"])
+        provider._request_completion.assert_awaited_once()
+
+    async def test_ai_provider_probe_reports_provider_failure_without_mutating_config(self):
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "test"}, clear=False):
+            provider = OpenAIShieldAIProvider()
+        provider._request_completion = AsyncMock(side_effect=shield_ai._TimeoutProviderFailure("timeout"))
+        self.service.ai_provider = provider
+        before = deepcopy(self.store.state)
+
+        probe = await self.service.probe_ai_provider(10)
+
+        self.assertEqual(self.store.state, before)
+        self.assertFalse(probe["ok"])
+        self.assertEqual(probe["failure_reason"], "provider_no_review")
+        self.assertIn("did not return a review", probe["message"])
 
     async def test_support_guild_flagged_message_can_enrich_alert_with_ai_review(self):
         guild = FakeGuild(SHIELD_AI_ALLOWED_GUILD_ID)
