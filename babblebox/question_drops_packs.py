@@ -1163,7 +1163,7 @@ EXPANDED_STATIC_SEEDS: tuple[dict[str, Any], ...] = (
         subcategory="figurative-language",
         mode="classification",
         accepted=("figurative", "figuratively"),
-        clue="In the sentence 'the classroom was a zoo,' is zoo being used literally or figuratively?",
+        clue="In the sentence 'the classroom was a zoo,' what language label fits that comparison?",
         templates=LANGUAGE_TEXT_TEMPLATES,
     ),
     _choice_seed(
@@ -1277,7 +1277,7 @@ EXPANDED_STATIC_SEEDS: tuple[dict[str, Any], ...] = (
         subcategory="ordering",
         mode="deduction",
         accepted=("cora",),
-        clue="Ava sits left of Ben. Cora sits between them. Who sits in the middle?",
+        clue="Ava, Cora, and Ben sit in a row. Ava is not in the middle. Ben is not in the middle. Who sits in the middle?",
         templates=LOGIC_TEXT_TEMPLATES,
     ),
     _choice_seed(
@@ -1538,7 +1538,7 @@ EXPANDED_STATIC_SEEDS: tuple[dict[str, Any], ...] = (
         "math.average-balance",
         subcategory="averages",
         mode="reasoning",
-        question="A class average is 72. One score is 8 points above average and another is 8 below. What is the average of those two scores together?",
+        question="Two balanced scores are 64 and 80. What is their average?",
         value=72,
         templates=MATH_NUMERIC_TEMPLATES,
     ),

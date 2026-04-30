@@ -814,10 +814,7 @@ def _shuffle_choice_values(choices: list[str], *, seed_material: str) -> list[st
 def _choice_slot_index(seed_material: str, *, count: int, offset: int = 0) -> int:
     if count <= 1:
         return 0
-    match = _TRAILING_INT_RE.search(seed_material)
-    if match is not None:
-        return (int(match.group(1)) + offset) % count
-    digest = int(hashlib.sha256(seed_material.encode("utf-8")).hexdigest()[:8], 16)
+    digest = int(hashlib.sha256(f"{seed_material}:answer-slot".encode("utf-8")).hexdigest()[:8], 16)
     return (digest + offset) % count
 
 
@@ -1527,6 +1524,7 @@ def _logic_elimination(seed: dict[str, Any], *, seed_material: str, variant_inde
     answer_index = (rotation + variant_index) % 3
     answer_name = names[answer_index]
     other_index = (answer_index + 1) % 3
+    remaining_index = next(index for index in range(3) if index not in {answer_index, other_index})
     templates = (
         "{body}",
         "Elimination round: {body}",
@@ -1535,8 +1533,8 @@ def _logic_elimination(seed: dict[str, Any], *, seed_material: str, variant_inde
     )
     body = (
         f"{names[0]}, {names[1]}, and {names[2]} each picked one of these: {items[0]}, {items[1]}, {items[2]}. "
-        f"{answer_name} picked neither {items[0]} nor {items[1]}. "
-        f"{names[other_index]} did not pick {items[2]}. "
+        f"{names[other_index]} picked {items[0]}. "
+        f"{names[remaining_index]} did not pick {items[2]}. "
         f"Who picked {items[2]}?"
     )
     prompt = templates[(rotation + (variant_index // len(name_sets))) % len(templates)].format(body=body)
@@ -1598,14 +1596,16 @@ def _logic_parity_grouping(seed: dict[str, Any], *, seed_material: str, variant_
         "Logic grouping: {lead} A) {a0}, {a1}, {a2} B) {b0}, {b1}, {b2} C) {c0}, {c1}, {c2}",
     )
     canonical_sets = [set_a, set_b, set_c]
-    display_order = [0, 1, 2]
-    order_rng = _make_rng(f"{seed_material}:{seed['concept_id']}:{variant_index}:set-order")
-    order_rng.shuffle(display_order)
-    if display_order == [0, 1, 2]:
-        display_order = display_order[1:] + display_order[:1]
-    shown_sets = [canonical_sets[index] for index in display_order]
     canonical_answer_index = {"set a": 0, "set b": 1, "set c": 2}[answer]
-    displayed_answer = ["option a", "option b", "option c"][display_order.index(canonical_answer_index)]
+    slot_seed = f"{seed_material}:{seed['concept_id']}:{variant_index}:set-order"
+    answer_slot_index = _choice_slot_index(slot_seed, count=len(canonical_sets))
+    distractor_indices = [index for index in range(len(canonical_sets)) if index != canonical_answer_index]
+    distractor_rng = _make_rng(f"{slot_seed}:distractors")
+    distractor_rng.shuffle(distractor_indices)
+    display_order = list(distractor_indices)
+    display_order.insert(answer_slot_index, canonical_answer_index)
+    shown_sets = [canonical_sets[index] for index in display_order]
+    displayed_answer = ["option a", "option b", "option c"][answer_slot_index]
     prompt = templates[(rotation + (variant_index // 3)) % len(templates)].format(
         lead=lead,
         a0=shown_sets[0][0],
@@ -2497,6 +2497,11 @@ def _normalize_prompt_for_audit(prompt: str) -> str:
     return normalize_answer_text(prompt)
 
 
+def _normalize_prompt_for_leak_audit(raw: str | None) -> str:
+    text = normalize_answer_text(raw).replace("-", " ")
+    return _SPACE_RE.sub(" ", text).strip()
+
+
 def _multiple_choice_prompt_stem(prompt: str) -> str:
     marker = " A) "
     if marker not in prompt:
@@ -2505,20 +2510,23 @@ def _multiple_choice_prompt_stem(prompt: str) -> str:
 
 
 def _multiple_choice_stem_reveals_answer(prompt: str, answer_spec: dict[str, Any]) -> bool:
-    stem = normalize_answer_text(_multiple_choice_prompt_stem(prompt))
+    stem = _normalize_prompt_for_leak_audit(_multiple_choice_prompt_stem(prompt))
     answer = normalize_answer_text(answer_spec.get("answer"))
-    if not answer or answer not in stem:
+    if not answer:
         return False
     choices = [normalize_answer_text(choice) for choice in answer_spec.get("choices", [])]
     present_choices = {choice for choice in choices if choice and choice in stem}
-    return present_choices == {answer}
+    if answer in stem and present_choices == {answer}:
+        return True
+    distractors = {choice for choice in choices if choice and choice != answer}
+    return answer not in stem and len(distractors) >= 2 and present_choices == distractors
 
 
 def _ordered_prompt_leaks_solution(prompt: str, tokens: list[str] | tuple[str, ...]) -> bool:
-    prompt_norm = normalize_answer_text(prompt)
+    prompt_norm = _normalize_prompt_for_leak_audit(prompt)
     cursor = 0
     for token in tokens:
-        token_norm = normalize_answer_text(token)
+        token_norm = _normalize_prompt_for_leak_audit(token)
         position = prompt_norm.find(token_norm, cursor)
         if position < 0:
             return False
@@ -2526,8 +2534,33 @@ def _ordered_prompt_leaks_solution(prompt: str, tokens: list[str] | tuple[str, .
     return True
 
 
+def _prompt_has_direct_answer_reveal(prompt: str, answer_texts: tuple[str, ...]) -> bool:
+    prompt_norm = _normalize_prompt_for_leak_audit(prompt)
+    if not prompt_norm:
+        return False
+    reveal_nouns = ("answer", "average", "result", "solution", "value")
+    for answer_text in answer_texts:
+        answer_norm = _normalize_prompt_for_leak_audit(answer_text)
+        if not answer_norm:
+            continue
+        escaped_answer = re.escape(answer_norm)
+        for noun in reveal_nouns:
+            if re.search(rf"\b(?:the\s+)?{noun}\s+(?:is|=)\s+{escaped_answer}\b", prompt_norm):
+                return True
+            if re.search(rf"\b{escaped_answer}\s+is\s+(?:the\s+)?{noun}\b", prompt_norm):
+                return True
+    return False
+
+
 def _audit_rendered_variant(seed: dict[str, Any], variant: QuestionDropVariant) -> str | None:
     answer_type = str(variant.answer_spec.get("type") or "").strip().casefold()
+    if answer_type == "text":
+        accepted = tuple(str(item) for item in variant.answer_spec.get("accepted", ()) if isinstance(item, str))
+        if _prompt_has_direct_answer_reveal(variant.prompt, accepted):
+            return "Prompt reveals the answer."
+    if answer_type == "numeric":
+        if _prompt_has_direct_answer_reveal(variant.prompt, (render_answer_summary(variant.answer_spec),)):
+            return "Prompt reveals the answer."
     if answer_type == "multiple_choice":
         choices = [str(choice).strip().casefold() for choice in variant.answer_spec.get("choices", []) if str(choice).strip()]
         if len(choices) != len(set(choices)):

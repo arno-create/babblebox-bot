@@ -299,6 +299,24 @@ class QuestionDropsContentTests(unittest.TestCase):
             cursor = position + len(token_norm)
         return True
 
+    def _custom_static_seed(
+        self,
+        *,
+        concept_id: str,
+        answer_shape: str,
+        variants: tuple[dict[str, object], ...],
+    ) -> dict[str, object]:
+        return {
+            "concept_id": concept_id,
+            "family_id": f"test.{concept_id}",
+            "category": "logic",
+            "difficulty": 1,
+            "source_type": "curated",
+            "generator_type": "static_pack",
+            "tags": ("sub:test", "mode:test", f"shape:{answer_shape}"),
+            "variants": variants,
+        }
+
     def test_content_pack_validates(self):
         ok, message = validate_content_pack()
         self.assertTrue(ok)
@@ -449,6 +467,134 @@ class QuestionDropsContentTests(unittest.TestCase):
             with self.subTest(letter=letter, share=share):
                 self.assertGreaterEqual(share, 0.25)
                 self.assertLessEqual(share, 0.40)
+
+    def test_multiple_choice_real_slot_distribution_stays_near_even_for_representative_seeds(self):
+        concept_ids = ("science:chemical-change", "logic:parity-grouping", "math:divisibility")
+
+        for concept_id in concept_ids:
+            seed = self._seed_for(concept_id)
+            variant_count = len(seed.get("variants", ())) if seed.get("generator_type") == "static_pack" else 12
+            letter_counts = Counter()
+            for day in range(1, 31):
+                for slot_index in range(10):
+                    seed_material = _slot_seed_material(101, 202, f"2026-04-{day:02d}:{slot_index}")
+                    for variant_index in range(variant_count):
+                        variant = build_variant(seed, seed_material=seed_material, variant_index=variant_index)
+                        letter_counts[self._correct_choice_letter(variant.answer_spec)] += 1
+
+            total = sum(letter_counts.values())
+            shares = {letter: letter_counts[letter] / total for letter in ("A", "B", "C")}
+            with self.subTest(concept_id=concept_id, shares=shares):
+                self.assertLessEqual(max(shares.values()) - min(shares.values()), 0.04)
+
+    def test_content_validation_rejects_multiple_choice_stems_that_expose_distractor_elimination(self):
+        seed = self._custom_static_seed(
+            concept_id="test:mc-distractor-leak",
+            answer_shape="multiple_choice",
+            variants=(
+                {
+                    "prompt": "Red and blue are already ruled out. Which color remains? A) red B) green C) blue",
+                    "answer_spec": {"type": "multiple_choice", "choices": ["red", "green", "blue"], "answer": "green"},
+                },
+            ),
+        )
+
+        ok, message = validate_content_pack((seed,))
+
+        self.assertFalse(ok)
+        self.assertIn("reveals", str(message).casefold())
+
+    def test_content_validation_rejects_ordered_prompts_that_leak_multiword_tokens_through_punctuation(self):
+        seed = self._custom_static_seed(
+            concept_id="test:ordered-punctuation-leak",
+            answer_shape="ordered_tokens",
+            variants=(
+                {
+                    "prompt": "Put these in the timeline: printing-press -> telephone -> internet",
+                    "answer_spec": {"type": "ordered_tokens", "tokens": ["printing press", "telephone", "internet"]},
+                },
+            ),
+        )
+
+        ok, message = validate_content_pack((seed,))
+
+        self.assertFalse(ok)
+        self.assertIn("ordered", str(message).casefold())
+
+    def test_content_validation_rejects_direct_text_and_numeric_answer_reveals(self):
+        text_seed = self._custom_static_seed(
+            concept_id="test:text-answer-reveal",
+            answer_shape="text",
+            variants=(
+                {
+                    "prompt": "The answer is Mercury. Which planet is nearest the Sun?",
+                    "answer_spec": {"type": "text", "accepted": ["Mercury"]},
+                },
+            ),
+        )
+        numeric_seed = self._custom_static_seed(
+            concept_id="test:numeric-answer-reveal",
+            answer_shape="numeric",
+            variants=(
+                {
+                    "prompt": "The average is 72. What is the answer?",
+                    "answer_spec": {"type": "numeric", "value": 72},
+                },
+            ),
+        )
+
+        text_ok, text_message = validate_content_pack((text_seed,))
+        numeric_ok, numeric_message = validate_content_pack((numeric_seed,))
+
+        self.assertFalse(text_ok)
+        self.assertIn("reveals", str(text_message).casefold())
+        self.assertFalse(numeric_ok)
+        self.assertIn("reveals", str(numeric_message).casefold())
+
+    def test_current_content_avoids_known_answer_reveal_patterns(self):
+        checks = {
+            "language:figurative-zoo": ("figurative", "figuratively", "literal", "literally"),
+            "logic:middle-seat": ("cora sits between",),
+            "math:balanced-average": ("average is 72", "class average is 72"),
+        }
+        for concept_id, forbidden_fragments in checks.items():
+            seed = self._seed_for(concept_id)
+            variant_count = len(seed.get("variants", ())) if seed.get("generator_type") == "static_pack" else 12
+            for variant_index in range(variant_count):
+                variant = build_variant(seed, seed_material=f"known-leak-audit:{concept_id}", variant_index=variant_index)
+                prompt_norm = normalize_answer_text(variant.prompt)
+                with self.subTest(concept_id=concept_id, prompt=variant.prompt):
+                    for fragment in forbidden_fragments:
+                        self.assertNotIn(fragment, prompt_norm)
+
+        elimination_seed = self._seed_for("logic:elimination")
+        for variant_index in range(32):
+            variant = build_variant(elimination_seed, seed_material="known-leak-audit:logic-elimination", variant_index=variant_index)
+            answer = normalize_answer_text(variant.answer_spec.get("accepted", [""])[0])
+            prompt_norm = normalize_answer_text(variant.prompt)
+            with self.subTest(prompt=variant.prompt):
+                self.assertNotIn(f"{answer} picked neither", prompt_norm)
+
+    def test_multiple_choice_validation_normalizes_duplicate_options_before_shipping(self):
+        seed = self._custom_static_seed(
+            concept_id="test:normalized-duplicate-options",
+            answer_shape="multiple_choice",
+            variants=(
+                {
+                    "prompt": "Which spelling is normalized here? A) Cote d'Ivoire B) cote divoire C) Ghana",
+                    "answer_spec": {
+                        "type": "multiple_choice",
+                        "choices": ["Cote d'Ivoire", "cote divoire", "Ghana"],
+                        "answer": "Ghana",
+                    },
+                },
+            ),
+        )
+
+        ok, message = validate_content_pack((seed,))
+
+        self.assertFalse(ok)
+        self.assertIn("distinct", str(message).casefold())
 
     def test_curated_multiple_choice_prompts_do_not_leak_answers_in_the_stem(self):
         for seed in QUESTION_DROP_SEEDS:
