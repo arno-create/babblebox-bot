@@ -565,7 +565,7 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
         shield_page = next(page for page in HELP_PAGES if page["title"] == "Shield / Admin Safety")
 
         self.assertIn("Babblebox Plus raises saved-vs-active headroom for Watch, reminders, and recurring AFK", utilities_page["body"])
-        self.assertIn("gpt-5.4-nano", shield_page["body"])
+        self.assertIn("gpt-5-nano", shield_page["body"])
         self.assertIn("effective higher-tier use still needs Guild Pro plus provider/runtime readiness", shield_page["body"])
         self.assertIn("effective lane plus local readiness, entitlement state, and provider gates", shield_page["body"])
         self.assertIn("larger safe Confessions image ceiling", premium_page["fields"][0][1])
@@ -2288,7 +2288,7 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             self.assertIn("Configured models", fields["Access Policy"])
             self.assertIn("Effective models right now", fields["Access Policy"])
             self.assertIn("Ordinary-guild default", fields["Access Policy"])
-            self.assertIn("gpt-5.4-nano", fields["Access Policy"])
+            self.assertIn("gpt-5-nano", fields["Access Policy"])
             self.assertIn("Babblebox Guild Pro can make", fields["Access Policy"])
             self.assertIn("review scope is admin-configurable", embed.footer.text.lower())
             self.assertIn("guild pro can make mini/full available", embed.footer.text.lower())
@@ -2305,17 +2305,17 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
                     "provider": "OpenAI",
                     "available": True,
                     "configured": True,
-                    "model": "gpt-5.4-nano",
+                    "model": "gpt-5-nano",
                     "routing_strategy": "routed_fast_complex",
                     "single_model_override": False,
                     "ignored_model_settings": ["SHIELD_AI_MODEL"],
                     "provider_readiness": "Ready.",
                     "model_override_state": "invalid",
                     "model_override_note": "Invalid override ignored: SHIELD_AI_MODEL. Shield is using routed defaults instead.",
-                    "routed_default_model": "gpt-5.4-nano",
-                    "fast_model": "gpt-5.4-nano",
-                    "complex_model": "gpt-5.4-mini",
-                    "top_model": "gpt-5.4",
+                    "routed_default_model": "gpt-5-nano",
+                    "fast_model": "gpt-5-nano",
+                    "complex_model": "gpt-5-mini",
+                    "top_model": "gpt-5",
                     "top_tier_enabled": False,
                     "timeout_seconds": 4.0,
                     "max_chars": 160,
@@ -2330,7 +2330,7 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
 
             self.assertIn("Provider readiness: Ready.", provider_value)
             self.assertIn("Model override: Invalid override ignored: SHIELD_AI_MODEL", provider_value)
-            self.assertIn("Routed default: `gpt-5.4-nano`", provider_value)
+            self.assertIn("Routed default: `gpt-5-nano`", provider_value)
             self.assertNotIn("Provider model gate", provider_value)
             self.assertNotIn("Ignored invalid model settings", provider_value)
             self.assertNotIn(": None", provider_value)
@@ -2362,13 +2362,13 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
                     "provider": "OpenAI",
                     "available": True,
                     "configured": True,
-                    "model": "gpt-5.4-nano",
+                    "model": "gpt-5-nano",
                     "routing_strategy": "routed_fast_complex",
                     "single_model_override": False,
                     "ignored_model_settings": [],
-                    "fast_model": "gpt-5.4-nano",
-                    "complex_model": "gpt-5.4-mini",
-                    "top_model": "gpt-5.4",
+                    "fast_model": "gpt-5-nano",
+                    "complex_model": "gpt-5-mini",
+                    "top_model": "gpt-5",
                     "top_tier_enabled": False,
                     "timeout_seconds": 4.0,
                     "max_chars": 160,
@@ -2389,7 +2389,7 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             access_value = next(field.value for field in ai_panel.fields if field.name == "Access Policy")
 
             self.assertIn("Effective models right now:", overview_value)
-            self.assertIn("nano (gpt-5.4-nano)", overview_value)
+            self.assertIn("nano (gpt-5-nano)", overview_value)
             self.assertIn("Policy source: Per-guild owner override", overview_value)
             self.assertNotIn("Configured models:", overview_value)
             self.assertNotIn("Entitlement:", overview_value)
@@ -3049,9 +3049,9 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
                 self.assertEqual(len(ctx.send_calls), 1)
                 self.assertEqual(ctx.send_calls[0]["embed"].title, "Shield AI Owner Policy")
                 status_field = next(field for field in ctx.send_calls[0]["embed"].fields if field.name == "Default Owner Policy")
-                self.assertIn("gpt-5.4-nano", status_field.value)
-                self.assertIn("gpt-5.4-mini", status_field.value)
-                self.assertIn("gpt-5.4", status_field.value)
+                self.assertIn("gpt-5-nano", status_field.value)
+                self.assertIn("gpt-5-mini", status_field.value)
+                self.assertIn("gpt-5", status_field.value)
             finally:
                 await cog.service.close()
 
@@ -3090,17 +3090,17 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
                     "provider": "OpenAI",
                     "available": True,
                     "configured": True,
-                    "model": "gpt-5.4-nano",
+                    "model": "gpt-5-nano",
                     "routing_strategy": "routed_fast_complex",
                     "single_model_override": False,
                     "ignored_model_settings": [],
                     "provider_readiness": "Ready.",
                     "model_override_state": "blank",
                     "model_override_note": "No single-model override configured. Shield is using routed defaults.",
-                    "routed_default_model": "gpt-5.4-nano",
-                    "fast_model": "gpt-5.4-nano",
-                    "complex_model": "gpt-5.4-mini",
-                    "top_model": "gpt-5.4",
+                    "routed_default_model": "gpt-5-nano",
+                    "fast_model": "gpt-5-nano",
+                    "complex_model": "gpt-5-mini",
+                    "top_model": "gpt-5",
                     "top_tier_enabled": False,
                     "timeout_seconds": 4.0,
                     "max_chars": 160,
@@ -3113,10 +3113,10 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
                         priority="normal",
                         false_positive=False,
                         explanation="Synthetic provider probe succeeded.",
-                        model="gpt-5.4-nano",
+                        model="gpt-5-nano",
                         tier="fast",
                         target_tier="fast",
-                        attempted_models=("gpt-5.4-nano",),
+                        attempted_models=("gpt-5-nano",),
                     )
                 ),
                 close=AsyncMock(return_value=None),
@@ -3133,7 +3133,7 @@ class HybridCommandSmokeTests(unittest.IsolatedAsyncioTestCase):
             self.assertEqual(embed.title, "Shield AI Provider Probe")
             self.assertIn("Provider probe succeeded", embed.description)
             result_field = next(field for field in embed.fields if field.name == "Result")
-            self.assertIn("Model: `gpt-5.4-nano`", result_field.value)
+            self.assertIn("Model: `gpt-5-nano`", result_field.value)
             self.assertIn("Tier: `fast`", result_field.value)
             self.assertNotIn("Provider model gate", result_field.value)
             self.assertNotIn("Ignored invalid model settings", result_field.value)

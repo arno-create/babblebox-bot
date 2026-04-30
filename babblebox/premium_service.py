@@ -888,7 +888,7 @@ class PremiumService:
                     "Inevitable Friendship Legendary Patron Discord benefits.",
                     "Up to 15 bump detection channels.",
                     "Higher bounded Shield config ceilings for patterns, filters, allowlists, exemptions, and severe terms.",
-                    "Shield AI's higher gpt-5.4-mini and gpt-5.4 tiers when owner policy and provider/runtime readiness allow review.",
+                    "Shield AI's higher gpt-5-mini and gpt-5 tiers when owner policy and provider/runtime readiness allow review.",
                     "Optional Question Drops AI celebrations when celebration policy and provider/runtime readiness allow live copy.",
                     "Confessions max_images up to 6.",
                 ),

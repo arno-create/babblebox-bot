@@ -67,9 +67,9 @@ class ShieldAITests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(shield_ai.shield_ai_available_in_guild(10))
 
     def test_parse_model_list_accepts_aliases_and_canonical_names(self):
-        parsed = shield_ai.parse_shield_ai_model_list(["mini", "gpt-5.4", "nano", "mini"])
+        parsed = shield_ai.parse_shield_ai_model_list(["mini", "gpt-5", "nano", "mini"])
 
-        self.assertEqual(parsed, ("gpt-5.4-nano", "gpt-5.4-mini", "gpt-5.4"))
+        self.assertEqual(parsed, ("gpt-5-nano", "gpt-5-mini", "gpt-5"))
 
     def test_route_defaults_to_fast_for_simple_case(self):
         provider = shield_ai.OpenAIShieldAIProvider()
@@ -77,7 +77,7 @@ class ShieldAITests(unittest.IsolatedAsyncioTestCase):
         route = provider._route_request(_request())
 
         self.assertEqual(route.target_tier, "fast")
-        self.assertEqual(route.selected_model, "gpt-5.4-nano")
+        self.assertEqual(route.selected_model, "gpt-5-nano")
         self.assertFalse(route.policy_capped)
 
     def test_route_escalates_to_complex_for_high_risk_or_ambiguous_case(self):
@@ -96,7 +96,7 @@ class ShieldAITests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(route.target_tier, "complex")
-        self.assertEqual(route.selected_model, "gpt-5.4-mini")
+        self.assertEqual(route.selected_model, "gpt-5-mini")
         self.assertIn("high_risk_pack", route.route_reasons)
         self.assertIn("high_severity_action", route.route_reasons)
 
@@ -115,7 +115,7 @@ class ShieldAITests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(route.target_tier, "complex")
-        self.assertEqual(route.selected_model, "gpt-5.4-mini")
+        self.assertEqual(route.selected_model, "gpt-5-mini")
 
     def test_route_can_reach_frontier_when_enabled_and_justified(self):
         with patch.dict(os.environ, {"SHIELD_AI_ENABLE_TOP_TIER": "true"}, clear=False):
@@ -134,7 +134,7 @@ class ShieldAITests(unittest.IsolatedAsyncioTestCase):
         )
 
         self.assertEqual(route.target_tier, "frontier")
-        self.assertEqual(route.selected_model, "gpt-5.4")
+        self.assertEqual(route.selected_model, "gpt-5")
 
     def test_diagnostics_report_frontier_capable_routing_when_top_tier_is_enabled(self):
         with patch.dict(os.environ, {"SHIELD_AI_ENABLE_TOP_TIER": "true"}, clear=False):
@@ -154,12 +154,12 @@ class ShieldAITests(unittest.IsolatedAsyncioTestCase):
                 local_confidence="medium",
                 local_action="delete_escalate",
                 local_labels=("Scam", "Unknown risky link"),
-                allowed_models=("gpt-5.4-nano",),
+                allowed_models=("gpt-5-nano",),
             )
         )
 
         self.assertEqual(route.target_tier, "complex")
-        self.assertEqual(route.selected_model, "gpt-5.4-nano")
+        self.assertEqual(route.selected_model, "gpt-5-nano")
         self.assertTrue(route.policy_capped)
 
     def test_single_model_override_bypasses_routing_with_supported_model(self):
@@ -169,7 +169,7 @@ class ShieldAITests(unittest.IsolatedAsyncioTestCase):
         route = provider._route_request(_request())
 
         self.assertTrue(route.single_model_override)
-        self.assertEqual(route.selected_model, "gpt-5.4-mini")
+        self.assertEqual(route.selected_model, "gpt-5-mini")
         self.assertEqual(route.route_reasons, ("single_model_override",))
 
     def test_invalid_single_model_override_is_ignored_and_reported_truthfully(self):
@@ -180,13 +180,13 @@ class ShieldAITests(unittest.IsolatedAsyncioTestCase):
 
         self.assertTrue(diagnostics["available"])
         self.assertFalse(diagnostics["single_model_override"])
-        self.assertEqual(diagnostics["model"], "gpt-5.4-nano")
+        self.assertEqual(diagnostics["model"], "gpt-5-nano")
         self.assertEqual(diagnostics["status"], "Ready.")
         self.assertEqual(diagnostics["ignored_model_settings"], ["SHIELD_AI_MODEL"])
         self.assertEqual(diagnostics["model_override_state"], "invalid")
         self.assertIn("Invalid override ignored: SHIELD_AI_MODEL", diagnostics["model_override_note"])
         self.assertIn("routed defaults", diagnostics["model_override_note"])
-        self.assertEqual(diagnostics["routed_default_model"], "gpt-5.4-nano")
+        self.assertEqual(diagnostics["routed_default_model"], "gpt-5-nano")
 
     def test_invalid_tier_model_settings_are_ignored_and_reported_truthfully(self):
         with patch.dict(
@@ -203,9 +203,9 @@ class ShieldAITests(unittest.IsolatedAsyncioTestCase):
 
         diagnostics = provider.diagnostics()
 
-        self.assertEqual(diagnostics["fast_model"], "gpt-5.4-nano")
-        self.assertEqual(diagnostics["complex_model"], "gpt-5.4-mini")
-        self.assertEqual(diagnostics["top_model"], "gpt-5.4")
+        self.assertEqual(diagnostics["fast_model"], "gpt-5-nano")
+        self.assertEqual(diagnostics["complex_model"], "gpt-5-mini")
+        self.assertEqual(diagnostics["top_model"], "gpt-5")
         self.assertEqual(
             diagnostics["ignored_model_settings"],
             ["SHIELD_AI_FAST_MODEL", "SHIELD_AI_COMPLEX_MODEL", "SHIELD_AI_TOP_MODEL"],
@@ -236,8 +236,8 @@ class ShieldAITests(unittest.IsolatedAsyncioTestCase):
         self.assertIsNotNone(result)
         self.assertEqual(provider._request_completion.await_count, 2)
         self.assertTrue(result.fallback_used)
-        self.assertEqual(result.attempted_models, ("gpt-5.4-mini", "gpt-5.4-nano"))
-        self.assertEqual(result.model, "gpt-5.4-nano")
+        self.assertEqual(result.attempted_models, ("gpt-5-mini", "gpt-5-nano"))
+        self.assertEqual(result.model, "gpt-5-nano")
 
     async def test_timeout_failure_does_not_retry(self):
         with patch.dict(os.environ, {"OPENAI_API_KEY": "test"}, clear=False):

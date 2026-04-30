@@ -3190,9 +3190,24 @@ class ConfessionsServiceTests(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(snapshot["support_ready"])
         self.assertEqual(snapshot["review_issue_counts"]["public"], 1)
         self.assertEqual(snapshot["support_issue_counts"]["bot_missing_permissions"], 1)
+        self.assertEqual(snapshot["review_issue_details"][0]["guild_id"], self.guild.id)
+        self.assertEqual(snapshot["review_issue_details"][0]["status"], "public")
+        self.assertEqual(snapshot["review_issue_details"][0]["channel_id"], self.review_channel.id)
+        self.assertIn("@everyone", snapshot["review_issue_details"][0]["detail"])
+        self.assertEqual(snapshot["support_issue_details"][0]["guild_id"], self.guild.id)
+        self.assertEqual(snapshot["support_issue_details"][0]["status"], "bot_missing_permissions")
+        self.assertEqual(snapshot["support_issue_details"][0]["missing_permissions"], ("Embed Links",))
         self.assertIn("confessions_privacy_backfill_incomplete", snapshot["issue_codes"])
         self.assertIn("confessions_review_channel_public", snapshot["issue_codes"])
         self.assertIn("confessions_support_channel_bot_missing_permissions", snapshot["issue_codes"])
+
+        with self.assertLogs("babblebox.confessions_service", level="WARNING") as captured:
+            self.service.log_readiness_summary()
+        rendered = " ".join(captured.output)
+        self.assertIn(f"guild={self.guild.id}", rendered)
+        self.assertIn(f"channel={self.review_channel.id}", rendered)
+        self.assertIn("status=public", rendered)
+        self.assertIn("missing_permissions=Embed Links", rendered)
 
     async def test_start_logs_privacy_warning_when_backfill_is_needed(self):
         service = ConfessionsService(self.bot, store=ConfessionsStore(backend="memory"))

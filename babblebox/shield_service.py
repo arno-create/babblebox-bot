@@ -175,6 +175,7 @@ CAMPAIGN_USERS_PER_SIGNATURE_LIMIT = 12
 NEWCOMER_STATE_LIMIT = 512
 GIF_INCIDENT_WINDOW_SECONDS = 90.0
 SPAM_INCIDENT_WINDOW_SECONDS = 90.0
+INCIDENT_ALERT_EDIT_MIN_SECONDS = 8.0
 SHIELD_BASELINE_VERSION = 4
 TRUSTED_ONLY_BUILTIN_FAMILIES = frozenset(TRUSTED_LINK_SAFE_FAMILIES)
 TRUSTED_ONLY_BUILTIN_DOMAINS = frozenset(TRUSTED_MAINSTREAM_DOMAINS)
@@ -3013,12 +3014,12 @@ class ShieldService:
         single_model_override = bool(diagnostics.get("single_model_override"))
         top_tier_enabled = bool(diagnostics.get("top_tier_enabled"))
         provider_capped_models = (
-            ("gpt-5.4",)
-            if "gpt-5.4" in policy.allowed_models and not top_tier_enabled and not single_model_override
+            ("gpt-5",)
+            if "gpt-5" in policy.allowed_models and not top_tier_enabled and not single_model_override
             else ()
         )
         provider_model_note = (
-            "gpt-5.4 remains provider-gated until top-tier routing is enabled."
+            "gpt-5 remains provider-gated until top-tier routing is enabled."
             if provider_capped_models
             else None
         )
@@ -3163,10 +3164,25 @@ class ShieldService:
             )
             return base
         if result is None:
+            failure = self.ai_provider.diagnostics().get("last_review_failure")
+            failure_reason = "provider_no_review"
+            failure_detail = None
+            if isinstance(failure, dict):
+                candidate_reason = str(failure.get("reason") or "").strip()
+                candidate_detail = str(failure.get("detail") or "").strip()
+                if candidate_reason:
+                    failure_reason = candidate_reason
+                if candidate_detail:
+                    failure_detail = candidate_detail
             base.update(
                 {
-                    "failure_reason": "provider_no_review",
-                    "message": "Provider probe reached the review path but did not return a review.",
+                    "failure_reason": failure_reason,
+                    "provider_failure_detail": failure_detail,
+                    "message": (
+                        f"Provider probe reached the review path but did not return a review: {failure_detail}"
+                        if failure_detail
+                        else "Provider probe reached the review path but did not return a review."
+                    ),
                 }
             )
             return base
@@ -3454,7 +3470,7 @@ class ShieldService:
 
         message = f"Shield live-message moderation is now {'enabled' if enabled else 'disabled'} for this server."
         if enabled:
-            message += " Shield AI stays second-pass only, owner policy controls whether review runs, and Babblebox Guild Pro can make gpt-5.4-mini plus gpt-5.4 available when provider/runtime readiness also allows review."
+            message += " Shield AI stays second-pass only, owner policy controls whether review runs, and Babblebox Guild Pro can make gpt-5-mini plus gpt-5 available when provider/runtime readiness also allows review."
             if first_enable:
                 message += (
                     " On first enable, Babblebox applies its recommended non-AI baseline anywhere you had not already customized it. "
@@ -4436,7 +4452,7 @@ class ShieldService:
         if enabled is not None:
             return (
                 False,
-                "Shield AI availability is resolved by owner policy outside `/shield ai`. This command only changes review threshold and eligible packs, and Babblebox Guild Pro only makes gpt-5.4-mini and gpt-5.4 available when owner policy and provider/runtime readiness also allow review.",
+                "Shield AI availability is resolved by owner policy outside `/shield ai`. This command only changes review threshold and eligible packs, and Babblebox Guild Pro only makes gpt-5-mini and gpt-5 available when owner policy and provider/runtime readiness also allow review.",
             )
         cleaned_min_confidence = str(min_confidence).strip().lower() if isinstance(min_confidence, str) else None
         if cleaned_min_confidence is not None and cleaned_min_confidence not in SHIELD_AI_MIN_CONFIDENCE_CHOICES:
@@ -4467,7 +4483,7 @@ class ShieldService:
         entitlement_note = (
             "Guild Pro enhanced models are active on this server."
             if policy.premium_unlocked
-            else "Guild Pro is still required for gpt-5.4-mini and gpt-5.4 on this server."
+            else "Guild Pro is still required for gpt-5-mini and gpt-5 on this server."
         )
         return await self._update_config(
             guild_id,
@@ -9511,8 +9527,10 @@ class ShieldService:
             incident_state = self._spam_incident_alerts.get(spam_incident_key)
             if incident_state is not None and now - float(incident_state.get("last_seen", 0.0)) <= SPAM_INCIDENT_WINDOW_SECONDS:
                 hits = int(incident_state.get("hits", 1)) + 1
+                new_severity_rank = self._spam_incident_rank(decision, top_reason)
+                severity_increased = new_severity_rank > int(incident_state.get("severity_rank", -1))
                 stronger = (
-                    self._spam_incident_rank(decision, top_reason) > int(incident_state.get("severity_rank", -1))
+                    severity_increased
                     or bool(decision.deleted) != bool(incident_state.get("deleted"))
                     or bool(decision.timed_out) != bool(incident_state.get("timed_out"))
                     or decision.alert_evidence_signature != incident_state.get("signature")
@@ -9522,8 +9540,12 @@ class ShieldService:
                 incident_state["signature"] = decision.alert_evidence_signature
                 incident_state["deleted"] = bool(decision.deleted)
                 incident_state["timed_out"] = bool(decision.timed_out)
-                incident_state["severity_rank"] = self._spam_incident_rank(decision, top_reason)
+                incident_state["severity_rank"] = new_severity_rank
                 if not stronger:
+                    self._spam_incident_alerts[spam_incident_key] = incident_state
+                    decision.logged = True
+                    return
+                if not severity_increased and now - float(incident_state.get("last_edit_at", 0.0)) < INCIDENT_ALERT_EDIT_MIN_SECONDS:
                     self._spam_incident_alerts[spam_incident_key] = incident_state
                     decision.logged = True
                     return
@@ -9543,6 +9565,7 @@ class ShieldService:
                             decision,
                             top_reason=top_reason,
                         )
+                        incident_state["last_edit_at"] = now
                         self._spam_incident_alerts[spam_incident_key] = incident_state
                         decision.logged = True
                         return
@@ -9554,8 +9577,10 @@ class ShieldService:
             if incident_state is not None and now - float(incident_state.get("last_seen", 0.0)) <= GIF_INCIDENT_WINDOW_SECONDS:
                 hits = int(incident_state.get("hits", 1)) + 1
                 channel_level_incident = bool(gif_incident_key and gif_incident_key[0] == "channel")
+                new_severity_rank = self._gif_incident_rank(decision, top_reason)
+                severity_increased = new_severity_rank > int(incident_state.get("severity_rank", -1))
                 stronger = (
-                    self._gif_incident_rank(decision, top_reason) > int(incident_state.get("severity_rank", -1))
+                    severity_increased
                     or (
                         not channel_level_incident
                         and decision.alert_evidence_signature != incident_state.get("signature")
@@ -9568,8 +9593,12 @@ class ShieldService:
                 incident_state["signature"] = decision.alert_evidence_signature
                 incident_state["deleted"] = bool(decision.deleted)
                 incident_state["timed_out"] = bool(decision.timed_out)
-                incident_state["severity_rank"] = self._gif_incident_rank(decision, top_reason)
+                incident_state["severity_rank"] = new_severity_rank
                 if not stronger:
+                    self._gif_incident_alerts[gif_incident_key] = incident_state
+                    decision.logged = True
+                    return
+                if not severity_increased and now - float(incident_state.get("last_edit_at", 0.0)) < INCIDENT_ALERT_EDIT_MIN_SECONDS:
                     self._gif_incident_alerts[gif_incident_key] = incident_state
                     decision.logged = True
                     return
@@ -9593,6 +9622,7 @@ class ShieldService:
                             decision,
                             top_reason=top_reason,
                         )
+                        incident_state["last_edit_at"] = now
                         self._gif_incident_alerts[gif_incident_key] = incident_state
                         decision.logged = True
                         return
@@ -9623,6 +9653,7 @@ class ShieldService:
                 "deleted": bool(decision.deleted),
                 "timed_out": bool(decision.timed_out),
                 "action_token": str(action_record["token"]),
+                "last_edit_at": now,
             }
         if gif_incident_key is not None:
             self._gif_incident_alerts[gif_incident_key] = {
@@ -9634,6 +9665,7 @@ class ShieldService:
                 "deleted": bool(decision.deleted),
                 "timed_out": bool(decision.timed_out),
                 "action_token": str(action_record["token"]),
+                "last_edit_at": now,
             }
 
     def _format_action_summary(self, decision: ShieldDecision) -> str:
