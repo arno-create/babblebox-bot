@@ -1,4 +1,4 @@
-﻿from __future__ import annotations
+from __future__ import annotations
 
 import contextlib
 import logging
@@ -2090,7 +2090,7 @@ class ShieldCog(commands.Cog):
             f"Entitlement: {ai_status.get('premium_summary') or 'Guild Pro status is unavailable right now.'}",
             f"Configured models: {self._format_ai_models(ai_status.get('configured_allowed_models', []))}",
             f"Effective models right now: {self._format_ai_models(ai_status.get('effective_allowed_models', ai_status.get('allowed_models', [])))}",
-            "Upgrade path: Babblebox Guild Pro can make gpt-5.4-mini plus gpt-5.4 available when owner policy and provider/runtime readiness allow review.",
+            "Upgrade path: Babblebox Guild Pro can make gpt-5-mini plus gpt-5 available when owner policy and provider/runtime readiness allow review.",
         ]
         if include_plan_allowed:
             lines.append(f"Plan-allowed models: {self._format_ai_models(ai_status.get('plan_allowed_models', []))}")
@@ -2347,8 +2347,8 @@ class ShieldCog(commands.Cog):
         embed.add_field(
             name="AI Model Tiers",
             value=(
-                f"Baseline tier: {self._format_ai_models(['gpt-5.4-nano'])}\n"
-                f"Guild Pro tiers: {self._format_ai_models(['gpt-5.4-mini', 'gpt-5.4'])}\n"
+                f"Baseline tier: {self._format_ai_models(['gpt-5-nano'])}\n"
+                f"Guild Pro tiers: {self._format_ai_models(['gpt-5-mini', 'gpt-5'])}\n"
                 "Owner policy can list all three models by default, but provider/runtime readiness still gates frontier routing. "
                 "AI stays second-pass only and owner policy controls whether review runs at all."
             ),
@@ -2423,6 +2423,8 @@ class ShieldCog(commands.Cog):
                 result_lines.append("Policy cap: Stronger tier was blocked by this guild's effective allowed models.")
         else:
             result_lines.append(f"Failure reason: `{probe.get('failure_reason') or 'unknown'}`")
+            if probe.get("provider_failure_detail"):
+                result_lines.append(f"Failure detail: {probe.get('provider_failure_detail')}")
         embed.add_field(name="Result", value="\n".join(result_lines), inline=False)
         embed.add_field(
             name="Live Readiness",

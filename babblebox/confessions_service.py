@@ -3372,6 +3372,8 @@ class ConfessionsService:
             "bot_missing_permissions": 0,
             "guild_unavailable": 0,
         }
+        review_issue_details: list[dict[str, Any]] = []
+        support_issue_details: list[dict[str, Any]] = []
         issue_codes: list[str] = []
         if not self.storage_ready:
             issue_codes.append("confessions_storage_unavailable")
@@ -3388,16 +3390,50 @@ class ConfessionsService:
                 if self._review_features_required(config):
                     review_required_guild_count += 1
                     review_issue_counts["guild_unavailable"] += 1
+                    review_issue_details.append(
+                        {
+                            "guild_id": guild_id,
+                            "status": "guild_unavailable",
+                            "channel_id": config.get("review_channel_id"),
+                            "detail": "The configured guild is not available to this bot process.",
+                        }
+                    )
                 support_issue_counts["guild_unavailable"] += 1
+                support_issue_details.append(
+                    {
+                        "guild_id": guild_id,
+                        "status": "guild_unavailable",
+                        "channel_id": config.get("appeals_channel_id"),
+                        "detail": "The configured guild is not available to this bot process.",
+                    }
+                )
                 continue
             if self._review_features_required(config):
                 review_required_guild_count += 1
                 review_snapshot = self.review_channel_snapshot(guild)
                 if not review_snapshot["ok"]:
                     review_issue_counts[str(review_snapshot["status"])] += 1
+                    review_issue_details.append(
+                        {
+                            "guild_id": guild_id,
+                            "status": str(review_snapshot["status"]),
+                            "channel_id": review_snapshot.get("channel_id"),
+                            "detail": str(review_snapshot.get("detail") or review_snapshot.get("message") or ""),
+                            "missing_permissions": tuple(review_snapshot.get("missing_permissions") or ()),
+                        }
+                    )
             support_snapshot = self.support_channel_snapshot(guild)
             if not support_snapshot["ok"]:
                 support_issue_counts[str(support_snapshot["status"])] += 1
+                support_issue_details.append(
+                    {
+                        "guild_id": guild_id,
+                        "status": str(support_snapshot["status"]),
+                        "channel_id": support_snapshot.get("channel_id"),
+                        "detail": str(support_snapshot.get("detail") or support_snapshot.get("message") or ""),
+                        "missing_permissions": tuple(support_snapshot.get("missing_permissions") or ()),
+                    }
+                )
         review_ready = not any(review_issue_counts.values())
         support_ready = not any(support_issue_counts.values())
         for status, count in review_issue_counts.items():
@@ -3419,8 +3455,26 @@ class ConfessionsService:
             "support_ready": support_ready,
             "review_issue_counts": {name: count for name, count in review_issue_counts.items() if count},
             "support_issue_counts": {name: count for name, count in support_issue_counts.items() if count},
+            "review_issue_details": tuple(review_issue_details),
+            "support_issue_details": tuple(support_issue_details),
             "issue_codes": tuple(issue_codes),
         }
+
+    def _format_readiness_issue_details(self, details: Sequence[dict[str, Any]]) -> str:
+        parts: list[str] = []
+        for item in details[:6]:
+            guild_id = item.get("guild_id")
+            status = normalize_plain_text(str(item.get("status") or "unknown"))
+            channel_id = item.get("channel_id")
+            channel_label = str(channel_id) if isinstance(channel_id, int) else "not_set"
+            detail = normalize_plain_text(str(item.get("detail") or ""))
+            missing_permissions = tuple(item.get("missing_permissions") or ())
+            if missing_permissions:
+                detail = f"missing_permissions={','.join(str(value) for value in missing_permissions)}"
+            parts.append(f"guild={guild_id} status={status} channel={channel_label} detail={detail or 'none'}")
+        if len(details) > len(parts):
+            parts.append(f"+{len(details) - len(parts)} more")
+        return "; ".join(parts) if parts else "none"
 
     def log_readiness_summary(self):
         snapshot = self.readiness_snapshot()
@@ -3433,10 +3487,12 @@ class ConfessionsService:
             )
             return
         LOGGER.warning(
-            "Confessions readiness degraded: configured_guilds=%s review_required_guilds=%s issue_codes=%s",
+            "Confessions readiness degraded: configured_guilds=%s review_required_guilds=%s issue_codes=%s review_issues=%s support_issues=%s",
             snapshot["configured_guild_count"],
             snapshot["review_required_guild_count"],
             issue_codes,
+            self._format_readiness_issue_details(snapshot.get("review_issue_details") or ()),
+            self._format_readiness_issue_details(snapshot.get("support_issue_details") or ()),
         )
 
     def _restriction_label(self, state: dict[str, Any]) -> str:

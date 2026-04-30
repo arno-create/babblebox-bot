@@ -33,23 +33,23 @@ SHIELD_AI_ALLOWED_GUILD_ID = SHIELD_AI_SUPPORT_GUILD_ID
 SHIELD_AI_REVIEW_PACKS = ("privacy", "promo", "scam", "adult", "severe")
 SHIELD_AI_MIN_CONFIDENCE_CHOICES = ("low", "medium", "high")
 SHIELD_AI_ROUTING_TIERS = ("fast", "complex", "frontier")
-SHIELD_AI_MODEL_ORDER = ("gpt-5.4-nano", "gpt-5.4-mini", "gpt-5.4")
+SHIELD_AI_MODEL_ORDER = ("gpt-5-nano", "gpt-5-mini", "gpt-5")
 SHIELD_AI_MODEL_ALIASES = {
-    "nano": "gpt-5.4-nano",
-    "mini": "gpt-5.4-mini",
-    "full": "gpt-5.4",
-    "gpt-5.4-nano": "gpt-5.4-nano",
-    "gpt-5.4-mini": "gpt-5.4-mini",
-    "gpt-5.4": "gpt-5.4",
+    "nano": "gpt-5-nano",
+    "mini": "gpt-5-mini",
+    "full": "gpt-5",
+    "gpt-5-nano": "gpt-5-nano",
+    "gpt-5-mini": "gpt-5-mini",
+    "gpt-5": "gpt-5",
 }
 SHIELD_AI_MODEL_SHORT_NAMES = {
-    "gpt-5.4-nano": "nano",
-    "gpt-5.4-mini": "mini",
-    "gpt-5.4": "full",
+    "gpt-5-nano": "nano",
+    "gpt-5-mini": "mini",
+    "gpt-5": "full",
 }
-DEFAULT_SHIELD_AI_FAST_MODEL = "gpt-5.4-nano"
-DEFAULT_SHIELD_AI_COMPLEX_MODEL = "gpt-5.4-mini"
-DEFAULT_SHIELD_AI_TOP_MODEL = "gpt-5.4"
+DEFAULT_SHIELD_AI_FAST_MODEL = "gpt-5-nano"
+DEFAULT_SHIELD_AI_COMPLEX_MODEL = "gpt-5-mini"
+DEFAULT_SHIELD_AI_TOP_MODEL = "gpt-5"
 DEFAULT_SHIELD_AI_MODEL = DEFAULT_SHIELD_AI_FAST_MODEL
 DEFAULT_SHIELD_AI_ENABLE_TOP_TIER = False
 DEFAULT_SHIELD_AI_TIMEOUT_SECONDS = 4.0
@@ -372,6 +372,7 @@ class OpenAIShieldAIProvider(ShieldAIProvider):
         )
         self._session: aiohttp.ClientSession | None = None
         self._semaphore = asyncio.Semaphore(DEFAULT_SHIELD_AI_CONCURRENCY)
+        self._last_review_failure: dict[str, Any] | None = None
         self.ignored_model_settings = tuple(
             name
             for name, invalid in (
@@ -438,6 +439,7 @@ class OpenAIShieldAIProvider(ShieldAIProvider):
             "top_tier_enabled": self.top_tier_enabled,
             "timeout_seconds": self.timeout_seconds,
             "max_chars": self.max_chars,
+            "last_review_failure": dict(self._last_review_failure) if self._last_review_failure else None,
             "status": status,
         }
 
@@ -447,9 +449,12 @@ class OpenAIShieldAIProvider(ShieldAIProvider):
             self._session = None
 
     async def review(self, request: ShieldAIReviewRequest) -> ShieldAIReviewResult | None:
+        self._last_review_failure = None
         if not self.api_key:
+            self._remember_review_failure("provider_unavailable", "OpenAI API key is not configured.")
             return None
         if not request.sanitized_content and not request.domains and not request.attachment_extensions:
+            self._remember_review_failure("empty_review_request", "The review request had no sanitized text or compact metadata.")
             return None
 
         route = self._route_request(request)
@@ -459,6 +464,7 @@ class OpenAIShieldAIProvider(ShieldAIProvider):
             acquired = True
         except asyncio.TimeoutError:
             LOGGER.info("Shield AI review skipped: reviewer queue is busy.")
+            self._remember_review_failure("queue_busy", "Reviewer concurrency limit was busy.")
             return None
 
         try:
@@ -472,14 +478,19 @@ class OpenAIShieldAIProvider(ShieldAIProvider):
                 except _RetryableProviderFailure:
                     if attempt_index + 1 >= len(route.attempted_models):
                         LOGGER.info("Shield AI review skipped: retryable provider failure with no fallback remaining.")
+                        self._remember_review_failure("retryable_provider_failure", "Provider returned a retryable error and no fallback model remained.")
                         return None
                     continue
                 except _TimeoutProviderFailure:
                     LOGGER.info("Shield AI review skipped: provider timeout.")
+                    self._remember_review_failure("provider_timeout", "Provider request timed out.")
                     return None
-                except _NonRetryableProviderFailure:
+                except _NonRetryableProviderFailure as exc:
+                    reason = str(exc).strip() or "provider_request_error"
+                    self._remember_review_failure(reason, "Provider rejected the review request.")
                     return None
             if payload is None:
+                self._remember_review_failure("provider_empty_response", "Provider returned no payload.")
                 return None
         finally:
             if acquired:
@@ -501,7 +512,16 @@ class OpenAIShieldAIProvider(ShieldAIProvider):
                 "Shield AI review skipped: malformed provider output (%s).",
                 type(exc).__name__,
             )
+            self._remember_review_failure("provider_malformed_output", f"Provider returned malformed output ({type(exc).__name__}).")
             return None
+
+    def _remember_review_failure(self, reason: str, detail: str | None = None):
+        cleaned_reason = normalize_plain_text(reason).casefold().replace(" ", "_") or "provider_no_review"
+        payload: dict[str, Any] = {"reason": cleaned_reason}
+        cleaned_detail = normalize_plain_text(detail)
+        if cleaned_detail:
+            payload["detail"] = cleaned_detail[:220]
+        self._last_review_failure = payload
 
     async def _get_session(self) -> aiohttp.ClientSession:
         if self._session is None or self._session.closed:
@@ -529,7 +549,7 @@ class OpenAIShieldAIProvider(ShieldAIProvider):
                     raise _RetryableProviderFailure("server_error")
                 if response.status >= 400:
                     LOGGER.info("Shield AI review skipped: provider request error (%s).", response.status)
-                    raise _NonRetryableProviderFailure("request_error")
+                    raise _NonRetryableProviderFailure(f"provider_request_error_{response.status}")
                 try:
                     return await response.json(content_type=None)
                 except json.JSONDecodeError as exc:
@@ -695,9 +715,9 @@ class OpenAIShieldAIProvider(ShieldAIProvider):
 
 def _tier_for_model(model: str) -> str:
     normalized = normalize_shield_ai_model_name(model)
-    if normalized == "gpt-5.4":
+    if normalized == DEFAULT_SHIELD_AI_TOP_MODEL:
         return "frontier"
-    if normalized == "gpt-5.4-mini":
+    if normalized == DEFAULT_SHIELD_AI_COMPLEX_MODEL:
         return "complex"
     return "fast"
 

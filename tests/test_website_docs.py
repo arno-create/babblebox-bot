@@ -389,17 +389,17 @@ class WebsiteDocsTests(unittest.TestCase):
 
         for text in (
             "no-link DM-lure",
-            "gpt-5.4-nano",
-            "gpt-5.4-mini",
-            "gpt-5.4",
+            "gpt-5-nano",
+            "gpt-5-mini",
+            "gpt-5",
             "effective lane plus local readiness, entitlement state, and provider gates",
         ):
             self.assertIn(text, readme)
         for text in (
             "no-link DM-lure",
-            "gpt-5.4-nano",
-            "gpt-5.4-mini",
-            "gpt-5.4",
+            "gpt-5-nano",
+            "gpt-5-mini",
+            "gpt-5",
             "effective lane plus local readiness and entitlement state",
         ):
             self.assertIn(text, help_html)
@@ -786,11 +786,11 @@ class WebsiteDocsTests(unittest.TestCase):
             self.assertIn(text, help_html)
             self.assertIn(text, readme)
         self.assertIn(
-            "ordinary guilds still need Babblebox Guild Pro for effective `gpt-5.4-mini` / `gpt-5.4` access",
+            "ordinary guilds still need Babblebox Guild Pro for effective `gpt-5-mini` / `gpt-5` access",
             readme,
         )
         self.assertIn(
-            "can make <code>gpt-5.4-mini</code> plus <code>gpt-5.4</code> effective for Shield AI",
+            "can make <code>gpt-5-mini</code> plus <code>gpt-5</code> effective for Shield AI",
             help_html,
         )
 
