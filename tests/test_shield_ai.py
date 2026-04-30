@@ -173,20 +173,26 @@ class ShieldAITests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(route.route_reasons, ("single_model_override",))
 
     def test_invalid_single_model_override_is_ignored_and_reported_truthfully(self):
-        with patch.dict(os.environ, {"SHIELD_AI_MODEL": "gpt-4.1-mini"}, clear=False):
+        with patch.dict(os.environ, {"OPENAI_API_KEY": "test", "SHIELD_AI_MODEL": "gpt-4.1-mini"}, clear=False):
             provider = shield_ai.OpenAIShieldAIProvider()
 
         diagnostics = provider.diagnostics()
 
+        self.assertTrue(diagnostics["available"])
         self.assertFalse(diagnostics["single_model_override"])
         self.assertEqual(diagnostics["model"], "gpt-5.4-nano")
-        self.assertIn("ignored", diagnostics["status"].lower())
+        self.assertEqual(diagnostics["status"], "Ready.")
         self.assertEqual(diagnostics["ignored_model_settings"], ["SHIELD_AI_MODEL"])
+        self.assertEqual(diagnostics["model_override_state"], "invalid")
+        self.assertIn("Invalid override ignored: SHIELD_AI_MODEL", diagnostics["model_override_note"])
+        self.assertIn("routed defaults", diagnostics["model_override_note"])
+        self.assertEqual(diagnostics["routed_default_model"], "gpt-5.4-nano")
 
     def test_invalid_tier_model_settings_are_ignored_and_reported_truthfully(self):
         with patch.dict(
             os.environ,
             {
+                "OPENAI_API_KEY": "",
                 "SHIELD_AI_FAST_MODEL": "gpt-4.1-mini",
                 "SHIELD_AI_COMPLEX_MODEL": "bad-model",
                 "SHIELD_AI_TOP_MODEL": "legacy-full",
@@ -204,7 +210,8 @@ class ShieldAITests(unittest.IsolatedAsyncioTestCase):
             diagnostics["ignored_model_settings"],
             ["SHIELD_AI_FAST_MODEL", "SHIELD_AI_COMPLEX_MODEL", "SHIELD_AI_TOP_MODEL"],
         )
-        self.assertIn("SHIELD_AI_FAST_MODEL", diagnostics["status"])
+        self.assertEqual(diagnostics["status"], "OpenAI API key is not configured.")
+        self.assertIn("SHIELD_AI_FAST_MODEL", diagnostics["invalid_model_settings_note"])
 
     async def test_retryable_failure_falls_back_once(self):
         with patch.dict(os.environ, {"OPENAI_API_KEY": "test"}, clear=False):

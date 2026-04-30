@@ -3004,6 +3004,11 @@ class ShieldService:
         enabled_packs = [pack for pack in config.get("ai_enabled_packs", []) if pack in AI_REVIEW_PACK_SET]
         provider_status = str(diagnostics.get("status") or "Unavailable.")
         provider_available = bool(diagnostics.get("available"))
+        provider_readiness = str(diagnostics.get("provider_readiness") or provider_status)
+        model_override_note = str(
+            diagnostics.get("model_override_note") or "No single-model override configured. Shield is using routed defaults."
+        )
+        invalid_model_settings_note = diagnostics.get("invalid_model_settings_note")
         configured_models_capped = tuple(policy.configured_allowed_models) != tuple(policy.allowed_models)
         single_model_override = bool(diagnostics.get("single_model_override"))
         top_tier_enabled = bool(diagnostics.get("top_tier_enabled"))
@@ -3065,12 +3070,17 @@ class ShieldService:
             "provider": diagnostics.get("provider"),
             "provider_available": provider_available,
             "provider_status": provider_status,
+            "provider_readiness": provider_readiness,
             "model": diagnostics.get("model"),
             "provider_capped_models": list(provider_capped_models),
             "provider_model_note": provider_model_note,
             "routing_strategy": diagnostics.get("routing_strategy"),
             "single_model_override": single_model_override,
             "ignored_model_settings": list(diagnostics.get("ignored_model_settings") or []),
+            "model_override_state": diagnostics.get("model_override_state") or ("valid" if single_model_override else "blank"),
+            "model_override_note": model_override_note,
+            "routed_default_model": diagnostics.get("routed_default_model"),
+            "invalid_model_settings_note": str(invalid_model_settings_note) if invalid_model_settings_note else None,
             "fast_model": diagnostics.get("fast_model"),
             "complex_model": diagnostics.get("complex_model"),
             "top_model": diagnostics.get("top_model"),
@@ -3089,6 +3099,98 @@ class ShieldService:
             "updated_by": policy.updated_by,
             "updated_at": policy.updated_at,
         }
+
+    async def probe_ai_provider(self, guild_id: int) -> dict[str, Any]:
+        ai_status = self.get_ai_status(guild_id)
+        base: dict[str, Any] = {
+            "ok": False,
+            "guild_id": guild_id,
+            "provider": ai_status.get("provider") or "Not configured",
+            "provider_available": bool(ai_status.get("provider_available")),
+            "provider_readiness": ai_status.get("provider_readiness") or ai_status.get("provider_status") or "Unavailable.",
+            "provider_status": ai_status.get("provider_status") or "Unavailable.",
+            "policy_enabled": bool(ai_status.get("enabled")),
+            "ready_for_review": bool(ai_status.get("ready_for_review")),
+            "live_blockers": list(ai_status.get("setup_blockers") or []),
+            "model_override_note": ai_status.get("model_override_note"),
+            "ignored_model_settings": list(ai_status.get("ignored_model_settings") or []),
+            "routed_default_model": ai_status.get("routed_default_model"),
+            "effective_allowed_models": list(ai_status.get("effective_allowed_models") or ai_status.get("allowed_models") or []),
+        }
+        if not base["policy_enabled"]:
+            base["live_blockers"].append(str(ai_status.get("status") or "AI review is off until the owner enables it."))
+        elif not base["ready_for_review"] and not base["live_blockers"]:
+            base["live_blockers"].append(str(ai_status.get("status") or "AI review is not ready for live second-pass review."))
+        if not base["provider_available"]:
+            base.update(
+                {
+                    "failure_reason": "provider_unavailable",
+                    "message": f"Provider probe skipped: {base['provider_readiness']}",
+                }
+            )
+            return base
+
+        diagnostics = self.ai_provider.diagnostics()
+        max_chars = int(diagnostics.get("max_chars") or 340)
+        sanitized = sanitize_message_for_ai("Provider probe: contact me at probe@example.com for access.", max_chars=max_chars)
+        request = ShieldAIReviewRequest(
+            guild_id=guild_id,
+            pack="privacy",
+            local_confidence="high",
+            local_action="delete_log",
+            local_labels=("Privacy Leak", "Provider Probe"),
+            local_reasons=("Synthetic provider probe with redacted contact detail.",),
+            sanitized_content=sanitized.text,
+            sanitized_redaction_count=sanitized.redaction_count,
+            sanitized_truncated=sanitized.truncated,
+            has_links=False,
+            domains=(),
+            has_suspicious_attachment=False,
+            attachment_extensions=(),
+            invite_detected=False,
+            repetitive_promo=False,
+            allowed_models=tuple(base["effective_allowed_models"]) or (DEFAULT_SHIELD_AI_FAST_MODEL,),
+        )
+        try:
+            result = await self.ai_provider.review(request)
+        except Exception as exc:  # pragma: no cover - defensive around custom provider adapters.
+            LOGGER.info("Shield AI provider probe failed with unexpected provider exception (%s).", type(exc).__name__)
+            base.update(
+                {
+                    "failure_reason": "provider_exception",
+                    "message": f"Provider probe failed before returning a review ({type(exc).__name__}).",
+                }
+            )
+            return base
+        if result is None:
+            base.update(
+                {
+                    "failure_reason": "provider_no_review",
+                    "message": "Provider probe reached the review path but did not return a review.",
+                }
+            )
+            return base
+
+        base.update(
+            {
+                "ok": True,
+                "message": "Provider probe succeeded. Live second-pass review still follows owner policy and local Shield readiness.",
+                "classification": result.classification,
+                "classification_label": result.classification_label,
+                "confidence": result.confidence,
+                "priority": result.priority,
+                "false_positive": result.false_positive,
+                "explanation": result.explanation,
+                "model": result.model,
+                "tier": result.tier,
+                "target_tier": result.target_tier,
+                "route_reasons": list(result.route_reasons),
+                "attempted_models": list(result.attempted_models),
+                "fallback_used": result.fallback_used,
+                "policy_capped": result.policy_capped,
+            }
+        )
+        return base
 
     def get_link_safety_status(self) -> dict[str, Any]:
         return self.link_safety.diagnostics()

@@ -201,7 +201,7 @@ Babblebox premium is intentionally narrow:
 - bot and webhook scam handling stays conservative by default unless the evidence is clearly dangerous
 - optional AI-assisted second-pass review for moderator context only
 - Shield AI stays live-message-only; AFK, reminders, watch keywords, and Confessions feature checks remain local-first and AI-free
-- Shield AI can route between `gpt-5.4-nano`, `gpt-5.4-mini`, and `gpt-5.4`; owner policy can keep all three models configured by default, while ordinary guilds still need Babblebox Guild Pro for effective `gpt-5.4-mini` / `gpt-5.4` access and provider/runtime readiness still gates frontier routing. Diagnostics report the effective lane plus local readiness, entitlement state, and provider gates.
+- Shield AI can route between `gpt-5.4-nano`, `gpt-5.4-mini`, and `gpt-5.4`; owner policy can keep all three models configured by default, while ordinary guilds still need Babblebox Guild Pro for effective `gpt-5.4-mini` / `gpt-5.4` access and provider/runtime readiness still gates frontier routing. Diagnostics report the effective lane plus local readiness, entitlement state, and provider gates, with separate provider readiness, model override, and routed-default details.
 - ordinary guild AI needs both owner policy and Babblebox Guild Pro
 - `/shield ai` only configures review scope; Guild Pro plus owner policy controls real AI access and allowed models
 - log-first defaults with global `adaptive` vs `compact` delivery, `smart` vs `never` ping policy, and bounded per-pack delivery overrides
@@ -870,6 +870,7 @@ OPENAI_API_KEY=sk-...
 # SHIELD_AI_COMPLEX_MODEL=gpt-5.4-mini
 # SHIELD_AI_TOP_MODEL=gpt-5.4
 # SHIELD_AI_ENABLE_TOP_TIER=false
+# Leave SHIELD_AI_MODEL blank unless you intentionally want one fixed model.
 # SHIELD_AI_MODEL=
 # SHIELD_AI_TIMEOUT_SECONDS=4
 # SHIELD_AI_MAX_CHARS=340
@@ -911,9 +912,9 @@ Environment variable notes:
 - `CONFESSIONS_CONTENT_KEY` and `CONFESSIONS_IDENTITY_KEY` are required for Postgres-backed Confessions and should be separate random secrets of at least 32 characters each
 - `CONFESSIONS_CONTENT_KEY_ID` and `CONFESSIONS_IDENTITY_KEY_ID` are optional but recommended active key labels; if omitted they default to `active`
 - `CONFESSIONS_CONTENT_LEGACY_KEYS` and `CONFESSIONS_IDENTITY_LEGACY_KEYS` are optional comma-separated `key_id=secret` lists used only during key rotation or compatibility windows so Babblebox can read old Confessions rows while writing with the new active key
-- `OPENAI_API_KEY` is optional and only needed for Shield AI assist
+- `OPENAI_API_KEY` is optional and only needed for Shield AI assist. After setting it, restart the bot and DM the bot as a system owner with `bb!shieldai provider test <guild_id>` to verify the real provider path without changing server config or posting a mod-log alert
 - `SHIELD_AI_FAST_MODEL`, `SHIELD_AI_COMPLEX_MODEL`, `SHIELD_AI_TOP_MODEL`, `SHIELD_AI_ENABLE_TOP_TIER`, `SHIELD_AI_MODEL`, `SHIELD_AI_TIMEOUT_SECONDS`, and `SHIELD_AI_MAX_CHARS` are optional Shield AI tuning knobs
-  `SHIELD_AI_MODEL` accepts `nano`, `mini`, `full`, or the canonical GPT-5.4 model names. Invalid overrides are ignored so diagnostics stay truthful.
+  `SHIELD_AI_MODEL` should normally be blank. It accepts only `nano`, `mini`, `full`, or the canonical GPT-5.4 model names when you intentionally want one fixed model. Invalid overrides are ignored, diagnostics say Shield is using routed defaults, and AI can still use the routed baseline when `OPENAI_API_KEY` is valid.
 - `UTILITY_STORAGE_BACKEND=memory` is for explicit local/test work only
 - `ADMIN_STORAGE_BACKEND=memory` is optional for local/test admin lifecycle work
 - `SHIELD_STORAGE_BACKEND=memory` is optional for local/test Shield work
